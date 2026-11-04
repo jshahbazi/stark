@@ -20,6 +20,8 @@ repository root:
 
 Add ``--reuse boundary`` for backends that resume only from a snapshot at the
 previous prompt's last full prefill chunk (native hybrid models).
+The pinned raw EXL3/FP8 pack also requires ``--download-receipt RECEIPT``;
+its complete original pack stays unchanged and its chat codec is adapted in RAM.
 """
 
 import argparse
@@ -28,8 +30,10 @@ import json
 import os
 import platform
 import random
+import re
 import secrets
 import select
+import stat
 import statistics
 import subprocess
 import sys
@@ -38,6 +42,7 @@ from pathlib import Path
 
 from stark_convert.api_tools import parse_tool_output, tool_parser_for
 from stark_convert.chat import load_template
+from stark_convert import hybrid_prepare, template_runtime
 from stark_convert.local_api import APIError
 
 WORDS = (
@@ -102,6 +107,16 @@ INVALIDATIONS = (
     "image_operation",
     "cancellation",
 )
+EXL3_REPOSITORY = "OpensourceWTF/GLM-5.3-Flash-streaming-repack-exl3-3.05bpw"
+EXL3_REVISION = "50237d5c26ceb98bfd85f779990b0f5e6d7af144"
+EXL3_FILES = frozenset({
+    ".gitattributes", "LICENSE", "README.md", "chat_template.jinja", "config.json",
+    "expert-manifest-v2.json", "expert-manifest.json", "expert-usage-v1.json", "experts.bin",
+    "generation_config.json", "hf_quant_config.json", "manifest.sha256",
+    "model.safetensors.index.json", "mtp-expert-manifest-nvfp4.json", "mtp-experts-nvfp4.bin",
+    "processor_config.json", "residents-fp8-manifest.json", "tokenizer.json", "tokenizer_config.json",
+    *(f"model-{index:05d}-of-00005.safetensors" for index in range(1, 6)),
+})
 
 
 def digest_ids(ids):
@@ -122,8 +137,135 @@ def file_sha256(path):
     return hasher.hexdigest()
 
 
-def weights_sha256(model):
+def download_receipt_identity(model, receipt_path):
+    """Bind the complete pinned flat pack to prior verified content hashes.
+
+    This is a trusted local download receipt, not a fresh payload hash audit.
+    Every file is checked against its recorded size, mtime and inode, and the
+    caller must repeat this guard after model-bound execution.
+    """
+    receipt = hybrid_prepare._json(receipt_path, 2 * 1024 * 1024)
+    if (not isinstance(receipt, dict) or receipt.get("passed") is not True
+            or receipt.get("repository") != EXL3_REPOSITORY or receipt.get("revision") != EXL3_REVISION
+            or not isinstance(receipt.get("destination"), str)
+            or Path(receipt["destination"]).resolve() != model.resolve()):
+        raise ValueError("download receipt source or completion mismatch")
+    files = receipt.get("files")
+    if not isinstance(files, dict) or set(files) != EXL3_FILES:
+        raise ValueError("download receipt must include the complete EXL3 pack")
+    for path in model.iterdir():
+        if path.is_symlink() or not ((path.is_file() and path.name in files)
+                                     or (path.is_dir() and path.name == ".cache")):
+            raise ValueError("unlisted or linked EXL3 pack entry")
+    identities = {}
+    total = 0
+    for name, expected in sorted(files.items()):
+        if not isinstance(expected, dict) or expected.get("matched") is not True:
+            raise ValueError("download receipt contains an unverified file")
+        digest = expected.get("sha256")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError("download receipt content hash is invalid")
+        if any(type(expected.get(key)) is not int for key in ("bytes", "mtime_ns", "inode")):
+            raise ValueError("download receipt file identity is invalid")
+        path = model / name
+        try:
+            current = path.lstat()
+        except OSError:
+            raise ValueError("EXL3 pack file is missing") from None
+        if (not stat.S_ISREG(current.st_mode)
+                or (current.st_size, current.st_mtime_ns, current.st_ino)
+                != (expected["bytes"], expected["mtime_ns"], expected["inode"])):
+            raise ValueError("EXL3 pack file changed since download verification")
+        identities[name] = {"bytes": current.st_size, "mtime_ns": current.st_mtime_ns,
+                            "inode": current.st_ino, "prior_verified_sha256": digest}
+        total += current.st_size
+    if type(receipt.get("total_bytes")) is not int or receipt["total_bytes"] != total:
+        raise ValueError("download receipt byte total mismatch")
+    manifest = "".join(f"{name}\t{row['prior_verified_sha256']}\n" for name, row in identities.items())
+    return {"repository": EXL3_REPOSITORY, "revision": EXL3_REVISION,
+            "receipt_sha256": file_sha256(receipt_path), "content_sha256": digest_text(manifest),
+            "files": identities, "total_bytes": total,
+            "verification": "Prior verified SHA-256 hashes with current size/mtime/inode guards; payloads are not rehashed."}
+
+
+def streaming_contract(config):
+    stream = config.get("expert_streaming")
+    return (config.get("model_type") == "glm5_next" and isinstance(stream, dict)
+            and all(stream.get(key) == value for key, value in {
+                "family": "mlx-stream", "format": "mtplx-expert-manifest-v2",
+                "manifest": "expert-manifest-v2.json", "runtime_manifest": "expert-manifest.json",
+                "quant": "exl3-k3-mul1",
+            }.items()) and config.get("residents_format") == "fp8_block128")
+
+
+def load_validation_template(model, download_receipt=None):
+    """Adapt verified raw HF metadata in RAM using native template evaluation.
+
+    Normal prepared models retain chat.load_template behaviour. The raw pack
+    uses the same EOS/BOS/template normalization rules as finish_metadata,
+    without invoking its file-writing preparation step.
+    """
+    config = hybrid_prepare._json(model / "config.json", 2 * 1024 * 1024)
+    if not isinstance(config, dict):
+        raise ValueError("model configuration is invalid")
+    if "expert_streaming" not in config:
+        if download_receipt is not None:
+            raise ValueError("download receipt requires the explicit EXL3 streaming pack")
+        codec, template = load_template(model)
+        return codec, template, None
+    if not streaming_contract(config) or download_receipt is None:
+        raise ValueError("EXL3 streaming validation requires its pinned download receipt")
+    identity = download_receipt_identity(model, download_receipt)
+    tokenizer = hybrid_prepare._json(model / "tokenizer_config.json", 2 * 1024 * 1024)
+    generation = hybrid_prepare._json(model / "generation_config.json")
+    if not isinstance(tokenizer, dict) or not isinstance(generation, dict):
+        raise ValueError("raw tokenizer metadata is invalid")
+    source_path = model / "chat_template.jinja"
+    if source_path.stat().st_size > 256 * 1024:
+        raise ValueError("missing or excessive chat template")
+    source = source_path.read_text(encoding="utf-8")
+    if not 0 < len(source.encode("utf-8")) <= 256 * 1024:
+        raise ValueError("missing or excessive chat template")
+    text = config.get("text_config", config)
+    if not isinstance(text, dict):
+        raise ValueError("raw text metadata is invalid")
+    stops = hybrid_prepare._ids(text.get("eos_token_id"))
+    if generation.get("eos_token_id") is not None:
+        stops.extend(hybrid_prepare._ids(generation["eos_token_id"]))
+    vocab = text.get("vocab_size")
+    if type(vocab) is not int or not 0 < vocab <= 1_000_000 or any(not 0 <= item < vocab for item in stops):
+        raise ValueError("invalid model vocabulary or EOS IDs")
+    codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    for field in ("bos_token", "eos_token"):
+        token = tokenizer.get(field)
+        if isinstance(token, dict):
+            token = token.get("content")
+        if token is not None:
+            if not isinstance(token, str) or not 0 < len(token.encode()) <= 8192:
+                raise ValueError("invalid special-token metadata")
+            codec[field] = token
+    metadata_hashes = {name: file_sha256(model / name) for name in
+                       ("config.json", "tokenizer_config.json", "generation_config.json", "chat_template.jinja")}
+    if any(digest != identity["files"][name]["prior_verified_sha256"] for name, digest in metadata_hashes.items()):
+        raise ValueError("raw chat metadata content changed")
+    template = template_runtime.IsolatedTemplate(source)
+    provenance = {"adapter": "raw_hf_exl3_in_memory_v1", "source_template_sha256": digest_text(source),
+                  "codec_sha256": digest_text(json.dumps(codec, sort_keys=True, ensure_ascii=False)),
+                  "metadata_sha256": metadata_hashes,
+                  "metadata_normalization_sha256": file_sha256(Path(hybrid_prepare.__file__)),
+                  "template_runtime_sha256": file_sha256(Path(template_runtime.__file__)),
+                  "native_template_executable_sha256": file_sha256(template._executable)}
+    if download_receipt_identity(model, download_receipt) != identity:
+        raise ValueError("EXL3 pack changed during template preparation")
+    return codec, template, provenance
+
+
+def weights_sha256(model, download_receipt=None):
     """Bind actual native or converted weights, including external n-gram data."""
+    if download_receipt is not None:
+        return download_receipt_identity(model, download_receipt)["content_sha256"]
+    if (model / "experts.bin").exists() or (model / "mtp-experts-nvfp4.bin").exists():
+        raise ValueError("EXL3 banks require a complete verified download receipt")
     shards = sorted([*model.glob("*.safetensors"), *model.glob("*.gguf")])
     if (model / "ngram_table.bin").is_file():
         shards.append(model / "ngram_table.bin")
@@ -876,6 +1018,8 @@ def timing_passed(timing):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True, type=Path)
+    parser.add_argument("--download-receipt", type=Path,
+                        help="Verified pinned EXL3 flat-pack receipt; checks all file identities before and after execution")
     parser.add_argument(
         "--baseline", required=True, help="Worker built without prefix reuse"
     )
@@ -919,17 +1063,19 @@ def main():
     ):
         parser.error("session sizes and run counts must be positive")
 
-    codec, template = load_template(args.model)
+    codec, template, template_provenance = load_validation_template(args.model, args.download_receipt)
+    download_identity = (download_receipt_identity(args.model, args.download_receipt)
+                         if args.download_receipt is not None else None)
     preflight_sessions(args, template, codec)
     tool_parser = tool_parser_for(codec)
     started = time.time()
     report(args, phase="artifact_hashing")
     record = {
-        "schema": "stark-prefix-cache-validation-v3",
+        "schema": "stark-prefix-cache-validation-v4",
         "harness_sha256": file_sha256(Path(__file__)),
         "host": {"machine": platform.machine(), "macos": platform.mac_ver()[0]},
         "model": {
-            "weights_sha256": weights_sha256(args.model),
+            "weights_sha256": weights_sha256(args.model, args.download_receipt),
             "config_sha256": file_sha256(args.model / "config.json"),
             "tokenizer_sha256": file_sha256(args.model / "tokenizer.json"),
             "metadata_sha256": {
@@ -955,6 +1101,9 @@ def main():
         },
         "tool_parser": tool_parser,
     }
+    if download_identity is not None:
+        record["model"]["download_receipt"] = download_identity
+        record["model"]["template_adapter"] = template_provenance
     if args.mode in ("all", "exactness"):
         record["exactness"] = run_exactness(args, template, codec, tool_parser)
     if args.mode in ("all", "timing"):
@@ -967,6 +1116,14 @@ def main():
         record["passed"] = record.get("passed", True) and timing_passed(
             record["timing"]
         )
+    if download_identity is not None:
+        if download_receipt_identity(args.model, args.download_receipt) != download_identity:
+            raise ValueError("EXL3 pack changed during validation")
+        if (file_sha256(template._executable) != template_provenance["native_template_executable_sha256"]
+                or file_sha256(Path(hybrid_prepare.__file__)) != template_provenance["metadata_normalization_sha256"]
+                or file_sha256(Path(template_runtime.__file__)) != template_provenance["template_runtime_sha256"]):
+            raise ValueError("chat template tooling changed during validation")
+        record["model"]["download_guard_after_matched"] = True
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(
         args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600

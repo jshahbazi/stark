@@ -66,6 +66,14 @@ request and host-key rules. Use the actual artifact, prompts longer than the
 advertised boundary, and a context that admits follow-ups. Preserve separate
 source-bound receipts whenever tooling or precision changes.
 
+For the raw pack, provide `--download-receipt` with its completed pinned flat-pack
+receipt. The harness binds both expert banks, residents and metadata to the
+previously verified hashes and checks sizes, modification times and inodes
+before and after execution. It renders the shipped HF template through the
+native evaluator using an in-memory codec, and records template/helper hashes.
+It does not modify the pack. A 32,768-token context and the default first-turn
+target of 18,560 tokens admit the synthetic qualification session.
+
 Performance measurements must use uncached requests, one excluded warm-up,
 screened measured runs and the effective admitted expert row counts. The
 bridge benchmark includes final full-readout materialization. The historical

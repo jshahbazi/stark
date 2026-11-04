@@ -69,6 +69,18 @@ preserved. Artifact qualification uses these final stages.
 
 ## Remaining artifact checks
 
+The prefix validator now supports the raw pack through an explicit verified
+download receipt and an in-memory native template adapter. Its schema v4 binds
+both expert banks, all resident shards, manifests and other flat-pack metadata;
+the existing prepared-model route remains available. Twelve focused tests
+passed. A separate metadata-only component check verified the five available
+chat/tokenizer files and rendered synthetic sessions with lengths 18,185,
+18,808, 19,200 and 20,423 tokens. This check loaded no inference model and did
+not declare the incomplete pack verified. The shipped template SHA-256 is
+`34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891`;
+the native helper is
+`ec61d32f636d3e7a4a679f48a8dbdb6d2330801f876f6d2f73c03b0b34cb230b`.
+
 Verify all pack files against the pinned revision before loading them. Then
 compare full F32 readouts and complete logical KDA/DSA state digests between
 fresh and restored changed-suffix requests, including continuation and failed

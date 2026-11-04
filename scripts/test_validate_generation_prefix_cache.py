@@ -1,10 +1,12 @@
 """Model-free regression checks for the model onboarding qualification harness."""
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 _spec = importlib.util.spec_from_file_location(
     "prefix_qualification",
@@ -15,6 +17,116 @@ _spec.loader.exec_module(harness)
 
 
 class PrefixQualificationTests(unittest.TestCase):
+    def streaming_pack(self, root):
+        model = root / "model"
+        model.mkdir()
+        for name in harness.EXL3_FILES:
+            (model / name).write_bytes(b"synthetic")
+        config = {"model_type": "glm5_next", "residents_format": "fp8_block128",
+                  "text_config": {"vocab_size": 8, "eos_token_id": 1},
+                  "expert_streaming": {"family": "mlx-stream", "format": "mtplx-expert-manifest-v2",
+                                       "manifest": "expert-manifest-v2.json", "runtime_manifest": "expert-manifest.json",
+                                       "quant": "exl3-k3-mul1"}}
+        (model / "config.json").write_text(json.dumps(config))
+        (model / "tokenizer_config.json").write_text(json.dumps({"eos_token": {"content": "<eos>"}}))
+        (model / "generation_config.json").write_text('{"eos_token_id":[1,2]}')
+        (model / "chat_template.jinja").write_text("{{ bos_token }}{{ messages[0].content }}{{ eos_token }}")
+        files = {}
+        for path in model.iterdir():
+            current = path.stat()
+            files[path.name] = {"bytes": current.st_size, "mtime_ns": current.st_mtime_ns,
+                                "inode": current.st_ino, "sha256": harness.file_sha256(path), "matched": True}
+        receipt = {"passed": True, "destination": str(model), "repository": harness.EXL3_REPOSITORY,
+                   "revision": harness.EXL3_REVISION, "files": files,
+                   "total_bytes": sum(row["bytes"] for row in files.values())}
+        path = root / "download-receipt.json"
+        path.write_text(json.dumps(receipt))
+        return model, path, receipt
+
+    def test_verified_download_receipt_binds_both_banks_and_all_metadata_without_payload_rehash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, receipt_path, receipt = self.streaming_pack(Path(directory))
+            original_hash = harness.file_sha256
+            with patch.object(harness, "file_sha256", wraps=original_hash) as hashing:
+                identity = harness.download_receipt_identity(model, receipt_path)
+            self.assertEqual([call.args[0] for call in hashing.call_args_list], [receipt_path])
+            self.assertEqual(set(identity["files"]), harness.EXL3_FILES)
+            self.assertIn("experts.bin", identity["files"])
+            self.assertIn("mtp-experts-nvfp4.bin", identity["files"])
+            self.assertIn("residents-fp8-manifest.json", identity["files"])
+            first = harness.weights_sha256(model, receipt_path)
+            receipt["files"]["experts.bin"]["sha256"] = "0" * 64
+            receipt_path.write_text(json.dumps(receipt))
+            self.assertNotEqual(first, harness.weights_sha256(model, receipt_path))
+            with self.assertRaisesRegex(ValueError, "complete verified download receipt"):
+                harness.weights_sha256(model)
+
+    def test_download_receipt_rejects_stale_incomplete_wrong_revision_and_missing_expert(self):
+        for mutation in ("stale", "incomplete", "revision", "missing_manifest_entry", "missing_expert"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                model, path, receipt = self.streaming_pack(Path(directory))
+                if mutation == "stale":
+                    (model / "experts.bin").write_bytes(b"changed expert bytes")
+                elif mutation == "incomplete":
+                    receipt["passed"] = False
+                elif mutation == "revision":
+                    receipt["revision"] = "0" * 40
+                elif mutation == "missing_manifest_entry":
+                    del receipt["files"]["experts.bin"]
+                else:
+                    (model / "experts.bin").unlink()
+                path.write_text(json.dumps(receipt))
+                with self.assertRaises(ValueError):
+                    harness.download_receipt_identity(model, path)
+
+    def test_download_receipt_rejects_unlisted_files_and_symlink_weights(self):
+        for linked in (False, True):
+            with self.subTest(linked=linked), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                model, path, _ = self.streaming_pack(root)
+                if linked:
+                    (root / "external.bin").write_bytes(b"synthetic")
+                    (model / "experts.bin").unlink()
+                    (model / "experts.bin").symlink_to(root / "external.bin")
+                else:
+                    (model / "extra.safetensors").write_bytes(b"synthetic")
+                with self.assertRaisesRegex(ValueError, "unlisted or linked"):
+                    harness.download_receipt_identity(model, path)
+
+    def test_raw_streaming_template_uses_native_evaluator_without_modifying_pack(self):
+        try:
+            harness.template_runtime._template_executable()
+        except harness.template_runtime.TemplateHelperMissing:
+            self.skipTest("native template helper has not been built")
+        with tempfile.TemporaryDirectory() as directory:
+            model, receipt_path, _ = self.streaming_pack(Path(directory))
+            before = harness.download_receipt_identity(model, receipt_path)
+            config = (model / "config.json").read_bytes()
+            codec, template, provenance = harness.load_validation_template(model, receipt_path)
+            self.assertIsInstance(template, harness.template_runtime.IsolatedTemplate)
+            self.assertEqual(template.render(messages=[{"role": "user", "content": "synthetic"}],
+                                             bos_token=codec.get("bos_token", ""), eos_token=codec["eos_token"]),
+                             "synthetic<eos>")
+            self.assertNotIn("bos_token", codec)
+            self.assertEqual(provenance["source_template_sha256"], harness.file_sha256(model / "chat_template.jinja"))
+            self.assertEqual(provenance["native_template_executable_sha256"], harness.file_sha256(template._executable))
+            self.assertEqual(config, (model / "config.json").read_bytes())
+            self.assertEqual(before, harness.download_receipt_identity(model, receipt_path))
+
+    def test_streaming_contract_and_prepared_template_paths_remain_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model, receipt_path, _ = self.streaming_pack(Path(directory))
+            with self.assertRaisesRegex(ValueError, "pinned download receipt"):
+                harness.load_validation_template(model)
+            config = json.loads((model / "config.json").read_text())
+            config["expert_streaming"]["quant"] = "other"
+            self.assertFalse(harness.streaming_contract(config))
+            (model / "config.json").write_text('{"token_codec_config":{}}')
+            sentinel = ({"type": "ChatCodecConfig"}, object())
+            with patch.object(harness, "load_template", return_value=sentinel) as prepared:
+                self.assertEqual(harness.load_validation_template(model), (*sentinel, None))
+                prepared.assert_called_once_with(model)
+
     def test_native_weight_digest_binds_gguf_and_external_ngram_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             model = Path(directory)
