@@ -21,6 +21,20 @@ const WIDE_OWNER_BYTES: usize = 448 * MIB;
 const WIDE_CARRY_BYTES: usize = 32 * MIB;
 const PREFIX_GRID: usize = 1024;
 
+fn prefill_graph(decode: &MetalDecode) -> Result<DecodeGraph> {
+    if std::env::var_os("STARK_GLM53_PREFILL_PROFILE").is_some_and(|value| value == "1") {
+        if ["STARK_GLM53_UNRETAINED_GRAPH", "STARK_GLM53_SCRATCH_HEAP"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| value == "1"))
+        {
+            return Err(Error::Unsupported("GLM prefill profiling requires retained non-heap graphs"));
+        }
+        DecodeGraph::new_prefill_profiled()
+    } else {
+        new_encoder_graph(decode)
+    }
+}
+
 fn wide_limit(value: Option<&std::ffi::OsStr>) -> Result<Option<usize>> {
     match value.and_then(std::ffi::OsStr::to_str) {
         None if value.is_none() => Ok(None),
@@ -92,6 +106,12 @@ fn layer_workspace(
             + 4 * h
             + 5 * c.experts as u128
             + 4 * c.active_experts as u128
+            // Optional grouping lists, jobs, flat route copies, indirect
+            // arguments and input-bound flags. Charge every schedule.
+            + c.experts as u128 * c.active_experts as u128
+            + 8 * c.active_experts as u128
+            + c.experts as u128
+            + 16
     };
     // Fewer than 128 graph scratch allocations per token in every schedule,
     // including T8 projection concatenation and legacy one-row controls.
@@ -272,7 +292,7 @@ impl GlmModel {
                             values.extend_from_slice(&embedding);
                         }
                     }
-                    let mut graph = new_encoder_graph(decode)?;
+                    let mut graph = prefill_graph(decode)?;
                     let mut streams = graph.upload_into(&values)?;
                     let group = &plan.groups[0];
                     let banks = self.weights.encoder_indexed_group(&group.names, plan.budget)?;
@@ -378,7 +398,7 @@ impl GlmModel {
                     let (graph, next) = objc2::rc::autoreleasepool(|_| -> Result<_> {
                         let _scope = super::super::profile::Scope::new("native.glm.prefill.wide_encode_cpu");
                         before_token()?;
-                        let mut graph = new_encoder_graph(decode)?;
+                        let mut graph = prefill_graph(decode)?;
                         graph.set_scratch_limit(group.scratch)?;
                         let banks = self.weights.encoder_indexed_group(&bank_group.names, plan.budget)?;
                         if banks.registered_bytes() > bank_group.bytes {
@@ -547,23 +567,37 @@ fn encode_layer(
     use_mma: bool,
 ) -> Result<DeviceVector> {
     let p = format!("blk.{layer}");
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.setup")?;
     let (norm, mix) = controls_pre(&decode.controls[layer][0], graph, streams, c.hidden, c.hc, tokens)?;
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.control_pre")?;
     let attention = match state {
         LayerState::Kda(state) => encode_kda_batch(w, c, graph, &norm, &p, state, banks, tokens, use_mma)?,
         LayerState::Attention(_) => {
-            let output = graph.scratch(tokens * c.hidden)?;
             let state = decode.attention[layer].as_mut().ok_or(Error::Invalid("GLM chunk MLA state"))?;
-            // Append then attend each token before appending its successor.
-            // Cache pooling/tail compression therefore keeps causal chronology.
-            for token in 0..tokens {
-                let row = encode_mla(w, c, graph, &norm.slice(token * c.hidden, c.hidden)?, &p, state, false)?;
-                graph.copy_into(&row, &output.slice(token * c.hidden, c.hidden)?)?;
+            if let Some(output) =
+                super::mla_prefill::encode_mla_prefill(w, c, graph, &norm, &p, state, banks, tokens, use_mma)?
+            {
+                output
+            } else {
+                let output = graph.scratch(tokens * c.hidden)?;
+                // Append then attend each token before appending its successor.
+                // Cache pooling/tail compression therefore keeps causal chronology.
+                for token in 0..tokens {
+                    let row = encode_mla(w, c, graph, &norm.slice(token * c.hidden, c.hidden)?, &p, state, false)?;
+                    graph.copy_into(&row, &output.slice(token * c.hidden, c.hidden)?)?;
+                }
+                output
             }
-            output
         },
     };
+    graph.diagnostic_checkpoint(if c.layer_types[layer] {
+        "native.glm.prefill.gpu.kda_output"
+    } else {
+        "native.glm.prefill.gpu.mla_attention"
+    })?;
     let residual = controls_post(&decode.controls[layer][0], graph, streams, &attention, &mix, c.hidden, c.hc)?;
     let (norm, mix) = controls_pre(&decode.controls[layer][1], graph, &residual, c.hidden, c.hc, tokens)?;
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.control_mid")?;
     let ffn = if layer < c.dense_layers {
         let gate = project(banks, graph, &p, "ffn_gate.weight", &norm, tokens, use_mma)?;
         let up = project(banks, graph, &p, "ffn_up.weight", &norm, tokens, use_mma)?;
@@ -575,38 +609,90 @@ fn encode_layer(
         let up = project(banks, graph, &p, "ffn_up_shexp.weight", &norm, tokens, use_mma)?;
         let active = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
         let shared = project(banks, graph, &p, "ffn_down_shexp.weight", &active, tokens, use_mma)?;
+        graph.diagnostic_checkpoint("native.glm.prefill.gpu.shared_router")?;
         let output = graph.scratch(tokens * c.hidden)?;
         let bias = decode.routing_biases[layer].as_ref().ok_or(Error::Invalid("GLM chunk router bias"))?;
         let scale = graph.upload_into(&[1.0])?;
-        for token in 0..tokens {
-            let norm = norm.slice(token * c.hidden, c.hidden)?;
-            let (indices, probabilities) = super::super::glm_metal::route(
-                graph,
-                &logits.slice(token * c.experts, c.experts)?,
-                bias,
-                c.active_experts,
-                c.routed_scale,
-            )?;
-            let gate_name = format!("{p}.ffn_gate_exps.weight");
-            let up_name = format!("{p}.ffn_up_exps.weight");
-            let gate = banks.encode_indexed_matvec(graph, &gate_name, &indices, c.active_experts, &norm, false)?;
-            let up = banks.encode_indexed_matvec(graph, &up_name, &indices, c.active_experts, &norm, false)?;
+        let expert_names = [
+            format!("{p}.ffn_gate_exps.weight"),
+            format!("{p}.ffn_up_exps.weight"),
+            format!("{p}.ffn_down_exps.weight"),
+        ];
+        if banks.grouped_experts_admitted(&expert_names, tokens, c.active_experts)? {
+            let indices = graph.scratch(tokens * c.active_experts)?;
+            let probabilities = graph.scratch(tokens * c.active_experts)?;
+            for token in 0..tokens {
+                let (row_ids, row_probabilities) = super::super::glm_metal::route(
+                    graph,
+                    &logits.slice(token * c.experts, c.experts)?,
+                    bias,
+                    c.active_experts,
+                    c.routed_scale,
+                )?;
+                graph.copy_expert_indices(&row_ids, &indices.slice(token * c.active_experts, c.active_experts)?)?;
+                graph
+                    .copy_into(&row_probabilities, &probabilities.slice(token * c.active_experts, c.active_experts)?)?;
+            }
+            let routes = graph
+                .group_expert_routes(&indices, c.experts, tokens, c.active_experts)?
+                .ok_or(Error::Invalid("grouped expert route admission changed during encoding"))?;
+            let gate =
+                banks.encode_grouped_experts(graph, &expert_names[0], &routes, c.active_experts, &norm, false)?;
+            let up = banks.encode_grouped_experts(graph, &expert_names[1], &routes, c.active_experts, &norm, false)?;
             let active = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
-            let down = banks.encode_indexed_matvec(
-                graph,
-                &format!("{p}.ffn_down_exps.weight"),
-                &indices,
-                c.active_experts,
-                &active,
-                true,
-            )?;
-            let row =
-                graph.weighted_sum_device(&down, &probabilities, &shared.slice(token * c.hidden, c.hidden)?, &scale)?;
-            graph.copy_into(&row, &output.slice(token * c.hidden, c.hidden)?)?;
+            let down =
+                banks.encode_grouped_experts(graph, &expert_names[2], &routes, c.active_experts, &active, true)?;
+            for token in 0..tokens {
+                let row = graph.weighted_sum_device(
+                    &down.slice(token * c.active_experts * c.hidden, c.active_experts * c.hidden)?,
+                    &probabilities.slice(token * c.active_experts, c.active_experts)?,
+                    &shared.slice(token * c.hidden, c.hidden)?,
+                    &scale,
+                )?;
+                graph.copy_into(&row, &output.slice(token * c.hidden, c.hidden)?)?;
+            }
+        } else {
+            for token in 0..tokens {
+                let norm = norm.slice(token * c.hidden, c.hidden)?;
+                let (indices, probabilities) = super::super::glm_metal::route(
+                    graph,
+                    &logits.slice(token * c.experts, c.experts)?,
+                    bias,
+                    c.active_experts,
+                    c.routed_scale,
+                )?;
+                let gate_name = format!("{p}.ffn_gate_exps.weight");
+                let up_name = format!("{p}.ffn_up_exps.weight");
+                let gate = banks.encode_indexed_matvec(graph, &gate_name, &indices, c.active_experts, &norm, false)?;
+                let up = banks.encode_indexed_matvec(graph, &up_name, &indices, c.active_experts, &norm, false)?;
+                let active = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
+                let down = banks.encode_indexed_matvec(
+                    graph,
+                    &format!("{p}.ffn_down_exps.weight"),
+                    &indices,
+                    c.active_experts,
+                    &active,
+                    true,
+                )?;
+                let row = graph.weighted_sum_device(
+                    &down,
+                    &probabilities,
+                    &shared.slice(token * c.hidden, c.hidden)?,
+                    &scale,
+                )?;
+                graph.copy_into(&row, &output.slice(token * c.hidden, c.hidden)?)?;
+            }
         }
         output
     };
-    controls_post(&decode.controls[layer][1], graph, &residual, &ffn, &mix, c.hidden, c.hc)
+    graph.diagnostic_checkpoint(if layer < c.dense_layers {
+        "native.glm.prefill.gpu.dense_ffn"
+    } else {
+        "native.glm.prefill.gpu.routed_experts"
+    })?;
+    let next = controls_post(&decode.controls[layer][1], graph, &residual, &ffn, &mix, c.hidden, c.hc)?;
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.control_post")?;
+    Ok(next)
 }
 
 #[expect(clippy::too_many_arguments, reason = "chronological recurrence between two same-weight projection levels")]
@@ -631,6 +717,7 @@ fn encode_kda_batch(
             .collect::<Result<Vec<_>>>()?;
     let forget = project(banks, graph, p, "ssm_f_b.weight", &projections[4], tokens, use_mma)?;
     let gate = project(banks, graph, p, "ssm_g_b.weight", &projections[5], tokens, use_mma)?;
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.kda_projections")?;
     let persistent_input = DeviceVector {
         buffer: metal.input_buffer().clone(),
         offset: 0,
@@ -655,6 +742,7 @@ fn encode_kda_batch(
             tokens,
         )?
     {
+        graph.diagnostic_checkpoint("native.glm.prefill.gpu.kda_recurrence")?;
         return project(banks, graph, p, "attn_output.weight", &recurrent, tokens, use_mma);
     }
     for token in 0..tokens {
@@ -674,6 +762,7 @@ fn encode_kda_batch(
         // before the next recurrence reuses the buffer.
         graph.copy_into(&persistent_output, &recurrent.slice(token * inner, inner)?)?;
     }
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.kda_recurrence")?;
     project(banks, graph, p, "attn_output.weight", &recurrent, tokens, use_mma)
 }
 

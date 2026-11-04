@@ -50,7 +50,8 @@ def test_requested_dispatch_must_be_observed_and_reference_must_not_use_new_path
         "glm.control.prefill.batch.tokens": {"bytes": 64},
         "glm.kda.prefill.register.tokens": {"bytes": 64},
     }}
-    requested = dict(zip(comparison.NEW_FLAGS, ["64", "1", "1"], strict=True))
+    requested = dict.fromkeys(comparison.NEW_FLAGS)
+    requested.update(zip(comparison.NEW_FLAGS[:3], ["64", "1", "1"], strict=True))
     comparison.routes_observed(metadata, requested)
     metadata["dispatch"].pop("glm.kda.prefill.register.tokens")
     with pytest.raises(ValueError, match="requested_route_not_observed"):

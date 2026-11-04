@@ -636,6 +636,51 @@ impl BoundedBankGroup<'_> {
         self.registered_bytes
     }
 
+    fn grouped_expert_matrix(
+        &self,
+        name: &str,
+        selected: usize,
+    ) -> Result<(super::weight_metal::MappedMatrix, super::weight_metal::MatrixFormat, [usize; 3])> {
+        if !self.encoder_registry || self.registered_bytes > self.budget || !self.names.contains(name) {
+            return Err(Error::Invalid("grouped expert bank is outside its admitted encoder group"));
+        }
+        let (tensor, shape) = self.weights.indexed_geometry(name, selected)?;
+        Ok((self.weights.encoder_bank_matrix(name, tensor)?, self.weights.matrix_format(tensor)?, shape))
+    }
+
+    pub(super) fn grouped_experts_admitted(
+        &self,
+        names: &[String; 3],
+        tokens: usize,
+        selected: usize,
+    ) -> Result<bool> {
+        if !std::env::var_os("STARK_GLM53_EXPERT_PREFILL_BATCH").is_some_and(|value| value == "1") {
+            return Ok(false);
+        }
+        for name in names {
+            let (matrix, format, shape) = self.grouped_expert_matrix(name, selected)?;
+            if !super::weight_metal::DecodeGraph::expert_grouped_admitted(&matrix, format, shape, tokens, selected)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(super) fn encode_grouped_experts(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        name: &str,
+        routes: &super::weight_metal::GroupedExpertRoutes,
+        selected: usize,
+        input: &super::weight_metal::DeviceVector,
+        input_batched: bool,
+    ) -> Result<super::weight_metal::DeviceVector> {
+        let (matrix, format, shape) = self.grouped_expert_matrix(name, selected)?;
+        graph
+            .mapped_expert_grouped(&matrix, format, shape, routes, input, input_batched)?
+            .ok_or(Error::Invalid("grouped expert admission changed during encoding"))
+    }
+
     /// Dense weights retain the existing separately capped static-view cache.
     /// Expert access still goes exclusively through this group's whitelist.
     pub(super) fn encode_same_weight_batch(
@@ -684,12 +729,19 @@ impl BoundedBankGroup<'_> {
             rows_per_batch: 0,
             format: self.weights.matrix_format(tensor)?,
         };
-        if tokens <= 8 {
+        let mla_batch = std::env::var_os("STARK_GLM53_MLA_PREFILL_BATCH").is_some_and(|value| value == "1");
+        if tokens <= 8 && !mla_batch {
             return graph.mapped_same_weight(&operation, input, tokens, use_mma);
         }
         // Preserve the separately qualified T8/T4 packed arithmetic. Wider
         // scheduling only concatenates disjoint results from those kernels.
         let output = graph.scratch(tensor.shape[0] * tokens)?;
+        if graph.mapped_mla_tokens_into(&operation, input, &output, tokens)? {
+            return Ok(output);
+        }
+        if use_mma && graph.mapped_dense_wide_into(&operation, input, &output, tokens)? {
+            return Ok(output);
+        }
         let mut start = 0;
         while start < tokens {
             let remaining = tokens - start;
@@ -1869,6 +1921,46 @@ impl Weights {
             },
             input,
         )
+    }
+
+    #[cfg(feature = "metal")]
+    pub(super) fn encode_mla_head_batch(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        name: &str,
+        input: &super::weight_metal::DeviceVector,
+        tokens: usize,
+    ) -> Result<super::weight_metal::DeviceVector> {
+        let tensor = self.tensor(name)?;
+        if tensor.shape.len() != 3
+            || !(1..=128).contains(&tokens)
+            || tensor.shape.iter().any(|&n| n == 0 || n > MAX_VECTOR)
+            || tensor.shape[0].checked_mul(tensor.shape[2]).and_then(|n| n.checked_mul(tokens)) != Some(input.len)
+        {
+            return Err(Error::Invalid("MLA token head projection geometry"));
+        }
+        let rows = tensor.shape[0]
+            .checked_mul(tensor.shape[1])
+            .filter(|&n| n <= MAX_VECTOR)
+            .ok_or(Error::Invalid("MLA token head projection row bound"))?;
+        let output = graph.scratch(rows.checked_mul(tokens).ok_or(Error::Invalid("MLA projection size overflow"))?)?;
+        let operation = super::weight_metal::MappedOperation {
+            matrices: vec![self.mapped_matrix(tensor, 0, rows, tensor.shape[2], true)?],
+            inputs: &[],
+            rows,
+            columns: tensor.shape[2],
+            rows_per_batch: tensor.shape[1],
+            format: self.matrix_format(tensor)?,
+        };
+        if graph.mapped_mla_tokens_into(&operation, input, &output, tokens)? {
+            return Ok(output);
+        }
+        let width = tensor.shape[0] * tensor.shape[2];
+        for token in 0..tokens {
+            let row = self.encode_batched_matvec(graph, name, &input.slice(token * width, width)?)?;
+            graph.copy_into(&row, &output.slice(token * rows, rows)?)?;
+        }
+        Ok(output)
     }
 
     #[cfg(feature = "metal")]

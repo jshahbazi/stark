@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[path = "decode_graph_dense_wide.rs"]
+mod dense_wide;
+
 type MmaCache = Mutex<HashMap<(u32, usize), PipelineState>>;
 static MMA_PIPELINES: OnceLock<MmaCache> = OnceLock::new();
 

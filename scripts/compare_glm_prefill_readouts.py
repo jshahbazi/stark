@@ -31,6 +31,9 @@ NEW_FLAGS = (
     "STARK_GLM53_PREFILL_WIDE",
     "STARK_GLM53_CONTROL_PREFILL_BATCH",
     "STARK_GLM53_KDA_REGISTER_PREFILL",
+    "STARK_GLM53_EXPERT_PREFILL_BATCH",
+    "STARK_GLM53_PREFILL_DENSE_WIDE",
+    "STARK_GLM53_MLA_PREFILL_BATCH",
 )
 MAX_ARM_BYTES = 128 * 1024 * 1024
 ATOL = RTOL = 1e-3
@@ -124,7 +127,13 @@ def routes_observed(metadata, flags):
                 "wide_route_not_observed")
     else:
         require(count("native.glm.prefill.chunk_tokens") > 0, "t8_route_not_observed")
-    for flag, counter in zip(NEW_FLAGS[1:], ("glm.control.prefill.batch.tokens", "glm.kda.prefill.register.tokens"), strict=True):
+    for flag, counter in (
+        ("STARK_GLM53_CONTROL_PREFILL_BATCH", "glm.control.prefill.batch.tokens"),
+        ("STARK_GLM53_KDA_REGISTER_PREFILL", "glm.kda.prefill.register.tokens"),
+        ("STARK_GLM53_EXPERT_PREFILL_BATCH", "native.glm.prefill.expert_group.projections"),
+        ("STARK_GLM53_PREFILL_DENSE_WIDE", "native.glm.prefill.dense_wide.tokens"),
+        ("STARK_GLM53_MLA_PREFILL_BATCH", "native.glm.prefill.mla_batch.tokens"),
+    ):
         require((count(counter) > 0) == (flags.get(flag) == "1"), "requested_route_not_observed")
 
 

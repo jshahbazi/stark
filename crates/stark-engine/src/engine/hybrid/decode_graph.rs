@@ -4,6 +4,13 @@
 
 use super::*;
 
+#[path = "decode_graph_experts.rs"]
+mod experts;
+pub(crate) use experts::GroupedExpertRoutes;
+
+#[path = "decode_graph_mla.rs"]
+mod mla;
+
 #[path = "decode_graph_counters.rs"]
 mod counters;
 use counters::EncoderTiming;
@@ -139,6 +146,12 @@ pub(crate) struct DecodeGraph {
 impl DecodeGraph {
     pub fn new() -> Result<Self> {
         Self::new_with_encoder(false)
+    }
+
+    /// Diagnostic retained transport for per-stage GPU timestamps. It keeps
+    /// all commands queued and must use the existing non-heap scratch budget.
+    pub fn new_prefill_profiled() -> Result<Self> {
+        Self::new_with_ownership(false, false, true, false)
     }
 
     /// A Qwen-only experimental transport. Every dependent dispatch inserts
