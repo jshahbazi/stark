@@ -24,8 +24,8 @@ earlier rejected run.
 | Weights | Verified HF revision `50237d5c26ceb98bfd85f779990b0f5e6d7af144`; EXL3 K3 experts, FP8 residents | Same advertised pack format | Exact historical payload identity remains unproven |
 | Engine source | Public host `dc92a3e8`, plugin `7d29eaa7`, pinned MLX/MLX-C | Historical host `a8f6c6b8`, plugin `88d2aad` | A screened current-public-source host control measured 835.678 prefill / 16.632 decode at 131/159 rows with MTP off |
 | MTP | Disabled in qualified baseline; native commit interface and head-inclusive prefix snapshot implemented in a private candidate | Depth 3, gate 0.5, exact acceptance, BF16 draft head | Same-policy greedy128 output hashes and round counts match the normal host. Observed native-host decode 23.523 / 23.668 tok/s failed the external CPU screen; production throughput remains unqualified |
-| Expert rows, prompt/decode | 142 / 169 in the qualified headless baseline; latest head-loaded host control 104 / 130 | 190 / 217 | At fixed 104 prompt rows, 104-to-130 decode rows cut settled decode payload by 26.2%; faster screened observations support the residency hypothesis, but the complete ABBA failed its CPU screen. Extrapolation to 217 is unsupported |
-| Allocation admission | 112 GiB ceiling, 2 GiB margin, native census and automatic fill | Same ceiling/margin; 190/217 requires a baseline at most 12.69 GB | Baselines vary by run: about 35–41 GB in earlier controls and 46–47 GB in the latest host cells. The upstream 12.69 GB is an admission threshold, not a measured baseline for the 33.15 tok/s run; the current excess is not established reclaimable capacity |
+| Expert rows, prompt/decode | 142 / 169 in the qualified headless baseline; latest head-loaded pair 104 / 153 versus 104 / 130 | 190 / 217 | At fixed 104 prompt rows, 130-to-153 decode rows repeatedly cut settled payload by 16.91%. High Power observations were 21.16–21.38 versus 19.32–19.34 decode tok/s; the clock-matching gate failed, so the gain remains provisional |
+| Allocation admission | 112 GiB ceiling, 2 GiB margin, native census and automatic fill | Same ceiling/margin; 190/217 requires a baseline at most 12.69 GB | After the operator closed nonessential apps, an exact metadata admission census measured 35.455 GB, down from 46.766 GB. With an additional 2 GiB selection reserve it admitted 153 decode rows. The upstream 12.69 GB is an admission threshold, not a measured baseline for the 33.15 tok/s run |
 | Residency capacity | About 81 GB, bounded by the model bill and remaining budget | Current public host defaults to Metal's recommended maximum; historical policy not independently established | Fixed-row ABBA diagnostic observed under 1% effect and exact readout fingerprints; its external CPU screen failed, so no throughput gain qualifies |
 | Prompt-combine prerequisite | Unset wiring environment selects `inplace`, despite bill-bound capacity | Unset/`max` selects `inplace`; `fit`/`off` selects `fused` | The plugin couples this route to residency policy. The capacity experiment keeps the route unchanged in both arms |
 | KDA | Baseline did not record installation; new fixed-row control confirms per-core on 40 cores, 80 groups, 104 rows, 2 groups/core | Same expected plan | Stock fallback is ruled out for the new control |
@@ -36,7 +36,7 @@ earlier rejected run.
 | Input | 16,384 raw-source tokens | 16,381 templated tokens | Contents affect expert routes and MTP acceptance; the three-token difference is not the substantive issue |
 | Decode length and sampling | 128 greedy steps | 1,024 sampled steps, temperature 1, top-p 0.95, seed 1 | Different trajectories and fixed-cost sensitivity |
 | Context and prefix reuse | 32,768; reuse off for throughput | Same context; reuse off | Aligned. The serial stage has no snapshot cost; prefix validation is separate evidence |
-| Hardware conditions | M5 Max, 40 GPU cores, 128 GiB; macOS 26.7.1 (25G241), AC `powermode 0`; CPU/paging/thermal screen | Same advertised hardware, maximum fans and clock-matched pairs; historical OS build not established | Timed workload clocks and fan settings were not recorded. A subsequent idle probe confirmed the upstream no-root IOReport helper works; it supplies state residency, not clock locking. Thermal readings do not prove matched GPU frequency |
+| Hardware conditions | M5 Max, 40 GPU cores, 128 GiB; macOS 26.7.1 (25G241); Automatic initially, operator-enabled High Power for the repeat | Same advertised chip/RAM, maximum fans and clock-matched pairs; historical OS build not established | Workload IOReport capture now works. Automatic-mode decode clock fell from about 1,568 to 1,002 MHz; High Power reduced that collapse but did not meet the paired 0.5% clock gate. Maximum fans and RPM were not established |
 | Global GPU wiring setting | Read-only `iogpu.wired_limit_mb` query returns `0`; unchanged | Published serve recipe explicitly sets `114688` | The raw zero does not establish the kernel's default capacity. This is separate from MLX's measured per-process residency capacity; no causal effect measured |
 
 The public pack sets MTP lane construction, depth and gate. The qualified bridge overrides
@@ -660,3 +660,127 @@ disposition. The unchanged upstream helper source SHA-256 is
 `5bec7460db07be0b07e292b2d91e48d7333c3b1e11386a4003a413976748f8d9`;
 the standalone wrapper source SHA-256 is
 `83627b2564785e766c76ef4cde592301430d8cf6531ac6a7019ecd3f1def8472`.
+
+## Lower host baseline and exact cache admission
+
+The operator closed nonessential apps and identified Codex as the only remaining
+open app. A new standalone admission helper used the frozen bridge's exact
+configuration, normal pack-only page-cache census/invalidation and metadata
+bill. It read bounded manifests and safetensors headers, never tensor payloads.
+Its executable links only libSystem and creates no MLX device, tensor or GPU
+context. This is a GPU-memory admission calculation, not CPU inference.
+
+The original 104/130 process bound matched exactly at 70,955,800,308 bytes.
+All 24 pack-file stat guards and source/artifact postguards matched.
+
+| Admission observation | Bytes |
+| --- | ---: |
+| Physical used | 35,701,030,912 |
+| Pack-owned file-cache credit | 246,038,528 |
+| Separately sampled non-file floor | 20,730,281,984 |
+| Admitted baseline | 35,454,992,384 |
+| Ceiling | 120,259,084,288 |
+| Existing margin plus snapshot reserve | 2,453,094,400 |
+| Additional selection headroom | 2,147,483,648 |
+| Protected target | 115,658,506,240 |
+| P104/D153 decode-phase total | 115,373,021,432 |
+| P104/D154 decode-phase total | 115,771,514,504 |
+
+The helper therefore selected D153 with P104. The normal joint fill was
+132/159; the joint fill with the additional reserve was 127/153. These are
+snapshot-specific admission results, not promises of future availability or an
+optimal performance configuration. No over-budget pin, global cache purge,
+memory-pressure allocation or budget relaxation occurred. The difference
+between physical and non-file readings is not established reclaimable memory.
+
+Helper source SHA-256:
+`e9852a2dd54c6ad5c66c3498adc4c3e4ea8c3e3fd93cca270a55d966b1670a5f`.
+CPU build receipt SHA-256:
+`3c366216b14f5b9759a8cce94a818570b9f2db2c04401127f966257d36ab5817`.
+Actual census result SHA-256:
+`fbc28acb972dd69fed4d781e71c3270e7779f4363701213e3fa040749df86551`.
+
+## Cache frontier with workload clock capture
+
+Before inference, a new controller fixed P104 and D130/153/153/130 in ABBA
+order. Each fresh child ran an identical excluded greedy128 warmup, reset,
+quiet gate and one measured greedy128 request. Every warmup and measurement
+matched `882d4378e2910a4d`, 45 rounds, 99 verified drafts and 83 accepted drafts.
+All model/source/artifact guards, actual row checks, process-group cleanup and
+live memory/paging checks passed. The native engine and inference source were
+unchanged. This isolates a decode-row intervention; it does not establish a
+prefill improvement.
+
+The C caller now captures the upstream read-only IOReport counters through
+symbols already present in the staged library. Three samples surround prefill
+and decoding; the middle sample follows native initial-token selection. The
+calls add no MLX evaluation or fence, but their boundaries have small documented
+offsets from the native timers. It retains labeled state-residency deltas and
+the frequency table. P14/P15 have no frequency mapping on this host, so any
+positive residency there vetoes clock qualification. All measured intervals
+had positive mapped coverage and zero unmapped active residency.
+
+Timing comparability required all four original host screens and a relative
+difference of at most 0.5% between the two arms' mean active decode clocks.
+Clock correction was not used. The supplied row plan, source bindings and
+clock policy were frozen before model execution; no thresholds were relaxed.
+
+| Automatic mode, arm order | Prefill tok/s | Decode tok/s | Active decode MHz | Host screen |
+| --- | ---: | ---: | ---: | --- |
+| D130 | 890.529 | 19.179 | 1,569.959 | CPU rejection |
+| D153 | 852.716 | 21.221 | 1,565.998 | Passed |
+| D153 | 621.775 | 18.880 | 1,013.616 | Passed |
+| D130 | 579.388 | 17.568 | 990.313 | Passed |
+
+The first arm had 204.581% foreign CPU, including `codex` and `xcodebuild`.
+The original candidate filter did not identify `xcodebuild` as a compiler
+candidate; the CPU veto already rejected the arm. Its original classification
+is preserved. No rate from that arm becomes qualified by ignoring the build.
+The clock gate also failed: the arm means differed by 0.753%, with a large
+frequency decline between the first and second halves.
+
+The slow phases had sharply increased CLTM aggregates alongside the lower
+mapped clock. The counter sums non-`NO_CLTM` residency across matching
+subgroup channels without identifying their count. Its aggregate nearly
+equaling a phase duration must not be described as an exact fraction of unique
+wall time throttled. The observations support thermal/power limiting as a
+practical explanation; they do not distinguish temperature from power policy.
+
+## Operator-enabled High Power repeat
+
+The operator enabled High Power on AC. Read-only `pmset` observations confirmed
+AC `powermode 2` before and after the repeat, with battery mode unchanged at 0.
+The exact same source, binary, row plan, request policy, ABBA order and guards
+were used. No fan utility was installed or used; maximum fans and RPM were not
+verified. The repeat is a separate result, not a requalification of the first.
+
+| High Power, arm order | Prefill tok/s | Decode tok/s | Active decode MHz | Host screen |
+| --- | ---: | ---: | ---: | --- |
+| D130 | 905.319 | 19.344 | 1,584.085 | Passed |
+| D153 | 886.825 | 21.384 | 1,566.108 | Passed |
+| D153 | 785.706 | 21.162 | 1,440.971 | Passed |
+| D130 | 787.232 | 19.318 | 1,491.502 | Passed |
+
+All four host screens passed. The clock gate still failed: arm means were
+1,537.794 MHz at D130 and 1,503.539 MHz at D153, a 2.253% difference. Observed
+decode was about 10% higher with D153 despite its lower mean clock, but the
+predeclared paired timing criterion remains unmet. Production performance
+qualification remains false. No numerical or artifact failure occurred.
+
+Across both experiments, D130 had 6,481 decode misses and 61,401,305,088 bytes
+of settled payload; D153 had 5,385 misses and 51,017,748,480 bytes. These values
+repeated exactly in every corresponding arm, a 16.91% reduction. They establish
+the cache intervention's payload effect, not a physical SSD or removable-time
+estimate. The 1,000 prefill / 33 decode objective remains unmet.
+
+Automatic-mode result SHA-256:
+`36dc7c560ed5702e2805dbdf7a66520c58d77400f82ee429882151bc92992261`.
+High Power result SHA-256:
+`78d927d9037dd11f81e596ac1e77aa131913008262e3e300b89d509d09672dec`.
+Controller source SHA-256:
+`452c93dfcbd9e173ee5dc7f8b1f1dcf80254f1e7de79321d2e5fb63d6bc2e183`.
+Tooling receipt SHA-256:
+`bd4c27ff309613797dbd003f031128e6586ad8aef69c33659006689cd422e02a`.
+The C client links the unchanged native stage `44cc7794…`; its build receipt
+SHA-256 is
+`ab4451716c86df816d76bd826438e3345a8e71a08f6de49f89fe89fbd46fa20a`.
