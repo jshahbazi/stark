@@ -83,6 +83,9 @@ records the optional native bridge and its separate artifact qualification.
 The [GLM EXL3 artifact run](archive/runs/2026-11-04-glm-exl3-qualification.md)
 records the verified pack, residency integration, full-state restoration and
 worker qualification against sealed executables.
+The [GLM mlx-stream comparison](benchmarks/2026-11-04-glm-mlx-stream-comparison.md)
+tracks configuration differences, measured effects and the ongoing prefill and
+decode investigation.
 The [live OpenWork Qwen3.8 run](archive/runs/2026-11-02-openwork-qwen38-live-prefix-reuse.md)
 records reuse and first-text timing for one real agent session.
 The [OpenCode Desktop managed-client record](archive/runs/2026-11-01-opencode-managed-client.md)
