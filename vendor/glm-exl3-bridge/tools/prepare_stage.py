@@ -36,10 +36,10 @@ def archive(source: Path, revision: str, destination: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(packed.stdout), mode="r:") as bundle:
         bundle.extractall(destination, filter="data")
 
-def mlxc_diff(source: Path) -> bytes:
+def source_diff(source: Path) -> bytes:
     result = subprocess.run(["git", "-C", str(source), "--no-pager", "diff", "--no-ext-diff", "--no-textconv",
         "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--"], capture_output=True)
-    require(result.returncode == 0, "MLX-C source check failed")
+    require(result.returncode == 0, "dependency source check failed")
     return result.stdout
 
 def main() -> None:
@@ -47,25 +47,36 @@ def main() -> None:
     p.add_argument("--host", type=Path, required=True)
     p.add_argument("--plugin", type=Path, required=True)
     p.add_argument("--mlx-stage", type=Path, required=True)
+    p.add_argument("--mlx-source", type=Path, required=True)
     p.add_argument("--zig", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--experimental-prefix", action="store_true")
     args = p.parse_args()
     host, plugin, stage, zig, out = (x.resolve() for x in
         (args.host, args.plugin, args.mlx_stage, args.zig, args.output))
+    mlx_source = args.mlx_source.resolve()
     lock = json.loads((ROOT / "lock.json").read_text())
     for entry in lock["owned_sources"]:
         require(sha(ROOT / entry["path"]) == entry["sha256"], "bridge source hash mismatch")
     for directory, revision in ((host, lock["host_revision"]), (plugin, lock["plugin_revision"]),
-            (host / "lib/mlx-src", lock["mlx_revision"]), (host / "lib/mlxc-src", lock["mlxc_revision"]),
+            (mlx_source, lock["mlx_revision"]), (host / "lib/mlxc-src", lock["mlxc_revision"]),
             (host / "lib/sushi", lock["sushi_revision"])):
         require(command("git", "-C", str(directory), "rev-parse", "HEAD") == revision,
                 "upstream source revision mismatch")
     # Compile immutable archives, never copy a worktree with staged/untracked edits.
+    require(command("git", "-C", str(mlx_source), "diff", "HEAD", "--name-only") ==
+            "mlx/backend/metal/allocator.cpp\nmlx/backend/metal/allocator.h\nmlx/memory.h",
+            "MLX unexpected modified source")
+    require(hashlib.sha256(source_diff(mlx_source)).hexdigest() == lock["mlx_worktree_diff_sha256"],
+            "MLX actual getter source patch mismatch")
+    require(command("git", "-C", str(mlx_source), "ls-files", "--others", "--exclude-standard") == "",
+            "MLX has untracked source imports")
+    require(sha(ROOT / "patches/mlx-get-wired-limit.patch") == lock["mlx_getter_patch_sha256"],
+            "MLX getter patch mismatch")
     mlxc = host / "lib/mlxc-src"
     require(command("git", "-C", str(mlxc), "diff", "HEAD", "--name-only") == "mlx/c/ops.cpp",
             "MLX-C unexpected modified source")
-    require(hashlib.sha256(mlxc_diff(mlxc)).hexdigest() == lock["mlxc_worktree_diff_sha256"],
+    require(hashlib.sha256(source_diff(mlxc)).hexdigest() == lock["mlxc_worktree_diff_sha256"],
             "MLX-C actual source patch mismatch")
     require(command("git", "-C", str(mlxc), "ls-files", "--others", "--exclude-standard", "mlx/c") == "",
             "MLX-C has untracked source imports")
@@ -117,6 +128,8 @@ def main() -> None:
         **{key: lock[key] for key in ("bridge_source_sha256", "host_revision", "plugin_revision", "mlx_revision", "mlxc_revision", "mlxc_patch_sha256", "plugin_patch_sha256", "sushi_revision", "zig_version", "zig_sha256")},
         "experimental_prefix": args.experimental_prefix, "mlx_lib_dir": str(stage / "lib"),
         "mlxc_worktree_diff_sha256": lock["mlxc_worktree_diff_sha256"],
+        "mlx_worktree_diff_sha256": lock["mlx_worktree_diff_sha256"],
+        "mlx_getter_patch_sha256": lock["mlx_getter_patch_sha256"],
         "dependency_headers_sha256": lock["dependency_headers_sha256"],
         "artifacts": artifacts, "validation": {"c_abi_smoke": "passed", "model_loaded": False,
             "gpu_inference": False, "prefix_restore_qualified": False}}

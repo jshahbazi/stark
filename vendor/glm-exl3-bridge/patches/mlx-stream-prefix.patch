@@ -133,14 +133,15 @@ index 9d2eaa17..a56aad52 100644
              }
              try self.g.evalAll(&.{logits.?});
 diff --git a/src/arch/glm5_next/root.zig b/src/arch/glm5_next/root.zig
-index e0659e2c..2202cb3e 100644
+index e0659e2c..ec0da7e8 100644
 --- a/src/arch/glm5_next/root.zig
 +++ b/src/arch/glm5_next/root.zig
-@@ -31,6 +31,7 @@ pub const caps: sdk.Caps = .{
+@@ -31,6 +31,8 @@ pub const caps: sdk.Caps = .{
  
  pub const Config = settings.Config;
  pub const Module = if (host_caps.dsa_nax) module.Module else struct {};
 +pub const PrefixSnapshot = module.PrefixSnapshot;
++pub const admitted = module.admitted;
  
  /// G6: the process's one expert reader, claimed at the load claim, released when the loaded model goes.
  pub const claimProcess = sdk_ext.expert.takeReader;

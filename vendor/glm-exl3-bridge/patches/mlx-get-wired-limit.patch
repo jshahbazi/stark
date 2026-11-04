@@ -1,0 +1,47 @@
+diff --git a/mlx/backend/metal/allocator.cpp b/mlx/backend/metal/allocator.cpp
+--- a/mlx/backend/metal/allocator.cpp
++++ b/mlx/backend/metal/allocator.cpp
+@@ -97,6 +97,11 @@
+   return block_limit_;
+ }
+ 
++size_t MetalAllocator::get_wired_limit() {
++  std::unique_lock lk(mutex_);
++  return wired_limit_;
++}
++
+ size_t MetalAllocator::set_wired_limit(size_t limit) {
+   std::unique_lock lk(mutex_);
+   std::swap(limit, wired_limit_);
+@@ -260,6 +265,9 @@
+   }
+   return metal::allocator().set_wired_limit(limit);
+ }
++size_t get_wired_limit() {
++  return metal::allocator().get_wired_limit();
++}
+ size_t get_active_memory() {
+   return metal::allocator().get_active_memory();
+ }
+diff --git a/mlx/backend/metal/allocator.h b/mlx/backend/metal/allocator.h
+--- a/mlx/backend/metal/allocator.h
++++ b/mlx/backend/metal/allocator.h
+@@ -40,6 +40,7 @@
+   size_t set_memory_limit(size_t limit);
+   size_t get_memory_limit();
+   size_t set_wired_limit(size_t limit);
++  size_t get_wired_limit();
+   void clear_cache();
+ 
+  private:
+diff --git a/mlx/memory.h b/mlx/memory.h
+--- a/mlx/memory.h
++++ b/mlx/memory.h
+@@ -90,4 +90,7 @@
+  * */
+ MLX_API size_t set_wired_limit(size_t limit);
+ 
++/* Get the current process-local wired limit without changing residency. */
++MLX_API size_t get_wired_limit();
++
+ } // namespace mlx::core

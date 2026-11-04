@@ -100,6 +100,8 @@ pub fn link(
         "plugin_patch_sha256",
         "bridge_source_sha256",
         "mlxc_worktree_diff_sha256",
+        "mlx_getter_patch_sha256",
+        "mlx_worktree_diff_sha256",
         "dependency_headers_sha256",
         "sushi_revision",
         "zig_version",
@@ -113,10 +115,10 @@ pub fn link(
         Ok("1") => true,
         _ => bail!("STARK_GLM_EXL3_VALIDATE_PREFIX must be 0 or 1"),
     };
-    ensure!(
-        experimental == validation,
-        "experimental GLM prefix stage requires the matching explicit validation opt-in"
-    );
+    ensure!(!validation || experimental, "GLM state validation requires a prefix-capable native stage");
+    if experimental {
+        println!("cargo::rustc-cfg=stark_glm_exl3_prefix_available");
+    }
     if validation {
         println!("cargo::rustc-cfg=stark_glm_exl3_prefix_validation");
     }

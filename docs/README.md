@@ -80,6 +80,9 @@ records bounded readout and expert-batching results, and the qualification
 gaps that prevent selector promotion.
 The [GLM EXL3 backend record](archive/runs/2026-11-03-glm-exl3-backend.md)
 records the optional native bridge and its separate artifact qualification.
+The [GLM EXL3 artifact run](archive/runs/2026-11-04-glm-exl3-qualification.md)
+records the verified pack, residency integration, full-state restoration and
+worker qualification against sealed executables.
 The [live OpenWork Qwen3.8 run](archive/runs/2026-11-02-openwork-qwen38-live-prefix-reuse.md)
 records reuse and first-text timing for one real agent session.
 The [OpenCode Desktop managed-client record](archive/runs/2026-11-01-opencode-managed-client.md)

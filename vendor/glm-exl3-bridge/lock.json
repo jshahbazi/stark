@@ -9,10 +9,10 @@
   "sushi_revision": "0bc61aa690cadfed63637997f86b5de641d6645c",
   "zig_version": "0.17.0",
   "zig_sha256": "1c5f706db0ed6d55451940f31dc05a6177d05696bc1fa5d853696d04c718b523",
-  "plugin_patch_sha256": "0efb38bc247d6e7626eadb2c2d7732043394ac694fc7715ef4a567824986219b",
-  "bridge_source_sha256": "20197d24593ffff2046e9394a47f7737abfc2440fb0f4f5d6988eb71695382dd",
+  "plugin_patch_sha256": "29321d29027526e1371f249263e96b4aa820c019e54292104943bcdf3258942a",
+  "bridge_source_sha256": "fa5617ae3f8c5de87550d840603524fb9b992ca3de33e2df59b92c099a48ff71",
   "dependency_artifacts": {
-    "mlx": "39f48c76c001212fe4afed2c3152f7863e3f25e433ad49450fd0d81186865fb6",
+    "mlx": "04352e86da9f34479c320168aa5911226ce6d14fe200c3440118244f4442fb91",
     "mlxc": "2ea0b00f39a3e9b69f2b651678565be095c41c1f49268bc5edc94ad19ad5864d",
     "jaccl": "bda733bfd3ff3560306bb8bbd2be6cbf7027025ee6502edb3247f952f771e715",
     "metallib": "178186a29eb67d159b6c6d2f2d4a59003298a4dec957edc78762e5376adb7c4c"
@@ -24,7 +24,7 @@
     },
     {
       "path": "build.zig",
-      "sha256": "9a215ff0080f824999860ceca53735e9e49c461520e6d1ffbd437efe08d1351f"
+      "sha256": "2c77d11123e43e3fcb2b4fc42b6f3a871f0432993dcac3de1ae6632a31e63dce"
     },
     {
       "path": "build.zig.zon",
@@ -32,7 +32,7 @@
     },
     {
       "path": "include/stark_glm.h",
-      "sha256": "fbb2b2d7049b31afe964734ef10cfb7c04ed8309e40e2b09c7cbb9ea6577cde2"
+      "sha256": "985d9cebc4977a1ef2489c3f07e0f14c09e0116bdee5a281075dbe23bf5395ea"
     },
     {
       "path": "licenses/mlx-serve-LICENSE",
@@ -55,12 +55,16 @@
       "sha256": "09f2ab4c2cc372a2980e954d12af7f1834ae863c0bbf4870a40aef7034e87ce0"
     },
     {
+      "path": "patches/mlx-get-wired-limit.patch",
+      "sha256": "72563c4aa3d81125df33a6d9502b8fbce1c4100cc9ffcda6f3eec05f97395ecd"
+    },
+    {
       "path": "patches/mlx-stream-prefix.patch",
-      "sha256": "0efb38bc247d6e7626eadb2c2d7732043394ac694fc7715ef4a567824986219b"
+      "sha256": "29321d29027526e1371f249263e96b4aa820c019e54292104943bcdf3258942a"
     },
     {
       "path": "src/bridge.zig",
-      "sha256": "d830d80c3584acfcb85b72798d073fd11de6edea591c79f7ca96c26996385eb2"
+      "sha256": "4edda06ee9e2f4a8b605e69abdb635a266f3ae5c2d2d79748b8394e47beb44f7"
     },
     {
       "path": "src/host/crt.zig",
@@ -95,16 +99,20 @@
       "sha256": "aea2d54973faad5ba4bd0e25bf6860285048b2ca5fcd585ec1cfe6ade0f07a8d"
     },
     {
+      "path": "src/mlx_wired.cpp",
+      "sha256": "12b25cfd0b4f89d7ea0a3b49fd7fdfe0692aa8013d92a54fd0a9aa8b8432d59c"
+    },
+    {
       "path": "tests/abi_smoke.c",
-      "sha256": "b753f01bf2fd0d2eb69671fca75a1195cb3b990ffec0fbc59acf639fd9e9e168"
+      "sha256": "44af561be005b95ae8bf2638a7154408a4ac4745747650e2a3e1fa758c64f483"
     },
     {
       "path": "tools/bench.c",
-      "sha256": "871ebbb9164fc7318112fc1bc94402b9d3154bb14fa7189e1d010bfec21813ee"
+      "sha256": "54faba5f90f423bae26fdef402ceee0c847b9307431d6c000bec6805803b2668"
     },
     {
       "path": "tools/prepare_stage.py",
-      "sha256": "a70ec2312e1448b40c7d9a2cecc86ae22aa2c9ecc880827c39fd8cd9f84b5f4a"
+      "sha256": "51b0fdb14601a6e1e9a13fb3dd467b94a8c244e4875b9e6b087df9e2cd1ef982"
     }
   ],
   "dependency_headers": [
@@ -998,7 +1006,7 @@
     },
     {
       "path": "mlx-stage/include/mlx/backend/metal/allocator.h",
-      "sha256": "5ca3b085cc210f23c719175960921b51c39aed823a10736f95edd5b9bfbb0fff"
+      "sha256": "284f6798f41e62808af0c759200c676cbb45d1568d34f8aecbb8afd8a131b6ed"
     },
     {
       "path": "mlx-stage/include/mlx/backend/metal/binary.h",
@@ -1710,7 +1718,7 @@
     },
     {
       "path": "mlx-stage/include/mlx/memory.h",
-      "sha256": "dfe012ac8f2dff5d3d9a677b1f124556bb91614119979d8f290b0d41293f9636"
+      "sha256": "5212e0878197e63f448b933e4bf03db82cf42becd42b26f9c928646056f1f182"
     },
     {
       "path": "mlx-stage/include/mlx/mlx.h",
@@ -1837,6 +1845,8 @@
       "sha256": "ea41b02364fbb5c1bb3f1e2b238846bdf76602a055d6464fe5e720be07319536"
     }
   ],
-  "dependency_headers_sha256": "33ed5bdd62d68132902739ba838c02841c392c05c9f2574da07563acf750d36b",
-  "mlxc_worktree_diff_sha256": "e87c9bb59e365ee8a19ee4b98c605a516f44ff5106cf099f2787f58ec9f48723"
+  "dependency_headers_sha256": "157040a6c6ed180302ca6ad3945e6e014f4d84409768982d68fbcbfa5c69cf0c",
+  "mlxc_worktree_diff_sha256": "e87c9bb59e365ee8a19ee4b98c605a516f44ff5106cf099f2787f58ec9f48723",
+  "mlx_getter_patch_sha256": "72563c4aa3d81125df33a6d9502b8fbce1c4100cc9ffcda6f3eec05f97395ecd",
+  "mlx_worktree_diff_sha256": "458411eb8ddd7a7a4ebaeeed6324ccffd5b3c68a86095074f49d58cf14305cfe"
 }

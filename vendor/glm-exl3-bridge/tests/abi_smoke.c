@@ -71,6 +71,8 @@ int main(void) {
                 "info rejects null handle");
     ok &= check(stark_glm_get_rows(NULL, &token, &token) == STARK_GLM_INVALID_ARGUMENT,
                 "admitted rows rejects null handle");
+    ok &= check(stark_glm_get_wired_capacity(NULL, &position, &position) == STARK_GLM_INVALID_ARGUMENT,
+                "wired capacity rejects null handle");
     ok &= check(stark_glm_capture_prefix_at(NULL, 16384) == STARK_GLM_INVALID_ARGUMENT,
                 "capture rejects null model");
     ok &= check(stark_glm_take_prefix_snapshot(NULL, &snapshot) == STARK_GLM_INVALID_ARGUMENT,

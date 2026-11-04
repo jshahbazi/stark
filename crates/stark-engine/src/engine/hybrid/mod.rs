@@ -275,7 +275,7 @@ impl Model {
                 let context = max_context.min(32_768);
                 let canonical = path.canonicalize()?;
                 let mut options = glm_exl3::LoadOptions::new(context as usize);
-                options.experimental_prefix_reuse = cfg!(stark_glm_exl3_prefix_validation);
+                options.prefix_reuse = cfg!(stark_glm_exl3_prefix_available);
                 let model = glm_exl3::GlmExl3Model::load(&canonical, vocab_size, options)?;
                 if model.vocab_size() != vocab_size
                     || model.max_context_length() != context as usize

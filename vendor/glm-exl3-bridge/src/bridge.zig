@@ -10,6 +10,7 @@ const allocator = std.heap.c_allocator;
 const abi_version: u32 = 1;
 const max_ceiling: u64 = 112 << 30;
 const default_margin: u64 = 2 << 30;
+extern "c" fn stark_glm_mlx_get_wired_limit(result: *usize) c_int;
 
 pub const std_options: std.Options = .{ .logFn = silentLog };
 fn silentLog(comptime _: std.log.Level, comptime _: @EnumLiteral(), comptime _: []const u8, _: anytype) void {}
@@ -44,6 +45,8 @@ const Model = struct {
     fenced: bool = false,
     request_invalid: bool = false,
     fresh: bool = true,
+    wired_capacity: usize = 0,
+    previous_wired_capacity: ?usize = null,
 };
 // The plugin reader and MLX error callback are process-owned, so admit one model.
 var process_claimed = std.atomic.Value(bool).init(false);
@@ -55,7 +58,7 @@ fn statusOf(e: anyerror) Status {
         var discarded: [512]u8 = undefined;
         _ = mlx.takeError(&discarded);
         @memset(&discarded, 0);
-        return if (memory) .out_of_memory else .device_failure;
+        return if (e == error.WiredRestoreFailed) .device_failure else if (memory) .out_of_memory else .device_failure;
     }
     return switch (e) {
         error.OutOfMemory => .out_of_memory,
@@ -125,6 +128,31 @@ fn checkResult(m: *Model, row: mlx.mlx_array) !void {
     m.readout = row;
 }
 
+fn installWired(m: *Model, target: usize) !void {
+    if (target == 0) return error.OverBudget;
+    var previous: usize = 0;
+    try mlx.check(stark_glm_mlx_get_wired_limit(&previous));
+    m.previous_wired_capacity = previous;
+    // Both resizes can fail after mutation. The observational getter saves the
+    // previous value first, including when it is nonzero.
+    var ignored: usize = 0;
+    try mlx.check(mlx.mlx_set_wired_limit(&ignored, 0));
+    try mlx.check(mlx.mlx_set_wired_limit(&ignored, target));
+    m.wired_capacity = target;
+}
+
+fn restoreWired(m: *Model) !void {
+    const previous = m.previous_wired_capacity orelse return;
+    var failed = false;
+    // Call only after module/weight handles and the stream have been freed.
+    mlx.check(mlx.mlx_clear_cache()) catch { failed = true; };
+    var ignored: usize = 0;
+    mlx.check(mlx.mlx_set_wired_limit(&ignored, previous)) catch { failed = true; };
+    if (failed) return error.WiredRestoreFailed;
+    m.previous_wired_capacity = null;
+    m.wired_capacity = 0;
+}
+
 pub export fn stark_glm_abi_version() u32 { return abi_version; }
 pub export fn stark_glm_status_name(status: u32) [*:0]const u8 {
     return switch (status) {
@@ -172,6 +200,16 @@ fn load(path: []const u8, options: Options, margin: u64) !*Model {
     m.* = .{ .io_runtime = std.Io.Threaded.init(allocator, .{}), .owner = std.Thread.getCurrentId(),
         .module = undefined, .config = undefined, .weights = undefined, .stream = .{} };
     errdefer m.io_runtime.deinit();
+    loadInto(m, path, options, margin) catch |e| {
+        // loadInto's errdefers release every model buffer before restoring the
+        // process-local residency capacity. Restoration failure has one status.
+        restoreWired(m) catch return error.WiredRestoreFailed;
+        return e;
+    };
+    return m;
+}
+
+fn loadInto(m: *Model, path: []const u8, options: Options, margin: u64) !void {
     const io = m.io_runtime.io();
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -198,8 +236,7 @@ fn load(path: []const u8, options: Options, margin: u64) !*Model {
     cfg.residency.label_named = false;
     // Finish the phase before returning from prefill; reset has no pending tail.
     cfg.prompt.ttft_tail = .off;
-    const baseline = sdk.memory.boxUsedBytes() orelse return error.MemoryReadingUnavailable;
-    cfg.memory_baseline_bytes = baseline;
+    const nonfile = sdk.memory.boxUsedBytes() orelse return error.MemoryReadingUnavailable;
     // Budget CPU checkpoint + independent restore/copy peak explicitly. No
     // snapshot payload is included in the upstream inference-only bill.
     const snapshot_reserve: u64 = if (experimental_prefix)
@@ -212,6 +249,12 @@ fn load(path: []const u8, options: Options, margin: u64) !*Model {
     // Pack-supplied operator pins must never override bridge admission.
     cfg.expert_rows = if (options.expert_rows > 0) options.expert_rows else null;
     cfg.expert_prefill_rows = if (options.expert_prefill_rows > 0) options.expert_prefill_rows else null;
+    // Match the normal host: count and evict this pack's file cache, retaining
+    // the foreign-file cache charge and the non-file floor in the baseline.
+    cfg.* = try Arch.admitted(io, cfg, &.{ .memory_baseline_bytes = nonfile,
+        .effective_context = options.context_tokens, .wired_margin_bytes = stop,
+        .expert_rows = cfg.expert_rows, .expert_prefill_rows = cfg.expert_prefill_rows });
+    const baseline = cfg.memory_baseline_bytes orelse return error.MemoryReadingUnavailable;
     try cfg.validate();
     const bill = try Arch.bill(arena.allocator(), io, &.{ .peek = &peek, .cfg = cfg, .routes = cfg,
         .prompt_tokens = options.context_tokens, .max_tokens = 0, .ceiling = options.gpu_ceiling_bytes, .stop = stop });
@@ -239,7 +282,11 @@ fn load(path: []const u8, options: Options, margin: u64) !*Model {
     m.module = try Arch.Module.init(allocator, io, cfg, &m.weights, m.stream, options.gpu_ceiling_bytes, stop);
     errdefer m.module.deinit();
     try flush(m);
-    return m;
+    // Residency changes only this process's MLX allocator. Never exceed the
+    // admitted model's own bill, the remaining budget, or Metal's local limit.
+    const process_budget = options.gpu_ceiling_bytes -| stop -| baseline;
+    const wired_capacity = @min(bill.processBound(m.module.rows), process_budget, mlx.maxRecommendedWorkingSet());
+    try installWired(m, @intCast(wired_capacity));
 }
 
 pub export fn stark_glm_prefill(model: ?*Model, ids_ptr: ?[*]const u32, count: usize) u32 {
@@ -298,7 +345,7 @@ pub export fn stark_glm_get_info(model: ?*Model, info_ptr: ?*Info) u32 {
     if (dst.struct_size != @sizeOf(Info) or dst.abi_version != abi_version) return code(.abi_mismatch);
     dst.* = .{ .struct_size = @sizeOf(Info), .abi_version = abi_version, .vocab_size = m.config.model.vocab_size,
         .prefill_chunk_tokens = 16_384, .context_tokens = m.module.maxContext(), .position = m.module.position(),
-        .capabilities = 3, .fenced = @intFromBool(m.fenced), .reserved = 0 };
+        .capabilities = if (experimental_prefix) 7 else 3, .fenced = @intFromBool(m.fenced), .reserved = 0 };
     return code(.ok);
 }
 pub export fn stark_glm_get_rows(model: ?*Model, prompt_ptr: ?*u32, decode_ptr: ?*u32) u32 {
@@ -311,6 +358,16 @@ pub export fn stark_glm_get_rows(model: ?*Model, prompt_ptr: ?*u32, decode_ptr: 
     // construct the expert source. Requested config pins are not authoritative.
     prompt.* = m.module.rows.prompt;
     decode.* = m.module.rows.decode;
+    return code(.ok);
+}
+pub export fn stark_glm_get_wired_capacity(model: ?*Model, capacity_ptr: ?*u64, previous_ptr: ?*u64) u32 {
+    const m = model orelse return code(.invalid_argument);
+    const capacity = capacity_ptr orelse return code(.invalid_argument);
+    const previous = previous_ptr orelse return code(.invalid_argument);
+    const state = owned(m);
+    if (state != .ok) return code(state);
+    capacity.* = m.wired_capacity;
+    previous.* = m.previous_wired_capacity orelse return code(.invalid_state);
     return code(.ok);
 }
 pub export fn stark_glm_cancel(model: ?*Model) u32 {
@@ -347,7 +404,7 @@ pub export fn stark_glm_reset(model: ?*Model) u32 {
     m.cancelled.store(false, .release);
     return code(.ok);
 }
-// Experimental ABI: CPU-owned snapshots; no prefix capability is advertised.
+// CPU-owned snapshots; the capability reports compiled implementation only.
 // Qualification must compare fresh/restored full readouts and all state hashes.
 pub export fn stark_glm_capture_prefix_at(model: ?*Model, position: u64) u32 {
     const m = model orelse return code(.invalid_argument);
@@ -412,6 +469,7 @@ pub export fn stark_glm_destroy(model_ptr: ?*?*Model) u32 {
     m.weights.deinit();
     Arch.freeConfig(allocator, m.config);
     _ = mlx.mlx_stream_free(m.stream);
+    restoreWired(m) catch { status = .device_failure; };
     m.io_runtime.deinit();
     allocator.destroy(m);
     slot.* = null;

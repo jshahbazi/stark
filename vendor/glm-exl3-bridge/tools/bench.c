@@ -130,6 +130,7 @@ int main(int argc, char **argv) {
     stark_glm_load_options options = {0};
     stark_glm_info info = {0};
     uint32_t prompt_rows = 0, decode_rows = 0;
+    uint64_t wired_capacity = 0, previous_wired_capacity = 0;
     float *readout = NULL;
     stark_glm_status status;
     int result = 1;
@@ -161,6 +162,8 @@ int main(int argc, char **argv) {
     if (status != STARK_GLM_OK) { fail_status("get_info", status); goto done; }
     status = stark_glm_get_rows(model, &prompt_rows, &decode_rows);
     if (status != STARK_GLM_OK) { fail_status("get_rows", status); goto done; }
+    status = stark_glm_get_wired_capacity(model, &wired_capacity, &previous_wired_capacity);
+    if (status != STARK_GLM_OK) { fail_status("get_wired_capacity", status); goto done; }
     if (info.vocab_size == 0 || info.vocab_size > 1048576 ||
         (info.capabilities & STARK_GLM_CAP_FULL_F32_READOUT) == 0) {
         fputs("unsupported readout metadata\n", stderr); goto done;
@@ -170,9 +173,11 @@ int main(int argc, char **argv) {
     printf("abi_version=%u warmup_runs=1 measured_runs=%u prompt_tokens=%zu "
            "decode_tokens_per_run=%u load_seconds=%.6f "
            "expert_prefill_rows=%u expert_rows=%u "
+           "wired_capacity_bytes=%llu previous_wired_capacity_bytes=%llu "
            "hash_encoding=fnv1a64-f32-little-endian\n",
            stark_glm_abi_version(), args.runs, token_count, args.decode, load_seconds,
-           prompt_rows, decode_rows);
+           prompt_rows, decode_rows,
+           (unsigned long long)wired_capacity, (unsigned long long)previous_wired_capacity);
     fflush(stdout);
     for (uint32_t run = 0; run <= args.runs; ++run) {
         status = stark_glm_reset(model);

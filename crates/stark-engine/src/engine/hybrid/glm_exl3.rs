@@ -2,10 +2,10 @@
 //! Owned serial execution of the pinned EXL3/FP8 GLM pack.
 //!
 //! The bridge owns all MLX state and returns complete F32 vocabulary readouts.
-//! Rust retains a prompt only while its batched prefill is pending. Experimental
-//! snapshots retain their private source prefix in memory and are never logged
-//! or persisted. Prefix reuse remains disabled until explicitly qualified for
-//! the artifact and precision policy.
+//! Rust retains a prompt only while its batched prefill is pending. Snapshots
+//! retain their private source prefix in memory and are never logged or
+//! persisted. The staged library advertises implementation availability;
+//! every artifact and precision policy needs separate qualification.
 
 use std::{
     marker::PhantomData,
@@ -33,10 +33,9 @@ pub struct LoadOptions {
     pub wired_margin_bytes: u64,
     pub expert_rows: u32,
     pub expert_prefill_rows: u32,
-    /// Qualification only. The bridge must also be built with its experimental
-    /// prefix implementation. Production callers must leave this disabled
-    /// until this exact artifact's fresh/restored state is qualified.
-    pub experimental_prefix_reuse: bool,
+    /// The native library must advertise snapshot support. Each actual
+    /// artifact and precision policy still needs its own qualification.
+    pub prefix_reuse: bool,
 }
 
 impl LoadOptions {
@@ -47,7 +46,7 @@ impl LoadOptions {
             wired_margin_bytes: WIRED_MARGIN_BYTES,
             expert_rows: 0,
             expert_prefill_rows: 0,
-            experimental_prefix_reuse: false,
+            prefix_reuse: false,
         }
     }
 
@@ -201,7 +200,7 @@ impl GlmExl3Model {
             capture_at: None,
             captured: None,
             restore: None,
-            prefix_reuse: options.experimental_prefix_reuse,
+            prefix_reuse: options.prefix_reuse,
             fenced: false,
             _load_thread: PhantomData,
         };
@@ -216,6 +215,9 @@ impl GlmExl3Model {
             || info.reserved != 0
         {
             return Err(Error::Invalid("GLM EXL3 loaded model metadata"));
+        }
+        if model.prefix_reuse && info.capabilities & ffi::CAP_PREFIX_SNAPSHOT == 0 {
+            return Err(Error::Unsupported("GLM EXL3 native prefix snapshots unavailable"));
         }
         Ok(model)
     }
@@ -502,7 +504,7 @@ impl GlmExl3Model {
     ) -> Result<()> {
         let result = (|| {
             if !self.prefix_reuse {
-                return Err(Error::Unsupported("GLM EXL3 prefix reuse is unqualified"));
+                return Err(Error::Unsupported("GLM EXL3 prefix snapshots unavailable"));
             }
             if self.fenced
                 || self.native_started
@@ -539,7 +541,7 @@ impl GlmExl3Model {
     ) -> Result<()> {
         let result = (|| {
             if !self.prefix_reuse {
-                return Err(Error::Unsupported("GLM EXL3 prefix reuse is unqualified"));
+                return Err(Error::Unsupported("GLM EXL3 prefix snapshots unavailable"));
             }
             if self.fenced
                 || self.position != 0
@@ -591,7 +593,7 @@ mod tests {
         assert!(LoadOptions::new(0).native().is_err());
         assert!(LoadOptions::new(MAX_CONTEXT + 1).native().is_err());
         let mut options = LoadOptions::new(32_768);
-        assert!(!options.experimental_prefix_reuse);
+        assert!(!options.prefix_reuse);
         assert!(options.native().is_ok());
         options.gpu_ceiling_bytes = MAX_GPU_BYTES + 1;
         assert!(options.native().is_err());

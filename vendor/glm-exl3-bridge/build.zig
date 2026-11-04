@@ -19,9 +19,10 @@ pub fn build(b: *std.Build) void {
     const plugin = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ plugin_dir, "src/root.zig" }) }, .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "mlx_host", .module = host }, .{ .name = "sdk", .module = sdk } } });
     const bridge = b.createModule(.{ .root_source_file = b.path("src/bridge.zig"), .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true, .imports = &.{ .{ .name = "mlx_stream", .module = plugin }, .{ .name = "mlx_host", .module = host }, .{ .name = "sdk", .module = sdk } } });
     const options = b.addOptions();
-    options.addOption(bool, "experimental_prefix", b.option(bool, "experimental-prefix", "Enable unqualified model-local prefix experiment; no capability is advertised") orelse false);
+    options.addOption(bool, "experimental_prefix", b.option(bool, "experimental-prefix", "Compile model-local prefix support; artifact qualification is separate") orelse false);
     bridge.addOptions("bridge_options", options);
     const csrc = b.pathJoin(&.{ plugin_dir, "csrc" });
+    bridge.addCSourceFile(.{ .file = b.path("src/mlx_wired.cpp"), .flags = &.{ "-std=c++20", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-Wno-deprecated-copy" } });
     bridge.addCSourceFile(.{ .file = .{ .cwd_relative = b.pathJoin(&.{ csrc, "q3_lookahead4_exl3.c" }) }, .flags = &.{ "-O2", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pthread" } });
     bridge.addCSourceFile(.{ .file = .{ .cwd_relative = b.pathJoin(&.{ csrc, "q3_event_shim.mm" }) }, .flags = &.{ "-O2", "-Wall", "-Wextra", "-Werror", "-fno-objc-arc" } });
     for ([_][]const u8{ "mlx_event_shim.cpp", "mlx_alloc_shim.cpp" }) |name| bridge.addCSourceFile(.{ .file = .{ .cwd_relative = b.pathJoin(&.{ csrc, name }) }, .flags = &.{ "-std=c++20", "-O2", "-D_METAL_", "-DACCELERATE_NEW_LAPACK", "-fno-sanitize=all", "-Wall", "-Wno-unused-parameter", "-Wno-deprecated-declarations" } });

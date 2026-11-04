@@ -31,6 +31,7 @@ enum {
 
 #define STARK_GLM_CAP_FULL_F32_READOUT UINT64_C(1)
 #define STARK_GLM_CAP_SERIAL_DECODE UINT64_C(2)
+#define STARK_GLM_CAP_PREFIX_SNAPSHOT UINT64_C(4)
 
 typedef struct stark_glm_load_options {
     uint32_t struct_size;
@@ -76,9 +77,15 @@ stark_glm_status stark_glm_get_info(stark_glm_model *model,
 /* Actual admitted expert rows from the installed module plan. */
 stark_glm_status stark_glm_get_rows(stark_glm_model *model,
                                     uint32_t *prompt_rows, uint32_t *decode_rows);
+/* Installed process-local MLX capacity and its saved pre-load setting. The
+ * current capacity is bounded by this model's admitted budget. Previous may
+ * exceed that budget; destruction restores it after freeing model buffers.
+ */
+stark_glm_status stark_glm_get_wired_capacity(stark_glm_model *model,
+                                            uint64_t *capacity, uint64_t *previous);
 
-/* Experimental, disabled by default and absent from advertised capabilities.
- * Build with -Dexperimental-prefix=true only for explicit qualification.
+/* Compiled with -Dexperimental-prefix=true; advertised by PREFIX_SNAPSHOT.
+ * This reports implementation availability. Artifact qualification is separate.
  * Capture must be armed before prefill at a positive 16384-token boundary.
  * Restore follows reset and receives the complete new prompt to verify source
  * ownership privately. Snapshots contain private CPU state and token IDs.

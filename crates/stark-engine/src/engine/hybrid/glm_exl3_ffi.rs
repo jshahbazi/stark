@@ -6,6 +6,7 @@ use std::ffi::c_void;
 pub(super) const ABI_VERSION: u32 = 1;
 pub(super) const CAP_FULL_F32_READOUT: u64 = 1;
 pub(super) const CAP_SERIAL_DECODE: u64 = 2;
+pub(super) const CAP_PREFIX_SNAPSHOT: u64 = 4;
 
 pub(super) type Model = c_void;
 pub(super) type Snapshot = c_void;
