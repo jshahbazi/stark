@@ -36,7 +36,7 @@ earlier rejected run.
 | Input | 16,384 raw-source tokens | 16,381 templated tokens | Contents affect expert routes and MTP acceptance; the three-token difference is not the substantive issue |
 | Decode length and sampling | 128 greedy steps | 1,024 sampled steps, temperature 1, top-p 0.95, seed 1 | Different trajectories and fixed-cost sensitivity |
 | Context and prefix reuse | 32,768; reuse off for throughput | Same context; reuse off | Aligned. The serial stage has no snapshot cost; prefix validation is separate evidence |
-| Hardware conditions | M5 Max, 40 GPU cores, 128 GiB; macOS 26.7.1 (25G241), AC `powermode 0`; CPU/paging/thermal screen | Same advertised hardware, maximum fans and clock-matched pairs; historical OS build not established | GPU frequency/fan telemetry remains unavailable: the read-only power sampler requires administrator authentication. Thermal readings do not prove matched GPU frequency |
+| Hardware conditions | M5 Max, 40 GPU cores, 128 GiB; macOS 26.7.1 (25G241), AC `powermode 0`; CPU/paging/thermal screen | Same advertised hardware, maximum fans and clock-matched pairs; historical OS build not established | Timed workload clocks and fan settings were not recorded. A subsequent idle probe confirmed the upstream no-root IOReport helper works; it supplies state residency, not clock locking. Thermal readings do not prove matched GPU frequency |
 | Global GPU wiring setting | Read-only `iogpu.wired_limit_mb` query returns `0`; unchanged | Published serve recipe explicitly sets `114688` | The raw zero does not establish the kernel's default capacity. This is separate from MLX's measured per-process residency capacity; no causal effect measured |
 
 The public pack sets MTP lane construction, depth and gate. The qualified bridge overrides
@@ -251,8 +251,8 @@ interface without a second sampler. It accounts for the already-published
 initial choice in the committed budget, suppresses its committed duplicate and
 never publishes the next uncommitted pending choice. It drains request work
 before success. The original headless loader and F32 readout remain reference
-paths. Native capability bits stay disabled in the ordinary build while worker
-and sampled-policy qualification proceed.
+paths. Native capability bits stay disabled in the ordinary build while the
+remaining quality and performance gates are unresolved.
 
 The native candidate also captures the MTP head at the nonfinal, chunk-aligned
 16K prefill boundary. On the actual model, restored continuation B and fresh B
@@ -564,3 +564,99 @@ whitelist that four-integer line without a native rebuild or another mutating
 census. This would attribute the final branch; it would not itself free memory
 or justify a larger pin. At the present footprint, useful engineering work
 must reduce misses or exposed read latency within the same admitted budget.
+
+## Direct versus staged expert reads
+
+One separately prepared private pair tested the supported `miss_reads`
+policies. Direct reads bypass staging copies and disable preread. Staged reads
+permit earlier preread and pay the copy. Both policies allocate and bill the
+same worker/speculative staging, metadata and slot geometry. This selector
+affects only the trunk stream; the draft head preloads its complete bank and
+retains its original math and reads. The existing calibrated 42-layer row
+offsets are already enabled, so a uniform-to-per-layer switch is not missing.
+
+Before any new inference, both arms were fixed at 96 prompt / 122 decode rows
+to retain headroom after CPU preparation. Each fresh child ran one identical
+excluded card1024 warmup, reset, passed the quiet gate and ran one measured
+request. All four requests matched `89c3e863f47bad76`, 1,024 choices, 367 rounds,
+889 verified drafts and 657 accepted drafts. Installed rows matched; every
+model/source/artifact postguard, cleanup and live memory/paging check passed.
+
+The private getter returns 36 existing cumulative trunk counters. One call
+at each phase boundary supplies both this snapshot and the original seven-field
+projection, checked for exact agreement. It adds no graph evaluation or fence.
+The native stage, C client and controller received independent source and
+receipt review; all 17 controller tests and model-free preparation passed.
+
+| Observation | Direct | Staged |
+| --- | ---: | ---: |
+| Prefill tok/s | 851.289 | 653.146 |
+| Decode tok/s | 16.486 | 15.564 |
+| Complete request seconds | 81.361 | 90.877 |
+| Decode cache misses / hits | 63,762 / 270,988 | 63,762 / 270,988 |
+| Settled decode payload | 604.084 GB | 604.084 GB |
+| Adopted bytes | 144.972 GB | 144.972 GB |
+| Speculative issued | 28,108 | 28,108 |
+| Source-reported speculative read bytes | 227.913 GB | 225.250 GB |
+| Abandoned speculative bytes | 78.883 GB | 75.394 GB |
+| Prereads issued / served | 0 / 0 | 96,910 / 44,791 |
+| Closed demand/preread busy intervals | 40.203 s | 43.612 s |
+
+Preread engagement is established by its counters and the direct-range change
+from 96,920 to zero. Demand payload, misses and adopted bytes remained identical.
+The new counters expose speculation separately: settled payload includes adopted
+data, so matching payload per miss does not establish zero speculative waste.
+Payload and speculative bytes must not simply be added; adoption overlaps them.
+These are source-level read statistics, not physical SSD-device telemetry.
+Closed busy intervals overlap computation and do not establish removable time.
+Their gauge excludes speculative workers and adoption waits/copies; it is not
+a measure of all expert I/O or GPU event-wait time. The small host `read_wait_ns`
+counter does not establish small GPU-visible waits.
+
+Both measured windows failed the unchanged external-CPU screen, at 171.595%
+and 173.540%, largely the Codex renderer. All other screens passed, with no new
+pageouts or swapouts, no compiler/download candidates, no monitor failures or
+gaps and thermal readings at most 1. The complete pair is numerical/counter
+evidence, with timing comparability and production performance false. Its
+observations provide no evidence supporting staged-policy promotion. No
+production read policy changed.
+
+Source review defines speculative bytes as bytes returned by speculative
+`preadv`, and abandoned bytes as partial reads for abandoned records. For the
+direct arm, speculative bytes minus adopted bytes is about 82.94 GB. A
+read-accounting proxy, `settled - adopted + speculative`, is about 687.03 GB;
+the excess is about 12.1% of that proxy. This is not SSD telemetry or a latency
+bound. About 95.4% of claimed records were still in flight when claimed, which
+can include useful partial lead. Neither percentage establishes that removing
+speculation would improve throughput. The evidence does not identify a
+same-budget change capable of doubling decode speed.
+
+Private result SHA-256:
+`9fd046e5d8b7d6216e4d9e8d8374f964a5628d6feb3825eb2b78f76352d36a98`.
+Controller SHA-256:
+`bbb741caa8f330ea3765a4eed5155d2573ab5a5cd00bcc33077acd166ed652ca`.
+Tooling receipt SHA-256:
+`2615153e0c7194dfb6c4418bf690ebc5f3413a67f35e96906739475f00df529a`.
+Native source/stage provenance SHA-256:
+`704e23f73aec835e7fcf5bd0f35cdaa4f33cbe1216676bbbea8630f651bd9789`.
+
+## Read-only hardware telemetry follow-up
+
+The earlier denied `powermetrics` query did not establish that all frequency
+telemetry requires administrator access. A bounded idle probe compiled the
+pinned upstream `mimo_gpu_power.inc` unchanged into a standalone helper. Its
+no-root IOReport subscription, two samples and delta succeeded, with finite
+nonnegative GPU-state residency and available energy/thermal-limit fields.
+It reported 16 state entries and a 14-entry static frequency table. No model,
+Metal context or tensor workload was created, and no fan, power or kernel
+setting changed.
+
+This establishes an available measurement path. It does not establish held
+clocks or clock matching in any earlier timed run. State labels and frequency
+table entries must be mapped correctly before deriving operating frequency;
+their differing counts must not be indexed naively. The sealed direct/staged
+pair was not modified to add this collector and retains its unmeasured-clock
+disposition. The unchanged upstream helper source SHA-256 is
+`5bec7460db07be0b07e292b2d91e48d7333c3b1e11386a4003a413976748f8d9`;
+the standalone wrapper source SHA-256 is
+`83627b2564785e766c76ef4cde592301430d8cf6531ac6a7019ecd3f1def8472`.
