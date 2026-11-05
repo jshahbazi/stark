@@ -784,3 +784,39 @@ Tooling receipt SHA-256:
 The C client links the unchanged native stage `44cc7794…`; its build receipt
 SHA-256 is
 `ab4451716c86df816d76bd826438e3345a8e71a08f6de49f89fe89fbd46fa20a`.
+
+## Private GPU p/q sampler speed check
+
+The private GPU p/q sampler passed its tiny three-case, 768-draw fixture after
+fixing an unsupported scalar-zero construction. A same-stage exploratory pair
+then used the same weights and raw 16,384-token input, temperature 1 / top-p
+0.95 / seed 1, 1,024 outputs, one excluded warmup and one measurement per
+fresh child, P16/D40 rows, and an equal 128 MiB workspace reserve. Results are
+sampler-specific: the trajectories differ, so output fingerprints and draft
+counters are not expected to match across arms.
+
+| Sampler / gate | Prefill tok/s | Decode tok/s | Measured rounds / verified / accepted | Host screen |
+| --- | ---: | ---: | ---: | --- |
+| Legacy / 0.5 | 821.44 | 7.2977 | 367 / 889 / 657 | Passed |
+| GPU p/q / 0.5 | 846.13 | 7.55494 | 380 / 848 / 644 | Failed: external CPU 240.8% |
+| GPU p/q / 0 | 562.95 | 6.35507 | 357 / 1,070 / 667 | Passed |
+
+Both p/q cells committed 1,024 outputs. The gate-0.5 cell's faster observed
+times are not comparable under its failed host screen; the screened gate-0
+cell had a lower observed throughput. Clocks were not matched, and these single observations show no
+useful speed gain. No paging or swapout increase occurred. The private sampler
+remains disabled and unqualified. The 1,000 prefill / 33 decode objective
+remains unmet.
+
+The preflight census that selected this P16/D40 footprint measured an admission
+baseline of 78.26 GB, about 49 GB above its separately sampled non-file floor
+of 29.01 GB. This difference was not established as safely reclaimable capacity.
+Admission retained the existing pack-specific
+cache invalidation, ceiling, margin and reserve. No global cache purge or
+admission-budget relaxation was used. These exploratory timings do not qualify
+the 104/130 or historical 190/217 profiles.
+
+Private pair result SHA-256:
+`6e5f7096ed3302f958c454e9dcb7de7638797f56e6522489706f3c0116f6b891`.
+Gate-0 p/q result SHA-256:
+`fcbd482a0857caa3a5f988b235470d91abe6892d96be87a2e632a1141068db4e`.
