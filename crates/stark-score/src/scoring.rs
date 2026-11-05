@@ -699,6 +699,7 @@ mod tests {
             json!({"model_type":"glm5_next"}),
             json!({"model_type":"qwen4_exp"}),
             json!({"model_type":"flint"}),
+            json!({"model_type":"ricursive"}),
         ] {
             std::fs::write(directory.0.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
             assert!(matches!(NativeBackend::load(&directory.0), Err("hybrid_model_load_failed")));

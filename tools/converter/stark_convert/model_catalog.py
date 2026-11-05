@@ -383,19 +383,19 @@ def _generation_architecture(config, family):
 
 def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
     """Return candidate downloads; actual installation must repeat pinned preflight."""
-    from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
-    from .native_catalog import catalog_item as native_catalog_item
+    from .native_catalog import FAMILY_IDS as NATIVE_FAMILY_IDS
+    from .native_catalog import catalog_items as native_catalog_items
 
-    if family_id == NATIVE_FAMILY_ID:
+    if family_id in NATIVE_FAMILY_IDS:
         if type(limit) is not int or not 1 <= limit <= MAX_ITEMS:
-            return _report(NATIVE_FAMILY_ID, "error", "The model catalogue request is invalid.")
+            return _report(family_id, "error", "The model catalogue request is invalid.")
         if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
-            return _report(NATIVE_FAMILY_ID, "offline", "Connect to the internet to browse models.")
+            return _report(family_id, "offline", "Connect to the internet to browse models.")
         return _report(
-            NATIVE_FAMILY_ID,
+            family_id,
             "ready",
             "Choose a model to download.",
-            [native_catalog_item()],
+            native_catalog_items(family_id)[:limit],
         )
 
     family = normalize_architecture(family_id)

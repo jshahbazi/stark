@@ -1,7 +1,7 @@
-# Native GLM-5.3-Flash, Qwen3.8-Flash-Next and Flint
+# Native GLM-5.3-Flash, Qwen3.8-Flash-Next, Flint and Ripple
 
 Stark has a separate native Rust/Metal forward path for `glm5_next`,
-`qwen4_exp` and `flint`. It reads their prepared quantized GGUF or MLX
+`qwen4_exp`, `flint` and `ricursive`. It reads their prepared quantized GGUF or MLX
 Safetensors storage. Lily-format Qwen3.8 text models also have a typed Uzu
 artifact conversion and loader, described below; the pinned artifact's
 readout and sampled-generation controls are recorded in the Uzu-format study.
@@ -19,10 +19,15 @@ The preparation command pins these sources:
 | `qwen38-mixed` | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, revision `b2c422f3c643e36f04227a64d61796b44a4b1029` | 106,195,031,237 bytes, 98.90 GiB |
 | `qwen38-lily-q4-xl` | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83` | 106,905,155,192 bytes, 99.56 GiB |
 | `flint-int4` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | 22,568,912,600 bytes, 21.02 GiB |
+| `ripple-q8` | `AtomicChat/Ripple-65B-Preview-GGUF`, Q8_0, revision `57066fdb2348a53f2261f096e0a793b9554b4106` | 68,840,113,568 bytes, 64.11 GiB |
 
 See [Recursive Flint](FLINT.md) for its architecture, installation command,
 precision policy and validation. The GLM/Qwen-specific execution details below
 retain their own scope.
+
+See [Ripple-65B Preview](RIPPLE.md) for the native Ripple architecture,
+preparation, F32 state policy and validation limits. Its Q8 weights use the
+official model's pinned configuration and tools-aware template.
 
 GLM uses the configuration and tokenizer from `zai-org/GLM-5.3-Flash` at
 `04c4e9e95c5da8862dced7e5056455116f83a7e0`. Its four GGUF shards retain their
@@ -76,9 +81,10 @@ it is not a weight-content qualification receipt.
 
 The prepared folder can be imported through **Manage Models → Add from Source →
 Local Folder** in an app build containing the new workers. Chat uses the existing
-generation worker. **Manage Models → Model Catalog → GLM-5.3 Flash** also offers
-`glm53-q2` directly, using the same pinned preparation helper. Its one text-only
-entry retains `UD-Q2_K_XL` storage and the four-shard byte total above. The app
+generation worker. **Manage Models → Model Catalog** also offers
+**GLM-5.3 Flash** (`glm53-q2`) and **Ripple-65B Preview** (`ripple-q8`) directly,
+using the same pinned preparation helper. The text-only entries retain their
+quantized storage and the shard byte totals above. The app
 validates the prepared source identity before registering the managed folder;
 loading and execution remain separate checks. Download progress is indeterminate
 until all stored weight bytes are verified. Stop terminates preparation;

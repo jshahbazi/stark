@@ -123,6 +123,26 @@ stark-convert [SOURCE] [options]
 
 The command prints one JSON object on success and `{"status":"error","error_category":...}` on failure. See [errors](#errors).
 
+## Native Ripple preparation
+
+Ripple-65B Preview uses its own native Rust architecture. Prepare the pinned
+Q8_0 GGUF with the publisher's configuration, tokenizer, license and tools-aware
+chat template:
+
+```sh
+uv run --project tools/converter --locked python -m stark_convert.hybrid_prepare ripple-q8 --output runtime/ripple-q8
+```
+
+The recipe preserves AtomicChat's two Q8_0 shards (68,840,113,568 bytes) and
+records both the weight and official metadata revisions in `native-source.json`.
+It downloads no repository Python and invokes no external inference engine.
+`ripple-bf16` prepares the official 16-shard BF16 checkpoint through the same
+path; its 129,565,519,472 weight bytes require substantially more memory.
+Preparation reports loading and execution as `unverified`; native validation is
+a separate operation. The app's Ripple family offers the pinned Q8_0 recipe for
+text generation. Decision scoring and image input remain disabled for this
+family. See [native model setup](../../docs/NATIVE_HYBRID_MODELS.md).
+
 ## Catalog coverage and qualification
 
 The declarative [catalog](stark_convert/catalog.json) records 110 reference model identities from the pinned Lalamo inventory plus five Stark extensions. Adapters and metadata profiles implement 90 of them (43 dense language profiles, 40 MLX profiles, two ModernBERT classifier profiles, and the five extensions):

@@ -340,7 +340,7 @@ Eligibility and key:
 
 - Converted text models whose owned layers are all full, non-ring attention caches (for example Qwen3 dense models) rewind their attention cache.
 - The native mixed-precision Qwen3.8 backend (Lily-format, official mixed-affine and Uzu-converted Qwen3.8 artifacts) resumes from a recurrent-state snapshot. Its attention, indexer and draft-head caches below the snapshot stay in the loaded model's own state.
-- Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window, speculator and image models, and for the native GLM, Flint and F32 Qwen graphs.
+- Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window, speculator and image models, and for the native GLM, Flint, Ripple and F32 Qwen graphs.
 - A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On the Qwen3.8 backend, whether MTP is enabled must also match (`key` reports this).
 
 Exactness, converted models:

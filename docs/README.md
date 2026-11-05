@@ -13,6 +13,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Native hybrid models](NATIVE_HYBRID_MODELS.md) | GLM-5.3-Flash GGUF, Qwen3.8-Flash-Next native-source preparation and typed Uzu text artifacts, execution and validation |
 | [Native hybrid sampling](NUMERICAL_SAMPLING.md) | Exact nucleus-prefix proof, reference-order fallbacks, precision and scratch lifetime |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
+| [Ripple-65B Preview](RIPPLE.md) | Native Rust/Metal architecture, pinned Q8 preparation, precision and validation limits |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
 | [Local API](LOCAL_API.md) | The loopback OpenAI-style chat API: authentication, endpoints, parameters, limits, error codes, tested clients |
 

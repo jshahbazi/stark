@@ -50,6 +50,23 @@ Model weights, private fixtures, runtime executables, and host application archi
 
 ## Naming and compatibility
 
+Ripple's independent native Rust forward follows Ricursive Intelligence's
+Apache-2.0 `ricursiveAI/Ripple-65B-Preview` reference at revision
+`e27e171792f303d74c048184e8259ba663cfa0d5`. The inspected
+`modeling_ricursive.py` SHA-256 is
+`f83865ef643e273a6c9aecf1575e85c95ad01fd995b1e43c3c7a892765006bb3`;
+`configuration_ricursive.py` SHA-256 is
+`002cb3915be9685eb962d617623bec14d45b5d6b5d46e689fac98a3b38cb6cf6`.
+The original license is retained in `LICENSE.ripple-reference` and included
+with distribution notices. Native execution uses Stark's matrix kernels and
+does not execute the reference Python. The optional validation tools import
+only the hash-pinned reference sources. Q8_0 GGUF weights are pinned separately
+to `AtomicChat/Ripple-65B-Preview-GGUF` revision
+`57066fdb2348a53f2261f096e0a793b9554b4106`; its tensor mapping preserves Q/K
+row order and the split-half rotary convention. Existing ggml storage notices
+continue to cover the shared GGUF reader. See [Ripple support](../docs/RIPPLE.md)
+for the precision policy, preparation and validation scope.
+
 Recursive Flint's native Rust forward contract follows the Apache-2.0
 `recursive-oss/rec` model module at revision
 `0e3150ca4262f572dee25c231d9ac7148414d2af`, path

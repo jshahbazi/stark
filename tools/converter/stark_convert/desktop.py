@@ -56,7 +56,8 @@ from .model_removal import RemovalError, prepare_removal, removal_info, remove_m
 from .model_support import support_matrix
 from .mtp import mtp_capabilities, resolve_mtp
 from .native_catalog import CHOICE as NATIVE_CHOICE
-from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
+from .native_catalog import FAMILY_CHOICES as NATIVE_FAMILY_CHOICES
+from .native_catalog import FAMILY_IDS as NATIVE_FAMILY_IDS
 from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
@@ -76,14 +77,14 @@ class DesktopError(Exception):
 
 
 @contextmanager
-def native_download_stage(data_dir):
+def native_download_stage(data_dir, choice=NATIVE_CHOICE):
     """Keep pinned native downloads reusable and owned by one installer."""
     root = data_dir / "native-downloads"
     if root.is_symlink():
         raise DesktopError("The native download folder is unavailable.")
     root.mkdir(mode=0o700, exist_ok=True)
-    identity = hashlib.sha256(json.dumps(NATIVE_SOURCES[NATIVE_CHOICE], sort_keys=True).encode()).hexdigest()[:16]
-    directory = root / (NATIVE_CHOICE + "-" + identity)
+    identity = hashlib.sha256(json.dumps(NATIVE_SOURCES[choice], sort_keys=True).encode()).hexdigest()[:16]
+    directory = root / (choice + "-" + identity)
     if directory.is_symlink():
         raise DesktopError("The native download folder is unavailable.")
     directory.mkdir(mode=0o700, exist_ok=True)
@@ -598,7 +599,7 @@ class Desktop:
             if mode not in item["artifact_modes"]:
                 raise DesktopError("Choose an available model version.")
             native_choice = native_source_choice(self.catalog_family_id, item)
-            if self.catalog_family_id == NATIVE_FAMILY_ID and native_choice is None:
+            if self.catalog_family_id in NATIVE_FAMILY_IDS and native_choice is None:
                 raise DesktopError("Refresh this family before downloading a model.")
             installed = self.catalog_installed_ids(item, mode)
             previous = next((model for model in self.models if model["id"] in installed), None)
@@ -1080,15 +1081,16 @@ class Desktop:
             source_key, name, converted = "huggingface:" + source, source.split("/")[-1], False
         elif kind == "native":
             # Only the server-held, pinned catalogue choice can enter this path.
-            # Generic HF preflight/conversion does not implement GLM GGUF.
-            native_item = native_catalog_item()
+            # Generic HF preflight/conversion does not implement these GGUFs.
+            if source not in {choice for choices in NATIVE_FAMILY_CHOICES.values() for choice in choices}:
+                raise DesktopError("Choose a pinned native text model from the catalogue.")
+            native_item = native_catalog_item(source)
             if (
-                source != NATIVE_CHOICE
-                or expected_revision != native_item["revision"]
+                expected_revision != native_item["revision"]
                 or selected_mode != "text"
                 or support_mode not in (None, "text")
             ):
-                raise DesktopError("Choose the pinned GLM text model from the catalogue.")
+                raise DesktopError("Choose a pinned native text model from the catalogue.")
             source_key, name, converted = "huggingface:" + native_item["repo"], native_item["name"], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
@@ -1145,7 +1147,7 @@ class Desktop:
             if not converted:
                 if kind == "native":
                     source_revision = expected_revision
-                    staging = resources.enter_context(native_download_stage(self.data_dir))
+                    staging = resources.enter_context(native_download_stage(self.data_dir, source))
                 else:
                     source_revision = self.check_install_support(
                         epoch,
@@ -1198,7 +1200,7 @@ class Desktop:
                         "Model installation failed. Check model support, free disk space and Hugging Face access."
                     )
                 if kind == "native":
-                    pinned = NATIVE_SOURCES[NATIVE_CHOICE]
+                    pinned = NATIVE_SOURCES[source]
                     if prepared_identity(output) != {
                         "repo": pinned["weights_repo"],
                         "revision": pinned["weights_revision"],
@@ -1206,7 +1208,7 @@ class Desktop:
                         "weight_bytes": pinned["weight_bytes"],
                         "quantization": pinned["quantization"],
                     }:
-                        raise DesktopError("The prepared model does not match the pinned GLM catalogue source.")
+                        raise DesktopError("The prepared model does not match the pinned native catalogue source.")
                 with self.lock:
                     if epoch != self.epoch:
                         return

@@ -1,4 +1,4 @@
-//! Architecture-specific execution for GLM5-Next, Qwen4-Exp and Recursive Flint.
+//! Architecture-specific execution for GLM5-Next, Qwen4-Exp, Flint and Ripple.
 //!
 //! These models carry distinct recurrent state, sparse attention and residual
 //! streams. Qwen3.8 also admits the typed Uzu converted architecture extension.
@@ -16,6 +16,7 @@ pub mod profile;
 pub mod qwen;
 #[cfg(feature = "metal")]
 mod qwen_metal;
+pub mod ripple;
 mod uzu;
 #[cfg(feature = "metal")]
 mod weight_metal;
@@ -129,11 +130,15 @@ fn extend_eos(
 pub fn recognizes(path: &Path) -> Result<bool> {
     let value = config(path)?;
     Ok(value.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE)
-        || matches!(value.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp" | "flint")))
+        || matches!(
+            value.get("model_type").and_then(Value::as_str),
+            Some("glm5_next" | "qwen4_exp" | "flint" | "ricursive")
+        ))
 }
 
 enum Forward {
     Flint(flint::FlintModel),
+    Ripple(ripple::RippleModel),
     Glm(glm::GlmModel),
     Qwen(qwen::QwenModel),
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -243,6 +248,7 @@ impl Model {
             let weights = weights::Weights::open(path)?;
             let forward = match outer.get("model_type").and_then(Value::as_str) {
                 Some("flint") => Forward::Flint(flint::FlintModel::new(weights, &outer)?),
+                Some("ricursive") => Forward::Ripple(ripple::RippleModel::new(weights, &outer)?),
                 Some("glm5_next") => Forward::Glm(glm::GlmModel::new(weights, &outer)?),
                 Some("qwen4_exp") => Forward::Qwen(qwen::QwenModel::new(weights, &outer)?),
                 _ => return Err(Error::Unsupported("architecture")),
@@ -327,6 +333,7 @@ impl Model {
     pub fn reset(&mut self) {
         match &mut self.forward {
             Forward::Flint(model) => model.reset(),
+            Forward::Ripple(model) => model.reset(),
             Forward::Glm(model) => model.reset(),
             Forward::Qwen(model) => model.reset(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -343,6 +350,7 @@ impl Model {
         } else {
             match &mut self.forward {
                 Forward::Flint(model) => model.step(token),
+                Forward::Ripple(model) => model.step(token),
                 Forward::Glm(model) => model.step(token),
                 Forward::Qwen(model) => model.step(token),
                 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -373,6 +381,7 @@ impl Model {
         } else {
             match &mut self.forward {
                 Forward::Flint(model) => model.ingest(token),
+                Forward::Ripple(model) => model.ingest(token),
                 Forward::Glm(model) => model.ingest(token),
                 Forward::Qwen(model) => model.ingest(token),
                 #[cfg(all(feature = "metal", target_os = "macos"))]

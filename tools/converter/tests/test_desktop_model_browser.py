@@ -162,9 +162,10 @@ def test_catalogue_download_resolves_server_cache_and_pins_mode_and_revision(hos
     assert len(called) == 1 and events(host)[-1]["request_id"] == "install"
 
 
-def test_glm_catalogue_download_uses_only_the_offered_pinned_native_choice(host, monkeypatch):
-    item = native_catalog.catalog_item()
-    host.catalog_request_id, host.catalog_family_id = "request", native_catalog.FAMILY_ID
+@pytest.mark.parametrize("family,choice", [("glm5_next", "glm53-q2"), ("ricursive", "ripple-q8")])
+def test_native_catalogue_download_uses_only_the_offered_pinned_native_choice(host, monkeypatch, family, choice):
+    item = native_catalog.catalog_item(choice)
+    host.catalog_request_id, host.catalog_family_id = "request", family
     host.catalog_entries = {item["id"]: item}
     called = []
     monkeypatch.setattr(host, "start", lambda *args, **kwargs: called.append((args, kwargs)))
@@ -177,7 +178,7 @@ def test_glm_catalogue_download_uses_only_the_offered_pinned_native_choice(host,
     }
     host.install_catalog(payload)
     args, kwargs = called[0]
-    assert args[3:] == ("native", "glm53-q2", "text", "text", "install", item["revision"])
+    assert args[3:] == ("native", choice, "text", "text", "install", item["revision"])
     assert kwargs == {"request_id": "install"}
     for change in ({"revision": "f" * 40}, {"repo": "untrusted/Replacement"}, {"artifact_modes": ["vision-language"]}):
         host.catalog_entries[item["id"]] = {**item, **change}

@@ -30,7 +30,7 @@ Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scri
 | Path | Contents |
 | --- | --- |
 | `src/engine/` | `Engine` (Metal context, capture manager), `LanguageModel` loading, `language_model/stream/` (generation: prefill, decode loop, sampling, lookahead), `language_model/scoring.rs` (next-token readout), `language_model/state.rs` (per-request state), `classifier_model.rs` (loads classifiers produced by the converter's ModernBERT path; no worker runs one) |
-| `src/engine/hybrid/` | Native GLM, Qwen3.8 and Flint loading, execution and request state; explicit Lily-format Qwen checkpoints select the in-process mixed-precision adapter |
+| `src/engine/hybrid/` | Native GLM, Qwen3.8, Flint and Ripple loading, execution and request state; explicit Lily-format Qwen checkpoints select the in-process mixed-precision adapter |
 | `vendor/lily-core/` | Pinned Lily Rust/Metal 4 Qwen core, with server, persistence and diagnostics removed; speculative execution disabled; licenses and patch provenance retained |
 | `src/encodable_block/` | The model graph as encodable blocks: `decoder.rs`, `transformer.rs`, `transformer_layer.rs`, `mixer/attention/`, `mixer/delta_net.rs`, `mixer/mamba2.rs`, `mlp/`, `linear/`, `sampling/`, embeddings and normalisation |
 | `src/backends/metal/` | Metal context, command buffers, buffer allocation and retirement, kernel wrappers under `kernel/` (matmul GEMM and GEMV, attention, GDN, sampling, normalization); `.metal` sources live next to their Rust wrappers |

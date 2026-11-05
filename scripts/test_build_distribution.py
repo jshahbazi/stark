@@ -574,6 +574,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "LICENSE.ggml-hybrid",
                 "LICENSE.qwen38-reference",
                 "LICENSE.flint-reference",
+                "LICENSE.ripple-reference",
                 "provenance/UPSTREAM.md",
                 "tools/converter/LICENSE.lalamo",
                 "vendor/cxx/LICENSE-MIT",
@@ -759,6 +760,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "LICENSE.ggml-hybrid",
                 "LICENSE.qwen38-reference",
                 "LICENSE.flint-reference",
+                "LICENSE.ripple-reference",
             ):
                 self.assertEqual(
                     (bundle / "share/stark/licenses" / name).read_text(), f"{name}\n"

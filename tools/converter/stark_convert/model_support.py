@@ -94,12 +94,13 @@ class MetadataSizeError(ConversionError):
 
 def support_matrix() -> dict:
     """Return a fresh displayable inventory without granting model capability."""
+    from .native_catalog import FAMILY_IDS
     from .native_catalog import family_definition as native_family_definition
 
     return {
         "schema_version": SCHEMA_VERSION,
         "modes": list(MODES),
-        "families": [*deepcopy(list(_FAMILIES)), native_family_definition()],
+        "families": [*deepcopy(list(_FAMILIES)), *(native_family_definition(family) for family in FAMILY_IDS)],
         "qualification": dict(_QUALIFICATION),
     }
 
