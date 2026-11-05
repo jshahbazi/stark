@@ -62,6 +62,11 @@ extension EngineController {
         apiContextTokens = 32_768
         apiMaxNewTokens = 512
     }
+
+    func switchConnectionFixtureToOtherModel() {
+        selectedID = "window-fixture-other"
+        loadedID = selectedID
+    }
 }
 
 extension AppDelegate {
@@ -163,6 +168,26 @@ extension AppDelegate {
         engine.desktopConnections.shutdown()
         return !delegate.menuPanel.isVisible
     }
+
+    static func exerciseCurrentModelDiscovery() -> Bool {
+        let suite = "stark.beginner-discovery-test." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let credentials = APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage())
+        let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults)
+        engine.configureConnectionFixture(state: "ready", loadedMode: .chat, apiAvailable: true, hasModels: true)
+        let observation = BeginnerOpenWorkStatus.staleWindowFixture()
+        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
+            session: BeginnerSetupSession(), interface: StarkInterfacePreferences(defaults: defaults),
+            observation: observation, selectInterface: { _ in }, openChat: {})
+        // A periodic observation from a previous model is still true while the
+        // engine changes. It cannot replace a verified current-model handshake.
+        engine.switchConnectionFixtureToOtherModel()
+        let snapshot = host.snapshot
+        engine.desktopConnections.shutdown()
+        return observation.running && observation.liveConnection && snapshot.openWorkRunning
+            && snapshot.runningModelID == "window-fixture-other" && !snapshot.openWorkClientActive
+    }
 }
 
 @main
@@ -171,6 +196,7 @@ struct WindowChecks {
         switch CommandLine.arguments.dropFirst().first {
         case "lifecycle": exit(AppDelegate.exerciseWindowLifecycle() ? 0 : 1)
         case "connections": exit(AppDelegate.exerciseConnectionLayouts() ? 0 : 1)
+        case "beginner-discovery": exit(AppDelegate.exerciseCurrentModelDiscovery() ? 0 : 1)
         default: exit(2)
         }
     }
@@ -199,6 +225,18 @@ extension ConnectionDetailsView {
               json["selected_model_is_running"] as? Bool == selectedMatches else { return false }
         return servesChat ? json["running_model"] as? String == "fixture/chat-model"
             : json["running_model"] is NSNull
+    }
+}
+"""
+
+BEGINNER_CONNECTION_FIXTURE = r"""
+
+extension BeginnerOpenWorkStatus {
+    static func staleWindowFixture() -> BeginnerOpenWorkStatus {
+        let result = BeginnerOpenWorkStatus()
+        result.running = true
+        result.liveConnection = true
+        return result
     }
 }
 """
@@ -238,6 +276,11 @@ class WindowLifecycleTests(unittest.TestCase):
         )
         connection = directory / "ConnectionDetailsView.swift"
         connection.write_text(connection_source + CONNECTION_FIXTURE)
+        beginner_host = directory / "BeginnerSetupHost.swift"
+        beginner_host.write_text(
+            (sources / "BeginnerSetupHost.swift").read_text()
+            + BEGINNER_CONNECTION_FIXTURE
+        )
         cls.executable = directory / "window-checks"
         compiled = subprocess.run(
             [
@@ -248,11 +291,16 @@ class WindowLifecycleTests(unittest.TestCase):
                 "arm64-apple-macosx26.4",
                 str(main),
                 str(connection),
+                str(beginner_host),
                 *(
                     str(path)
                     for path in sorted(sources.glob("*.swift"))
                     if path.name
-                    not in {"StarkApp.swift", "ConnectionDetailsView.swift"}
+                    not in {
+                        "StarkApp.swift",
+                        "ConnectionDetailsView.swift",
+                        "BeginnerSetupHost.swift",
+                    }
                 ),
                 "-o",
                 str(cls.executable),
@@ -282,6 +330,9 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_connection_sections_fit_across_model_lifecycle_states(self):
         self.run_check("connections")
+
+    def test_beginner_snapshot_rejects_cached_discovery_after_model_switch(self):
+        self.run_check("beginner-discovery")
 
 
 if __name__ == "__main__":
