@@ -23,6 +23,14 @@ mod greedy;
 #[path = "glm_prefill_batch.rs"]
 mod prefill_batch;
 
+#[cfg(feature = "metal")]
+#[path = "glm_mla_prefill.rs"]
+mod mla_prefill;
+
+#[path = "glm_prefix.rs"]
+mod prefix;
+pub(super) use prefix::PrefixSnapshot;
+
 #[derive(Clone)]
 struct Config {
     hidden: usize,
@@ -262,7 +270,7 @@ impl KdaState {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct AttentionState {
     latents: Vec<Vec<f32>>,
     // Only the incomplete pool retains uncompressed indexer rows. Completed
@@ -293,6 +301,9 @@ pub struct GlmModel {
     #[cfg(feature = "metal")]
     decode_graph_enabled: bool,
     position: usize,
+    prefix_instance: u64,
+    capture_at: Option<usize>,
+    captured: Option<PrefixSnapshot>,
     #[cfg(feature = "metal")]
     last_greedy: Option<(u32, usize)>,
     #[cfg(feature = "metal")]
@@ -367,6 +378,9 @@ impl GlmModel {
             #[cfg(feature = "metal")]
             decode_graph_enabled,
             position: 0,
+            prefix_instance: prefix::next_instance(),
+            capture_at: None,
+            captured: None,
             #[cfg(feature = "metal")]
             last_greedy: None,
             #[cfg(feature = "metal")]
@@ -389,6 +403,8 @@ impl GlmModel {
     }
 
     pub fn reset(&mut self) {
+        self.capture_at = None;
+        self.captured = None;
         for state in &mut self.states {
             match state {
                 LayerState::Kda(s) => s.reset(),
@@ -453,7 +469,10 @@ impl GlmModel {
                 return Err(Error::Invalid("GLM context requires reload after cleanup failure"));
             }
         }
-        let result = self.step_inner(token, readout);
+        let result = self.step_inner(token, readout).and_then(|logits| {
+            self.capture_prefix_if_ready()?;
+            Ok(logits)
+        });
         if result.is_err() {
             self.reset();
         }
@@ -1819,6 +1838,7 @@ fn encode_mla(
     if parallel {
         graph.end_projection_level()?;
     }
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.mla_input_projections")?;
     let qnorm = DecodeGraph::upload(&w.vector(&format!("{p}.attn_q_a_norm.weight"))?)?;
     let q = graph.rms_norm(&q, &qnorm, c.q_rank, c.rms_eps)?;
     if parallel {
@@ -1829,16 +1849,23 @@ fn encode_mla(
     if parallel {
         graph.end_projection_level()?;
     }
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.mla_query_projections")?;
     let kvnorm = DecodeGraph::upload(&w.vector(&format!("{p}.attn_kv_a_norm.weight"))?)?;
     let latent = graph.rms_norm(&latent, &kvnorm, c.kv_rank, c.rms_eps)?;
     let keynorm = DecodeGraph::upload(&w.vector(&format!("{p}.indexer.k_norm.weight"))?)?;
     let keybias = DecodeGraph::upload(&w.vector(&format!("{p}.indexer.k_norm.bias"))?)?;
     let key = super::glm_metal::index_layer_norm(graph, &key, &keynorm, &keybias)?;
     state.append(graph, &latent, &key, &gate)?;
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.mla_norm_append")?;
     let query = w.encode_batched_matvec(graph, &format!("{p}.attn_k_b.weight"), &query)?;
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.mla_key_projection")?;
     let attended = state.attend(graph, &query, &index_query, &weights)?;
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.mla_attend")?;
     let output = w.encode_batched_matvec(graph, &format!("{p}.attn_v_b.weight"), &attended)?;
-    w.encode_matvec(graph, &format!("{p}.attn_output.weight"), &output)
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.mla_value_projection")?;
+    let output = w.encode_matvec(graph, &format!("{p}.attn_output.weight"), &output)?;
+    graph.diagnostic_checkpoint("native.glm.prefill.gpu.mla_output_projection")?;
+    Ok(output)
 }
 
 fn layer_norm(

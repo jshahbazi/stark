@@ -6,8 +6,8 @@
 
 GLM-5.3-Flash UD-Q2_K_XL and Qwen3.8-Flash-Next mixed 4/8-bit use the
 [native hybrid loader](NATIVE_HYBRID_MODELS.md). Their prepared original-format
-folders use this same text protocol, sampling, cancellation and fresh-request
-state policy. Their initial native implementation is text-only.
+folders use this same text protocol, sampling, cancellation and scoped
+[prefix-reuse policy](#prefix-reuse). Their native implementation is text-only.
 
 The installed bundle includes a terminal chat client built on the worker:
 
@@ -84,6 +84,19 @@ attributes, includes/imports and over-limit programs fail with fixed errors.
 Reviewed model templates are tested against Jinja2 for exact output, including
 tool history and JSON formatting. MiniJinja is not a complete Python runtime;
 unsupported method variants and out-of-range integer inputs are rejected.
+Plain `set` and `for` bindings may declare single-underscore temporary names.
+Dunder names, undeclared underscore names and underscore-prefixed member access
+remain rejected. Underscore-prefixed root argument bindings are omitted before
+rendering, so an unbound local cannot fall back to caller-provided private data.
+Nested JSON keys are preserved. Loop metadata includes `previtem` and `nextitem` so templates
+can group tool results across multiple completed tool cycles.
+
+`tojson` accepts an optional `indent` from 0 through 16 or `none`, and an
+explicit boolean `ensure_ascii` (default `true`). Keys are sorted and HTML
+characters remain escaped under either ASCII policy. Other keywords and
+non-boolean ASCII options are rejected; the same allocation and output limits
+apply.
+
 Tuple-valued expressions are unsupported because this MiniJinja version
 represents them as lists. Constant-string tuple literals are admitted only as
 direct `in` / `not in` membership operands, where those collection semantics
@@ -125,7 +138,7 @@ context limit, EOS IDs and MTP support vary by loaded model:
 | `mode` | Protocol tag for this contract |
 | `operations` | Accepted `operation` values |
 | `state_policy` | `fresh-per-request`: no state survives between requests. `consecutive-prefix-v1` when [prefix reuse](#prefix-reuse) is enabled |
-| `prefix_cache` | Present only when the worker was started with `--prefix-cache`: `supported`, `enabled`, `chunk_tokens` (the reuse grid, a multiple of 1,024: 1,024 for converted models, 4,096 for the native Qwen3.8 backend), `idle_seconds` (600) and the reuse `key`. When enabled, `operations` also lists `reset_cache` |
+| `prefix_cache` | Present only when the worker was started with `--prefix-cache`: `supported`, `enabled`, `chunk_tokens` (the reuse grid, a multiple of 1,024: 1,024 for converted models and native GLM-5.3, 4,096 for native mixed-precision Qwen3.8), `idle_seconds` (600) and the reuse `key`. When enabled, `operations` also lists `reset_cache` |
 | `vocab_size` | Upper bound for every token ID |
 | `max_context_tokens` | Loaded model's configured maximum context; no global 16,384-token cap. A backend with no finite maximum reports the protocol's unsigned 32-bit maximum. |
 | `max_new_tokens` | Fixed cap of 4,096 output tokens per request |
@@ -246,8 +259,13 @@ worker lifetime; a contradictory backend capability or completion
 acknowledgement fences the worker.
 
 Use `"mtp": true` for the recommendation, `"mtp": false` to disable it, or
-`"mtp_drafts": N` for an explicit supported depth. Omission disables MTP in
-the native protocol. `mtp` requires a boolean and `mtp_drafts` an unsigned
+`"mtp_drafts": N` for an explicit supported depth. If neither selector is
+present, the worker uses the loaded backend's `default_drafts`, reported in
+readiness; this is normally zero. The explicitly staged GLM EXL3
+`bf16-native-experimental` profile sets that default to three. Send
+`"mtp": false` or `"mtp_drafts": 0` to request serial generation for that
+profile. The default `headless-reference` stage and other model families retain
+their existing defaults. `mtp` requires a boolean and `mtp_drafts` an unsigned
 integer; `null` and conflicting selectors are rejected. Completion metadata
 reports the resolved `enabled` state and `drafts` limit,
 `sampling` and `verification`, plus backend counters when available.
@@ -339,21 +357,24 @@ Agent clients resend the same instructions, tool definitions and history on ever
 Eligibility and key:
 
 - Converted text models whose owned layers are all full, non-ring attention caches (for example Qwen3 dense models) rewind their attention cache.
-- The native mixed-precision Qwen3.8 backend (Lily-format, official mixed-affine and Uzu-converted Qwen3.8 artifacts) resumes from a recurrent-state snapshot. Its attention, indexer and draft-head caches below the snapshot stay in the loaded model's own state.
-- Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window, speculator and image models, and for the native GLM, Flint and F32 Qwen graphs.
-- A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On the Qwen3.8 backend, whether MTP is enabled must also match (`key` reports this).
+- Native GGUF GLM-5.3 resumes from a snapshot on a 1,024-token grid. The snapshot includes KDA recurrence and convolution history, plus the MLA/indexer position and incomplete pooling tail. Completed attention and indexer prefix rows remain in the loaded model's own state.
+- The ordinary [EXL3/FP8 GLM backend](validation/GLM_EXL3_BACKEND.md) resumes on a 16,384-token grid with MTP off and its head unloaded. A private native MTP candidate, enabled through a separately prepared capability stage and explicit `STARK_GLM_EXL3_VALIDATE_NATIVE=1`, snapshots the draft-head state with the native prefix state. Its native greedy, sampled and prefix mechanism/invalidation checks pass; full Rust-worker and quality validation remain pending, so production MTP is unqualified. The state-hash diagnostic build setting is separate. See the [native mechanism record](archive/runs/2026-11-04-glm-exl3-native-mtp-prefix.md) and [comparison record](benchmarks/2026-11-04-glm-mlx-stream-comparison.md).
+- The native mixed-precision Qwen3.8 backend (Lily-format, external mixed-affine and Uzu-converted Qwen3.8 artifacts) resumes from a recurrent-state snapshot on a 4,096-token grid. This includes the admitted `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` layout. Its attention, indexer and draft-head caches below the snapshot stay in the loaded model's own state.
+- Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window, speculator and image models, and for the native Flint and F32 Qwen graphs.
+- A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On Qwen3.8 and the private native EXL3 candidate, whether MTP is enabled must also match (`key` reports this).
 
 Exactness, converted models:
 
 - Prompts are prefilled in 1,024-token chunks from position zero. The worker retains only rows produced by full, non-final prefill chunks of the previous prompt. It reuses the longest common token prefix rounded down to a chunk boundary and kept below the new prompt's own final chunk.
 - The rest of the prompt is then prefilled with the same chunk boundaries, kernels and arithmetic as on a fresh state. Rows from the previous final chunk and from decoding are never reused, and the sampler is reseeded from the request.
 
-Exactness, Qwen3.8:
+Exactness, native hybrid snapshots:
 
-- Prefill runs in 4,096-token passes counted from the position it starts at. A scoped request splits its prefill at the start of its final pass and copies the recurrent state there: GDN states and convolution windows, the n-gram history and window, and the draft head's last hidden. Both parts run the same passes as one prefill.
-- A snapshot cannot be rewound. The next request reuses it only when its prompt begins with the whole snapshotted prefix and leaves at least two tokens to prefill; otherwise it reuses nothing. The remaining prompt then runs the same 4,096-token passes, final-token route and draw as on a fresh state.
+- GGUF GLM captures at the start of the final 1,024-token reuse chunk. That boundary is divisible by its admitted 4/8-token prefill group widths, so splitting for capture preserves their grouping and arithmetic. After all GPU writers finish, capture copies the exact stored KDA state and convolution histories, and the MLA/indexer cursor and incomplete pooling tail. Restore resets the model, restores those values and exposes only the completed prefix rows retained below the boundary.
+- Qwen3.8 prefill runs in 4,096-token passes counted from the position it starts at. A scoped request splits its prefill at the start of its final pass and copies the recurrent state there: GDN states and convolution windows, the n-gram history and window, and, when present, the draft head's last hidden. Both parts run the same passes as one prefill.
+- A snapshot cannot be rewound. The next request reuses it only when its prompt begins with the whole snapshotted prefix and leaves at least two tokens to prefill; otherwise it reuses nothing. The remaining prompt uses the backend's original prefill grouping, final-token route and draw.
 
-Greedy and seeded outputs are therefore identical to a fresh-state run. The [validation record](archive/runs/2026-11-01-generation-prefix-reuse.md) checks this on the pinned Qwen3-4B artifact, and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) on the native Lily-format Qwen3.8 checkpoint.
+Restored execution must produce greedy and seeded outputs identical to a fresh-state run. The [validation record](archive/runs/2026-11-01-generation-prefix-reuse.md) checks this on the pinned Qwen3-4B artifact, and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) on the native Lily-format Qwen3.8 checkpoint. The [GLM and external mixed-affine record](archive/runs/2026-11-03-glm-qwen-prefix-reuse.md) records the artifact-specific scope for those paths.
 
 Lifetime:
 
@@ -367,7 +388,7 @@ Lifetime:
   - process exit
 - `tokenize` and `decode` keep it.
 
-Memory: on converted models the entry holds the KV cache of the previous request. On Qwen3-4B that is 144 KiB per token, about 2.7 GiB after an 18,500-token step, bounded by the state's capacity of `context_tokens` plus 1,024 rows. A request of that size already maps this memory while it runs; reuse keeps it resident until the next request or idle expiry. The Qwen3.8 backend already keeps its caches allocated between requests; its entry adds the snapshot, about 110 MiB (36 GDN layers of 48 × 128 × 128 F32 state plus convolution windows).
+Memory: on converted models the entry holds the KV cache of the previous request. On Qwen3-4B that is 144 KiB per token, about 2.7 GiB after an 18,500-token step, bounded by the state's capacity of `context_tokens` plus 1,024 rows. A request of that size already maps this memory while it runs; reuse keeps it resident until the next request or idle expiry. Native GLM and Qwen3.8 keep their completed attention caches in the loaded model; retention adds the snapshot of mutable recurrence and history. GLM also preserves the incomplete indexer pool. The Lily-format Qwen3.8 snapshot is about 110 MiB (36 GDN layers of 48 × 128 × 128 F32 state plus convolution windows); other graph geometries have their own memory cost.
 
 Privacy: the retained state and its prefix token IDs exist only in worker memory. They are never written to disk, logged, or included in replies; replies carry counts only. A faster first token reveals that the previous request shared a prefix, so hosts give each principal its own random scope. The desktop backend uses one scope per Playground conversation, per API session and master key, and per managed client grant. It rotates scopes on reset, revocation and key change, and sends `reset_cache` on revocation and API restart.
 
@@ -395,7 +416,7 @@ A write failure on the reply pipe also ends the process with exit status 1.
 
 By default every generate request creates a fresh native state sized to `context_tokens`, runs the prompt through prefill, generates, and drops the state before the terminal reply is written. No KV cache or prompt prefix survives between requests, so each turn of a conversation re-processes the whole conversation. This is the `fresh-per-request` policy advertised in readiness.
 
-With `--prefix-cache` on an eligible model, the policy is `consecutive-prefix-v1`: the state of the previous successful text generation (on Qwen3.8, its recurrent-state snapshot) is kept in memory for the next request under the key, lifetime and privacy rules in [Prefix reuse](#prefix-reuse). Nothing is ever persisted.
+With `--prefix-cache` on an eligible model, the policy is `consecutive-prefix-v1`: the state of the previous successful text generation (on GLM-5.3 and Qwen3.8, its recurrent-state snapshot) is kept in memory for the next request under the key, lifetime and privacy rules in [Prefix reuse](#prefix-reuse). Nothing is ever persisted.
 
 The worker suppresses native diagnostics and capture variables as described in [worker protocols](WORKER_PROTOCOLS.md#privacy-and-diagnostics). It opens no network listener and executes no tools.
 
@@ -409,7 +430,7 @@ cargo test --release --locked -p stark-generate -- --test-threads=1
 uv run --no-project --python 3.12.13 python scripts/test_generation_process.py --binary target/release/stark-generate
 ```
 
-The model-free tests also cover prefix-reuse alignment, backend reuse grids, whole-prefix snapshot matching, key matching, publication after the reply is flushed and every invalidation path. A model-bound script compares a `--prefix-cache` worker with fresh-state workers on synthetic agent sessions rendered by the model's chat template. It compares generated token IDs, text and parsed tool calls (when the template has a qualified tool parser), checks every reuse count against the documented rule, checks each invalidation path and measures first-token time. Workers run one at a time, so models that fill most of unified memory can be checked. It writes aggregates and hashes only. Add `--reuse boundary` for the Qwen3.8 backend:
+The model-free tests also cover prefix-reuse alignment, backend reuse grids, whole-prefix snapshot matching, key matching, publication after the reply is flushed and every invalidation path. A model-bound script compares a `--prefix-cache` worker with fresh-state workers on synthetic agent sessions rendered by the model's chat template. It compares generated token IDs, text and parsed tool calls (when the template has a qualified tool parser), checks every reuse count against the documented rule, checks each invalidation path and measures first-token time. Workers run one at a time, so models that fill most of unified memory can be checked. It writes aggregates and hashes only. Add `--reuse boundary` for the native GLM-5.3 and Qwen3.8 backends. Follow the [model onboarding workflow](MODEL_ONBOARDING.md) for every new model or state-affecting path:
 
 ```sh
 uv run --project tools/converter --locked --python 3.13.13 python scripts/validate_generation_prefix_cache.py --model MODEL_DIR --baseline BASELINE_WORKER --candidate CANDIDATE_WORKER --output runtime/prefix-cache-validation.json
