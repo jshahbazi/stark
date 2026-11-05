@@ -210,6 +210,8 @@ pub struct RippleModel {
     position: usize,
     #[cfg(feature = "metal")]
     graph: Option<decode_graph::State>,
+    #[cfg(feature = "metal")]
+    graph_admitted: bool,
     #[cfg(all(feature = "metal", test))]
     graph_enabled: bool,
 }
@@ -247,7 +249,7 @@ impl RippleModel {
         let layers =
             (0..config.sliding.len()).map(|i| load_layer(&weights, &config, i, gguf)).collect::<Result<Vec<_>>>()?;
         #[cfg(feature = "metal")]
-        {
+        let graph_admitted = {
             // A dense model scans every projection at each token. Retaining
             // the complete compressed inventory avoids repeatedly registering
             // and evicting Metal wrappers when the original 8 GiB cache is
@@ -267,8 +269,11 @@ impl RippleModel {
                     projections.push(gate.clone());
                 }
             }
-            weights.configure_complete_dense_views(&projections, 8 * 1024 * 1024 * 1024)?;
-        }
+            // A token graph owns every bound view through completion. Keep
+            // the staged, bounded streaming path if the complete inventory
+            // was declined, even when some individual projections fit.
+            weights.configure_complete_dense_views(&projections, 8 * 1024 * 1024 * 1024)?
+        };
         let states = config.sliding.iter().map(|_| AttentionState::default()).collect();
         Ok(Self {
             weights,
@@ -281,6 +286,8 @@ impl RippleModel {
             position: 0,
             #[cfg(feature = "metal")]
             graph: None,
+            #[cfg(feature = "metal")]
+            graph_admitted,
             #[cfg(all(feature = "metal", test))]
             graph_enabled: true,
         })
@@ -302,11 +309,11 @@ impl RippleModel {
     fn use_graph(&self) -> bool {
         #[cfg(test)]
         {
-            self.graph_enabled
+            self.graph_admitted && self.graph_enabled
         }
         #[cfg(not(test))]
         {
-            true
+            self.graph_admitted
         }
     }
 

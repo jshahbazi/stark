@@ -461,6 +461,7 @@ fn graph_growth_reference_checks(
         c["ffn_clamp_threshold"] = json!(clamp);
         let fixture = Fixture::new(&tensors, &c);
         let mut graph = fixture.load(&c).unwrap();
+        assert!(graph.graph_admitted);
         let mut staged = fixture.load(&c).unwrap();
         staged.graph_enabled = false;
         let sequence: Vec<_> = (0..40).map(|index| index % 5).collect();
@@ -545,4 +546,36 @@ fn device_graph_rejects_nonfinite_projections_before_clipping_can_hide_them() {
         assert_eq!(graph.position, 0);
         assert!(graph.graph.is_none());
     }
+}
+
+#[cfg(feature = "metal")]
+#[stark_test]
+fn unadmitted_dense_inventory_uses_staged_forward_and_resets_state() {
+    let tensors = tensors();
+    let fixture = Fixture::new(&tensors, &config());
+    let expected = reference(&tensors, &[0, 1, 2, 3]);
+    let mut model = fixture.load(&config()).unwrap();
+    assert!(model.graph_admitted);
+    assert!(model.graph_enabled);
+    // Model a declined complete-view inventory without constructing a huge
+    // fixture. The test selector remains enabled and cannot bypass admission.
+    model.graph_admitted = false;
+    assert!(!model.use_graph());
+    model.ingest(0).unwrap();
+    model.ingest(1).unwrap();
+    close(&model.step(2).unwrap(), &expected[2]);
+    assert!(model.graph.is_none());
+    assert_eq!(model.states[0].keys.len(), 2);
+    assert_eq!(model.states[1].keys.len(), 3);
+    assert!(model.step(u32::MAX).is_err());
+    assert_eq!(model.position, 0);
+    assert!(model.graph.is_none());
+    assert!(model.states.iter().all(|state| state.keys.is_empty() && state.values.is_empty()));
+    close(&model.step(0).unwrap(), &expected[0]);
+    model.reset();
+    assert_eq!(model.position, 0);
+    assert!(model.states.iter().all(|state| state.keys.is_empty() && state.values.is_empty()));
+    close(&model.step(0).unwrap(), &expected[0]);
+    assert!(!model.graph_admitted);
+    assert!(model.graph.is_none());
 }

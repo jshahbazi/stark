@@ -38,8 +38,9 @@ Successful preparation does not qualify loading, generation quality or speed.
 
 Q8_0 weights retain their original block scales and integer codes. Matrix
 products accumulate into F32 outputs. Residuals, normalization, rotary
-transformations, attention, gates and KV state use F32 arithmetic. On Metal,
-these operations stay in a device graph through each token, with a single
+transformations, attention, gates and KV state use F32 arithmetic. When the
+complete projection inventory is admitted on Metal, these operations stay in a
+device graph through each token, with a single
 completion before returning its readout. Growing the KV allocation adds
 separate bounded copy commands at capacity boundaries. This is a
 separate precision policy from the publisher's BF16 inference and benchmarks.
@@ -56,7 +57,7 @@ Ripple retains the complete set of immutable Metal projection views when its
 page-rounded size fits three quarters of the device's recommended working set,
 after an 8 GiB dynamic reserve. Embeddings remain CPU mappings. Admission is
 lazy and changes buffer lifetime only. A model that does not fit keeps the
-existing 8 GiB streaming view cache. On the tested 128 GiB M5 Max, the Q8
+existing staged execution with an 8 GiB streaming view cache. On the tested 128 GiB M5 Max, the Q8
 projection inventory occupies 63.604 GiB within a 72.640 GiB policy limit. Request
 KV state remains subject to the independent bounds below.
 
