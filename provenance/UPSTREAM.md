@@ -67,6 +67,15 @@ row order and the split-half rotary convention. Existing ggml storage notices
 continue to cover the shared GGUF reader. See [Ripple support](../docs/RIPPLE.md)
 for the precision policy, preparation and validation scope.
 
+Ripple's F32 Metal graph and shape-scoped Q8 dispatch were introduced in
+`410bec76c195522b6478c329225d6cbfb84b9977`, with complete-inventory admission
+enforced in `1978a3b17df1ea83b4d7e1139ec2e91619f2acfc`. The control kernels
+independently implement the same pinned equations. Q8 dispatch reuses Stark's
+existing MIT-licensed ggml grouped kernel; its source header and
+`LICENSE.ggml-hybrid` remain intact. The separate
+[GPU validation record](../docs/benchmarks/RIPPLE_65B_GPU_2026_11_05.md)
+preserves the new numerical policy checks and measured worker comparison.
+
 Recursive Flint's native Rust forward contract follows the Apache-2.0
 `recursive-oss/rec` model module at revision
 `0e3150ca4262f572dee25c231d9ac7148414d2af`, path

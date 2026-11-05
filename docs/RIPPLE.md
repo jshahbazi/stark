@@ -120,3 +120,6 @@ It does not establish parity with the original BF16 checkpoint's inference
 policy or reproduce the publisher's quality scores.
 
 Recorded checks: [native validation](archive/runs/2026-11-04-ripple-native-support.md).
+The later [GPU performance report](benchmarks/RIPPLE_65B_GPU_2026_11_05.md)
+records graph/Q8 validation, the matched worker comparison and the installed
+development build.
