@@ -115,6 +115,7 @@ def make_desktop(worker):
     desktop = object.__new__(Desktop)
     desktop.lock = threading.RLock()
     desktop.write_lock = threading.Lock()
+    desktop.converter_termination_lock = threading.Lock()
     desktop.output = io.StringIO()
     desktop.output_failed = False
     desktop.epoch = 1

@@ -189,6 +189,58 @@ The readout box below **Manage Models** and at the top of the playground shows i
 
 While a request runs, the time row shows elapsed time against an estimated total, such as `1.3 s of ~8.7 s`, with a progress bar. The estimate is the middle of a range that updates from live token timings and recent successful requests for the same model session and options. A new session first learns its speed and shows elapsed time alone, as does a request that runs past its estimate. Response length and system load can change the estimate. These timings start when the worker begins generation; loading, queueing and prompt preparation are separate. Live values contain counts and timings only, never request or response content. Estimates and calibration counts stay in memory, and replies still appear when generation finishes.
 
+## Beginner and Advanced setup
+
+The interface picker offers **Beginner** and **Advanced**. On first launch,
+Stark waits for model inventory before choosing a default: an empty library
+opens Beginner, while a library with installed models opens Advanced. The
+choice is saved separately from the **Chat** or **Decision** playground mode.
+Advanced retains the existing Manage Models, Model Catalog, Add from Source,
+Playground, Connections and chat controls.
+
+Beginner's **Guided Steps** flow asks what you want help with, checks the
+available starting recipes, and offers an eligible installed model or a pinned
+download recipe. It shows download and preparation as separate stages. After
+installation, you must explicitly start the model; when another model is
+running, it remains installed and available until you explicitly choose to
+switch. Stark clears the current chat only after the selected model reports
+ready.
+
+The pinned starting choices are **Qwen3-4B-4bit** and **Qwen3-0.6B**, each
+with source-bound native chat evidence. Both checked OpenWork recipes require
+at least 16 GiB of physical memory and use a 32,768-token Playground/API
+budget. The stock OpenWork initial prompt has been observed at about 17,000 to
+19,000 tokens. A 16,384-token budget failed historical client runs, and the
+observed prefixes also exceed a 4,096-token budget.
+The guided API budget is separate from each model's trained/native context
+capacity; Advanced keeps its existing raw context controls. Memory planning
+estimates are 10 GiB for the 4B recipe and 9 GiB for the 0.6B recipe, not
+per-Mac fit guarantees. On an 8 GiB Mac, neither checked OpenWork starter is
+eligible, so Beginner offers the existing model browser in Advanced. These
+recommendations are conservative estimates informed by native chat evidence,
+not proof of best fit for a particular Mac or task, or of general OpenWork
+agent competence.
+
+After the model is running, Beginner can guide setup of the official OpenWork
+app. **Download OpenWork** opens its official download page in a browser; the
+user installs and opens the app, chooses a local workspace, and confirms that
+choice in Stark. Stark does not select or inspect the folder. The flow then
+offers the existing managed connection authorization, asks the user to select
+Stark and the running model in OpenWork, and checks that OpenWork's connector
+is active before enabling **Finish setup**. Connector authorization, an active
+connector, and the user's workspace/model confirmations are separate checks.
+Stark does not automatically grant folder access, restart OpenWork, select a
+model in OpenWork, or execute its tools. The ready check confirms connector
+metadata and the user's workspace/model confirmations; it does not prove that
+OpenWork can perform a task or that the selected model will perform it well.
+
+After setup, **Try a different model** is available from Beginner chat and the
+ready step. Choosing or preparing an alternative keeps the current running
+model, OpenWork workspace and authorization. **Cancel new setup** cancels only
+that candidate operation; it does not remove an installed model. Switching is
+explicit. The current chat is cleared only after the selected model reports
+ready, and the previous model remains installed.
+
 ## Connect another application
 
 Select **Connections** in the menu or playground window. The shared model header identifies the model running in Chat mode and its current availability. **Apps** groups OpenWork and OpenCode Desktop in one list, with separate connection status and controls for each app. Choose **Connect** to set one up, or **Manage** to reveal its **Reconnect** and **Disconnect** controls. A pending OpenCode engine keeps its own **Allow** and **Deny** prompt. API startup and Keychain recovery messages remain visible when setup needs attention.
@@ -235,7 +287,7 @@ The API offers authenticated health, capability, model listing and chat completi
 | --- | --- |
 | Model registry and managed models | `~/Library/Application Support/Stark` (folders registered in place stay where they are) |
 | Local image-check receipts | `~/Library/Application Support/Stark/image-checks`; private identity hashes and boolean results, reused only for an identical runtime |
-| Selected model, playground mode, pending update workspace | `UserDefaults` for `com.starkengine.menubar` (`selectedModel`, `playgroundMode`, `appUpdateWorkspace`) |
+| Selected model, playground mode, Beginner/Advanced interface, pending update workspace | `UserDefaults` for `com.starkengine.menubar` (`selectedModel`, `playgroundMode`, `starkInterfaceMode`, `appUpdateWorkspace`) |
 | Conversations, decision results, system prompt and limits | Memory only; cleared on Stop, mode change or quit |
 | API key | macOS Keychain; stable service and account described above |
 | API port | `UserDefaults`, keyed by the credential namespace; defaults to 8000 |

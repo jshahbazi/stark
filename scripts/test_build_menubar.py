@@ -1153,6 +1153,7 @@ class ConverterPackageTests(unittest.TestCase):
                 "model_support.py",
                 "model_inventory.py",
                 "model_catalog.py",
+                "guided_models.py",
                 "model_removal.py",
                 "vision_runtime_qualifications.json",
             ):
@@ -1190,6 +1191,7 @@ class ConverterPackageTests(unittest.TestCase):
                 "stark_convert/model_support.py",
                 "stark_convert/model_inventory.py",
                 "stark_convert/model_catalog.py",
+                "stark_convert/guided_models.py",
                 "stark_convert/model_removal.py",
                 "stark_convert/media.py",
                 "stark_convert/vision_runtime_qualifications.json",
@@ -1343,6 +1345,9 @@ print(String(data: try! JSONSerialization.data(withJSONObject: result), encoding
                 [
                     "swiftc",
                     str(swift),
+                    str(
+                        builder.ROOT / "apps/menu-bar/Sources/BeginnerModelReport.swift"
+                    ),
                     str(
                         builder.ROOT / "apps/menu-bar/Sources/APICredentialStore.swift"
                     ),

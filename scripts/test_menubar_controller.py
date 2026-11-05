@@ -50,10 +50,13 @@ final class ControllerCredentialStorage: APICredentialStorage {
 extension EngineController {
     static func exercise(_ scenario: String, backendError: String) -> Bool {
         let previousSelectedModel = UserDefaults.standard.object(forKey: "selectedModel")
+        let previousPlaygroundMode = UserDefaults.standard.object(forKey: "playgroundMode")
         defer {
             if let previousSelectedModel = previousSelectedModel {
                 UserDefaults.standard.set(previousSelectedModel, forKey: "selectedModel")
             } else { UserDefaults.standard.removeObject(forKey: "selectedModel") }
+            if let previousPlaygroundMode { UserDefaults.standard.set(previousPlaygroundMode, forKey: "playgroundMode") }
+            else { UserDefaults.standard.removeObject(forKey: "playgroundMode") }
         }
         let credentialStorage = ControllerCredentialStorage()
         let apiSuite = "stark.controller-api-test." + UUID().uuidString
@@ -183,8 +186,155 @@ extension EngineController {
             if let reused { event["reused_input_tokens"] = reused }
             return event
         }
+        func beginnerReport(_ installed: [String] = []) -> [String: Any] {
+            ["schema_version": 1, "status": "ready", "message": "Checked starting recipes",
+             "host": ["physical_memory_bytes": Int64(16 * 1024 * 1024 * 1024),
+                      "available_memory_bytes": Int64(8 * 1024 * 1024 * 1024),
+                      "free_disk_bytes": Int64(50 * 1024 * 1024 * 1024)],
+             "items": [["id": "fixture-recipe", "name": "Starting model", "repo": "example/model",
+                        "revision": String(repeating: "a", count: 40), "artifact_mode": "text",
+                        "quantization": "BF16", "download_bytes": 1000, "installed_bytes_estimate": 1200,
+                        "setup_disk_bytes_estimate": 4000, "runtime_memory_bytes_estimate": 8000,
+                        "context_tokens": 4096, "installed_ids": installed, "license": "Apache-2.0",
+                        "qualification": "Synthetic controller fixture", "caveats": ["Planning estimates"]]]]
+        }
+        func prepareBeginnerReport(_ installed: [String] = []) -> String {
+            engine.requestBeginnerModels(task: "unsure")
+            let id = command()["request_id"] as! String
+            engine.apply(["event": "guided_models", "request_id": id, "report": beginnerReport(installed)])
+            return id
+        }
         let apiFirst = String(repeating: "a", count: 32), apiSecond = String(repeating: "b", count: 32)
         switch scenario {
+        case "beginner-recommendation-fences":
+            engine.requestBeginnerModels(task: "unsure")
+            let request = command()
+            let id = request["request_id"] as! String
+            engine.apply(["event": "guided_models", "request_id": UUID().uuidString.lowercased(),
+                          "report": beginnerReport()])
+            guard engine.beginnerChoicesLoading, engine.beginnerReport == nil else { return false }
+            var invalid = beginnerReport()
+            var items = invalid["items"] as! [[String: Any]]
+            items[0]["setup_disk_bytes_estimate"] = -1; invalid["items"] = items
+            engine.apply(["event": "guided_models", "request_id": id, "report": invalid])
+            guard !engine.beginnerChoicesLoading, engine.beginnerReport == nil,
+                  engine.beginnerChoicesError != nil else { return false }
+            _ = prepareBeginnerReport()
+            engine.requestBeginnerModels(task: "code", excludingModelID: "fixture-model")
+            let retry = command()
+            engine.apply(["event": "guided_models", "request_id": id, "report": beginnerReport()])
+            return engine.beginnerChoicesLoading && engine.beginnerReport == nil &&
+                retry["excluded_model_ids"] as? [String] == ["fixture-model"] && engine.loadedID == "fixture-model"
+        case "beginner-cancel-preserves-current":
+            engine.models = [variant("fixture-model", name: "Current", display: nil)]
+            engine.messages = [ChatMessage(text: "synthetic history", isUser: true)]
+            engine.draft = "synthetic draft"
+            let recommendation = prepareBeginnerReport()
+            engine.installBeginnerModel(recipeID: "fixture-recipe")
+            let install = command(); let id = install["support_request_id"] as! String
+            guard install["command"] as? String == "install_guided",
+                  install["recommendation_request_id"] as? String == recommendation,
+                  engine.selectedID == "fixture-model", engine.loadedID == "fixture-model",
+                  engine.loadedMode == .decision, engine.messages.count == 1 else { return false }
+            let progress: [String: Any] = ["event": "progress", "phase": "download", "state": "running",
+                                          "completed_bytes": Int64(50), "total_bytes": Int64(100)]
+            engine.apply(progress.merging(["request_id": UUID().uuidString]) { _, new in new })
+            guard engine.downloadProgress.completedBytes == 0 else { return false }
+            engine.apply(progress.merging(["request_id": id]) { _, new in new })
+            guard engine.downloadProgress.fraction == 0.5 else { return false }
+            engine.cancelBeginnerInstallation()
+            let cancel = command()
+            guard cancel["command"] as? String == "cancel_install", cancel["request_id"] as? String == id,
+                  engine.beginnerCancelPending, engine.loadedID == "fixture-model" else { return false }
+            engine.apply(["event": "install_cancelled", "request_id": UUID().uuidString])
+            guard engine.beginnerCancelPending else { return false }
+            engine.apply(["event": "install_cancelled", "request_id": id])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            return engine.beginnerInstallState == "cancelled" && !engine.beginnerCancelPending &&
+                engine.loadedID == "fixture-model" && engine.selectedID == "fixture-model" &&
+                engine.modelReady && engine.messages.count == 1 && engine.draft == "synthetic draft" && noCommandSent()
+        case "beginner-explicit-switch-fences":
+            engine.models = [variant("fixture-model", name: "Current", display: nil)]
+            engine.messages = [ChatMessage(text: "synthetic history", isUser: true)]
+            let recommendation = prepareBeginnerReport()
+            engine.installBeginnerModel(recipeID: "fixture-recipe")
+            let install = command(); let id = install["support_request_id"] as! String
+            engine.apply(["event": "installed", "support_request_id": UUID().uuidString,
+                          "model": ["id": "new-model"]])
+            guard engine.beginnerInstalledResultID == nil else { return false }
+            engine.models.append(variant("new-model", name: "New", display: nil))
+            engine.apply(["event": "installed", "support_request_id": id, "model": ["id": "new-model"]])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard engine.selectedID == "fixture-model", engine.loadedID == "fixture-model",
+                  engine.messages.count == 1, engine.beginnerInstalledResultID == "new-model" else { return false }
+            guard engine.startBeginnerModel(recipeID: "fixture-recipe", modelID: "new-model") else { return false }
+            let load = command(); let loadID = load["request_id"] as! String
+            guard load["command"] as? String == "run_guided", load["recommendation_request_id"] as? String == recommendation,
+                  load["model_id"] as? String == "new-model", engine.messages.count == 1 else { return false }
+            var ready: [String: Any] = ["event": "ready", "request_id": UUID().uuidString.lowercased(),
+                "mode": "chat", "model_id": "new-model", "max_context_tokens": 4096,
+                "context_tokens": 4096, "max_output_tokens": 512, "tools": true]
+            engine.apply(ready)
+            guard engine.messages.count == 1, engine.loadedID == "fixture-model" else { return false }
+            ready["request_id"] = loadID; ready["model_id"] = "unrelated-model"; engine.apply(ready)
+            guard engine.messages.count == 1 else { return false }
+            ready["model_id"] = "new-model"; engine.apply(ready)
+            return engine.modelReady && engine.loadedID == "new-model" && engine.messages.isEmpty &&
+                engine.apiContextTokens == 4096 && engine.models.count == 2 && noCommandSent()
+        case "beginner-load-rejection-preserves-history":
+            engine.mode = .chat; engine.loadedMode = .chat; engine.supportsTools = true; engine.toolParser = "fixture"
+            engine.models = [variant("fixture-model", name: "Current", display: nil), variant("new-model", name: "New", display: nil)]
+            engine.messages = [ChatMessage(text: "synthetic history", isUser: true)]
+            _ = prepareBeginnerReport(["new-model"])
+            guard engine.startBeginnerModel(recipeID: "fixture-recipe", modelID: "new-model") else { return false }
+            let id = command()["request_id"] as! String
+            engine.apply(["event": "error", "request_id": id, "message": "Source recipe changed"])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            return engine.modelReady && engine.selectedID == "fixture-model" && engine.loadedID == "fixture-model" &&
+                engine.messages.count == 1 && engine.supportsTools && engine.toolParser == "fixture"
+        case "beginner-api-budget-keeps-native-capacity":
+            guard BeginnerContextPolicy.requiresRestart(expected: 32768, local: 4096, api: 4096),
+                  BeginnerContextPolicy.requiresRestart(expected: 32768, local: 32768, api: 4096),
+                  BeginnerContextPolicy.requiresRestart(expected: 32768, local: 40960, api: 40960),
+                  !BeginnerContextPolicy.requiresRestart(expected: 32768, local: 32768, api: 32768) else { return false }
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
+                          "max_context_tokens": 40960, "context_tokens": 32768,
+                          "api_context_tokens": 32768, "max_output_tokens": 4096, "tools": true])
+            guard engine.contextLimit == 40960, engine.contextCapacityKnown,
+                  engine.apiContextTokens == 32768, engine.options.contextTokens == 32768 else { return false }
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
+                          "max_context_tokens": Int(UInt32.max), "context_capacity_known": false,
+                          "context_tokens": 32768, "api_context_tokens": 32768, "max_output_tokens": 4096])
+            return !engine.contextCapacityKnown && engine.contextLimit == Int(UInt32.max) &&
+                engine.apiContextTokens == 32768
+        case "beginner-start-busy-rejection", "beginner-start-missing-rejection":
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.supportsTools = true; engine.toolParser = "fixture"
+            engine.models = [variant("fixture-model", name: "Current", display: nil), variant("new-model", name: "New", display: nil)]
+            engine.messages = [ChatMessage(text: "synthetic history", isUser: true)]
+            engine.draft = "synthetic draft"
+            _ = prepareBeginnerReport(["new-model"])
+            let historyIDs = engine.messages.map(\.id)
+            let context = engine.options.contextTokens
+            let maximum = engine.options.maxNewTokens
+            if scenario == "beginner-start-busy-rejection" {
+                engine.state = "generating"; engine.message = "Synthetic active request"
+            } else {
+                engine.models.removeAll { $0.id == "new-model" }
+            }
+            let priorState = engine.state, priorMessage = engine.message
+            guard !engine.startBeginnerModel(recipeID: "fixture-recipe", modelID: "new-model"),
+                  noCommandSent(), engine.beginnerRunRequestID == nil, engine.beginnerRunBackup == nil,
+                  engine.selectedID == "fixture-model", engine.loadedID == "fixture-model",
+                  engine.mode == .chat, engine.loadedMode == .chat,
+                  engine.state == priorState, engine.message == priorMessage,
+                  engine.messages.map(\.id) == historyIDs, engine.draft == "synthetic draft",
+                  engine.options.contextTokens == context, engine.options.maxNewTokens == maximum,
+                  engine.supportsTools, engine.toolParser == "fixture",
+                  let error = engine.errorMessage, error.count < 200 else { return false }
+            return scenario == "beginner-start-busy-rejection"
+                ? error.contains("current request") : error.contains("no longer installed")
         case "generation-progress-external-activity":
             engine.mode = .chat; engine.loadedMode = .chat
             engine.state = "generating"; engine.message = "Connected application request"
@@ -1919,7 +2069,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_playground_request_error_restores_draft_and_ignores_stale_ids(self):
         self.exercise("playground-request-error")
 
-    def test_generation_progress_matches_active_request_and_retains_actual_first_token(self):
+    def test_generation_progress_matches_active_request_and_retains_actual_first_token(
+        self,
+    ):
         self.exercise("generation-progress-request-and-lifecycle")
 
     def test_generation_progress_rejects_invalid_counts_times_and_partial_ranges(self):
@@ -1967,6 +2119,29 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_model_default_context_and_restore_defaults_use_published_maximum(self):
         self.exercise("context-model-defaults")
 
+    def test_beginner_recommendations_reject_stale_or_invalid_reports(self):
+        self.exercise("beginner-recommendation-fences")
+
+    def test_beginner_cancellation_preserves_the_current_worker_and_history(self):
+        self.exercise("beginner-cancel-preserves-current")
+
+    def test_beginner_switch_requires_an_exact_ready_acknowledgement(self):
+        self.exercise("beginner-explicit-switch-fences")
+
+    def test_beginner_rejected_start_preserves_the_current_chat(self):
+        self.exercise("beginner-load-rejection-preserves-history")
+
+    def test_beginner_api_budget_does_not_replace_native_model_capacity(self):
+        self.exercise("beginner-api-budget-keeps-native-capacity")
+
+    def test_beginner_local_start_rejection_preserves_the_current_operation(self):
+        for scenario in [
+            "beginner-start-busy-rejection",
+            "beginner-start-missing-rejection",
+        ]:
+            with self.subTest(scenario=scenario):
+                self.exercise(scenario)
+
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="stark-controller-test-")
@@ -1986,6 +2161,7 @@ class ControllerLifecycleTests(unittest.TestCase):
                     "-target",
                     "arm64-apple-macosx26.4",
                     str(test_source),
+                    str(ROOT / "apps/menu-bar/Sources/BeginnerModelReport.swift"),
                     str(ROOT / "apps/menu-bar/Sources/APICredentialStore.swift"),
                     str(ROOT / "apps/menu-bar/Sources/DesktopClientPeer.swift"),
                     str(ROOT / "apps/menu-bar/Sources/DesktopConnectionApproval.swift"),

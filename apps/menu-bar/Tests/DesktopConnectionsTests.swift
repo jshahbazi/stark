@@ -79,6 +79,7 @@ struct DesktopConnectionsTests {
             case "approval-ui": try approvalUI()
             case "controller-ack": try controllerAck()
             case "controller-refresh": try controllerRefresh()
+            case "controller-model-discovery": try controllerModelDiscovery()
             case "controller-session": try controllerSession()
             case "controller-revoke": try controllerRevoke(storageFails: false)
             case "controller-store-failure":
@@ -102,6 +103,9 @@ struct DesktopConnectionsTests {
             case "opencode-engine-path": try openCodeEnginePath()
             case "opencode-config-directory": try openCodeConfigDirectory()
             case "launch-environment": try launchEnvironment()
+            case "openwork-launch-isolated": try openWorkLaunchIsolated()
+            case "openwork-launch-normal": try openWorkLaunchNormal()
+            case "openwork-launch-unavailable": try openWorkLaunchUnavailable()
             case "connection-binding": try connectionBinding()
             case "coordinator": try coordinator()
             default: throw CheckFailure()
@@ -200,6 +204,7 @@ struct DesktopConnectionsTests {
 
     private static func withController(_ mock: MockApprovalStorage = MockApprovalStorage(approved: true),
                                        sendWorks: Bool = true,
+                                       models: [[String: Any]] = [],
                                        _ body: (OpenWorkConnectionController, ResultBox<[[String: Any]]>, () -> TimeInterval, (TimeInterval) -> Void) throws -> Void) throws {
         let service = namespace()
         let packets = ResultBox<[[String: Any]]>()
@@ -208,7 +213,7 @@ struct DesktopConnectionsTests {
         let value = OpenWorkConnectionController(service: service,
             storage: DesktopConnectionApprovalStore(service: service, storage: mock), clock: { now },
             send: { packet in packets.set((packets.value ?? []) + [packet]); return sendWorks },
-            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": []] },
+            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": models] },
             brokerPath: { "/private/tmp/stark-synthetic-broker/openwork.sock" })
         defer { value.shutdown(); pump() }
         value.receiveConnection(["api_session": firstSession, "base_url": "http://127.0.0.1:8000/v1"])
@@ -300,6 +305,41 @@ struct DesktopConnectionsTests {
             try check(packets.value!.last!["api_key"] as? String == existing)
             acknowledge(controller, packets.value!.last!)
             try check(responses.count == 3 && token(responses.last) == existing)
+        }
+    }
+
+    private static func controllerModelDiscovery() throws {
+        let model: [String: Any] = ["id": "fixture/model", "context_length": 4096, "tool_calling": true]
+        try withController(models: [model]) { controller, packets, clock, advance in
+            let current = try peer()
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            var response: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("status", peer: current) { response = $0 }
+            try check(token(response) == nil && packets.value?.isEmpty == true && !controller.clientActive)
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            try check(!controller.hasDiscoveredModel(apiID: "other/model", contextTokens: 4096))
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 8192))
+            advance(clock() + 29)
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            advance(clock() + 1)
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            controller.handle("status", peer: current) { response = $0 }
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            controller.receiveConnection(["api_session": nextSession, "base_url": "http://127.0.0.1:8000/v1"])
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            let invalid = DesktopProcessIdentity(pid: 0, parent: 0, seconds: 0, microseconds: 0)
+            controller.handle("status", peer: invalid) { response = $0 }
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            controller.handle("status", peer: current) { response = $0 }
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            let previousScope = controller.discoveryScope
+            controller.disconnect()
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            try check(controller.discoveryScope != previousScope)
+        }
+        try withController(models: [["id": "fixture/model", "context_length": 4096, "tool_calling": false]]) { controller, _, _, _ in
+            controller.handle("status", peer: try peer()) { _ in }
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
         }
     }
 
@@ -957,6 +997,54 @@ struct DesktopConnectionsTests {
         for (environment, expected) in cases {
             try check(DesktopClientPeer.openCodeConfigDirectory(environment)?.path == expected)
         }
+    }
+
+    private static func openWorkLaunchIsolated() throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("stark-openwork-launch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuration = try OpenWorkConnectionController.launchConfiguration(profile: root)
+        let environment: [String: String]? = configuration.environment
+        guard let environment else { throw CheckFailure() }
+        let expected = Set(["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+                            "OPENWORK_ELECTRON_USERDATA", "OPENWORK_DESKTOP_BOOTSTRAP_PATH", "OPENWORK_SERVER_CONFIG",
+                            "OPENWORK_ENV_STORE", "OPENWORK_TOKEN_STORE", "OPENWORK_RUNTIME_DB", "OPENWORK_DATA_DIR",
+                            "OPENCODE_CONFIG_DIR", "OPENCODE_DB"])
+        try check(configuration.createsNewApplicationInstance && Set(environment.keys) == expected)
+        let fileKeys = Set(["OPENWORK_DESKTOP_BOOTSTRAP_PATH", "OPENWORK_SERVER_CONFIG", "OPENWORK_ENV_STORE",
+                            "OPENWORK_TOKEN_STORE", "OPENWORK_RUNTIME_DB", "OPENCODE_DB"])
+        for (key, path) in environment {
+            let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+            try check(path.hasPrefix(root.path + "/") && url.path.hasPrefix(root.path + "/"))
+            let directory = fileKeys.contains(key) ? url.deletingLastPathComponent() : url
+            var isDirectory: ObjCBool = false
+            try check(FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) && isDirectory.boolValue)
+            if fileKeys.contains(key) { try check(!FileManager.default.fileExists(atPath: url.path)) }
+        }
+        try check(environment["HOME"] == environment["USERPROFILE"])
+        let normal = try OpenWorkConnectionController.launchConfiguration(profile: nil)
+        let normalEnvironment: [String: String]? = normal.environment
+        try check(normalEnvironment == nil || normalEnvironment?.isEmpty == true)
+    }
+
+    private static func openWorkLaunchNormal() throws {
+        let configuration = try OpenWorkConnectionController.launchConfiguration(profile: nil)
+        let environment: [String: String]? = configuration.environment
+        try check(!configuration.createsNewApplicationInstance)
+        try check(environment == nil || environment?.isEmpty == true)
+    }
+
+    private static func openWorkLaunchUnavailable() throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("stark-openwork-launch-unavailable-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("occupied")
+        try Data("synthetic fixture".utf8).write(to: file)
+        do {
+            _ = try OpenWorkConnectionController.launchConfiguration(profile: file)
+        } catch { return }
+        throw CheckFailure()
     }
 
     private static func launchEnvironment() throws {

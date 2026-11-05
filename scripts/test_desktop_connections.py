@@ -19,6 +19,7 @@ SCENARIOS = (
     "approval-ui",
     "controller-ack",
     "controller-refresh",
+    "controller-model-discovery",
     "controller-session",
     "controller-revoke",
     "controller-store-failure",
@@ -40,6 +41,9 @@ SCENARIOS = (
     "opencode-engine-path",
     "opencode-config-directory",
     "launch-environment",
+    "openwork-launch-isolated",
+    "openwork-launch-normal",
+    "openwork-launch-unavailable",
     "connection-binding",
     "coordinator",
 )
