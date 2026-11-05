@@ -238,6 +238,29 @@ impl RippleModel {
         let norm = vector(&weights, norm, config.hidden)?;
         let layers =
             (0..config.sliding.len()).map(|i| load_layer(&weights, &config, i, gguf)).collect::<Result<Vec<_>>>()?;
+        #[cfg(feature = "metal")]
+        {
+            // A dense model scans every projection at each token. Retaining
+            // the complete compressed inventory avoids repeatedly registering
+            // and evicting Metal wrappers when the original 8 GiB cache is
+            // smaller than the model. Embeddings remain CPU-only mappings.
+            let mut projections = vec![output.clone()];
+            for layer in &layers {
+                projections.extend([
+                    layer.q.clone(),
+                    layer.k.clone(),
+                    layer.v.clone(),
+                    layer.o.clone(),
+                    layer.ffn_gate.clone(),
+                    layer.ffn_up.clone(),
+                    layer.ffn_down.clone(),
+                ]);
+                if let Some(gate) = &layer.gate {
+                    projections.push(gate.clone());
+                }
+            }
+            weights.configure_complete_dense_views(&projections, 8 * 1024 * 1024 * 1024)?;
+        }
         let states = config.sliding.iter().map(|_| AttentionState::default()).collect();
         Ok(Self {
             weights,

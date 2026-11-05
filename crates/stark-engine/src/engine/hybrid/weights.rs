@@ -876,6 +876,77 @@ impl Weights {
         names
     }
 
+    /// Retain the complete validated dense projection inventory when it fits
+    /// below three quarters of the device's recommended working set, less the
+    /// caller's dynamic reserve. Admission changes only the lazy wrapper-cache
+    /// limit: no buffers are created, pages touched or residency requested here.
+    /// Other models retain the default cache limit. A model that does not fit
+    /// keeps the same bounded streaming path instead of retaining a partial scan.
+    #[cfg(feature = "metal")]
+    pub(super) fn configure_complete_dense_views(
+        &self,
+        names: &[String],
+        dynamic_reserve: usize,
+    ) -> Result<bool> {
+        let cap = (super::weight_metal::recommended_working_set()? / 4 * 3).saturating_sub(dynamic_reserve);
+        self.configure_complete_dense_views_with_budget(names, cap, super::weight_metal::max_buffer_length()?)
+    }
+
+    #[cfg(feature = "metal")]
+    fn configure_complete_dense_views_with_budget(
+        &self,
+        names: &[String],
+        cap: usize,
+        max_buffer_length: usize,
+    ) -> Result<bool> {
+        if names.is_empty() || names.len() > 4096 {
+            return Err(Error::Invalid("dense Metal view inventory is empty or excessive"));
+        }
+        let mut unique = HashSet::new();
+        let mut spans = HashMap::new();
+        let mut within_buffer_limit = true;
+        for name in names {
+            if !unique.insert(name.as_str()) {
+                return Err(Error::Invalid("duplicate dense Metal view inventory name"));
+            }
+            let tensor = self.tensor(name)?;
+            if tensor.shape.len() != 2 {
+                return Err(Error::Invalid("dense Metal view inventory requires matrices"));
+            }
+            let mut planes = vec![tensor];
+            if let Some(affine) = &tensor.affine {
+                planes.push(self.tensor(&affine.scales)?);
+                planes.push(self.tensor(&affine.biases)?);
+            }
+            for plane in planes {
+                let key = StaticViewKey {
+                    file: plane.file,
+                    offset: plane.offset,
+                    length: plane.size,
+                };
+                let bytes = self.files[plane.file].metal_span(plane.offset, plane.size)?.1;
+                within_buffer_limit &= bytes <= max_buffer_length;
+                spans.insert(key, bytes);
+            }
+        }
+        let required = spans
+            .values()
+            .try_fold(0usize, |sum, &bytes| sum.checked_add(bytes))
+            .ok_or(Error::Invalid("dense Metal view inventory size overflow"))?;
+        super::profile::record("native.metal.dense_cache.inventory_bytes", 0.0, required);
+        super::profile::record("native.metal.dense_cache.policy_cap", 0.0, cap);
+        if !within_buffer_limit || required > cap {
+            return Ok(false);
+        }
+        let mut cache = self.static_views.lock().map_err(|_| Error::Invalid("static Metal view cache failed"))?;
+        if !cache.entries.is_empty() || cache.registered_bytes != 0 {
+            return Err(Error::Invalid("dense Metal view admission requires an unused cache"));
+        }
+        cache.limit = MAX_STATIC_VIEW_BYTES.max(required);
+        super::profile::record("native.metal.dense_cache.admitted_bytes", 0.0, required);
+        Ok(true)
+    }
+
     fn tensor(
         &self,
         name: &str,
@@ -3064,6 +3135,69 @@ mod tests {
 
     #[cfg(feature = "metal")]
     #[stark_test]
+    fn complete_dense_view_admission_is_lazy_all_or_nothing_and_validates_inventory() {
+        let fixture = Fixture::new();
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[
+                ("first", "F32", vec![1, 32], 1.0f32.to_le_bytes().repeat(32)),
+                ("second", "F32", vec![1, 32], 2.0f32.to_le_bytes().repeat(32)),
+                ("embedding", "F32", vec![1, 32], 3.0f32.to_le_bytes().repeat(32)),
+                ("norm", "F32", vec![32], 1.0f32.to_le_bytes().repeat(32)),
+            ],
+        );
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let names = ["first".to_owned(), "second".to_owned()];
+        let first = weights.tensor("first").unwrap();
+        let page = weights.files[first.file].metal_span(first.offset, first.size).unwrap().1;
+        assert!(page > first.size);
+        assert!(!weights.configure_complete_dense_views_with_budget(&names, page * 2 - 1, usize::MAX).unwrap());
+        assert!(!weights.configure_complete_dense_views_with_budget(&names, page * 2, page - 1).unwrap());
+        assert_eq!(weights.static_views.lock().unwrap().limit, MAX_STATIC_VIEW_BYTES);
+        assert!(weights.configure_complete_dense_views_with_budget(&names, page * 2, page).unwrap());
+        {
+            let cache = weights.static_views.lock().unwrap();
+            assert_eq!(cache.limit, MAX_STATIC_VIEW_BYTES);
+            assert!(cache.entries.is_empty());
+            assert_eq!(cache.registered_bytes, 0);
+        }
+        assert!(weights.configure_complete_dense_views_with_budget(&[], usize::MAX, usize::MAX).is_err());
+        assert!(
+            weights
+                .configure_complete_dense_views_with_budget(&["first".into(), "first".into()], usize::MAX, usize::MAX)
+                .is_err()
+        );
+        assert!(
+            weights.configure_complete_dense_views_with_budget(&["missing".into()], usize::MAX, usize::MAX).is_err()
+        );
+        assert!(weights.configure_complete_dense_views_with_budget(&["norm".into()], usize::MAX, usize::MAX).is_err());
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn complete_dense_view_admission_counts_affine_planes() {
+        let fixture = Fixture::new();
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[
+                ("matrix.weight", "U32", vec![2, 4], vec![0; 32]),
+                ("matrix.scales", "F32", vec![2, 1], 1.0f32.to_le_bytes().repeat(2)),
+                ("matrix.biases", "F32", vec![2, 1], 0.0f32.to_le_bytes().repeat(2)),
+            ],
+        );
+        fs::write(fixture.0.join("config.json"), br#"{"quantization":{"bits":4,"group_size":32}}"#).unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let tensor = weights.tensor("matrix.weight").unwrap();
+        let page = weights.files[tensor.file].metal_span(tensor.offset, tensor.size).unwrap().1;
+        let names = ["matrix.weight".to_owned()];
+        assert!(!weights.configure_complete_dense_views_with_budget(&names, page * 3 - 1, usize::MAX).unwrap());
+        assert!(weights.configure_complete_dense_views_with_budget(&names, page * 3, usize::MAX).unwrap());
+        assert!(weights.static_views.lock().unwrap().entries.is_empty());
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
     fn whole_bank_views_reuse_nonconsecutive_experts_and_release_mapping() {
         let fixture = Fixture::new();
         let data: Vec<_> = (1..=4).flat_map(|expert| (expert as f32).to_le_bytes().repeat(64)).collect();
@@ -3433,8 +3567,8 @@ mod tests {
         let weights = Weights::open(&fixture.0).unwrap();
         let tensor = weights.tensor("a").unwrap();
         let page_span = weights.files[tensor.file].metal_span(tensor.offset, tensor.size).unwrap().1;
-        // This override exists only in the test; production has a fixed 8 GiB
-        // retained-cache bound. Logical spans are only 128 bytes each.
+        // This override exists only in the test; the default retained-cache
+        // bound is 8 GiB. Logical spans are only 128 bytes each.
         *weights.static_views.lock().unwrap() = StaticViewCache::new(page_span);
         let inputs = vec![1.0; 32];
         let outputs = weights.matvec_many(&[("a", &inputs), ("b", &inputs)]).unwrap();
