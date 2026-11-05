@@ -2300,7 +2300,6 @@ struct MenuView: View {
     let manage: () -> Void
     let console: () -> Void
     let connection: () -> Void
-    var selectInterface: (StarkInterfaceMode) -> Void = { _ in }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
@@ -2313,7 +2312,7 @@ struct MenuView: View {
                 }
                 Spacer()
             }
-            StarkInterfacePicker(preferences: interface, selected: selectInterface)
+            StarkInterfacePicker(preferences: interface)
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 StatusLine(engine: engine)
                 if interface.mode == .advanced { GPUMemoryView(engine: engine) }
@@ -3251,8 +3250,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             engine: engine, updater: updater, interface: interface,
             manage: { [weak self] in self?.showModels() },
             console: { [weak self] in self?.showPrompt() },
-            connection: { [weak self] in self?.showConnection() },
-            selectInterface: { [weak self] in self?.selectInterface($0) })
+            connection: { [weak self] in self?.showConnection() })
+            .onChange(of: interface.mode) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.resizeMenuForUpdate() }
+            }
             .onChange(of: updater.message) { [weak self] _, _ in
                 DispatchQueue.main.async { self?.resizeMenuForUpdate() }
             }

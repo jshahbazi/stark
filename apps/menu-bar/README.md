@@ -195,6 +195,8 @@ The interface picker offers **Beginner** and **Advanced**. On first launch,
 Stark waits for model inventory before choosing a default: an empty library
 opens Beginner, while a library with installed models opens Advanced. The
 choice is saved separately from the **Chat** or **Decision** playground mode.
+Changing this picker in the main menu updates the menu without opening a window.
+Use **Guided setup** or **Manage Models** to open the selected interface.
 Advanced retains the existing Manage Models, Model Catalog, Add from Source,
 Playground, Connections and chat controls.
 
