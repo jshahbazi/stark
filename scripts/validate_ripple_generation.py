@@ -13,8 +13,10 @@ import hashlib
 import json
 import re
 import subprocess
+import threading
 from pathlib import Path
 
+import psutil
 from stark_convert.chat import Worker, load_template, render_template
 
 
@@ -33,12 +35,27 @@ def run(args) -> dict:
     require(config.get("model_type") == "ricursive")
     codec, template = load_template(args.model)
     peaks = []
+    resident_peaks = []
+    swap_before = psutil.swap_memory()
 
     def memory(_worker, amount):
         if type(amount) is int:
             peaks.append(amount)
 
     worker = Worker(args.worker.resolve(), args.model.resolve(), 3600, gpu_memory_callback=memory)
+    stop = threading.Event()
+
+    def resident_memory():
+        process = psutil.Process(worker.process.pid)
+        while not stop.is_set():
+            try:
+                resident_peaks.append(process.memory_info().rss)
+            except psutil.Error:
+                return
+            stop.wait(0.1)
+
+    monitor = threading.Thread(target=resident_memory, daemon=True)
+    monitor.start()
     try:
         ready = worker.read()
         require(ready.get("ready") is True and ready.get("state_policy") == "fresh-per-request")
@@ -102,9 +119,13 @@ def run(args) -> dict:
             "config_sha256": hashlib.sha256((args.model / "config.json").read_bytes()).hexdigest(),
             "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "peak_reported_gpu_memory_bytes": max(peaks, default=None),
+            "peak_worker_rss_bytes": max(resident_peaks, default=None),
+            "system_swap_out_delta_bytes": max(0, psutil.swap_memory().sout - swap_before.sout),
             "requests": receipts,
         }
     finally:
+        stop.set()
+        monitor.join(timeout=1)
         worker.close()
 
 
