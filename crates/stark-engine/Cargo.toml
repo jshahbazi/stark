@@ -8,12 +8,18 @@ homepage.workspace = true
 repository.workspace = true
 license = "MIT AND Apache-2.0"
 build = "build/main.rs"
+links = "stark_engine"
 
 [lints]
 workspace = true
 
 [features]
 default = ["cpu", "metal", "grammar"]
+
+# Explicitly built, pinned MLX EXL3/FP8 GLM backend (macOS arm64 26.2+).
+# Cargo never fetches or builds its native dependencies. See
+# vendor/glm-exl3-bridge/UPSTREAM.md for the required staged library.
+glm-exl3 = ["metal"]
 
 # Scoring-only features. All six are enabled by stark-score's `optimized`
 # feature set and validated for bit-exact scoring parity; stark-generate is
@@ -66,6 +72,7 @@ rope-cache = []
 
 [build-dependencies]
 anyhow.workspace = true
+sha2 = "=0.10.9"
 walkdir.workspace = true
 derive_more.workspace = true
 serde.workspace = true
@@ -143,3 +150,7 @@ proptest = { workspace = true, default-features = true }
 name = "cxx_string"
 path = "tests/cxx_string.rs"
 required-features = ["grammar"]
+
+[[example]]
+name = "glm_exl3_validate"
+required-features = ["glm-exl3"]

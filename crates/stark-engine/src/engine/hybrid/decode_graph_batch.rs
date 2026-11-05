@@ -6,6 +6,9 @@
 
 use super::*;
 
+#[path = "decode_graph_dense_wide.rs"]
+mod dense_wide;
+
 type MmaCache = Mutex<HashMap<(u32, usize), PipelineState>>;
 static MMA_PIPELINES: OnceLock<MmaCache> = OnceLock::new();
 
@@ -89,17 +92,44 @@ impl DecodeGraph {
         tokens: usize,
         use_mma: bool,
     ) -> Result<DeviceVector> {
+        let len = operation
+            .rows
+            .checked_mul(tokens)
+            .filter(|&len| len <= 8_000_000)
+            .ok_or(Error::Invalid("same-weight prefill output shape"))?;
+        let output = self.scratch(len)?;
+        self.mapped_same_weight_into(operation, input, &output, tokens, use_mma)?;
+        Ok(output)
+    }
+
+    /// Apply an existing qualified T4/T8 schedule to an explicitly disjoint
+    /// destination. Wider token tiles concatenate output spans without an
+    /// extra projection buffer or device copy for every small matrix batch.
+    pub fn mapped_same_weight_into(
+        &mut self,
+        operation: &MappedOperation<'_>,
+        input: &DeviceVector,
+        output: &DeviceVector,
+        tokens: usize,
+        use_mma: bool,
+    ) -> Result<()> {
         input.validate()?;
+        output.validate()?;
         if !(1..=8).contains(&tokens)
             || operation.matrices.len() != 1
             || operation.rows_per_batch != 0
             || operation.columns.checked_mul(tokens) != Some(input.len)
             || operation.rows.checked_mul(tokens).is_none_or(|n| n > 8_000_000)
+            || operation.rows.checked_mul(tokens) != Some(output.len)
+            || (std::ptr::eq(&*input.buffer, &*output.buffer)
+                && input.offset < output.offset + output.len * 4
+                && output.offset < input.offset + input.len * 4)
         {
             return Err(Error::Invalid("same-weight prefill shape"));
         }
+        self.prepare_external_write(output)?;
+        self.resources.push(output.buffer.clone());
         let parameters = operation.parameters_for_input(operation.columns)?;
-        let output = self.scratch(operation.rows * tokens)?;
         if !use_mma || !admitted(operation, tokens)? {
             for token in 0..tokens {
                 self.mapped_into(
@@ -109,7 +139,7 @@ impl DecodeGraph {
                     &parameters,
                 )?;
             }
-            return Ok(output);
+            return Ok(());
         }
         if self.projection_level || self.encoding_dispatch != MTLDispatchType::SERIAL {
             return Err(Error::Unsupported("prefill MMA requires serial encoding"));
@@ -164,7 +194,7 @@ impl DecodeGraph {
             },
         );
         self.resources.extend([matrix.codes.buffer.clone(), input.buffer.clone()]);
-        self.check_finite(&output)?;
+        self.check_finite(output)?;
         profile::record(
             if kind == 13 {
                 "native.glm.prefill.q5_mma"
@@ -174,6 +204,6 @@ impl DecodeGraph {
             0.0,
             bytes,
         );
-        Ok(output)
+        Ok(())
     }
 }

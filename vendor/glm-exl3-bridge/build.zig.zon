@@ -1,0 +1,8 @@
+.{
+    .name = .stark_glm_bridge,
+    .version = "0.1.0",
+    .fingerprint = 0x206c5ab43f2baf61,
+    .minimum_zig_version = "0.17.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "include", "tests", "tools", "licenses" },
+    .dependencies = .{},
+}

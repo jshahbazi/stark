@@ -676,6 +676,20 @@ fn kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates() {
             let (rrms, normalized, _) = numerical_errors(shape, &codes, &input, &actual, &source, 16);
             assert!(rrms <= 2e-5 && normalized <= 2e-6, "runtime MMA source/F64 tolerance failed");
 
+            // A wider projection writes each qualified tile straight into its
+            // output span. Nonzero destination offsets must preserve the exact
+            // standalone tile arithmetic and resource ownership.
+            let mut into = DecodeGraph::new_unretained().unwrap();
+            let values = into.upload_into(&input).unwrap();
+            let arena = into.scratch(17 + tokens * rows + 5).unwrap();
+            let destination = arena.slice(17, tokens * rows).unwrap();
+            into.mapped_same_weight_into(&operation, &values, &destination, tokens, true).unwrap();
+            let written = into.finish(&[destination]).unwrap().remove(0);
+            assert!(
+                written.iter().zip(&actual).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "into-slice projection changed tile arithmetic"
+            );
+
             for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
                 let mut bad = input.clone();
                 bad[(tokens - 1) * columns + 255] = poison;
