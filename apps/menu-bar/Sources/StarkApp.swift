@@ -1944,12 +1944,20 @@ final class EngineController: ObservableObject {
         if !send(payload) { pendingSupportRequestID = nil; activeInstallRequestID = nil; endInstallProgress("failed") }
     }
 
-    func requestBeginnerModels(task: String, excludingModelID: String? = nil) {
+    func requestBeginnerModels(task: String, excludingModelID: String? = nil, preference: String = "balanced") {
         guard ["everyday", "text", "code", "unsure"].contains(task) else { return }
+        guard ["balanced", "speed", "answers"].contains(preference) else { return }
         let requestID = UUID().uuidString.lowercased()
         beginnerRequestID = requestID; beginnerChoicesLoading = true; beginnerChoicesError = nil
         beginnerReport = nil
-        var payload: [String: Any] = ["command": "guided_models", "request_id": requestID, "task": task]
+        let device = MTLCreateSystemDefaultDevice()
+        // Native Metal data only narrows the backend's independently measured RAM/storage checks.
+        let hardware: [String: Any] = ["gpu_available": device != nil,
+            "gpu_name": device?.name ?? "Unavailable", "unified_memory": device?.hasUnifiedMemory ?? false,
+            "gpu_memory_budget_bytes": device?.recommendedMaxWorkingSetSize ?? 0,
+            "cpu_cores": ProcessInfo.processInfo.processorCount]
+        var payload: [String: Any] = ["command": "guided_models", "request_id": requestID, "task": task,
+                                      "preference": preference, "hardware": hardware]
         if let id = excludingModelID, !id.isEmpty { payload["excluded_model_ids"] = [id] }
         if !send(payload) {
             beginnerChoicesLoading = false

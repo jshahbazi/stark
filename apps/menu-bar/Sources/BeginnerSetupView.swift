@@ -91,6 +91,13 @@ struct BeginnerSetupView: View {
                     session.task = task
                 }
             }
+            Picker("Model priority", selection: $session.modelPriority) {
+                ForEach(BeginnerModelPriority.allCases) { priority in
+                    Text(priority.title).tag(priority)
+                }
+            }.pickerStyle(.menu)
+            Text("Stark estimates memory needs and model capacity. Speed and answer quality depend on the model and your task.")
+                .font(.caption).foregroundStyle(.secondary)
             deviceSummary
             HStack {
                 Button(session.choosingAnotherModel ? "See another model" : "Find a model") { requestChoices() }
@@ -106,13 +113,17 @@ struct BeginnerSetupView: View {
 
     @ViewBuilder private var recommendationStep: some View {
         if snapshot.choicesLoading {
-            heading("Checking starting models…", detail: "Checking the available recipes and this Mac before offering a download.")
+            heading("Checking models for this Mac…", detail: "Reading memory and GPU limits, then checking supported model metadata. This can take about a minute.")
             ProgressView().controlSize(.small)
         } else if let choice {
             let installed = session.installedID(for: choice, in: snapshot)
             heading(session.choosingAnotherModel ? "Try another starting model." : installed == nil ? "Start with this model." : "Use the model already on your Mac.",
                     detail: installed == nil ? "You can change models later." : "No new download is needed.")
             modelCard(choice)
+            deviceSummary
+            if !snapshot.recommendationMessage.isEmpty {
+                Text(snapshot.recommendationMessage).font(.caption).foregroundStyle(.secondary)
+            }
             if let unavailable = choice.availabilityMessage {
                 notice(unavailable, symbol: "exclamationmark.triangle", color: .orange)
             }
@@ -152,7 +163,7 @@ struct BeginnerSetupView: View {
             Text("Download once. The model runs on this Mac. Downloads contact the model host; OpenWork tools may contact other services.")
                 .font(.caption).foregroundStyle(.secondary)
         } else {
-            heading("No checked starting model is available.", detail: snapshot.choicesError ?? "Stark could not find another checked recipe for this Mac. Your current setup is kept.")
+            heading("No suitable starting model is available.", detail: snapshot.choicesError ?? "Stark could not establish a memory plan for another supported model on this Mac. Your current setup is kept.")
             deviceSummary
             HStack {
                 Button("Check again") { requestChoices() }.buttonStyle(.borderedProminent)
@@ -361,7 +372,8 @@ struct BeginnerSetupView: View {
         guard let task = session.task else { return }
         session.stage = .recommendation
         session.selectedChoiceID = nil
-        actions.refreshChoices(task, session.excludedModelID)
+        let preference = session.retryPreference == .speed ? "speed" : session.retryPreference == .answers ? "answers" : session.modelPriority.rawValue
+        actions.refreshChoices(task, session.excludedModelID, preference)
     }
 
     private func start(_ choice: BeginnerModelChoice) {

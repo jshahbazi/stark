@@ -45,6 +45,21 @@ _OTHER_TASK_TAGS = {
     "text-embeddings-inference",
     "text-ranking",
 }
+_PLANNING_DENSE_FAMILIES = {
+    "qwen3",
+    "qwen2",
+    "llama",
+    "mistral",
+    "phi3",
+    "granite",
+    "gemma2",
+    "gemma3_text",
+    "smollm3",
+}
+_CONTEXT_FIELDS = ("max_position_embeddings", "n_positions", "max_seq_len")
+_CODE_TASK_TAGS = {"code", "coding", "programming", "coder"}
+_GENERATION_BLOCK_TAG = re.compile(r"{%-?\s*(?:generation|endgeneration)\s*-?%}")
+_MAX_CHAT_TEMPLATE_BYTES = 256 * 1024
 
 
 class _Unavailable(Exception):
@@ -289,6 +304,143 @@ def _weight_bytes(selected, sizes):
     return None
 
 
+def _positive_int(value):
+    return value if type(value) is int and 0 < value <= 2**31 - 1 else None
+
+
+def _source_chat_template(entry, repo, names, read):
+    """Read only same-revision metadata used by Stark's chat conversion path."""
+    files = entry.get("files", {}) if isinstance(entry, dict) else {}
+    tokenizer_spec = files.get("tokenizer_config") or {"repo": repo, "filename": "tokenizer_config.json"}
+    template_spec = files.get("chat_template")
+    if template_spec is None and entry is None and "chat_template.jinja" in names:
+        template_spec = {"repo": repo, "filename": "chat_template.jinja"}
+    tokenizer_repo = tokenizer_spec.get("repo") if isinstance(tokenizer_spec, dict) else None
+    tokenizer_file = tokenizer_spec.get("filename") if isinstance(tokenizer_spec, dict) else None
+    if tokenizer_repo != repo:
+        return None, "tokenizer_metadata_source_not_pinned"
+    if not isinstance(tokenizer_file, str) or tokenizer_file not in names:
+        return None, "tokenizer_config_missing"
+    try:
+        tokenizer_config = _json(read(tokenizer_file, MAX_CONFIG_BYTES))
+    except (_Unavailable, _MalformedMetadata, _Inaccessible):
+        return None, "tokenizer_config_unavailable"
+    if not isinstance(tokenizer_config, dict):
+        return None, "tokenizer_config_invalid"
+
+    template = tokenizer_config.get("chat_template")
+    inline_id = entry.get("metadata", {}).get("inline_sources", {}).get("chat_template") if entry else None
+    if template is not None and (template_spec is not None or inline_id is not None):
+        return None, "chat_template_metadata_conflict"
+    if template_spec is not None:
+        template_repo = template_spec.get("repo") if isinstance(template_spec, dict) else None
+        template_file = template_spec.get("filename") if isinstance(template_spec, dict) else None
+        if template_repo != repo:
+            return None, "chat_template_source_not_pinned"
+        if not isinstance(template_file, str) or template_file not in names:
+            return None, "chat_template_file_missing"
+        try:
+            payload = read(template_file, MAX_CONFIG_BYTES)
+            if "field" in template_spec:
+                document = _json(payload)
+                template = document.get(template_spec["field"]) if isinstance(document, dict) else None
+            else:
+                template = payload.decode("utf-8")
+        except (UnicodeError, _Unavailable, _MalformedMetadata, _Inaccessible):
+            return None, "chat_template_file_invalid"
+    elif inline_id is not None:
+        try:
+            from .metadata import _inline_text
+
+            template = _inline_text("chat_template", inline_id)
+        except Exception:
+            return None, "chat_template_inline_source_unavailable"
+    if not isinstance(template, str):
+        return None, "chat_template_missing"
+    template = _GENERATION_BLOCK_TAG.sub("", template)
+    try:
+        if not template or len(template.encode("utf-8")) > _MAX_CHAT_TEMPLATE_BYTES:
+            return None, "chat_template_invalid"
+    except UnicodeEncodeError:
+        return None, "chat_template_invalid"
+    return template, None
+
+
+def _planning_metadata(family, config, info, names, sizes, *, chat_template=None, chat_template_blocker=None):
+    """Return bounded runtime-planning inputs without implying measured fit."""
+    text = config.get("text_config", config)
+    if not isinstance(text, dict):
+        text = {}
+    merged = {**text, **{key: value for key, value in config.items() if key != "text_config"}}
+    context = next((_positive_int(merged.get(key)) for key in _CONTEXT_FIELDS if _positive_int(merged.get(key))), None)
+    layers = _positive_int(merged.get("num_hidden_layers"))
+    heads = _positive_int(merged.get("num_attention_heads"))
+    kv_heads = _positive_int(merged.get("num_key_value_heads")) if "num_key_value_heads" in merged else heads
+    hidden = _positive_int(merged.get("hidden_size"))
+    head_dim = _positive_int(merged.get("head_dim"))
+    if head_dim is None and hidden is not None and heads is not None and hidden % heads == 0:
+        head_dim = _positive_int(hidden // heads)
+
+    blockers = []
+    if family not in _PLANNING_DENSE_FAMILIES:
+        blockers.append("runtime_layout_not_covered")
+    if context is None:
+        blockers.append("context_limit_unknown")
+    if layers is None or heads is None or kv_heads is None or head_dim is None or kv_heads > heads:
+        blockers.append("attention_geometry_incomplete")
+    from .api_tools import tool_parser_for
+    from .template_compat import template_program_sha256
+
+    chat_template_available = isinstance(chat_template, str) and template_program_sha256(chat_template) is not None
+    tool_parser = tool_parser_for({"prompt_template": chat_template}) if chat_template_available else None
+    supports_tools = tool_parser is not None
+    if not chat_template_available:
+        blockers.append(chat_template_blocker or "chat_template_unavailable")
+    if not supports_tools:
+        blockers.append("tool_parser_unavailable")
+
+    inventory_bytes = None
+    byte_values = [sizes.get(name) for name in names]
+    if byte_values and all(type(size) is int and 0 < size <= 2**63 - 1 for size in byte_values):
+        total = sum(byte_values)
+        if total <= 2**63 - 1:
+            inventory_bytes = total
+
+    raw_tags = _field(info, "tags", [])
+    task_tags = (
+        sorted(
+            {
+                tag.casefold()
+                for tag in raw_tags
+                if isinstance(tag, str) and len(tag) <= 64 and tag.casefold() in _CODE_TASK_TAGS
+            }
+        )
+        if isinstance(raw_tags, list)
+        else []
+    )
+    card = _field(info, "cardData", {})
+    license_id = card.get("license") if isinstance(card, dict) else None
+    if not isinstance(license_id, str) or not 0 < len(license_id) <= 80 or any(ord(char) < 32 for char in license_id):
+        license_id = None
+    return {
+        "status": "available" if not blockers else "unavailable",
+        "architecture": family,
+        "context_limit": context,
+        "attention_layers": layers,
+        "query_heads": heads,
+        "kv_heads": kv_heads,
+        "head_dim": head_dim,
+        "hidden_size": hidden,
+        "download_bytes": inventory_bytes,
+        "task_tags": task_tags,
+        "license": license_id,
+        "chat_template_available": chat_template_available,
+        "supports_tools": supports_tools,
+        "tool_parser": tool_parser,
+        "blockers": blockers,
+    }
+
+
 def _quantization(config, info, entry):
     if (
         config.get("model_type") == "qwen4_exp"
@@ -393,7 +545,9 @@ def _generation_architecture(config, family):
     )
 
 
-def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offset=0):
+def family_catalog(
+    family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offset=0, planning=False, deadline_seconds=80
+):
     """Return candidate downloads; actual installation must repeat pinned preflight."""
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
     from .native_catalog import catalog_item as native_catalog_item
@@ -406,6 +560,8 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offse
 
     if not valid_offset:
         return report(family_id or "", "error", "The model catalogue request is invalid.")
+    if type(planning) is not bool or type(deadline_seconds) not in (int, float) or not 0 < deadline_seconds <= 600:
+        return report(family_id or "", "error", "The model catalogue request is invalid.")
 
     if family_id == NATIVE_FAMILY_ID:
         if type(limit) is not int or not 1 <= limit <= MAX_ITEMS or offset != 0:
@@ -416,7 +572,34 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offse
             NATIVE_FAMILY_ID,
             "ready",
             "Choose a model to download.",
-            [native_catalog_item()],
+            [
+                {
+                    **native_catalog_item(),
+                    **(
+                        {
+                            "planning": {
+                                "status": "unavailable",
+                                "architecture": NATIVE_FAMILY_ID,
+                                "context_limit": None,
+                                "attention_layers": None,
+                                "query_heads": None,
+                                "kv_heads": None,
+                                "head_dim": None,
+                                "hidden_size": None,
+                                "download_bytes": native_catalog_item()["weight_bytes"],
+                                "task_tags": [],
+                                "license": None,
+                                "chat_template_available": False,
+                                "supports_tools": False,
+                                "tool_parser": None,
+                                "blockers": ["runtime_layout_not_covered"],
+                            }
+                        }
+                        if planning
+                        else {}
+                    ),
+                }
+            ],
         )
 
     family = normalize_architecture(family_id)
@@ -431,7 +614,7 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offse
         import huggingface_hub
 
         hub = huggingface_hub
-    deadline = time.monotonic() + 80
+    deadline = time.monotonic() + deadline_seconds
 
     def remaining():
         if time.monotonic() >= deadline:
@@ -579,7 +762,14 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offse
                             pass
                 extra_weights = any(name.endswith(".safetensors") and name not in selected for name in names)
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
-                return {
+                chat_template, chat_template_blocker = (None, None)
+                if planning:
+
+                    def read_source(filename, maximum):
+                        return read(repo, filename, revision, maximum)
+
+                    chat_template, chat_template_blocker = _source_chat_template(entry, repo, names, read_source)
+                item = {
                     "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
                     "repo": repo,
                     "revision": revision,
@@ -593,6 +783,19 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offse
                     "downloadable": True,
                     "model_group": _model_group(family, repo, repo.split("/")[-1], quantization, entry),
                 }
+                if planning:
+                    item["planning"] = _planning_metadata(
+                        family,
+                        config,
+                        info,
+                        names,
+                        sizes,
+                        chat_template=chat_template,
+                        chat_template_blocker=chat_template_blocker,
+                    )
+                    item["task_tags"] = item["planning"]["task_tags"]
+                    item["license"] = item["planning"]["license"]
+                return item
             except _Inaccessible:
                 return None
             except _MalformedMetadata:

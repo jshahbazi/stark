@@ -53,7 +53,7 @@ from .guided_models import (
     host_resources,
     installation_allowed,
     matches_recipe,
-    recipe_for,
+    recipe_from_catalog,
     recommendation_report,
 )
 from .hybrid_prepare import SOURCES as NATIVE_SOURCES
@@ -302,6 +302,11 @@ class Desktop:
         self.install_committing = False
         self.guided_reports = {}
         self.guided_install_offer_id = None
+        self.guided_hardware = {}
+        self.guided_discovery_generation = 0
+        self.guided_discovery_process = None
+        self.guided_discovery_job = None
+        self.guided_catalog_cache = None
         self.active_model = None
         self.active_mode = None
         self.vocab_size = None
@@ -729,12 +734,17 @@ class Desktop:
     def guided_models(self, payload):
         request_id = payload.get("request_id")
         if (
-            set(payload) - {"command", "request_id", "task", "excluded_model_ids", "excluded_recipe_ids"}
+            set(payload)
+            - {"command", "request_id", "task", "preference", "hardware", "excluded_model_ids", "excluded_recipe_ids"}
             or not self.request_id(request_id)
             or not isinstance(payload.get("task"), str)
             or payload["task"] not in TASKS
         ):
             raise DesktopError("Choose a task and check the starting models again.")
+        preference = payload.get("preference", "balanced")
+        if not isinstance(preference, str) or preference not in {"balanced", "speed", "answers"}:
+            raise DesktopError("Choose a model preference and check models again.")
+        hardware = self.guided_device(payload.get("hardware"))
         excluded = {}
         for key in ("excluded_model_ids", "excluded_recipe_ids"):
             values = payload.get(key, [])
@@ -748,34 +758,218 @@ class Desktop:
             ):
                 raise DesktopError("Check the starting models again.")
             excluded[key] = set(values)
-        with self.lock:
-            installed = {}
-            excluded_recipes = set(excluded["excluded_recipe_ids"])
-            from .guided_models import RECIPES
+        if hardware is not None:
+            self.cancel_guided_discovery()
+            with self.lock:
+                generation = self.guided_discovery_generation
+                self.guided_discovery_job = threading.Thread(
+                    target=self.load_guided_models,
+                    args=(payload["task"], preference, hardware, excluded, request_id, generation),
+                    daemon=True,
+                )
+                self.guided_discovery_job.start()
+            return
+        self.publish_guided_models(payload["task"], preference, hardware, excluded, request_id)
 
-            for recipe in RECIPES:
-                ids = [
-                    model["id"]
-                    for model in self.models
-                    if model.get("artifact_mode", "text") == "text"
-                    and model_valid(Path(model["path"]))
-                    and matches_recipe(model["path"], recipe)
-                ]
-                if excluded["excluded_model_ids"].intersection(ids):
-                    excluded_recipes.add(recipe.id)
-                installed[recipe.id] = ids
-            report = recommendation_report(host_resources(self.data_dir), installed, excluded_recipes)
+    @staticmethod
+    def guided_device(raw):
+        if raw is None:
+            return None  # Compatibility with earlier native clients.
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"gpu_available", "gpu_name", "unified_memory", "gpu_memory_budget_bytes", "cpu_cores"}
+            or type(raw.get("gpu_available")) is not bool
+            or type(raw.get("unified_memory")) is not bool
+            or type(raw.get("gpu_memory_budget_bytes")) is not int
+            or not 0 <= raw["gpu_memory_budget_bytes"] <= 2**63 - 1
+            or type(raw.get("cpu_cores")) is not int
+            or not 1 <= raw["cpu_cores"] <= 4096
+            or not isinstance(raw.get("gpu_name"), str)
+            or not 0 < len(raw["gpu_name"].encode()) <= 200
+            or any(ord(char) < 32 or ord(char) == 127 for char in raw["gpu_name"])
+        ):
+            raise DesktopError("Could not read this Mac's GPU configuration. Check models again.")
+        return dict(raw)
+
+    def guided_resources(self, hardware):
+        resources = host_resources(self.data_dir)
+        if hardware is not None:
+            resources.update(hardware)
+            physical = resources.get("physical_memory_bytes")
+            budget = hardware["gpu_memory_budget_bytes"]
+            # UI hints cannot expand independently measured host resources.
+            resources["gpu_memory_budget_bytes"] = min(budget, physical) if type(physical) is int else 0
+            resources["supported"] = (
+                resources.get("supported") is True and hardware["gpu_available"] and hardware["unified_memory"]
+            )
+        return resources
+
+    def cancel_guided_discovery(self):
+        with self.lock:
+            self.guided_discovery_generation = getattr(self, "guided_discovery_generation", 0) + 1
+            process = getattr(self, "guided_discovery_process", None)
+        terminate(process)
+
+    def run_guided_discovery(self, generation):
+        process = None
+        try:
+            with self.lock:
+                if generation != self.guided_discovery_generation:
+                    return None
+                process = subprocess.Popen(
+                    [sys.executable, "-I", "-B", "-m", "stark_convert.guided_discovery"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1"),
+                    start_new_session=True,
+                )
+                self.guided_discovery_process = process
+            pending, deadline = bytearray(), time.monotonic() + 65
+            while True:
+                with self.lock:
+                    if generation != self.guided_discovery_generation:
+                        return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError()
+                if not select.select([process.stdout], [], [], min(remaining, 0.1))[0]:
+                    continue
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                pending.extend(chunk)
+                if len(pending) > 2 * 1024 * 1024:
+                    raise ValueError()
+            if process.wait(timeout=max(0.1, deadline - time.monotonic())) != 0:
+                raise ValueError()
+            report = json.loads(pending)
+            if (
+                not isinstance(report, dict)
+                or report.get("schema_version") != 1
+                or not isinstance(report.get("items"), list)
+                or len(report["items"]) > 450
+            ):
+                raise ValueError()
+            return report
+        finally:
+            if process is not None:
+                terminate(process)
+                if process.stdout is not None:
+                    process.stdout.close()
+                with self.lock:
+                    if self.guided_discovery_process is process:
+                        self.guided_discovery_process = None
+
+    def load_guided_models(self, task, preference, hardware, excluded, request_id, generation):
+        try:
+            with self.lock:
+                cached = self.guided_catalog_cache
+            if cached is not None and time.monotonic() - cached[0] < 600:
+                discovery = cached[1]
+            else:
+                discovery = self.run_guided_discovery(generation)
+                if discovery is None:
+                    return
+                with self.lock:
+                    if generation != self.guided_discovery_generation:
+                        return
+                    if discovery["items"] and not discovery.get("failed_families", 0):
+                        self.guided_catalog_cache = (time.monotonic(), discovery)
+            self.publish_guided_models(task, preference, hardware, excluded, request_id, discovery, generation)
+        except Exception:
+            # Network/discovery failure keeps the exact qualified starters and
+            # reports the limited search; it never disturbs the loaded worker.
+            self.publish_guided_models(
+                task, preference, hardware, excluded, request_id, {"items": [], "incomplete": True}, generation
+            )
+
+    def publish_guided_models(self, task, preference, hardware, excluded, request_id, discovery=None, generation=None):
+        from .guided_models import RECIPES
+
+        with self.lock:
+            if generation is not None and generation != self.guided_discovery_generation:
+                return
+            models = [dict(model) for model in self.models]
+        candidates = {recipe.id: recipe for recipe in RECIPES}
+        sources = {(recipe.repo, recipe.revision) for recipe in RECIPES}
+        if discovery is not None:
+            for item in discovery["items"]:
+                recipe = recipe_from_catalog(item)
+                if recipe is not None and (recipe.repo, recipe.revision) not in sources:
+                    candidates[recipe.id] = recipe
+                    sources.add((recipe.repo, recipe.revision))
+        installed = {}
+        excluded_recipes = set(excluded["excluded_recipe_ids"])
+        valid_models = [
+            (model, model_display(model))
+            for model in models
+            if model.get("artifact_mode", "text") == "text" and model_valid(Path(model["path"]))
+        ]
+        for recipe in candidates.values():
+            ids = [
+                model["id"]
+                for model, display in valid_models
+                if (
+                    display is None
+                    or display.get("source_revision") is None
+                    or (
+                        display.get("group_id") == "repo:" + recipe.repo
+                        and display.get("source_revision") == recipe.revision
+                    )
+                )
+                and matches_recipe(model["path"], recipe)
+            ]
+            if excluded["excluded_model_ids"].intersection(ids):
+                excluded_recipes.add(recipe.id)
+            installed[recipe.id] = ids
+        report = recommendation_report(
+            self.guided_resources(hardware),
+            installed,
+            excluded_recipes,
+            task=task,
+            preference=preference,
+            candidates=tuple(candidates.values()),
+        )
+        if discovery is not None:
+            report["catalog_search"] = {
+                "bounded": True,
+                "incomplete": bool(discovery.get("incomplete", True)),
+                "candidates_considered": len(candidates),
+            }
+            search_note = (
+                "The search checked a bounded window of the supported catalog. "
+                if discovery["items"]
+                else "Catalog discovery is unavailable; only recorded starter choices were checked. "
+            )
+            if discovery.get("failed_families", 0):
+                search_note += "Some families could not be checked; Check again retries the search. "
+            report["message"] = search_note + report["message"]
+            for item in report["items"]:
+                item["caveats"].append(
+                    "Catalog discovery checks a bounded candidate window in each supported family; "
+                    "some models may not be included."
+                )
+        with self.lock:
+            if generation is not None and generation != self.guided_discovery_generation:
+                return
             # An independent refresh never changes an installation already in
             # progress. Offers retain only immutable server-owned recipe IDs.
-            self.guided_reports[request_id] = tuple(item["id"] for item in report["items"])
+            self.guided_reports[request_id] = {item["id"]: candidates[item["id"]] for item in report["items"]}
+            self.guided_hardware[request_id] = hardware
             while len(self.guided_reports) > 8:
                 oldest = next(key for key in self.guided_reports if key != self.guided_install_offer_id)
                 del self.guided_reports[oldest]
+                self.guided_hardware.pop(oldest, None)
             self.emit("guided_models", request_id=request_id, report=report)
 
     def guided_recipe(self, payload):
         request_id, identifier = payload.get("recommendation_request_id"), payload.get("recipe_id")
-        recipe = recipe_for(identifier)
+        recipe = (
+            self.guided_reports.get(request_id, {}).get(identifier)
+            if isinstance(request_id, str) and isinstance(identifier, str)
+            else None
+        )
         if (
             not self.request_id(request_id)
             or recipe is None
@@ -783,6 +977,10 @@ class Desktop:
         ):
             raise DesktopError("Check the starting models again before continuing.")
         return recipe
+
+    def bound_guided_recipe(self, identifier):
+        recipes = self.guided_reports.get(self.guided_install_offer_id, {})
+        return recipes.get(identifier) if isinstance(identifier, str) else None
 
     def install_guided(self, payload):
         if set(payload) != {"command", "recommendation_request_id", "recipe_id", "support_request_id"}:
@@ -802,7 +1000,8 @@ class Desktop:
                 ),
                 None,
             )
-            if not installation_allowed(recipe, host_resources(self.data_dir), installed=previous is not None):
+            resources = self.guided_resources(self.guided_hardware.get(payload["recommendation_request_id"]))
+            if not installation_allowed(recipe, resources, installed=previous is not None):
                 raise DesktopError(
                     "Resources changed. Check available memory and free space, then check models again."
                 )
@@ -843,7 +1042,8 @@ class Desktop:
             model = next((entry for entry in self.models if entry["id"] == payload.get("model_id")), None)
             if model is None or not model_valid(Path(model["path"])) or not matches_recipe(model["path"], recipe):
                 raise DesktopError("The installed model changed. Check the starting models again.")
-            if not installation_allowed(recipe, host_resources(self.data_dir), installed=True):
+            resources = self.guided_resources(self.guided_hardware.get(payload["recommendation_request_id"]))
+            if not installation_allowed(recipe, resources, installed=True):
                 raise DesktopError("This starting model is not available for the current Mac resources.")
             if self.job is not None or self.api_queue:
                 raise DesktopError("Wait for the current request before switching models.")
@@ -856,18 +1056,18 @@ class Desktop:
                 "loading",
                 "Starting model…",
                 model["id"],
-                recipe.id,
+                recipe,
+                self.guided_hardware.get(payload["recommendation_request_id"]),
                 request_id,
                 request_id=request_id,
             )
 
-    def run_guided_worker(self, epoch, identifier, recipe_id, request_id):
+    def run_guided_worker(self, epoch, identifier, recipe, hardware, request_id):
         with self.lock:
             if epoch != self.epoch:
                 return
             self.close_worker()
-        recipe = recipe_for(recipe_id)
-        resources = host_resources(self.data_dir)
+        resources = self.guided_resources(hardware)
         available = resources.get("available_memory_bytes")
         if (
             recipe is None
@@ -1050,6 +1250,7 @@ class Desktop:
 
     def stop(self, quiet=False):
         self.cancel_catalog()
+        self.cancel_guided_discovery()
         with self.lock:
             cancelled = self.install_progress.copy() if self.install_epoch == self.epoch else {}
             self.epoch += 1
@@ -1382,7 +1583,7 @@ class Desktop:
         guided_recipe_id=None,
     ):
         self.check_install_cancelled(epoch)
-        guided_recipe = recipe_for(guided_recipe_id) if guided_recipe_id is not None else None
+        guided_recipe = self.bound_guided_recipe(guided_recipe_id) if guided_recipe_id is not None else None
         if guided_recipe_id is not None and (
             guided_recipe is None
             or kind != "huggingface"

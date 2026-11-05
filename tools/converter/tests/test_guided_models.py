@@ -3,9 +3,12 @@
 import hashlib
 import io
 import json
+import struct
 import sys
 import threading
 import time
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,17 +29,49 @@ def resources(**changes):
     }
 
 
-def artifact(path, recipe):
+def artifact(path, recipe, *, dtype="BF16", parameter_dtype="BF16", native_loading="unverified"):
     """Synthetic output plus a source receipt; never real model payloads."""
     path.mkdir(parents=True, exist_ok=True)
     config = json.dumps({"type": "LanguageModelConfig", "decoder_config": {}}).encode()
     (path / "config.json").write_bytes(config)
     (path / "tokenizer.json").write_text("{}")
-    (path / "model.safetensors").write_bytes(b"synthetic output")
+    header, metadata, offset = {}, {}, 0
+
+    def tensor(name, shape, dtype):
+        nonlocal offset
+        elements = 1
+        for value in shape:
+            elements *= value
+        size = elements * {"BF16": 2, "F16": 2, "F32": 4, "U32": 4}[dtype]
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + size]}
+        offset += size
+
+    base = "decoder.embedding.embedding"
+    if recipe.quantization.endswith("-bit"):
+        metadata[base + ".spec"] = json.dumps(
+            {
+                "type": "MLXSpec",
+                "layout": "output_input",
+                "bits": int(recipe.quantization.removesuffix("-bit")),
+                "group_size": 64,
+            }
+        )
+        tensor(base + ".weights", [2, 1], "U32")
+        tensor(base + ".scales", [1, 2], parameter_dtype)
+        tensor(base + ".biases", [1, 2], parameter_dtype)
+    else:
+        metadata[base + ".spec"] = json.dumps({"type": "FullPrecisionSpec", "layout": "output_input"})
+        tensor(base + ".weights", [2, 4], dtype)
+    tensor("decoder.transformer.output_norm.scales", [2], "F32")
+    header["__metadata__"] = metadata
+    encoded = json.dumps(header).encode()
+    weights = path / "model.safetensors"
+    weights.write_bytes(struct.pack("<Q", len(encoded)) + encoded + b"\0" * offset)
     sources = [{"repo": recipe.repo, "revision": recipe.revision}]
+    selection = recipe.files or (("model.safetensors", recipe.weight_bytes, "a" * 64),)
     files = [
         {"repo": recipe.repo, "revision": recipe.revision, "size": size, "sha256": digest}
-        for _name, size, digest in recipe.files
+        for _name, size, digest in selection
     ]
     identity = {"sources": sources, "files": files}
     if recipe.metadata_profile is not None:
@@ -51,6 +86,15 @@ def artifact(path, recipe):
                 "source_files": files,
                 "source_manifest_sha256": hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest(),
                 "config_sha256": hashlib.sha256(config).hexdigest(),
+                "status": "ok",
+                "output_bytes": weights.stat().st_size,
+                "capability": {
+                    "adapter": recipe.architecture,
+                    "model_kind": "language",
+                    "conversion": "implemented",
+                    "source_validation": "complete",
+                    "native_loading": native_loading,
+                },
             }
         )
     )
@@ -122,12 +166,215 @@ def test_resources_select_starting_choices_and_installed_reuse():
     small = guided.recommendation_report(resources(physical_memory_bytes=8 * guided.GIB), {})
     assert small["items"] == [] and "16 GB" in small["message"]
     assert [item["context_tokens"] for item in normal["items"]] == [32768, 32768]
-    assert [item["runtime_memory_bytes_estimate"] for item in normal["items"]] == [10 * guided.GIB, 9 * guided.GIB]
+    assert [item["runtime_memory_bytes_estimate"] for item in normal["items"]] == [11 * guided.GIB, 9 * guided.GIB]
     pressure = resources(available_memory_bytes=0, free_disk_bytes=0, download_free_disk_bytes=0)
     assert guided.recommendation_report(pressure, {})["items"] == []
     reused = guided.recommendation_report(pressure, {guided.RECIPES[0].id: ["same-copy"]})
     assert reused["items"][0]["installed_ids"] == ["same-copy"]
     assert "planning estimates" in reused["items"][0]["caveats"][0]
+
+
+def catalog_candidate(number=1, *, weights=2 * guided.GIB, parameters=2_000_000_000, tags=()):
+    return {
+        "id": f"{number:032x}",
+        "repo": f"example/Model-{number}",
+        "revision": f"{number:040x}",
+        "name": f"Model {number}",
+        "weight_bytes": weights,
+        "parameter_count": parameters,
+        "quantization": "4-bit",
+        "artifact_modes": ["text"],
+        "downloadable": True,
+        "planning": {
+            "status": "available",
+            "architecture": "llama",
+            "context_limit": 32768,
+            "attention_layers": 8,
+            "kv_heads": 2,
+            "query_heads": 8,
+            "head_dim": 64,
+            "hidden_size": 1024,
+            "download_bytes": weights + 32 * guided.MIB,
+            "task_tags": list(tags),
+            "chat_template_available": True,
+            "supports_tools": True,
+            "tool_parser": "qwen3-hermes-v1",
+        },
+    }
+
+
+def gpu_resources(**changes):
+    return resources(
+        physical_memory_bytes=64 * guided.GIB,
+        available_memory_bytes=48 * guided.GIB,
+        free_disk_bytes=256 * guided.GIB,
+        download_free_disk_bytes=256 * guided.GIB,
+        gpu_available=True,
+        gpu_name="Fixture Apple GPU",
+        gpu_memory_budget_bytes=48 * guided.GIB,
+        unified_memory=True,
+        **changes,
+    )
+
+
+def test_gpu_budget_changes_catalog_recommendation():
+    candidates = [
+        guided.recipe_from_catalog(catalog_candidate(1)),
+        guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000)),
+        guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=32_000_000_000)),
+    ]
+    for budget, expected in ((48, candidates[2]), (16, candidates[1]), (10, candidates[0])):
+        host = gpu_resources()
+        host["gpu_memory_budget_bytes"] = budget * guided.GIB
+        report = guided.recommendation_report(host, {}, preference="answers", candidates=candidates)
+        assert report["items"][0]["id"] == expected.id
+        assert "GPU budget" in report["items"][0]["recommendation_reason"]
+        assert report["items"][0]["evidence"] == "catalogue_metadata"
+
+
+def test_preferences_and_explicit_task_metadata_change_order():
+    small = guided.recipe_from_catalog(catalog_candidate(1))
+    large = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
+    coding = guided.recipe_from_catalog(catalog_candidate(3, tags=("code",)))
+    candidates = [small, large, coding]
+    balanced = guided.recommendation_report(gpu_resources(), {}, candidates=candidates)
+    assert balanced["items"][0]["id"] == large.id
+    speed = guided.recommendation_report(gpu_resources(), {}, preference="speed", candidates=candidates)
+    assert speed["items"][0]["id"] == small.id
+    assert "has not been measured" in speed["items"][0]["recommendation_reason"]
+    code = guided.recommendation_report(gpu_resources(), {}, task="code", candidates=candidates)
+    assert code["items"][0]["id"] == coding.id
+    assert "intended use" in code["items"][0]["recommendation_reason"]
+
+
+def test_balanced_uses_a_memory_cost_knee_instead_of_largest_checkpoint():
+    small = guided.recipe_from_catalog(catalog_candidate(1))
+    medium = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
+    large = guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=32_000_000_000))
+    candidates = [small, medium, large]
+    for preference, expected in (("balanced", medium), ("speed", small), ("answers", large)):
+        report = guided.recommendation_report(gpu_resources(), {}, preference=preference, candidates=candidates)
+        assert report["items"][0]["id"] == expected.id
+
+
+def test_large_query_head_count_includes_attention_prefill_workspace():
+    item = catalog_candidate()
+    basic = guided.recipe_from_catalog(item)
+    item["planning"]["query_heads"] = 128
+    wide = guided.recipe_from_catalog(item)
+    assert wide.runtime_memory > basic.runtime_memory
+    assert wide.minimum_memory == wide.runtime_memory + 2 * guided.GIB
+
+
+def test_installed_copy_does_not_override_hardware_or_capacity_ranking():
+    small = guided.recipe_from_catalog(catalog_candidate(1))
+    large = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
+    report = guided.recommendation_report(gpu_resources(), {small.id: ["installed"]}, candidates=[small, large])
+    assert report["items"][0]["id"] == large.id
+    host = gpu_resources()
+    host["gpu_memory_budget_bytes"] = 10 * guided.GIB
+    report = guided.recommendation_report(host, {large.id: ["installed"]}, candidates=[small, large])
+    assert [item["id"] for item in report["items"]] == [small.id]
+
+
+def test_current_worker_memory_pressure_does_not_remove_static_fit():
+    candidate = guided.recipe_from_catalog(catalog_candidate())
+    host = gpu_resources()
+    host["available_memory_bytes"] = 2 * guided.GIB
+    report = guided.recommendation_report(host, {}, candidates=[candidate])
+    assert report["items"][0]["id"] == candidate.id
+    assert "when starting" in report["items"][0]["recommendation_reason"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"gpu_available": False},
+        {"gpu_memory_budget_bytes": None},
+        {"gpu_memory_budget_bytes": True},
+        {"gpu_memory_budget_bytes": 0},
+        {"unified_memory": False},
+    ],
+)
+def test_incomplete_or_unusable_gpu_does_not_offer_a_model(changes):
+    host = {**gpu_resources(), **changes}
+    assert guided.recommendation_report(host, {})["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("architecture", "qwen3_5"),
+        ("architecture", []),
+        ("context_limit", 16384),
+        ("attention_layers", None),
+        ("kv_heads", True),
+        ("query_heads", 3),
+        ("head_dim", 0),
+        ("hidden_size", 0),
+        ("download_bytes", 1),
+        ("status", "unavailable"),
+        ("task_tags", [{}]),
+        ("chat_template_available", False),
+        ("supports_tools", False),
+        ("tool_parser", "unknown-v1"),
+    ],
+)
+def test_unknown_or_unsupported_catalog_plans_are_excluded(key, value):
+    item = catalog_candidate()
+    item["planning"][key] = value
+    assert guided.recipe_from_catalog(item) is None
+
+
+def test_dynamic_recipe_snapshots_source_and_checks_config_receipt(tmp_path):
+    item = catalog_candidate()
+    candidate = guided.recipe_from_catalog(item)
+    assert candidate.minimum_memory == candidate.runtime_memory + 2 * guided.GIB
+    assert candidate.context_tokens == 32768
+    assert candidate.installed_bytes > item["weight_bytes"]
+    assert candidate.setup_bytes > candidate.download_bytes + candidate.installed_bytes
+    original_item = deepcopy(candidate.catalog_item)
+    item["revision"] = "f" * 40
+    assert candidate.catalog_item == original_item
+    path = artifact(tmp_path / "dynamic", candidate)
+    assert guided.matches_recipe(path, candidate)
+    receipt_path = path / "conversion.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["source_files"][0]["revision"] = "f" * 40
+    receipt_path.write_text(json.dumps(receipt))
+    assert not guided.matches_recipe(path, candidate)
+
+
+def test_catalog_results_are_bounded_and_unknown_parameter_count_is_honest():
+    candidates = [guided.recipe_from_catalog(catalog_candidate(number)) for number in range(1, 6)]
+    report = guided.recommendation_report(gpu_resources(), {}, candidates=candidates)
+    assert len(report["items"]) == 3
+    item = catalog_candidate()
+    item["parameter_count"] = None
+    candidate = guided.recipe_from_catalog(item)
+    report = guided.recommendation_report(gpu_resources(), {}, candidates=[candidate])
+    assert "capacity is unknown" in report["items"][0]["recommendation_reason"]
+
+
+@pytest.mark.parametrize("item", [None, [], {}, {"planning": []}])
+def test_malformed_catalog_document_does_not_raise(item):
+    assert guided.recipe_from_catalog(item) is None
+
+
+@pytest.mark.parametrize("key,value", [("name", "bad\ud800"), ("repo", "bad\ud800/model"), ("quantization", "bad\n")])
+def test_malformed_catalog_display_metadata_does_not_raise(key, value):
+    item = catalog_candidate()
+    item[key] = value
+    assert guided.recipe_from_catalog(item) is None
+
+
+def test_explicit_coding_tag_aliases_and_declared_quantized_capacity():
+    item = catalog_candidate(tags=("coding", "code-generation"))
+    item["parameter_count"] = None
+    item["size_label"] = "7B"
+    candidate = guided.recipe_from_catalog(item)
+    assert candidate.logical_parameters == 7_000_000_000
+    assert candidate.task_tags == ("code",)
 
 
 @pytest.mark.parametrize(
@@ -442,3 +689,112 @@ def test_cancel_acknowledgement_is_visible_only_after_the_operation_slot_is_rele
     host.dispatch({"command": "cancel_install", "request_id": "install"})
     finish(host)
     assert acknowledgements == [True]
+
+
+def test_recorded_starter_and_catalog_geometry_use_the_same_prefill_memory_plan():
+    for starter in guided.RECIPES:
+        discovered = replace(
+            starter,
+            catalog_item={"planning": {"query_heads": starter.query_heads, "download_bytes": starter.download_bytes}},
+        )
+        assert starter.runtime_memory == discovered.runtime_memory
+    assert guided.RECIPES[0].runtime_memory == 11 * guided.GIB
+
+    # A source's recorded native history cannot bypass the same GPU reserve
+    # applied to that artifact when it is discovered through the catalog.
+    host = gpu_resources()
+    host["gpu_memory_budget_bytes"] = 12 * guided.GIB
+    assert not guided.installation_allowed(guided.RECIPES[0], host)
+
+
+@pytest.mark.parametrize("dtype", ["F16", "F32"])
+@pytest.mark.parametrize("catalog", [False, True])
+def test_reference_precision_copy_cannot_reuse_a_bf16_recipe(tmp_path, dtype, catalog):
+    recipe = (
+        guided.recipe_from_catalog({**catalog_candidate(), "quantization": "BF16"}) if catalog else guided.RECIPES[1]
+    )
+    bf16 = artifact(tmp_path / "bf16", recipe)
+    reference = artifact(tmp_path / "reference", recipe, dtype=dtype)
+    # Both artifacts have identical pinned sources and config bindings. Only
+    # the actual output tensor storage distinguishes this incompatible copy.
+    first = json.loads((bf16 / "conversion.json").read_text())
+    second = json.loads((reference / "conversion.json").read_text())
+    assert first["source_manifest_sha256"] == second["source_manifest_sha256"]
+    assert first["config_sha256"] == second["config_sha256"]
+    assert guided.matches_recipe(bf16, recipe)
+    assert not guided.matches_recipe(reference, recipe)
+
+
+@pytest.mark.parametrize("parameter_dtype", ["F16", "F32"])
+def test_quantized_recipe_requires_bf16_parameters_and_allows_f32_normalization(tmp_path, parameter_dtype):
+    recipe = guided.RECIPES[0]
+    native = artifact(tmp_path / "native", recipe)
+    incompatible = artifact(tmp_path / "incompatible", recipe, parameter_dtype=parameter_dtype)
+    assert guided.matches_recipe(native, recipe)
+    assert not guided.matches_recipe(incompatible, recipe)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("native_loading", "runtime_blocked"), ("source_validation", "not_performed"), ("conversion", "unsupported")],
+)
+def test_runtime_blocked_or_unvalidated_receipt_cannot_be_reused(tmp_path, field, value):
+    recipe = guided.RECIPES[1]
+    path = artifact(tmp_path / "model", recipe)
+    receipt_path = path / "conversion.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["capability"][field] = value
+    receipt_path.write_text(json.dumps(receipt))
+    assert not guided.matches_recipe(path, recipe)
+
+
+def test_installed_weights_must_remain_within_the_planned_size_allowance(tmp_path):
+    recipe = replace(guided.RECIPES[1], estimated_weight_bytes=1)
+    path = artifact(tmp_path / "model", recipe)
+    assert guided.matches_recipe(path, recipe)
+    with (path / "model.safetensors").open("r+b") as stream:
+        # A sparse file exercises the size gate without allocating a model.
+        stream.truncate(recipe.installed_bytes + 1)
+    receipt_path = path / "conversion.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["output_bytes"] = recipe.installed_bytes + 1
+    receipt_path.write_text(json.dumps(receipt))
+    assert not guided.matches_recipe(path, recipe)
+
+
+def test_weight_precision_check_never_reads_tensor_payloads(tmp_path, monkeypatch):
+    import contextlib
+
+    recipe = guided.RECIPES[0]
+    path = artifact(tmp_path / "model", recipe)
+    original = guided.open_regular
+
+    class HeaderOnly:
+        def __init__(self, stream):
+            self.stream = stream
+            self.allowed = 8
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, count=-1):
+            assert 0 <= count <= self.allowed - self.stream.tell()
+            data = self.stream.read(count)
+            if self.stream.tell() == 8:
+                self.allowed = 8 + struct.unpack("<Q", data)[0]
+            return data
+
+    @contextlib.contextmanager
+    def header_only(file):
+        with original(file) as stream:
+            if file.name == "model.safetensors":
+                yield HeaderOnly(stream)
+            else:
+                yield stream
+
+    # Every header reader obtains the same guarded file API. Any payload read
+    # would exceed its header boundary and fail the check.
+    monkeypatch.setattr(guided, "open_regular", header_only)
+    monkeypatch.setattr("stark_convert.model_inventory.open_regular", header_only)
+    monkeypatch.setattr("stark_convert.streaming.open_regular", header_only)
+    assert guided.matches_recipe(path, recipe)
