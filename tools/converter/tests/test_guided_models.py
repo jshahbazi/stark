@@ -3,10 +3,12 @@
 import hashlib
 import io
 import json
+import struct
 import sys
 import threading
 import time
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -27,13 +29,44 @@ def resources(**changes):
     }
 
 
-def artifact(path, recipe):
+def artifact(path, recipe, *, dtype="BF16", parameter_dtype="BF16", native_loading="unverified"):
     """Synthetic output plus a source receipt; never real model payloads."""
     path.mkdir(parents=True, exist_ok=True)
     config = json.dumps({"type": "LanguageModelConfig", "decoder_config": {}}).encode()
     (path / "config.json").write_bytes(config)
     (path / "tokenizer.json").write_text("{}")
-    (path / "model.safetensors").write_bytes(b"synthetic output")
+    header, metadata, offset = {}, {}, 0
+
+    def tensor(name, shape, dtype):
+        nonlocal offset
+        elements = 1
+        for value in shape:
+            elements *= value
+        size = elements * {"BF16": 2, "F16": 2, "F32": 4, "U32": 4}[dtype]
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + size]}
+        offset += size
+
+    base = "decoder.embedding.embedding"
+    if recipe.quantization.endswith("-bit"):
+        metadata[base + ".spec"] = json.dumps(
+            {
+                "type": "MLXSpec",
+                "layout": "output_input",
+                "bits": int(recipe.quantization.removesuffix("-bit")),
+                "group_size": 64,
+            }
+        )
+        tensor(base + ".weights", [2, 1], "U32")
+        tensor(base + ".scales", [1, 2], parameter_dtype)
+        tensor(base + ".biases", [1, 2], parameter_dtype)
+    else:
+        metadata[base + ".spec"] = json.dumps({"type": "FullPrecisionSpec", "layout": "output_input"})
+        tensor(base + ".weights", [2, 4], dtype)
+    tensor("decoder.transformer.output_norm.scales", [2], "F32")
+    header["__metadata__"] = metadata
+    encoded = json.dumps(header).encode()
+    weights = path / "model.safetensors"
+    weights.write_bytes(struct.pack("<Q", len(encoded)) + encoded + b"\0" * offset)
     sources = [{"repo": recipe.repo, "revision": recipe.revision}]
     selection = recipe.files or (("model.safetensors", recipe.weight_bytes, "a" * 64),)
     files = [
@@ -53,6 +86,15 @@ def artifact(path, recipe):
                 "source_files": files,
                 "source_manifest_sha256": hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest(),
                 "config_sha256": hashlib.sha256(config).hexdigest(),
+                "status": "ok",
+                "output_bytes": weights.stat().st_size,
+                "capability": {
+                    "adapter": recipe.architecture,
+                    "model_kind": "language",
+                    "conversion": "implemented",
+                    "source_validation": "complete",
+                    "native_loading": native_loading,
+                },
             }
         )
     )
@@ -124,7 +166,7 @@ def test_resources_select_starting_choices_and_installed_reuse():
     small = guided.recommendation_report(resources(physical_memory_bytes=8 * guided.GIB), {})
     assert small["items"] == [] and "16 GB" in small["message"]
     assert [item["context_tokens"] for item in normal["items"]] == [32768, 32768]
-    assert [item["runtime_memory_bytes_estimate"] for item in normal["items"]] == [10 * guided.GIB, 9 * guided.GIB]
+    assert [item["runtime_memory_bytes_estimate"] for item in normal["items"]] == [11 * guided.GIB, 9 * guided.GIB]
     pressure = resources(available_memory_bytes=0, free_disk_bytes=0, download_free_disk_bytes=0)
     assert guided.recommendation_report(pressure, {})["items"] == []
     reused = guided.recommendation_report(pressure, {guided.RECIPES[0].id: ["same-copy"]})
@@ -647,3 +689,112 @@ def test_cancel_acknowledgement_is_visible_only_after_the_operation_slot_is_rele
     host.dispatch({"command": "cancel_install", "request_id": "install"})
     finish(host)
     assert acknowledgements == [True]
+
+
+def test_recorded_starter_and_catalog_geometry_use_the_same_prefill_memory_plan():
+    for starter in guided.RECIPES:
+        discovered = replace(
+            starter,
+            catalog_item={"planning": {"query_heads": starter.query_heads, "download_bytes": starter.download_bytes}},
+        )
+        assert starter.runtime_memory == discovered.runtime_memory
+    assert guided.RECIPES[0].runtime_memory == 11 * guided.GIB
+
+    # A source's recorded native history cannot bypass the same GPU reserve
+    # applied to that artifact when it is discovered through the catalog.
+    host = gpu_resources()
+    host["gpu_memory_budget_bytes"] = 12 * guided.GIB
+    assert not guided.installation_allowed(guided.RECIPES[0], host)
+
+
+@pytest.mark.parametrize("dtype", ["F16", "F32"])
+@pytest.mark.parametrize("catalog", [False, True])
+def test_reference_precision_copy_cannot_reuse_a_bf16_recipe(tmp_path, dtype, catalog):
+    recipe = (
+        guided.recipe_from_catalog({**catalog_candidate(), "quantization": "BF16"}) if catalog else guided.RECIPES[1]
+    )
+    bf16 = artifact(tmp_path / "bf16", recipe)
+    reference = artifact(tmp_path / "reference", recipe, dtype=dtype)
+    # Both artifacts have identical pinned sources and config bindings. Only
+    # the actual output tensor storage distinguishes this incompatible copy.
+    first = json.loads((bf16 / "conversion.json").read_text())
+    second = json.loads((reference / "conversion.json").read_text())
+    assert first["source_manifest_sha256"] == second["source_manifest_sha256"]
+    assert first["config_sha256"] == second["config_sha256"]
+    assert guided.matches_recipe(bf16, recipe)
+    assert not guided.matches_recipe(reference, recipe)
+
+
+@pytest.mark.parametrize("parameter_dtype", ["F16", "F32"])
+def test_quantized_recipe_requires_bf16_parameters_and_allows_f32_normalization(tmp_path, parameter_dtype):
+    recipe = guided.RECIPES[0]
+    native = artifact(tmp_path / "native", recipe)
+    incompatible = artifact(tmp_path / "incompatible", recipe, parameter_dtype=parameter_dtype)
+    assert guided.matches_recipe(native, recipe)
+    assert not guided.matches_recipe(incompatible, recipe)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("native_loading", "runtime_blocked"), ("source_validation", "not_performed"), ("conversion", "unsupported")],
+)
+def test_runtime_blocked_or_unvalidated_receipt_cannot_be_reused(tmp_path, field, value):
+    recipe = guided.RECIPES[1]
+    path = artifact(tmp_path / "model", recipe)
+    receipt_path = path / "conversion.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["capability"][field] = value
+    receipt_path.write_text(json.dumps(receipt))
+    assert not guided.matches_recipe(path, recipe)
+
+
+def test_installed_weights_must_remain_within_the_planned_size_allowance(tmp_path):
+    recipe = replace(guided.RECIPES[1], estimated_weight_bytes=1)
+    path = artifact(tmp_path / "model", recipe)
+    assert guided.matches_recipe(path, recipe)
+    with (path / "model.safetensors").open("r+b") as stream:
+        # A sparse file exercises the size gate without allocating a model.
+        stream.truncate(recipe.installed_bytes + 1)
+    receipt_path = path / "conversion.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["output_bytes"] = recipe.installed_bytes + 1
+    receipt_path.write_text(json.dumps(receipt))
+    assert not guided.matches_recipe(path, recipe)
+
+
+def test_weight_precision_check_never_reads_tensor_payloads(tmp_path, monkeypatch):
+    import contextlib
+
+    recipe = guided.RECIPES[0]
+    path = artifact(tmp_path / "model", recipe)
+    original = guided.open_regular
+
+    class HeaderOnly:
+        def __init__(self, stream):
+            self.stream = stream
+            self.allowed = 8
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def read(self, count=-1):
+            assert 0 <= count <= self.allowed - self.stream.tell()
+            data = self.stream.read(count)
+            if self.stream.tell() == 8:
+                self.allowed = 8 + struct.unpack("<Q", data)[0]
+            return data
+
+    @contextlib.contextmanager
+    def header_only(file):
+        with original(file) as stream:
+            if file.name == "model.safetensors":
+                yield HeaderOnly(stream)
+            else:
+                yield stream
+
+    # Every header reader obtains the same guarded file API. Any payload read
+    # would exceed its header boundary and fail the check.
+    monkeypatch.setattr(guided, "open_regular", header_only)
+    monkeypatch.setattr("stark_convert.model_inventory.open_regular", header_only)
+    monkeypatch.setattr("stark_convert.streaming.open_regular", header_only)
+    assert guided.matches_recipe(path, recipe)

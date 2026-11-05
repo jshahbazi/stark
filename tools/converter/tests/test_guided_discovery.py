@@ -274,3 +274,42 @@ def test_stale_failed_discovery_does_not_publish_fallback(desktop, monkeypatch):
     )
     assert published == []
     assert desktop.guided_catalog_cache is None
+
+
+def test_installed_model_checks_do_not_hold_generation_lock_or_publish_after_cancellation(desktop, monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    desktop.models = [{"id": "installed", "name": "Fixture", "path": "/synthetic/unused", "source": "fixture"}]
+
+    def slow_validity(_path):
+        started.set()
+        assert release.wait(2)
+        return False
+
+    monkeypatch.setattr("stark_convert.desktop.model_valid", slow_validity)
+    generation = desktop.guided_discovery_generation
+    thread = threading.Thread(
+        target=desktop.publish_guided_models,
+        args=(
+            "everyday",
+            "balanced",
+            hardware(),
+            {"excluded_model_ids": set(), "excluded_recipe_ids": set()},
+            "offer",
+            None,
+            generation,
+        ),
+    )
+    thread.start()
+    try:
+        assert started.wait(1)
+        acquired = desktop.lock.acquire(timeout=0.2)
+        if acquired:
+            desktop.lock.release()
+        assert acquired, "Template/header inspection must not stall generation or Stop."
+        desktop.cancel_guided_discovery()
+    finally:
+        release.set()
+        thread.join(2)
+    assert not thread.is_alive()
+    assert "offer" not in desktop.guided_reports
+    assert desktop.output.getvalue() == ""

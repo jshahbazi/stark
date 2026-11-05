@@ -271,7 +271,7 @@ budget. The stock OpenWork initial prompt has been observed at about 17,000 to
 observed prefixes also exceed a 4,096-token budget.
 The guided API budget is separate from each model's trained/native context
 capacity; Advanced keeps its existing raw context controls. Memory planning
-estimates are 10 GiB for the 4B recipe and 9 GiB for the 0.6B recipe, not
+estimates are 11 GiB for the 4B recipe and 9 GiB for the 0.6B recipe, not
 per-Mac fit guarantees. On an 8 GiB Mac, neither fallback OpenWork starter is
 eligible. The broader catalog uses model-specific memory plans rather than
 that fixed minimum. When no candidate can be planned within the hardware

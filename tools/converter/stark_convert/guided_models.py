@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import re
 import shutil
+import struct
 import sys
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -22,9 +24,10 @@ from pathlib import Path
 
 import psutil
 
-from ._build_metadata import open_regular
+from ._build_metadata import _signature, open_regular
+from .model_inventory import MAX_HEADER_BYTES, _weights
 from .registry import get_model
-from .streaming import authorize_source_path
+from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, read_safetensors_header
 
 GIB = 1024**3
 MIB = 1024**2
@@ -56,6 +59,7 @@ class Recipe:
     estimated_weight_bytes: int | None = None
     logical_parameters: int | None = None
     task_tags: tuple[str, ...] = ()
+    query_heads: int | None = None
 
     @property
     def weight_bytes(self):
@@ -85,18 +89,18 @@ class Recipe:
         # Guided installs use the converter's BF16 default (cli.py), matching
         # the dense generation route's activation/KV state policy.
         # Budget both full-context KV buffers, the 1024-row attention suffix,
-        # selected source weights and a 3 GiB workspace/tokenizer allowance.
+        # converted weights/header overhead and a 3 GiB workspace/tokenizer allowance.
         # Rounded-up planning values still do not grant native admission.
         cache = 2 * (self.context_tokens + 1024) * self.attention_layers * self.kv_heads * self.head_dim * 2
         workspace = 3 * GIB
-        if self.catalog_item is not None:
+        if self.query_heads is not None:
             # Include the fallback attention score tensors for one full prefill
             # chunk, plus a GiB for other activations. The score tensors are
             # described by backends/metal/kernel/attention/fallback.rs.
-            heads = self.catalog_item["planning"]["query_heads"]
+            heads = self.query_heads
             scores = 1024 * (self.context_tokens + 1024) * (heads + heads // self.kv_heads) * 2
             workspace = max(workspace, scores + GIB)
-        return ((self.weight_bytes + cache + workspace + GIB - 1) // GIB) * GIB
+        return ((self.installed_bytes + cache + workspace + GIB - 1) // GIB) * GIB
 
 
 # Metadata checked without downloading weights on 2026-11-04 against the named
@@ -135,6 +139,7 @@ RECIPES = (
             ("tokenizer_config.json", 9706, "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0"),
         ),
         logical_parameters=4_000_000_000,
+        query_heads=32,
     ),
     Recipe(
         "qwen3-06b-bf16-c1899de2",
@@ -163,6 +168,7 @@ RECIPES = (
             ("tokenizer_config.json", 9732, "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"),
         ),
         logical_parameters=600_000_000,
+        query_heads=16,
     ),
 )
 
@@ -282,6 +288,7 @@ def _recipe_from_catalog(item):
         estimated_weight_bytes=weights,
         logical_parameters=parameters,
         task_tags=tuple(sorted(tags)),
+        query_heads=plan["query_heads"],
     )
     return replace(recipe, minimum_memory=recipe.runtime_memory + 2 * GIB)
 
@@ -322,6 +329,67 @@ def _small_file(root, name):
     if len(value) > 2 * MIB:
         raise ValueError()
     return value
+
+
+def _artifact_precision_matches(root, recipe, receipt):
+    """Check native BF16 storage and its size allowance using only headers.
+
+    Source identity alone also matches F16/F32 reference conversions. Those
+    outputs cannot inherit the guide's BF16 load/memory policy. Normalization
+    scales remain F32 in the supported dense route; quantization parameters
+    and floating matrices must be BF16.
+    """
+    capability = receipt.get("capability")
+    if (
+        receipt.get("status") != "ok"
+        or not isinstance(capability, dict)
+        or capability.get("adapter") != recipe.architecture
+        or capability.get("model_kind") != "language"
+        or capability.get("conversion") != "implemented"
+        or capability.get("source_validation") != "complete"
+        or capability.get("native_loading")
+        not in {"qualified_tuple", "supported_layout_unverified_tuple", "supported_family_unverified", "unverified"}
+    ):
+        return False
+    path = authorize_source_path(root, root / "model.safetensors")
+    with open_regular(path) as stream:
+        before = os.fstat(stream.fileno())
+        signature = _signature(before)
+        if not 10 <= before.st_size <= recipe.installed_bytes:
+            return False
+        prefix = stream.read(8)
+        if len(prefix) != 8 or not 2 <= struct.unpack("<Q", prefix)[0] <= MAX_HEADER_BYTES:
+            return False
+    size, label = _weights(root)
+    if size != before.st_size or label != recipe.quantization:
+        return False
+    if type(receipt.get("output_bytes")) is not int or receipt["output_bytes"] != size:
+        return False
+    metadata, tensors = read_safetensors_header(path)
+    if not tensors or any(tensor.file_signature != signature for tensor in tensors.values()):
+        return False
+    quantized = set()
+    for name, raw in metadata.items():
+        if not name.endswith(".spec"):
+            continue
+        spec = json.loads(raw)
+        if not isinstance(spec, dict):
+            return False
+        if spec.get("type") in {"MLXSpec", "IntSpec"}:
+            quantized.add(name.removesuffix(".spec"))
+    for name, tensor in tensors.items():
+        base, _, plane = name.rpartition(".")
+        normalization = plane == "scales" and base.rsplit(".", 1)[-1].endswith("_norm")
+        if normalization:
+            if tensor.dtype != "F32" or len(tensor.shape) != 1:
+                return False
+        elif tensor.dtype == "BF16":
+            continue
+        elif tensor.dtype in {"U8", "I8", "U32", "I32"} and base in quantized and plane in {"weights", "zero_points"}:
+            continue
+        else:
+            return False
+    return signature == _signature(path.stat())
 
 
 def matches_recipe(path, recipe):
@@ -377,8 +445,18 @@ def matches_recipe(path, recipe):
             receipt.get("source_manifest_sha256")
             == hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
             and config_hash == hashlib.sha256(config).hexdigest()
+            and _artifact_precision_matches(root, recipe, receipt)
         )
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        RecursionError,
+        ConversionError,
+        UnsupportedConversion,
+    ):
         return False
 
 

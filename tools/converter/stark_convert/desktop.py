@@ -890,65 +890,69 @@ class Desktop:
         with self.lock:
             if generation is not None and generation != self.guided_discovery_generation:
                 return
-            candidates = {recipe.id: recipe for recipe in RECIPES}
-            sources = {(recipe.repo, recipe.revision) for recipe in RECIPES}
-            if discovery is not None:
-                for item in discovery["items"]:
-                    recipe = recipe_from_catalog(item)
-                    if recipe is not None and (recipe.repo, recipe.revision) not in sources:
-                        candidates[recipe.id] = recipe
-                        sources.add((recipe.repo, recipe.revision))
-            installed = {}
-            excluded_recipes = set(excluded["excluded_recipe_ids"])
-            valid_models = [
-                (model, model_display(model))
-                for model in self.models
-                if model.get("artifact_mode", "text") == "text" and model_valid(Path(model["path"]))
-            ]
-            for recipe in candidates.values():
-                ids = [
-                    model["id"]
-                    for model, display in valid_models
-                    if (
-                        display is None
-                        or display.get("source_revision") is None
-                        or (
-                            display.get("group_id") == "repo:" + recipe.repo
-                            and display.get("source_revision") == recipe.revision
-                        )
+            models = [dict(model) for model in self.models]
+        candidates = {recipe.id: recipe for recipe in RECIPES}
+        sources = {(recipe.repo, recipe.revision) for recipe in RECIPES}
+        if discovery is not None:
+            for item in discovery["items"]:
+                recipe = recipe_from_catalog(item)
+                if recipe is not None and (recipe.repo, recipe.revision) not in sources:
+                    candidates[recipe.id] = recipe
+                    sources.add((recipe.repo, recipe.revision))
+        installed = {}
+        excluded_recipes = set(excluded["excluded_recipe_ids"])
+        valid_models = [
+            (model, model_display(model))
+            for model in models
+            if model.get("artifact_mode", "text") == "text" and model_valid(Path(model["path"]))
+        ]
+        for recipe in candidates.values():
+            ids = [
+                model["id"]
+                for model, display in valid_models
+                if (
+                    display is None
+                    or display.get("source_revision") is None
+                    or (
+                        display.get("group_id") == "repo:" + recipe.repo
+                        and display.get("source_revision") == recipe.revision
                     )
-                    and matches_recipe(model["path"], recipe)
-                ]
-                if excluded["excluded_model_ids"].intersection(ids):
-                    excluded_recipes.add(recipe.id)
-                installed[recipe.id] = ids
-            report = recommendation_report(
-                self.guided_resources(hardware),
-                installed,
-                excluded_recipes,
-                task=task,
-                preference=preference,
-                candidates=tuple(candidates.values()),
-            )
-            if discovery is not None:
-                report["catalog_search"] = {
-                    "bounded": True,
-                    "incomplete": bool(discovery.get("incomplete", True)),
-                    "candidates_considered": len(candidates),
-                }
-                search_note = (
-                    "The search checked a bounded window of the supported catalog. "
-                    if discovery["items"]
-                    else "Catalog discovery is unavailable; only recorded starter choices were checked. "
                 )
-                if discovery.get("failed_families", 0):
-                    search_note += "Some families could not be checked; Check again retries the search. "
-                report["message"] = search_note + report["message"]
-                for item in report["items"]:
-                    item["caveats"].append(
-                        "Catalog discovery checks a bounded candidate window in each supported family; "
-                        "some models may not be included."
-                    )
+                and matches_recipe(model["path"], recipe)
+            ]
+            if excluded["excluded_model_ids"].intersection(ids):
+                excluded_recipes.add(recipe.id)
+            installed[recipe.id] = ids
+        report = recommendation_report(
+            self.guided_resources(hardware),
+            installed,
+            excluded_recipes,
+            task=task,
+            preference=preference,
+            candidates=tuple(candidates.values()),
+        )
+        if discovery is not None:
+            report["catalog_search"] = {
+                "bounded": True,
+                "incomplete": bool(discovery.get("incomplete", True)),
+                "candidates_considered": len(candidates),
+            }
+            search_note = (
+                "The search checked a bounded window of the supported catalog. "
+                if discovery["items"]
+                else "Catalog discovery is unavailable; only recorded starter choices were checked. "
+            )
+            if discovery.get("failed_families", 0):
+                search_note += "Some families could not be checked; Check again retries the search. "
+            report["message"] = search_note + report["message"]
+            for item in report["items"]:
+                item["caveats"].append(
+                    "Catalog discovery checks a bounded candidate window in each supported family; "
+                    "some models may not be included."
+                )
+        with self.lock:
+            if generation is not None and generation != self.guided_discovery_generation:
+                return
             # An independent refresh never changes an installation already in
             # progress. Offers retain only immutable server-owned recipe IDs.
             self.guided_reports[request_id] = {item["id"]: candidates[item["id"]] for item in report["items"]}
