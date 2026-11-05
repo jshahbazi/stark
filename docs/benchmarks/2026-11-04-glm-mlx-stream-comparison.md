@@ -820,3 +820,43 @@ Private pair result SHA-256:
 `6e5f7096ed3302f958c454e9dcb7de7638797f56e6522489706f3c0116f6b891`.
 Gate-0 p/q result SHA-256:
 `fcbd482a0857caa3a5f988b235470d91abe6892d96be87a2e632a1141068db4e`.
+
+## Post-purge first-request capacity check
+
+After the authorized OS purge, the exact CPU admission census measured a
+34.106 GB baseline, down from 79.560 GB before the purge. With the existing
+112 GiB ceiling, margin and snapshot reserve, the census's protected joint fill
+was P130/D157. It excluded the private stage's paired 128 MiB workspace reserve;
+selecting P129/D156 covered that reserve and kept the extra 2 GiB selection
+headroom. This confirms a large cache-sensitive change in the
+admission snapshot; it does not establish that the same baseline will recur.
+
+A fresh legacy child then ran the frozen raw 16,384-token, temperature 1 /
+top-p 0.95 / seed 1 workload for 1,024 outputs, with no warmup. It matched the
+strict fingerprint `89c3e863f47bad76`, 367 rounds, 889 verified drafts and 657
+accepted drafts. At P129/D156 it measured 922.6615 prefill and 20.3003 decode
+tok/s (17.757324 s prefill, 50.442620 s decode; 68.199944 s total). The host
+screen failed at 193.606% external CPU; paging, sampling, compiler and thermal
+checks passed. Clocks were not verified, so this is diagnostic evidence, not
+qualified throughput.
+
+Settled decode payload was 430.406 GB, compared with 1,689.924 GB in the earlier
+P16/D40 legacy run. Both had the same output fingerprint, but one was a fresh
+first request and the other followed an excluded warmup. This payload change
+does not make their timing ratio comparable.
+
+The source comparison found the historical `88d2aad` and current `7d29eaa`
+plugin use the same BF16 bill and baseline formula; the SDK memory-bill source
+is byte-identical. The historical loader's bill selection honors explicit pins
+and can warn on positive overfill, while the current private bridge rejects
+over-budget pins. The upstream benchmark README documents a pre-arm admission
+gate and reports 225-row cells that exceeded the bill fill by 1.25–1.79 GB
+after baseline drift. That does not show that the historical 190/217 cell
+overfilled. The historical host's actual load baseline was not reported, and
+12.69 GB is its published modeled maximum baseline for 190/217, not a measured
+baseline from the 33.15 tok/s run. The current bridge additionally reserves
+305.6 MB for prefix snapshots and, in the private p/q stage, 128 MiB for paired
+sampler workspace.
+
+Post-purge first-request result SHA-256:
+`01c6a99aea0a29bdd6c377597896b8fbc4e8fe2362c09541171052bb5bad5a2a`.
