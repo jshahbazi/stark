@@ -36,6 +36,53 @@ def _hash_file(path: Path) -> str:
     return value.hexdigest()
 
 
+def _ordered_shards(sources: list):
+    """Admit complete split GGUF inventories with metadata on shard zero."""
+    split = any(
+        any(
+            key in source.metadata
+            for key in ("split.no", "split.count", "split.tensors.count")
+        )
+        for source in sources
+    )
+    if not split:
+        if len(sources) != 1:
+            raise ValueError("multiple GGUF files require split metadata")
+        ordered = sources
+    else:
+        by_index = {}
+        declared_tensors = None
+        for source in sources:
+            index = source.metadata.get("split.no")
+            count = source.metadata.get("split.count")
+            tensors = source.metadata.get("split.tensors.count")
+            if (
+                type(index) is not int
+                or type(count) is not int
+                or count != len(sources)
+                or not 0 <= index < count
+                or index in by_index
+                or type(tensors) is not int
+                or not 0 < tensors <= 2_000_000
+                or (declared_tensors is not None and tensors != declared_tensors)
+            ):
+                raise ValueError("incomplete or inconsistent GGUF split metadata")
+            declared_tensors = tensors
+            by_index[index] = source
+        if (
+            set(by_index) != set(range(len(sources)))
+            or sum(len(source.tensors) for source in sources) != declared_tensors
+        ):
+            raise ValueError("incomplete GGUF split tensor inventory")
+        ordered = [by_index[index] for index in range(len(sources))]
+    if ordered[0].metadata.get("general.architecture") != "ricursive" or any(
+        source.metadata.get("general.architecture", "ricursive") != "ricursive"
+        for source in ordered[1:]
+    ):
+        raise ValueError("GGUF architecture mismatch")
+    return ordered
+
+
 class Q8Weights:
     """Read Q8_0/F32 tensors independently of the native Rust decoder."""
 
@@ -48,17 +95,19 @@ class Q8Weights:
         self.files = sorted(directory.glob("*.gguf"))
         if not 1 <= len(self.files) <= 8:
             raise ValueError("invalid GGUF shard inventory")
-        self.tensors = {}
+        sources = []
         for path in self.files:
             if path.is_symlink():
                 raise ValueError("GGUF source must be a regular file")
-            source = read_gguf(path)
-            if source.metadata.get("general.architecture") != "ricursive":
-                raise ValueError("GGUF architecture mismatch")
+            sources.append(read_gguf(path))
+        sources = _ordered_shards(sources)
+        self.files = [source.path for source in sources]
+        self.tensors = {}
+        for source in sources:
             for name, tensor in source.tensors.items():
                 if name in self.tensors:
                     raise ValueError("duplicate GGUF tensor")
-                self.tensors[name] = (path, tensor)
+                self.tensors[name] = (source.path, tensor)
 
     def _read(
         self, name: str, first_row: int | None = None, row_count: int | None = None
@@ -206,6 +255,16 @@ def reference(
         "source_revision": SOURCE_REVISION,
         "source_sha256": SOURCE_HASHES,
         "source_transformations": [],
+        "harness_sha256": _hash_file(Path(__file__)),
+        "harness_dependencies_sha256": {
+            "ripple_native_fixture.py": _hash_file(
+                Path(__file__).with_name("ripple_native_fixture.py")
+            ),
+            "tools/converter/stark_convert/gguf_import.py": _hash_file(
+                Path(__file__).resolve().parents[1]
+                / "tools/converter/stark_convert/gguf_import.py"
+            ),
+        },
         "reference_runtime": {
             "torch": torch.__version__,
             "transformers": transformers.__version__,
