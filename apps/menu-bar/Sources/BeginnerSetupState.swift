@@ -53,6 +53,19 @@ enum BeginnerRetryPreference: String, CaseIterable, Identifiable {
     }
 }
 
+enum BeginnerModelPriority: String, CaseIterable, Identifiable {
+    case balanced, speed, answers
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .balanced: return "Balanced"
+        case .speed: return "Lighter model"
+        case .answers: return "More model capacity"
+        }
+    }
+}
+
 enum BeginnerSetupStage: String, CaseIterable {
     case task, recommendation, installation, openWork, connection, ready, retry
 
@@ -99,6 +112,7 @@ struct BeginnerSetupSnapshot: Equatable {
     var choicesLoading = false
     var choicesError: String? = nil
     var deviceSummary = ""
+    var recommendationMessage = ""
     var installChoiceID: String? = nil
     var installedResultID: String? = nil
     var installPhase: BeginnerInstallPhase = .idle
@@ -136,7 +150,7 @@ struct BeginnerSetupSnapshot: Equatable {
 }
 
 struct BeginnerSetupActions {
-    var refreshChoices: (BeginnerTask, String?) -> Void = { _, _ in }
+    var refreshChoices: (BeginnerTask, String?, String) -> Void = { _, _, _ in }
     var install: (BeginnerModelChoice) -> Void = { _ in }
     var cancelInstall: () -> Void = {}
     var startModel: (BeginnerModelChoice) -> Bool = { _ in false }
@@ -153,6 +167,7 @@ struct BeginnerSetupActions {
 final class BeginnerSetupSession: ObservableObject {
     @Published var stage: BeginnerSetupStage = .task
     @Published var task: BeginnerTask?
+    @Published var modelPriority: BeginnerModelPriority = .balanced
     @Published var selectedChoiceID: String?
     @Published var retryPreference: BeginnerRetryPreference?
     @Published private(set) var choosingAnotherModel = false

@@ -17,6 +17,21 @@ ROOT = Path(__file__).resolve().parent.parent
 
 VIEW_CHECK = r"""
 extension BeginnerSetupView {
+    @MainActor static func checkRecommendationPreferences() -> Bool {
+        let session = BeginnerSetupSession()
+        session.task = .code
+        session.modelPriority = .speed
+        var received: [(BeginnerTask, String?, String)] = []
+        var actions = BeginnerSetupActions()
+        actions.refreshChoices = { received.append(($0, $1, $2)) }
+        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+        view.requestChoices()
+        session.retryPreference = .answers
+        view.requestChoices()
+        return received.count == 2 && received[0].0 == .code && received[0].2 == "speed"
+            && received[1].2 == "answers" && session.stage == .recommendation
+    }
+
     @MainActor static func checkStartPolicy(restart: Bool, accepted: Bool = true) -> Bool {
         let session = BeginnerSetupSession()
         session.stage = .recommendation
@@ -290,6 +305,7 @@ struct BeginnerChecks {
             preferences.resolveInitialMode(hasInstalledModels: true)
             return preferences.mode == .beginner
         case "start-reuses-current": return BeginnerSetupView.checkStartPolicy(restart: false)
+        case "recommendation-preferences": return BeginnerSetupView.checkRecommendationPreferences()
         case "start-applies-restart-policy": return BeginnerSetupView.checkStartPolicy(restart: true)
         case "start-rejection-does-not-wait": return BeginnerSetupView.checkStartPolicy(restart: true, accepted: false)
         default: return false
@@ -362,6 +378,9 @@ class BeginnerSetupTests(unittest.TestCase):
 
     def test_start_waits_for_exact_model_readiness(self):
         self.run_check("start-exact-readiness")
+
+    def test_model_priority_and_retry_preference_reach_recommendations(self):
+        self.run_check("recommendation-preferences")
 
     def test_failed_start_can_be_retried(self):
         for scenario in ["failed-start-can-retry", "failed-switch-can-choose-again"]:

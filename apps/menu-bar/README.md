@@ -216,15 +216,54 @@ Use **Guided setup** or **Manage Models** to open the selected interface.
 Advanced retains the existing Manage Models, Model Catalog, Add from Source,
 Playground, Connections and chat controls.
 
-Beginner's **Guided Steps** flow asks what you want help with, checks the
-available starting recipes, and offers an eligible installed model or a pinned
-download recipe. It shows download and preparation as separate stages. After
+Beginner's **Guided Steps** flow asks what you want help with and whether to
+prioritize a balance of capacity and memory, a lighter model, or more model
+capacity. It reads the native Metal device name, unified-memory support and
+recommended working-set budget, plus CPU count, physical and available memory,
+and free space in the library and download cache. GPU and system memory share
+the same physical memory; the algorithm never adds their budgets together.
+
+The guide checks a bounded window of candidates in each supported catalog
+family using metadata only. Every candidate retains its exact source revision
+and quantization. A new catalog choice needs complete dense attention geometry,
+at least 32,768 tokens of published context, a usable chat template and a
+supported tool parser for OpenWork. Candidates with unknown memory layouts,
+including recurrent/hybrid and native expert routes without a guide planner,
+remain available through Advanced. Catalog compatibility describes metadata
+support; it does not inherit another model's native qualification.
+
+The memory plan includes weights, both full-context BF16 KV buffers, attention
+score scratch and a workspace allowance. It must leave 2 GiB of physical
+memory and use no more than 85% of Metal's recommended working-set budget.
+New downloads also need 2 GiB currently available memory and enough space for
+source and converted copies plus setup reserves. Starting rechecks available
+memory after releasing the previous worker. A running model's memory is never
+assumed to be reclaimable during recommendations.
+
+Ranking first prefers comfortable memory headroom, then explicit source task
+tags when available. **Balanced** uses parameter capacity divided by squared
+estimated runtime memory; **Lighter model** prefers lower weight traffic; and
+**More model capacity** prefers higher parameter counts. These are documented
+heuristics, with no measured tokens-per-second or answer-quality score. Unknown
+parameter counts receive no capacity credit. Installed copies break otherwise
+equal ties. The guide offers up to three choices and explains each choice's
+resource fit and evidence. CPU count and GPU name describe the machine; core
+count alone does not establish inference speed.
+
+Discovery runs separately from generation, with three concurrent family lookups
+and a 65-second overall process limit. Successful nonempty catalog scans are
+cached only in memory for ten minutes; failed family lookups retry immediately.
+Resource checks are fresh on every recommendation,
+installation and start. A failed search offers only the recorded starter
+recipes that still meet the hardware checks and identifies the limited search.
+
+The flow shows download and preparation as separate stages. After
 installation, you must explicitly start the model; when another model is
 running, it remains installed and available until you explicitly choose to
 switch. Stark clears the current chat only after the selected model reports
 ready.
 
-The pinned starting choices are **Qwen3-4B-4bit** and **Qwen3-0.6B**, each
+The fallback starting choices are **Qwen3-4B-4bit** and **Qwen3-0.6B**, each
 with source-bound native chat evidence. Both checked OpenWork recipes require
 at least 16 GiB of physical memory and use a 32,768-token Playground/API
 budget. The stock OpenWork initial prompt has been observed at about 17,000 to
@@ -233,11 +272,12 @@ observed prefixes also exceed a 4,096-token budget.
 The guided API budget is separate from each model's trained/native context
 capacity; Advanced keeps its existing raw context controls. Memory planning
 estimates are 10 GiB for the 4B recipe and 9 GiB for the 0.6B recipe, not
-per-Mac fit guarantees. On an 8 GiB Mac, neither checked OpenWork starter is
-eligible, so Beginner offers the existing model browser in Advanced. These
-recommendations are conservative estimates informed by native chat evidence,
-not proof of best fit for a particular Mac or task, or of general OpenWork
-agent competence.
+per-Mac fit guarantees. On an 8 GiB Mac, neither fallback OpenWork starter is
+eligible. The broader catalog uses model-specific memory plans rather than
+that fixed minimum. When no candidate can be planned within the hardware
+budget, Beginner offers the existing model browser in Advanced.
+Recommendations are conservative planning estimates; task quality, speed and
+general OpenWork competence still require artifact-specific validation.
 
 After the model is running, Beginner can guide setup of the official OpenWork
 app. **Download OpenWork** opens its official download page in a browser; the

@@ -23,6 +23,7 @@ struct BeginnerModelReport {
         let license: String
         let qualification: String
         let caveats: [String]
+        let recommendationReason: String
 
         init?(_ raw: [String: Any]) {
             guard let id = BeginnerMetadata.string(raw["id"], limit: 128),
@@ -45,6 +46,12 @@ struct BeginnerModelReport {
             self.quantization = quantization; downloadBytes = download; installedBytes = installed
             setupBytes = setup; runtimeBytes = runtime; contextTokens = Int(context)
             installedIDs = ids; self.license = license; self.qualification = qualification; self.caveats = caveats
+            if raw["recommendation_reason"] != nil {
+                guard let reason = BeginnerMetadata.string(raw["recommendation_reason"], limit: 2_000) else { return nil }
+                recommendationReason = reason
+            } else {
+                recommendationReason = "A starting model checked for this setup. Review its answers and any actions in OpenWork."
+            }
         }
     }
 
@@ -52,6 +59,8 @@ struct BeginnerModelReport {
     let physicalMemoryBytes: Int64?
     let availableMemoryBytes: Int64?
     let freeDiskBytes: Int64?
+    let gpuName: String?
+    let gpuMemoryBudgetBytes: Int64?
     let items: [Item]
 
     init?(_ raw: [String: Any]) {
@@ -67,11 +76,15 @@ struct BeginnerModelReport {
         physicalMemoryBytes = BeginnerMetadata.integer(host["physical_memory_bytes"])
         availableMemoryBytes = BeginnerMetadata.integer(host["available_memory_bytes"])
         freeDiskBytes = BeginnerMetadata.integer(host["free_disk_bytes"])
+        gpuName = BeginnerMetadata.string(host["gpu_name"], limit: 200)
+        gpuMemoryBudgetBytes = BeginnerMetadata.integer(host["gpu_memory_budget_bytes"])
     }
 
     var deviceSummary: String {
         var details: [String] = []
+        if let gpuName { details.append(gpuName) }
         if let bytes = physicalMemoryBytes { details.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory) + " memory") }
+        if let bytes = gpuMemoryBudgetBytes, bytes > 0 { details.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory) + " GPU budget") }
         if let bytes = freeDiskBytes { details.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) + " free for setup") }
         return details.joined(separator: " · ")
     }

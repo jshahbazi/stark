@@ -6,6 +6,7 @@ import json
 import sys
 import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -34,9 +35,10 @@ def artifact(path, recipe):
     (path / "tokenizer.json").write_text("{}")
     (path / "model.safetensors").write_bytes(b"synthetic output")
     sources = [{"repo": recipe.repo, "revision": recipe.revision}]
+    selection = recipe.files or (("model.safetensors", recipe.weight_bytes, "a" * 64),)
     files = [
         {"repo": recipe.repo, "revision": recipe.revision, "size": size, "sha256": digest}
-        for _name, size, digest in recipe.files
+        for _name, size, digest in selection
     ]
     identity = {"sources": sources, "files": files}
     if recipe.metadata_profile is not None:
@@ -128,6 +130,209 @@ def test_resources_select_starting_choices_and_installed_reuse():
     reused = guided.recommendation_report(pressure, {guided.RECIPES[0].id: ["same-copy"]})
     assert reused["items"][0]["installed_ids"] == ["same-copy"]
     assert "planning estimates" in reused["items"][0]["caveats"][0]
+
+
+def catalog_candidate(number=1, *, weights=2 * guided.GIB, parameters=2_000_000_000, tags=()):
+    return {
+        "id": f"{number:032x}",
+        "repo": f"example/Model-{number}",
+        "revision": f"{number:040x}",
+        "name": f"Model {number}",
+        "weight_bytes": weights,
+        "parameter_count": parameters,
+        "quantization": "4-bit",
+        "artifact_modes": ["text"],
+        "downloadable": True,
+        "planning": {
+            "status": "available",
+            "architecture": "llama",
+            "context_limit": 32768,
+            "attention_layers": 8,
+            "kv_heads": 2,
+            "query_heads": 8,
+            "head_dim": 64,
+            "hidden_size": 1024,
+            "download_bytes": weights + 32 * guided.MIB,
+            "task_tags": list(tags),
+            "chat_template_available": True,
+            "supports_tools": True,
+            "tool_parser": "qwen3-hermes-v1",
+        },
+    }
+
+
+def gpu_resources(**changes):
+    return resources(
+        physical_memory_bytes=64 * guided.GIB,
+        available_memory_bytes=48 * guided.GIB,
+        free_disk_bytes=256 * guided.GIB,
+        download_free_disk_bytes=256 * guided.GIB,
+        gpu_available=True,
+        gpu_name="Fixture Apple GPU",
+        gpu_memory_budget_bytes=48 * guided.GIB,
+        unified_memory=True,
+        **changes,
+    )
+
+
+def test_gpu_budget_changes_catalog_recommendation():
+    candidates = [
+        guided.recipe_from_catalog(catalog_candidate(1)),
+        guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000)),
+        guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=32_000_000_000)),
+    ]
+    for budget, expected in ((48, candidates[2]), (16, candidates[1]), (10, candidates[0])):
+        host = gpu_resources()
+        host["gpu_memory_budget_bytes"] = budget * guided.GIB
+        report = guided.recommendation_report(host, {}, preference="answers", candidates=candidates)
+        assert report["items"][0]["id"] == expected.id
+        assert "GPU budget" in report["items"][0]["recommendation_reason"]
+        assert report["items"][0]["evidence"] == "catalogue_metadata"
+
+
+def test_preferences_and_explicit_task_metadata_change_order():
+    small = guided.recipe_from_catalog(catalog_candidate(1))
+    large = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
+    coding = guided.recipe_from_catalog(catalog_candidate(3, tags=("code",)))
+    candidates = [small, large, coding]
+    balanced = guided.recommendation_report(gpu_resources(), {}, candidates=candidates)
+    assert balanced["items"][0]["id"] == large.id
+    speed = guided.recommendation_report(gpu_resources(), {}, preference="speed", candidates=candidates)
+    assert speed["items"][0]["id"] == small.id
+    assert "has not been measured" in speed["items"][0]["recommendation_reason"]
+    code = guided.recommendation_report(gpu_resources(), {}, task="code", candidates=candidates)
+    assert code["items"][0]["id"] == coding.id
+    assert "intended use" in code["items"][0]["recommendation_reason"]
+
+
+def test_balanced_uses_a_memory_cost_knee_instead_of_largest_checkpoint():
+    small = guided.recipe_from_catalog(catalog_candidate(1))
+    medium = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
+    large = guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=32_000_000_000))
+    candidates = [small, medium, large]
+    for preference, expected in (("balanced", medium), ("speed", small), ("answers", large)):
+        report = guided.recommendation_report(gpu_resources(), {}, preference=preference, candidates=candidates)
+        assert report["items"][0]["id"] == expected.id
+
+
+def test_large_query_head_count_includes_attention_prefill_workspace():
+    item = catalog_candidate()
+    basic = guided.recipe_from_catalog(item)
+    item["planning"]["query_heads"] = 128
+    wide = guided.recipe_from_catalog(item)
+    assert wide.runtime_memory > basic.runtime_memory
+    assert wide.minimum_memory == wide.runtime_memory + 2 * guided.GIB
+
+
+def test_installed_copy_does_not_override_hardware_or_capacity_ranking():
+    small = guided.recipe_from_catalog(catalog_candidate(1))
+    large = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
+    report = guided.recommendation_report(gpu_resources(), {small.id: ["installed"]}, candidates=[small, large])
+    assert report["items"][0]["id"] == large.id
+    host = gpu_resources()
+    host["gpu_memory_budget_bytes"] = 10 * guided.GIB
+    report = guided.recommendation_report(host, {large.id: ["installed"]}, candidates=[small, large])
+    assert [item["id"] for item in report["items"]] == [small.id]
+
+
+def test_current_worker_memory_pressure_does_not_remove_static_fit():
+    candidate = guided.recipe_from_catalog(catalog_candidate())
+    host = gpu_resources()
+    host["available_memory_bytes"] = 2 * guided.GIB
+    report = guided.recommendation_report(host, {}, candidates=[candidate])
+    assert report["items"][0]["id"] == candidate.id
+    assert "when starting" in report["items"][0]["recommendation_reason"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"gpu_available": False},
+        {"gpu_memory_budget_bytes": None},
+        {"gpu_memory_budget_bytes": True},
+        {"gpu_memory_budget_bytes": 0},
+        {"unified_memory": False},
+    ],
+)
+def test_incomplete_or_unusable_gpu_does_not_offer_a_model(changes):
+    host = {**gpu_resources(), **changes}
+    assert guided.recommendation_report(host, {})["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("architecture", "qwen3_5"),
+        ("architecture", []),
+        ("context_limit", 16384),
+        ("attention_layers", None),
+        ("kv_heads", True),
+        ("query_heads", 3),
+        ("head_dim", 0),
+        ("hidden_size", 0),
+        ("download_bytes", 1),
+        ("status", "unavailable"),
+        ("task_tags", [{}]),
+        ("chat_template_available", False),
+        ("supports_tools", False),
+        ("tool_parser", "unknown-v1"),
+    ],
+)
+def test_unknown_or_unsupported_catalog_plans_are_excluded(key, value):
+    item = catalog_candidate()
+    item["planning"][key] = value
+    assert guided.recipe_from_catalog(item) is None
+
+
+def test_dynamic_recipe_snapshots_source_and_checks_config_receipt(tmp_path):
+    item = catalog_candidate()
+    candidate = guided.recipe_from_catalog(item)
+    assert candidate.minimum_memory == candidate.runtime_memory + 2 * guided.GIB
+    assert candidate.context_tokens == 32768
+    assert candidate.installed_bytes > item["weight_bytes"]
+    assert candidate.setup_bytes > candidate.download_bytes + candidate.installed_bytes
+    original_item = deepcopy(candidate.catalog_item)
+    item["revision"] = "f" * 40
+    assert candidate.catalog_item == original_item
+    path = artifact(tmp_path / "dynamic", candidate)
+    assert guided.matches_recipe(path, candidate)
+    receipt_path = path / "conversion.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["source_files"][0]["revision"] = "f" * 40
+    receipt_path.write_text(json.dumps(receipt))
+    assert not guided.matches_recipe(path, candidate)
+
+
+def test_catalog_results_are_bounded_and_unknown_parameter_count_is_honest():
+    candidates = [guided.recipe_from_catalog(catalog_candidate(number)) for number in range(1, 6)]
+    report = guided.recommendation_report(gpu_resources(), {}, candidates=candidates)
+    assert len(report["items"]) == 3
+    item = catalog_candidate()
+    item["parameter_count"] = None
+    candidate = guided.recipe_from_catalog(item)
+    report = guided.recommendation_report(gpu_resources(), {}, candidates=[candidate])
+    assert "capacity is unknown" in report["items"][0]["recommendation_reason"]
+
+
+@pytest.mark.parametrize("item", [None, [], {}, {"planning": []}])
+def test_malformed_catalog_document_does_not_raise(item):
+    assert guided.recipe_from_catalog(item) is None
+
+
+@pytest.mark.parametrize("key,value", [("name", "bad\ud800"), ("repo", "bad\ud800/model"), ("quantization", "bad\n")])
+def test_malformed_catalog_display_metadata_does_not_raise(key, value):
+    item = catalog_candidate()
+    item[key] = value
+    assert guided.recipe_from_catalog(item) is None
+
+
+def test_explicit_coding_tag_aliases_and_declared_quantized_capacity():
+    item = catalog_candidate(tags=("coding", "code-generation"))
+    item["parameter_count"] = None
+    item["size_label"] = "7B"
+    candidate = guided.recipe_from_catalog(item)
+    assert candidate.logical_parameters == 7_000_000_000
+    assert candidate.task_tags == ("code",)
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,7 @@
 """Metadata-only family browsing never downloads model weight payloads."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +39,7 @@ class Hub:
         sidecars=None,
         pipeline_tag=None,
         tags=(),
+        card_data=None,
     ):
         root = tmp_path / repo.replace("/", "--")
         root.mkdir(parents=True)
@@ -53,6 +55,7 @@ class Hub:
             safetensors={"parameters": summary, "total": sum(summary.values())},
             pipeline_tag=pipeline_tag,
             tags=list(tags),
+            cardData=card_data or {},
         )
         self.repos[repo] = root, info
         return root
@@ -109,6 +112,116 @@ def test_live_compatible_fine_tune_has_pinned_download_identity_and_real_sizes(t
     assert len(item["model_group"]["id"]) == 32
     assert len(item["id"]) == 32
     assert [event[2] for event in hub.events if event[0] == "download"] == ["config.json"]
+
+
+def test_planning_is_opt_in_and_exposes_sanitized_dense_geometry(tmp_path):
+    hub = Hub()
+    template = (Path(__file__).parent / "fixtures" / "qwen3_4b_chat_template.jinja").read_text()
+    hub.add(
+        tmp_path,
+        "someone/Coder",
+        {
+            "model_type": "qwen3",
+            "torch_dtype": "bfloat16",
+            "max_position_embeddings": 65536,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "hidden_size": 2048,
+        },
+        names={
+            "model.safetensors": 123456,
+            "config.json": 100,
+            "README.md": 25,
+            "tokenizer_config.json": 100,
+        },
+        sidecars={"tokenizer_config.json": {"chat_template": template}},
+        tags=["coding", "text-generation", "unknown-tag"],
+        card_data={"license": "apache-2.0", "extra": "ignored"},
+    )
+    hub.discovered["qwen3"] = ["someone/Coder"]
+
+    default = catalog.family_catalog("qwen3", hub=hub)
+    planned = catalog.family_catalog("qwen3", hub=hub, planning=True, deadline_seconds=10)
+
+    assert "planning" not in default["items"][0]
+    item = planned["items"][0]
+    assert item["task_tags"] == ["coding"]
+    assert item["license"] == "apache-2.0"
+    assert item["planning"] == {
+        "status": "available",
+        "architecture": "qwen3",
+        "context_limit": 65536,
+        "attention_layers": 28,
+        "query_heads": 16,
+        "kv_heads": 4,
+        "head_dim": 128,
+        "hidden_size": 2048,
+        "download_bytes": 123681,
+        "task_tags": ["coding"],
+        "license": "apache-2.0",
+        "chat_template_available": True,
+        "supports_tools": True,
+        "tool_parser": "qwen3-hermes-v1",
+        "blockers": [],
+    }
+
+
+def test_planning_requires_pinned_chat_template_and_tool_parser(tmp_path):
+    hub = Hub()
+    hub.add(
+        tmp_path,
+        "someone/BaseCheckpoint",
+        {
+            "model_type": "qwen3",
+            "max_position_embeddings": 4096,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "hidden_size": 128,
+        },
+    )
+    hub.discovered["qwen3"] = ["someone/BaseCheckpoint"]
+    item = catalog.family_catalog("qwen3", hub=hub, planning=True)["items"][0]
+    assert item["planning"]["chat_template_available"] is False
+    assert item["planning"]["supports_tools"] is False
+    assert "tokenizer_config_missing" in item["planning"]["blockers"]
+    assert "tool_parser_unavailable" in item["planning"]["blockers"]
+    assert item["planning"]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "family,config,blocker",
+    [
+        (
+            "qwen3",
+            {"model_type": "qwen3", "num_hidden_layers": 28, "num_attention_heads": 16},
+            "context_limit_unknown",
+        ),
+        (
+            "qwen3_5",
+            {
+                "model_type": "qwen3_5",
+                "max_position_embeddings": 65536,
+                "num_hidden_layers": 28,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 4,
+                "hidden_size": 2048,
+            },
+            "runtime_layout_not_covered",
+        ),
+    ],
+)
+def test_planning_marks_unknown_context_and_hybrid_layout_unavailable(family, config, blocker):
+    info = SimpleNamespace(tags=[], cardData={})
+    planning = catalog._planning_metadata(family, config, info, ["model.safetensors"], {"model.safetensors": 100})
+    assert planning["status"] == "unavailable"
+    assert blocker in planning["blockers"]
+
+
+@pytest.mark.parametrize("deadline", [0, -1, 601, True, "10"])
+def test_planning_deadline_must_be_bounded_numeric_seconds(deadline):
+    assert catalog.family_catalog("qwen3", hub=object(), planning=True, deadline_seconds=deadline)["status"] == "error"
 
 
 @pytest.mark.parametrize(

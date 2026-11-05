@@ -1,10 +1,10 @@
 """Source-bound starting choices for the optional beginner guide.
 
-Recipes are deliberately small and deterministic. Source checkpoints have
-recorded native chat evidence; this is neither a quality ranking nor proof of
-OpenWork task competence. Resource numbers are conservative planning estimates,
-not measurements or a runtime admission decision. The actual converter and
-worker still validate every artifact.
+Pinned starters have recorded native chat evidence. Additional candidates come
+from metadata-preflighted catalogue revisions with complete dense memory plans.
+Ranking is an explainable resource/capacity heuristic, not measured answer
+quality or proof of OpenWork task competence. The converter and worker still
+validate every artifact.
 """
 
 from __future__ import annotations
@@ -12,20 +12,28 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
+import re
 import shutil
 import sys
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from fractions import Fraction
 from pathlib import Path
 
 import psutil
 
 from ._build_metadata import open_regular
+from .registry import get_model
 from .streaming import authorize_source_path
 
 GIB = 1024**3
 MIB = 1024**2
 TASKS = frozenset({"everyday", "text", "files", "code", "unsure"})
 MAX_EXCLUSIONS = 64
+PREFERENCES = frozenset({"balanced", "speed", "answers", "task", "unsure"})
+DENSE_ARCHITECTURES = frozenset(
+    {"qwen3", "qwen2", "llama", "mistral", "phi3", "granite", "gemma2", "gemma3_text", "smollm3"}
+)
 
 
 @dataclass(frozen=True)
@@ -44,16 +52,28 @@ class Recipe:
     head_dim: int
     qualification: str
     files: tuple[tuple[str, int, str], ...]
+    catalog_item: dict | None = None
+    estimated_weight_bytes: int | None = None
+    logical_parameters: int | None = None
+    task_tags: tuple[str, ...] = ()
+
+    @property
+    def weight_bytes(self):
+        if self.estimated_weight_bytes is not None:
+            return self.estimated_weight_bytes
+        return sum(size for name, size, _digest in self.files if name.endswith(".safetensors"))
 
     @property
     def download_bytes(self):
+        if self.catalog_item is not None:
+            return self.catalog_item["planning"]["download_bytes"]
         return sum(size for _name, size, _digest in self.files)
 
     @property
     def installed_bytes(self):
         # Repacking preserves the selected weight payload; allow an additional
         # 128 MiB for output headers, tokenizer, config and receipts.
-        return sum(size for name, size, _digest in self.files if name.endswith(".safetensors")) + 128 * MIB
+        return self.weight_bytes + 128 * MIB
 
     @property
     def setup_bytes(self):
@@ -62,13 +82,21 @@ class Recipe:
 
     @property
     def runtime_memory(self):
-        # The current dense generation route uses BF16 activation/KV state.
+        # Guided installs use the converter's BF16 default (cli.py), matching
+        # the dense generation route's activation/KV state policy.
         # Budget both full-context KV buffers, the 1024-row attention suffix,
         # selected source weights and a 3 GiB workspace/tokenizer allowance.
         # Rounded-up planning values still do not grant native admission.
-        weights = sum(size for name, size, _digest in self.files if name.endswith(".safetensors"))
         cache = 2 * (self.context_tokens + 1024) * self.attention_layers * self.kv_heads * self.head_dim * 2
-        return ((weights + cache + 3 * GIB + GIB - 1) // GIB) * GIB
+        workspace = 3 * GIB
+        if self.catalog_item is not None:
+            # Include the fallback attention score tensors for one full prefill
+            # chunk, plus a GiB for other activations. The score tensors are
+            # described by backends/metal/kernel/attention/fallback.rs.
+            heads = self.catalog_item["planning"]["query_heads"]
+            scores = 1024 * (self.context_tokens + 1024) * (heads + heads // self.kv_heads) * 2
+            workspace = max(workspace, scores + GIB)
+        return ((self.weight_bytes + cache + workspace + GIB - 1) // GIB) * GIB
 
 
 # Metadata checked without downloading weights on 2026-11-04 against the named
@@ -106,6 +134,7 @@ RECIPES = (
             ("tokenizer.json", 11422654, "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"),
             ("tokenizer_config.json", 9706, "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0"),
         ),
+        logical_parameters=4_000_000_000,
     ),
     Recipe(
         "qwen3-06b-bf16-c1899de2",
@@ -133,12 +162,128 @@ RECIPES = (
             ("tokenizer.json", 11422654, "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"),
             ("tokenizer_config.json", 9732, "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"),
         ),
+        logical_parameters=600_000_000,
     ),
 )
 
 
 def recipe_for(identifier):
     return next((recipe for recipe in RECIPES if recipe.id == identifier), None)
+
+
+def recipe_from_catalog(item):
+    """Snapshot a pinned dense candidate only when its full memory plan is known.
+
+    A conditional metadata preflight is not native qualification. Hybrid routes
+    need their own recurrent/expert workspace planner before entering this flow.
+    """
+    try:
+        return _recipe_from_catalog(item)
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        # One malformed remote metadata document must not discard the other
+        # candidates or turn the entire catalogue search into a fallback.
+        return None
+
+
+def _recipe_from_catalog(item):
+    if not isinstance(item, dict) or not isinstance(item.get("planning"), dict):
+        return None
+    plan = item["planning"]
+    architecture = plan.get("architecture")
+    modes = item.get("artifact_modes")
+    if (
+        plan.get("status") != "available"
+        or not isinstance(architecture, str)
+        or architecture not in DENSE_ARCHITECTURES
+        or item.get("downloadable") is not True
+        or not isinstance(modes, (list, tuple))
+        or "text" not in modes
+        or plan.get("chat_template_available") is not True
+        or plan.get("supports_tools") is not True
+        or plan.get("tool_parser") not in ("qwen3-hermes-v1", "qwen38-xml-v1", "qwen35-xml-v1")
+    ):
+        return None
+    bounds = {
+        "context_limit": (32768, 1_048_576),
+        "attention_layers": (1, 512),
+        "kv_heads": (1, 256),
+        "query_heads": (1, 512),
+        "head_dim": (1, 1024),
+        "hidden_size": (1, 262144),
+        "download_bytes": (1, 2**63 - 1),
+    }
+    if any(type(plan.get(key)) is not int or not low <= plan[key] <= high for key, (low, high) in bounds.items()):
+        return None
+    if plan["query_heads"] % plan["kv_heads"]:
+        return None
+    weights = item.get("weight_bytes")
+    if type(weights) is not int or not 0 < weights <= plan["download_bytes"]:
+        return None
+    if (
+        not isinstance(item.get("id"), str)
+        or re.fullmatch(r"[0-9a-f]{32}", item["id"]) is None
+        or not isinstance(item.get("revision"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", item["revision"]) is None
+        or not isinstance(item.get("repo"), str)
+        or len(item["repo"].encode()) > 256
+        or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", item["repo"]) is None
+        or any(
+            not isinstance(item.get(key), str)
+            or not 0 < len(item[key].encode()) <= limit
+            or any(ord(char) < 32 or ord(char) == 127 for char in item[key])
+            for key, limit in (("name", 200), ("quantization", 80))
+        )
+    ):
+        return None
+    parameters = item.get("parameter_count")
+    if type(parameters) is not int or not 0 < parameters < 2**63:
+        parameters = None
+        label = item.get("size_label")
+        match = (
+            re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([KMBT])", label, re.IGNORECASE)
+            if isinstance(label, str) and len(label) <= 64
+            else None
+        )
+        if match:
+            count = float(match[1]) * {"K": 10**3, "M": 10**6, "B": 10**9, "T": 10**12}[match[2].upper()]
+            if 0 < count < 2**63:
+                parameters = int(count)
+    tags = plan.get("task_tags", ())
+    if not isinstance(tags, (list, tuple)) or any(
+        not isinstance(tag, str) or not 0 < len(tag) <= 80 or any(ord(char) < 32 or ord(char) == 127 for char in tag)
+        for tag in tags
+    ):
+        return None
+    code_tags = {"code", "coding", "programming", "coder", "code-generation", "code_generation", "code-completion"}
+    tags = {"code" if tag.casefold() in code_tags else tag for tag in tags}
+    tags.intersection_update(TASKS)
+    entry = get_model(item["repo"])
+    if entry is not None and any(rule.get("repo") != item["repo"] for rule in entry.get("files", {}).values()):
+        # Every sidecar needs an exact revision binding before cross-repository
+        # metadata can establish this candidate's installation identity.
+        return None
+    recipe = Recipe(
+        item["id"],
+        item["name"],
+        item["repo"],
+        item["revision"],
+        architecture,
+        "hf-generic" if entry is None else None,
+        item["quantization"],
+        0,
+        32768,
+        plan["attention_layers"],
+        plan["kv_heads"],
+        plan["head_dim"],
+        "Catalogue metadata supports this conversion route; native loading, answer quality and "
+        "OpenWork task competence remain to be checked for this exact artifact.",
+        (),
+        catalog_item=deepcopy(item),
+        estimated_weight_bytes=weights,
+        logical_parameters=parameters,
+        task_tags=tuple(sorted(tags)),
+    )
+    return replace(recipe, minimum_memory=recipe.runtime_memory + 2 * GIB)
 
 
 def _free_bytes(path):
@@ -203,12 +348,25 @@ def matches_recipe(path, recipe):
             or profile is None
             and "conversion_profile" in receipt
             or not isinstance(source_files, list)
-            or len(source_files) != len(expected)
+            or not 0 < len(source_files) <= 16384
+            or recipe.catalog_item is None
+            and len(source_files) != len(expected)
             or any(
                 not isinstance(item, dict) or set(item) != {"repo", "revision", "size", "sha256"}
                 for item in source_files
             )
-            or {(item["repo"], item["revision"], item["size"], item["sha256"]) for item in source_files} != expected
+            or recipe.catalog_item is None
+            and {(item["repo"], item["revision"], item["size"], item["sha256"]) for item in source_files} != expected
+            or recipe.catalog_item is not None
+            and any(
+                item["repo"] != recipe.repo
+                or item["revision"] != recipe.revision
+                or type(item["size"]) is not int
+                or not 0 < item["size"] < 2**63
+                or not isinstance(item["sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None
+                for item in source_files
+            )
         ):
             return False
         identity = {"sources": sources, "files": source_files}
@@ -230,6 +388,17 @@ def installation_allowed(recipe, host, *, installed=False):
     physical = host.get("physical_memory_bytes")
     if type(physical) is not int or physical < recipe.minimum_memory:
         return False
+    if "gpu_available" in host or "gpu_memory_budget_bytes" in host:
+        budget = host.get("gpu_memory_budget_bytes")
+        if (
+            host.get("gpu_available") is not True
+            or host.get("unified_memory") is not True
+            or type(budget) is not int
+            or budget <= 0
+            or recipe.runtime_memory * 100 > budget * 85
+            or recipe.runtime_memory + 2 * GIB > physical
+        ):
+            return False
     if installed:
         return True
     available = host.get("available_memory_bytes")
@@ -244,12 +413,94 @@ def installation_allowed(recipe, host, *, installed=False):
     )
 
 
-def recommendation_report(host, installed, excluded_recipe_ids=()):
+def _fit_tier(recipe, host):
+    """A comfortable fit leaves 10% beyond the admission planning reserves."""
+    physical = host["physical_memory_bytes"] - 2 * GIB
+    budget = host.get("gpu_memory_budget_bytes")
+    planned = min(physical, budget * 85 // 100) if type(budget) is int and budget > 0 else physical
+    return int(recipe.runtime_memory * 110 <= planned * 100)
+
+
+def _ranking_key(recipe, host, installed, task, preference):
+    common = (-_fit_tier(recipe, host), -int(task in recipe.task_tags))
+    if preference == "speed":
+        objective = (recipe.weight_bytes, recipe.runtime_memory)
+    elif preference == "answers":
+        objective = (-(recipe.logical_parameters or 0), recipe.runtime_memory)
+    else:
+        # A memory-cost knee keeps balanced from always choosing the largest
+        # fitting checkpoint. This policy is a heuristic, not a quality score.
+        capacity_per_cost = Fraction((recipe.logical_parameters or 0) * GIB**2, recipe.runtime_memory**2)
+        objective = (-capacity_per_cost, recipe.runtime_memory)
+    return (
+        *common,
+        *objective,
+        not bool(installed.get(recipe.id)),
+        recipe.repo.casefold(),
+        recipe.revision,
+        recipe.id,
+    )
+
+
+def _recommendation_reason(recipe, host, task, preference):
+    reasons = [
+        "The memory plan fits this Mac's RAM and GPU budget."
+        if "gpu_available" in host
+        else "The memory plan fits this Mac's physical memory."
+    ]
+    if task in recipe.task_tags:
+        reasons.append(
+            "The source explicitly identifies coding as an intended use."
+            if task == "code"
+            else "The source identifies your selected task as an intended use."
+        )
+    if preference == "speed":
+        reasons.append("Favors a model with less weight data to read; response speed has not been measured.")
+    elif recipe.logical_parameters:
+        reasons.append(
+            "Favors a larger model among options that leave memory headroom; answer quality has not been measured."
+            if preference == "answers"
+            else "Balances model size with estimated memory use; answer quality has not been measured."
+        )
+    else:
+        reasons.append("Parameter capacity is unknown, so the choice uses resource fit and deterministic tie-breaks.")
+    available = host.get("available_memory_bytes")
+    if type(available) is not int or available < recipe.runtime_memory:
+        reasons.append("More memory must be available when starting; switching away from a running model may free it.")
+    return " ".join(reasons)
+
+
+def _license_label(value):
+    try:
+        if (
+            isinstance(value, str)
+            and 0 < len(value.encode()) <= 160
+            and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            return value
+    except UnicodeError:
+        pass
+    return "Review the source license"
+
+
+def recommendation_report(
+    host, installed, excluded_recipe_ids=(), *, task="unsure", preference="balanced", candidates=None
+):
+    candidates = tuple(RECIPES if candidates is None else candidates)
+    task = task if task in TASKS else "unsure"
+    preference = preference if preference in PREFERENCES else "balanced"
+    eligible = [
+        recipe
+        for recipe in candidates
+        if recipe.id not in excluded_recipe_ids
+        and installation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
+    ]
+    eligible.sort(key=lambda recipe: _ranking_key(recipe, host, installed, task, preference))
     items = []
-    for recipe in RECIPES:
+    for recipe in eligible[:3]:
         ids = list(installed.get(recipe.id, ()))
-        if recipe.id in excluded_recipe_ids or not installation_allowed(recipe, host, installed=bool(ids)):
-            continue
+        license_name = recipe.catalog_item.get("license") if recipe.catalog_item is not None else "Apache-2.0"
+        license_name = _license_label(license_name)
         items.append(
             {
                 "id": recipe.id,
@@ -264,23 +515,27 @@ def recommendation_report(host, installed, excluded_recipe_ids=()):
                 "runtime_memory_bytes_estimate": recipe.runtime_memory,
                 "context_tokens": recipe.context_tokens,
                 "installed_ids": ids,
-                "license": "Apache-2.0",
+                "license": license_name,
                 "qualification": recipe.qualification,
+                "recommendation_reason": _recommendation_reason(recipe, host, task, preference),
+                "evidence": "catalogue_metadata" if recipe.catalog_item is not None else "recorded_native_checks",
                 "caveats": [
                     "Memory and setup storage are conservative planning estimates, not measured fit guarantees.",
                     "Start the model to check it on this Mac. Speed, answer quality, and OpenWork task success vary.",
                 ],
             }
         )
-    # Reuse an eligible installed recipe before offering a new download.
-    items.sort(key=lambda item: not bool(item["installed_ids"]))
     physical = host.get("physical_memory_bytes")
-    message = "Choose a starting model."
+    message = "Choose a model selected for this Mac's resources and your preferences."
     if not items:
         message = (
-            "No checked starting option is available for these resources. Check again or browse models in Advanced."
+            "No model with a complete memory plan fits these resources. Check again or browse models in Advanced."
         )
-        if type(physical) is int and physical < min(recipe.minimum_memory for recipe in RECIPES):
+        if (
+            candidates == RECIPES
+            and type(physical) is int
+            and physical < min(recipe.minimum_memory for recipe in RECIPES)
+        ):
             message = (
                 "This guided OpenWork setup currently needs at least 16 GB of memory. "
                 "You can browse smaller chat models in Advanced."

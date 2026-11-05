@@ -191,16 +191,19 @@ extension EngineController {
             return event
         }
         func beginnerReport(_ installed: [String] = []) -> [String: Any] {
-            ["schema_version": 1, "status": "ready", "message": "Checked starting recipes",
-             "host": ["physical_memory_bytes": Int64(16 * 1024 * 1024 * 1024),
-                      "available_memory_bytes": Int64(8 * 1024 * 1024 * 1024),
-                      "free_disk_bytes": Int64(50 * 1024 * 1024 * 1024)],
-             "items": [["id": "fixture-recipe", "name": "Starting model", "repo": "example/model",
+            let host: [String: Any] = ["physical_memory_bytes": Int64(16 * 1024 * 1024 * 1024),
+                "available_memory_bytes": Int64(8 * 1024 * 1024 * 1024),
+                "gpu_name": "Fixture GPU", "gpu_memory_budget_bytes": Int64(12 * 1024 * 1024 * 1024),
+                "free_disk_bytes": Int64(50 * 1024 * 1024 * 1024)]
+            let item: [String: Any] = ["id": "fixture-recipe", "name": "Starting model", "repo": "example/model",
                         "revision": String(repeating: "a", count: 40), "artifact_mode": "text",
                         "quantization": "BF16", "download_bytes": 1000, "installed_bytes_estimate": 1200,
                         "setup_disk_bytes_estimate": 4000, "runtime_memory_bytes_estimate": 8000,
                         "context_tokens": 4096, "installed_ids": installed, "license": "Apache-2.0",
-                        "qualification": "Synthetic controller fixture", "caveats": ["Planning estimates"]]]]
+                        "qualification": "Synthetic controller fixture", "recommendation_reason": "Fits the fixture GPU budget",
+                        "caveats": ["Planning estimates"]]
+            return ["schema_version": 1, "status": "ready", "message": "Checked starting recipes",
+                    "host": host, "items": [item]]
         }
         func prepareBeginnerReport(_ installed: [String] = []) -> String {
             engine.requestBeginnerModels(task: "unsure")
@@ -214,6 +217,10 @@ extension EngineController {
             engine.requestBeginnerModels(task: "unsure")
             let request = command()
             let id = request["request_id"] as! String
+            guard request["preference"] as? String == "balanced",
+                  let hardware = request["hardware"] as? [String: Any],
+                  hardware["gpu_available"] is Bool, hardware["gpu_name"] is String,
+                  hardware["gpu_memory_budget_bytes"] != nil, hardware["cpu_cores"] != nil else { return false }
             engine.apply(["event": "guided_models", "request_id": UUID().uuidString.lowercased(),
                           "report": beginnerReport()])
             guard engine.beginnerChoicesLoading, engine.beginnerReport == nil else { return false }
@@ -224,11 +231,15 @@ extension EngineController {
             guard !engine.beginnerChoicesLoading, engine.beginnerReport == nil,
                   engine.beginnerChoicesError != nil else { return false }
             _ = prepareBeginnerReport()
-            engine.requestBeginnerModels(task: "code", excludingModelID: "fixture-model")
+            guard engine.beginnerReport?.deviceSummary.contains("Fixture GPU") == true,
+                  engine.beginnerReport?.items.first?.recommendationReason == "Fits the fixture GPU budget" else { return false }
+            engine.requestBeginnerModels(task: "code", excludingModelID: "fixture-model", preference: "speed")
             let retry = command()
             engine.apply(["event": "guided_models", "request_id": id, "report": beginnerReport()])
+            let excluded = retry["excluded_model_ids"] as? [String]
+            let preference = retry["preference"] as? String
             return engine.beginnerChoicesLoading && engine.beginnerReport == nil &&
-                retry["excluded_model_ids"] as? [String] == ["fixture-model"] && engine.loadedID == "fixture-model"
+                excluded == ["fixture-model"] && engine.loadedID == "fixture-model" && preference == "speed"
         case "beginner-cancel-preserves-current":
             engine.models = [variant("fixture-model", name: "Current", display: nil)]
             engine.messages = [ChatMessage(text: "synthetic history", isUser: true)]

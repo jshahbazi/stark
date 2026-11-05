@@ -71,7 +71,7 @@ struct BeginnerSetupHost: View {
         var result = BeginnerSetupSnapshot()
         result.choices = (engine.beginnerReport?.items ?? []).map { item in
             BeginnerModelChoice(id: item.id, name: item.name,
-                summary: "A starting model checked for this setup. Review its answers and any actions in OpenWork.",
+                summary: item.recommendationReason,
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens,
                 installedModelID: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) },
@@ -91,6 +91,7 @@ struct BeginnerSetupHost: View {
         result.choicesLoading = engine.beginnerChoicesLoading
         result.choicesError = engine.beginnerChoicesError
         result.deviceSummary = engine.beginnerReport?.deviceSummary ?? ""
+        result.recommendationMessage = engine.beginnerReport?.message ?? ""
         result.installChoiceID = engine.beginnerInstallChoice?.id
         result.installedResultID = engine.beginnerInstalledResultID
         result.installPhase = installationPhase
@@ -141,7 +142,9 @@ struct BeginnerSetupHost: View {
 
     private var actions: BeginnerSetupActions {
         BeginnerSetupActions(
-            refreshChoices: { task, excluded in engine.requestBeginnerModels(task: task.rawValue, excludingModelID: excluded) },
+            refreshChoices: { task, excluded, preference in
+                engine.requestBeginnerModels(task: task.rawValue, excludingModelID: excluded, preference: preference)
+            },
             install: { engine.installBeginnerModel(recipeID: $0.id) },
             cancelInstall: engine.cancelBeginnerInstallation,
             startModel: { choice in
