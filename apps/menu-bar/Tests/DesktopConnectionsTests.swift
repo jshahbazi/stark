@@ -79,6 +79,7 @@ struct DesktopConnectionsTests {
             case "approval-ui": try approvalUI()
             case "controller-ack": try controllerAck()
             case "controller-refresh": try controllerRefresh()
+            case "controller-model-discovery": try controllerModelDiscovery()
             case "controller-session": try controllerSession()
             case "controller-revoke": try controllerRevoke(storageFails: false)
             case "controller-store-failure":
@@ -200,6 +201,7 @@ struct DesktopConnectionsTests {
 
     private static func withController(_ mock: MockApprovalStorage = MockApprovalStorage(approved: true),
                                        sendWorks: Bool = true,
+                                       models: [[String: Any]] = [],
                                        _ body: (OpenWorkConnectionController, ResultBox<[[String: Any]]>, () -> TimeInterval, (TimeInterval) -> Void) throws -> Void) throws {
         let service = namespace()
         let packets = ResultBox<[[String: Any]]>()
@@ -208,7 +210,7 @@ struct DesktopConnectionsTests {
         let value = OpenWorkConnectionController(service: service,
             storage: DesktopConnectionApprovalStore(service: service, storage: mock), clock: { now },
             send: { packet in packets.set((packets.value ?? []) + [packet]); return sendWorks },
-            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": []] },
+            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": models] },
             brokerPath: { "/private/tmp/stark-synthetic-broker/openwork.sock" })
         defer { value.shutdown(); pump() }
         value.receiveConnection(["api_session": firstSession, "base_url": "http://127.0.0.1:8000/v1"])
@@ -300,6 +302,41 @@ struct DesktopConnectionsTests {
             try check(packets.value!.last!["api_key"] as? String == existing)
             acknowledge(controller, packets.value!.last!)
             try check(responses.count == 3 && token(responses.last) == existing)
+        }
+    }
+
+    private static func controllerModelDiscovery() throws {
+        let model: [String: Any] = ["id": "fixture/model", "context_length": 4096, "tool_calling": true]
+        try withController(models: [model]) { controller, packets, clock, advance in
+            let current = try peer()
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            var response: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("status", peer: current) { response = $0 }
+            try check(token(response) == nil && packets.value?.isEmpty == true && !controller.clientActive)
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            try check(!controller.hasDiscoveredModel(apiID: "other/model", contextTokens: 4096))
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 8192))
+            advance(clock() + 29)
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            advance(clock() + 1)
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            controller.handle("status", peer: current) { response = $0 }
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            controller.receiveConnection(["api_session": nextSession, "base_url": "http://127.0.0.1:8000/v1"])
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            let invalid = DesktopProcessIdentity(pid: 0, parent: 0, seconds: 0, microseconds: 0)
+            controller.handle("status", peer: invalid) { response = $0 }
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            controller.handle("status", peer: current) { response = $0 }
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            let previousScope = controller.discoveryScope
+            controller.disconnect()
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            try check(controller.discoveryScope != previousScope)
+        }
+        try withController(models: [["id": "fixture/model", "context_length": 4096, "tool_calling": false]]) { controller, _, _, _ in
+            controller.handle("status", peer: try peer()) { _ in }
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
         }
     }
 

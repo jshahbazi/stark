@@ -9,6 +9,17 @@ final class OpenWorkConnectionController: ObservableObject {
     @Published private(set) var message = "OpenWork is not connected."
     @Published private(set) var clientActive = false
     @Published private(set) var disconnectPending = false
+    @Published private(set) var discoveryScope = UUID().uuidString
+
+    /// A verified status handshake advertises model metadata without issuing
+    /// an API capability. The connector polls every five seconds, even idle.
+    func hasDiscoveredModel(apiID: String, contextTokens: Int) -> Bool {
+        guard approved, !closing, !disconnectPending, !apiSession.isEmpty,
+              observedSession == apiSession, observedPeer?.isCurrent == true,
+              let observedAt, observationClock() >= observedAt,
+              observationClock() - observedAt < 30, contextTokens > 0 else { return false }
+        return observedModels[apiID] == contextTokens
+    }
 
     private let storage: DesktopConnectionApprovalStore
     private let capabilities: DesktopClientCapabilities
@@ -22,6 +33,11 @@ final class OpenWorkConnectionController: ObservableObject {
     private var lastBaseURL = ""
     private var operation = UUID()
     private var installedDirectory: URL?
+    private let observationClock: () -> TimeInterval
+    private var observedPeer: DesktopProcessIdentity?
+    private var observedSession = ""
+    private var observedAt: TimeInterval?
+    private var observedModels: [String: Int] = [:]
 
     init(service: String, storage: DesktopConnectionApprovalStore? = nil,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
@@ -31,6 +47,7 @@ final class OpenWorkConnectionController: ObservableObject {
         self.capabilities = DesktopClientCapabilities(client: .openWork, limit: 16, clock: clock, send: send)
         self.snapshot = snapshot
         self.brokerPath = brokerPath
+        self.observationClock = clock
     }
 
     func receiveConnection(_ event: [String: Any]) {
@@ -91,7 +108,13 @@ final class OpenWorkConnectionController: ObservableObject {
         guard !closing else { reply(.failure(.unavailable)); return }
         guard approved else { reply(.success(["version": 1, "status": "not_connected"])); return }
         guard !apiSession.isEmpty, snapshot()["api_base_url"] as? String != "" else { reply(.failure(.backend)); return }
-        if method == "status" { reply(.success(status())); return }
+        if method == "status" {
+            guard peer.isCurrent else { reply(.failure(.identity)); return }
+            let value = status()
+            observeStatus(value, peer: peer)
+            reply(.success(value))
+            return
+        }
         guard method == "connection", peer.isCurrent else { reply(.failure(.identity)); return }
         capabilities.issue(to: peer, approved: { [weak self] in self?.approved == true }) { [weak self] result in
             guard let self else { reply(.failure(.unavailable)); return }
@@ -99,8 +122,24 @@ final class OpenWorkConnectionController: ObservableObject {
             case .success(let token):
                 self.clientActive = true
                 self.message = "Connected to OpenWork."
-                reply(.success(self.connection(token)))
+                let value = self.connection(token)
+                self.observeStatus(value, peer: peer)
+                reply(.success(value))
             case .failure(let error): reply(.failure(error))
+            }
+        }
+    }
+
+    private func observeStatus(_ value: [String: Any], peer: DesktopProcessIdentity) {
+        if observedPeer != nil && (observedPeer != peer || observedSession != apiSession) {
+            discoveryScope = UUID().uuidString
+        }
+        observedPeer = peer; observedSession = apiSession; observedAt = observationClock()
+        observedModels.removeAll()
+        for model in value["models"] as? [[String: Any]] ?? [] {
+            if let id = model["id"] as? String, let context = model["context_length"] as? Int,
+               context > 0, model["tool_calling"] as? Bool == true {
+                observedModels[id] = context
             }
         }
     }
@@ -213,6 +252,7 @@ final class OpenWorkConnectionController: ObservableObject {
 
     func disconnect() {
         guard !busy, !closing else { return }
+        discoveryScope = UUID().uuidString
         busy = true
         approved = false
         disconnectPending = true

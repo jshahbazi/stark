@@ -19,6 +19,7 @@ SCENARIOS = (
     "approval-ui",
     "controller-ack",
     "controller-refresh",
+    "controller-model-discovery",
     "controller-session",
     "controller-revoke",
     "controller-store-failure",

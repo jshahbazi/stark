@@ -1093,11 +1093,20 @@ final class EngineController: ObservableObject {
     @Published private(set) var catalogInstallFailed = false
     @Published private(set) var removingModelID: String?
     @Published private(set) var removalError: String?
+    @Published private(set) var beginnerReport: BeginnerModelReport?
+    @Published private(set) var beginnerChoicesLoading = false
+    @Published private(set) var beginnerChoicesError: String?
+    @Published private(set) var beginnerInstallChoice: BeginnerModelReport.Item?
+    @Published private(set) var beginnerInstalledResultID: String?
+    @Published private(set) var beginnerInstallState = "idle"
+    @Published private(set) var beginnerInstallError: String?
+    @Published private(set) var beginnerCancelPending = false
     @Published var options = ChatOptions()
     @Published var contextLimit = 0
     @Published var contextCapacityKnown = false
     @Published var outputLimit = 512
     var onInstalled: (() -> Void)?
+    var onModelInventory: (() -> Void)?
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
@@ -1116,6 +1125,12 @@ final class EngineController: ObservableObject {
     private var installErrorMessage: String?
     private var catalogRequestID: String?
     private var activeInstallRequestID: String?
+    private var beginnerRequestID: String?
+    private var beginnerInstallRequestID: String?
+    private var beginnerInstallRecommendationID: String?
+    private var beginnerRunRequestID: String?
+    private var beginnerRunBackup: (selectedID: String, mode: PlaygroundMode, state: String, message: String,
+                                   tools: Bool, parser: String, gpu: Int64?)?
     private var removalRequestID: String?
     private var removalAction: InstalledModelRemoval.Action?
     private let gpuMemoryBudgetBytes: UInt64?
@@ -1337,6 +1352,27 @@ final class EngineController: ObservableObject {
             if !models.contains(where: { $0.id == selectedID }) && !(catalogInstallation != nil && selectedID.isEmpty) {
                 selectedID = models.first?.id ?? ""
             }
+            onModelInventory?()
+        case "guided_models":
+            guard let expected = beginnerRequestID, event["request_id"] as? String == expected else { return }
+            beginnerChoicesLoading = false
+            guard let raw = event["report"] as? [String: Any], let report = BeginnerModelReport(raw) else {
+                beginnerChoicesError = "Could not check starting models. Try again or use Advanced."
+                beginnerReport = nil
+                return
+            }
+            beginnerReport = report
+            beginnerChoicesError = report.items.isEmpty ? report.message : nil
+        case "install_cancelled":
+            guard let expected = beginnerInstallRequestID, event["request_id"] as? String == expected,
+                  expected == activeInstallRequestID else { return }
+            beginnerCancelPending = false; beginnerInstallState = "cancelled"
+            beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
+            endInstallProgress("cancelled")
+        case "install_cancel_error":
+            guard let expected = beginnerInstallRequestID, event["request_id"] as? String == expected else { return }
+            beginnerCancelPending = false
+            beginnerInstallError = event["message"] as? String ?? "Could not cancel setup. Wait for it to finish."
         case "model_families":
             guard let raw = event["report"] as? [String: Any], let registry = ModelFamilyRegistry(raw) else { return }
             modelFamilies = registry
@@ -1388,10 +1424,19 @@ final class EngineController: ObservableObject {
                   !["idle", "error", "stopping"].contains(state) else { return }
             gpuMemoryBytes = SupportMetadata.integer(event["gpu_memory_bytes"])
         case "ready":
+            if let expected = beginnerRunRequestID {
+                guard event["request_id"] as? String == expected else { return }
+            }
             guard let readyMode = PlaygroundMode(rawValue: event["mode"] as? String ?? "chat"), readyMode == mode,
                   event["model_id"] as? String == selectedID, state != "stopping" else { return }
+            if beginnerRunRequestID != nil {
+                clearConversation(); clearDecision()
+                beginnerRunRequestID = nil; beginnerRunBackup = nil
+                UserDefaults.standard.set(selectedID, forKey: "selectedModel")
+                UserDefaults.standard.set(mode.rawValue, forKey: "playgroundMode")
+            }
             loadedID = event["model_id"] as? String ?? selectedID
-            apiContextTokens = event["max_context_tokens"] as? Int ?? 0
+            apiContextTokens = event["api_context_tokens"] as? Int ?? event["max_context_tokens"] as? Int ?? 0
             apiMaxNewTokens = event["max_output_tokens"] as? Int ?? 0
             loadedMode = readyMode
             applyLimits(event)
@@ -1413,6 +1458,15 @@ final class EngineController: ObservableObject {
             if let requestID = event["support_request_id"] as? String {
                 guard requestID == activeInstallRequestID else { return }
             } else if catalogInstallation != nil { return }
+            if let expected = beginnerInstallRequestID {
+                guard event["support_request_id"] as? String == expected,
+                      expected == activeInstallRequestID,
+                      let model = event["model"] as? [String: Any], let id = model["id"] as? String else { return }
+                beginnerInstalledResultID = id; beginnerInstallState = "installed"; beginnerCancelPending = false
+                beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
+                // Installation does not select or load a different model.
+                return
+            }
             pendingSupportRequestID = nil
             activeInstallRequestID = nil
             if let completed = catalogInstallation {
@@ -1492,6 +1546,28 @@ final class EngineController: ObservableObject {
             pendingDecisionAnswers = nil
         case "error":
             let requestID = event["request_id"] as? String
+            if let expected = beginnerRunRequestID, requestID == expected {
+                if let previous = beginnerRunBackup {
+                    selectedID = previous.selectedID; mode = previous.mode
+                    supportsTools = previous.tools; toolParser = previous.parser; gpuMemoryBytes = previous.gpu
+                }
+                beginnerRunRequestID = nil; beginnerRunBackup = nil
+                errorMessage = event["message"] as? String ?? "Could not start this model. Try again."
+                return
+            }
+            if requestID == beginnerRequestID, beginnerRequestID != nil {
+                beginnerChoicesLoading = false; beginnerReport = nil
+                beginnerChoicesError = event["message"] as? String ?? "Could not check starting models. Try again."
+                return
+            }
+            if let expected = beginnerInstallRequestID, requestID == expected {
+                beginnerInstallError = event["message"] as? String ?? "Could not prepare this model. Try again."
+                beginnerInstallState = "failed"; beginnerCancelPending = false
+                beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
+                endInstallProgress("failed")
+                // The backend restores ready/idle without replacing the loaded model.
+                return
+            }
             if let requestID = requestID, requestID == removalRequestID {
                 removalError = event["message"] as? String ?? "Could not remove this model. Try again."
                 removalRequestID = nil; removingModelID = nil; removalAction = nil
@@ -1527,6 +1603,8 @@ final class EngineController: ObservableObject {
                 message = loadedID.isEmpty ? "Stopped" : "Ready"
             }
         case "progress":
+            if let requestID = event["request_id"] as? String, requestID != activeInstallRequestID { return }
+            if beginnerInstallRequestID != nil && event["request_id"] as? String != beginnerInstallRequestID { return }
             guard let phase = event["phase"] as? String, ["download", "conversion"].contains(phase),
                   let progressState = event["state"] as? String,
                   ["waiting", "running", "complete", "skipped", "cancelled", "failed"].contains(progressState),
@@ -1565,6 +1643,9 @@ final class EngineController: ObservableObject {
         outputLimit = event["max_output_tokens"] as? Int ?? outputLimit
         options.contextTokens = event["context_tokens"] as? Int ?? options.contextTokens
         options.maxNewTokens = event["max_new_tokens"] as? Int ?? options.maxNewTokens
+        if let budget = SupportMetadata.integer(event["api_context_tokens"]), budget > 0, budget <= Int64(UInt32.max) {
+            apiContextTokens = Int(budget)
+        }
     }
 
     private func applyImageCapabilities(_ event: [String: Any]) {
@@ -1835,6 +1916,80 @@ final class EngineController: ObservableObject {
         if !send(payload) { pendingSupportRequestID = nil; activeInstallRequestID = nil; endInstallProgress("failed") }
     }
 
+    func requestBeginnerModels(task: String, excludingModelID: String? = nil) {
+        guard ["everyday", "text", "code", "unsure"].contains(task) else { return }
+        let requestID = UUID().uuidString.lowercased()
+        beginnerRequestID = requestID; beginnerChoicesLoading = true; beginnerChoicesError = nil
+        beginnerReport = nil
+        var payload: [String: Any] = ["command": "guided_models", "request_id": requestID, "task": task]
+        if let id = excludingModelID, !id.isEmpty { payload["excluded_model_ids"] = [id] }
+        if !send(payload) {
+            beginnerChoicesLoading = false
+            beginnerChoicesError = "Could not check starting models. Reopen Stark and try again."
+        }
+    }
+
+    func installBeginnerModel(recipeID: String) {
+        guard !busy, let recommendation = beginnerRequestID,
+              let choice = beginnerReport?.items.first(where: { $0.id == recipeID }),
+              choice.installedIDs.allSatisfy({ id in !models.contains(where: { $0.id == id }) }) else { return }
+        resetInstallProgress(kind: "huggingface")
+        errorMessage = nil; beginnerInstallError = nil; beginnerCancelPending = false
+        let requestID = UUID().uuidString.lowercased()
+        beginnerInstallChoice = choice; beginnerInstalledResultID = nil; beginnerInstallState = "installing"
+        beginnerInstallRecommendationID = recommendation; beginnerInstallRequestID = requestID
+        activeInstallRequestID = requestID; pendingSupportRequestID = requestID
+        state = "installing"; message = "Checking the starting model…"
+        if !send(["command": "install_guided", "recommendation_request_id": recommendation,
+                  "recipe_id": recipeID, "support_request_id": requestID]) {
+            beginnerInstallState = "failed"; beginnerInstallError = "Could not start setup. Reopen Stark and try again."
+            beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
+            endInstallProgress("failed")
+            state = loadedID.isEmpty ? "idle" : "ready"
+        }
+    }
+
+    func cancelBeginnerInstallation() {
+        guard let requestID = beginnerInstallRequestID, requestID == activeInstallRequestID,
+              !beginnerCancelPending else { return }
+        beginnerCancelPending = true
+        if !send(["command": "cancel_install", "request_id": requestID]) {
+            beginnerCancelPending = false
+            beginnerInstallError = "Could not cancel setup. Reopen Stark if it stops responding."
+        }
+    }
+
+    @discardableResult
+    func startBeginnerModel(recipeID: String, modelID: String) -> Bool {
+        guard !busy, models.contains(where: { $0.id == modelID }) else { return false }
+        let recommendation: String?
+        if beginnerReport?.items.contains(where: { $0.id == recipeID && $0.installedIDs.contains(modelID) }) == true {
+            recommendation = beginnerRequestID
+        } else if beginnerInstallChoice?.id == recipeID, beginnerInstalledResultID == modelID {
+            recommendation = beginnerInstallRecommendationID
+        } else { recommendation = nil }
+        guard let recommendation else {
+            errorMessage = "This starting choice changed. Check the recommendation again before starting it."
+            return false
+        }
+        let requestID = UUID().uuidString.lowercased()
+        beginnerRunBackup = (selectedID, mode, state, message, supportsTools, toolParser, gpuMemoryBytes)
+        beginnerRunRequestID = requestID
+        mode = .chat; selectedID = modelID; errorMessage = nil
+        state = "loading"; message = "Checking and starting the selected model…"
+        if !send(["command": "run_guided", "request_id": requestID,
+                  "recommendation_request_id": recommendation, "recipe_id": recipeID, "model_id": modelID]) {
+            if let previous = beginnerRunBackup {
+                selectedID = previous.selectedID; mode = previous.mode; state = previous.state; message = previous.message
+                supportsTools = previous.tools; toolParser = previous.parser; gpuMemoryBytes = previous.gpu
+            }
+            beginnerRunBackup = nil; beginnerRunRequestID = nil
+            errorMessage = "Could not start this model. Reopen Stark and try again."
+            return false
+        }
+        return true
+    }
+
     func requestModelCatalog(familyID: String) {
         guard SupportMetadata.string(familyID, maximum: 128) != nil else { return }
         let changedFamily = catalogFamilyID != familyID
@@ -1902,6 +2057,10 @@ final class EngineController: ObservableObject {
         catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil
         activeInstallRequestID = nil; catalogInstallation = nil; catalogInstallMessage = nil; catalogInstallFailed = false
         removalRequestID = nil; removingModelID = nil; removalAction = nil; removalError = nil
+        beginnerRequestID = nil; beginnerChoicesLoading = false; beginnerReport = nil
+        if beginnerInstallRequestID != nil { beginnerInstallState = "cancelled" }
+        beginnerInstallRequestID = nil; beginnerCancelPending = false
+        beginnerRunRequestID = nil; beginnerRunBackup = nil
     }
 
     func generate() {
@@ -2130,9 +2289,11 @@ struct RunningModelLabel: View {
 struct MenuView: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var updater: AppUpdateController
+    @ObservedObject var interface = StarkInterfacePreferences()
     let manage: () -> Void
     let console: () -> Void
     let connection: () -> Void
+    var selectInterface: (StarkInterfaceMode) -> Void = { _ in }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
@@ -2145,13 +2306,14 @@ struct MenuView: View {
                 }
                 Spacer()
             }
+            StarkInterfacePicker(preferences: interface, selected: selectInterface)
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 StatusLine(engine: engine)
-                GPUMemoryView(engine: engine)
+                if interface.mode == .advanced { GPUMemoryView(engine: engine) }
             }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            Button("Manage Models", action: manage).buttonStyle(.borderedProminent)
-            if engine.mode == .chat { SpeedView(engine: engine) }
+            Button(interface.mode == .beginner ? "Guided setup" : "Manage Models", action: manage).buttonStyle(.borderedProminent)
+            if interface.mode == .advanced && engine.mode == .chat { SpeedView(engine: engine) }
             if engine.busy || !engine.loadedID.isEmpty {
                 HStack {
                     Spacer()
@@ -2159,11 +2321,11 @@ struct MenuView: View {
                 }
             }
             Divider()
-            Button("Connections", action: connection)
+            Button(interface.mode == .beginner ? "OpenWork setup" : "Connections", action: connection)
                 .frame(maxWidth: .infinity, alignment: .leading)
             AppUpdateView(updater: updater)
             HStack {
-                Button("Open Playground", action: console).buttonStyle(.link)
+                Button(interface.mode == .beginner ? "Open chat" : "Open Playground", action: console).buttonStyle(.link)
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }.buttonStyle(.link)
             }.font(.caption)
@@ -3012,6 +3174,9 @@ private final class MenuPanel: NSPanel {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let engine: EngineController
+    private let interface: StarkInterfacePreferences
+    private let beginnerSession = BeginnerSetupSession()
+    private let beginnerOpenWork = BeginnerOpenWorkStatus()
     private let modelManagement = ModelManagementState()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
@@ -3021,9 +3186,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var modelsWindow: NSWindow?
     private var promptWindow: NSWindow?
     private var connectionWindow: NSWindow?
+    private var beginnerWindow: NSWindow?
+    private var beginnerChatWindow: NSWindow?
 
-    init(engine: EngineController = EngineController()) {
+    init(engine: EngineController = EngineController(), interface: StarkInterfacePreferences? = nil) {
         self.engine = engine
+        self.interface = interface ?? StarkInterfacePreferences()
         super.init()
     }
 
@@ -3073,15 +3241,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menuPanel.collectionBehavior = [.transient, .moveToActiveSpace, .fullScreenAuxiliary]
         menuPanel.onEscape = { [weak self] in self?.dismissMenu() }
         menuPanel.contentViewController = NSHostingController(rootView: MenuView(
-            engine: engine, updater: updater,
+            engine: engine, updater: updater, interface: interface,
             manage: { [weak self] in self?.showModels() },
             console: { [weak self] in self?.showPrompt() },
-            connection: { [weak self] in self?.showConnection() })
+            connection: { [weak self] in self?.showConnection() },
+            selectInterface: { [weak self] in self?.selectInterface($0) })
             .onChange(of: updater.message) { [weak self] _, _ in
                 DispatchQueue.main.async { self?.resizeMenuForUpdate() }
             }
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
             .clipShape(RoundedRectangle(cornerRadius: 13)))
+        engine.onModelInventory = { [weak self] in
+            guard let self else { return }
+            self.interface.resolveInitialMode(hasInstalledModels: !self.engine.models.isEmpty)
+        }
         engine.start()
         updater.startAutomaticChecks()
     }
@@ -3158,14 +3331,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func presentModels(tab: ModelsSheetTab? = nil) {
+        if tab != nil {
+            interface.select(.advanced)
+            beginnerWindow?.orderOut(nil); beginnerChatWindow?.orderOut(nil)
+        }
+        if interface.mode == .beginner, tab == nil { showBeginner(); return }
         dismissMenu()
         if let tab = tab { modelManagement.tab = tab }
         else if modelsWindow?.isVisible != true { modelManagement.tab = .initial }
         engine.requestModelFamilies()
         if modelsWindow?.isVisible != true {
-            let view = ModelsView(engine: engine, navigation: modelManagement,
-                                  onDone: { [weak self] in self?.modelsWindow?.close() },
-                                  onRun: { [weak self] identifier in self?.runSavedModel(identifier) })
+            let view = AdvancedModelsHost(engine: engine, navigation: modelManagement, interface: interface,
+                                  selectInterface: { [weak self] in self?.selectInterface($0) },
+                                  close: { [weak self] in self?.modelsWindow?.close() },
+                                  run: { [weak self] identifier in self?.runSavedModel(identifier) })
             if let modelsWindow = modelsWindow {
                 modelsWindow.contentViewController = NSHostingController(rootView: view)
             } else {
@@ -3186,10 +3365,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func showPrompt() {
+        if interface.mode == .beginner { showBeginnerChat(); return }
         dismissMenu()
         if promptWindow == nil {
             promptWindow = window(title: "Stark — Playground",
-                                  view: PlaygroundView(engine: engine,
+                                  view: AdvancedPlaygroundHost(engine: engine, interface: interface,
+                                                       selectInterface: { [weak self] in self?.selectInterface($0) },
                                                        connection: { [weak self] in self?.showConnection() },
                                                        manage: { [weak self] in self?.showModels() }), resizable: true)
         }
@@ -3197,6 +3378,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func showConnection() {
+        if interface.mode == .beginner {
+            beginnerOpenWork.refresh(engine: engine)
+            if beginnerSession.stage == .task, engine.modelReady, engine.loadedMode == .chat {
+                beginnerSession.continueAfterModel(snapshot: beginnerHost.snapshot)
+            }
+            showBeginner()
+            return
+        }
         dismissMenu()
         let view = ConnectionDetailsView(engine: engine,
                                          manage: { [weak self] in self?.showModels() },
@@ -3208,6 +3397,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             connectionWindow?.contentViewController = NSHostingController(rootView: view)
         }
         present(connectionWindow)
+    }
+
+    private var beginnerHost: BeginnerSetupHost {
+        BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
+            session: beginnerSession, interface: interface, observation: beginnerOpenWork,
+            selectInterface: { [weak self] in self?.selectInterface($0) },
+            openChat: { [weak self] in self?.showBeginnerChat() })
+    }
+
+    private func showBeginner() {
+        dismissMenu()
+        if beginnerWindow == nil {
+            beginnerWindow = window(title: "Stark — Guided Setup", view: beginnerHost, resizable: true)
+        }
+        present(beginnerWindow)
+    }
+
+    private func showBeginnerChat() {
+        dismissMenu()
+        if beginnerChatWindow == nil {
+            let view = BeginnerChatView(engine: engine, interface: interface,
+                selectInterface: { [weak self] in self?.selectInterface($0) },
+                setup: { [weak self] in self?.showBeginner() },
+                tryAnotherModel: { [weak self] in
+                    guard let self else { return }
+                    self.beginnerOpenWork.refresh(engine: self.engine)
+                    self.beginnerSession.beginAnotherModel(snapshot: self.beginnerHost.snapshot)
+                    self.showBeginner()
+                })
+            beginnerChatWindow = window(title: "Stark — Chat", view: view, resizable: true)
+        }
+        present(beginnerChatWindow)
+    }
+
+    private func selectInterface(_ mode: StarkInterfaceMode) {
+        interface.select(mode)
+        if mode == .beginner {
+            modelsWindow?.orderOut(nil); promptWindow?.orderOut(nil); connectionWindow?.orderOut(nil)
+            showBeginner()
+        } else {
+            beginnerWindow?.orderOut(nil); beginnerChatWindow?.orderOut(nil)
+            presentModels()
+        }
     }
 
     private func window<V: View>(title: String, view: V, resizable: Bool) -> NSWindow {

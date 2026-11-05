@@ -47,6 +47,15 @@ from .chat import (
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .desktop_media import DesktopAttachments
 from .generation_eta import GenerationEstimates
+from .guided_models import (
+    MAX_EXCLUSIONS,
+    TASKS,
+    host_resources,
+    installation_allowed,
+    matches_recipe,
+    recipe_for,
+    recommendation_report,
+)
 from .hybrid_prepare import SOURCES as NATIVE_SOURCES
 from .hybrid_prepare import prepared_identity
 from .local_api import APIError, LocalAPI
@@ -73,6 +82,10 @@ MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
 class DesktopError(Exception):
     """A fixed, content-free user-facing failure."""
+
+
+class InstallCancelled(DesktopError):
+    """A scoped install cancellation, leaving the loaded worker untouched."""
 
 
 @contextmanager
@@ -262,6 +275,8 @@ class Desktop:
         self.write_lock = threading.Lock()
         self._completion_events = {}
         self.output_failed = False
+        self.current_state = "idle"
+        self.current_status = "No model running"
         self.epoch = 0
         self.job = None
         self.worker = None
@@ -272,8 +287,15 @@ class Desktop:
         self.catalog_family_id = None
         self.catalog_entries = {}
         self.catalog_termination_lock = threading.Lock()
+        self.converter_termination_lock = threading.Lock()
         self.install_epoch = None
         self.install_progress = {}
+        self.install_request_id = None
+        self.guided_install_request_id = None
+        self.install_cancelled = None
+        self.install_committing = False
+        self.guided_reports = {}
+        self.guided_install_offer_id = None
         self.active_model = None
         self.active_mode = None
         self.vocab_size = None
@@ -339,7 +361,17 @@ class Desktop:
                 return
             operation = getattr(self, "_completion_events", {}).get(threading.current_thread())
             if operation is not None and (
-                event in {"ready", "reply", "decision", "error", "installed", "model_removed", "model_remove_error"}
+                event
+                in {
+                    "ready",
+                    "reply",
+                    "decision",
+                    "error",
+                    "installed",
+                    "install_cancelled",
+                    "model_removed",
+                    "model_remove_error",
+                }
                 or (event == "status" and fields.get("state") in {"ready", "idle", "error"})
             ):
                 # The next command must be admissible when the UI sees Ready.
@@ -347,6 +379,9 @@ class Desktop:
                 operation_epoch, completion = operation
                 completion.append((event, operation_epoch if epoch is None else epoch, fields))
                 return
+            if event == "status":
+                self.current_state = fields.get("state", "idle")
+                self.current_status = fields.get("message", "")
             with self.write_lock:
                 try:
                     serialized = json.dumps({"event": event, **fields}, ensure_ascii=False, allow_nan=False)
@@ -624,6 +659,200 @@ class Desktop:
                 request_id=request_id,
             )
 
+    def guided_models(self, payload):
+        request_id = payload.get("request_id")
+        if (
+            set(payload) - {"command", "request_id", "task", "excluded_model_ids", "excluded_recipe_ids"}
+            or not self.request_id(request_id)
+            or not isinstance(payload.get("task"), str)
+            or payload["task"] not in TASKS
+        ):
+            raise DesktopError("Choose a task and check the starting models again.")
+        excluded = {}
+        for key in ("excluded_model_ids", "excluded_recipe_ids"):
+            values = payload.get(key, [])
+            if (
+                not isinstance(values, list)
+                or len(values) > MAX_EXCLUSIONS
+                or any(
+                    not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value) is None
+                    for value in values
+                )
+            ):
+                raise DesktopError("Check the starting models again.")
+            excluded[key] = set(values)
+        with self.lock:
+            installed = {}
+            excluded_recipes = set(excluded["excluded_recipe_ids"])
+            from .guided_models import RECIPES
+
+            for recipe in RECIPES:
+                ids = [
+                    model["id"]
+                    for model in self.models
+                    if model.get("artifact_mode", "text") == "text"
+                    and model_valid(Path(model["path"]))
+                    and matches_recipe(model["path"], recipe)
+                ]
+                if excluded["excluded_model_ids"].intersection(ids):
+                    excluded_recipes.add(recipe.id)
+                installed[recipe.id] = ids
+            report = recommendation_report(host_resources(self.data_dir), installed, excluded_recipes)
+            # An independent refresh never changes an installation already in
+            # progress. Offers retain only immutable server-owned recipe IDs.
+            self.guided_reports[request_id] = tuple(item["id"] for item in report["items"])
+            while len(self.guided_reports) > 8:
+                oldest = next(key for key in self.guided_reports if key != self.guided_install_offer_id)
+                del self.guided_reports[oldest]
+            self.emit("guided_models", request_id=request_id, report=report)
+
+    def guided_recipe(self, payload):
+        request_id, identifier = payload.get("recommendation_request_id"), payload.get("recipe_id")
+        recipe = recipe_for(identifier)
+        if (
+            not self.request_id(request_id)
+            or recipe is None
+            or identifier not in self.guided_reports.get(request_id, ())
+        ):
+            raise DesktopError("Check the starting models again before continuing.")
+        return recipe
+
+    def install_guided(self, payload):
+        if set(payload) != {"command", "recommendation_request_id", "recipe_id", "support_request_id"}:
+            raise DesktopError("Choose a checked starting model to download.")
+        request_id = payload.get("support_request_id")
+        if not self.request_id(request_id):
+            raise DesktopError("Check the starting model again before downloading.")
+        with self.lock:
+            if self.job is not None and self.job.is_alive():
+                raise DesktopError("Wait for the current operation before downloading another model.")
+            recipe = self.guided_recipe(payload)
+            previous = next(
+                (
+                    model
+                    for model in self.models
+                    if model_valid(Path(model["path"])) and matches_recipe(model["path"], recipe)
+                ),
+                None,
+            )
+            if not installation_allowed(recipe, host_resources(self.data_dir), installed=previous is not None):
+                raise DesktopError(
+                    "Resources changed. Check available memory and free space, then check models again."
+                )
+            self.guided_install_offer_id = payload["recommendation_request_id"]
+            if previous is not None:
+                self.library()
+                self.emit(
+                    "installed",
+                    model={key: previous[key] for key in ("id", "name", "path")},
+                    support_request_id=request_id,
+                    request_id=request_id,
+                )
+                self.status("ready" if self.worker else "idle", "Model already installed")
+                return
+            self.start(
+                self.install,
+                "installing",
+                "Checking starting model…",
+                "huggingface",
+                recipe.repo,
+                "text",
+                "text",
+                request_id,
+                recipe.revision,
+                recipe.id,
+                request_id=request_id,
+                guided_install=True,
+            )
+
+    def run_guided(self, payload):
+        if set(payload) != {"command", "request_id", "recommendation_request_id", "recipe_id", "model_id"}:
+            raise DesktopError("Choose an installed starting model to run.")
+        request_id = payload.get("request_id")
+        if not self.request_id(request_id):
+            raise DesktopError("Choose the starting model again before running it.")
+        with self.lock:
+            recipe = self.guided_recipe(payload)
+            model = next((entry for entry in self.models if entry["id"] == payload.get("model_id")), None)
+            if model is None or not model_valid(Path(model["path"])) or not matches_recipe(model["path"], recipe):
+                raise DesktopError("The installed model changed. Check the starting models again.")
+            if not installation_allowed(recipe, host_resources(self.data_dir), installed=True):
+                raise DesktopError("This starting model is not available for the current Mac resources.")
+            if self.job is not None or self.api_queue:
+                raise DesktopError("Wait for the current request before switching models.")
+            # Claim the operation slot before releasing the old worker, so an
+            # API request cannot enter between the idle check and model switch.
+            self.epoch += 1
+            self.api_condition.notify_all()
+            self.start(
+                self.run_guided_worker,
+                "loading",
+                "Starting model…",
+                model["id"],
+                recipe.id,
+                request_id,
+                request_id=request_id,
+            )
+
+    def run_guided_worker(self, epoch, identifier, recipe_id, request_id):
+        with self.lock:
+            if epoch != self.epoch:
+                return
+            self.close_worker()
+        recipe = recipe_for(recipe_id)
+        resources = host_resources(self.data_dir)
+        available = resources.get("available_memory_bytes")
+        if (
+            recipe is None
+            or not installation_allowed(recipe, resources, installed=True)
+            or type(available) is not int
+            or available < recipe.runtime_memory
+        ):
+            raise DesktopError("Not enough memory is available to start this model. Close other apps and try again.")
+        self.run(epoch, identifier, "chat", guided_context=recipe.context_tokens, guided_request_id=request_id)
+
+    def check_install_cancelled(self, epoch):
+        cancelled = getattr(self, "install_cancelled", None)
+        if self.install_epoch == epoch and cancelled is not None and cancelled.is_set():
+            raise InstallCancelled()
+
+    def cancel_install(self, payload):
+        request_id = payload.get("request_id")
+        with self.lock:
+            if (
+                set(payload) != {"command", "request_id"}
+                or not self.request_id(request_id)
+                or request_id != self.guided_install_request_id
+                or self.install_epoch != self.epoch
+                or self.job is None
+                or not self.job.is_alive()
+                or self.install_committing
+                or self.install_cancelled is None
+            ):
+                self.emit(
+                    "install_cancel_error",
+                    request_id=request_id,
+                    message="This installation has already finished or is no longer active.",
+                )
+                return
+            self.install_cancelled.set()
+            converter = self.converter
+        self.terminate_converter(converter)
+
+    def terminate_converter(self, process):
+        # Cancellation and the child's finally block can otherwise race in
+        # Popen.poll/wait and signal an already-reaped process group on macOS.
+        with self.converter_termination_lock:
+            terminate(process)
+
+    def finish_install_cancellation(self, epoch, request_id):
+        self.install_committing = True
+        for phase in PROGRESS_PHASES:
+            previous = self.install_progress.get(phase, {})
+            self.progress(epoch, phase, "cancelled", previous.get("completed_bytes", 0), previous.get("total_bytes"))
+        self.emit("install_cancelled", epoch, request_id=request_id)
+        self.status("ready" if self.worker else "idle", "Model setup cancelled", epoch)
+
     def remove_saved_model(self, epoch, identifier, action, request_id):
         stopped = False
         try:
@@ -724,7 +953,8 @@ class Desktop:
             if previous and completed_bytes < previous["completed_bytes"]:
                 return
             self.install_progress[phase] = value
-            self.emit("progress", epoch, phase=phase, **value)
+            request_id = getattr(self, "install_request_id", None)
+            self.emit("progress", epoch, phase=phase, **value, **({"request_id": request_id} if request_id else {}))
 
     def begin_install_progress(self, epoch, kind):
         with self.lock:
@@ -762,7 +992,7 @@ class Desktop:
             for phase, previous in cancelled.items():
                 if previous["state"] in {"waiting", "running"}:
                     self.emit("progress", phase=phase, **{**previous, "state": "cancelled"})
-        terminate(converter)
+        self.terminate_converter(converter)
         self.close_worker()
         if job is not None and job is not threading.current_thread():
             job.join(timeout=5)
@@ -781,7 +1011,7 @@ class Desktop:
             except MediaError:
                 raise DesktopError("Cannot clear private image storage. Quit and reopen Stark.") from None
 
-    def start(self, function, state, message, *args, request_id=None):
+    def start(self, function, state, message, *args, request_id=None, guided_install=False):
         with self.lock:
             if self.job is not None and self.job.is_alive():
                 self.emit(
@@ -793,6 +1023,10 @@ class Desktop:
             epoch = self.epoch
             installing = state == "installing"
             if installing:
+                self.install_request_id = request_id
+                self.guided_install_request_id = request_id if guided_install else None
+                self.install_cancelled = threading.Event()
+                self.install_committing = False
                 self.begin_install_progress(epoch, args[0])
             self.status(state, message, epoch)
 
@@ -803,33 +1037,61 @@ class Desktop:
                     self._completion_events[current] = (epoch, completion)
                 try:
                     function(epoch, *args)
+                except InstallCancelled:
+                    with self.lock:
+                        if epoch == self.epoch:
+                            self.finish_install_cancellation(epoch, request_id)
                 except (DesktopError, ChatRequestTooLarge) as error:
-                    if epoch == self.epoch:
-                        if installing:
-                            self.fail_install_progress(epoch)
-                        self.emit(
-                            "error", epoch, message=str(error), **({"request_id": request_id} if request_id else {})
-                        )
-                        self.status(
-                            "ready" if self.worker else "error", "Ready" if self.worker else "Operation failed", epoch
-                        )
+                    with self.lock:
+                        if epoch == self.epoch:
+                            if installing and self.install_cancelled is not None and self.install_cancelled.is_set():
+                                self.finish_install_cancellation(epoch, request_id)
+                            else:
+                                if installing:
+                                    self.install_committing = True
+                                    self.fail_install_progress(epoch)
+                                self.emit(
+                                    "error",
+                                    epoch,
+                                    message=str(error),
+                                    **({"request_id": request_id} if request_id else {}),
+                                )
+                                self.status(
+                                    "ready" if self.worker else "error",
+                                    "Ready" if self.worker else "Operation failed",
+                                    epoch,
+                                )
                 except BaseException:
-                    if epoch == self.epoch:
-                        if installing:
-                            self.fail_install_progress(epoch)
-                        self.close_worker()
-                        self.emit(
-                            "error",
-                            epoch,
-                            message="Unable to complete the operation. Check the model and try again.",
-                            **({"request_id": request_id} if request_id else {}),
-                        )
-                        self.status("error", "Operation failed", epoch)
+                    with self.lock:
+                        if epoch == self.epoch:
+                            if installing and self.install_cancelled is not None and self.install_cancelled.is_set():
+                                self.finish_install_cancellation(epoch, request_id)
+                            else:
+                                if installing:
+                                    self.install_committing = True
+                                    self.fail_install_progress(epoch)
+                                else:
+                                    self.close_worker()
+                                self.emit(
+                                    "error",
+                                    epoch,
+                                    message="Unable to complete the operation. Check the model and try again.",
+                                    **({"request_id": request_id} if request_id else {}),
+                                )
+                                self.status(
+                                    "ready" if self.worker else "error",
+                                    "Ready" if self.worker else "Operation failed",
+                                    epoch,
+                                )
                 finally:
                     with self.lock:
                         self._completion_events.pop(current, None)
                         if installing and self.install_epoch == epoch:
                             self.install_epoch = None
+                            self.install_request_id = None
+                            self.guided_install_request_id = None
+                            self.install_cancelled = None
+                            self.install_committing = False
                         if self.job is current:
                             self.job = None
                             self.api_condition.notify_all()
@@ -883,6 +1145,7 @@ class Desktop:
             with self.lock:
                 if epoch != self.epoch:
                     return None
+                self.check_install_cancelled(epoch)
                 process = subprocess.Popen(
                     [*command, "--progress-fd", str(write_descriptor)],
                     stdin=subprocess.DEVNULL,
@@ -896,13 +1159,14 @@ class Desktop:
             os.close(write_descriptor)
             write_descriptor = None
             self.read_converter_progress(read_descriptor, process, epoch)
+            self.check_install_cancelled(epoch)
             return process.wait()
         finally:
             os.close(read_descriptor)
             if write_descriptor is not None:
                 os.close(write_descriptor)
             if process is not None:
-                terminate(process)
+                self.terminate_converter(process)
                 # A child must not leave descendants holding its private pipe.
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -919,6 +1183,7 @@ class Desktop:
             with self.lock:
                 if epoch != self.epoch:
                     return None
+                self.check_install_cancelled(epoch)
                 process = subprocess.Popen(
                     command,
                     stdin=subprocess.DEVNULL,
@@ -934,6 +1199,7 @@ class Desktop:
                 with self.lock:
                     if epoch != self.epoch:
                         return None
+                    self.check_install_cancelled(epoch)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise DesktopError("The model support check timed out. Check Hugging Face access and retry.")
@@ -946,7 +1212,9 @@ class Desktop:
                 if len(pending) > MAX_SUPPORT_BYTES:
                     raise DesktopError("Cannot read the model support report. Update Stark and retry.")
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or process.wait(timeout=remaining) != 0:
+            returncode = process.wait(timeout=remaining) if remaining > 0 else None
+            self.check_install_cancelled(epoch)
+            if remaining <= 0 or returncode != 0:
                 raise DesktopError("Cannot check this model's family. Check the source and Hugging Face access.")
             report = json.loads(pending)
             if (
@@ -963,10 +1231,11 @@ class Desktop:
         except DesktopError:
             raise
         except (OSError, ValueError, UnicodeError, TypeError, subprocess.SubprocessError):
+            self.check_install_cancelled(epoch)
             raise DesktopError("Cannot check this model's family. Check the source and Hugging Face access.") from None
         finally:
             if process is not None:
-                terminate(process)
+                self.terminate_converter(process)
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -978,7 +1247,15 @@ class Desktop:
                         self.converter = None
 
     def check_install_support(
-        self, epoch, kind, source, selected_mode, support_mode, request_id, expected_revision=None
+        self,
+        epoch,
+        kind,
+        source,
+        selected_mode,
+        support_mode,
+        request_id,
+        expected_revision=None,
+        metadata_profile=None,
     ):
         command = [
             sys.executable,
@@ -995,7 +1272,7 @@ class Desktop:
         ]
         if expected_revision is not None:
             command.extend(["--revision", expected_revision])
-        if kind == "local" or get_model(source) is None:
+        if kind == "local" or get_model(source) is None or metadata_profile == "hf-generic":
             command.extend(["--metadata-profile", "hf-generic"])
         if kind == "local":
             command.append("--offline")
@@ -1005,6 +1282,7 @@ class Desktop:
         with self.lock:
             if epoch != self.epoch:
                 return None
+            self.check_install_cancelled(epoch)
             if report is None:
                 raise DesktopError("Cannot check this model's family. Retry the support check.")
             if report.get("mode") != support_mode:
@@ -1034,7 +1312,19 @@ class Desktop:
         support_mode=None,
         support_request_id=None,
         expected_revision=None,
+        guided_recipe_id=None,
     ):
+        self.check_install_cancelled(epoch)
+        guided_recipe = recipe_for(guided_recipe_id) if guided_recipe_id is not None else None
+        if guided_recipe_id is not None and (
+            guided_recipe is None
+            or kind != "huggingface"
+            or source != guided_recipe.repo
+            or expected_revision != guided_recipe.revision
+            or artifact_mode != "text"
+            or support_mode != "text"
+        ):
+            raise DesktopError("Choose a checked starting model to download.")
         if expected_revision is not None and (
             kind not in {"huggingface", "native"}
             or not isinstance(expected_revision, str)
@@ -1114,6 +1404,7 @@ class Desktop:
                         expected_revision is None
                         or (model_display(m) or {}).get("source_revision") == expected_revision
                     )
+                    and (guided_recipe is None or matches_recipe(m["path"], guided_recipe))
                 ),
                 None,
             )
@@ -1124,6 +1415,7 @@ class Desktop:
             with self.lock:
                 if epoch != self.epoch:
                     return
+                self.check_install_cancelled(epoch)
                 if verification is not None:
                     previous["image_verification"] = verification
                     self.persist()
@@ -1155,10 +1447,16 @@ class Desktop:
                         purpose,
                         support_request_id,
                         **({"expected_revision": expected_revision} if expected_revision is not None else {}),
+                        **(
+                            {"metadata_profile": guided_recipe.metadata_profile}
+                            if guided_recipe is not None and guided_recipe.metadata_profile is not None
+                            else {}
+                        ),
                     )
                 with self.lock:
                     if epoch != self.epoch:
                         return
+                    self.check_install_cancelled(epoch)
                 if kind != "native":
                     staging.mkdir(mode=0o700)
                 output = staging / "model"
@@ -1176,7 +1474,12 @@ class Desktop:
                             purpose,
                         ]
                     )
-                    if kind == "local" or get_model(source) is None:
+                    if (
+                        kind == "local"
+                        or get_model(source) is None
+                        or guided_recipe is not None
+                        and guided_recipe.metadata_profile == "hf-generic"
+                    ):
                         command.extend(["--metadata-profile", "hf-generic"])
                     if kind == "local":
                         command.append("--offline")
@@ -1193,10 +1496,13 @@ class Desktop:
                 with self.lock:
                     if epoch != self.epoch:
                         return
+                    self.check_install_cancelled(epoch)
                 if result != 0 or not model_valid(output):
                     raise DesktopError(
                         "Model installation failed. Check model support, free disk space and Hugging Face access."
                     )
+                if guided_recipe is not None and not matches_recipe(output, guided_recipe):
+                    raise DesktopError("The downloaded model does not match its checked source. Check models again.")
                 if kind == "native":
                     pinned = NATIVE_SOURCES[NATIVE_CHOICE]
                     if prepared_identity(output) != {
@@ -1210,6 +1516,7 @@ class Desktop:
                 with self.lock:
                     if epoch != self.epoch:
                         return
+                    self.check_install_cancelled(epoch)
                     managed = self.model_dir / identifier
                     output.replace(managed)
                     path = managed
@@ -1222,6 +1529,8 @@ class Desktop:
             with self.lock:
                 if epoch != self.epoch:
                     return
+                self.check_install_cancelled(epoch)
+                self.install_committing = True
                 self.models.append(model)
                 try:
                     self.persist()
@@ -1236,6 +1545,7 @@ class Desktop:
                     epoch,
                     model={k: model[k] for k in ("id", "name", "path")},
                     support_request_id=support_request_id,
+                    **({"request_id": support_request_id} if guided_recipe is not None else {}),
                 )
                 self.status("ready" if self.worker else "idle", "Model installed", epoch)
         finally:
@@ -1302,7 +1612,7 @@ class Desktop:
             if not current and worker is not None:
                 worker.close()
 
-    def run(self, epoch, identifier, mode="chat"):
+    def run(self, epoch, identifier, mode="chat", *, guided_context=None, guided_request_id=None):
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
@@ -1380,11 +1690,11 @@ class Desktop:
             self.context_limit = ready["max_context_tokens"]
             # The worker uses this integer as its wire ceiling when the model
             # declares no finite maximum. It is not a trained model capacity.
-            self.context_capacity_known = self.context_limit != 0xFFFFFFFF
+            self.context_capacity_known = ready["max_context_tokens"] != 0xFFFFFFFF
             self.output_limit = min(4096, ready["max_new_tokens"], self.context_limit - 1)
-            self.context = min(self.context_override or self.context_limit, self.context_limit)
+            self.context = min(guided_context or self.context_override or self.context_limit, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
-            self.api_context = self.context_limit
+            self.api_context = min(guided_context or self.context_limit, self.context_limit)
             self.api_maximum = min(self.output_limit, self.api_context - 1)
             self.api_vocab = ready.get("vocab_size", 0)
             self.active_model = identifier
@@ -1392,7 +1702,14 @@ class Desktop:
             self.api_cache_scopes = {}
             self.prefix_reset_pending = False
             self.reset()
-            self.emit("ready", epoch, model_id=identifier, mode=mode, **self.settings_summary())
+            self.emit(
+                "ready",
+                epoch,
+                model_id=identifier,
+                mode=mode,
+                **self.settings_summary(),
+                **({"request_id": guided_request_id} if guided_request_id else {}),
+            )
             self.status("ready", "Ready", epoch)
 
     def settings_summary(self):
@@ -1400,6 +1717,7 @@ class Desktop:
         capability, enabled = self.mtp_settings()
         return {
             "context_tokens": self.context,
+            "api_context_tokens": self.api_context,
             "max_new_tokens": self.maximum,
             "max_context_tokens": self.context_limit,
             "context_capacity_known": self.context_capacity_known,
@@ -2249,6 +2567,28 @@ class Desktop:
             self.api_client_command(payload)
         elif command == "support":
             self.families()
+        elif command in {"guided_models", "install_guided", "run_guided"}:
+            request_id = (
+                payload.get("support_request_id") if command == "install_guided" else payload.get("request_id")
+            )
+            try:
+                {
+                    "guided_models": self.guided_models,
+                    "install_guided": self.install_guided,
+                    "run_guided": self.run_guided,
+                }[command](payload)
+            except DesktopError as error:
+                with self.lock:
+                    self.emit(
+                        "error",
+                        message=str(error),
+                        request_id=request_id,
+                        operation_started=False,
+                        preserved_model_id=self.active_model,
+                    )
+                    self.status(self.current_state, self.current_status)
+        elif command == "cancel_install":
+            self.cancel_install(payload)
         elif command == "catalog":
             self.start_catalog(payload.get("family_id"), payload.get("request_id"))
         elif command == "catalog_cancel":
