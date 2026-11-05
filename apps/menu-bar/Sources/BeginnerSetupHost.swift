@@ -109,7 +109,11 @@ struct BeginnerSetupHost: View {
         result.runningContextKnown = engine.contextCapacityKnown
         result.engineBusy = engine.busy; result.engineMessage = engine.message; result.engineError = engine.errorMessage
         result.openWorkInstalled = observation.applicationURL != nil; result.openWorkRunning = observation.running
-        result.openWorkApproved = openWork.approved; result.openWorkClientActive = observation.liveConnection
+        result.openWorkApproved = openWork.approved
+        // Query against this snapshot's model and budget. The application scan
+        // is periodic; its cached connection result may belong to a prior model.
+        result.openWorkClientActive = observation.running && openWork.hasDiscoveredModel(
+            apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
         result.openWorkBusy = openWork.busy
         result.openWorkMessage = engine.apiBaseURL.isEmpty ? engine.apiMessage : (observation.message ?? openWork.message)
         result.openWorkScope = observation.scope
