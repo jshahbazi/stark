@@ -6,7 +6,10 @@ has sliding attention with split-half RoPE, global attention without RoPE,
 per-head Q/K RMS normalization, sigmoid attention gates, four normalization
 stages per layer, embedding-conditioned value projections and clipped SwiGLU.
 The value-residual seed is the initial scaled embedding and stays fixed across
-all layers of each token's forward pass.
+all layers of each token's forward pass. The publisher describes the design as
+Gemma 3N-like, developed from an OLMo 3 baseline. Its released model type is
+`ricursive`; the attention gates, value residuals, normalization and activation
+clipping require Ripple-specific execution.
 
 ## Prepare and run
 
@@ -35,10 +38,19 @@ Successful preparation does not qualify loading, generation quality or speed.
 
 Q8_0 weights retain their original block scales and integer codes. Matrix
 products accumulate into F32 outputs. Residuals, normalization, rotary
-transformations, attention, gates and KV state use F32 arithmetic. This is a
+transformations, attention, gates and KV state use F32 arithmetic. On Metal,
+these operations stay in a device graph through each token, with a single
+completion before returning its readout. Growing the KV allocation adds
+separate bounded copy commands at capacity boundaries. This is a
 separate precision policy from the publisher's BF16 inference and benchmarks.
 Floating reference fixtures store F32 or BF16 weights and execute in F32 to
 isolate architecture and storage behavior.
+
+The released Q8 projection geometries use a measured, grouped two-row matrix
+schedule within the Ripple device graph. The schedule retains Q8 block scales,
+F32 accumulation and Safe Metal math, while changing reduction grouping. Other
+shapes and storage formats use their established matrix kernels. This policy
+is local to Ripple's graph.
 
 Ripple retains the complete set of immutable Metal projection views when its
 page-rounded size fits three quarters of the device's recommended working set,
@@ -58,8 +70,13 @@ quality. A checked 32 GiB cache-payload bound stops growth before allocation
 exceeds that limit; a failure clears the request state. Full-length execution
 requires separate validation and a suitable memory policy.
 
-Prefill currently advances one token at a time and omits discarded vocabulary
-projections. Each request starts with fresh state; errors clear the sequence.
+The Metal cache includes persistent attention probability workspace and spare
+capacity from amortized growth. Its checked 32 GiB bound includes these buffers
+and the old layer allocation while that layer's replacement is copied. The
+payload estimates above exclude this overhead.
+
+Prefill currently advances one token at a time on the device and omits discarded
+vocabulary projections. Each request starts with fresh state; errors clear the sequence.
 Cross-request prefix reuse, image input and DFlash2 speculative decoding are
 not implemented for Ripple. Source chat-template preservation does not itself
 establish structured tool-call parsing or agent performance.

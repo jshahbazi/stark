@@ -214,6 +214,16 @@ fn reference(
     tensors: &Tensors,
     sequence: &[u32],
 ) -> Vec<Vec<f64>> {
+    reference_options(tensors, sequence, true, true, Some(0.25))
+}
+
+fn reference_options(
+    tensors: &Tensors,
+    sequence: &[u32],
+    gated: bool,
+    valres: bool,
+    clamp: Option<f64>,
+) -> Vec<Vec<f64>> {
     let t = |name: &str| tensors[name].1.iter().map(|&v| f64::from(v)).collect::<Vec<_>>();
     let matrix = |name: &str, x: &[f64]| {
         let (shape, values) = &tensors[name];
@@ -242,7 +252,11 @@ fn reference(
             let mut q = matrix(&format!("{a}.q_proj.weight"), &n);
             let mut k = matrix(&format!("{a}.k_proj.weight"), &n);
             let blend = 1.0 / (1.0 + (-t(&format!("{a}.value_res_lambda"))[0]).exp());
-            let v_input: Vec<_> = seed.iter().zip(&n).map(|(&s, &h)| (1.0 - blend) * s + blend * h).collect();
+            let v_input: Vec<_> = if valres {
+                seed.iter().zip(&n).map(|(&s, &h)| (1.0 - blend) * s + blend * h).collect()
+            } else {
+                n.clone()
+            };
             let v = matrix(&format!("{a}.v_proj.weight"), &v_input);
             for (heads, name) in [(&mut q, "q"), (&mut k, "k")] {
                 for head in heads.chunks_exact_mut(2) {
@@ -277,9 +291,11 @@ fn reference(
                     }
                 }
             }
-            let gates = matrix(&format!("{a}.g_proj.weight"), &n);
-            for (value, gate) in attn.iter_mut().zip(gates) {
-                *value /= 1.0 + (-gate).exp();
+            if gated {
+                let gates = matrix(&format!("{a}.g_proj.weight"), &n);
+                for (value, gate) in attn.iter_mut().zip(gates) {
+                    *value /= 1.0 + (-gate).exp();
+                }
             }
             let attn = matrix(&format!("{a}.o_proj.weight"), &attn);
             let attn = norm(&format!("{p}.post_attention_layernorm.weight"), &attn);
@@ -294,8 +310,8 @@ fn reference(
                 .iter()
                 .zip(u)
                 .map(|(&g, u)| {
-                    let g = g.min(0.25);
-                    g / (1.0 + (-g).exp()) * u.clamp(-0.25, 0.25)
+                    let (g, u) = clamp.map_or((g, u), |limit| (g.min(limit), u.clamp(-limit, limit)));
+                    g / (1.0 + (-g).exp()) * u
                 })
                 .collect();
             let update = matrix(&format!("{m}.down_proj.weight"), &activated);
@@ -315,7 +331,7 @@ fn close(
 ) {
     assert_eq!(actual.len(), expected.len());
     let maximum = actual.iter().zip(expected).map(|(&a, &b)| (f64::from(a) - b).abs()).fold(0.0, f64::max);
-    assert!(maximum < 2e-5, "synthetic Ripple numerical mismatch");
+    assert!(maximum < 2e-5, "synthetic Ripple numerical mismatch: max abs error {maximum}");
 }
 
 #[stark_test]
@@ -325,6 +341,10 @@ fn full_forward_matches_independent_reference_past_sliding_window() {
     let sequence = [0, 1, 2, 3, 4, 0];
     let expected = reference(&tensors, &sequence);
     let mut model = fixture.load(&config()).unwrap();
+    #[cfg(feature = "metal")]
+    {
+        model.graph_enabled = false;
+    }
     for (token, expected) in sequence.into_iter().zip(&expected) {
         close(&model.step(token).unwrap(), expected);
     }
@@ -418,4 +438,111 @@ fn gguf_metadata_mismatch_and_ambiguous_residual_fail_admission() {
     let fixture = Fixture::new(&ambiguous, &config());
     fixture.gguf(&ambiguous, false);
     assert!(fixture.load(&config()).is_err());
+}
+
+#[cfg(feature = "metal")]
+fn graph_growth_reference_checks(
+    embedding_multiplier: f32,
+    tolerance: f64,
+) {
+    let mut tensors = tensors();
+    // Keep the extended four-channel synthetic trajectory away from a nearly
+    // zero residual norm. Otherwise both F32 implementations amplify tiny
+    // reduction differences against f64 after repeated normalized updates.
+    // The original short fixture above retains its unchanged source tensors.
+    for value in &mut tensors.get_mut("model.embed_tokens.weight").unwrap().1 {
+        *value *= embedding_multiplier;
+    }
+    for (gated, valres, clamp) in [(true, true, 0.25), (false, false, 0.0)] {
+        let mut c = config();
+        c["max_position_embeddings"] = json!(40);
+        c["use_gated_attention"] = json!(gated);
+        c["use_valres"] = json!(valres);
+        c["ffn_clamp_threshold"] = json!(clamp);
+        let fixture = Fixture::new(&tensors, &c);
+        let mut graph = fixture.load(&c).unwrap();
+        let mut staged = fixture.load(&c).unwrap();
+        staged.graph_enabled = false;
+        let sequence: Vec<_> = (0..40).map(|index| index % 5).collect();
+        let oracle = reference_options(
+            &tensors,
+            &sequence,
+            gated,
+            valres,
+            if clamp == 0.0 {
+                None
+            } else {
+                Some(clamp)
+            },
+        );
+        let mut graph_error = 0.0f64;
+        let mut staged_error = 0.0f64;
+        let mut graph_staged_error = 0.0f64;
+        let mut graph_squared_error = 0.0f64;
+        let mut reference_squared = 0.0f64;
+        let first = graph.step(0).unwrap();
+        close(&first, &staged.step(0).unwrap().into_iter().map(f64::from).collect::<Vec<_>>());
+        for index in 1..40 {
+            let token = index % 5;
+            if index % 4 == 0 {
+                graph.ingest(token).unwrap();
+                staged.ingest(token).unwrap();
+            } else {
+                let expected = staged.step(token).unwrap().into_iter().map(f64::from).collect::<Vec<_>>();
+                let actual = graph.step(token).unwrap();
+                for ((&actual, &expected), &reference) in actual.iter().zip(&expected).zip(&oracle[index as usize]) {
+                    graph_error = graph_error.max((f64::from(actual) - reference).abs());
+                    staged_error = staged_error.max((expected - reference).abs());
+                    graph_staged_error = graph_staged_error.max((f64::from(actual) - expected).abs());
+                    graph_squared_error += (f64::from(actual) - reference).powi(2);
+                    reference_squared += reference.powi(2);
+                }
+            }
+        }
+        eprintln!(
+            "Ripple graph aggregate: embedding_multiplier={embedding_multiplier} gated={gated} valres={valres} clamp={clamp} graph_f64_max={graph_error} staged_f64_max={staged_error} graph_staged_max={graph_staged_error} graph_f64_relative_l2={}",
+            (graph_squared_error / reference_squared).sqrt()
+        );
+        assert!(graph_error < tolerance && staged_error < tolerance && graph_staged_error < tolerance);
+        assert!(graph.step(0).is_err());
+        assert_eq!(graph.position, 0);
+        assert!(graph.graph.is_none());
+        assert_eq!(graph.step(0).unwrap(), first);
+        graph.reset();
+        assert!(graph.graph.is_none());
+        assert_eq!(graph.step(0).unwrap(), first);
+        assert!(graph.ingest(u32::MAX).is_err());
+        assert!(graph.graph.is_none());
+        assert_eq!(graph.step(0).unwrap(), first);
+    }
+}
+
+#[cfg(feature = "metal")]
+#[stark_test]
+fn device_graph_matches_staged_forward_through_cache_growth_and_ring_eviction() {
+    graph_growth_reference_checks(10.0, 2e-5);
+}
+
+#[cfg(feature = "metal")]
+#[stark_test]
+fn device_graph_and_staged_bound_ill_conditioned_trajectory_against_f64() {
+    // This unchanged four-channel fixture can nearly cancel its residual
+    // after repeated norm-scaled updates. Both F32 paths accumulate larger
+    // error against the independent f64 oracle; keep that evidence separate
+    // from the stable strict comparison and unchanged short source fixture.
+    graph_growth_reference_checks(1.0, 0.002);
+}
+
+#[cfg(feature = "metal")]
+#[stark_test]
+fn device_graph_rejects_nonfinite_projections_before_clipping_can_hide_them() {
+    for poison in [f32::NAN, f32::INFINITY] {
+        let mut tensors = tensors();
+        tensors.get_mut("model.layers.1.mlp.gate_proj.weight").unwrap().1[0] = poison;
+        let fixture = Fixture::new(&tensors, &config());
+        let mut graph = fixture.load(&config()).unwrap();
+        assert!(graph.step(0).is_err());
+        assert_eq!(graph.position, 0);
+        assert!(graph.graph.is_none());
+    }
 }

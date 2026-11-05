@@ -16,6 +16,10 @@ use super::{
     weights::Weights,
 };
 
+#[cfg(feature = "metal")]
+#[path = "ripple_graph.rs"]
+mod decode_graph;
+
 // The published maximum context is metadata, not an allocation request. Cache
 // grows with the sequence and is checked before any layer is advanced.
 const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024 * 1024;
@@ -204,6 +208,10 @@ pub struct RippleModel {
     layers: Vec<Layer>,
     states: Vec<AttentionState>,
     position: usize,
+    #[cfg(feature = "metal")]
+    graph: Option<decode_graph::State>,
+    #[cfg(all(feature = "metal", test))]
+    graph_enabled: bool,
 }
 
 impl RippleModel {
@@ -271,15 +279,35 @@ impl RippleModel {
             layers,
             states,
             position: 0,
+            #[cfg(feature = "metal")]
+            graph: None,
+            #[cfg(all(feature = "metal", test))]
+            graph_enabled: true,
         })
     }
 
     pub fn reset(&mut self) {
+        #[cfg(feature = "metal")]
+        {
+            self.graph = None;
+        }
         for state in &mut self.states {
             state.keys.clear();
             state.values.clear();
         }
         self.position = 0;
+    }
+
+    #[cfg(feature = "metal")]
+    fn use_graph(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.graph_enabled
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
     }
 
     pub fn step(
@@ -318,6 +346,10 @@ impl RippleModel {
             return Err(Error::Invalid("ripple_token_or_context"));
         }
         c.cache_bytes(self.position + 1)?;
+        #[cfg(feature = "metal")]
+        if self.use_graph() {
+            return decode_graph::step(self, token, readout);
+        }
         let mut seed = self.weights.row(&self.embedding, token as usize)?;
         for value in &mut seed {
             *value *= c.embed_scale;

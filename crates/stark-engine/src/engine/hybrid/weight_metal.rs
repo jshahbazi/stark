@@ -50,6 +50,7 @@ struct Executor {
     q8_block_pipelines: PipelineCache,
     q8_grouped8_pipelines: PipelineCache,
     q8_segmented8_pipelines: PipelineCache,
+    ripple_q8_pipelines: PipelineCache,
     q6_grouped16_pipelines: PipelineCache,
     q5_grouped32_pipelines: PipelineCache,
     q4_grouped32_pipelines: PipelineCache,
@@ -218,6 +219,21 @@ fn q8_block_shape(
     matches!(format, MatrixFormat::Packed(8))
         && matches!((rows, columns), (16_384, 1536) | (8192, 128))
         && *Q8_SHAPES.get_or_init(|| std::env::var_os("STARK_GLM53_Q8_SHAPES").is_some_and(|value| value == "1"))
+}
+
+// These are the six independently measured dense projection geometries in
+// Ripple-65B. Selection additionally requires the Ripple graph's explicit
+// per-instance policy; other families and indexed banks keep their defaults.
+fn ripple_dense_q8_shape(
+    format: MatrixFormat,
+    rows: usize,
+    columns: usize,
+) -> bool {
+    format == MatrixFormat::Packed(8)
+        && matches!(
+            (rows, columns),
+            (40960, 5120) | (5120, 40960) | (10240, 5120) | (1024, 5120) | (5120, 10240) | (100352, 5120)
+        )
 }
 
 fn q4k_block_enabled() -> bool {
@@ -685,6 +701,7 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("affine_chunk32_matvec.metal"));
             source.push_str(include_str!("qwen_graph.metal"));
             source.push_str(include_str!("qwen_attention.metal"));
+            source.push_str(include_str!("ripple_graph.metal"));
             #[cfg(test)]
             source.push_str(include_str!("../../../unit/fixtures/hybrid_tiled_experiment.metal"));
             #[cfg(test)]
@@ -718,6 +735,7 @@ fn executor() -> Result<&'static Executor> {
                 q8_block_pipelines: Mutex::new(HashMap::new()),
                 q8_grouped8_pipelines: Mutex::new(HashMap::new()),
                 q8_segmented8_pipelines: Mutex::new(HashMap::new()),
+                ripple_q8_pipelines: Mutex::new(HashMap::new()),
                 q6_grouped16_pipelines: Mutex::new(HashMap::new()),
                 q5_grouped32_pipelines: Mutex::new(HashMap::new()),
                 q4_grouped32_pipelines: Mutex::new(HashMap::new()),
@@ -1262,6 +1280,29 @@ impl Executor {
         input: (&ProtocolObject<dyn MTLBuffer>, usize),
         output: (&ProtocolObject<dyn MTLBuffer>, usize),
     ) {
+        Self::encode_matrix_at_with_geometry(
+            encoding,
+            operation,
+            parameters,
+            pipeline,
+            input,
+            output,
+            (
+                matrix_groups(operation.format, operation.rows, operation.columns),
+                matrix_threads(operation.format, operation.rows, operation.columns),
+            ),
+        );
+    }
+
+    fn encode_matrix_at_with_geometry(
+        encoding: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+        operation: &MappedOperation<'_>,
+        parameters: &[u32; 8],
+        pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+        input: (&ProtocolObject<dyn MTLBuffer>, usize),
+        output: (&ProtocolObject<dyn MTLBuffer>, usize),
+        geometry: (usize, usize),
+    ) {
         encoding.set_compute_pipeline_state(pipeline);
         encoding.set_bytes(NonNull::from(parameters).cast(), std::mem::size_of_val(parameters), 3);
         for (index, matrix) in operation.matrices.iter().enumerate() {
@@ -1278,12 +1319,12 @@ impl Executor {
             encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
             encoding.dispatch_threadgroups(
                 MTLSize {
-                    width: matrix_groups(operation.format, operation.rows, operation.columns),
+                    width: geometry.0,
                     height: 1,
                     depth: 1,
                 },
                 MTLSize {
-                    width: matrix_threads(operation.format, operation.rows, operation.columns),
+                    width: geometry.1,
                     height: 1,
                     depth: 1,
                 },
