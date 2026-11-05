@@ -103,6 +103,9 @@ struct DesktopConnectionsTests {
             case "opencode-engine-path": try openCodeEnginePath()
             case "opencode-config-directory": try openCodeConfigDirectory()
             case "launch-environment": try launchEnvironment()
+            case "openwork-launch-isolated": try openWorkLaunchIsolated()
+            case "openwork-launch-normal": try openWorkLaunchNormal()
+            case "openwork-launch-unavailable": try openWorkLaunchUnavailable()
             case "connection-binding": try connectionBinding()
             case "coordinator": try coordinator()
             default: throw CheckFailure()
@@ -994,6 +997,54 @@ struct DesktopConnectionsTests {
         for (environment, expected) in cases {
             try check(DesktopClientPeer.openCodeConfigDirectory(environment)?.path == expected)
         }
+    }
+
+    private static func openWorkLaunchIsolated() throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("stark-openwork-launch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuration = try OpenWorkConnectionController.launchConfiguration(profile: root)
+        let environment: [String: String]? = configuration.environment
+        guard let environment else { throw CheckFailure() }
+        let expected = Set(["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+                            "OPENWORK_ELECTRON_USERDATA", "OPENWORK_DESKTOP_BOOTSTRAP_PATH", "OPENWORK_SERVER_CONFIG",
+                            "OPENWORK_ENV_STORE", "OPENWORK_TOKEN_STORE", "OPENWORK_RUNTIME_DB", "OPENWORK_DATA_DIR",
+                            "OPENCODE_CONFIG_DIR", "OPENCODE_DB"])
+        try check(configuration.createsNewApplicationInstance && Set(environment.keys) == expected)
+        let fileKeys = Set(["OPENWORK_DESKTOP_BOOTSTRAP_PATH", "OPENWORK_SERVER_CONFIG", "OPENWORK_ENV_STORE",
+                            "OPENWORK_TOKEN_STORE", "OPENWORK_RUNTIME_DB", "OPENCODE_DB"])
+        for (key, path) in environment {
+            let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+            try check(path.hasPrefix(root.path + "/") && url.path.hasPrefix(root.path + "/"))
+            let directory = fileKeys.contains(key) ? url.deletingLastPathComponent() : url
+            var isDirectory: ObjCBool = false
+            try check(FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) && isDirectory.boolValue)
+            if fileKeys.contains(key) { try check(!FileManager.default.fileExists(atPath: url.path)) }
+        }
+        try check(environment["HOME"] == environment["USERPROFILE"])
+        let normal = try OpenWorkConnectionController.launchConfiguration(profile: nil)
+        let normalEnvironment: [String: String]? = normal.environment
+        try check(normalEnvironment == nil || normalEnvironment?.isEmpty == true)
+    }
+
+    private static func openWorkLaunchNormal() throws {
+        let configuration = try OpenWorkConnectionController.launchConfiguration(profile: nil)
+        let environment: [String: String]? = configuration.environment
+        try check(!configuration.createsNewApplicationInstance)
+        try check(environment == nil || environment?.isEmpty == true)
+    }
+
+    private static func openWorkLaunchUnavailable() throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("stark-openwork-launch-unavailable-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("occupied")
+        try Data("synthetic fixture".utf8).write(to: file)
+        do {
+            _ = try OpenWorkConnectionController.launchConfiguration(profile: file)
+        } catch { return }
+        throw CheckFailure()
     }
 
     private static func launchEnvironment() throws {

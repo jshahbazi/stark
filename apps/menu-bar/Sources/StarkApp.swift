@@ -1961,7 +1961,14 @@ final class EngineController: ObservableObject {
 
     @discardableResult
     func startBeginnerModel(recipeID: String, modelID: String) -> Bool {
-        guard !busy, models.contains(where: { $0.id == modelID }) else { return false }
+        guard !busy else {
+            errorMessage = "Wait for the current request to finish, then try starting this model again."
+            return false
+        }
+        guard models.contains(where: { $0.id == modelID }) else {
+            errorMessage = "This model is no longer installed. Check the recommendation again."
+            return false
+        }
         let recommendation: String?
         if beginnerReport?.items.contains(where: { $0.id == recipeID && $0.installedIDs.contains(modelID) }) == true {
             recommendation = beginnerRequestID

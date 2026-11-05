@@ -58,8 +58,8 @@ struct BeginnerSetupView: View {
             }
             Spacer(minLength: 20)
             VStack(alignment: .leading, spacing: 6) {
-                Label(snapshot.modelReady ? "Model running" : snapshot.modelStarting ? "Starting model" : "No model running",
-                      systemImage: snapshot.modelReady ? "checkmark.circle" : "circle")
+                Label(snapshot.modelGenerating ? "Model working" : snapshot.modelReady ? "Model running" : snapshot.modelStarting ? "Starting model" : "No model running",
+                      systemImage: snapshot.modelReady || snapshot.modelGenerating ? "checkmark.circle" : "circle")
                 if !snapshot.runningModelName.isEmpty { Text(snapshot.runningModelName) }
             }.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Button("Advanced settings", action: actions.showAdvanced).buttonStyle(.link).font(.caption)
@@ -77,7 +77,7 @@ struct BeginnerSetupView: View {
         case .openWork: openWorkStep
         case .connection: connectionStep
         case .ready:
-            if session.canFinish(snapshot: snapshot) { readyStep }
+            if session.canFinish(snapshot: snapshot) || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot) { readyStep }
             else { connectionStep }
         case .retry: retryStep
         }
@@ -302,7 +302,7 @@ struct BeginnerSetupView: View {
             Image(systemName: "checkmark.circle.fill").font(.largeTitle).foregroundStyle(.green).accessibilityHidden(true)
             heading("OpenWork is ready.", detail: "Your local model is running. OpenWork’s connector has checked its current settings.")
             VStack(alignment: .leading, spacing: 15) {
-                checkRow(snapshot.runningModelName, detail: "Running on this Mac.", checked: snapshot.modelReady)
+                checkRow(snapshot.runningModelName, detail: "Running on this Mac.", checked: snapshot.modelReady || snapshot.modelGenerating)
                 checkRow("OpenWork checked this model", detail: "Recent connector check detected by Stark.", checked: snapshot.openWorkClientActive)
                 checkRow("Workspace and model selected", detail: "Confirmed by you in OpenWork.", checked: session.workspaceConfirmed && session.confirmedOpenWorkModelID == snapshot.runningModelID)
             }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
@@ -369,9 +369,8 @@ struct BeginnerSetupView: View {
         session.selectedChoiceID = choice.id
         if snapshot.modelReady && snapshot.runningModelID == identifier && !snapshot.choiceRequiresRestart {
             session.continueAfterModel(snapshot: snapshot)
-        } else {
+        } else if actions.startModel(choice.installed(as: identifier)) {
             session.requestStart(modelID: identifier)
-            actions.startModel(choice.installed(as: identifier))
         }
     }
 

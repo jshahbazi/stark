@@ -41,6 +41,9 @@ SCENARIOS = (
     "opencode-engine-path",
     "opencode-config-directory",
     "launch-environment",
+    "openwork-launch-isolated",
+    "openwork-launch-normal",
+    "openwork-launch-unavailable",
     "connection-binding",
     "coordinator",
 )

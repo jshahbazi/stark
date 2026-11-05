@@ -308,6 +308,33 @@ extension EngineController {
                           "context_tokens": 32768, "api_context_tokens": 32768, "max_output_tokens": 4096])
             return !engine.contextCapacityKnown && engine.contextLimit == Int(UInt32.max) &&
                 engine.apiContextTokens == 32768
+        case "beginner-start-busy-rejection", "beginner-start-missing-rejection":
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.supportsTools = true; engine.toolParser = "fixture"
+            engine.models = [variant("fixture-model", name: "Current", display: nil), variant("new-model", name: "New", display: nil)]
+            engine.messages = [ChatMessage(text: "synthetic history", isUser: true)]
+            engine.draft = "synthetic draft"
+            _ = prepareBeginnerReport(["new-model"])
+            let historyIDs = engine.messages.map(\.id)
+            let context = engine.options.contextTokens
+            let maximum = engine.options.maxNewTokens
+            if scenario == "beginner-start-busy-rejection" {
+                engine.state = "generating"; engine.message = "Synthetic active request"
+            } else {
+                engine.models.removeAll { $0.id == "new-model" }
+            }
+            let priorState = engine.state, priorMessage = engine.message
+            guard !engine.startBeginnerModel(recipeID: "fixture-recipe", modelID: "new-model"),
+                  noCommandSent(), engine.beginnerRunRequestID == nil, engine.beginnerRunBackup == nil,
+                  engine.selectedID == "fixture-model", engine.loadedID == "fixture-model",
+                  engine.mode == .chat, engine.loadedMode == .chat,
+                  engine.state == priorState, engine.message == priorMessage,
+                  engine.messages.map(\.id) == historyIDs, engine.draft == "synthetic draft",
+                  engine.options.contextTokens == context, engine.options.maxNewTokens == maximum,
+                  engine.supportsTools, engine.toolParser == "fixture",
+                  let error = engine.errorMessage, error.count < 200 else { return false }
+            return scenario == "beginner-start-busy-rejection"
+                ? error.contains("current request") : error.contains("no longer installed")
         case "generation-progress-external-activity":
             engine.mode = .chat; engine.loadedMode = .chat
             engine.state = "generating"; engine.message = "Connected application request"
@@ -2106,6 +2133,14 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_beginner_api_budget_does_not_replace_native_model_capacity(self):
         self.exercise("beginner-api-budget-keeps-native-capacity")
+
+    def test_beginner_local_start_rejection_preserves_the_current_operation(self):
+        for scenario in [
+            "beginner-start-busy-rejection",
+            "beginner-start-missing-rejection",
+        ]:
+            with self.subTest(scenario=scenario):
+                self.exercise(scenario)
 
     @classmethod
     def setUpClass(cls):

@@ -150,6 +150,39 @@ final class OpenWorkConnectionController: ObservableObject {
         return value
     }
 
+    func openApplication() {
+        guard !closing else { return }
+        if let application = DesktopApplicationIdentity.running(.openWork, configurationRoot: testProfileDirectory),
+           let running = NSRunningApplication(processIdentifier: application.process.pid) {
+            running.activate()
+            return
+        }
+        guard let url = DesktopConnectionTesting.application(.openWork)
+                ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: DesktopClient.openWork.bundleID),
+              DesktopClientPeer.verifyApplication(url, client: .openWork) else {
+            message = "Install the official OpenWork macOS app, then choose Check installation."
+            return
+        }
+        let configuration: NSWorkspace.OpenConfiguration
+        do { configuration = try Self.launchConfiguration(profile: testProfileDirectory) }
+        catch { message = "The isolated connection test profile is unavailable."; return }
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] _, error in
+            DispatchQueue.main.async {
+                guard let self, !self.closing else { return }
+                if error != nil { self.message = "OpenWork could not open. Open it from Applications, then return here." }
+            }
+        }
+    }
+
+    static func launchConfiguration(profile: URL?) throws -> NSWorkspace.OpenConfiguration {
+        let configuration = NSWorkspace.OpenConfiguration()
+        if let profile {
+            configuration.createsNewApplicationInstance = true
+            configuration.environment = try testEnvironment(profile)
+        }
+        return configuration
+    }
+
     func connect() {
         guard !busy, !closing, !disconnectPending, brokerPath() != nil, !apiSession.isEmpty,
               let base = snapshot()["api_base_url"] as? String, !base.isEmpty else {
@@ -171,12 +204,9 @@ final class OpenWorkConnectionController: ObservableObject {
             busy = false; message = "Install the official OpenWork macOS app, open a local workspace, then connect again."
             return
         }
-        let configuration = NSWorkspace.OpenConfiguration()
-        if let profile = testProfileDirectory {
-            configuration.createsNewApplicationInstance = true
-            do { configuration.environment = try Self.testEnvironment(profile) }
-            catch { busy = false; message = "The isolated connection test profile is unavailable."; return }
-        }
+        let configuration: NSWorkspace.OpenConfiguration
+        do { configuration = try Self.launchConfiguration(profile: testProfileDirectory) }
+        catch { busy = false; message = "The isolated connection test profile is unavailable."; return }
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] _, error in
             DispatchQueue.main.async {
                 guard let self, self.operation == identifier, !self.closing else { return }

@@ -17,8 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 VIEW_CHECK = r"""
 extension BeginnerSetupView {
-    @MainActor static func checkStartPolicy(restart: Bool) -> Bool {
+    @MainActor static func checkStartPolicy(restart: Bool, accepted: Bool = true) -> Bool {
         let session = BeginnerSetupSession()
+        session.stage = .recommendation
         let choice = BeginnerModelChoice(id: "recipe-a", name: "Fixture model", summary: "Fixture",
                                          installedModelID: "installed-a")
         var snapshot = BeginnerSetupSnapshot()
@@ -31,9 +32,13 @@ extension BeginnerSetupView {
         var actions = BeginnerSetupActions()
         actions.startModel = { received in
             if received.id == choice.id && received.installedModelID == "installed-a" { calls += 1 }
+            return accepted
         }
         let view = BeginnerSetupView(session: session, snapshot: snapshot, actions: actions)
         view.start(choice)
+        if restart && !accepted {
+            return calls == 1 && session.startRequestedModelID == nil && session.stage == .recommendation
+        }
         return restart
             ? calls == 1 && session.startRequestedModelID == "installed-a" && session.stage == .installation
             : calls == 0 && session.startRequestedModelID == nil && session.stage == .openWork
@@ -223,6 +228,36 @@ struct BeginnerChecks {
                 guard session.stage != .ready, !session.canFinish(snapshot: snapshot) else { return false }
             }
             return true
+        case "completed-setup-survives-generation":
+            let (session, base) = ready()
+            var snapshot = base
+            snapshot.modelReady = false
+            snapshot.engineBusy = true
+            snapshot.modelGenerating = true
+            session.synchronize(with: snapshot)
+            guard session.stage == .ready, !session.canFinish(snapshot: snapshot),
+                  session.keepsCompletedSetupWhileGenerating(snapshot: snapshot) else { return false }
+            session.synchronize(with: base)
+            guard session.stage == .ready, session.canFinish(snapshot: base) else { return false }
+            session.beginAnotherModel(snapshot: base)
+            return session.stage == .retry && session.excludedModelID == base.runningModelID
+        case "generation-cannot-hide-invalidated-setup":
+            let mutations: [(inout BeginnerSetupSnapshot) -> Void] = [
+                { $0.runningModelID = "" }, { $0.runningModelID = "different-model" },
+                { $0.runningSupportsTools = false }, { $0.runningContextKnown = false },
+                { $0.localAPIAvailable = false }, { $0.openWorkRunning = false },
+                { $0.openWorkApproved = false }, { $0.openWorkClientActive = false },
+                { $0.openWorkScope = "another-client" }, { $0.modelGenerating = false }
+            ]
+            for mutate in mutations {
+                let (session, base) = ready()
+                var snapshot = base
+                snapshot.modelReady = false; snapshot.engineBusy = true; snapshot.modelGenerating = true
+                mutate(&snapshot)
+                session.synchronize(with: snapshot)
+                guard session.stage != .ready, !session.canFinish(snapshot: snapshot) else { return false }
+            }
+            return true
         case "mode-defaults":
             let suite = "stark.beginner-test." + UUID().uuidString
             let defaults = UserDefaults(suiteName: suite)!
@@ -256,6 +291,7 @@ struct BeginnerChecks {
             return preferences.mode == .beginner
         case "start-reuses-current": return BeginnerSetupView.checkStartPolicy(restart: false)
         case "start-applies-restart-policy": return BeginnerSetupView.checkStartPolicy(restart: true)
+        case "start-rejection-does-not-wait": return BeginnerSetupView.checkStartPolicy(restart: true, accepted: false)
         default: return false
         }
     }
@@ -341,6 +377,8 @@ class BeginnerSetupTests(unittest.TestCase):
             "first-approval-preserves-workspace",
             "model-confirmation-scoped",
             "ready-regresses",
+            "completed-setup-survives-generation",
+            "generation-cannot-hide-invalidated-setup",
         ]:
             with self.subTest(scenario=scenario):
                 self.run_check(scenario)
@@ -355,7 +393,11 @@ class BeginnerSetupTests(unittest.TestCase):
                 self.run_check(scenario)
 
     def test_start_reuse_and_explicit_restart_policy(self):
-        for scenario in ["start-reuses-current", "start-applies-restart-policy"]:
+        for scenario in [
+            "start-reuses-current",
+            "start-applies-restart-policy",
+            "start-rejection-does-not-wait",
+        ]:
             with self.subTest(scenario=scenario):
                 self.run_check(scenario)
 

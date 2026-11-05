@@ -113,6 +113,7 @@ struct BeginnerSetupSnapshot: Equatable {
     var runningModelName = ""
     var modelReady = false
     var modelStarting = false
+    var modelGenerating = false
     var runningSupportsTools = false
     var runningContextKnown = false
     var localAPIAvailable = true
@@ -138,7 +139,7 @@ struct BeginnerSetupActions {
     var refreshChoices: (BeginnerTask, String?) -> Void = { _, _ in }
     var install: (BeginnerModelChoice) -> Void = { _ in }
     var cancelInstall: () -> Void = {}
-    var startModel: (BeginnerModelChoice) -> Void = { _ in }
+    var startModel: (BeginnerModelChoice) -> Bool = { _ in false }
     var openOpenWork: () -> Void = {}
     var downloadOpenWork: () -> Void = {}
     var connectOpenWork: () -> Void = {}
@@ -249,6 +250,15 @@ final class BeginnerSetupSession: ObservableObject {
             confirmedOpenWorkModelID == snapshot.runningModelID
     }
 
+    // A request temporarily makes the worker unavailable for a model switch;
+    // it does not undo a completed setup for the same verified connection.
+    func keepsCompletedSetupWhileGenerating(snapshot: BeginnerSetupSnapshot) -> Bool {
+        snapshot.modelGenerating && !snapshot.runningModelID.isEmpty &&
+            snapshot.runningSupportsTools && snapshot.runningContextKnown && snapshot.localAPIAvailable &&
+            snapshot.openWorkRunning && snapshot.openWorkApproved && snapshot.openWorkClientActive &&
+            workspaceConfirmed && confirmedOpenWorkModelID == snapshot.runningModelID
+    }
+
     func finish(snapshot: BeginnerSetupSnapshot) {
         guard canFinish(snapshot: snapshot) else { return }
         choosingAnotherModel = false
@@ -280,7 +290,7 @@ final class BeginnerSetupSession: ObservableObject {
         }
         observedModelID = snapshot.runningModelID
         if !snapshot.openWorkApproved { confirmedOpenWorkModelID = nil }
-        if stage == .ready, !canFinish(snapshot: snapshot) {
+        if stage == .ready, !canFinish(snapshot: snapshot), !keepsCompletedSetupWhileGenerating(snapshot: snapshot) {
             stage = snapshot.openWorkInstalled && workspaceConfirmed ? .connection : .openWork
         }
         if let pending = installingChoiceID, pending == snapshot.installChoiceID,

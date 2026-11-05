@@ -103,6 +103,7 @@ struct BeginnerSetupHost: View {
         result.runningModelID = engine.loadedID; result.runningModelName = engine.activeModel?.name ?? ""
         result.modelReady = engine.modelReady && engine.loadedMode == .chat
         result.modelStarting = engine.state == "loading"
+        result.modelGenerating = engine.state == "generating"
         result.localAPIAvailable = !engine.apiBaseURL.isEmpty
         result.runningSupportsTools = engine.supportsTools
         result.runningContextKnown = engine.contextCapacityKnown
@@ -140,8 +141,8 @@ struct BeginnerSetupHost: View {
             install: { engine.installBeginnerModel(recipeID: $0.id) },
             cancelInstall: engine.cancelBeginnerInstallation,
             startModel: { choice in
-                guard let id = choice.installedModelID,
-                      engine.startBeginnerModel(recipeID: choice.id, modelID: id) else { return }
+                guard let id = choice.installedModelID else { return false }
+                return engine.startBeginnerModel(recipeID: choice.id, modelID: id)
             },
             openOpenWork: openOpenWork,
             downloadOpenWork: { NSWorkspace.shared.open(URL(string: "https://openworklabs.com/download")!) },
@@ -163,15 +164,8 @@ struct BeginnerSetupHost: View {
 
     private func openOpenWork() {
         observation.refresh(engine: engine, force: true)
-        guard let url = observation.applicationURL, DesktopClientPeer.verifyApplication(url, client: .openWork) else {
-            observation.message = "Install the official OpenWork macOS app, then choose Check installation."
-            return
-        }
-        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-            if error != nil {
-                DispatchQueue.main.async { observation.message = "OpenWork could not open. Open it from Applications, then return here." }
-            }
-        }
+        observation.message = nil
+        openWork.openApplication()
     }
 }
 
