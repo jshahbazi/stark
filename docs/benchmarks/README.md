@@ -4,6 +4,14 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Ripple-65B Preview native Q8 text (2026-11-04).** The full checkpoint runs on
+the 128 GiB M5 Max, passes bounded F32 reference and recovery checks, and uses
+about 63.6 GiB of reported Metal allocations. Longer shared-load runs observe
+0.71–1.54 decode tok/s; quiet-machine screening did not admit a timed run. The
+[native Ripple report](RIPPLE_65B_NATIVE_2026_11_04.md) separates the numerical
+evidence, view-cache diagnostic and unqualified timing observations. This is a
+new-model result and does not supersede other-model comparisons.
+
 **GLM-5.3-Flash focused prefill validation (2026-11-03).** The focused branch's
 same-binary MMA off/on comparison measured 34.90 to 40.87 prefill tok/s (+17.1%)
 and 2.970 to 2.565 seconds per warm request (13.7% lower), with four accepted

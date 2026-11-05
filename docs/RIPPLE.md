@@ -40,6 +40,14 @@ separate precision policy from the publisher's BF16 inference and benchmarks.
 Floating reference fixtures store F32 or BF16 weights and execute in F32 to
 isolate architecture and storage behavior.
 
+Ripple retains the complete set of immutable Metal projection views when its
+page-rounded size fits three quarters of the device's recommended working set,
+after an 8 GiB dynamic reserve. Embeddings remain CPU mappings. Admission is
+lazy and changes buffer lifetime only. A model that does not fit keeps the
+existing 8 GiB streaming view cache. On the tested 128 GiB M5 Max, the Q8
+projection inventory occupies 63.604 GiB within a 72.640 GiB policy limit. Request
+KV state remains subject to the independent bounds below.
+
 KV allocation grows with the actual prefix. Sliding layers retain at most
 1,024 positions in the released architecture, while global layers retain the
 request prefix. For the 80-layer checkpoint, F32 cache payload is approximately
@@ -66,3 +74,31 @@ The source revision, hashes and license are recorded in
 [upstream provenance](../provenance/UPSTREAM.md). Private numerical fixtures
 and runtime outputs stay ignored; validation reports contain aggregate errors,
 timings and hashes.
+
+Generate a small source-bound fixture and compare native Metal readouts:
+
+```sh
+uv run --project tools --locked --python 3.12.13 python scripts/ripple_native_fixture.py --output runtime/ripple-reference-q8 --q8
+cargo +1.98.1 run --release --locked -p stark-engine --example hybrid_parity -- runtime/ripple-reference-q8
+```
+
+`--bf16` selects BF16 storage with F32 reference
+execution; omitting both options creates an F32 fixture. Fixtures exercise
+window eviction, global attention, nonzero value-residual coefficients,
+embedding scaling, nonunit normalization weights and both clipping bounds.
+
+For a prepared Q8 checkpoint, the full reference helper independently decodes
+one layer at a time and runs the publisher's unchanged PyTorch decoder on CPU.
+It avoids allocating an expanded copy of the entire model:
+
+```sh
+uv run --project tools --locked --python 3.12.13 python scripts/ripple_full_reference.py --model-path models/ripple-q8 --output runtime/ripple-full-reference
+cargo +1.98.1 run --release --locked -p stark-engine --example hybrid_parity -- runtime/ripple-full-reference 0.001
+uv run --project tools/converter --locked --python 3.13.13 python scripts/validate_ripple_generation.py --model models/ripple-q8 --worker target/release/stark-generate --output runtime/ripple-generation.json
+```
+
+The full reference compares the same quantized weights under F32 execution.
+It does not establish parity with the original BF16 checkpoint's inference
+policy or reproduce the publisher's quality scores.
+
+Recorded checks: [native validation](archive/runs/2026-11-04-ripple-native-support.md).
