@@ -174,7 +174,9 @@ offset. Cancelling the lookup terminates only that child. Discovery uses an
 sources precede the complete Hugging Face iterators for the family's architecture
 aliases, so successive pages have no fixed total candidate or item ceiling.
 An offset counts candidates including those rejected by metadata checks; a page
-can therefore be empty with a continuation available. Discovery inspects bounded
+can therefore be empty with a continuation available. Continuations replay the
+live Hub download ordering; changes between requests can move candidates across
+page boundaries. Discovery inspects bounded
 configuration, processing metadata and repository file information without
 reading weight payloads. Size and byte estimates remain nullable. Metadata
 eligibility does not establish complete tensor compatibility or native execution.
