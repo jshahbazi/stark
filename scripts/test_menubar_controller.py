@@ -160,13 +160,17 @@ extension EngineController {
             item["model_group"] = ["id": String(repeating: group, count: 32), "name": groupName, "publisher": publisher]
             return item
         }
-        func catalogReport(_ family: String, status: String = "ready", items: [[String: Any]]? = nil) -> [String: Any] {
+        func catalogReport(_ family: String, status: String = "ready", items: [[String: Any]]? = nil,
+                           offset: Int64 = 0, nextOffset: Int64? = nil) -> [String: Any] {
             ["schema_version": 1, "family_id": family, "status": status, "message": "Fixture catalog message",
-             "items": items ?? (status == "ready" ? [catalogItem()] : []), "has_more": false]
+             "items": items ?? (status == "ready" ? [catalogItem()] : []), "has_more": nextOffset != nil,
+             "offset": offset, "next_offset": nextOffset as Any? ?? NSNull()]
         }
-        func catalogReply(_ request: [String: Any], status: String = "ready", items: [[String: Any]]? = nil) -> [String: Any] {
+        func catalogReply(_ request: [String: Any], status: String = "ready", items: [[String: Any]]? = nil,
+                          nextOffset: Int64? = nil) -> [String: Any] {
             ["event": "model_catalog", "request_id": request["request_id"]!, "family_id": request["family_id"]!,
-             "report": catalogReport(request["family_id"] as! String, status: status, items: items)]
+             "report": catalogReport(request["family_id"] as! String, status: status, items: items,
+                                     offset: (request["offset"] as? NSNumber)?.int64Value ?? 0, nextOffset: nextOffset)]
         }
         func removal(_ action: String = "trash") -> [String: Any] {
             ["schema_version": 1, "action": action, "label": action == "trash" ? "Move to Trash" : "Remove from Stark",
@@ -1191,6 +1195,89 @@ extension EngineController {
             guard engine.catalogLoading, engine.catalog == nil else { return false }
             engine.apply(catalogReply(retry))
             return engine.catalog?.status == .ready && engine.catalogError == nil && engine.loadedID == "fixture-model"
+        case "catalog-pagination-merge-and-fence":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let first = command()
+            let firstItems = (0..<30).map { catalogItem("entry-\($0)") }
+            engine.apply(catalogReply(first, items: firstItems, nextOffset: 30))
+            engine.requestMoreModelCatalog()
+            let second = command()
+            guard second["request_id"] as? String == first["request_id"] as? String,
+                  (second["offset"] as? NSNumber)?.int64Value == 30, engine.catalogLoading,
+                  engine.catalog?.items.count == 30 else { return false }
+            engine.requestMoreModelCatalog()
+            guard noCommandSent() else { return false }
+            engine.apply(catalogReply(first, items: [catalogItem("stale")], nextOffset: 30))
+            guard engine.catalogLoading, engine.catalog?.items.count == 30 else { return false }
+            let secondItems = (29..<59).map { catalogItem("entry-\($0)") }
+            engine.apply(catalogReply(second, items: secondItems))
+            guard !engine.catalogLoading, engine.catalog?.items.count == 59,
+                  engine.catalog?.items.first?.id == "entry-0", engine.catalog?.items.last?.id == "entry-58",
+                  engine.catalog?.nextOffset == nil, engine.catalogError == nil else { return false }
+            engine.apply(catalogReply(second, items: [catalogItem("duplicate-response")]))
+            return engine.catalog?.items.count == 59 && engine.modelReady && engine.loadedID == "fixture-model"
+        case "catalog-pagination-failure-retry-and-empty-page":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let first = command()
+            engine.apply(catalogReply(first, items: [], nextOffset: 30))
+            guard engine.catalog?.items.isEmpty == true, engine.catalog?.nextOffset == 30,
+                  engine.catalogLoading else { return false }
+            let second = command()
+            engine.apply(catalogReply(second, status: "error"))
+            guard engine.catalog?.status == .ready, engine.catalog?.nextOffset == 30,
+                  engine.catalogError != nil, !engine.catalogLoading else { return false }
+            engine.requestMoreModelCatalog()
+            let retry = command()
+            guard (retry["offset"] as? NSNumber)?.int64Value == 30,
+                  retry["request_id"] as? String == second["request_id"] as? String else { return false }
+            engine.apply(catalogReply(retry, items: [catalogItem("later")], nextOffset: 60))
+            engine.requestMoreModelCatalog()
+            let third = command()
+            engine.apply(catalogReply(third, status: "offline"))
+            guard engine.catalog?.items.map(\.id) == ["later"], engine.catalog?.nextOffset == 60,
+                  engine.catalogError != nil else { return false }
+            engine.requestModelCatalog(familyID: "qwen3_5")
+            let newFamily = commands().last!
+            engine.apply(catalogReply(third, items: [catalogItem("stale-family")]))
+            guard engine.catalog == nil, engine.catalogLoading else { return false }
+            engine.apply(catalogReply(newFamily))
+            return engine.catalog?.familyID == "qwen3_5" && engine.catalog?.items.map(\.id) == ["entry"]
+        case "catalog-pagination-skips-empty-and-duplicate-pages":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let first = command()
+            engine.apply(catalogReply(first, items: [catalogItem("known")], nextOffset: 30))
+            guard !engine.catalogLoading, noCommandSent() else { return false }
+            engine.requestMoreModelCatalog()
+            let second = command()
+            engine.apply(catalogReply(second, items: [], nextOffset: 60))
+            let third = command()
+            guard engine.catalogLoading, engine.catalog?.items.map(\.id) == ["known"],
+                  (third["offset"] as? NSNumber)?.int64Value == 60 else { return false }
+            engine.apply(catalogReply(third, items: [catalogItem("known")], nextOffset: 90))
+            let fourth = command()
+            guard engine.catalogLoading, engine.catalog?.items.map(\.id) == ["known"],
+                  (fourth["offset"] as? NSNumber)?.int64Value == 90 else { return false }
+            engine.apply(catalogReply(third, items: [catalogItem("stale")], nextOffset: 90))
+            guard engine.catalogLoading, noCommandSent() else { return false }
+            engine.apply(catalogReply(fourth, items: [catalogItem("found")], nextOffset: 120))
+            guard !engine.catalogLoading, noCommandSent(), engine.catalog?.items.map(\.id) == ["known", "found"]
+            else { return false }
+            engine.requestMoreModelCatalog()
+            let final = command()
+            engine.apply(catalogReply(final, items: []))
+            guard !engine.catalogLoading, engine.catalog?.nextOffset == nil, noCommandSent() else { return false }
+            engine.requestModelCatalog(familyID: "qwen3_5")
+            let busyRequest = commands().last!
+            engine.state = "installing"
+            engine.apply(catalogReply(busyRequest, items: [], nextOffset: 30))
+            guard !engine.catalogLoading, noCommandSent(), engine.catalog?.nextOffset == 30 else { return false }
+            engine.state = "ready"
+            engine.requestMoreModelCatalog()
+            let cancelled = command()
+            engine.cancelModelCatalog()
+            guard command()["command"] as? String == "catalog_cancel" else { return false }
+            engine.apply(catalogReply(cancelled, items: [], nextOffset: 60))
+            return engine.catalog == nil && !engine.catalogLoading && noCommandSent()
         case "catalog-schema-bounds":
             var report = catalogReport("qwen3")
             report["schema_version"] = 2
@@ -1198,6 +1285,16 @@ extension EngineController {
             report = catalogReport("qwen3"); report["items"] = (0..<31).map { catalogItem("entry-\($0)") }
             guard FamilyModelCatalog(report) == nil else { return false }
             report = catalogReport("qwen3", items: [catalogItem(), catalogItem()])
+            guard FamilyModelCatalog(report) == nil else { return false }
+            for value in [true as Any, -1 as Any, 0.5 as Any] {
+                report = catalogReport("qwen3"); report["offset"] = value
+                guard FamilyModelCatalog(report) == nil else { return false }
+            }
+            report = catalogReport("qwen3", offset: 30, nextOffset: 30)
+            guard FamilyModelCatalog(report) == nil else { return false }
+            report = catalogReport("qwen3", nextOffset: 30); report["has_more"] = false
+            guard FamilyModelCatalog(report) == nil else { return false }
+            report = catalogReport("qwen3"); report["has_more"] = true
             guard FamilyModelCatalog(report) == nil else { return false }
             for (key, value) in [("revision", "bad" as Any), ("weight_bytes", true as Any),
                                  ("parameter_count", -1 as Any), ("default_artifact_mode", "unsupported" as Any),
@@ -2358,6 +2455,15 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_catalog_offline_retry_preserves_runtime_state(self):
         self.exercise("catalog-offline-retry")
+
+    def test_catalog_pagination_preserves_rows_merges_duplicates_and_fences_pages(self):
+        self.exercise("catalog-pagination-merge-and-fence")
+
+    def test_catalog_pagination_retries_failed_and_empty_pages(self):
+        self.exercise("catalog-pagination-failure-retry-and-empty-page")
+
+    def test_catalog_pagination_continues_past_empty_and_duplicate_pages(self):
+        self.exercise("catalog-pagination-skips-empty-and-duplicate-pages")
 
     def test_catalog_schema_and_item_bounds_are_enforced(self):
         self.exercise("catalog-schema-bounds")

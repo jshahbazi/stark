@@ -621,6 +621,8 @@ struct FamilyModelCatalog {
     let message: String
     let items: [Item]
     let hasMore: Bool
+    let offset: Int64
+    let nextOffset: Int64?
 
     init?(_ raw: [String: Any]) {
         guard SupportMetadata.schemaOne(raw),
@@ -631,8 +633,26 @@ struct FamilyModelCatalog {
               let hasMore = SupportMetadata.boolean(raw["has_more"]) else { return nil }
         let items = rawItems.compactMap(Item.init)
         guard items.count == rawItems.count, Set(items.map(\.id)).count == items.count else { return nil }
+        let offset = raw["offset"].flatMap(SupportMetadata.integer) ?? 0
+        if let value = raw["offset"], SupportMetadata.integer(value) == nil { return nil }
+        let nextOffset = raw["next_offset"].flatMap(SupportMetadata.integer)
+        if let value = raw["next_offset"], !(value is NSNull), nextOffset == nil { return nil }
+        if let nextOffset, (!hasMore || status != .ready || nextOffset <= offset) { return nil }
+        if raw["next_offset"] != nil, hasMore != (nextOffset != nil) { return nil }
         self.familyID = familyID; self.status = status; self.message = message; self.hasMore = hasMore
-        self.items = items
+        self.items = items; self.offset = offset; self.nextOffset = nextOffset
+    }
+
+    init(page: Self, previous: Self?) {
+        familyID = page.familyID; status = page.status; message = page.message
+        hasMore = page.hasMore; offset = page.offset; nextOffset = page.nextOffset
+        var combined = previous?.items ?? []
+        var positions = Dictionary(uniqueKeysWithValues: combined.enumerated().map { ($0.element.id, $0.offset) })
+        for item in page.items {
+            if let index = positions[item.id] { combined[index] = item }
+            else { positions[item.id] = combined.count; combined.append(item) }
+        }
+        items = combined
     }
 }
 
@@ -1124,6 +1144,7 @@ final class EngineController: ObservableObject {
     private var pendingSupportRequestID: String?
     private var installErrorMessage: String?
     private var catalogRequestID: String?
+    private var pendingCatalogOffset: Int64?
     private var activeInstallRequestID: String?
     private var beginnerRequestID: String?
     private var beginnerInstallRequestID: String?
@@ -1386,9 +1407,16 @@ final class EngineController: ObservableObject {
             guard let expected = catalogRequestID, event["request_id"] as? String == expected,
                   event["family_id"] as? String == catalogFamilyID,
                   let raw = event["report"] as? [String: Any], let result = FamilyModelCatalog(raw),
-                  result.familyID == catalogFamilyID else { return }
-            catalog = result; catalogLoading = false
+                  let pendingOffset = pendingCatalogOffset, catalogLoading,
+                  result.familyID == catalogFamilyID, result.offset == pendingOffset else { return }
+            let previousIDs = Set(pendingOffset > 0 ? (catalog?.items.map(\.id) ?? []) : [])
+            let addedItems = result.items.contains { !previousIDs.contains($0.id) }
+            if result.status == .ready {
+                catalog = FamilyModelCatalog(page: result, previous: pendingOffset > 0 ? catalog : nil)
+            } else if pendingOffset == 0 { catalog = result }
+            catalogLoading = false; pendingCatalogOffset = nil
             catalogError = result.status == .ready ? nil : (result.message.isEmpty ? "Could not load these models. Try again." : result.message)
+            if result.status == .ready, !addedItems, result.nextOffset != nil { requestMoreModelCatalog() }
         case "model_removed", "model_remove_error":
             guard let expected = removalRequestID, event["request_id"] as? String == expected,
                   event["model_id"] as? String == removingModelID else { return }
@@ -2007,9 +2035,21 @@ final class EngineController: ObservableObject {
             if !busy { resetInstallProgress(kind: "huggingface") }
         }
         let requestID = UUID().uuidString.lowercased()
-        catalogRequestID = requestID; catalogFamilyID = familyID; catalogLoading = true
+        catalogRequestID = requestID; catalogFamilyID = familyID; catalogLoading = true; pendingCatalogOffset = 0
         if !send(["command": "catalog", "family_id": familyID, "request_id": requestID]) {
-            catalogLoading = false; catalogError = "Could not reach Stark. Reopen the app and try again."
+            catalogLoading = false; pendingCatalogOffset = nil
+            catalogError = "Could not reach Stark. Reopen the app and try again."
+        }
+    }
+
+    func requestMoreModelCatalog() {
+        guard !catalogLoading, !busy, let requestID = catalogRequestID, let familyID = catalogFamilyID,
+              let catalog, catalog.familyID == familyID, catalog.status == .ready,
+              let offset = catalog.nextOffset else { return }
+        catalogLoading = true; pendingCatalogOffset = offset; catalogError = nil
+        if !send(["command": "catalog", "family_id": familyID, "request_id": requestID, "offset": offset]) {
+            catalogLoading = false; pendingCatalogOffset = nil
+            catalogError = "Could not reach Stark. Reopen the app and try again."
         }
     }
 
@@ -2017,7 +2057,7 @@ final class EngineController: ObservableObject {
         if let requestID = catalogRequestID, catalogInstallation?.catalogRequestID != requestID {
             send(["command": "catalog_cancel", "request_id": requestID])
         }
-        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil
+        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil; pendingCatalogOffset = nil
     }
 
     func catalogItemIsDownloaded(_ item: FamilyModelCatalog.Item, artifactMode: ModelArtifactMode) -> Bool {
@@ -2061,7 +2101,7 @@ final class EngineController: ObservableObject {
     }
 
     private func clearBrowserRequests() {
-        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil
+        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil; pendingCatalogOffset = nil
         activeInstallRequestID = nil; catalogInstallation = nil; catalogInstallMessage = nil; catalogInstallFailed = false
         removalRequestID = nil; removingModelID = nil; removalAction = nil; removalError = nil
         beginnerRequestID = nil; beginnerChoicesLoading = false; beginnerReport = nil
@@ -2684,24 +2724,36 @@ struct ModelsView: View {
 
     @ViewBuilder
     private func catalogContent(_ family: ModelsInventory.Family) -> some View {
-        if engine.catalogLoading {
-            VStack(spacing: 10) { ProgressView(); Text("Finding models…").foregroundStyle(.secondary) }
-                .frame(maxWidth: .infinity, minHeight: 220)
-        } else if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
+        if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
             let groups = CatalogBrowserInventory(items: catalog.items, query: catalogQuery, sort: catalogSort,
                                                  quantization: catalogQuantization).groups
-            if catalog.items.isEmpty {
-                VStack(spacing: 10) {
-                    Text("No models listed yet").font(.headline)
-                    Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
-                }.frame(maxWidth: .infinity, minHeight: 220)
-            } else if groups.isEmpty { noSearchResults("No matching models") }
-            else {
-                LazyVStack(spacing: 12) {
+            LazyVStack(spacing: 12) {
+                if catalog.items.isEmpty {
+                    Text(catalog.nextOffset == nil ? "No compatible models found" : "No compatible models found yet")
+                        .font(.headline).frame(maxWidth: .infinity, minHeight: 180)
+                } else if groups.isEmpty { noSearchResults("No matching models") }
+                else {
                     ForEach(groups) { group in catalogGroup(group) }
-                    if catalog.hasMore { Text("More models may be available on Hugging Face.").font(.caption).foregroundStyle(.secondary) }
+                }
+                if engine.catalogLoading {
+                    HStack(spacing: 10) { ProgressView().controlSize(.small); Text("Finding more models…").foregroundStyle(.secondary) }
+                } else if let message = engine.catalogError {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                    Button("Retry loading more") { engine.requestMoreModelCatalog() }.disabled(engine.busy)
+                } else if catalog.nextOffset != nil {
+                    if !catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("Search filters the models loaded so far.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button(catalog.items.isEmpty ? "Check more models" : "Load more models") {
+                        engine.requestMoreModelCatalog()
+                    }.disabled(engine.busy)
+                } else if catalog.items.isEmpty {
+                    Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
                 }
             }
+        } else if engine.catalogLoading {
+            VStack(spacing: 10) { ProgressView(); Text("Finding models…").foregroundStyle(.secondary) }
+                .frame(maxWidth: .infinity, minHeight: 220)
         } else {
             VStack(spacing: 10) {
                 Text(engine.catalog?.status == .offline ? "You’re offline" : "Couldn’t load models").font(.headline)

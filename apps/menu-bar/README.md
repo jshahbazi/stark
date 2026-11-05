@@ -132,6 +132,10 @@ weights). Its download uses native preparation, preserves quantization and check
 the prepared source before adding it to **Installed**. It supports text chat;
 image input and Decision mode are unavailable. Download progress remains
 indeterminate until the stored weight total is verified.
+**Qwen3.8 Flash Next** includes the pinned Lily Q4-XL source through the typed
+text converter and the pinned `pipenetwork` mixed 4/8-bit source through native
+preparation. The mixed source preserves its original quantized storage and uses
+the same preparation and source-identity checks as the native GLM download.
 Inside a family, the tabs at the top switch between **All models** and each
 available quantization or precision, such as **4-bit**, **8-bit** and **BF16**.
 Search narrows the selected tab and sorting applies to its matching rows.
@@ -146,14 +150,22 @@ stay in the browser. A completed download appears in **Installed** without
 selecting it; choose it and **Run** when ready. Some image installations stop
 the running model for their required local checks.
 
-The catalogue combines reference models with bounded live Hugging Face search
-and shows representative compatible choices rather than every repository.
+The catalogue starts with known sources, then follows the family's Hugging Face
+architecture search through successive pages. Each request checks up to 30
+distinct candidates; there is no fixed total result ceiling. **Load more models**
+continues discovery while preserving the rows already loaded. Pages that add no
+new models are checked automatically until a new result appears, discovery ends,
+or a request fails. An initially empty catalogue follows the same process.
+Failed continuations can be retried without losing earlier rows. Search and
+quantization filters apply to the models loaded so far.
 Compatible quantizations from one publisher can share a card across model sizes;
 Base, Instruct, Thinking, context-length variants and fine-tunes remain distinct.
 Selected registered quantized exports may join their registered base model
 across publishers. Size and download bytes appear when source metadata provides
-them. Browsing reads metadata only. Stark checks the selected model again before
-downloading weights and uses that row's exact source version. **Back** or
+them. Browsing reads metadata only and offers the formats implemented by Stark;
+it does not establish complete tensor compatibility or successful execution.
+Stark checks the selected model again before downloading weights and uses that
+row's exact source version. **Back** or
 **Done** leaves the browser; **Stop** cancels an active installation.
 
 Use a model's trash button in **Installed** to review its removal. **Move to

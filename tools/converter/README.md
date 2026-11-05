@@ -54,21 +54,38 @@ Inspect it without downloading a checkpoint:
 uv run --project tools/converter --locked stark-convert --list-families
 ```
 
-Browse representative download choices for one family without fetching weights:
+Browse download candidates for one family without fetching weights:
 
 ```sh
 uv run --project tools/converter --locked stark-convert --family-models qwen3_5
 ```
 
-This combines reference sources with bounded live Hugging Face discovery, using
-parsed configuration and recognized source formats. It inspects at most 45
-candidates and returns at most 30 choices, preserving available sizes and
-quantizations. It reads bounded metadata and repository file information only.
-The JSON report has `ready`, `offline` or `error` status; each choice includes an
-immutable primary revision, metadata-derived size when known, native output
-quantization and offered artifact modes. Missing size metadata remains unknown.
-The list is representative, and a compatible fine-tune can appear without a
-registered catalogue entry. `--offline` returns an offline report.
+This visits known sources and then the complete Hugging Face result iterators for
+the family's architecture aliases, deduplicating repositories. Each request
+checks up to 30 candidates using parsed configuration and recognized source
+formats. It reads bounded metadata and repository file information only; no
+weight payloads are fetched. The JSON report has `ready`, `offline` or `error`
+status, an `offset`, and a `next_offset` when more candidates remain. Pass that
+exact continuation value with `--catalog-offset`:
+
+```sh
+uv run --project tools/converter --locked stark-convert --family-models qwen3_5 --catalog-offset 30
+```
+
+`has_more` is true when a continuation is available. An offset counts inspected
+candidates, including incompatible repositories, so a ready page can contain no
+items and still have a next page. Continue until `next_offset` is null. There is
+no fixed 45-candidate or 30-choice ceiling across pages. The discovery budget is
+80 seconds per request.
+
+Each choice includes an immutable primary revision, metadata-derived size when
+known, output weight precision and offered artifact modes. Missing size metadata
+remains unknown. A compatible fine-tune can appear without a registered catalogue
+entry. Known Qwen3.8 sources include the pinned Lily Q4-XL conversion source and
+the pinned `pipenetwork` mixed 4/8-bit native preparation choice. Discovery covers
+the implemented formats among the returned architecture matches; complete tensor
+validation and native loading remain separate checks. `--offline` returns an
+offline report.
 
 Check source metadata before downloading weights:
 
@@ -114,7 +131,8 @@ stark-convert [SOURCE] [options]
 | `--write-source-manifest PATH` | | Write a private manifest describing every selected source file |
 | `--require-native-support` | | Require a stored named-build match for the exact output: load-only evidence for text mode, image execution evidence for vision mode. Requires BF16 and a catalog model |
 | `--list-families` | | Print the shared family/mode/format matrix without a source or download |
-| `--family-models FAMILY` | family ID, such as `qwen3_5` | Print representative compatible download choices from bounded live metadata discovery; no source or output directory required |
+| `--family-models FAMILY` | family ID, such as `qwen3_5` | Print one metadata-only page of compatible download candidates; no source or output directory required |
+| `--catalog-offset N` | nonnegative integer, default 0 | Continue `--family-models` at the preceding report's `next_offset`; counts candidates, including rejected sources |
 | `--preflight` | | Inspect selected source metadata and print a support report before weight download; creates no output |
 | `--support-mode MODE` | `text`, `decision`, `vision-language` | Check intended native use during preflight or conversion; preflight defaults to the artifact mode |
 | `--capabilities` | | Report catalog coverage for `SOURCE` without reading or downloading it |

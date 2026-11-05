@@ -621,6 +621,12 @@ def main() -> int:
     )
     parser.add_argument("--family-models", help="Browse compatible model-family downloads without fetching weights")
     parser.add_argument(
+        "--catalog-offset",
+        type=int,
+        default=0,
+        help="Continue family-model browsing from a candidate offset",
+    )
+    parser.add_argument(
         "--preflight", action="store_true", help="Check bounded model metadata without downloading weights"
     )
     parser.add_argument("--support-mode", choices=MODES, help="Check the requested app mode before weight downloads")
@@ -642,10 +648,19 @@ def main() -> int:
         if args.family_models is not None:
             from .model_catalog import family_catalog
 
+            if not 0 <= args.catalog_offset <= 10_000_000:
+                raise ValueError("invalid_catalog_offset")
             logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
             os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-            print(json.dumps(family_catalog(args.family_models, offline=args.offline), sort_keys=True))
+            print(
+                json.dumps(
+                    family_catalog(args.family_models, offset=args.catalog_offset, offline=args.offline),
+                    sort_keys=True,
+                )
+            )
             return 0
+        if args.catalog_offset != 0:
+            raise ValueError("catalog_offset_requires_family_models")
         if args.list_families:
             print(json.dumps(support_matrix(), sort_keys=True))
             return 0
