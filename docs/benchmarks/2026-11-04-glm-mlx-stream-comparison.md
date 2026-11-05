@@ -893,3 +893,61 @@ P190/D217 attempt SHA-256:
 `06318e9601d9139b357128da5142bf66eb68e29390411d1915eec89e90f9f230`.
 P129/D217 retry SHA-256:
 `89dce7ffb5e4318496982c6986e634546318a5ace396d38ad9bb43d4dd824b76`.
+
+## Private Q8 draft-head comparison
+
+At the strict 39.060 GB admission baseline, the protected BF16 fill was
+P118/D144. Fixed P115/D141 rows for both arms also covered the Q8 copy and
+wiring, paired 128 MiB reserve, and retained 2 GiB selection headroom. The
+Q8 used the existing 256-candidate draft filter; BF16 used full-vocabulary
+draft sampling. Both used full target-row legacy draw matching, gate 0.5,
+raw 16K input, and T1/top-p 0.95/seed 1.
+
+Both heads matched the excluded 128-output warmup's full-target F32 readout
+hash (`3379492f9916220b`, 154,880 float32 values) and sampled fingerprint (`499c3d4762b75ec4`,
+44 rounds, 109 verified, 84 accepted). On the measured 1,024-output request,
+BF16 produced `89c3e863f47bad76` (367 / 889 / 657) at 891.4517 prefill and
+18.279755 decode tok/s; its host screen failed at 174.56% external CPU. Q8
+produced `427cfb361e7da505` (461 / 823 / 563) at 898.5284 /
+18.570303 tok/s; its host screen passed at 143.42% external CPU. Paging,
+compiler and thermal checks passed for both; clocks were unmatched.
+
+The observed 1.59% decode difference does not demonstrate a useful gain: one
+arm failed the CPU screen, clocks were unmatched, and the Q8 head changed the
+sampled trajectory and gate inputs through quantized logits and bounded
+filtering. This is not evidence of a normalization defect. Quality remains
+unqualified; Q8 stays private and disabled, and BF16 remains the retained head.
+
+Private pair result SHA-256:
+`b78bf50a0943178f752ab0447ca626809b60892728b4f515eb18fa86c91b260f`.
+
+## Private frequency-first comparison
+
+At P115/D141, the matched BF16 frequency-first run used the same full-target
+readout and warmup fingerprints, frozen 1,024-output workload, and strict
+`89c3e863f47bad76` output fingerprint with 367 / 889 / 657 counts as the
+transition-weighted arm. Weighted ranking measured 900.19 prefill /
+18.0908 decode tok/s (152.55% external CPU, host screen failed). Frequency-first
+measured 878.65 / 16.6914 tok/s (247.07% external CPU, CPU screen failed;
+thermal state reached 1). Paging, sampling and compiler checks passed; clocks
+were unmatched.
+The frequency-first arm also recorded 61,285 misses and 580,617,031,680 bytes,
+versus 54,775 misses and 518,940,979,200 bytes for weighted ranking, an 11.89%
+increase in this matched-work comparison. Reject frequency-first; this run does
+not support a statistical wall-time claim.
+
+Frequency-first result SHA-256:
+`6c9613ee8c2a27552a4aeb84c60e667b5c18ea0b9579d0b200fef6a8af064ff2`.
+
+## Transition-only prediction status
+
+A private transition-only scorer was built with the 1/0/0 scoring values;
+existing rank ties, cache-pinned experts and held-slot protections remain.
+Strict admission is unchanged. It has no runtime
+verdict because no candidate request completed. At the 43.516 GB admission
+baseline, the P115/D141 candidate was refused before inference. For the retry at P96/D122,
+legacy completed while Cargo activity prevented the candidate run; the next
+candidate-only launch was blocked before launch by Cargo process 88619. The
+scorer is prediction-only and unmeasured. No source or runtime evidence yet
+shows whether it improves cache selection. The original weighted ranking is
+retained; the private scorer remains disabled.
