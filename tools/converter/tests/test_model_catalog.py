@@ -4,11 +4,13 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
 from test_vision_family_geometry import geometry
 
 from stark_convert import model_catalog as catalog
 
 PIN = "a" * 40
+CATALOG_SEEDS = catalog._catalog_seeds
 
 
 @pytest.fixture(autouse=True)
@@ -230,6 +232,49 @@ def test_lily_qwen38_badge_includes_fixed_q8_projections_beyond_default_q4(group
     assert catalog._quantization(config, {}, None) == "4-bit / 8-bit"
 
 
+@pytest.mark.parametrize("discovery_fails", [False, True])
+def test_known_lily_source_remains_available_without_hub_search_results(tmp_path, monkeypatch, discovery_fails):
+    from test_qwen38 import fixture
+
+    from stark_convert.hybrid_prepare import SOURCES
+
+    source = SOURCES["qwen38-lily-q4-xl"]
+    repo, revision = source["weights_repo"], source["weights_revision"]
+    hub = Hub()
+    config, _tensors = fixture(tmp_path / "synthetic-lily")
+    config["architectures"] = ["Qwen4ExpForConditionalGeneration"]
+    hub.add(
+        tmp_path,
+        repo,
+        config,
+        revision=revision,
+    )
+    monkeypatch.setattr(catalog, "_catalog_seeds", CATALOG_SEEDS)
+    if discovery_fails:
+        monkeypatch.setattr(hub, "list_models", lambda **_kwargs: (_ for _ in ()).throw(OSError()))
+    report = catalog.family_catalog("qwen4_exp", hub=hub)
+    assert report["status"] == "ready"
+    identities = {(item["repo"], item["revision"]) for item in report["items"]}
+    assert (repo, revision) in identities
+    mixed = SOURCES["qwen38-mixed"]
+    assert identities == {(repo, revision), (mixed["weights_repo"], mixed["weights_revision"])}
+    assert next(item for item in report["items"] if item["repo"] == repo)["quantization"] == "4-bit / 8-bit"
+    assert ("info", repo, {"revision": revision, "files_metadata": True, "timeout": 5}) in hub.events
+    assert [event[2] for event in hub.events if event[0] == "download"] == ["config.json"]
+
+
+def test_known_lily_source_cannot_silently_move_to_another_revision(tmp_path, monkeypatch):
+    from stark_convert.hybrid_prepare import SOURCES
+
+    source = SOURCES["qwen38-lily-q4-xl"]
+    hub = Hub()
+    hub.add(tmp_path, source["weights_repo"], {"model_type": "qwen4_exp"}, revision=PIN)
+    monkeypatch.setattr(catalog, "_catalog_seeds", CATALOG_SEEDS)
+    report = catalog.family_catalog("qwen4_exp", hub=hub)
+    assert not any(item["repo"] == source["weights_repo"] for item in report["items"])
+    assert not [event for event in hub.events if event[0] == "download"]
+
+
 def test_seed_declared_size_is_preserved_without_parsing_the_repository_name(tmp_path, monkeypatch):
     hub = Hub()
     hub.add(tmp_path, "known/No-size-in-name", {"model_type": "qwen3"})
@@ -328,14 +373,17 @@ def test_group_normalization_strips_only_first_parameter_size_token(monkeypatch)
     assert two_m["id"] != eight_b["id"]
 
 
-def test_bounded_page_keeps_larger_sizes_instead_of_only_the_smallest_models(tmp_path):
+def test_every_size_remains_reachable_across_pages(tmp_path):
     hub = Hub()
     for name, size in (("A-small", 10**9), ("B-small", 10**9), ("C-large", 10**10)):
         hub.add(tmp_path, "someone/" + name, {"model_type": "qwen3"}, parameters={"BF16": size})
     hub.discovered["qwen3"] = list(hub.repos)
     report = catalog.family_catalog("qwen3", hub=hub, limit=2)
-    assert [item["size_label"] for item in report["items"]] == ["1B", "10B"]
-    assert report["has_more"] is True
+    assert [item["size_label"] for item in report["items"]] == ["1B", "1B"]
+    assert report["has_more"] is True and report["next_offset"] == 2
+    final = catalog.family_catalog("qwen3", hub=hub, limit=2, offset=report["next_offset"])
+    assert [item["size_label"] for item in final["items"]] == ["10B"]
+    assert final["has_more"] is False and final["next_offset"] is None
 
 
 def test_full_bf16_qwen35_defaults_to_images_after_own_processing_metadata_check(tmp_path, monkeypatch):
@@ -388,7 +436,7 @@ def test_oversized_config_stops_at_head_and_never_reaches_download(tmp_path):
         stream.truncate(catalog.MAX_CONFIG_BYTES + 1)
     hub.discovered["qwen3"] = ["someone/Large"]
     report = catalog.family_catalog("qwen3", hub=hub)
-    assert report["status"] == "error" and report["items"] == []
+    assert report["status"] == "ready" and report["items"] == []
     assert not [event for event in hub.events if event[0] == "download"]
 
 
@@ -465,6 +513,226 @@ def test_result_and_candidate_counts_are_bounded_even_if_api_ignores_limit(tmp_p
     assert len(report["items"]) == 3 and report["has_more"] is True
     assert len([event for event in hub.events if event[0] == "info"]) <= catalog.MAX_CANDIDATES
     assert len(json.dumps(report).encode()) < 256 * 1024
+
+
+def test_pagination_reaches_compatible_models_beyond_the_old_search_ceiling(tmp_path):
+    hub = Hub()
+    for index in range(100):
+        hub.add(tmp_path, f"someone/Model-{index}", {"model_type": "llama" if index < 60 else "qwen3"})
+    hub.discovered["qwen3"] = list(hub.repos)
+    offset, reports, items = 0, [], []
+    while True:
+        report = catalog.family_catalog("qwen3", hub=hub, offset=offset)
+        reports.append(report)
+        assert report["status"] == "ready" and report["offset"] == offset
+        assert len(report["items"]) <= catalog.MAX_ITEMS
+        items.extend(report["items"])
+        if report["next_offset"] is None:
+            break
+        assert report["next_offset"] > offset
+        offset = report["next_offset"]
+    assert len(reports) == 4 and not reports[0]["items"] and not reports[1]["items"]
+    assert {item["repo"] for item in items} == {f"someone/Model-{index}" for index in range(60, 100)}
+    assert len(items) == 40
+    assert len([event for event in hub.events if event[0] == "info"]) == 100
+    assert not reports[-1]["has_more"]
+
+
+def test_pagination_deduplicates_seeds_and_architecture_aliases_without_skipping_models(tmp_path, monkeypatch):
+    hub = Hub()
+    for name in ("A", "B", "C", "D"):
+        hub.add(tmp_path, f"someone/{name}", {"model_type": "qwen3_5"})
+    monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: ["someone/A"])
+    hub.discovered["qwen3_5"] = ["someone/A", "someone/B", "someone/B"]
+    hub.discovered["qwen3_5_text"] = ["someone/B", "someone/C", "someone/D"]
+    first = catalog.family_catalog("qwen3_5", hub=hub, limit=2)
+    second = catalog.family_catalog("qwen3_5", hub=hub, limit=2, offset=first["next_offset"])
+    assert {item["repo"] for item in first["items"] + second["items"]} == set(hub.repos)
+    assert len(first["items"] + second["items"]) == 4
+    assert second["next_offset"] is None
+
+
+@pytest.mark.parametrize("offset", [True, False, -1, 1.5, "1", 10_000_001])
+def test_invalid_pagination_offset_never_uses_the_hub(offset):
+    assert catalog.family_catalog("qwen3", hub=object(), offset=offset)["status"] == "error"
+
+
+def _repository_not_found():
+    response = SimpleNamespace(headers={}, request=SimpleNamespace())
+    return RepositoryNotFoundError("repository unavailable", response=response)
+
+
+def test_inaccessible_full_page_advances_to_later_compatible_models(tmp_path, monkeypatch):
+    hub = Hub()
+    for index in range(catalog.MAX_ITEMS):
+        hub.add(tmp_path, f"someone/Hidden-{index}", {"model_type": "qwen3"})
+    later = "someone/Visible-Later"
+    hub.add(tmp_path, later, {"model_type": "qwen3"})
+    hub.discovered["qwen3"] = list(hub.repos)
+    model_info = hub.model_info
+
+    def hidden_repo(repo_id, **kwargs):
+        if repo_id != later:
+            raise _repository_not_found()
+        return model_info(repo_id=repo_id, **kwargs)
+
+    monkeypatch.setattr(hub, "model_info", hidden_repo)
+    first = catalog.family_catalog("qwen3", hub=hub)
+    assert first["status"] == "ready" and first["items"] == []
+    assert first["next_offset"] == catalog.MAX_ITEMS
+    second = catalog.family_catalog("qwen3", hub=hub, offset=first["next_offset"])
+    assert second["status"] == "ready"
+    assert [item["repo"] for item in second["items"]] == [later]
+    assert second["next_offset"] is None
+
+
+def test_partial_transient_failure_retries_whole_page_without_advancing(tmp_path, monkeypatch):
+    hub = Hub()
+    flaky, stable = "someone/Flaky", "someone/Stable"
+    hub.add(tmp_path, flaky, {"model_type": "qwen3"})
+    hub.add(tmp_path, stable, {"model_type": "qwen3"})
+    hub.discovered["qwen3"] = [flaky, stable]
+    model_info = hub.model_info
+    failed = False
+
+    def transient_once(repo_id, **kwargs):
+        nonlocal failed
+        if repo_id == flaky and not failed:
+            failed = True
+            raise RuntimeError("temporary Hub failure")
+        return model_info(repo_id=repo_id, **kwargs)
+
+    monkeypatch.setattr(hub, "model_info", transient_once)
+    first = catalog.family_catalog("qwen3", hub=hub)
+    assert first["status"] == "error" and first["items"] == []
+    assert first["offset"] == 0 and first["next_offset"] is None
+    retried = catalog.family_catalog("qwen3", hub=hub, offset=first["offset"])
+    assert retried["status"] == "ready"
+    assert {item["repo"] for item in retried["items"]} == {flaky, stable}
+
+
+@pytest.mark.parametrize("method", ["get_hf_file_metadata", "hf_hub_download"])
+def test_missing_required_hub_metadata_file_is_an_incompatible_candidate(tmp_path, monkeypatch, method):
+    hub = Hub()
+    missing, available = "someone/Missing", "someone/Available"
+    hub.add(tmp_path, missing, {"model_type": "qwen3"})
+    hub.add(tmp_path, available, {"model_type": "qwen3"})
+    hub.discovered["qwen3"] = [missing, available]
+    original = getattr(hub, method)
+
+    def missing_file(*args, **kwargs):
+        if method == "get_hf_file_metadata":
+            repo, filename, _revision = args[0]
+        else:
+            repo, filename = kwargs["repo_id"], kwargs["filename"]
+        if repo == missing and filename == "config.json":
+            raise EntryNotFoundError("required metadata file is missing")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(hub, method, missing_file)
+    report = catalog.family_catalog("qwen3", hub=hub)
+    assert report["status"] == "ready"
+    assert [item["repo"] for item in report["items"]] == [available]
+
+
+def test_missing_config_repository_is_an_incompatible_candidate(tmp_path, monkeypatch):
+    hub = Hub()
+    repo = "someone/Model"
+    hub.add(tmp_path, repo, {"model_type": "qwen3"})
+    hub.discovered["qwen3"] = [repo]
+    entry = {
+        "adapter": "qwen3",
+        "files": {"model_config": {"repo": "someone/Missing-Config", "filename": "config.json"}},
+    }
+    model_info = hub.model_info
+
+    def missing_config(repo_id, **kwargs):
+        if repo_id == "someone/Missing-Config":
+            raise _repository_not_found()
+        return model_info(repo_id=repo_id, **kwargs)
+
+    monkeypatch.setattr(hub, "model_info", missing_config)
+    monkeypatch.setattr(catalog, "get_model", lambda candidate: entry if candidate == repo else None)
+    report = catalog.family_catalog("qwen3", hub=hub)
+    assert report["status"] == "ready" and report["items"] == []
+
+
+@pytest.mark.parametrize(
+    ("filename", "invalid_payload"),
+    [
+        ("config.json", b"{"),
+        ("config.json", b'{"model_type":"qwen3","model_type":"qwen3"}'),
+        ("config.json", b'{"model_type":NaN}'),
+        ("config.json", b"\xff"),
+        ("config.json", b"[" * 1100 + b"0" + b"]" * 1100),
+        ("model.safetensors.index.json", b"{"),
+    ],
+)
+def test_malformed_candidate_metadata_does_not_block_compatible_rows(tmp_path, filename, invalid_payload):
+    hub = Hub()
+    malformed_repo, compatible_repo = "someone/Malformed", "someone/Compatible"
+    config = {"model_type": "qwen3"}
+    names = {"config.json": 128, "model.safetensors": 1234567890}
+    sidecars = {}
+    if filename == "config.json":
+        sidecars[filename] = invalid_payload
+    else:
+        names[filename] = len(invalid_payload)
+        sidecars[filename] = invalid_payload
+    hub.add(tmp_path, malformed_repo, config, names=names, sidecars=sidecars)
+    hub.add(tmp_path, compatible_repo, config)
+    hub.discovered["qwen3"] = [malformed_repo, compatible_repo]
+
+    report = catalog.family_catalog("qwen3", hub=hub)
+
+    assert report["status"] == "ready"
+    assert [item["repo"] for item in report["items"]] == [compatible_repo]
+
+
+def test_full_malformed_page_can_continue_to_later_compatible_candidate(tmp_path):
+    hub = Hub()
+    malformed_repos = [f"someone/Malformed-{index}" for index in range(catalog.MAX_ITEMS)]
+    for repo in malformed_repos:
+        hub.add(tmp_path, repo, {"model_type": "qwen3"}, sidecars={"config.json": b"{"})
+    compatible_repo = "someone/Compatible"
+    hub.add(tmp_path, compatible_repo, {"model_type": "qwen3"})
+    hub.discovered["qwen3"] = [*malformed_repos, compatible_repo]
+
+    first = catalog.family_catalog("qwen3", hub=hub)
+    second = catalog.family_catalog("qwen3", hub=hub, offset=first["next_offset"])
+
+    assert first["status"] == "ready" and first["items"] == []
+    assert first["next_offset"] == catalog.MAX_ITEMS
+    assert second["status"] == "ready"
+    assert [item["repo"] for item in second["items"]] == [compatible_repo]
+
+
+@pytest.mark.parametrize("oversized_file", ["config.json", "model.safetensors.index.json"])
+def test_oversized_candidate_metadata_does_not_block_compatible_rows(tmp_path, oversized_file):
+    hub = Hub()
+    oversized_repo, compatible_repo = "someone/Oversized", "someone/Compatible"
+    config = {"model_type": "qwen3"}
+    names = {"config.json": 128, "model.safetensors": 1234567890}
+    sidecars = {}
+    if oversized_file == "config.json":
+        names["config.json"] = catalog.MAX_CONFIG_BYTES + 1
+        sidecars["config.json"] = json.dumps(config).encode() + b" " * (catalog.MAX_CONFIG_BYTES + 1)
+    else:
+        names["model.safetensors.index.json"] = catalog.MAX_CONFIG_BYTES + 1
+        sidecars["model.safetensors.index.json"] = b" " * (catalog.MAX_CONFIG_BYTES + 1)
+    hub.add(tmp_path, oversized_repo, config, names=names, sidecars=sidecars)
+    hub.add(tmp_path, compatible_repo, config)
+    hub.discovered["qwen3"] = [oversized_repo, compatible_repo]
+
+    report = catalog.family_catalog("qwen3", hub=hub)
+
+    assert report["status"] == "ready"
+    assert [item["repo"] for item in report["items"]] == [compatible_repo]
+    assert not [
+        event
+        for event in hub.events
+        if event[0] == "download" and event[1] == oversized_repo and event[2] == oversized_file
+    ]
 
 
 def test_offline_or_invalid_family_never_uses_the_hub():

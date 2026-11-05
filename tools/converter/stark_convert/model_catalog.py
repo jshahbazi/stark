@@ -9,7 +9,6 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from itertools import islice
 from pathlib import Path, PurePosixPath
 
 from .model_support import (
@@ -25,7 +24,7 @@ from .vision_contract import REPO as EXACT_VISION_REPO
 from .vision_contract import REVISION as EXACT_VISION_REVISION
 
 MAX_ITEMS = 30
-MAX_CANDIDATES = 45
+MAX_CANDIDATES = MAX_ITEMS
 MAX_INVENTORY = 16384
 MAX_CONFIG_BYTES = 1024 * 1024
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
@@ -52,6 +51,22 @@ class _Unavailable(Exception):
     pass
 
 
+class _Inaccessible(Exception):
+    """A source repo or metadata payload cannot be admitted to the catalogue."""
+
+
+class _MalformedMetadata(Exception):
+    """A bounded metadata document is invalid and cannot be retried usefully."""
+
+
+def _hub_source_unavailable(error):
+    try:
+        from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
+    except ImportError:
+        return False
+    return isinstance(error, (RepositoryNotFoundError, EntryNotFoundError, RevisionNotFoundError))
+
+
 def _field(value, name, default=None):
     return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
 
@@ -76,14 +91,16 @@ def _repo(value):
         return None
 
 
-def _report(family, status, message, items=(), *, has_more=False):
+def _report(family, status, message, items=(), *, offset=0, next_offset=None):
     return {
         "schema_version": 1,
         "family_id": family,
         "status": status,
         "message": message,
         "items": list(items),
-        "has_more": has_more,
+        "offset": offset,
+        "has_more": next_offset is not None,
+        "next_offset": next_offset,
     }
 
 
@@ -97,11 +114,14 @@ def _unique_object(pairs):
 
 
 def _json(payload):
-    return json.loads(
-        payload,
-        object_pairs_hook=_unique_object,
-        parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
-    )
+    try:
+        return json.loads(
+            payload,
+            object_pairs_hook=_unique_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+    except (ValueError, UnicodeError, RecursionError):
+        raise _MalformedMetadata() from None
 
 
 def _parameters(info, quantized):
@@ -142,32 +162,6 @@ def _size_order(item):
     else:
         count = item["parameter_count"] or float("inf")
     return count, item["name"].casefold(), item["repo"].casefold(), item["revision"]
-
-
-def _select_items(items, limit):
-    """Keep available sizes and formats represented before filling extra fine-tunes."""
-    representatives, seen = [], set()
-    for item in items:
-        key = item["size_label"], item["quantization"]
-        if key not in seen:
-            representatives.append(item)
-            seen.add(key)
-    if len(representatives) > limit:
-        chosen = (
-            [representatives[0]]
-            if limit == 1
-            else [representatives[round(index * (len(representatives) - 1) / (limit - 1))] for index in range(limit)]
-        )
-    else:
-        chosen = representatives
-    ids = {item["id"] for item in chosen}
-    for item in items:
-        if len(chosen) == limit:
-            break
-        if item["id"] not in ids:
-            chosen.append(item)
-            ids.add(item["id"])
-    return sorted(chosen, key=_size_order)
 
 
 def _variant_stem(name, quantization):
@@ -341,12 +335,30 @@ def _quantization(config, info, entry):
     return "BF16"
 
 
+def _catalog_pins(family):
+    if family == "qwen4_exp":
+        from .hybrid_prepare import SOURCES
+
+        # The supported Lily export can fall outside the bounded Hub search.
+        # Reuse its reviewed source identity and keep generic conversion checks.
+        source = SOURCES["qwen38-lily-q4-xl"]
+        return {source["weights_repo"]: source["weights_revision"]}
+    if family == "qwen3_5":
+        return {EXACT_VISION_REPO: EXACT_VISION_REVISION}
+    return {}
+
+
 def _catalog_seeds(family):
-    return [
+    from .native_catalog import catalog_items
+
+    registered = [
         entry["repo"]
         for entry in models()
         if entry.get("adapter") == family and entry.get("container") == ".safetensors"
     ]
+    return list(
+        dict.fromkeys([*registered, *_catalog_pins(family), *(item["repo"] for item in catalog_items(family))])
+    )
 
 
 def _application_source(info, repo):
@@ -381,17 +393,26 @@ def _generation_architecture(config, family):
     )
 
 
-def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
+def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offset=0):
     """Return candidate downloads; actual installation must repeat pinned preflight."""
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
     from .native_catalog import catalog_item as native_catalog_item
+    from .native_catalog import catalog_items as native_catalog_items
+
+    valid_offset = type(offset) is int and 0 <= offset <= 10_000_000
+
+    def report(*args, **kwargs):
+        return _report(*args, offset=offset if valid_offset else 0, **kwargs)
+
+    if not valid_offset:
+        return report(family_id or "", "error", "The model catalogue request is invalid.")
 
     if family_id == NATIVE_FAMILY_ID:
-        if type(limit) is not int or not 1 <= limit <= MAX_ITEMS:
-            return _report(NATIVE_FAMILY_ID, "error", "The model catalogue request is invalid.")
+        if type(limit) is not int or not 1 <= limit <= MAX_ITEMS or offset != 0:
+            return report(NATIVE_FAMILY_ID, "error", "The model catalogue request is invalid.")
         if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
-            return _report(NATIVE_FAMILY_ID, "offline", "Connect to the internet to browse models.")
-        return _report(
+            return report(NATIVE_FAMILY_ID, "offline", "Connect to the internet to browse models.")
+        return report(
             NATIVE_FAMILY_ID,
             "ready",
             "Choose a model to download.",
@@ -401,11 +422,11 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
     family = normalize_architecture(family_id)
     definition = next((item for item in support_matrix()["families"] if item["family_id"] == family), None)
     if definition is None or definition["modes"]["text"]["status"] != "conditional":
-        return _report(family or "", "error", "This model family is not available in Stark.")
+        return report(family or "", "error", "This model family is not available in Stark.")
     if type(limit) is not int or not 1 <= limit <= MAX_ITEMS:
-        return _report(family, "error", "The model catalogue request is invalid.")
+        return report(family, "error", "The model catalogue request is invalid.")
     if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
-        return _report(family, "offline", "Connect to the internet to browse models.")
+        return report(family, "offline", "Connect to the internet to browse models.")
     if hub is None:
         import huggingface_hub
 
@@ -419,30 +440,41 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
     try:
         api = hub.HfApi()
         seeds = _catalog_seeds(family)
-        discovered = []
+        pins = _catalog_pins(family)
+        native_items = {item["repo"]: item for item in native_catalog_items(family)}
         discovery_failed = False
-        for alias in definition["architecture_aliases"]:
-            try:
-                for item in islice(
-                    api.list_models(filter=alias, sort="downloads", limit=MAX_CANDIDATES, expand=["sha"]),
-                    MAX_CANDIDATES,
-                ):
-                    remaining()
-                    repo = _repo(_field(item, "id"))
-                    if repo is not None:
-                        discovered.append(repo)
-            except Exception:
-                discovery_failed = True
-        candidates = []
-        # Keep known sizes/quantizations visible while also inspecting live fine-tunes.
-        for index in range(max(len(seeds), len(discovered))):
-            for collection in (seeds, discovered):
-                if index < len(collection) and collection[index] not in candidates:
-                    candidates.append(collection[index])
-        omitted = len(candidates) > MAX_CANDIDATES
-        candidates = candidates[:MAX_CANDIDATES]
+
+        def repositories():
+            nonlocal discovery_failed
+            yield from seeds
+            for alias in definition["architecture_aliases"]:
+                try:
+                    # Let the Hub iterator follow every result page. The local
+                    # window bounds metadata inspection, rather than hiding the
+                    # tail of each family behind a fixed discovery limit.
+                    for item in api.list_models(filter=alias, sort="downloads", expand=["sha"]):
+                        remaining()
+                        repo = _repo(_field(item, "id"))
+                        if repo is not None:
+                            yield repo
+                except Exception:
+                    discovery_failed = True
+                    return  # Retry this frontier instead of skipping a failed alias.
+
+        candidates, seen = [], set()
+        for repo in repositories():
+            remaining()
+            if repo in seen:
+                continue
+            seen.add(repo)
+            if len(seen) > offset:
+                candidates.append(repo)
+                if len(candidates) > limit:
+                    break
+        omitted = len(candidates) > limit or discovery_failed
+        candidates = candidates[:limit]
         if not candidates:
-            return _report(
+            return report(
                 family,
                 "error" if discovery_failed else "ready",
                 "Models could not be loaded. Check your connection and try again."
@@ -457,7 +489,9 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
                 metadata = hub.get_hf_file_metadata(
                     hub.hf_hub_url(repo_id=repo, filename=filename, revision=revision), timeout=5
                 )
-                if type(metadata.size) is not int or not 0 < metadata.size <= maximum:
+                if type(metadata.size) is int and metadata.size > maximum:
+                    raise _Inaccessible()
+                if type(metadata.size) is not int or metadata.size <= 0:
                     raise _Unavailable()
                 if _field(metadata, "commit_hash") not in (None, revision):
                     raise _Unavailable()
@@ -474,14 +508,25 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
                 for _part in PurePosixPath(filename).parts:
                     authority = authority.parent
                 return read_metadata_bytes(selected, root=authority, maximum=maximum)
-            except Exception:
+            except _Inaccessible:
+                raise
+            except Exception as error:
+                if _hub_source_unavailable(error):
+                    raise _Inaccessible() from None
                 raise _Unavailable() from None
 
         def inspect(repo):
             remaining()
             try:
-                requested_revision = EXACT_VISION_REVISION if repo == EXACT_VISION_REPO else None
-                info = api.model_info(repo_id=repo, revision=requested_revision, files_metadata=True, timeout=5)
+                if repo in native_items:
+                    return dict(native_items[repo])
+                requested_revision = pins.get(repo)
+                try:
+                    info = api.model_info(repo_id=repo, revision=requested_revision, files_metadata=True, timeout=5)
+                except Exception as error:
+                    if _hub_source_unavailable(error):
+                        return None
+                    raise
                 if not _application_source(info, repo):
                     return None
                 revision = _field(info, "sha")
@@ -490,10 +535,6 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
                 if requested_revision is not None and revision != requested_revision:
                     raise _Unavailable()
                 names, sizes = _weight_inventory(info)
-                selected = _selected_weights(names, lambda filename, maximum: read(repo, filename, revision, maximum))
-                if selected is None:
-                    return None
-                weight_bytes = _weight_bytes(selected, sizes)
                 entry = get_model(repo)
                 if entry is not None and entry.get("adapter") != family:
                     return None
@@ -503,7 +544,13 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
                 config_repo = rule["repo"]
                 config_revision = revision
                 if config_repo != repo:
-                    config_revision = _field(api.model_info(repo_id=config_repo, timeout=5), "sha")
+                    try:
+                        config_info = api.model_info(repo_id=config_repo, timeout=5)
+                    except Exception as error:
+                        if _hub_source_unavailable(error):
+                            return None
+                        raise
+                    config_revision = _field(config_info, "sha")
                     if not isinstance(config_revision, str) or _REVISION.fullmatch(config_revision) is None:
                         raise _Unavailable()
                 config = _json(read(config_repo, rule["filename"], config_revision, MAX_CONFIG_BYTES))
@@ -515,6 +562,10 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
                 quantization = _quantization(config, info, entry)
                 if quantization is None:
                     return None
+                selected = _selected_weights(names, lambda filename, maximum: read(repo, filename, revision, maximum))
+                if selected is None:
+                    return None
+                weight_bytes = _weight_bytes(selected, sizes)
                 modes = ["text"]
                 if family == "qwen3_5" and quantization == "BF16":
                     vision = preflight_model(config, mode="vision-language", expected_architecture=family)
@@ -542,6 +593,10 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
                     "downloadable": True,
                     "model_group": _model_group(family, repo, repo.split("/")[-1], quantization, entry),
                 }
+            except _Inaccessible:
+                return None
+            except _MalformedMetadata:
+                return None
             except _Unavailable:
                 raise
             except Exception:
@@ -558,14 +613,14 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
                 except Exception:
                     failures += 1
         accepted.sort(key=_size_order)
-        if not accepted and failures == len(candidates):
-            return _report(family, "error", "Models could not be loaded. Check your connection and try again.")
-        return _report(
+        if failures:
+            return report(family, "error", "Models could not be loaded. Check your connection and try again.")
+        return report(
             family,
             "ready",
             "Choose a model to download." if accepted else "No compatible models were found in this family.",
-            _select_items(accepted, limit),
-            has_more=omitted or len(accepted) > limit,
+            accepted,
+            next_offset=offset + len(candidates) if omitted else None,
         )
     except Exception:
-        return _report(family, "error", "Models could not be loaded. Check your connection and try again.")
+        return report(family, "error", "Models could not be loaded. Check your connection and try again.")

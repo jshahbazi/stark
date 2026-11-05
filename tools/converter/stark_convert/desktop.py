@@ -64,9 +64,10 @@ from .model_inventory import model_display
 from .model_removal import RemovalError, prepare_removal, removal_info, remove_model
 from .model_support import support_matrix
 from .mtp import mtp_capabilities, resolve_mtp
-from .native_catalog import CHOICE as NATIVE_CHOICE
 from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
+from .native_catalog import allowed_choice as native_choice_allowed
 from .native_catalog import catalog_item as native_catalog_item
+from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
 from .sources import huggingface_repository
@@ -89,14 +90,17 @@ class InstallCancelled(DesktopError):
 
 
 @contextmanager
-def native_download_stage(data_dir):
+def native_download_stage(data_dir, choice):
     """Keep pinned native downloads reusable and owned by one installer."""
+    if not native_choice_allowed(choice):
+        raise DesktopError("Choose a pinned native catalogue model.")
+    source = NATIVE_SOURCES[choice]
     root = data_dir / "native-downloads"
     if root.is_symlink():
         raise DesktopError("The native download folder is unavailable.")
     root.mkdir(mode=0o700, exist_ok=True)
-    identity = hashlib.sha256(json.dumps(NATIVE_SOURCES[NATIVE_CHOICE], sort_keys=True).encode()).hexdigest()[:16]
-    directory = root / (NATIVE_CHOICE + "-" + identity)
+    identity = hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest()[:16]
+    directory = root / (choice + "-" + identity)
     if directory.is_symlink():
         raise DesktopError("The native download folder is unavailable.")
     directory.mkdir(mode=0o700, exist_ok=True)
@@ -286,6 +290,8 @@ class Desktop:
         self.catalog_request_id = None
         self.catalog_family_id = None
         self.catalog_entries = {}
+        self.catalog_next_offset = 0
+        self.catalog_active_offset = None
         self.catalog_termination_lock = threading.Lock()
         self.converter_termination_lock = threading.Lock()
         self.install_epoch = None
@@ -430,6 +436,8 @@ class Desktop:
             self.catalog_request_id = None
             self.catalog_family_id = None
             self.catalog_entries = {}
+            self.catalog_next_offset = 0
+            self.catalog_active_offset = None
         self.terminate_catalog(process)
 
     def terminate_catalog(self, process):
@@ -442,16 +450,38 @@ class Desktop:
                 if process.poll() is None:
                     raise
 
-    def start_catalog(self, family, request_id):
+    def start_catalog(self, family, request_id, offset=0):
         allowed = {item["family_id"] for item in support_matrix()["families"] if item["model_kind"] == "language"}
-        if family not in allowed or not self.request_id(request_id):
+        if (
+            family not in allowed
+            or not self.request_id(request_id)
+            or type(offset) is not int
+            or not 0 <= offset <= 10_000_000
+        ):
             raise DesktopError("Choose a model family to browse.")
-        self.cancel_catalog()
-        with self.lock:
-            self.catalog_request_id, self.catalog_family_id = request_id, family
-            generation = self.catalog_generation
+        if offset == 0:
+            self.cancel_catalog()
+            with self.lock:
+                self.catalog_request_id, self.catalog_family_id = request_id, family
+                self.catalog_active_offset = 0
+                generation = self.catalog_generation
+        else:
+            with self.lock:
+                if (
+                    request_id != self.catalog_request_id
+                    or family != self.catalog_family_id
+                    or offset != self.catalog_next_offset
+                    or self.catalog_active_offset is not None
+                ):
+                    raise DesktopError("Refresh this family before loading more models.")
+                self.catalog_generation += 1
+                self.catalog_active_offset = offset
+                generation = self.catalog_generation
         threading.Thread(
-            target=self.load_catalog, args=(family, request_id, generation), name="stark-model-catalog", daemon=True
+            target=self.load_catalog,
+            args=(family, request_id, generation, offset),
+            name="stark-model-catalog",
+            daemon=True,
         ).start()
 
     def run_catalog_check(self, command, environment, generation):
@@ -507,7 +537,7 @@ class Desktop:
                     if self.catalog_process is process:
                         self.catalog_process = None
 
-    def catalog_report(self, value, family):
+    def catalog_report(self, value, family, offset=0):
         if (
             not isinstance(value, dict)
             or type(value.get("schema_version")) is not int
@@ -520,6 +550,26 @@ class Desktop:
             or len(value["items"]) > 30
             or type(value.get("has_more")) is not bool
         ):
+            raise ValueError()
+        if "offset" not in value:
+            if offset != 0:
+                raise ValueError()
+            report_offset = offset
+        else:
+            report_offset = value["offset"]
+            if type(report_offset) is not int or report_offset != offset:
+                raise ValueError()
+        next_offset = value.get("next_offset")
+        if "next_offset" in value:
+            if next_offset is not None and (
+                type(next_offset) is not int or not report_offset < next_offset <= 10_000_000
+            ):
+                raise ValueError()
+            if value["has_more"] != (next_offset is not None):
+                raise ValueError()
+            if value["status"] != "ready" and next_offset is not None:
+                raise ValueError()
+        elif offset != 0:
             raise ValueError()
         if value["status"] != "ready" and value["items"]:
             raise ValueError()
@@ -568,7 +618,12 @@ class Desktop:
             ):
                 raise ValueError()
             ids.add(item["id"])
-        return value
+        return {
+            **value,
+            "offset": report_offset,
+            "has_more": value["has_more"] if "next_offset" in value else False,
+            "next_offset": next_offset,
+        }
 
     def catalog_installed_ids(self, item, artifact_mode=None, descriptions=None):
         identifiers = []
@@ -587,14 +642,16 @@ class Desktop:
                 identifiers.append(identifier)
         return identifiers
 
-    def load_catalog(self, family, request_id, generation):
+    def load_catalog(self, family, request_id, generation, offset=0):
         command = [sys.executable, "-I", "-B", "-m", "stark_convert.cli", "--family-models", family]
+        if offset > 0:
+            command.extend(["--catalog-offset", str(offset)])
         environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
         try:
             report = self.run_catalog_check(command, environment, generation)
             if report is None:
                 return
-            report = self.catalog_report(report, family)
+            report = self.catalog_report(report, family, offset)
         except Exception:
             report = {
                 "schema_version": 1,
@@ -602,12 +659,19 @@ class Desktop:
                 "status": "error",
                 "items": [],
                 "has_more": False,
+                "offset": offset,
+                "next_offset": None,
                 "message": "Models could not be loaded. Check your connection and try again.",
             }
         with self.lock:
             if generation != self.catalog_generation or request_id != self.catalog_request_id:
                 return
-            self.catalog_entries = {item["id"]: dict(item) for item in report["items"]}
+            if self.catalog_active_offset not in (None, offset):
+                return
+            if report["status"] == "ready":
+                self.catalog_next_offset = report["next_offset"] if report["next_offset"] is not None else 0
+            self.catalog_active_offset = None
+            self.catalog_entries.update({item["id"]: dict(item) for item in report["items"]})
             descriptions = [(model["id"], model_display(model)) for model in self.models]
             report = {
                 **report,
@@ -633,7 +697,10 @@ class Desktop:
             if mode not in item["artifact_modes"]:
                 raise DesktopError("Choose an available model version.")
             native_choice = native_source_choice(self.catalog_family_id, item)
-            if self.catalog_family_id == NATIVE_FAMILY_ID and native_choice is None:
+            fixed_native_ids = {native_item["id"] for native_item in native_catalog_items(self.catalog_family_id)}
+            if (
+                self.catalog_family_id == NATIVE_FAMILY_ID or item["id"] in fixed_native_ids
+            ) and native_choice is None:
                 raise DesktopError("Refresh this family before downloading a model.")
             installed = self.catalog_installed_ids(item, mode)
             previous = next((model for model in self.models if model["id"] in installed), None)
@@ -1369,16 +1436,16 @@ class Desktop:
                 raise DesktopError("Enter a model name or a https://huggingface.co/owner/model URL.") from None
             source_key, name, converted = "huggingface:" + source, source.split("/")[-1], False
         elif kind == "native":
-            # Only the server-held, pinned catalogue choice can enter this path.
-            # Generic HF preflight/conversion does not implement GLM GGUF.
-            native_item = native_catalog_item()
+            # Only a server-held, exact pinned choice can enter this path.
+            # These fixed native formats bypass generic conversion.
+            native_item = native_catalog_item(source) if native_choice_allowed(source) else None
             if (
-                source != NATIVE_CHOICE
+                native_item is None
                 or expected_revision != native_item["revision"]
                 or selected_mode != "text"
                 or support_mode not in (None, "text")
             ):
-                raise DesktopError("Choose the pinned GLM text model from the catalogue.")
+                raise DesktopError("Choose a pinned native text model from the catalogue.")
             source_key, name, converted = "huggingface:" + native_item["repo"], native_item["name"], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
@@ -1437,7 +1504,7 @@ class Desktop:
             if not converted:
                 if kind == "native":
                     source_revision = expected_revision
-                    staging = resources.enter_context(native_download_stage(self.data_dir))
+                    staging = resources.enter_context(native_download_stage(self.data_dir, source))
                 else:
                     source_revision = self.check_install_support(
                         epoch,
@@ -1504,7 +1571,7 @@ class Desktop:
                 if guided_recipe is not None and not matches_recipe(output, guided_recipe):
                     raise DesktopError("The downloaded model does not match its checked source. Check models again.")
                 if kind == "native":
-                    pinned = NATIVE_SOURCES[NATIVE_CHOICE]
+                    pinned = NATIVE_SOURCES[source]
                     if prepared_identity(output) != {
                         "repo": pinned["weights_repo"],
                         "revision": pinned["weights_revision"],
@@ -1512,7 +1579,7 @@ class Desktop:
                         "weight_bytes": pinned["weight_bytes"],
                         "quantization": pinned["quantization"],
                     }:
-                        raise DesktopError("The prepared model does not match the pinned GLM catalogue source.")
+                        raise DesktopError("The prepared model does not match the pinned catalogue source.")
                 with self.lock:
                     if epoch != self.epoch:
                         return
@@ -2590,7 +2657,7 @@ class Desktop:
         elif command == "cancel_install":
             self.cancel_install(payload)
         elif command == "catalog":
-            self.start_catalog(payload.get("family_id"), payload.get("request_id"))
+            self.start_catalog(payload.get("family_id"), payload.get("request_id"), payload.get("offset", 0))
         elif command == "catalog_cancel":
             if not self.request_id(payload.get("request_id")):
                 raise DesktopError("Invalid model catalogue request.")

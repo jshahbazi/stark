@@ -82,13 +82,26 @@ The prepared folder can be imported through **Manage Models → Add from Source 
 Local Folder** in an app build containing the new workers. Chat uses the existing
 generation worker. **Manage Models → Model Catalog → GLM-5.3 Flash** also offers
 `glm53-q2` directly, using the same pinned preparation helper. Its one text-only
-entry retains `UD-Q2_K_XL` storage and the four-shard byte total above. The app
-validates the prepared source identity before registering the managed folder;
-loading and execution remain separate checks. Download progress is indeterminate
-until all stored weight bytes are verified. Stop terminates preparation;
-private download staging is retained for retry without registering the model.
-Other native-source downloads use the
-preparation commands above. The family registry also includes the typed Uzu Qwen3.8 text converter.
+entry retains `UD-Q2_K_XL` storage and the four-shard byte total above.
+**Model Catalog → Qwen3.8 Flash Next** offers the pinned `qwen38-mixed` source
+through the same native preparation helper, retaining its original mixed 4/8-bit
+storage and 106,195,031,237-byte weight total. This Pipe artifact selects the
+existing F32 Qwen graph, whose [prefix-reuse disposition](GENERATION.md#prefix-reuse)
+is `fresh-per-request` with `prefix_cache.supported: false`. That family also
+seeds the pinned Lily Q4-XL source through the typed Uzu text converter, with its
+separate artifact-specific reuse qualification.
+
+The app validates each prepared native source identity before registering the
+managed folder; loading and execution remain separate checks. Native download
+progress is indeterminate until all stored weight bytes are verified. Stop
+terminates preparation; private download staging is retained for retry without
+registering the model. Other native-source downloads use the preparation commands
+above. Family discovery checks metadata in successive pages; **Load more models**
+continues beyond the initial results and retains previously offered choices.
+Pages with no new compatible rows are followed automatically until another
+choice appears, discovery ends or a request fails.
+Discovery does not admit additional Qwen3.8 quantization formats to the native
+loader.
 An incomplete prepared folder is rejected before registration. The native
 loader remains responsible for tensor admission.
 

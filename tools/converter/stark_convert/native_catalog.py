@@ -6,14 +6,28 @@ import hashlib
 
 FAMILY_ID = "glm5_next"
 CHOICE = "glm53-q2"
+QWEN_FAMILY_ID = "qwen4_exp"
+QWEN_CHOICE = "qwen38-mixed"
+
+_NATIVE_CHOICES = {
+    FAMILY_ID: (CHOICE,),
+    QWEN_FAMILY_ID: (QWEN_CHOICE,),
+}
 
 
-def _source():
+def source_for(choice: str) -> dict | None:
     # Keep source metadata owned by the preparation path and avoid importing its
     # download dependencies unless this native catalog family is requested.
     from .hybrid_prepare import SOURCES
 
-    return SOURCES[CHOICE]
+    if choice not in {value for choices in _NATIVE_CHOICES.values() for value in choices}:
+        return None
+    return SOURCES[choice]
+
+
+def allowed_choice(choice: str) -> bool:
+    """Return whether a fixed source has a native catalog install path."""
+    return any(choice in choices for choices in _NATIVE_CHOICES.values())
 
 
 def family_definition() -> dict:
@@ -50,15 +64,23 @@ def family_definition() -> dict:
     }
 
 
-def catalog_item() -> dict:
-    """Return the one pinned GLM checkpoint prepared by the native path."""
-    source = _source()
+def catalog_item(choice: str = CHOICE) -> dict:
+    """Return one pinned native checkpoint, defaulting to the legacy GLM item."""
+    source = source_for(choice)
+    if source is None:
+        raise ValueError("unknown native catalog choice")
     repo, revision = source["weights_repo"], source["weights_revision"]
+    if choice == CHOICE:
+        name = "GLM-5.3-Flash-GGUF"
+    elif choice == QWEN_CHOICE:
+        name = "Qwen3.8-Flash-Next-MLX-mixed-4_8bit"
+    else:
+        raise ValueError("unknown native catalog choice")
     return {
         "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
         "repo": repo,
         "revision": revision,
-        "name": "GLM-5.3-Flash-GGUF",
+        "name": name,
         "size_label": None,
         "parameter_count": None,
         "weight_bytes": source["weight_bytes"],
@@ -70,8 +92,13 @@ def catalog_item() -> dict:
     }
 
 
+def catalog_items(family: str) -> list[dict]:
+    """Return the fixed native choices for a family, without generic duplicates."""
+    return [catalog_item(choice) for choice in _NATIVE_CHOICES.get(family, ())]
+
+
 def source_choice(family: str, item: object) -> str | None:
-    """Return the preparation choice only for the exact fixed catalog item."""
-    if family != FAMILY_ID or not isinstance(item, dict):
+    """Return a preparation choice only for an exact fixed catalog item."""
+    if not isinstance(item, dict):
         return None
-    return CHOICE if item == catalog_item() else None
+    return next((choice for choice in _NATIVE_CHOICES.get(family, ()) if item == catalog_item(choice)), None)
