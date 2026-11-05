@@ -417,6 +417,7 @@ struct ModelFamily: Identifiable {
         case "qwen3_5": return "Qwen3.5"
         case "qwen4_exp": return "Qwen3.8 Flash Next"
         case "glm5_next": return "GLM-5.3 Flash"
+        case "ricursive": return "Ripple-65B Preview"
         case "llama": return "Llama"
         case "mistral": return "Mistral"
         case "gemma2": return "Gemma 2"

@@ -626,7 +626,7 @@ extension EngineController {
             guard let payload = try? JSONSerialization.jsonObject(with: Data(backendError.utf8)) as? [String: Any],
                   let registry = payload["registry"] as? [String: Any], let report = payload["report"] as? [String: Any] else { return false }
             engine.apply(["event": "model_families", "report": registry])
-            guard let families = engine.modelFamilies?.families, families.count == 15,
+            guard let families = engine.modelFamilies?.families, families.count == 16,
                   let classifier = families.first(where: { $0.modelKind == "classifier" }),
                   classifier.modes.values.allSatisfy({ $0.status == .unsupported }),
                   let qwen3 = families.first(where: { $0.id == "qwen3" }),
@@ -635,6 +635,9 @@ extension EngineController {
                   let glm = families.first(where: { $0.id == "glm5_next" }),
                   glm.containers == [".gguf"], glm.sourceFormats == ["UD-Q2_K_XL"],
                   glm.hasAppMode(.text), !glm.hasAppMode(.visionLanguage), !glm.hasAppMode(.decision),
+                  let ripple = families.first(where: { $0.id == "ricursive" }),
+                  ripple.displayName == "Ripple-65B Preview", ripple.sourceFormats == ["Q8_0"],
+                  ripple.hasAppMode(.text), !ripple.hasAppMode(.visionLanguage), !ripple.hasAppMode(.decision),
                   families.first(where: { $0.id == "qwen3_5" })?.modes[.visionLanguage]?.status == .conditional else { return false }
             engine.install(source: "fixture/source", kind: "huggingface", artifactMode: "vision-language")
             let requested = command()
@@ -686,7 +689,7 @@ extension EngineController {
             guard let registry = ModelFamilyRegistry(raw),
                   let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
             return rows.map(\.name) == ["Gemma 2", "Gemma 3", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
-                "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.8 Flash Next", "SmolLM3"] &&
+                "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.8 Flash Next", "Ripple-65B Preview", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
             engine.apply(["event": "models", "models": [
@@ -705,6 +708,21 @@ extension EngineController {
             for key in ["family_id", "quantization", "weight_bytes", "source_revision"] { unknown[key] = NSNull() }
             guard let descriptor = InstalledModelDisplay(unknown) else { return false }
             return descriptor.familyID == nil && descriptor.quantization == nil && descriptor.weightBytes == nil && descriptor.sourceRevision == nil
+        case "models-ripple-display-event":
+            var display = modelDisplay("repo:AtomicChat/Ripple-65B-Preview-GGUF")
+            display["group_name"] = "Ripple-65B-Preview-GGUF"
+            display["family_id"] = "ricursive"
+            display["quantization"] = "Q8_0"
+            display["weight_bytes"] = Int64(68_840_113_568)
+            engine.apply(["event": "models", "models": [
+                ["id": "ripple", "name": "Ripple-65B Preview", "path": "/private/ripple", "display": display]
+            ]])
+            guard let model = engine.models.first, model.display?.familyID == "ricursive",
+                  model.display?.quantization == "Q8_0", model.display?.weightBytes == 68_840_113_568 else { return false }
+            let inventory = ModelsInventory(models: engine.models, loadedID: "", registry: nil)
+            return inventory.groups.first?.family == "Ripple-65B Preview" &&
+                inventory.models.first?.detailLabels.first == "Q8_0" &&
+                inventory.models.first?.detailLabels.count == 3 && !engine.supportsImages
         case "models-display-malformed":
             let mutations: [(String, Any)] = [
                 ("schema_version", 2), ("schema_version", true), ("group_id", ""),
@@ -2108,6 +2126,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_model_display_metadata_cannot_change_runtime_capabilities(self):
         self.exercise("models-display-event")
+
+    def test_ripple_inventory_preserves_family_quantization_and_weight_size(self):
+        self.exercise("models-ripple-display-event")
 
     def test_malformed_display_keeps_exact_model_name_without_guessed_badges(self):
         self.exercise("models-display-malformed")
