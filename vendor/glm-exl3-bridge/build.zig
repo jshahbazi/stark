@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 const std = @import("std");
+const native_protocol = @import("src/native_protocol.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .default_target = .{
@@ -19,8 +20,14 @@ pub fn build(b: *std.Build) void {
     const plugin = b.createModule(.{ .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ plugin_dir, "src/root.zig" }) }, .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "mlx_host", .module = host }, .{ .name = "sdk", .module = sdk } } });
     const bridge = b.createModule(.{ .root_source_file = b.path("src/bridge.zig"), .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true, .imports = &.{ .{ .name = "mlx_stream", .module = plugin }, .{ .name = "mlx_host", .module = host }, .{ .name = "sdk", .module = sdk } } });
     const options = b.addOptions();
-    options.addOption(bool, "experimental_prefix", b.option(bool, "experimental-prefix", "Compile model-local prefix support; artifact qualification is separate") orelse false);
-    options.addOption(bool, "private_native_caps", b.option(bool, "private-native-caps", "Advertise native/head-prefix implementation only in a private qualification stage") orelse false);
+    const profile = b.option([]const u8, "profile", "headless-reference or bf16-native-experimental") orelse "headless-reference";
+    const private_caps = b.option(bool, "private-native-caps", "Advertise native/head-prefix implementation only in a private qualification stage") orelse false;
+    const stage_config = native_protocol.stageConfig(profile,
+        b.option(bool, "experimental-prefix", "Compile model-local prefix support; artifact qualification is separate"),
+        private_caps) orelse @panic("invalid GLM profile or conflicting prefix/private capability options");
+    options.addOption(bool, "experimental_prefix", stage_config.prefix);
+    options.addOption(bool, "private_native_caps", private_caps);
+    options.addOption(bool, "bf16_native_profile", stage_config.native_profile);
     bridge.addOptions("bridge_options", options);
     const csrc = b.pathJoin(&.{ plugin_dir, "csrc" });
     bridge.addCSourceFile(.{ .file = b.path("src/mlx_wired.cpp"), .flags = &.{ "-std=c++20", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-Wno-deprecated-copy" } });

@@ -9,6 +9,8 @@ mod cpu;
 
 #[cfg(feature = "glm-exl3")]
 mod glm_exl3;
+#[cfg(feature = "glm-exl3")]
+mod glm_exl3_profile;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod metal;
@@ -19,6 +21,7 @@ fn main() -> anyhow::Result<ExitCode> {
     println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_prefix_available)");
     println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_native_decode_stage)");
     println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_native_decode_available)");
+    println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_bf16_profile)");
 
     if envs::build_always() {
         println!("cargo::rerun-if-changed=/var/empty/hack_nonexistent_file_to_always_rerun");

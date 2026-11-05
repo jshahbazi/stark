@@ -969,3 +969,37 @@ candidate-only launch was blocked before launch by Cargo process 88619. The
 scorer is prediction-only and unmeasured. No source or runtime evidence yet
 shows whether it improves cache selection. The original weighted ranking is
 retained; the private scorer remains disabled.
+
+## Experiment index and retained conclusion
+
+The selected long profile is the strongest completed result for the frozen
+sampled workload: raw 16,384-token input; 1,024 outputs; T1/top-p 0.95/seed 1;
+BF16 head, depth 3, gate 0.5, original target-draw-match acceptance, weighted
+cache retention, P129/D156, 32,768 context, strict admission, and no warmup.
+It produced 922.6615 prefill / 20.3003 decode tok/s and the strict reference
+fingerprint `89c3e863f47bad76` (367 rounds / 889 verified / 657 accepted).
+The external CPU screen failed at 193.606%; clocks were not verified. Retain it
+as a diagnostic working profile, not a production throughput qualification.
+This number is not combined with the 21.384 short greedy result or the 23.668
+native-host observation; their workloads and controls differ.
+
+| Investigation | Outcome and disposition | Aggregate evidence |
+| --- | --- | --- |
+| Qualified Stark baseline | 723.751 prefill / 17.070 decode tok/s; qualification remains governed by the archived run record. | [Qualification record](../archive/runs/2026-11-04-glm-exl3-qualification.md) |
+| Current-source normal host control | 835.678 / 16.632 at MTP off; quiet-host checks passed, but full output/readout parity was unavailable. | [Normal-host control](#same-source-normal-host-control); `053af3675a498f41c4afaba2415a124f60b1dbd390173768d6d918f451240666` |
+| Selected first-request sampled profile | Best completed long sampled run, diagnostic only for the CPU and clock limitations above. | `large-cache-first-request-129-156-v1.json`; `01c6a99aea0a29bdd6c377597896b8fbc4e8fe2362c09541171052bb5bad5a2a` |
+| Numerical/MTP and state investigations | Parity, state and mismatch diagnostics are recorded above; they do not qualify sampled performance. No MTP throughput result cleared the host screen. | Sections [MTP numerical policy](#mtp-numerical-policy-investigation), [longer sampled diagnostic](#longer-sampled-diagnostic), and [worker and quality status](#worker-and-quality-status) |
+| Quality smoke | Both modes scored 22/24; an all-pass claim is false. No quality clearance follows for the retained profile or experimental heads. | `runtime/glm-prefill-throughput-2026-11-03/mtp-quality-smoke-v2/QUALITY-V9C.json` |
+| Residency, read policy and cache-frontier controls | Fixed-row residency effect was under 1% with a failed CPU screen. Higher-row/high-power comparisons failed clock matching; none establishes a causal throughput gain. | Sections [fixed-row residency](#fixed-row-residency-diagnostic), [direct versus staged reads](#direct-versus-staged-expert-reads), [cache frontier](#cache-frontier-with-workload-clock-capture), and [High Power repeat](#operator-enabled-high-power-repeat) |
+| P/Q sampler prototype | No useful speed gain demonstrated; remains private and disabled. | [P/Q sampler check](#private-gpu-pq-sampler-speed-check); `pq-speed-pair-v3.json` and `pq-speed-verify-all-v1.json` |
+| Operator-pinned P190/D217 and P129/D217 | Both were aborted by the retained 112 GiB live memory guard before a measured completion; no output or throughput result. | [Attempt record](#operator-pinned-217-row-attempts); `06318e9601d9139b357128da5142bf66eb68e29390411d1915eec89e90f9f230`, `89dce7ffb5e4318496982c6986e634546318a5ace396d38ad9bb43d4dd824b76` |
+| Q8 draft head | No useful gain shown; BF16 control failed CPU screening, clocks unmatched, Q8 trajectory differed; quality remains unqualified and Q8 stays off. | [Q8 comparison](#private-q8-draft-head-comparison); `b78bf50a0943178f752ab0447ca626809b60892728b4f515eb18fa86c91b260f` |
+| Frequency-first retention | Rejected: 11.89% more matched decode reads/bytes; both arms failed CPU screening. | [Frequency-first comparison](#private-frequency-first-comparison); `6c9613ee8c2a27552a4aeb84c60e667b5c18ea0b9579d0b200fef6a8af064ff2` |
+| Transition-only cache scorer | Built as prediction-only; no candidate inference completed because external Cargo activity blocked launches. No measured verdict; do not enable. | [Prediction status](#transition-only-prediction-status); `30412ab62c2f9c1b4f8f2c0a0fc6f2fd27a278fe0050682c7d1788409eb139fa`, `f51f7d597370475f577e11a3c23a501ff6964c9412638eec7a328fe02dee4832`, `18789832e50b4b5894120e0d998d86af67c099b058a667aaadce504376715c17` |
+| GPU timeline profiler | Source review only; no profile build, capture or run occurred. Route tracing was not enabled. File output without route tracing was not established, and synchronization/fence overhead remains unknown. | Private source review recorded in `runtime/glm-prefill-throughput-2026-11-03/WORK_STATE.md`; no profiler result artifact. |
+
+The detailed sections above preserve the earlier admission, first-request,
+templating, read-policy and hardware investigations. Private runtime artifacts
+and checkpoint notes remain ignored; this tracked index records aggregate
+outcomes and hashes only. No experimental alternative is selected for
+production, and the approximately 1,000/33 target remains unmet.

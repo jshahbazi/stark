@@ -652,6 +652,9 @@ impl GenerationBackend for HybridBackend {
     fn mtp_metadata(&self) -> Option<serde_json::Value> {
         self.last_mtp.clone()
     }
+    fn default_mtp_drafts(&self) -> u32 {
+        self.model.default_mtp_drafts()
+    }
     fn effective_mtp_drafts(
         &self,
         options: &GenerationOptions,

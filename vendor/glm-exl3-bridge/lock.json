@@ -10,7 +10,7 @@
   "zig_version": "0.17.0",
   "zig_sha256": "1c5f706db0ed6d55451940f31dc05a6177d05696bc1fa5d853696d04c718b523",
   "plugin_patch_sha256": "29321d29027526e1371f249263e96b4aa820c019e54292104943bcdf3258942a",
-  "bridge_source_sha256": "34da056a26a8b2ad64737f3dbf048021bfad5cf69a2c26df9e2e57d46761bd7d",
+  "bridge_source_sha256": "85bc8d8986897597d193968083f86652ad5cd7305287a736068f363cea217413",
   "dependency_artifacts": {
     "mlx": "04352e86da9f34479c320168aa5911226ce6d14fe200c3440118244f4442fb91",
     "mlxc": "2ea0b00f39a3e9b69f2b651678565be095c41c1f49268bc5edc94ad19ad5864d",
@@ -24,7 +24,7 @@
     },
     {
       "path": "build.zig",
-      "sha256": "2030b2378d3904dbc3fcf352c69a36d1b5b0b9b96bf38e41e1c7665c62c048eb"
+      "sha256": "54e1b461ae0f92dd6aae563840ee1ff5a9beeeedd8f2c67b45db3f2a254235bb"
     },
     {
       "path": "build.zig.zon",
@@ -32,7 +32,7 @@
     },
     {
       "path": "include/stark_glm.h",
-      "sha256": "2de15d6f232c835ee5c4df60650a6d73c0614dd5d191a3b90332d732eaa52d45"
+      "sha256": "e8c92fffe76521144a66a5fb1858ccec6a76b054d0083e3b3a66e0c4ec7701fa"
     },
     {
       "path": "licenses/mlx-serve-LICENSE",
@@ -68,7 +68,7 @@
     },
     {
       "path": "src/bridge.zig",
-      "sha256": "26347b76dcf00765f19f3c5cdedadad7dd89afc47ed6d340931f7206ee18b39f"
+      "sha256": "fccfe2529c2c969040e0994a3977a7bac5be130682685a72023a7f23969d8e25"
     },
     {
       "path": "src/host/crt.zig",
@@ -108,7 +108,7 @@
     },
     {
       "path": "src/native_protocol.zig",
-      "sha256": "99ea3e5ba8e3328f4e374800444ee35f00abba3e0aeae1aa61621c790a2f8ce3"
+      "sha256": "d838625fe3ead04fb06a1c25c070b51d9bca66acd424d8c774bb2df6075a62e7"
     },
     {
       "path": "tests/abi_smoke.c",
@@ -120,7 +120,7 @@
     },
     {
       "path": "tools/prepare_stage.py",
-      "sha256": "99124af7948853721865e5e3195b77ae15705012d605aa06d3dbea98abd2096e"
+      "sha256": "2cb1645f9e565b65f3e688f17776242d942aec1246e055d1f3cc4ca7a8d9b702"
     }
   ],
   "dependency_headers": [

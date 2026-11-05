@@ -12,9 +12,20 @@ pub const Round = extern struct {
 };
 pub const Policy = struct { temperature: f32, top_p: f32, seed: u64 };
 
-pub fn capabilities(prefix: bool, active_head: bool, native_loader: bool, head_loaded: bool, private_caps: bool) u64 {
+pub const StageConfig = struct { prefix: bool, native_profile: bool };
+
+/// The usable native profile is explicit and experimental. Private candidates
+/// retain their separate validation gate; the reference build stays selectable.
+pub fn stageConfig(profile: []const u8, prefix: ?bool, private_caps: bool) ?StageConfig {
+    const native = std.mem.eql(u8, profile, "bf16-native-experimental");
+    if (!native and !std.mem.eql(u8, profile, "headless-reference")) return null;
+    if (native and (private_caps or (prefix != null and !prefix.?))) return null;
+    return .{ .prefix = prefix orelse native, .native_profile = native };
+}
+
+pub fn capabilities(prefix: bool, active_head: bool, native_loader: bool, head_loaded: bool, native_available: bool) u64 {
     var bits: u64 = if (prefix and !active_head) 7 else 3;
-    if (private_caps and native_loader and head_loaded) {
+    if (native_available and native_loader and head_loaded) {
         bits |= 8;
         if (prefix) bits |= 16;
     }
@@ -51,7 +62,19 @@ test "native protocol fixed C layout" {
     try std.testing.expectEqual(@as(usize, 40), @offsetOf(Round, "position"));
 }
 
-test "native capabilities stay default off and private loaded-head availability survives parking" {
+test "native stage profiles preserve the reference and reject conflicting availability" {
+    const reference = stageConfig("headless-reference", null, false).?;
+    try std.testing.expect(!reference.prefix and !reference.native_profile);
+    try std.testing.expect(stageConfig("headless-reference", true, true) != null);
+    const native = stageConfig("bf16-native-experimental", null, false).?;
+    try std.testing.expect(native.prefix and native.native_profile);
+    try std.testing.expect(stageConfig("bf16-native-experimental", true, false) != null);
+    try std.testing.expect(stageConfig("bf16-native-experimental", false, false) == null);
+    try std.testing.expect(stageConfig("bf16-native-experimental", true, true) == null);
+    try std.testing.expect(stageConfig("unknown", null, false) == null);
+}
+
+test "native capabilities stay default off and explicit loaded-head availability survives parking" {
     try std.testing.expectEqual(@as(u64, 7), capabilities(true, false, true, true, false));
     try std.testing.expectEqual(@as(u64, 3), capabilities(true, true, true, true, false));
     try std.testing.expectEqual(@as(u64, 31), capabilities(true, false, true, true, true));

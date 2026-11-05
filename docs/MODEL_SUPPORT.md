@@ -16,9 +16,15 @@ includes a `qwen4_exp` converter for Lily-format Qwen3.8 text models. It writes
 a self-contained typed `Qwen38LanguageModelConfig` artifact with canonical
 MLX storage and unchanged mixed quantization, sharing the existing specialized
 Qwen kernels. Vision and MTP tensors are omitted from this converter path. The
-ordinary/catalog GLM GGUF path keeps MTP unavailable; the
-private EXL3/FP8 API1 candidate and its qualification status are documented in
-the [backend reference](validation/GLM_EXL3_BACKEND.md). The
+ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
+backend has an unchanged `headless-reference` default and a separately staged
+`--profile bf16-native-experimental` profile that includes the BF16 draft head,
+native MTP, and prefix support. Only that profile defaults to three drafts; requests
+can explicitly disable MTP. Its evidence remains experimental: the worker
+matrix passed 41/41, while the quality smoke passed 22/24 and missed its
+all-pass gate. The 922.7/20.3 tok/s observation failed host screening and had
+unverified clocks, so it does not qualify production throughput. See the
+[backend reference](validation/GLM_EXL3_BACKEND.md) and the
 [Uzu-format study](benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records storage,
 readout and sampled-generation controls for the pinned converted artifact.
 The native loader validates tensors; generic Decision use still requires a

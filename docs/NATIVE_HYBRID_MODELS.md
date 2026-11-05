@@ -143,9 +143,20 @@ GLM implements all trunk layers, including channel convolutions, Kimi Delta
 Attention, compressed MLA, the pooled sparse indexer, mHC Sinkhorn mixing, and
 routed/shared MoE. The GGUF reader validates metadata against the source
 configuration and checks the transformed negative decay coefficients used by
-GGML. The ordinary included GGUF MTP layer is not executed. A separate private
-EXL3/FP8 API1 candidate is documented in the [backend reference](validation/GLM_EXL3_BACKEND.md)
-and is not enabled by the GGUF path.
+GGML. The ordinary included GGUF MTP layer is not executed. The optional
+EXL3/FP8 API1 backend has an unchanged `headless-reference` default. Its
+explicitly selected `--profile bf16-native-experimental` stage includes the
+BF16 draft head, three-draft MTP default, and prefix support. It builds without the
+validation-only `STARK_GLM_EXL3_VALIDATE_NATIVE` flag. This named profile is an
+experimental opt-in, not a default change to the GGUF or other model paths.
+It retains the normal 112 GiB memory ceiling, 2 GiB margin, and automatic
+expert-row admission; observed row counts are host-dependent and are not pins.
+The worker matrix passed 41/41, but the quality smoke passed only 22/24 across
+both modes, so the all-pass gate is unmet. The 922.7/20.3 tok/s observation
+failed the external CPU screen and had unverified clocks. Neither quality nor
+throughput is production-qualified. See the
+[backend reference](validation/GLM_EXL3_BACKEND.md) and the
+[dated comparison](benchmarks/2026-11-04-glm-mlx-stream-comparison.md).
 
 Qwen implements Gated DeltaNet, causal block-sparse QSA, gated residual streams,
 routed and gated shared experts, and the n-gram PLE embedding and convolution.
@@ -242,10 +253,11 @@ Hybrid generation and scoring hold a macOS user-initiated, latency-critical
 process activity through request execution and GPU cleanup, then release it
 between requests. This expresses the request's activity lifetime; it does not
 reserve GPU resources or establish a fixed clock or throughput.
-The generation worker can also load the checkpoint's existing MTP head and
-enable one to three draft tokens per request through `mtp_drafts`. It is off
-by default. The generic `mtp: true` request option chooses the loaded model's
-recommended count; readiness exposes per-model MTP support and limits.
+For Qwen3.8, the generation worker can also load the checkpoint's existing MTP
+head and enable one to three draft tokens per request through `mtp_drafts`.
+It remains off by default. The generic `mtp: true` request option chooses the
+loaded model's recommended count; readiness exposes per-model MTP support and
+limits. The named GLM EXL3 profile's separate default is documented above.
 Draft and target distributions use Stark's complete-logit CPU
 sampler with exact probability-ratio rejection and residual correction;
 quantization is unchanged. Lily batched verification retains ordinary decode arithmetic,
@@ -467,8 +479,9 @@ license boundaries.
 These paths are text-only. They do not execute vision, video, audio or DFlash.
 MTP is available through the native Lily and official mixed-affine generation
 paths described above when the checkpoint contains its trained head. The
-ordinary GLM GGUF path does not execute its MTP layer; the private EXL3/FP8 candidate and its
-qualification status are described in the [backend reference](validation/GLM_EXL3_BACKEND.md).
+ordinary GLM GGUF path does not execute its MTP layer; the explicitly selected
+EXL3/FP8 profile and its qualification status are described in the
+[backend reference](validation/GLM_EXL3_BACKEND.md).
 The workers enforce the loaded model's configured context
 maximum and retain the 4,096-output-token cap; the upstream advertised maximum
 context is not a Stark memory qualification. A weight set fitting within 128 GiB does not establish

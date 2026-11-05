@@ -176,7 +176,7 @@ pub struct LoadOptions {
     /// The native library must advertise snapshot support. Each actual
     /// artifact and precision policy still needs its own qualification.
     pub prefix_reuse: bool,
-    /// Explicit development-stage load. Never selected by the ordinary loader.
+    /// Native decode stage selected by an explicit prepared profile or validation build.
     pub native_decode_stage: bool,
     pub load_mtp_head: bool,
 }
@@ -324,6 +324,14 @@ pub struct GlmExl3Model {
 }
 
 impl GlmExl3Model {
+    /// Only the explicitly prepared retained profile opts requests into MTP.
+    pub fn default_mtp_drafts(&self) -> u32 {
+        if cfg!(stark_glm_exl3_bf16_profile) && self.native_decode_stage && self.head_loaded {
+            3
+        } else {
+            0
+        }
+    }
     pub fn load(
         path: &Path,
         expected_vocab: usize,

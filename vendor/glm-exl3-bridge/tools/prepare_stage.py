@@ -52,7 +52,11 @@ def main() -> None:
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--experimental-prefix", action="store_true")
     p.add_argument("--private-native-caps", action="store_true")
+    p.add_argument("--profile", choices=("headless-reference", "bf16-native-experimental"), default="headless-reference")
     args = p.parse_args()
+    native_profile = args.profile == "bf16-native-experimental"
+    require(not (native_profile and args.private_native_caps), "native profile conflicts with private native capabilities")
+    prefix_enabled = args.experimental_prefix or native_profile
     host, plugin, stage, zig, out = (x.resolve() for x in
         (args.host, args.plugin, args.mlx_stage, args.zig, args.output))
     mlx_source = args.mlx_source.resolve()
@@ -119,13 +123,15 @@ def main() -> None:
         "--cache-dir", str(out / "build-cache"),
         f"-Dhost-dir={host}", f"-Dplugin-dir={copied}", f"-Dmlx-stage={stage}",
         f"-Dsushi-dir={sushi}",
-        f"-Dexperimental-prefix={'true' if args.experimental_prefix else 'false'}",
+        f"-Dprofile={args.profile}",
+        f"-Dexperimental-prefix={'true' if prefix_enabled else 'false'}",
         f"-Dprivate-native-caps={'true' if args.private_native_caps else 'false'}", cwd=ROOT)
     command(str(zig), "build", "-Doptimize=ReleaseFast", "--prefix", str(out),
         "--cache-dir", str(out / "build-cache"),
         f"-Dhost-dir={host}", f"-Dplugin-dir={copied}", f"-Dmlx-stage={stage}",
         f"-Dsushi-dir={sushi}",
-        f"-Dexperimental-prefix={'true' if args.experimental_prefix else 'false'}",
+        f"-Dprofile={args.profile}",
+        f"-Dexperimental-prefix={'true' if prefix_enabled else 'false'}",
         f"-Dprivate-native-caps={'true' if args.private_native_caps else 'false'}", cwd=ROOT)
     artifacts = {"stark_glm": {"path": "lib/libstark_glm.a", "sha256": sha(out / "lib/libstark_glm.a")}}
     for name, filename in dependency_paths.items():
@@ -133,10 +139,14 @@ def main() -> None:
         artifacts[name] = {"path": str(dep), "sha256": sha(dep)}
     for entry in lock["owned_sources"]:
         require(sha(ROOT / entry["path"]) == entry["sha256"], "bridge source changed during build")
+    require(type(prefix_enabled) is bool and
+            prefix_enabled == (args.experimental_prefix or native_profile), "prefix disposition changed during build")
     receipt = {"version": 1, "abi_version": 1, "native_decode_api_version": 1,
         "native_decode_patch_sha256": lock["native_decode_patch_sha256"],
         **{key: lock[key] for key in ("bridge_source_sha256", "host_revision", "plugin_revision", "mlx_revision", "mlxc_revision", "mlxc_patch_sha256", "plugin_patch_sha256", "sushi_revision", "zig_version", "zig_sha256")},
-        "experimental_prefix": args.experimental_prefix, "private_native_caps": args.private_native_caps,
+        "native_profile": args.profile,
+        "experimental_prefix": prefix_enabled, "private_native_caps": args.private_native_caps,
+        "quality_qualified": False, "throughput_qualified": False,
         "mlx_lib_dir": str(stage / "lib"),
         "mlxc_worktree_diff_sha256": lock["mlxc_worktree_diff_sha256"],
         "mlx_worktree_diff_sha256": lock["mlx_worktree_diff_sha256"],

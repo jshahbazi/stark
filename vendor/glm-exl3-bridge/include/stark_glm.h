@@ -33,7 +33,8 @@ enum {
 #define STARK_GLM_CAP_FULL_F32_READOUT UINT64_C(1)
 #define STARK_GLM_CAP_SERIAL_DECODE UINT64_C(2)
 #define STARK_GLM_CAP_PREFIX_SNAPSHOT UINT64_C(4)
-/* Default builds leave these bits clear. An explicit private qualification
+/* Reference builds leave these bits clear. The explicit experimental native
+ * profile or a private qualification
  * stage may expose implementation availability for an admitted head before
  * worker/seeded/quality qualification. This is not production qualification. */
 #define STARK_GLM_CAP_NATIVE_DECODE UINT64_C(8)
@@ -88,7 +89,9 @@ const char *stark_glm_status_name(uint32_t status);
 stark_glm_status stark_glm_load(const uint8_t *path_utf8, size_t path_len,
                                 const stark_glm_load_options *options,
                                 stark_glm_model **out_model);
-/* Separate staged loader. The original loader remains the headless F32
+/* Separate native loader. The bf16-native-experimental stage profile advertises
+ * native/head-prefix implementation availability with quality still experimental.
+ * The original loader remains the headless F32
  * reference. Head preload is fully admitted even while parked for MTP-off.
  * Request MTP defaults off and may change only after load/reset, before prefill.
  * These entrypoints do not imply advertised or numerical qualification.

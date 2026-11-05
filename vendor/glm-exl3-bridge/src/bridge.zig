@@ -7,6 +7,7 @@ const mlx = @import("mlx_host").mlx;
 const Arch = plugin.glm5_next.arch;
 const experimental_prefix = @import("bridge_options").experimental_prefix;
 const private_native_caps = @import("bridge_options").private_native_caps;
+const bf16_native_profile = @import("bridge_options").bf16_native_profile;
 const allocator = std.heap.c_allocator;
 const native_protocol = @import("native_protocol.zig");
 const abi_version: u32 = 1;
@@ -249,6 +250,7 @@ fn loadInto(m: *Model, path: []const u8, options: Options, margin: u64) !void {
     m.config = try Arch.parse(allocator, &peek, &diag);
     errdefer Arch.freeConfig(allocator, m.config);
     const cfg = m.config;
+    if (bf16_native_profile and m.native_loader) cfg.miss_reads = .direct;
     if (cfg.expert_family != .exl3) return error.UnsupportedPack;
     // The original entry remains headless. Preload is charged by the upstream
     // bill even when the staged native loader parks the head for an off request.
@@ -534,7 +536,7 @@ pub export fn stark_glm_get_info(model: ?*Model, info_ptr: ?*Info) u32 {
         // expose the implementation for worker qualification, even while the
         // admitted head is parked before request-mode selection.
         .capabilities = native_protocol.capabilities(experimental_prefix, m.module.mtp != null,
-            m.native_loader, m.native_head_loaded, private_native_caps),
+            m.native_loader, m.native_head_loaded, private_native_caps or bf16_native_profile),
         .fenced = @intFromBool(m.fenced), .reserved = 0 };
     return code(.ok);
 }

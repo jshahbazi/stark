@@ -1,6 +1,6 @@
 # Optional GLM EXL3/FP8 backend
 
-The `glm-exl3` Cargo feature adds a serial macOS arm64 backend for the
+The `glm-exl3` Cargo feature adds an optional macOS arm64 backend for the
 `mlx-stream` GLM-5.3-Flash EXL3 K3/mul1 streaming pack. It uses a pinned MLX
 engine through Stark's C ABI and returns full F32 vocabulary readouts to the
 existing generation worker. The model's FP8/BF16/EXL3 arithmetic is retained.
@@ -12,7 +12,7 @@ manifest contract. It selects this backend before the GGUF loader. Builds
 without the feature report the pack as unsupported. Current admission reserves a
 maximum 32,768-token context, caps the GPU budget at 112 GiB with a 2 GiB margin, and
 chooses expert rows from the native phase bills. Vision is unavailable. The
-ordinary loader keeps the MTP head unloaded and reports MTP unavailable. A separate private
+`headless-reference` stage keeps the MTP head unloaded and reports MTP unavailable. A separate private
 native MTP and head-prefix candidate uses native decode extension API version 1.
 It requires a source-bound stage prepared with `--private-native-caps` and
 explicit `STARK_GLM_EXL3_VALIDATE_NATIVE=1` during the Cargo build. Prefix support
@@ -20,8 +20,38 @@ also requires `--experimental-prefix`. Ordinary stages keep native capability
 bits disabled and retain headless loading. This
 candidate is not a production capability.
 
-The bridge exposes serial steps and full readouts, and the private candidate
-adds a native chosen-token MTP round interface with committed-round semantics
+## Retained BF16 native profile
+
+Prepare a stage with `--profile bf16-native-experimental` using the pinned
+source/dependency command in the [upstream record](../../vendor/glm-exl3-bridge/UPSTREAM.md).
+This explicitly selected profile includes prefix support and the retained BF16
+draft head, depth 3, gate 0.5, native target-draw-match acceptance, original
+transition-weighted expert retention and direct expert reads. Cache rows are
+chosen by strict normal admission; the observed 129/156 counts are not forced.
+
+Build the generation worker against that stage without validation-only flags:
+
+```sh
+STARK_GLM_EXL3_STAGE=/absolute/ignored/bf16-native-stage \
+cargo +1.98.1 build --release --locked -p stark-generate --features glm-exl3
+target/release/stark-generate --model-path /absolute/path/to/glm-exl3-pack --prefix-cache
+```
+
+For this profile, omitted MTP request settings select three drafts. Readiness
+reports `mtp.default_drafts: 3`; `"mtp": false` or `"mtp_drafts": 0` selects
+serial execution for that request. Other model families and the default
+`headless-reference` stage retain their existing opt-in MTP behavior. The public
+profile and `--private-native-caps` are mutually exclusive; private validation
+stages continue to require their explicit validation build flag.
+
+This remains an experimental profile. The earlier worker matrix passed 41/41,
+and the quality smoke passed 22/24 across both modes; the all-pass gate remains
+unmet. The retained 922.7 prefill / 20.3 decode observation failed CPU screening
+and had unverified clocks. Selecting this profile does not qualify production
+quality or throughput. Every new artifact retains separate validation evidence.
+
+The bridge exposes serial steps and full readouts, and its native profiles
+add a chosen-token MTP round interface with committed-round semantics
 and draft-head state in prefix snapshots. The greedy 128-output and sampled
 1,024-output checks match the native policy; the candidate's prefix mechanism
 and invalidations pass. The actual Rust worker passes a 41-case contract matrix.

@@ -429,6 +429,9 @@ pub(crate) trait GenerationBackend {
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
         None
     }
+    fn default_mtp_drafts(&self) -> u32 {
+        0
+    }
     fn mtp_metadata(&self) -> Option<Value> {
         None
     }
@@ -514,6 +517,7 @@ pub(crate) type ProgressCallback<'a> = dyn FnMut(GenerationProgress) -> Result<(
 pub(crate) struct GenerationWorker<B: GenerationBackend> {
     backend: B,
     mtp: Option<MtpCapabilities>,
+    default_mtp_drafts: u32,
     media: Option<MediaStore>,
     prepared: Option<PreparedRequest<B::PreparedImage>>,
     /// `Some(enabled)` when the host requested prefix reuse at startup.
@@ -548,10 +552,12 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         prefix_cache: bool,
     ) -> Result<Self, &'static str> {
         let mtp = backend.mtp_capabilities();
+        let default_drafts = backend.default_mtp_drafts();
         if backend.vocab_size() == 0
             || backend.vocab_size() > u32::MAX as usize
             || backend.max_context_length() == Some(0)
             || !valid_ids(backend.eos_token_ids(), backend.vocab_size())
+            || (default_drafts > 0 && mtp.is_none_or(|caps| default_drafts as usize > caps.max_drafts))
             || mtp.is_some_and(|capabilities| {
                 capabilities.max_drafts == 0
                     || capabilities.max_drafts > u32::MAX as usize
@@ -576,6 +582,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         Ok(Self {
             backend,
             mtp,
+            default_mtp_drafts: default_drafts,
             media,
             prepared: None,
             prefix_cache,
@@ -591,7 +598,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         enabled: Option<bool>,
         drafts: Option<u32>,
     ) -> Result<u32, &'static str> {
-        if self.backend.mtp_capabilities() != self.mtp {
+        if self.backend.mtp_capabilities() != self.mtp || self.backend.default_mtp_drafts() != self.default_mtp_drafts {
             return Err("invalid_generation_output");
         }
         if enabled.is_some() && drafts.is_some() {
@@ -599,7 +606,8 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         }
         let drafts = match (enabled, drafts) {
             (Some(true), None) => self.mtp.ok_or("mtp_not_supported")?.recommended_drafts as u32,
-            (Some(false) | None, None) => 0,
+            (Some(false), None) => 0,
+            (None, None) => self.default_mtp_drafts,
             (None, Some(drafts)) => drafts,
             (Some(_), Some(_)) => unreachable!("conflicting MTP settings rejected"),
         };
@@ -1068,7 +1076,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     }
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
-            "recommended_drafts":capabilities.recommended_drafts,"default_drafts":0,
+            "recommended_drafts":capabilities.recommended_drafts,"default_drafts":worker.default_mtp_drafts,
             "sampling":capabilities.sampling,"verification":capabilities.verification,
             "operations":["generate"]}),
         None => json!({"supported":false,"max_drafts":0,"recommended_drafts":0,
@@ -1198,6 +1206,7 @@ mod tests {
         invalid_tokenization: bool,
         images: bool,
         mtp: Option<MtpCapabilities>,
+        default_mtp_drafts: u32,
         omit_mtp_metadata: bool,
         mtp_reply_override: Option<Value>,
         mtp_requests: Vec<u32>,
@@ -1243,6 +1252,9 @@ mod tests {
         }
         fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
             self.mtp
+        }
+        fn default_mtp_drafts(&self) -> u32 {
+            self.default_mtp_drafts
         }
         fn effective_mtp_drafts(
             &self,
@@ -1481,6 +1493,7 @@ mod tests {
             invalid_tokenization: false,
             images: false,
             mtp: None,
+            default_mtp_drafts: 0,
             omit_mtp_metadata: false,
             mtp_reply_override: None,
             mtp_requests: Vec::new(),
@@ -1546,6 +1559,34 @@ mod tests {
         native.sampling = "native-target-draw-match-v1";
         backend.mtp = Some(native);
         assert!(GenerationWorker::new(backend).is_ok());
+    }
+
+    #[test]
+    fn selected_backend_default_is_resolved_and_can_be_disabled() {
+        let mut backend = worker().backend;
+        backend.mtp = Some(capabilities(3, 3));
+        backend.default_mtp_drafts = 3;
+        let mut worker = GenerationWorker::new(backend).unwrap();
+        let reply = post(&mut worker, standard());
+        assert_eq!(reply["mtp"]["drafts"], 3);
+        assert_eq!(worker.backend.mtp_requests, vec![3]);
+        let mut request = standard();
+        request["mtp"] = json!(false);
+        let reply = post(&mut worker, request);
+        assert_eq!(reply["mtp"]["drafts"], 0);
+        let mut request = standard();
+        request["mtp_drafts"] = json!(0);
+        assert_eq!(post(&mut worker, request)["mtp"]["drafts"], 0);
+    }
+
+    #[test]
+    fn invalid_or_changing_backend_default_is_rejected() {
+        let mut backend = worker().backend;
+        backend.default_mtp_drafts = 3;
+        assert!(GenerationWorker::new(backend).is_err());
+        let mut worker = mtp_worker(3, 3);
+        worker.backend.default_mtp_drafts = 3;
+        assert_eq!(worker.resolve_mtp(None, None), Err("invalid_generation_output"));
     }
 
     #[test]

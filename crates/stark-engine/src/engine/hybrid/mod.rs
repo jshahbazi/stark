@@ -261,8 +261,8 @@ impl Model {
         Self::load_with_policy(path, with_mtp, false)
     }
 
-    /// Explicit source-bound development stage. The ordinary loader keeps its
-    /// current serial EXL3 behavior and does not preload a native MTP head.
+    /// Explicit source-bound native profile or private validation stage. The
+    /// ordinary model loader retains its serial EXL3 reference behavior.
     /// Other model families, and builds without the stage, keep their loader.
     pub fn load_with_native_decode(
         path: &Path,
@@ -278,6 +278,15 @@ impl Model {
             target_arch = "aarch64",
             stark_glm_exl3_native_decode_available
         ))
+    }
+
+    /// A model-specific default established by the explicitly selected stage.
+    pub fn default_mtp_drafts(&self) -> u32 {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &self.forward {
+            return model.default_mtp_drafts();
+        }
+        0
     }
 
     fn load_with_policy(

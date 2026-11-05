@@ -137,11 +137,26 @@ pub fn link(
         Ok("1") => true,
         _ => bail!("STARK_GLM_EXL3_VALIDATE_NATIVE must be 0 or 1"),
     };
-    ensure!(
-        private_native_caps == native_validation && (!private_native_caps || native_api_version == 1),
-        "private GLM native capabilities require an API-1 stage and STARK_GLM_EXL3_VALIDATE_NATIVE=1"
-    );
     let experimental = receipt["experimental_prefix"].as_bool().context("missing GLM bridge prefix disposition")?;
+    let profile_name = receipt
+        .get("native_profile")
+        .map(|value| value.as_str().context("invalid GLM native profile disposition"))
+        .transpose()?;
+    let profile = super::glm_exl3_profile::select(
+        profile_name,
+        private_native_caps,
+        native_validation,
+        native_api_version,
+        experimental,
+    )
+    .map_err(anyhow::Error::msg)?;
+    if profile == super::glm_exl3_profile::NativeProfile::Bf16NativeExperimental {
+        ensure!(
+            receipt["quality_qualified"] == false && receipt["throughput_qualified"] == false,
+            "experimental GLM profile must retain its unqualified disposition"
+        );
+        println!("cargo::rustc-cfg=stark_glm_exl3_bf16_profile");
+    }
     let validation = match env::var("STARK_GLM_EXL3_VALIDATE_PREFIX").as_deref() {
         Err(env::VarError::NotPresent) | Ok("0") => false,
         Ok("1") => true,
@@ -191,7 +206,7 @@ pub fn link(
     if native_api_version == 1 {
         println!("cargo::rustc-cfg=stark_glm_exl3_native_decode_stage");
     }
-    if private_native_caps {
+    if profile != super::glm_exl3_profile::NativeProfile::HeadlessReference {
         println!("cargo::rustc-cfg=stark_glm_exl3_native_decode_available");
     }
     println!("cargo::rustc-link-search=native={}", bridge_dir.context("missing GLM static library")?.display());

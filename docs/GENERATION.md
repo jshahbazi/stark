@@ -259,8 +259,13 @@ worker lifetime; a contradictory backend capability or completion
 acknowledgement fences the worker.
 
 Use `"mtp": true` for the recommendation, `"mtp": false` to disable it, or
-`"mtp_drafts": N` for an explicit supported depth. Omission disables MTP in
-the native protocol. `mtp` requires a boolean and `mtp_drafts` an unsigned
+`"mtp_drafts": N` for an explicit supported depth. If neither selector is
+present, the worker uses the loaded backend's `default_drafts`, reported in
+readiness; this is normally zero. The explicitly staged GLM EXL3
+`bf16-native-experimental` profile sets that default to three. Send
+`"mtp": false` or `"mtp_drafts": 0` to request serial generation for that
+profile. The default `headless-reference` stage and other model families retain
+their existing defaults. `mtp` requires a boolean and `mtp_drafts` an unsigned
 integer; `null` and conflicting selectors are rejected. Completion metadata
 reports the resolved `enabled` state and `drafts` limit,
 `sampling` and `verification`, plus backend counters when available.
