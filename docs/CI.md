@@ -85,6 +85,13 @@ uv run --no-project --python 3.13.13 python -m unittest \
   scripts/test_apple_credentials.py scripts/test_build_dmg.py scripts/test_release_version.py scripts/test_app_update.py
 ```
 
+The native beginner-flow checks use isolated preferences and synthetic model
+identities without a backend or production credentials:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python scripts/test_beginner_setup.py
+```
+
 Rust formatting, dependencies and the workers (Apple silicon with Xcode's Metal tools):
 
 ```sh
