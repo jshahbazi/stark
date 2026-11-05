@@ -104,6 +104,8 @@ def test_ripple_catalog_is_pinned_text_only_and_uses_native_preparation(monkeypa
     assert native_catalog.source_choice("ricursive", {**item, "revision": "f" * 40}) is None
     assert native_catalog.source_choice("glm5_next", item) is None
     assert item["weight_bytes"] == 68_840_113_568
+    assert item["size_label"] == "65B"
+    assert item["parameter_count"] == 64_782_689_360
     assert item["artifact_modes"] == ["text"]
     # Generic conversion must not treat custom HF code as an implementation.
     assert preflight_model({"model_type": "ricursive"}, mode="text")["reasons"] == ["unsupported_architecture"]
