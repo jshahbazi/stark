@@ -860,3 +860,36 @@ sampler workspace.
 
 Post-purge first-request result SHA-256:
 `01c6a99aea0a29bdd6c377597896b8fbc4e8fe2362c09541171052bb5bad5a2a`.
+
+## Operator-pinned 217-row attempts
+
+With approval to bypass the modeled-fit rejection for fixed operator pins,
+the runtime non-file-memory ceiling of 112 GiB and paging guards remained
+active. P190/D217 aborted before model load completed: non-file
+baseline was 31.7228 GB and the observed maximum reached 124,475,326,464 bytes
+(115.927 GiB), above the configured ceiling. The owned process group was
+reaped; pageouts rose by 15 and swapouts did not change.
+
+A first P129/D217 attempt loaded the header but timed out at quiet admission,
+without a measured request. Review found that the private screen had counted an
+installed GUI Stark process as model CPU. The classifier was corrected only
+for the exact GUI process name `Stark`; generation-worker CPU, global CPU,
+GPU and memory/paging guards
+remain. On retry, P129/D217 passed the 10.12-second quiet gate (external CPU
+75.57%, model CPU and GPU zero), then the live memory guard stopped execution:
+the non-file baseline was 31.9499 GB and its maximum observed floor reached
+127,330,680,832 bytes (118.586 GiB), above the retained ceiling. Pageouts rose
+by 8, swapouts were unchanged, and the process group was reaped.
+
+No 217-row attempt reached a measured end or produced an output
+fingerprint, timing or correctness result. The retry only reached measurement
+start before the guard aborted. These observations constrain this host under
+the retained 112 GiB policy; they do not establish that 217 rows are
+physically impossible on a 128 GiB machine. The runtime limits were not raised.
+A subsequent, separate `vm_stat` check after cleanup measured approximately
+31.7 GB of non-file memory; the test process groups were absent.
+
+P190/D217 attempt SHA-256:
+`06318e9601d9139b357128da5142bf66eb68e29390411d1915eec89e90f9f230`.
+P129/D217 retry SHA-256:
+`89dce7ffb5e4318496982c6986e634546318a5ace396d38ad9bb43d4dd824b76`.
