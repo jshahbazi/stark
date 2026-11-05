@@ -85,8 +85,11 @@ generation worker. **Manage Models → Model Catalog → GLM-5.3 Flash** also of
 entry retains `UD-Q2_K_XL` storage and the four-shard byte total above.
 **Model Catalog → Qwen3.8 Flash Next** offers the pinned `qwen38-mixed` source
 through the same native preparation helper, retaining its original mixed 4/8-bit
-storage and 106,195,031,237-byte weight total. That family also seeds the pinned
-Lily Q4-XL source through the typed Uzu text converter.
+storage and 106,195,031,237-byte weight total. This Pipe artifact selects the
+existing F32 Qwen graph, whose [prefix-reuse disposition](GENERATION.md#prefix-reuse)
+is `fresh-per-request` with `prefix_cache.supported: false`. That family also
+seeds the pinned Lily Q4-XL source through the typed Uzu text converter, with its
+separate artifact-specific reuse qualification.
 
 The app validates each prepared native source identity before registering the
 managed folder; loading and execution remain separate checks. Native download

@@ -657,6 +657,56 @@ def test_missing_config_repository_is_an_incompatible_candidate(tmp_path, monkey
     assert report["status"] == "ready" and report["items"] == []
 
 
+@pytest.mark.parametrize(
+    ("filename", "invalid_payload"),
+    [
+        ("config.json", b"{"),
+        ("config.json", b'{"model_type":"qwen3","model_type":"qwen3"}'),
+        ("config.json", b'{"model_type":NaN}'),
+        ("config.json", b"\xff"),
+        ("config.json", b"[" * 1100 + b"0" + b"]" * 1100),
+        ("model.safetensors.index.json", b"{"),
+    ],
+)
+def test_malformed_candidate_metadata_does_not_block_compatible_rows(tmp_path, filename, invalid_payload):
+    hub = Hub()
+    malformed_repo, compatible_repo = "someone/Malformed", "someone/Compatible"
+    config = {"model_type": "qwen3"}
+    names = {"config.json": 128, "model.safetensors": 1234567890}
+    sidecars = {}
+    if filename == "config.json":
+        sidecars[filename] = invalid_payload
+    else:
+        names[filename] = len(invalid_payload)
+        sidecars[filename] = invalid_payload
+    hub.add(tmp_path, malformed_repo, config, names=names, sidecars=sidecars)
+    hub.add(tmp_path, compatible_repo, config)
+    hub.discovered["qwen3"] = [malformed_repo, compatible_repo]
+
+    report = catalog.family_catalog("qwen3", hub=hub)
+
+    assert report["status"] == "ready"
+    assert [item["repo"] for item in report["items"]] == [compatible_repo]
+
+
+def test_full_malformed_page_can_continue_to_later_compatible_candidate(tmp_path):
+    hub = Hub()
+    malformed_repos = [f"someone/Malformed-{index}" for index in range(catalog.MAX_ITEMS)]
+    for repo in malformed_repos:
+        hub.add(tmp_path, repo, {"model_type": "qwen3"}, sidecars={"config.json": b"{"})
+    compatible_repo = "someone/Compatible"
+    hub.add(tmp_path, compatible_repo, {"model_type": "qwen3"})
+    hub.discovered["qwen3"] = [*malformed_repos, compatible_repo]
+
+    first = catalog.family_catalog("qwen3", hub=hub)
+    second = catalog.family_catalog("qwen3", hub=hub, offset=first["next_offset"])
+
+    assert first["status"] == "ready" and first["items"] == []
+    assert first["next_offset"] == catalog.MAX_ITEMS
+    assert second["status"] == "ready"
+    assert [item["repo"] for item in second["items"]] == [compatible_repo]
+
+
 @pytest.mark.parametrize("oversized_file", ["config.json", "model.safetensors.index.json"])
 def test_oversized_candidate_metadata_does_not_block_compatible_rows(tmp_path, oversized_file):
     hub = Hub()

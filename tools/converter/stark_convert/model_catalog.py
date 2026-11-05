@@ -52,7 +52,11 @@ class _Unavailable(Exception):
 
 
 class _Inaccessible(Exception):
-    """A source repo or required metadata entry is permanently unavailable."""
+    """A source repo or metadata payload cannot be admitted to the catalogue."""
+
+
+class _MalformedMetadata(Exception):
+    """A bounded metadata document is invalid and cannot be retried usefully."""
 
 
 def _hub_source_unavailable(error):
@@ -110,11 +114,14 @@ def _unique_object(pairs):
 
 
 def _json(payload):
-    return json.loads(
-        payload,
-        object_pairs_hook=_unique_object,
-        parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
-    )
+    try:
+        return json.loads(
+            payload,
+            object_pairs_hook=_unique_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+    except (ValueError, UnicodeError, RecursionError):
+        raise _MalformedMetadata() from None
 
 
 def _parameters(info, quantized):
@@ -587,6 +594,8 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offse
                     "model_group": _model_group(family, repo, repo.split("/")[-1], quantization, entry),
                 }
             except _Inaccessible:
+                return None
+            except _MalformedMetadata:
                 return None
             except _Unavailable:
                 raise
