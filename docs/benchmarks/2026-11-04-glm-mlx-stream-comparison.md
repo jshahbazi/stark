@@ -16,6 +16,24 @@ identifies the historical cell and its controls. New experiments retain separate
 private source-bound receipts; their results must not retroactively qualify an
 earlier rejected run.
 
+## Retained working profile
+
+The selected baseline for continued work is the completed 16,384-input /
+1,024-output profile at **922.6615 prefill / 20.3003 decode tok/s**. Its recipe
+uses the BF16 draft head, depth 3, gate 0.5, original native draw-match
+acceptance, transition-weighted expert retention and direct reads. Sampling
+is temperature 1 / top-p 0.95 / seed 1, with a 32,768-token context.
+
+The recorded run admitted 129 prompt / 156 decode entries within the existing
+memory ceiling and reserves. Those counts depend on the host baseline; normal
+admission remains in force. This is a diagnostic result with a failed external
+CPU screen and unverified clocks, not a new throughput qualification.
+
+Further acceptance, Q8-head and cache-retention experiments are stopped at the
+user's request. The experimental alternatives and operator-pin overrides remain
+disabled. The prediction-only scorer remains unmeasured; the earlier request
+for an idle benchmark window is superseded by this selection.
+
 ## Configuration and evidence
 
 | Area | Stark qualified baseline | Historical mlx-stream cell / current public host | Performance effect established so far |
