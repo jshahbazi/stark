@@ -58,7 +58,7 @@ struct BeginnerSetupView: View {
             }
             Spacer(minLength: 20)
             VStack(alignment: .leading, spacing: 6) {
-                Label(snapshot.modelGenerating ? "Model working" : snapshot.modelReady ? "Model running" : snapshot.modelStarting ? "Starting model" : "No model running",
+                Label(snapshot.modelGenerating ? "Model working" : snapshot.modelReady ? "Model running" : snapshot.modelStarting ? "Starting model" : !snapshot.runningModelID.isEmpty ? "Model loaded" : "No model running",
                       systemImage: snapshot.modelReady || snapshot.modelGenerating ? "checkmark.circle" : "circle")
                 if !snapshot.runningModelName.isEmpty { Text(snapshot.runningModelName) }
             }.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
