@@ -49,6 +49,8 @@ and the quality smoke passed 22/24 across both modes; the all-pass gate remains
 unmet. The retained 922.7 prefill / 20.3 decode observation failed CPU screening
 and had unverified clocks. Selecting this profile does not qualify production
 quality or throughput. Every new artifact retains separate validation evidence.
+The [retained-profile setup record](../archive/runs/2026-11-05-glm-retained-profile.md)
+binds the named stage and worker to its actual-model defaults and prefix smoke.
 
 The bridge exposes serial steps and full readouts, and its native profiles
 add a chosen-token MTP round interface with committed-round semantics

@@ -152,6 +152,10 @@ pub fn link(
     .map_err(anyhow::Error::msg)?;
     if profile == super::glm_exl3_profile::NativeProfile::Bf16NativeExperimental {
         ensure!(
+            receipt.get("private_native_caps").and_then(serde_json::Value::as_bool) == Some(false),
+            "experimental GLM profile requires an explicit non-private disposition"
+        );
+        ensure!(
             receipt["quality_qualified"] == false && receipt["throughput_qualified"] == false,
             "experimental GLM profile must retain its unqualified disposition"
         );

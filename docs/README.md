@@ -13,7 +13,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Native hybrid models](NATIVE_HYBRID_MODELS.md) | GLM-5.3-Flash GGUF, Qwen3.8-Flash-Next native-source preparation and typed Uzu text artifacts, execution and validation |
 | [Experimental GLM wide prefill](validation/GLM_WIDE_PREFILL.md) | Wider token scheduling, batched controls, register KDA, memory admission and qualification requirements |
 | [Experimental GLM batched matrices](validation/GLM_BATCHED_MATRICES.md) | Dense-wide, grouped expert and MLA matrix batching selectors and qualification requirements |
-| [Optional GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) | Pinned MLX core, explicit native staging, serial worker integration and prefix-state qualification |
+| [Optional GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) | Pinned MLX core, explicit experimental BF16 native profile, worker defaults and source-bound prefix validation |
 | [Native hybrid sampling](NUMERICAL_SAMPLING.md) | Exact nucleus-prefix proof, reference-order fallbacks, precision and scratch lifetime |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
