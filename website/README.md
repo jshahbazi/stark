@@ -24,6 +24,11 @@ Release copy is evergreen. Download and release-note links use GitHub's stable `
   Availability is explicitly tied to a build containing PR #86. The dense 27B
   result remains in the repository's benchmark reports; no performance tab or
   benchmark dataset for this model is added to the website.
+- The Text directory puts Qwen3.8-Flash-Next and dense Qwen3.8-27B first in
+  publisher coding-comparison order, without displaying scores. Other families
+  remain in an explicitly unranked group. The
+  [ordering record](../docs/archive/runs/2026-11-06-website-coding-order.md)
+  pins the primary model-card sources and explains the quantization/family limits.
 
 - The original logo is retained byte-for-byte in `public/assets/stark-engine.jpg`; [brand provenance](https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/docs/brand/README.md) records its source and hash.
 - The social preview card `public/assets/stark-social-card.jpg` (1200 by 630) is rendered from the original logo by `scripts/render_social_card.swift`, which places the unmodified logo in the hero's framed card beside the headline. The Open Graph and Twitter card tags reference it; the original logo remains the favicon and hero image.
