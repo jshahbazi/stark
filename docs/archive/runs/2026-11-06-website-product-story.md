@@ -167,3 +167,9 @@ dynamic recommendations calculate model-specific requirements and may admit
 other models below that memory size. The page's Qwen3.8-27B availability was
 updated after verifying release `v0.16.5` at
 `3462a5098397cbb11c7e9f3a7c9c1cec23df214b`.
+
+The initial publication succeeded as Site version 36. A direct read of
+`https://starkengine.app/` matched the authored HTML apart from a Cloudflare
+JavaScript security-check injection before `</body>`. The privacy copy was
+then narrowed to no site-authored analytics or advertising trackers, with an
+explicit hosting-security-check boundary. No hosting security settings changed.
