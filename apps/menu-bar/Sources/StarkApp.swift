@@ -3278,6 +3278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var connectionWindow: NSWindow?
     private var beginnerWindow: NSWindow?
     private var beginnerChatWindow: NSWindow?
+    private var terminating = false
 
     init(engine: EngineController = EngineController(), interface: StarkInterfacePreferences? = nil) {
         self.engine = engine
@@ -3457,8 +3458,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        guard let closing = notification.object as? NSWindow, closing === modelsWindow else { return }
-        engine.cancelModelCatalog()
+        guard let closing = notification.object as? NSWindow else { return }
+        if closing === modelsWindow { engine.cancelModelCatalog() }
+        if closing === promptWindow, !terminating, !menuPanel.isVisible { toggle() }
     }
 
     private func showPrompt() {
@@ -3473,6 +3475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Include the interface picker above the playground's own minimum.
             promptWindow?.contentMinSize = NSSize(width: 520, height: 770)
             promptWindow?.setContentSize(NSSize(width: 560, height: 800))
+            promptWindow?.delegate = self
         }
         present(promptWindow)
     }
@@ -3562,6 +3565,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        terminating = true
+        return .terminateNow
+    }
     func applicationWillTerminate(_ notification: Notification) {
         updater.stopAutomaticChecks()
         engine.shutdown()
