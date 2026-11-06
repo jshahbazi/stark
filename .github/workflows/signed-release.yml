@@ -228,21 +228,6 @@ jobs:
             "Stark $STARK_RELEASE_VERSION for Apple silicon, macOS 26.4 or newer." \
             '' \
             'Includes terminal chat, the native menu bar app, generation/scoring workers and the converter with private Python runtimes. Native code is Developer ID signed with hardened runtime and secure timestamps. Apple accepted the distribution for notarization; the app ticket is stapled and validated.' \
-            'Download the signed, notarized DMG for drag-and-drop application installation, or use the script below for the application and CLI tools.' \
-            '' \
-            '```sh' \
-            "curl -fL https://github.com/$GH_REPO/releases/latest/download/install.sh -o stark-install.sh" \
-            'sh stark-install.sh' \
-            'export PATH="$HOME/.local/bin:$PATH"' \
-            'stark doctor' \
-            'open "$HOME/Applications/Stark.app"' \
-            '```' \
-            '' \
-            'No Rust, Xcode, uv, or system Python setup is required. Models are separate.' \
-            '' \
-            'Built from the tagged source revision with locked dependencies. Source and signing-recipe revisions, archive hashes, Apple acceptance, and model-free installation checks are recorded in the attached JSON receipts.' \
-            '' \
-            'The app includes its notarization ticket. Standalone command-line executables use online tickets. The installer does not remove quarantine attributes or change Gatekeeper settings.' \
             > "$RUNNER_TEMP/signed-release-notes.md"
           # Create the immutable tag only after signing and verification succeed.
           # The API rejects an existing tag instead of moving it.
