@@ -64,16 +64,11 @@
         <div class="models-heading"><div><p class="eyebrow">MODELS / MEMORY / TOOLS</p><h2 id="models-title">Find your model.<br>Choose your task.</h2></div><p>Start with your Mac and the task you have in mind. Model size, context length and tool support all affect what you can do.</p></div>
         <div class="fit-guide" id="model-fit" aria-labelledby="fit-title">
           <div class="fit-intro"><h3 id="fit-title">What fits on your Mac?</h3><p>Check unified memory in <strong>Apple menu → About This Mac</strong>. Downloads need storage; running a model needs memory too. Longer conversations need more room.</p></div>
-          <div class="memory-guide">
-            <article><h4>Under 16 GiB</h4><p>Beginner checks fit model by model. Its two built-in Qwen3 starters require 16 GiB; other catalog suggestions use their own memory estimates. Check the recommendation before downloading.</p></article>
-            <article><h4>16 GiB and up</h4><p>Start in Beginner. It checks available memory, GPU budget and storage, then suggests a model. Its two built-in Qwen3 starters use a 32K-token context.</p></article>
-            <article><h4>Considering a large model?</h4><p>The mixed 4/8-bit Qwen3.8-Flash-Next benchmark checkpoint alone is about 107 GB. It was measured on a 128 GiB M5 Max. Extra context and runtime memory must also fit.</p></article>
+          <div class="memory-guide" aria-label="Suggested models by unified memory">
+            <article><h4>16 GiB</h4><p>Qwen3 0.6B · BF16<br>Qwen3 4B · 4-bit</p></article>
+            <article><h4>64 GiB</h4><p>Qwen3 14B · BF16</p></article>
+            <article><h4>128 GiB</h4><p>Qwen3.8-Flash-Next · mixed 4/8-bit<br>GLM-5.3-Flash · UD-Q2_K_XL</p></article>
           </div>
-          <div class="starter-models" aria-label="Included guided starter models">
-            <article><span class="capability-badge">Tool-calling format supported</span><h4>Qwen3 0.6B · BF16</h4><p>The smaller guided starter. About 9 GiB estimated runtime memory at the guided 32K context.</p><code>Qwen/Qwen3-0.6B</code></article>
-            <article><span class="capability-badge">Tool-calling format supported</span><h4>Qwen3 4B · 4-bit</h4><p>The larger guided starter. About 11 GiB estimated runtime memory at the guided 32K context.</p><code>mlx-community/Qwen3-4B-4bit</code></article>
-          </div>
-          <p class="capture-note">Planning estimates, not per-Mac performance guarantees. Beginner may suggest other eligible models after checking their metadata. Model files, context, other apps and macOS all need room. <a href="https://github.com/jshahbazi/stark/blob/3462a5098397cbb11c7e9f3a7c9c1cec23df214b/docs/archive/runs/2026-11-05-hardware-model-recommendation-review.md">How the estimates were checked</a>.</p>
         </div>
         <article class="decision-feature" id="featured-decision" aria-labelledby="decision-title">
           <div><p class="eyebrow">LOCAL DECISION MODELS</p><h3 id="decision-title">JevK5, on your Mac.</h3><p>Use a Jev-like decision model in Playground's Decision mode. Stark runs the open-weight <strong>JevK5 4B BF16</strong> model locally.</p></div>
