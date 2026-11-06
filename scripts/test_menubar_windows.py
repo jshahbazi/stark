@@ -67,9 +67,39 @@ extension EngineController {
         selectedID = "window-fixture-other"
         loadedID = selectedID
     }
+
+    func configureAdvancedOptionsFixture(supported: Bool) {
+        configureConnectionFixture(state: "ready", loadedMode: .chat, apiAvailable: false, hasModels: true)
+        contextLimit = 8192; contextCapacityKnown = true; outputLimit = 4096
+        options = ChatOptions.defaults(contextLimit: contextLimit, outputLimit: outputLimit)
+        supportsMTP = supported; mtpEnabled = supported
+    }
 }
 
 extension AppDelegate {
+    static func exerciseAdvancedOptionsLayouts() -> Bool {
+        let suite = "stark.advanced-window-test." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let credentials = APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage())
+        let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults,
+                                      gpuMemoryBudgetBytes: 8_589_934_592)
+        let delegate = AppDelegate(engine: engine)
+        for supported in [false, true] {
+            engine.configureAdvancedOptionsFixture(supported: supported)
+            let window = delegate.window(title: "Advanced Options", view: AdvancedOptionsView(engine: engine), resizable: false)
+            guard let content = window.contentView else { return false }
+            content.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            content.layoutSubtreeIfNeeded()
+            let size = content.fittingSize
+            guard !window.isVisible, size.width >= 500, size.width <= 540,
+                  size.height > 350, size.height < 800 else { return false }
+            window.close()
+        }
+        return true
+    }
+
     static func exerciseWindowLifecycle() -> Bool {
         let application = NSApplication.shared
         let suite = "stark.window-test." + UUID().uuidString
@@ -197,6 +227,7 @@ struct WindowChecks {
         case "lifecycle": exit(AppDelegate.exerciseWindowLifecycle() ? 0 : 1)
         case "connections": exit(AppDelegate.exerciseConnectionLayouts() ? 0 : 1)
         case "beginner-discovery": exit(AppDelegate.exerciseCurrentModelDiscovery() ? 0 : 1)
+        case "advanced-options": exit(AppDelegate.exerciseAdvancedOptionsLayouts() ? 0 : 1)
         default: exit(2)
         }
     }
@@ -333,6 +364,9 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_beginner_snapshot_rejects_cached_discovery_after_model_switch(self):
         self.run_check("beginner-discovery")
+
+    def test_advanced_options_fit_with_and_without_mtp_support(self):
+        self.run_check("advanced-options")
 
 
 if __name__ == "__main__":

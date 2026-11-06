@@ -205,6 +205,14 @@ The readout box below **Manage Models** and at the top of the playground shows i
 
 While a request runs, the time row shows elapsed time against an estimated total, such as `1.3 s of ~8.7 s`, with a progress bar. The estimate is the middle of a range that updates from live token timings and recent successful requests for the same model session and options. A new session first learns its speed and shows elapsed time alone, as does a request that runs past its estimate. Response length and system load can change the estimate. These timings start when the worker begins generation; loading, queueing and prompt preparation are separate. Live values contain counts and timings only, never request or response content. Estimates and calibration counts stay in memory, and replies still appear when generation finishes.
 
+Supported models also show **Multi-token prediction (MTP)** in **Advanced
+Options**. It defaults on and uses the running model's recommended draft count.
+**Apply and New Chat** saves the on/off choice separately for that model across
+stops, model switches and app restarts. Existing models with no saved choice
+default on; a saved off choice stays off. **Restore Defaults** selects MTP on for
+review. Image requests keep MTP off while preserving the text preference.
+Connected apps inherit this setting unless they override `mtp` for a request.
+
 ## Beginner and Advanced setup
 
 The interface picker offers **Beginner** and **Advanced**. On first launch,
@@ -343,7 +351,7 @@ The API offers authenticated health, capability, model listing and chat completi
 
 | Data | Location |
 | --- | --- |
-| Model registry and managed models | `~/Library/Application Support/Stark` (folders registered in place stay where they are) |
+| Model registry, per-model MTP preferences and managed models | `~/Library/Application Support/Stark` (folders registered in place stay where they are) |
 | Local image-check receipts | `~/Library/Application Support/Stark/image-checks`; private identity hashes and boolean results, reused only for an identical runtime |
 | Selected model, playground mode, Beginner/Advanced interface, pending update workspace | `UserDefaults` for `com.starkengine.menubar` (`selectedModel`, `playgroundMode`, `starkInterfaceMode`, `appUpdateWorkspace`) |
 | Conversations, decision results, system prompt and limits | Memory only; cleared on Stop, mode change or quit |

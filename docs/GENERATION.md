@@ -37,7 +37,7 @@ When a backend has no declared finite context maximum, the CLI treats its unsign
 | `--mtp`, `--no-mtp` | off | Enable or disable exact MTP for this terminal session; enabling uses the loaded model's recommended draft count |
 | `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
 
-Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits and thinking through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)). MTP configuration is available through the backend; its UI control is pending.
+Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits, thinking and a supported-model MTP toggle through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)). The app defaults MTP on for supported models and remembers an explicit choice per model; the terminal session defaults off.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
@@ -320,7 +320,8 @@ For the qualified BF16 128-dimensional, 16-key-head/48-value-head MXU geometry,
 a Metal kernel fuses those per-row operations without changing their arithmetic.
 Other supported layouts retain the serial verifier.
 
-The desktop backend remembers an opt-in preference per registered model;
+The desktop backend defaults MTP on for supported models with no saved choice
+and remembers an explicit on/off preference per registered model;
 its API can inherit or override that preference. See
 [the backend configuration contract](LOCAL_API.md#mtp-capabilities-and-per-model-preferences).
 Terminal `--mtp` applies only to that terminal session and does not modify the

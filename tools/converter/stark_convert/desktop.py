@@ -2015,7 +2015,7 @@ class Desktop:
             active = self.active_mode == "chat" and self.worker is not None
             capability = mtp_capabilities({"mtp": getattr(self.worker, "mtp", None)} if active else {})
             model = next((m for m in self.models if m["id"] == self.active_model), None)
-            enabled = bool(capability["supported"] and model and model.get("mtp_enabled") is True)
+            enabled = bool(capability["supported"] and model and model.get("mtp_enabled", True) is True)
             return capability, enabled
 
     def configure_mtp(self, payload):
@@ -2042,20 +2042,23 @@ class Desktop:
                 resolve_mtp(enabled, capability)
             except ValueError:
                 raise DesktopError("MTP is not supported by this model and worker.") from None
-            model = next(m for m in self.models if m["id"] == self.active_model)
-            previous = dict(model)
-            model["mtp_enabled"] = enabled
-            try:
-                self.persist()
-            except (OSError, ValueError, TypeError):
-                model.clear()
-                model.update(previous)
-                raise DesktopError("Cannot save MTP options. Try again.") from None
+            self.save_mtp_preference(enabled)
             self.emit("mtp_configured", model_id=self.active_model, mtp=capability, mtp_enabled=enabled)
+
+    def save_mtp_preference(self, enabled):
+        model = next(m for m in self.models if m["id"] == self.active_model)
+        previous = dict(model)
+        model["mtp_enabled"] = enabled
+        try:
+            self.persist()
+        except (OSError, ValueError, TypeError):
+            model.clear()
+            model.update(previous)
+            raise DesktopError("Cannot save MTP options. Try again.") from None
 
     def configure(self, payload):
         with self.lock:
-            if self.job is not None:
+            if self.job is not None or self.api_queue:
                 raise DesktopError("Wait for the current operation or choose Stop.")
             if self.worker is None:
                 raise DesktopError("Run a model before changing advanced options.")
@@ -2063,8 +2066,10 @@ class Desktop:
                 raise DesktopError("Advanced chat options are available in Chat mode.")
             context, maximum = payload.get("context_tokens"), payload.get("max_new_tokens")
             system, thinking = payload.get("system_prompt"), payload.get("thinking")
+            fields = {"command", "context_tokens", "max_new_tokens", "system_prompt", "thinking"}
+            has_mtp = "mtp_enabled" in payload or "model_id" in payload
             if (
-                set(payload) != {"command", "context_tokens", "max_new_tokens", "system_prompt", "thinking"}
+                set(payload) != fields | ({"model_id", "mtp_enabled"} if has_mtp else set())
                 or type(context) is not int
                 or not 2 <= context <= self.context_limit
                 or type(maximum) is not int
@@ -2073,11 +2078,18 @@ class Desktop:
                 or type(thinking) is not bool
             ):
                 raise DesktopError("Invalid advanced options. Check the model's token limits.")
+            if has_mtp:
+                if payload["model_id"] != self.active_model:
+                    raise DesktopError("Model changed. Refresh its MTP options.")
+                capability, _ = self.mtp_settings()
+                if type(payload["mtp_enabled"]) is not bool or not capability["supported"]:
+                    raise DesktopError("MTP is not supported by this model and worker.")
+                self.save_mtp_preference(payload["mtp_enabled"])
             self.context, self.maximum = context, maximum
             self.context_override = None if context == self.context_limit else context
             self.system_prompt, self.thinking = system, thinking
             self.reset()
-            self.emit("configured", **self.settings_summary())
+            self.emit("configured", model_id=self.active_model, **self.settings_summary())
 
     def reset(self):
         with self.lock:
