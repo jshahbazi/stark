@@ -1485,7 +1485,7 @@ final class EngineController: ObservableObject {
             state = "ready"
             message = "Ready"
         case "configured":
-            guard state == "configuring", let configured = pendingOptions,
+            guard let configured = pendingOptions,
                   pendingOptionsModelID == loadedID, loadedMode == .chat, mode == .chat,
                   event["model_id"] == nil || event["model_id"] as? String == loadedID else { return }
             options = configured
@@ -1494,8 +1494,8 @@ final class EngineController: ObservableObject {
             applyLimits(event)
             applyImageCapabilities(event)
             applyMTPCapabilities(event)
+            clearConversation()
             if state == "configuring" {
-                clearConversation()
                 state = "ready"
                 message = "Ready"
             }

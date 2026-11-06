@@ -612,8 +612,13 @@ extension EngineController {
             engine.apply(configured)
             guard engine.state == "configuring", engine.mtpEnabled else { return false }
             configured["model_id"] = "fixture-model"
+            // An API operation can finish before its buffered statuses reach
+            // the UI, while the backend accepts the configure command afterward.
+            engine.messages = [ChatMessage(text: "synthetic previous turn", isUser: true)]
+            engine.apply(["event": "status", "state": "generating", "message": "Generating for an app…"])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             engine.apply(configured)
-            guard engine.supportsMTP, !engine.mtpEnabled, engine.modelReady else { return false }
+            guard engine.supportsMTP, !engine.mtpEnabled, engine.modelReady, engine.messages.isEmpty else { return false }
             guard engine.configure(options, mtpEnabled: true, modelID: "fixture-model") else { return false }
             _ = command()
             engine.stop()
