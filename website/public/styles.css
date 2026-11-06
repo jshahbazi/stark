@@ -2002,7 +2002,7 @@ code {
 }
 .privacy-section {
   border-top:1px solid var(--line);
-  background:#eaece2
+  background:var(--paper)
 }
 .privacy-grid {
   display:grid;
