@@ -7,6 +7,10 @@ and qualifies new artifacts separately. The checkpoint remains
 128 GiB unified memory, macOS 26.7.2. Generator builds use Rust 1.98.1 with
 locked dependencies. Tests use the pinned nightly toolchain.
 
+The [approach and decision ledger](2026-11-06-qwen38-27b-approaches.md)
+records the retained changes, unsuccessful candidates, numerical repairs and
+investigated-only ideas across both stages of this work.
+
 ## Packing-only result
 
 The first sealed packing worker measured **48.957 versus 45.250 useful decode
