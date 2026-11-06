@@ -137,7 +137,7 @@ private:
     } else if constexpr (!BOUNDED && SLICE_BYTES == 2 * QuantChunk<BITS>::WORD_BYTES) {
       const uint2 packed = *reinterpret_cast<const device uint2*>(source);
       words[0] = uint4(packed[0], packed[1], 0u, 0u);
-    } else if constexpr (!BOUNDED) {
+    } else if constexpr (!BOUNDED && SLICE_BYTES % QuantChunk<BITS>::VECTOR_BYTES == 0) {
       static_assert(SLICE_BYTES % QuantChunk<BITS>::VECTOR_BYTES == 0, "large slices contain complete uint4 words");
       const device uint4* packed = reinterpret_cast<const device uint4*>(source);
       METAL_PRAGMA_UNROLL

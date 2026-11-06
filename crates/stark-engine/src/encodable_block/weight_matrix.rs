@@ -1,6 +1,8 @@
 use derive_more::Debug;
 use thiserror::Error;
 
+mod coarse;
+
 use crate::{
     backends::common::{
         Backend, BufferCpuAccessible, BufferMut,
@@ -57,6 +59,8 @@ pub fn parse_spec<B: Backend>(spec: &AnyWeightMatrixSpec) -> Result<ParsedWeight
         Some((bits, group_size, method)) => {
             let mode = match bits {
                 4 => QuantizationMode::U4,
+                5 if method == QuantizationMethod::ScaleBias => QuantizationMode::U5,
+                6 if method == QuantizationMethod::ScaleBias => QuantizationMode::U6,
                 8 => QuantizationMode::U8,
                 _ => {
                     return Err(WeightMatrixError::UnsupportedConfiguration(format!(
@@ -66,6 +70,13 @@ pub fn parse_spec<B: Backend>(spec: &AnyWeightMatrixSpec) -> Result<ParsedWeight
             };
             if group_size == 0 {
                 return Err(WeightMatrixError::UnsupportedConfiguration("group size must be non-zero".into()));
+            }
+            if matches!(mode, QuantizationMode::U5 | QuantizationMode::U6)
+                && (group_size != 64 || layout != Layout::OutputInput)
+            {
+                return Err(WeightMatrixError::UnsupportedConfiguration(
+                    "packed five/six-bit affine matrices require group64 and output-input layout".into(),
+                ));
             }
             Some(QuantizationInfo {
                 mode,
@@ -127,17 +138,33 @@ impl<B: Backend> WeightMatrix<B> {
         };
 
         let group_size = info.group_size;
-        let packing_divisor = info.mode.packing_divisor();
+        if matches!(info.mode, QuantizationMode::U5 | QuantizationMode::U6)
+            && (layout != Layout::OutputInput
+                || group_size != 64
+                || !columns.is_multiple_of(group_size)
+                || data_type != DataType::BF16)
+        {
+            return Err(WeightMatrixError::UnsupportedConfiguration(
+                "packed five/six-bit affine matrices require output-input layout, complete group-64 rows and BF16 coefficients".into(),
+            ));
+        }
         let storage_data_type = info.mode.storage_type();
-        if !columns.is_multiple_of(packing_divisor) {
+        if !columns.is_multiple_of(if info.mode == QuantizationMode::U4 {
+            2
+        } else {
+            1
+        }) {
             return Err(WeightMatrixError::UnsupportedConfiguration(format!(
-                "stored columns {columns} are not divisible by packing divisor {packing_divisor}"
+                "stored columns {columns} do not contain complete packed bytes"
             )));
         }
         let groups = columns.div_ceil(group_size);
 
-        let values =
-            tree.leaf("weights")?.validate(&[rows, columns / packing_divisor], storage_data_type)?.read_buffer()?;
+        let row_bytes = info
+            .mode
+            .packed_row_bytes(columns)
+            .ok_or_else(|| WeightMatrixError::UnsupportedConfiguration("packed row size overflow".into()))?;
+        let values = tree.leaf("weights")?.validate(&[rows, row_bytes], storage_data_type)?.read_buffer()?;
         let params = QuantParams::new(params_layout, rows, groups);
         let load_plane =
             |name: &str, shape: [u32; 2], storage_type: DataType| -> Result<B::GlobalBuffer, WeightMatrixError<B>> {
@@ -216,7 +243,11 @@ impl<B: Backend> WeightMatrix<B> {
     }
 
     pub fn a8_signed_codes(&self) -> Option<bool> {
-        self.quantized.as_ref().map(|quantized| quantized.info.mode != QuantizationMode::U4)
+        self.quantized.as_ref().and_then(|quantized| match quantized.info.mode {
+            QuantizationMode::U4 => Some(false),
+            QuantizationMode::I8 | QuantizationMode::U8 => Some(true),
+            QuantizationMode::U3 | QuantizationMode::U5 | QuantizationMode::U6 => None,
+        })
     }
 }
 
@@ -225,6 +256,9 @@ impl<B: Backend> Quantized<B> {
         &mut self,
         values: impl BufferMut<Buffer: BufferCpuAccessible>,
     ) -> bool {
+        if matches!(self.info.mode, QuantizationMode::U3 | QuantizationMode::U5 | QuantizationMode::U6) {
+            return false;
+        }
         if self.params.layout() != QuantParamsLayout::GroupOutput {
             return false;
         }
@@ -251,5 +285,54 @@ fn physical_shape(
     match layout {
         Layout::OutputInput => (output_dim, input_dim),
         Layout::InputOutput => (input_dim, output_dim),
+    }
+}
+
+#[cfg(all(test, feature = "cpu"))]
+mod packed_affine_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+    use crate::backends::cpu::Cpu;
+
+    #[stark_test]
+    fn packed_affine_spec_admission_is_narrow() {
+        for bits in [5, 6] {
+            let valid =
+                serde_json::json!({"type": "MLXSpec", "bits": bits, "group_size": 64, "layout": "output_input"});
+            let spec = serde_json::from_value::<AnyWeightMatrixSpec>(valid.clone()).unwrap();
+            let parsed = parse_spec::<Cpu>(&spec).unwrap();
+            let info = parsed.quantization.unwrap();
+            assert_eq!(info.mode.bits(), bits);
+            assert_eq!(info.mode.packed_row_bytes(5120), Some(5120 * bits / 8));
+            assert_eq!(info.mode.storage_type(), DataType::U8);
+            assert_eq!(info.mode.packed_row_bytes(u32::MAX), None);
+            for (field, value) in [("group_size", serde_json::json!(32)), ("layout", serde_json::json!("input_output"))]
+            {
+                let mut invalid = valid.clone();
+                invalid[field] = value;
+                let spec = serde_json::from_value::<AnyWeightMatrixSpec>(invalid).unwrap();
+                assert!(parse_spec::<Cpu>(&spec).is_err());
+            }
+            let mut invalid = valid;
+            invalid["type"] = serde_json::json!("IntSpec");
+            invalid["is_symmetric"] = serde_json::json!(true);
+            let spec = serde_json::from_value::<AnyWeightMatrixSpec>(invalid).unwrap();
+            assert!(parse_spec::<Cpu>(&spec).is_err());
+        }
+    }
+
+    #[stark_test]
+    fn internal_three_bit_storage_is_not_a_source_spec() {
+        for ty in ["MLXSpec", "IntSpec"] {
+            let mut encoded = serde_json::json!({
+                "type": ty, "bits": 3, "group_size": 64, "layout": "output_input"
+            });
+            if ty == "IntSpec" {
+                encoded["is_symmetric"] = serde_json::json!(true);
+            }
+            let spec = serde_json::from_value::<AnyWeightMatrixSpec>(encoded).unwrap();
+            assert!(parse_spec::<Cpu>(&spec).is_err());
+        }
     }
 }

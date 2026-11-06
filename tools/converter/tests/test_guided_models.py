@@ -101,6 +101,53 @@ def artifact(path, recipe, *, dtype="BF16", parameter_dtype="BF16", native_loadi
     return path
 
 
+def partitioned_artifact(path):
+    weights = path / "model.safetensors"
+    raw = weights.read_bytes()
+    header_length = struct.unpack("<Q", raw[:8])[0]
+    header = json.loads(raw[8 : 8 + header_length])
+    metadata = {}
+    parent = "decoder.embedding.embedding"
+    header = {}
+    offset = 0
+    for index, (rows, bits) in enumerate(((2, 4), (2, 6))):
+        base = f"{parent}.segment_{index}"
+        code_bytes = 64 * bits // 8
+        header[base + ".weights"] = {
+            "dtype": "U8",
+            "shape": [rows, code_bytes],
+            "data_offsets": [offset, offset + rows * code_bytes],
+        }
+        offset += rows * code_bytes
+        for plane in ("scales", "biases"):
+            header[base + "." + plane] = {"dtype": "BF16", "shape": [1, 4], "data_offsets": [offset, offset + 8]}
+            offset += 8
+    metadata[parent + ".spec"] = json.dumps(
+        {
+            "type": "MLXRowPartitionedSpec",
+            "layout": "output_input",
+            "segments": [
+                {"rows": 2, "bits": 4, "group_size": 64},
+                {"rows": 2, "bits": 6, "group_size": 64},
+            ],
+        }
+    )
+    header["decoder.transformer.output_norm.scales"] = {
+        "dtype": "F32",
+        "shape": [2],
+        "data_offsets": [offset, offset + 8],
+    }
+    offset += 8
+    header["__metadata__"] = metadata
+    encoded = json.dumps(header).encode()
+    weights.write_bytes(struct.pack("<Q", len(encoded)) + encoded + b"\0" * offset)
+    receipt_path = path / "conversion.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["output_bytes"] = weights.stat().st_size
+    receipt_path.write_text(json.dumps(receipt))
+    return path
+
+
 class ExistingWorker:
     closed = False
 
@@ -732,6 +779,12 @@ def test_quantized_recipe_requires_bf16_parameters_and_allows_f32_normalization(
     incompatible = artifact(tmp_path / "incompatible", recipe, parameter_dtype=parameter_dtype)
     assert guided.matches_recipe(native, recipe)
     assert not guided.matches_recipe(incompatible, recipe)
+
+
+def test_guided_precision_accepts_row_partitioned_integer_weights(tmp_path):
+    recipe = replace(guided.RECIPES[0], quantization="4-bit / 6-bit")
+    path = partitioned_artifact(artifact(tmp_path / "partitioned", guided.RECIPES[0]))
+    assert guided.matches_recipe(path, recipe)
 
 
 @pytest.mark.parametrize(

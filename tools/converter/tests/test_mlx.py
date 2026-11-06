@@ -11,7 +11,10 @@ import pytest
 from test_streaming import save_tensors, tensor_bytes
 
 from stark_convert.compressed import (
+    MLXQuantization,
     parse_mlx_quantization,
+    plan_mlx_matrix,
+    read_mlx_matrix,
     validate_mlx_operation,
 )
 from stark_convert.qwen3 import build_qwen3_plan
@@ -222,6 +225,8 @@ def test_mlx_tied_head_may_be_absent(tmp_path):
     "quantization,error",
     [
         ({"bits": 1, "group_size": 32}, UnsupportedConversion),
+        ({"bits": 5, "group_size": 64}, UnsupportedConversion),
+        ({"bits": 6, "group_size": 64}, UnsupportedConversion),
         ({"bits": 4, "group_size": 8}, UnsupportedConversion),
         ({"bits": 4, "group_size": -1}, UnsupportedConversion),
         ({"bits": True, "group_size": 32}, ConversionError),
@@ -252,6 +257,102 @@ def test_mlx_duplicate_config_fields_compare_canonical_semantics():
         parse_mlx_quantization(
             {"quantization": {"bits": 4, "group_size": 32}, "quantization_config": {"bits": 8, "group_size": 32}}
         )
+
+
+def test_mlx_per_module_precision_requires_explicit_opt_in_and_exact_resolution():
+    description = {
+        "bits": 4,
+        "group_size": 64,
+        "language_model.model.layers.0.mlp.down_proj": {"bits": 5, "group_size": 64},
+        "language_model.model.embed_tokens": {"bits": 6, "group_size": 64, "mode": "affine"},
+        "language_model.mtp.projection": {"bits": 8, "group_size": 32},
+        "language_model.model.norm": False,
+    }
+    with pytest.raises(UnsupportedConversion):
+        parse_mlx_quantization({"quantization": description})
+    quant = parse_mlx_quantization({"quantization": description}, allow_mixed=True)
+    assert quant.for_module("language_model.model.layers.0.mlp.down_proj") == MLXQuantization(5, 64)
+    assert quant.for_module("language_model.model.embed_tokens") == MLXQuantization(6, 64)
+    assert quant.for_module("language_model.mtp.projection") == MLXQuantization(8, 32)
+    assert quant.for_module("language_model.model.norm") is None
+    assert quant.for_module("language_model.model.norm.child") == MLXQuantization(4, 64)
+    assert quant.for_module("language_model.model.layers.0.mlp.gate_proj") == MLXQuantization(4, 64)
+    equivalent = dict(reversed(list(description.items())))
+    equivalent["mode"] = "affine"
+    equivalent["quant_method"] = "mlx"
+    assert (
+        parse_mlx_quantization({"quantization": description, "quantization_config": equivalent}, allow_mixed=True)
+        == quant
+    )
+    equivalent["language_model.model.embed_tokens"] = {"bits": 8, "group_size": 64}
+    with pytest.raises(ConversionError, match="disagree"):
+        parse_mlx_quantization({"quantization": description, "quantization_config": equivalent}, allow_mixed=True)
+    with pytest.raises(ConversionError, match="Resolve"):
+        read_mlx_matrix({}, "language_model.model.embed_tokens.weight", (3, 64), quant)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        True,
+        5,
+        {"bits": 5},
+        {"bits": 5, "group_size": 64, "mode": "mxfp4"},
+        {"bits": 5, "group_size": 64, "extra": 1},
+        {"bits": True, "group_size": 64},
+    ],
+)
+def test_mlx_malformed_per_module_precision_is_rejected(override):
+    with pytest.raises((ConversionError, UnsupportedConversion)):
+        parse_mlx_quantization(
+            {"quantization": {"bits": 4, "group_size": 64, "model.proj": override}}, allow_mixed=True
+        )
+
+
+@pytest.mark.parametrize("bits", [5, 6])
+def test_mlx_non_power_of_two_packing_preserves_every_source_bit(tmp_path, bits):
+    # MLX packs 5-bit values across 5-byte groups (8 values) and 6-bit
+    # values across 3-byte groups (4 values). These groups cross U32 boundaries.
+    # Construct a scalar little-endian bitstream, independent of word arithmetic.
+    rows, columns = 3, 128
+    payload = bytearray()
+    for row in range(rows):
+        word = sum(((index + row * 17) % (1 << bits)) << (index * bits) for index in range(columns))
+        payload.extend(word.to_bytes(columns * bits // 8, "little"))
+    tensors = {
+        "matrix.weight": ("U32", np.frombuffer(payload, dtype="<u4").reshape(rows, columns * bits // 32)),
+        "matrix.scales": ("F32", np.ones((rows, 2), dtype="<f4")),
+        "matrix.biases": ("F32", np.zeros((rows, 2), dtype="<f4")),
+    }
+    save_tensors(tmp_path / "source.safetensors", tensors)
+    infos = read_safetensors_header(tmp_path / "source.safetensors")[1]
+    quant = MLXQuantization(bits, 64)
+    matrix = read_mlx_matrix(infos, "matrix.weight", (rows, columns), quant)
+    operations = plan_mlx_matrix(
+        "out", (matrix,), dtype="F32", layout="input_output", quantization=MLXQuantization(8, 64)
+    )
+    plan = ConversionPlan(
+        {}, operations, {}, sum(info.nbytes for info in infos.values()), len(infos), tuple(infos.values())
+    )
+    stats = write_plan(plan, tmp_path / "out.safetensors", chunk_bytes=64)
+    converted = read_safetensors_header(tmp_path / "out.safetensors")[1]
+    assert stats["peak_buffer_bytes"] <= 64
+    expected = bytes((index + row * 17) % (1 << bits) for row in range(rows) for index in range(columns))
+    assert tensor_bytes(converted["out.weights"]) == expected
+    assert tensor_bytes(converted["out.scales"]) == tensors["matrix.scales"][1].tobytes()
+    with pytest.raises(ConversionError, match="representations disagree"):
+        plan_mlx_matrix("out", (matrix,), dtype="F32", layout="input_output", quantization=MLXQuantization(8, 32))
+    packed_ops = plan_mlx_matrix("out", (matrix,), dtype="F32", layout="input_output", quantization=quant)
+    packed_plan = ConversionPlan(
+        {}, packed_ops, {}, sum(info.nbytes for info in infos.values()), len(infos), tuple(infos.values())
+    )
+    write_plan(packed_plan, tmp_path / "packed.safetensors", chunk_bytes=64)
+    packed = read_safetensors_header(tmp_path / "packed.safetensors")[1]
+    assert tensor_bytes(packed["out.weights"]) == payload
+    # A 16-column row at 5 bits has 80 bits, not a complete U32 array.
+    if bits == 5:
+        with pytest.raises(ConversionError, match="packing"):
+            read_mlx_matrix(infos, "matrix.weight", (rows, 16), MLXQuantization(5, 16))
 
 
 @pytest.mark.parametrize(

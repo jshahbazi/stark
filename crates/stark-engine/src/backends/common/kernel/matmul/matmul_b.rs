@@ -1,10 +1,7 @@
 use super::{QuantParams, QuantParamsLayout};
-use crate::{
-    backends::common::{
-        BufferRef,
-        gpu_types::{QuantizationMode, gemm::GemmBPrologueKind},
-    },
-    data_type::DataType,
+use crate::backends::common::{
+    BufferRef,
+    gpu_types::{QuantizationMode, gemm::GemmBPrologueKind},
 };
 
 pub enum MatmulB<TB: BufferRef> {
@@ -57,7 +54,7 @@ impl<T> QuantizedCorrection<T> {
 
 impl<TB: BufferRef> QuantizedB<TB> {
     pub fn bits(&self) -> u32 {
-        DataType::from(self.mode).size_in_bits() as u32
+        self.mode.bits()
     }
 
     pub fn prologue(&self) -> GemmBPrologueKind {
@@ -77,7 +74,11 @@ impl<TB: BufferRef> QuantizedB<TB> {
     }
 
     pub fn zero_point_strides(&self) -> super::QuantParamsStrides {
-        self.params.zero_point_strides(self.mode)
+        if self.zero_points().is_some() {
+            self.params.zero_point_strides(self.mode)
+        } else {
+            super::QuantParamsStrides::default()
+        }
     }
 }
 

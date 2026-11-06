@@ -441,7 +441,7 @@ def _planning_metadata(family, config, info, names, sizes, *, chat_template=None
     }
 
 
-def _quantization(config, info, entry):
+def _quantization(config, info, entry, family=None):
     if (
         config.get("model_type") == "qwen4_exp"
         and isinstance(config.get("lily"), dict)
@@ -462,7 +462,7 @@ def _quantization(config, info, entry):
         from .compressed import parse_mlx_quantization
 
         try:
-            quantization = parse_mlx_quantization(merged)
+            quantization = parse_mlx_quantization(merged, allow_mixed=family == "qwen3_5")
         except Exception:
             return None
         if quantization is None:
@@ -472,6 +472,13 @@ def _quantization(config, info, entry):
             not isinstance(packing, dict) or packing.get("scheme") != "mlx_affine" or packing.get("bits") != bits
         ):
             return None
+        widths = {bits}
+        if family == "qwen3_5":
+            widths.update(override.bits for _, override in quantization.overrides if override is not None)
+        if packing is not None and not widths <= set(packing.get("mixed_bits", [bits])):
+            return None
+        if len(widths) > 1:
+            return f"{'/'.join(str(width) for width in sorted(widths))}-bit"
         return f"{bits}-bit"
     if packing is not None:
         if isinstance(packing, dict) and packing.get("scheme") == "mlx_affine" and packing.get("bits") in {4, 8}:
@@ -742,7 +749,7 @@ def family_catalog(
                 verdict = preflight_model(config, mode="text", expected_architecture=family)
                 if verdict["status"] != "conditional":
                     return None
-                quantization = _quantization(config, info, entry)
+                quantization = _quantization(config, info, entry, family=family)
                 if quantization is None:
                     return None
                 selected = _selected_weights(names, lambda filename, maximum: read(repo, filename, revision, maximum))

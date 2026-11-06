@@ -20,6 +20,98 @@ MAX_HEADER_BYTES = 1024 * 1024
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\Z")
 _FLOATS = {"BF16": "BF16", "F16": "FP16", "F32": "FP32"}
+_QUANT_BITS = {2, 3, 4, 5, 6, 8}
+_MAX_ROW_SEGMENTS = 128
+
+
+def _quantized_tensor(header, name, size, *, expected_rows=None):
+    """Validate one quantized matrix plane from header metadata only."""
+    tensor = header.get(name)
+    if not isinstance(tensor, dict):
+        raise ValueError()
+    dtype, shape, offsets = tensor.get("dtype"), tensor.get("shape"), tensor.get("data_offsets")
+    if (
+        dtype not in {"U8", "I8", "U32", "I32"}
+        or not isinstance(shape, list)
+        or not 1 <= len(shape) <= 8
+        or any(type(value) is not int or not 0 < value <= 2**32 - 1 for value in shape)
+        or expected_rows is not None
+        and (len(shape) != 2 or shape[0] != expected_rows)
+        or not isinstance(offsets, list)
+        or len(offsets) != 2
+        or any(type(value) is not int for value in offsets)
+        or not 0 <= offsets[0] < offsets[1] <= size
+        or math.prod(shape) * (4 if dtype in {"U32", "I32"} else 1) != offsets[1] - offsets[0]
+    ):
+        raise ValueError()
+    return dtype, shape
+
+
+def _partition_widths(header, metadata, prefix, spec, size):
+    """Validate bounded row-partition metadata and return its virtual widths."""
+    if set(spec) != {"type", "layout", "segments"} or spec.get("layout") != "output_input":
+        raise ValueError()
+    segments = spec.get("segments")
+    if not isinstance(segments, list) or not 2 <= len(segments) <= _MAX_ROW_SEGMENTS:
+        raise ValueError()
+    widths, children = set(), set()
+    rows_total = 0
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, dict) or set(segment) != {"rows", "bits", "group_size"}:
+            raise ValueError()
+        rows, bits, group = segment["rows"], segment["bits"], segment["group_size"]
+        if (
+            type(rows) is not int
+            or not 0 < rows <= 2**32 - 1
+            or type(bits) is not int
+            or bits not in _QUANT_BITS
+            or type(group) is not int
+            or not 0 < group <= 2**32 - 1
+        ):
+            raise ValueError()
+        rows_total += rows
+        if rows_total > 2**32 - 1:
+            raise ValueError()
+        base = f"{prefix}.segment_{index}"
+        weight_name = base + ".weights"
+        dtype, shape = _quantized_tensor(header, weight_name, size, expected_rows=rows)
+        if len(shape) != 2:
+            raise ValueError()
+        words_per_code = 32 if dtype in {"U32", "I32"} else 8
+        packed_bits = shape[1] * words_per_code
+        if packed_bits % bits:
+            raise ValueError()
+        columns = packed_bits // bits
+        if columns <= 0 or columns % group or columns * bits % 32:
+            raise ValueError()
+        groups = columns // group
+        scale_name, bias_name = base + ".scales", base + ".biases"
+        parameter_dtypes = set()
+        for plane in (scale_name, bias_name):
+            parameter = header.get(plane)
+            if not isinstance(parameter, dict):
+                raise ValueError()
+            pdtype, pshape, poffsets = parameter.get("dtype"), parameter.get("shape"), parameter.get("data_offsets")
+            if (
+                pdtype not in _FLOATS
+                or not isinstance(pshape, list)
+                or pshape != [groups, rows + (-rows % 4)]
+                or not isinstance(poffsets, list)
+                or len(poffsets) != 2
+                or any(type(value) is not int for value in poffsets)
+                or not 0 <= poffsets[0] < poffsets[1] <= size
+                or math.prod(pshape) * {"BF16": 2, "F16": 2, "F32": 4}[pdtype] != poffsets[1] - poffsets[0]
+            ):
+                raise ValueError()
+            parameter_dtypes.add(pdtype)
+            children.add(plane)
+        if len(parameter_dtypes) != 1:
+            raise ValueError()
+        children.add(weight_name)
+        if any(base + suffix in metadata for suffix in (".spec",)):
+            raise ValueError()
+        widths.add(bits)
+    return widths, children
 
 
 def _text(value, maximum=256):
@@ -88,14 +180,28 @@ def _weights(root):
             return size, None
         widths, floating = set(), set()
         specs = 0
+        partition_children = set()
+        partition_widths = set()
         for key, raw in metadata.items():
             if not isinstance(key, str) or not key.endswith(".spec"):
                 continue
             if not isinstance(raw, str):
                 return size, None
             spec = _json(raw)
+            if not isinstance(spec, dict):
+                return size, None
+            if spec.get("type") == "MLXRowPartitionedSpec":
+                segment_widths, children = _partition_widths(
+                    header, metadata, key.removesuffix(".spec"), spec, size - 8 - length
+                )
+                if partition_children & children:
+                    return size, None
+                partition_children.update(children)
+                partition_widths.update(segment_widths)
+                specs += len(spec["segments"])
+                continue
             tensor = header.get(key.removesuffix(".spec") + ".weights")
-            if not isinstance(spec, dict) or not isinstance(tensor, dict):
+            if not isinstance(tensor, dict):
                 return size, None
             shape, offsets = tensor.get("shape"), tensor.get("data_offsets")
             if (
@@ -119,7 +225,7 @@ def _weights(root):
                 group = spec.get("group_size")
                 if (
                     type(bits) is not int
-                    or bits not in {2, 3, 4, 5, 6, 8}
+                    or bits not in _QUANT_BITS
                     or type(group) is not int
                     or not 0 < group <= 2**32 - 1
                     or spec.get("layout") not in {"input_output", "output_input"}
@@ -130,10 +236,18 @@ def _weights(root):
             else:
                 return size, None
             specs += 1
+        for name in partition_children:
+            if name not in header:
+                return size, None
+        widths.update(partition_widths)
         if not specs:
             return size, None
         for name, tensor in header.items():
-            if name.endswith(".weights") and name.removesuffix(".weights") + ".spec" not in metadata:
+            if (
+                name.endswith(".weights")
+                and name.removesuffix(".weights") + ".spec" not in metadata
+                and name not in partition_children
+            ):
                 # Floating convolution/control weights do not change matrix quantization.
                 if not isinstance(tensor, dict) or tensor.get("dtype") not in _FLOATS:
                     return size, None

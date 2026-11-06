@@ -12,6 +12,7 @@ from test_granite_smollm import fixture as scalar_family_fixture
 from test_mlx import mlx_qwen_fixture
 from test_mlx_dense import mlx_dense_fixture
 from test_mlx_gemma import mlx_gemma_fixture
+from test_mlx_qwen35 import mlx_qwen35_fixture
 from test_phi import phi_fixture
 from test_qualifications import evidence_record
 from test_sources import Hub
@@ -210,6 +211,25 @@ def test_dense_catalog_profile_rejects_compressed_checkpoint(tmp_path):
     with pytest.raises(UnsupportedConversion, match="registered compressed profile"):
         run(snapshot.root, tmp_path / "output", repo=REPOS["qwen3"])
     assert not (tmp_path / "output").exists() and not list(tmp_path.glob(".stark-convert-*"))
+
+
+def test_uniform_qwen35_catalog_rejects_mixed_width_override(tmp_path):
+    source = tmp_path / "primary"
+    mlx_qwen35_fixture(source, bits=4)
+    external = source_fixture(tmp_path / "external")
+    for name in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+        shutil.copyfile(external / name, source / name)
+    config_path = source / "config.json"
+    config = json.loads(config_path.read_text())
+    for name in ("quantization", "quantization_config"):
+        config[name]["model.layers.0.self_attn.q_proj"] = {"bits": 8, "group_size": 32}
+    config_path.write_text(json.dumps(config))
+    repo = "mlx-community/Qwen3.5-0.8B-MLX-4bit"
+    repositories = {rule["repo"]: external for rule in get_model(repo)["files"].values() if rule["repo"] != repo}
+    snapshot = resolve_source(repo, hub=Hub({**repositories, repo: source}))
+    with pytest.raises(ConversionError, match="packing disagrees"):
+        run(snapshot, tmp_path / "output", repo=repo)
+    assert not (tmp_path / "output").exists()
 
 
 def test_mlx_parameter_writer_failure_removes_private_staging(tmp_path, monkeypatch):

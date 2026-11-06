@@ -15,7 +15,7 @@ use crate::{
     text_stop::StopFilter,
 };
 
-mod mtp;
+pub(crate) mod mtp;
 #[path = "hybrid_nucleus.rs"]
 mod nucleus;
 
@@ -64,7 +64,7 @@ const PARALLEL_PROBABILITY_MIN_CANDIDATES: usize = 65_536;
 /// the current readout only during `install`, then park between maps. Small
 /// candidate sets never start the pool, and failed startup stays serial.
 #[derive(Default)]
-struct ProbabilityMapper {
+pub(crate) struct ProbabilityMapper {
     pool: Option<rayon::ThreadPool>,
     attempted: bool,
 }

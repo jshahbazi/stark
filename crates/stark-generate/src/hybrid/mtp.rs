@@ -68,7 +68,7 @@ enum Phase {
     Finished,
 }
 
-pub(super) struct ExactMtpSampler<'a> {
+pub(crate) struct ExactMtpSampler<'a> {
     sampling: &'a Sampling,
     rng: &'a mut u64,
     draft_rng: u64,
@@ -83,7 +83,7 @@ pub(super) struct ExactMtpSampler<'a> {
 }
 
 impl<'a> ExactMtpSampler<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         sampling: &'a Sampling,
         rng: &'a mut u64,
         mapper: &'a mut ProbabilityMapper,
@@ -106,7 +106,7 @@ impl<'a> ExactMtpSampler<'a> {
 
     /// The prompt's first draw has no proposal. It uses exactly the ordinary
     /// sampler, before the first draft round begins.
-    pub(super) fn sample_initial(
+    pub(crate) fn sample_initial(
         &mut self,
         logits: &[f32],
     ) -> std::result::Result<u32, &'static str> {
@@ -566,6 +566,41 @@ mod tests {
             let proposal = sampler.draft(&draft_logits).unwrap();
             assert!(proposal == 1);
             assert!(sampler.target(&target_logits, Some(proposal)).unwrap() == 0);
+        }
+    }
+
+    #[test]
+    fn shortlist_proposals_keep_full_target_support_and_exact_rejection_mass() {
+        let sampling = Sampling::Stochastic {
+            temperature: 0.6,
+            top_k: Some(20),
+            top_p: Some(0.95),
+            min_p: None,
+        };
+        let mut draft = vec![f32::MIN; 128];
+        draft[7] = 1.0;
+        draft[91] = 2.0;
+        let target = vec![0.0; 128];
+        let p = sampling_distribution(&target, &sampling, None).unwrap();
+        let q = sampling_distribution(&draft, &sampling, None).unwrap();
+        let lookup = ProbabilityLookup::new(&q, draft.len());
+        assert_eq!(lookup.get(0), 0.0);
+        assert_eq!(lookup.get(127), 0.0);
+        let rejection = 1.0 - p.indices.iter().map(|&id| probability(&p, id).min(lookup.get(id))).sum::<f64>();
+        let residual = residual_distribution(&p, &lookup).unwrap();
+        for id in 0..128 {
+            let accepted = probability(&p, id).min(lookup.get(id));
+            assert!((accepted + rejection * probability(&residual, id) - probability(&p, id)).abs() < 2e-15);
+        }
+        for seed in 0..64 {
+            let mut rng = seed;
+            let mut mapper = ProbabilityMapper::default();
+            let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+            sampler.begin_round();
+            let token = sampler.draft(&draft).unwrap();
+            assert!(token == 7 || token == 91);
+            let draw = sampler.target(&target, Some(token)).unwrap();
+            assert!(draw < 128);
         }
     }
 

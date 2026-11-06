@@ -1,0 +1,146 @@
+//! Private toy-artifact qualification. Never prints prompts, tokens or logits.
+use stark_engine_macros::stark_test;
+
+use super::{LanguageModel, dense_mtp::DenseMtpSession};
+use crate::{
+    backends::{
+        common::{BufferRef, Context},
+        metal::Metal,
+    },
+    engine::{
+        Engine,
+        hybrid::{MtpSampler, Result},
+    },
+};
+
+struct Sampler {
+    seed: u64,
+    stochastic: bool,
+}
+
+fn argmax(values: &[f32]) -> u32 {
+    values.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1).then_with(|| b.0.cmp(&a.0))).unwrap().0 as u32
+}
+
+impl MtpSampler for Sampler {
+    fn begin_round(&mut self) {}
+    fn draft(
+        &mut self,
+        values: &[f32],
+    ) -> Result<u32> {
+        Ok(argmax(values))
+    }
+    fn target(
+        &mut self,
+        values: &[f32],
+        _: Option<u32>,
+    ) -> Result<u32> {
+        if !self.stochastic {
+            return Ok(argmax(values));
+        }
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 7;
+        self.seed ^= self.seed << 17;
+        let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let weights = values.iter().map(|&v| f64::from(v - max).exp()).collect::<Vec<_>>();
+        let mut draw = (self.seed >> 11) as f64 / ((1u64 << 53) as f64) * weights.iter().sum::<f64>();
+        for (index, weight) in weights.iter().enumerate() {
+            draw -= weight;
+            if draw < 0.0 {
+                return Ok(index as u32);
+            }
+        }
+        Ok(values.len() as u32 - 1)
+    }
+}
+
+fn collect(
+    model: &LanguageModel<Metal>,
+    session: &mut DenseMtpSession<Metal>,
+    drafts: usize,
+    stochastic: bool,
+) -> Vec<u32> {
+    let mut sampler = Sampler {
+        seed: 17,
+        stochastic,
+    };
+    let mut current = sampler.target(session.logits(), None).unwrap();
+    let mut output = Vec::new();
+    while output.len() < 16 {
+        output.push(current);
+        if output.len() == 16 {
+            break;
+        }
+        let round = model.dense_mtp_round(session, current, drafts.min(15 - output.len()), &mut sampler).unwrap();
+        output.extend(round.accepted_drafts);
+        current = round.next_token;
+    }
+    output
+}
+
+#[stark_test]
+// Requires explicitly generated private dense-MTP toy artifact.
+#[ignore]
+fn dense_mtp_toy_greedy_and_prefix_metal() {
+    let path = std::path::PathBuf::from(std::env::var_os("STARK_DENSE_MTP_TOY").expect("set private toy path"));
+    let engine = Engine::<Metal>::new().unwrap();
+    let model = engine.load_language_model(&path).unwrap();
+    assert!(model.has_dense_mtp());
+    let short = (0..32).map(|i| 1 + i % 31).collect::<Vec<u32>>();
+    let baseline = collect(&model, &mut model.prefill_dense_mtp(&short, 4096).unwrap(), 0, false);
+    // One prefill row also fixes readout GEMV geometry on both routes.
+    let initial = model.prefill_dense_mtp(&short[..1], 4096).unwrap();
+    let initial_logits = initial.logits().to_vec();
+    let mut ordinary_state = model.create_empty_state(Some(4096), 17).unwrap();
+    ordinary_state.vision_prefill_logits_readback = Some(engine.context.create_buffer(256 * 2).unwrap());
+    let mut ordinary_options = model.default_stream_options();
+    ordinary_options.sampling_method = super::stream::SamplingMethod::Greedy;
+    let host_ids = short[..1].iter().copied().map(u64::from).collect::<Vec<_>>();
+    // The first output qualifies the shared embedding-input contract. Later
+    // ordinary decode uses fused full-accept recurrence; this session uses
+    // TreeVerify/StateAdvance, whose floating-point ordering differs.
+    let ordinary =
+        model.stream(&host_ids, &mut ordinary_state, ordinary_options).unwrap().next().unwrap().unwrap() as u32;
+    assert!(ordinary == argmax(&initial_logits), "ordinary stream and dense target device-input contracts differ");
+    let ordinary_logits = ordinary_state.vision_prefill_logits_readback.take().unwrap().copyout::<half::bf16>();
+    assert!(
+        ordinary_logits.iter().copied().map(f32::from).eq(initial_logits),
+        "ordinary and dense full-vocabulary prefill logits differ"
+    );
+    for drafts in 1..=3 {
+        let result = collect(&model, &mut model.prefill_dense_mtp(&short, 4096).unwrap(), drafts, false);
+        assert!(result == baseline, "greedy target and MTP token hashes differ");
+    }
+    let prompt = (0..1100).map(|i| 1 + i % 31).collect::<Vec<u32>>();
+    let mut followup = prompt.clone();
+    followup.extend([3, 5, 7]);
+    for stochastic in [false, true] {
+        for drafts in 0..=3 {
+            let mut retained = model.prefill_dense_mtp(&prompt, 4096).unwrap();
+            assert_eq!(retained.prefix_position(), Some(1024));
+            assert!(retained.prefix_payload_bytes() > 0);
+            collect(&model, &mut retained, drafts, stochastic);
+            model.restore_dense_mtp_prefix(&mut retained, 1024).unwrap();
+            assert_eq!(retained.position(), 1024);
+            model.continue_prefill_dense_mtp_controlled(&mut retained, &followup[1024..], 1024, &mut || false).unwrap();
+            let reused = collect(&model, &mut retained, drafts, stochastic);
+            let fresh = collect(&model, &mut model.prefill_dense_mtp(&followup, 4096).unwrap(), drafts, stochastic);
+            assert!(reused == fresh, "restored and fresh target token hashes differ");
+        }
+    }
+    let other = engine.load_language_model(&path).unwrap();
+    let mut session = model.prefill_dense_mtp(&prompt, 4096).unwrap();
+    assert!(other.restore_dense_mtp_prefix(&mut session, 1024).is_err());
+    let mut called = false;
+    let cancelled = model.continue_prefill_dense_mtp_controlled(&mut session, &short, 0, &mut || {
+        called = true;
+        true
+    });
+    // This session is not aligned after the original prefill, so it is refused
+    // before callback or GPU dispatch; restoring its boundary then tests cancel.
+    assert!(cancelled.is_err());
+    assert!(!called);
+    model.restore_dense_mtp_prefix(&mut session, 1024).unwrap();
+    assert!(model.continue_prefill_dense_mtp_controlled(&mut session, &short, 0, &mut || true).is_err());
+    assert!(model.restore_dense_mtp_prefix(&mut session, 1024).is_err());
+}

@@ -377,6 +377,12 @@ def _artifact_precision_matches(root, recipe, receipt):
             return False
         if spec.get("type") in {"MLXSpec", "IntSpec"}:
             quantized.add(name.removesuffix(".spec"))
+        elif spec.get("type") == "MLXRowPartitionedSpec":
+            prefix = name.removesuffix(".spec")
+            segments = spec.get("segments")
+            if not isinstance(segments, list) or not 2 <= len(segments) <= 128:
+                return False
+            quantized.update(f"{prefix}.segment_{index}" for index in range(len(segments)))
     for name, tensor in tensors.items():
         base, _, plane = name.rpartition(".")
         normalization = plane == "scales" and base.rsplit(".", 1)[-1].endswith("_norm")

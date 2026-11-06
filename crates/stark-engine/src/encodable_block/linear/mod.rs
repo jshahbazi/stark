@@ -6,6 +6,7 @@ mod matmul;
 mod qlora_wrapper;
 mod reference_bf16;
 mod rht_wrapper;
+mod row_partitioned;
 mod untied_readout;
 
 pub use matmul::{LinearMatmul, LinearMatmulError};
@@ -138,6 +139,19 @@ impl<B: Backend> dyn Linear<B> {
         let weights_tree = parameter_tree.subtree("weights");
         let spec = weights_tree.metadata::<AnyWeightMatrixSpec>("spec")?;
         match spec {
+            AnyWeightMatrixSpec::MLXRowPartitionedSpec(spec) => {
+                Ok(Box::new(row_partitioned::RowPartitionedLinear::load(
+                    context,
+                    spec,
+                    input_dimension,
+                    output_dimension_sum,
+                    has_biases,
+                    weights_data_type,
+                    input_data_type,
+                    output_data_type,
+                    &weights_tree,
+                )?))
+            },
             spec @ (AnyWeightMatrixSpec::FullPrecisionSpec(_)
             | AnyWeightMatrixSpec::MLXSpec(_)
             | AnyWeightMatrixSpec::IntSpec(_)) => {

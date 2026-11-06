@@ -22,10 +22,10 @@ from stark_convert.streaming import UnsupportedConversion
 def test_complete_pinned_builtin_inventory():
     catalog = load_catalog()
     assert catalog["entry_count"] == 110 == len(catalog["models"])
-    assert catalog["extension_count"] == 5 == len(catalog["extensions"])
+    assert catalog["extension_count"] == 6 == len(catalog["extensions"])
     assert catalog["reference"]["plugins"] is False
     assert catalog["reference"]["revision"] == "831accb8252a6b6606c378048caeb44178f1a050"
-    assert len({entry["repo"] for entry in models()}) == 115
+    assert len({entry["repo"] for entry in models()}) == 116
     assert sum(entry["model_kind"] == "LanguageModelSpec" for entry in catalog["models"]) == 107
     assert sum(entry["model_kind"] == "ClassifierModelSpec" for entry in models()) == 2
     assert sum(entry["model_kind"] == "TTSModelSpec" for entry in models()) == 1
@@ -34,7 +34,7 @@ def test_complete_pinned_builtin_inventory():
 
 def test_catalog_is_independent_of_reference_and_framework_imports():
     code = (
-        "import sys; from stark_convert.registry import models; assert len(models()) == 115; "
+        "import sys; from stark_convert.registry import models; assert len(models()) == 116; "
         "assert not any(name.split('.')[0] in {'lalamo','jax','torch'} for name in sys.modules)"
     )
     env = os.environ.copy()
@@ -49,7 +49,7 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 90
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 91
     assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 85
 
 
@@ -75,11 +75,11 @@ def test_extensions_are_separate_from_builtin_inventory():
 
 def test_mlx_profiles_bind_bit_width_without_promoting_other_packed_families():
     packed = [entry for entry in models() if entry.get("compressed_format") is not None]
-    assert len(packed) == 40
+    assert len(packed) == 41
     assert {
         adapter: sum(entry["adapter"] == adapter for entry in packed)
         for adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2", "llamba"}
-    } == {"qwen3": 12, "llama": 5, "smollm3": 2, "gemma3_text": 2, "qwen3_5": 10, "lfm2": 8, "llamba": 1}
+    } == {"qwen3": 12, "llama": 5, "smollm3": 2, "gemma3_text": 2, "qwen3_5": 11, "lfm2": 8, "llamba": 1}
     assert {entry["compressed_format"]["bits"] for entry in packed} == {4, 8}
     for entry in packed:
         assert entry["adapter"] == entry["metadata_profile"]
@@ -87,6 +87,7 @@ def test_mlx_profiles_bind_bit_width_without_promoting_other_packed_families():
         assert (
             entry["repo"].endswith(f"-{entry['compressed_format']['bits']}bit")
             or entry["repo"] == "cartesia-ai/Llamba-1B-4bit-mlx"
+            or entry["repo"] == "Jundot/Qwen3.8-27B-oQ4e-mtp"
         )
         assert entry["status"]["qualification"] == "pending"
     assert get_model("mlx-community/Qwen3.5-0.8B-MLX-4bit")["adapter"] == "qwen3_5"
@@ -132,6 +133,7 @@ def test_hybrid_mlx_promotions_use_exact_pinned_checkpoint_names():
     qwen = {
         f"mlx-community/Qwen3.5-{size}-MLX-{bits}bit" for size in ("0.8B", "2B", "4B", "9B") for bits in (4, 8)
     } | {f"mlx-community/Qwen3.5-27B-{bits}bit" for bits in (4, 8)}
+    qwen.add("Jundot/Qwen3.8-27B-oQ4e-mtp")
     lfm = {f"mlx-community/LFM2-{size}-{bits}bit" for size in ("350M", "700M", "1.2B", "2.6B") for bits in (4, 8)}
     for architecture, expected in (("qwen3_5", qwen), ("lfm2", lfm)):
         assert {

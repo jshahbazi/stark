@@ -4,6 +4,24 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Dense Qwen3.8-27B oQ4e packed-weight follow-up (2026-11-06).** The final
+host-screened run measured **51.48 useful decode tok/s median**, with all six
+768-token responses passing on their first attempt. The **70.8 tok/s target
+remains unmet**. An earlier balanced, unscreened packing-only comparison measured
+48.96 versus 45.25 tok/s (+8.19%); it does not isolate the later predictor changes.
+Final numerical, scoring and separate original/three-bit/four-bit prefix checks
+passed. See the [packed-weight follow-up](2026-11-06-qwen38-27b-packed-followup.md)
+and [public aggregate data](data/qwen38-27b-packed-followup-2026-11-06.json).
+The [approach ledger](2026-11-06-qwen38-27b-approaches.md) records the successful,
+rejected, optional and unimplemented approaches and the evidence for each decision.
+The [original source-bound record](2026-11-06-qwen38-27b-oq4e-mtp.md) remains
+unchanged. Neither report applies to the separate Flash-Next artifacts.
+
+The follow-up's seven-draft trial advanced 3.85 tokens per round versus 3.02
+with three drafts, while target GPU time rose from 47–50 ms to 79–85 ms and
+throughput fell from 48–50 to 35–37 tok/s. That experiment was removed; the
+shipped dense path is capped at three drafts.
+
 **GLM-5.3-Flash focused prefill validation (2026-11-03).** The focused branch's
 same-binary MMA off/on comparison measured 34.90 to 40.87 prefill tok/s (+17.1%)
 and 2.970 to 2.565 seconds per warm request (13.7% lower), with four accepted

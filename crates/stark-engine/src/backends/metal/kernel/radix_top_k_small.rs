@@ -1,12 +1,15 @@
 use std::mem::size_of;
 
 use super::{RadixTopKSmallCollectMetalKernel, RadixTopKSmallPassMetalKernel};
-use crate::backends::{
-    common::{
-        BufferMut, BufferRef, CommandBufferEncoding,
-        kernel::radix_top_k_small::{MAX_K, RadixTopKSmall},
+use crate::{
+    backends::{
+        common::{
+            BufferMut, BufferRef, CommandBufferEncoding, InvalidInput,
+            kernel::radix_top_k_small::{RadixTopKSmall, validate_buffers, validate_input_type},
+        },
+        metal::{Metal, command_buffer::MetalCommandBufferEncoding, context::MetalContext, error::MetalError},
     },
-    metal::{Metal, command_buffer::MetalCommandBufferEncoding, context::MetalContext, error::MetalError},
+    data_type::DataType,
 };
 
 const DEFAULT_PARTITIONS: u32 = 4;
@@ -28,28 +31,34 @@ pub struct MetalRadixTopKSmall {
     columns: u32,
     partitions: u32,
     passes: u32,
+    input_data_type: DataType,
 }
 
 impl RadixTopKSmall for MetalRadixTopKSmall {
     type Backend = Metal;
 
-    fn new(
+    fn new_with_data_type(
         context: &MetalContext,
         columns: u32,
+        input_data_type: DataType,
     ) -> Result<Self, MetalError> {
-        assert!(columns > 0);
+        validate_input_type(columns, input_data_type)?;
         let index_bits = if columns <= 1 {
             1
         } else {
             u32::BITS - (columns - 1).leading_zeros()
         };
         let partitions = partitions(columns);
+        if columns.checked_mul(partitions).is_none() {
+            return Err(InvalidInput("small radix partition indexing overflows").into());
+        }
         Ok(Self {
-            pass: RadixTopKSmallPassMetalKernel::new(context, columns, partitions)?,
-            collect: RadixTopKSmallCollectMetalKernel::new(context, columns, partitions)?,
+            pass: RadixTopKSmallPassMetalKernel::new(context, input_data_type, columns, partitions)?,
+            collect: RadixTopKSmallCollectMetalKernel::new(context, input_data_type, columns, partitions)?,
             columns,
             partitions,
             passes: (u32::BITS + index_bits).div_ceil(RADIX_BITS),
+            input_data_type,
         })
     }
 
@@ -62,16 +71,34 @@ impl RadixTopKSmall for MetalRadixTopKSmall {
         k: u32,
         command_buffer: &mut MetalCommandBufferEncoding,
     ) -> Result<(), MetalError> {
-        assert!(rows > 0 && k > 0 && k <= MAX_K && k <= self.columns);
+        validate_buffers(
+            self.columns,
+            rows,
+            k,
+            self.input_data_type,
+            input.size(),
+            input.parts().1.start,
+            output_ids.size(),
+            output_ids.as_ref().parts().1.start,
+            output_scores.size(),
+            output_scores.as_ref().parts().1.start,
+        )?;
         let rows = rows as usize;
-        let mut histograms =
-            command_buffer.allocate_scratch(rows * self.partitions as usize * RADIX_BUCKETS * size_of::<u32>())?;
+        let workspace_bytes = |elements: usize, bytes: usize| {
+            rows.checked_mul(elements)
+                .and_then(|n| n.checked_mul(bytes))
+                .filter(|&n| n <= 2 * 1024 * 1024 * 1024)
+                .ok_or(InvalidInput("small radix workspace exceeds native allocation limit"))
+        };
+        let histogram_bytes = workspace_bytes(self.partitions as usize * RADIX_BUCKETS, size_of::<u32>())?;
+        let key_bytes = workspace_bytes(k as usize, size_of::<u64>())?;
+        let mut histograms = command_buffer.allocate_scratch(histogram_bytes)?;
         let mut prefixes = command_buffer.allocate_scratch(rows * size_of::<u64>())?;
         let mut masks = command_buffer.allocate_scratch(rows * size_of::<u64>())?;
         let mut ranks = command_buffer.allocate_scratch(rows * size_of::<u32>())?;
         let mut counts = command_buffer.allocate_scratch(rows * size_of::<u32>())?;
         let mut done = command_buffer.allocate_scratch(rows * size_of::<u32>())?;
-        let mut keys = command_buffer.allocate_scratch(rows * k as usize * size_of::<u64>())?;
+        let mut keys = command_buffer.allocate_scratch(key_bytes)?;
         command_buffer.encode_fill(&mut prefixes, 0);
         command_buffer.encode_fill(&mut masks, 0);
         command_buffer.encode_fill(&mut counts, 0);

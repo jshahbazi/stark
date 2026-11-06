@@ -48,7 +48,8 @@ struct RightOperand {
                                      ? 0
                                      : ushort(1u << (BITS - 1));
 
-  static_assert(!QUANTIZED || BITS_ == 4 || BITS_ == 8, "quantized integer weights must use 4 or 8 bits");
+  static_assert(!QUANTIZED || BITS_ == 4 || BITS_ == 5 || BITS_ == 6 || BITS_ == 8,
+                "unsupported quantized weight width");
   static_assert(!QUANTIZED || PROLOGUE != GemmBPrologueKind::FullPrecision, "quantized weights need a scheme");
 
   using CodeElement = int8_t;

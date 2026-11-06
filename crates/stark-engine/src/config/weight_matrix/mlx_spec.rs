@@ -8,3 +8,18 @@ pub struct MLXSpec {
     pub group_size: u32,
     pub layout: Layout,
 }
+
+impl MLXSpec {
+    pub fn new(
+        bits: u32,
+        group_size: u32,
+        layout: Layout,
+    ) -> Self {
+        Self {
+            ty: Default::default(),
+            bits,
+            group_size,
+            layout,
+        }
+    }
+}

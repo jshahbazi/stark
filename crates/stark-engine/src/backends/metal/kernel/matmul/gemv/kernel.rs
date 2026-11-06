@@ -43,6 +43,42 @@ pub struct GemvSpecialization {
 }
 
 impl GemvSpecialization {
+    pub fn select_preserving_w8(
+        actual: &MatmulShape,
+        reference: &MatmulShape,
+        weights_data_type: DataType,
+        input_data_type: DataType,
+        output_data_type: DataType,
+        gpu_core_count: u32,
+        apple_gpu_family: MTLGPUFamily,
+    ) -> Option<Self> {
+        if !(1..=4).contains(&actual.m) {
+            return None;
+        }
+        let tile = policy::quantized_tile(
+            gpu_core_count,
+            apple_gpu_family,
+            8,
+            64,
+            actual.m,
+            reference.n,
+            actual.k,
+            true,
+            true,
+        )?;
+        if actual.n < tile.rows_per_lane() {
+            return None;
+        }
+        let mut specialization =
+            Self::select_tile(reference, weights_data_type, input_data_type, output_data_type, tile)?;
+        // Planning uses widened W8 arithmetic; unpacking and row bounds always
+        // use the actual packed operand. Its coefficient/FMA order is unchanged.
+        specialization.bits = actual.b_bits?;
+        specialization.full_tile = full_tile(actual, tile);
+        specialization.output_transform = output_transform_for_tile(actual, tile)?;
+        Some(specialization)
+    }
+
     pub fn select_shape(
         shape: &MatmulShape,
         weights_data_type: DataType,
@@ -54,7 +90,25 @@ impl GemvSpecialization {
         let is_quant = shape.is_quant();
         let bits = shape.b_bits.unwrap_or(0);
         let bf16_io = input_data_type == DataType::BF16 && output_data_type == DataType::BF16;
-        let tile = if is_quant && shape.gathered {
+        let tile = if bits == 3 {
+            if weights_data_type != DataType::BF16
+                || input_data_type != DataType::BF16
+                || output_data_type != DataType::F32
+                || shape.m != 1
+                || shape.n < 4
+                || shape.b_prologue != GemmBPrologueKind::ScaleBiasDequant
+                || shape.b_group_size != Some(64)
+                || shape.k == 0
+                || !shape.k.is_multiple_of(64)
+                || shape.params_layout != Some(QuantParamsLayout::GroupOutput)
+                || shape.signed_codes
+                || shape.gathered
+                || !shape.a_full_precision
+            {
+                return None;
+            }
+            Some(policy::GemvTile::quantized(8, 4, 1, 32, 8))
+        } else if is_quant && shape.gathered {
             policy::gathered_tile(bits, shape.b_group_size.unwrap_or(0), shape.m, shape.n)
         } else if is_quant {
             policy::quantized_tile(
@@ -181,6 +235,78 @@ impl GemvSpecialization {
             self.signed_codes,
             self.full_tile,
         )
+    }
+}
+
+#[cfg(test)]
+mod coarse_policy_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+
+    #[stark_test]
+    fn internal_coarse_three_bit_dispatch_is_narrow() {
+        let shape = MatmulShape {
+            m: 1,
+            n: 65536,
+            k: 5120,
+            b_transpose: true,
+            b_leading_dimension: None,
+            b_prologue: GemmBPrologueKind::ScaleBiasDequant,
+            b_bits: Some(3),
+            b_group_size: Some(64),
+            signed_codes: false,
+            a_full_precision: true,
+            gathered: false,
+            params_layout: Some(QuantParamsLayout::GroupOutput),
+            d_transform: GemmDTransform::empty(),
+        };
+        let select = |shape: &MatmulShape, input, output| {
+            GemvSpecialization::select_shape(shape, DataType::BF16, input, output, 40, MTLGPUFamily::Apple10)
+        };
+        assert!(select(&shape, DataType::BF16, DataType::F32).is_some());
+        for invalid in [
+            MatmulShape {
+                m: 2,
+                ..shape
+            },
+            MatmulShape {
+                k: 65,
+                ..shape
+            },
+            MatmulShape {
+                k: 0,
+                ..shape
+            },
+            MatmulShape {
+                b_group_size: Some(32),
+                ..shape
+            },
+            MatmulShape {
+                signed_codes: true,
+                ..shape
+            },
+            MatmulShape {
+                gathered: true,
+                ..shape
+            },
+            MatmulShape {
+                a_full_precision: false,
+                ..shape
+            },
+            MatmulShape {
+                b_prologue: GemmBPrologueKind::ScaleSymmetricDequant,
+                ..shape
+            },
+            MatmulShape {
+                params_layout: Some(QuantParamsLayout::OutputGroup),
+                ..shape
+            },
+        ] {
+            assert!(select(&invalid, DataType::BF16, DataType::F32).is_none());
+        }
+        assert!(select(&shape, DataType::F32, DataType::F32).is_none());
+        assert!(select(&shape, DataType::BF16, DataType::BF16).is_none());
     }
 }
 

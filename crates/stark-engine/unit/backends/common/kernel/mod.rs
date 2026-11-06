@@ -1,6 +1,7 @@
 mod activation_test;
 mod activation_transform_test;
 mod attention;
+mod copy_rows_test;
 mod embedding;
 mod gated_act_mul_test;
 mod gdn;

@@ -61,7 +61,11 @@ VARIANTS(
     GemmBPrologueKind::ScaleBiasDequant,
     GemmBPrologueKind::ScaleZeroPointDequant,
     GemmBPrologueKind::ScaleSymmetricDequant)
-VARIANTS(BITS, 0, 4, 8)
+VARIANTS(BITS, 0, 4, 5, 6, 8)
+CONSTRAINT((BITS != 5 && BITS != 6) ||
+    (B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant && GROUP_SIZE == 64 &&
+     AT == "bfloat" && BT == "bfloat" && DT == "bfloat" &&
+     A_PROLOGUE == GemmAPrologueKind::FullPrecision))
 VARIANTS(GROUP_SIZE, 0, 16, 32, 64, 128)
 VARIANTS(
     A_PROLOGUE,

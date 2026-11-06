@@ -2,6 +2,8 @@ use derive_more::Debug;
 use parking_lot::Mutex;
 use thiserror::Error;
 
+mod coarse;
+
 use crate::{
     backends::common::{
         Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput,
@@ -61,6 +63,26 @@ fn load_biases<B: Backend>(
 }
 
 impl<B: Backend> LinearMatmul<B> {
+    /// A row partition inherits its original fused matrix's eight-bit lane
+    /// arithmetic and prefill K partitions, while retaining packed storage.
+    pub(super) fn preserve_w8_row_arithmetic(
+        &mut self,
+        reference_output_dim: u32,
+    ) -> Result<(), LinearMatmulError<B>> {
+        let valid = self.matrix.quantization().is_some_and(|info| {
+            info.method == crate::backends::common::gpu_types::QuantizationMethod::ScaleBias
+                && info.group_size == 64
+                && matches!(info.mode.bits(), 4 | 5 | 6 | 8)
+        });
+        if !valid || self.output_dim < 4 || reference_output_dim < self.output_dim {
+            return Err(LinearMatmulError::UnsupportedConfiguration(
+                "row arithmetic preservation requires group64 affine rows and their original output dimension".into(),
+            ));
+        }
+        self.kernel.lock().set_row_arithmetic_reference(reference_output_dim);
+        Ok(())
+    }
+
     /// Loads a linear over any parsed spec — full precision, MLX or Int. Hybrid
     /// compositions live in the wrappers, not here.
     pub fn load(
@@ -132,7 +154,7 @@ impl<B: Backend> LinearMatmul<B> {
         self.matrix.try_prepare_a8_storage().then_some(quantization)
     }
 
-    pub(super) fn encode_with_a(
+    pub(crate) fn encode_with_a(
         &self,
         a: MatmulA<impl BufferRef<Backend = B>>,
         batch_dim: u32,

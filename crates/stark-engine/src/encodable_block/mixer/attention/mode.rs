@@ -37,14 +37,57 @@ impl<B: Backend> LinearProjection<B> {
 }
 
 impl<B: Backend> Attention<B> {
+    pub(crate) fn supports_cache_only(&self) -> bool {
+        self.num_kv_heads.is_some() && self.ring_capacity.is_none()
+    }
+
     #[cfg(feature = "scoring-last-layer-pruning")]
     pub(crate) fn supports_scoring_cache_only(&self) -> bool {
-        self.num_kv_heads.is_some() && self.ring_capacity.is_none()
+        self.supports_cache_only()
     }
 
     /// Preserve full-batch projection and all KV arithmetic/storage. The optional
     /// KV-only candidate omits dead query normalization and preparation while
     /// retaining the original packed offsets and prepare dispatch coordinates.
+    pub(crate) fn encode_cache_only(
+        &self,
+        hidden: B::ScratchBuffer,
+        precalculated_rope: Option<&PrecalculatedRoPE<B>>,
+        batch_dim: &BatchTopology,
+        state: &mut AttentionState<B>,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), B::Error> {
+        assert!(self.supports_cache_only(), "unsupported cache-only attention");
+        assert!(batch_dim.is_flat(), "cache-only requires flat topology");
+        assert_eq!(precalculated_rope.is_some(), self.max_rope_length.is_some(), "precalculated rope mismatch");
+        let qkvg = self.projection.project(hidden, batch_dim.size(), command_buffer)?;
+        self.prepare_cache_only(&qkvg, state, precalculated_rope, batch_dim, command_buffer)?;
+        // The caller still accepts every row before encoding the next batch.
+        Ok(())
+    }
+
+    fn prepare_cache_only(
+        &self,
+        qkvg: impl BufferRef<Backend = B>,
+        state: &mut AttentionState<B>,
+        precalculated_rope: Option<&PrecalculatedRoPE<B>>,
+        batch_dim: &BatchTopology,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), B::Error> {
+        let prefix_len = state.view().prefix_len();
+        let _queries = self.prepare_kv_and_queries(
+            qkvg,
+            state.keys.as_mut(),
+            state.values.as_mut(),
+            prefix_len,
+            self.num_q_heads,
+            precalculated_rope,
+            batch_dim.size(),
+            command_buffer,
+        )?;
+        Ok(())
+    }
+
     #[cfg(feature = "scoring-last-layer-pruning")]
     pub(crate) fn encode_scoring_cache_only(
         &self,
@@ -67,35 +110,27 @@ impl<B: Backend> Attention<B> {
         };
         #[cfg(not(feature = "attention-kv-only"))]
         let qkvg = self.projection.project(hidden, batch_dim.size(), command_buffer)?;
-        let prefix_len = state.view().prefix_len();
         #[cfg(feature = "attention-kv-only")]
-        self.prepare_kv_only.as_ref().expect("KV-only prepare requires owned full attention").encode(
-            &qkvg,
-            state.keys.as_mut(),
-            state.values.as_mut(),
-            precalculated_rope.map(|rope| &rope.cosines),
-            precalculated_rope.map(|rope| &rope.sines),
-            self.num_q_heads,
-            self.num_kv_heads.expect("KV-only prepare requires KV heads"),
-            self.head_dim,
-            precalculated_rope.map(|rope| rope.dim),
-            prefix_len,
-            self.projection_dim,
-            batch_dim.size(),
-            command_buffer,
-        );
+        {
+            let prefix_len = state.view().prefix_len();
+            self.prepare_kv_only.as_ref().expect("KV-only prepare requires owned full attention").encode(
+                &qkvg,
+                state.keys.as_mut(),
+                state.values.as_mut(),
+                precalculated_rope.map(|rope| &rope.cosines),
+                precalculated_rope.map(|rope| &rope.sines),
+                self.num_q_heads,
+                self.num_kv_heads.expect("KV-only prepare requires KV heads"),
+                self.head_dim,
+                precalculated_rope.map(|rope| rope.dim),
+                prefix_len,
+                self.projection_dim,
+                batch_dim.size(),
+                command_buffer,
+            );
+        }
         #[cfg(not(feature = "attention-kv-only"))]
-        self.prepare_kv_and_queries(
-            &qkvg,
-            state.keys.as_mut(),
-            state.values.as_mut(),
-            prefix_len,
-            self.num_q_heads,
-            precalculated_rope,
-            batch_dim.size(),
-            command_buffer,
-        )?;
-        // The caller still accepts every row before encoding the next batch.
+        self.prepare_cache_only(&qkvg, state, precalculated_rope, batch_dim, command_buffer)?;
         Ok(())
     }
 

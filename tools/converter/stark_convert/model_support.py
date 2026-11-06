@@ -69,6 +69,8 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
     formats = [] if architecture == "qwen4_exp" else ["safetensors-float"]
     if architecture in _MLX:
         formats.extend(["mlx-affine-4bit", "mlx-affine-8bit"])
+    if architecture == "qwen3_5":
+        formats.append("mlx-affine-mixed")
     return {
         "family_id": architecture,
         "name": name,
@@ -355,14 +357,14 @@ def preflight_model(
         try:
             from .compressed import parse_mlx_quantization
 
-            parse_mlx_quantization(text)
+            parse_mlx_quantization(text, allow_mixed=architecture == "qwen3_5")
         except (ConversionError, UnsupportedConversion):
             return _report(
                 family,
                 mode,
                 "unsupported",
                 "unsupported_weight_format",
-                "Only supported MLX affine 4/8-bit descriptions can be repacked.",
+                "Only supported MLX affine descriptions can be repacked; each matrix is validated during conversion.",
             )
     warnings = []
     if config.get("vision_config") is not None and mode in {None, "text", "decision"}:

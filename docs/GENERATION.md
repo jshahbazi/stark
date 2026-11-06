@@ -216,7 +216,7 @@ The terminal reply:
 | `reused_input_tokens` | Present only when prefix reuse is enabled: prompt tokens taken from the retained prefix instead of prefill, a multiple of `prefix_cache.chunk_tokens` below `input_tokens` |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
-| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, acceptance, verified-row and phase-time counters when available. |
+| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, accepted-prefix-count, verified-row and phase-time counters when available. |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
 
@@ -283,6 +283,43 @@ cost when drafting is disabled. Set `mtp_drafts` to 1,
 2 or 3 on a text request; omit it or use 0 for ordinary autoregressive decode.
 Requests on one worker remain serialized. With `--prefix-cache`, a request resumes a [prefix snapshot](#prefix-reuse) only when it enables or disables MTP the same way as the request that captured it.
 
+Converted dense `qwen3_5` models with an admitted quantized one-layer MTP head
+report `verification: "dense-qwen35-target-verify-v1"`, recommend three drafts
+and allow up to three. Drafting defaults to zero. This route includes
+`Jundot/Qwen3.8-27B-oQ4e-mtp`. The target and predictor share the model's
+embedding and vocabulary head; their BF16 logits are converted to F32 for the
+rejection sampler. The draft policy applies the target's final normalization
+to its captured residual, then supplies that hidden state and the next token
+embedding to the predictor. Chained drafts use the predictor's normalized
+output, matching the pinned oMLX post-normalization proposal variant. Accepted rows commit target
+recurrent and attention state; the predictor rewinds and rebuilds from the
+committed target residuals after every round. A zero-draft request still
+maintains predictor state, so its timing includes that cost.
+The round repair preserves the predictor's already-valid root KV and replays
+only accepted proposal rows using the preceding target hidden rows; root-only
+acceptance needs no replay. Zero-draft rounds prime the root through the same
+cache-only route. That route keeps embedding, hidden normalization, fusion,
+pre-attention normalization, Q/K/V projection, key normalization, RoPE and KV
+writes, while skipping unused attention output, FFN and final normalization.
+Target commit, repair and last-hidden ownership share one command completion:
+the three-draft path uses five normal command completions, down from eight.
+Completion metadata records aggregate round counts for zero through three
+accepted drafts; it contains no token or probability data.
+An optional `draft_readout_bits` model setting of three or four builds a
+coarse proposal head from the original affine vocabulary matrix. Each draft
+step proposes 64 shortlist IDs and rescores them with the original head. The
+full target vocabulary readout and exact rejection sampler are unchanged;
+omission keeps the full draft readout. Coarse-head performance and prefix
+behavior remain subject to artifact-bound qualification.
+Flat verification batches of two to four rows use serial per-row
+TreeVerify/StateAdvance arithmetic with batched projections; zero-draft
+generation uses the same verification arithmetic. This arithmetic differs from
+the ordinary stream's fused full-accept DeltaNet update and needs its own
+checkpoint-specific qualification.
+For the qualified BF16 128-dimensional, 16-key-head/48-value-head MXU geometry,
+a Metal kernel fuses those per-row operations without changing their arithmetic.
+Other supported layouts retain the serial verifier.
+
 The desktop backend remembers an opt-in preference per registered model;
 its API can inherit or override that preference. See
 [the backend configuration contract](LOCAL_API.md#mtp-capabilities-and-per-model-preferences).
@@ -291,7 +328,7 @@ model library. Older exact-MTP workers without a recommendation remain
 compatible: the Python host uses at most two drafts, bounded by their
 advertised maximum. Missing or malformed capabilities keep MTP unavailable.
 
-Both target and draft use complete F32 readouts and the existing temperature,
+The native hybrid routes use complete F32 readouts and the existing temperature,
 top-k, top-p and min-p filtering policy. The host accepts a proposed token with
 probability `min(1, p/q)` and samples a rejection from normalized `max(p-q, 0)`.
 The bonus token uses the target distribution. This is exact rejection sampling;
@@ -357,11 +394,12 @@ Agent clients resend the same instructions, tool definitions and history on ever
 Eligibility and key:
 
 - Converted text models whose owned layers are all full, non-ring attention caches (for example Qwen3 dense models) rewind their attention cache.
+- Converted dense `qwen3_5` models with an admitted MTP head restore a snapshot on a 1,024-token grid. It holds each DeltaNet layer's F32 recurrence and convolution history, the BF16 normalized target hidden state, F32 next-token logits and the predictor's committed position. Full-attention prefix rows in the target and predictor remain in the retained session. The exact selected draft count is part of the reuse key; draft-readout width is immutable loaded-model configuration. The packed 27B artifact and its separately configured three/four-bit draft-head variants passed artifact-bound prefix checks on the build named in the [follow-up report](benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
 - Native GGUF GLM-5.3 resumes from a snapshot on a 1,024-token grid. The snapshot includes KDA recurrence and convolution history, plus the MLA/indexer position and incomplete pooling tail. Completed attention and indexer prefix rows remain in the loaded model's own state.
 - The ordinary [EXL3/FP8 GLM backend](validation/GLM_EXL3_BACKEND.md) resumes on a 16,384-token grid with MTP off and its head unloaded. A private native MTP candidate, enabled through a separately prepared capability stage and explicit `STARK_GLM_EXL3_VALIDATE_NATIVE=1`, snapshots the draft-head state with the native prefix state. Its native greedy, sampled and prefix mechanism/invalidation checks pass; full Rust-worker and quality validation remain pending, so production MTP is unqualified. The state-hash diagnostic build setting is separate. See the [native mechanism record](archive/runs/2026-11-04-glm-exl3-native-mtp-prefix.md) and [comparison record](benchmarks/2026-11-04-glm-mlx-stream-comparison.md).
 - The native mixed-precision Qwen3.8 backend (Lily-format, external mixed-affine and Uzu-converted Qwen3.8 artifacts) resumes from a recurrent-state snapshot on a 4,096-token grid. This includes the admitted `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` layout. Its attention, indexer and draft-head caches below the snapshot stay in the loaded model's own state.
 - Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window, speculator and image models, and for the native Flint and F32 Qwen graphs.
-- A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On Qwen3.8 and the private native EXL3 candidate, whether MTP is enabled must also match (`key` reports this).
+- A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On Qwen3.8 and the private native EXL3 candidate, whether MTP is enabled must also match (`key` reports this). Dense MTP uses the exact selected draft count; model-level coarse-readout configuration is bound by the loaded model instance.
 
 Exactness, converted models:
 
@@ -372,6 +410,7 @@ Exactness, native hybrid snapshots:
 
 - GGUF GLM captures at the start of the final 1,024-token reuse chunk. That boundary is divisible by its admitted 4/8-token prefill group widths, so splitting for capture preserves their grouping and arithmetic. After all GPU writers finish, capture copies the exact stored KDA state and convolution histories, and the MLA/indexer cursor and incomplete pooling tail. Restore resets the model, restores those values and exposes only the completed prefix rows retained below the boundary.
 - Qwen3.8 prefill runs in 4,096-token passes counted from the position it starts at. A scoped request splits its prefill at the start of its final pass and copies the recurrent state there: GDN states and convolution windows, the n-gram history and window, and, when present, the draft head's last hidden. Both parts run the same passes as one prefill.
+- Dense Qwen3.5-family MTP prefill captures after the last complete non-final 1,024-token chunk. Restore copies the recurrence, convolution history and normalized target hidden state, rewinds both attention cursors, then prefills the remaining suffix with the fresh route's chunk boundaries. The snapshot belongs to one loaded model instance and one retained session.
 - A snapshot cannot be rewound. The next request reuses it only when its prompt begins with the whole snapshotted prefix and leaves at least two tokens to prefill; otherwise it reuses nothing. The remaining prompt uses the backend's original prefill grouping, final-token route and draw.
 
 Restored execution must produce greedy and seeded outputs identical to a fresh-state run. The [validation record](archive/runs/2026-11-01-generation-prefix-reuse.md) checks this on the pinned Qwen3-4B artifact, and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) on the native Lily-format Qwen3.8 checkpoint. The [GLM and external mixed-affine record](archive/runs/2026-11-03-glm-qwen-prefix-reuse.md) records the artifact-specific scope for those paths.

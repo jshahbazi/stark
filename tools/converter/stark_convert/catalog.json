@@ -1,7 +1,7 @@
 {
   "entry_count": 110,
   "exporter": "tools/converter/scripts/export_conversion_catalog.py",
-  "extension_count": 5,
+  "extension_count": 6,
   "extensions": [
     {
       "adapter": "qwen3_5",
@@ -287,6 +287,69 @@
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
+    },
+    {
+      "adapter": "qwen3_5",
+      "catalog_origin": "stark_extension",
+      "compressed_format": {
+        "scheme": "mlx_affine",
+        "bits": 4,
+        "mixed_bits": [
+          4,
+          5,
+          6,
+          8
+        ]
+      },
+      "config_class": "HFQwen35Config",
+      "container": ".safetensors",
+      "family": "Qwen3.8",
+      "files": {
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": "qwen_think_end",
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": "optional_thinking",
+        "reasoning_id": "boolean_default_on",
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "qwen3_5",
+      "model_kind": "LanguageModelSpec",
+      "name": "Qwen3.8-27B oQ4e MTP",
+      "origin": "HuggingFaceOrigin",
+      "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp",
+      "size": "27B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "Alibaba"
     }
   ],
   "models": [

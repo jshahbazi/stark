@@ -40,6 +40,197 @@ struct Input<T: ArrayElement + Float> {
     soft_cap: Option<f32>,
 }
 
+#[stark_test]
+fn packed_affine_cpu_matches_lossless_u8() {
+    for bits in [5, 6] {
+        let input =
+            QuantInput::<bf16>::new(4, 256, 64, 64, bits, QuantizationMethod::ScaleBias, 107).with_group_output();
+        let packed = crate::tests::matmul::run_quant_cpu(&input);
+        let widened = crate::tests::matmul::run_quant_cpu(&input.widened_u8());
+        assert!(packed == widened, "packed affine CPU calculation differs from widened codes");
+    }
+}
+
+fn run_coarse_f32<B: Backend>(
+    context: &B::Context,
+    input: &QuantInput<bf16>,
+) -> Vec<f32> {
+    let buffers = QuantBuffers::<B, bf16>::allocate(context, input);
+    let mut output = create_buffer::<B, f32>(context, (input.m * input.n) as usize);
+    let mut kernel = <B::Kernels as Kernels>::MatmulKernel::new(
+        context,
+        crate::data_type::DataType::BF16,
+        crate::data_type::DataType::BF16,
+        crate::data_type::DataType::F32,
+    )
+    .unwrap();
+    let mut command = context.create_command_buffer(None, None).unwrap();
+    kernel
+        .encode(
+            MatmulArguments {
+                a: MatmulA::FullPrecision {
+                    values: &buffers.x,
+                    offset: 0,
+                },
+                b: buffers.matmul_b(input),
+                b_leading_dimension: None,
+                b_transpose: true,
+                d: &mut output,
+                d_transform: MatmulDOps::none(),
+                gather_indices: None::<&B::GlobalBuffer>,
+                m: input.m,
+                n: input.n,
+                k: input.k,
+            },
+            &mut command,
+        )
+        .unwrap();
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    buffer_to_vec::<B, f32>(&output)
+}
+
+#[stark_test]
+fn internal_coarse_three_bit_cpu_matches_u8_f32_scores() {
+    let context = <Cpu as Backend>::Context::new().unwrap();
+    let input = QuantInput::<bf16>::new(1, 256, 64, 64, 3, QuantizationMethod::ScaleBias, 131).with_group_output();
+    let actual = run_coarse_f32::<Cpu>(&context, &input);
+    let expected = run_coarse_f32::<Cpu>(&context, &input.widened_u8());
+    assert!(
+        actual.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+        "internal coarse3 CPU scores differ"
+    );
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn internal_coarse_three_bit_metal_matches_u8_f32_scores() {
+    let context = MetalContext::new().unwrap();
+    for k in [64, 256, 5120] {
+        let input = QuantInput::<bf16>::new(1, k, 128, 64, 3, QuantizationMethod::ScaleBias, 137).with_group_output();
+        let actual = run_coarse_f32::<Metal>(&context, &input);
+        let expected = run_coarse_f32::<Metal>(&context, &input.widened_u8());
+        assert!(
+            actual.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "internal coarse3 Metal scores differ"
+        );
+    }
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn packed_affine_gathered_rescore_matches_full_readout() {
+    let context = MetalContext::new().unwrap();
+    let (k, vocab, count) = (5120, 256, 64);
+    let ids = (0..count).map(|i| (i * 73 + 11) % vocab).collect::<Vec<_>>();
+    let gathered = create_buffer_with_data::<Metal, u32>(&context, &ids);
+    for bits in [5, 6] {
+        let input =
+            QuantInput::<bf16>::new(1, k, vocab, 64, bits, QuantizationMethod::ScaleBias, 139).with_group_output();
+        let buffers = QuantBuffers::<Metal, bf16>::allocate(&context, &input);
+        let full = run_gemv::<Metal, bf16>(
+            &context,
+            &buffers.x,
+            buffers.matmul_b(&input),
+            None::<&<Metal as Backend>::GlobalBuffer>,
+            1,
+            vocab as usize,
+            k as usize,
+            None,
+        );
+        let selected = run_gemv::<Metal, bf16>(
+            &context,
+            &buffers.x,
+            buffers.matmul_b(&input),
+            Some(&gathered),
+            1,
+            count as usize,
+            k as usize,
+            None,
+        );
+        assert!(
+            selected.iter().zip(&ids).all(|(&score, &id)| score.to_bits() == full[id as usize].to_bits()),
+            "packed gathered rescore differs from full vocabulary scores"
+        );
+    }
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn packed_affine_metal_matches_u8_and_scalar_rows() {
+    let context = MetalContext::new().expect("Metal context");
+    for bits in [5, 6] {
+        for (k, n) in [(64, 4), (128, 4), (5120, 128), (17408, 128), (5120, 160)] {
+            for m in 1..=4 {
+                let input =
+                    QuantInput::<bf16>::new(m, k, n, 64, bits, QuantizationMethod::ScaleBias, 109).with_group_output();
+                let packed = crate::tests::matmul::quant::run_quant_metal(&context, &input, None);
+                let widened =
+                    crate::tests::matmul::quant::run_quant_metal_policy(&context, &input.widened_u8(), None, Some(n));
+                assert!(packed == widened, "packed affine GEMV differs from widened U8 arithmetic");
+                for row in 0..m as usize {
+                    let mut scalar = input.clone();
+                    scalar.m = 1;
+                    scalar.x = input.x[row * k as usize..(row + 1) * k as usize].to_vec();
+                    let reference = crate::tests::matmul::quant::run_quant_metal(&context, &scalar, None);
+                    assert!(
+                        packed[row * n as usize..(row + 1) * n as usize] == reference,
+                        "packed affine batch differs from independent scalar rows"
+                    );
+                }
+            }
+        }
+        for engine in [crate::backends::metal::GemmEngine::Simdgroup, crate::backends::metal::GemmEngine::Mxu] {
+            let input = QuantInput::<bf16>::new(64, 5120, 128, 64, bits, QuantizationMethod::ScaleBias, 113)
+                .with_group_output();
+            let packed = crate::tests::matmul::quant::run_quant_metal(&context, &input, Some(engine));
+            let widened = crate::tests::matmul::quant::run_quant_metal(&context, &input.widened_u8(), Some(engine));
+            assert!(packed == widened, "packed affine prefill differs from widened U8 arithmetic");
+        }
+    }
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn packed_affine_partition_retains_fused_u8_arithmetic() {
+    use crate::tests::matmul::quant::{run_quant_metal, run_quant_metal_policy};
+
+    let context = MetalContext::new().expect("Metal context");
+    let (k, fused_n, part_n) = (5120, 16480, 64);
+    for bits in [4, 5, 6, 8] {
+        for m in [1, 2, 3, 4, 64] {
+            let fused = QuantInput::<bf16>::new(m, k, fused_n, 64, bits, QuantizationMethod::ScaleBias, 127)
+                .with_group_output();
+            let reference = if bits == 8 {
+                fused.clone()
+            } else {
+                fused.widened_u8()
+            };
+            let expected = run_quant_metal(&context, &reference, None);
+            for offset in [0, 48] {
+                let mut part = fused.clone();
+                part.n = part_n;
+                part.w_packed = fused.w_packed
+                    [(offset * k * bits / 32) as usize..((offset + part_n) * k * bits / 32) as usize]
+                    .to_vec();
+                part.scales = fused.scales[(offset * k / 64) as usize..((offset + part_n) * k / 64) as usize].to_vec();
+                part.biases = Some(
+                    fused.biases.as_ref().unwrap()[(offset * k / 64) as usize..((offset + part_n) * k / 64) as usize]
+                        .to_vec(),
+                );
+                let actual = run_quant_metal_policy(&context, &part, None, Some(fused_n));
+                assert!(
+                    (0..m as usize).all(|row| {
+                        actual[row * part_n as usize..(row + 1) * part_n as usize]
+                            == expected[row * fused_n as usize + offset as usize
+                                ..row * fused_n as usize + (offset + part_n) as usize]
+                    }),
+                    "packed partition differs from original fused U8 arithmetic"
+                );
+            }
+        }
+    }
+}
+
 fn get_test_data<T: ArrayElement + Float>(
     m: usize,
     k: usize,
@@ -180,6 +371,51 @@ fn group_major_gemv_bf16(
     );
 
     assert_eq_float(&reference, &actual, 0.05, &format!("GroupOutput GEMV W{bits} {method:?}"));
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn dense_qwen27_affine_verification_matches_independent_scalar_rows() {
+    let context = MetalContext::new().expect("Metal context");
+    // Full model matrix geometries exercise all relevant loop lengths without
+    // loading model weights. Scalar rows remain the explicit baseline route.
+    for bits in [4, 8] {
+        for (n, k) in [(5120, 17408), (34816, 5120), (16480, 5120), (5120, 6144), (14336, 5120), (5120, 10240)] {
+            let input =
+                QuantInput::<bf16>::new(4, k, n, 64, bits, QuantizationMethod::ScaleBias, 37).with_group_output();
+            let buffers = QuantBuffers::<Metal, bf16>::allocate(&context, &input);
+            let row_bytes = k as usize * 2;
+            let mut reference = Vec::with_capacity(4 * n as usize);
+            for row in 0..4 {
+                reference.extend(run_gemv::<Metal, bf16>(
+                    &context,
+                    buffers.x.subrange(row * row_bytes..(row + 1) * row_bytes),
+                    buffers.matmul_b(&input),
+                    None::<&<Metal as Backend>::GlobalBuffer>,
+                    1,
+                    n as usize,
+                    k as usize,
+                    None,
+                ));
+            }
+            for m in 2..=4 {
+                let actual = run_gemv::<Metal, bf16>(
+                    &context,
+                    &buffers.x,
+                    buffers.matmul_b(&input),
+                    None::<&<Metal as Backend>::GlobalBuffer>,
+                    m,
+                    n as usize,
+                    k as usize,
+                    None,
+                );
+                assert!(
+                    actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "affine verify differs from scalar rows: W{bits}, m={m}, n={n}, k={k}"
+                );
+            }
+        }
+    }
 }
 
 #[rstest]

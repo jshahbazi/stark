@@ -5,6 +5,7 @@ pub mod full_precision_spec;
 pub mod hybrid_spec;
 pub mod int_spec;
 pub mod low_rank_spec;
+pub mod mlx_row_partitioned_spec;
 pub mod mlx_spec;
 
 #[stark_config]
@@ -20,6 +21,7 @@ pub enum Layout {
     hybrid_spec::HybridSpec,
     int_spec::IntSpec,
     mlx_spec::MLXSpec,
+    mlx_row_partitioned_spec::MLXRowPartitionedSpec,
     d4s4_spec::D4S4Spec
 )]
 pub struct WeightMatrixSpec;

@@ -26,9 +26,9 @@ METAL_FUNC void reset_arrival(device atomic_uint* count) {
   atomic_store_explicit(count, 0u, memory_order_relaxed);
 }
 
-template <typename Visitor>
+template <typename T, typename Visitor>
 METAL_FUNC void visit_partition_keys(
-    const device bfloat* input,
+    const device T* input,
     uint columns,
     uint index_bits,
     uint partition,
@@ -43,12 +43,12 @@ METAL_FUNC void visit_partition_keys(
       visit(top_k_ordered_key(float(input[column]), column, index_bits));
     return;
   }
-  const device vec<bfloat, VECTOR_WIDTH>* input4 = reinterpret_cast<const device vec<bfloat, VECTOR_WIDTH>*>(input);
+  const device vec<T, VECTOR_WIDTH>* input4 = reinterpret_cast<const device vec<T, VECTOR_WIDTH>*>(input);
   const uint vector_columns = columns / VECTOR_WIDTH;
   const uint vector_begin = vector_columns * partition / partitions;
   const uint vector_end = vector_columns * (partition + 1u) / partitions;
   for (uint vector = vector_begin + lid; vector < vector_end; vector += THREADS_PER_TG) {
-    const vec<bfloat, VECTOR_WIDTH> values = input4[vector];
+    const vec<T, VECTOR_WIDTH> values = input4[vector];
     for (uint lane = 0; lane < VECTOR_WIDTH; ++lane)
       visit(top_k_ordered_key(float(values[lane]), vector * VECTOR_WIDTH + lane, index_bits));
   }
@@ -58,8 +58,10 @@ METAL_FUNC void visit_partition_keys(
   }
 }
 
+template <typename T>
+VARIANTS(T, bfloat, float)
 KERNEL(RadixTopKSmallPass)(
-    const device bfloat* input,
+    const device T* input,
     device atomic_uint* partial_histograms,
     device ulong* prefixes,
     device ulong* prefix_masks,
@@ -81,7 +83,7 @@ KERNEL(RadixTopKSmallPass)(
   const uint index_bits = columns <= 1 ? 1u : 32u - clz(columns - 1u);
   const uint passes = (32u + index_bits + RADIX_BITS - 1u) / RADIX_BITS;
   const uint shift = (passes - pass - 1u) * RADIX_BITS;
-  const device bfloat* row_input = input + ulong(row) * columns;
+  const device T* row_input = input + ulong(row) * columns;
   const ulong prefix = prefixes[row];
   const ulong mask = prefix_masks[row];
 
@@ -151,8 +153,10 @@ KERNEL(RadixTopKSmallPass)(
     reset_arrival(&done_counts[row]);
 }
 
+template <typename T>
+VARIANTS(T, bfloat, float)
 KERNEL(RadixTopKSmallCollect)(
-    const device bfloat* input,
+    const device T* input,
     device uint* output_ids,
     device float* output_scores,
     const device ulong* prefixes,
@@ -171,7 +175,7 @@ KERNEL(RadixTopKSmallCollect)(
   const uint row = group / partitions;
   const uint partition = group % partitions;
   const uint index_bits = columns <= 1 ? 1u : 32u - clz(columns - 1u);
-  const device bfloat* row_input = input + ulong(row) * columns;
+  const device T* row_input = input + ulong(row) * columns;
   const ulong prefix = prefixes[row];
 
   visit_partition_keys(row_input, columns, index_bits, partition, partitions, lid, [&](ulong key) {

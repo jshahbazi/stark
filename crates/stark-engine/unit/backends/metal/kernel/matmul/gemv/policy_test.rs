@@ -99,6 +99,101 @@ fn quantized_policy_edges() {
 }
 
 #[stark_test]
+fn dense_qwen27_affine_verify_tiles_preserve_scalar_reduction_geometry() {
+    for bits in [4, 8] {
+        for m in 2..=4 {
+            for (n, k) in [
+                (5120, 17408),
+                (34816, 5120),
+                (16480, 5120),
+                (5120, 6144),
+                (14336, 5120),
+                (248320, 5120),
+                (5120, 10240),
+            ] {
+                let actual = quantized(LARGE_GPU_CORE_COUNT, MTLGPUFamily::Apple10, bits, 64, m, n, k).unwrap();
+                let input_rows = if bits == 8 && m == 4 && n == 5120 && k == 17408 {
+                    2
+                } else {
+                    m
+                };
+                assert_eq!(actual.input_row_tile, input_rows);
+                assert_eq!(actual.num_simdgroups, 8);
+                assert_eq!(actual.results_per_simdgroup, 4);
+                assert_eq!(actual.reduction_lanes, 32);
+                assert_eq!(
+                    actual.group_lanes,
+                    if bits == 4 {
+                        4
+                    } else {
+                        8
+                    }
+                );
+            }
+        }
+        // Older GPUs, other shapes and non-affine layouts keep their route.
+        for (cores, family, m, n, k, affine) in [
+            (LARGE_GPU_CORE_COUNT, MTLGPUFamily::Apple9, 4, 14336, 5120, true),
+            (SMALL_GPU_CORE_COUNT, MTLGPUFamily::Apple10, 4, 14336, 5120, true),
+            (LARGE_GPU_CORE_COUNT, MTLGPUFamily::Apple10, 4, 8192, 5120, true),
+            (LARGE_GPU_CORE_COUNT, MTLGPUFamily::Apple10, 4, 14336, 5120, false),
+            (LARGE_GPU_CORE_COUNT, MTLGPUFamily::Apple10, 1, 14336, 5120, true),
+        ] {
+            let actual = quantized_tile(cores, family, bits, 64, m, n, k, true, affine).unwrap();
+            assert_eq!(actual.input_row_tile, 1);
+        }
+    }
+}
+
+#[stark_test]
+fn dense_qwen27_affine_verification_dispatch_stays_on_gemv() {
+    use crate::backends::metal::kernel::matmul::{MatmulDispatch, MatmulMetalKernel};
+    for bits in [4, 8] {
+        for m in 2..=4 {
+            for (n, k) in [
+                (5120, 17408),
+                (34816, 5120),
+                (16480, 5120),
+                (5120, 6144),
+                (14336, 5120),
+                (248320, 5120),
+                (5120, 10240),
+            ] {
+                let shape = MatmulShape {
+                    m,
+                    n,
+                    k,
+                    b_transpose: true,
+                    b_leading_dimension: None,
+                    b_prologue: GemmBPrologueKind::ScaleBiasDequant,
+                    b_bits: Some(bits),
+                    b_group_size: Some(64),
+                    signed_codes: false,
+                    a_full_precision: true,
+                    gathered: false,
+                    params_layout: Some(QuantParamsLayout::GroupOutput),
+                    d_transform: GemmDTransform::empty(),
+                };
+                let dispatch = MatmulMetalKernel::choose_dispatch(
+                    &shape,
+                    "Apple M5 Max",
+                    40,
+                    MTLGPUFamily::Apple10,
+                    true,
+                    DataType::BF16,
+                    DataType::BF16,
+                    DataType::BF16,
+                );
+                assert!(
+                    matches!(dispatch, MatmulDispatch::Gemv(_)),
+                    "affine verification unexpectedly chose GEMM: W{bits}, m={m}, n={n}, k={k}"
+                );
+            }
+        }
+    }
+}
+
+#[stark_test]
 fn untuned_quantized_io_uses_only_the_generated_fallback() {
     assert_eq!(quantized_tile(LARGE_GPU_CORE_COUNT, MTLGPUFamily::Apple10, 4, 32, 4, 3, 4096, false, true), None);
     let tile = quantized_tile(LARGE_GPU_CORE_COUNT, MTLGPUFamily::Apple10, 4, 32, 4, 4096, 4096, false, true)
@@ -369,4 +464,127 @@ fn qwen35_tile8_preserves_group_major_affine_outputs() {
             outputs[0].iter().zip(&outputs[1]).all(|(baseline, candidate)| baseline.to_bits() == candidate.to_bits())
         );
     }
+}
+
+/// Private synthetic timing probe; no model, prompt or token data is loaded.
+#[stark_test]
+#[ignore]
+fn dense_qwen27_affine_input_row_tile_microbenchmark() {
+    use half::bf16;
+
+    use super::super::kernel::{GemvKernel, GemvSpecialization};
+    use crate::{
+        backends::{
+            common::{
+                CommandBufferCompleted, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context,
+                gpu_types::QuantizationMethod,
+            },
+            metal::{Metal, kernel::matmul::MatmulOutputWork},
+        },
+        tests::{
+            cold_pool::ColdPool,
+            helpers::buffer_to_vec,
+            matmul::{QuantBuffers, QuantInput, quant_arguments},
+        },
+    };
+
+    const DISPATCHES: usize = 16;
+    const WARMUPS: usize = 2;
+    const SAMPLES: usize = 9;
+    let context = crate::tests::util::shared_metal_context();
+    let output_work = MatmulOutputWork::new(&context, DataType::BF16, DataType::BF16).unwrap();
+    let mut kernel = GemvKernel::new(DataType::BF16, DataType::BF16, DataType::BF16);
+    let mut records = Vec::new();
+    for bits in [4, 8] {
+        for (label, n, k) in [("ffn_up", 34816, 5120), ("ffn_down", 5120, 17408), ("readout", 248320, 5120)] {
+            let input =
+                QuantInput::<bf16>::new(4, k, n, 64, bits, QuantizationMethod::ScaleBias, 197).with_group_output();
+            // Match existing cold GEMV benches: distinct buffers cover at least
+            // 256 MiB before an address is reused. Large readouts need one copy.
+            let mut pool =
+                ColdPool::new(input.weight_buffer_bytes(), || QuantBuffers::<Metal, bf16>::allocate(&context, &input));
+            let group_lanes = if bits == 4 {
+                4
+            } else {
+                8
+            };
+            let mut specializations = Vec::new();
+            let mut reference = None::<Vec<bf16>>;
+            for rows in [1, 2, 4] {
+                let buffers = pool.next_mut();
+                let mut command = context.create_command_buffer(None, None).unwrap();
+                let arguments = quant_arguments(buffers, &input);
+                let shape = MatmulShape::from_arguments(&arguments);
+                assert!(shape.m == 4 && shape.params_layout == Some(QuantParamsLayout::GroupOutput));
+                let specialization = GemvSpecialization::select_tile(
+                    &shape,
+                    DataType::BF16,
+                    DataType::BF16,
+                    DataType::BF16,
+                    GemvTile::quantized(8, 4, rows, 32, group_lanes),
+                )
+                .unwrap();
+                kernel.encode(arguments, specialization, &output_work, &mut command).unwrap();
+                command.end_encoding().submit().wait_until_completed().unwrap();
+                let actual = buffer_to_vec::<Metal, bf16>(&buffers.y);
+                assert!(actual.iter().all(|x| x.is_finite()), "synthetic affine result is nonfinite");
+                if let Some(reference) = &reference {
+                    assert!(
+                        actual.iter().zip(reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "input-row tile changes affine arithmetic: W{bits} n={n} k={k} rows={rows}"
+                    );
+                } else {
+                    reference = Some(actual);
+                }
+                specializations.push(specialization);
+            }
+            let mut timings: [Vec<f64>; 3] = std::array::from_fn(|_| Vec::with_capacity(SAMPLES));
+            for sample in 0..WARMUPS + SAMPLES {
+                // Alternate traversal to reduce a consistent order/thermal bias.
+                for offset in 0..3 {
+                    let index = if sample % 2 == 0 {
+                        offset
+                    } else {
+                        2 - offset
+                    };
+                    let mut command = context.create_command_buffer(None, None).unwrap();
+                    for _ in 0..DISPATCHES {
+                        kernel
+                            .encode(
+                                quant_arguments(pool.next_mut(), &input),
+                                specializations[index],
+                                &output_work,
+                                &mut command,
+                            )
+                            .unwrap();
+                    }
+                    let complete = command.end_encoding().submit().wait_until_completed().unwrap();
+                    let per_dispatch_us = complete.gpu_execution_time().as_secs_f64() * 1e6 / DISPATCHES as f64;
+                    assert!(per_dispatch_us.is_finite() && per_dispatch_us > 0.0);
+                    if sample >= WARMUPS {
+                        timings[index].push(per_dispatch_us);
+                    }
+                }
+            }
+            let variants = [1, 2, 4]
+                .into_iter()
+                .zip(timings)
+                .map(|(rows, mut values)| {
+                    values.sort_by(f64::total_cmp);
+                    serde_json::json!({"input_row_tile": rows, "median_gpu_us": values[SAMPLES / 2],
+                    "min_gpu_us": values[0], "max_gpu_us": values[SAMPLES-1]})
+                })
+                .collect::<Vec<_>>();
+            records.push(serde_json::json!({"label": label, "bits": bits, "m": 4, "n": n, "k": k,
+                "weight_and_coefficient_bytes": input.weight_buffer_bytes(), "bit_exact": true,
+                "variants": variants}));
+        }
+    }
+    let report = serde_json::json!({"schema": "stark-affine-input-row-tile-microbenchmark-v1",
+        "synthetic": true, "timer": "gpu-command-buffer", "cold_working_set_min_bytes": 256usize << 20,
+        "dispatches_per_sample": DISPATCHES, "warmups": WARMUPS, "samples": SAMPLES, "records": records});
+    if let Some(path) = std::env::var_os("STARK_AFFINE_TILE_BENCH_OUTPUT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    println!("{report}");
 }

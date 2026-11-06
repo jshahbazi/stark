@@ -26,6 +26,17 @@ pub mod mamba2;
 pub mod short_conv;
 
 pub trait MixerState<B: Backend>: Any + Send {
+    /// The coordinator fences before publishing device-owned snapshot payloads.
+    fn capture_prefix(
+        &self,
+        context_length: u32,
+        _context: &B::Context,
+        _command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<Box<dyn MixerStateSnapshot<B>>>, B::Error> {
+        Ok(self
+            .can_rewind(context_length)
+            .then(|| Box::new(RewindSnapshot(context_length)) as Box<dyn MixerStateSnapshot<B>>))
+    }
     fn prepare(
         &mut self,
         context_length: u32,
@@ -54,6 +65,39 @@ pub trait MixerState<B: Backend>: Any + Send {
         _context_length: u32,
     ) -> bool {
         false
+    }
+}
+
+pub trait MixerStateSnapshot<B: Backend>: Send {
+    fn can_restore(
+        &self,
+        state: &dyn MixerState<B>,
+    ) -> bool;
+    fn restore(
+        &self,
+        state: &mut dyn MixerState<B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> bool;
+    fn payload_bytes(&self) -> usize;
+}
+
+struct RewindSnapshot(u32);
+impl<B: Backend> MixerStateSnapshot<B> for RewindSnapshot {
+    fn can_restore(
+        &self,
+        state: &dyn MixerState<B>,
+    ) -> bool {
+        state.can_rewind(self.0)
+    }
+    fn restore(
+        &self,
+        state: &mut dyn MixerState<B>,
+        _: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> bool {
+        state.rewind(self.0)
+    }
+    fn payload_bytes(&self) -> usize {
+        0
     }
 }
 

@@ -316,6 +316,21 @@ def test_unsupported_and_malformed_config_variants(tmp_path, field, value, error
         build_qwen35_plan(source)
 
 
+def test_qwen38_swish_annotation_preserves_sigmoid_attention_plan(tmp_path):
+    source = tmp_path / "source"
+    config, _ = qwen35_fixture(source)
+    baseline = build_qwen35_plan(source)
+    config.update(output_gate_type="swish", language_model_only=False)
+    config["rope_parameters"]["type"] = config["rope_parameters"].pop("rope_type", "default")
+    (source / "config.json").write_text(json.dumps(config))
+    candidate = build_qwen35_plan(source)
+    assert candidate.decoder_config == baseline.decoder_config
+    config["output_gate_type"] = "relu"
+    (source / "config.json").write_text(json.dumps(config))
+    with pytest.raises(UnsupportedConversion, match="gate annotation"):
+        build_qwen35_plan(source)
+
+
 def test_declared_vision_extraction_preserves_input_signatures(tmp_path):
     source = tmp_path / "source"
     config, tensors = qwen35_fixture(source, wrapper=True, sharded=True)

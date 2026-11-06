@@ -194,6 +194,7 @@ class ConversionPlan:
     input_bytes: int
     source_tensors: int
     input_tensors: tuple[TensorInfo, ...] = ()
+    mtp_config: dict | None = None
 
 
 def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, TensorInfo]]:
@@ -687,11 +688,11 @@ def write_plan(
         for op in operations
     ):
         raise ConversionError("invalid_scalar_transform")
-    if any(op.kind in {"mlx_repack", "mlx_params"} for op in operations):
+    if any(op.kind in {"mlx_repack", "mlx_params", "mlx_widen"} for op in operations):
         from .compressed import validate_mlx_operation
 
         for op in operations:
-            if op.kind in {"mlx_repack", "mlx_params"}:
+            if op.kind in {"mlx_repack", "mlx_params", "mlx_widen"}:
                 validate_mlx_operation(op)
     for op in operations:
         if op.kind == "transpose_f32" and (
@@ -745,6 +746,10 @@ def write_plan(
                     from .compressed import write_mlx_params
 
                     peak = max(peak, write_mlx_params(op, output, chunk_bytes))
+                elif op.kind == "mlx_widen":
+                    from .compressed import write_mlx_widen
+
+                    peak = max(peak, write_mlx_widen(op, output, chunk_bytes))
                 else:
                     raise ConversionError("Conversion plan has an invalid operation")
                 if output.tell() - before != op.nbytes:

@@ -227,6 +227,70 @@ def test_packed_word_sign_does_not_change_output_bytes(tmp_path, bits, packed_dt
     assert tensor_bytes(converted[name]) == tensors["model.embed_tokens.weight"][1].tobytes()
 
 
+def test_mixed_affine_widths_widen_losslessly_through_qwen35_row_fusion(tmp_path):
+    source = tmp_path / "source"
+    config, tensors = mlx_qwen35_fixture(source, wrapper=True, vl_wrapper=True, nested_head=True)
+    q = "language_model.model.layers.1.self_attn.q_proj"
+    v = "language_model.model.layers.1.self_attn.v_proj"
+    gate = "language_model.model.layers.0.mlp.gate_proj"
+    for stem, bits in ((q, 5), (v, 6), (gate, 8)):
+        rows = tensors[stem + ".weight"][1].shape[0]
+        payload = b"".join(
+            sum(((column + row * 17) % (1 << bits)) << (column * bits) for column in range(128)).to_bytes(
+                128 * bits // 8, "little"
+            )
+            for row in range(rows)
+        )
+        tensors[stem + ".weight"] = "U32", np.frombuffer(payload, dtype="<u4").reshape(rows, 4 * bits)
+        for key in ("quantization", "quantization_config"):
+            config[key][stem] = {"bits": bits, "group_size": 32, "mode": "affine"}
+    (source / "config.json").write_text(json.dumps(config))
+    save_mlx_fixture(source, tensors)
+    plan = build_qwen35_plan(source)
+    output = tmp_path / "converted.safetensors"
+    stats = write_plan(plan, output, chunk_bytes=96)
+    metadata, converted = read_safetensors_header(output)
+    assert stats["peak_buffer_bytes"] <= 96
+    assert {json.loads(value)["bits"] for value in metadata.values() if json.loads(value)["type"] == "MLXSpec"} <= {
+        4,
+        8,
+    }
+
+    def codes(stem, bits):
+        values = tensors[stem + ".weight"][1]
+        return np.array(
+            [
+                [
+                    (int.from_bytes(row.tobytes(), "little") >> (column * bits)) & ((1 << bits) - 1)
+                    for column in range(128)
+                ]
+                for row in values
+            ],
+            dtype=np.uint8,
+        )
+
+    q_codes = codes(q, 5)
+    rows = [
+        *(q_codes[h * 64 : h * 64 + 32] for h in range(4)),
+        codes(q.replace("q_proj", "k_proj"), 4),
+        codes(v, 6),
+        *(q_codes[h * 64 + 32 : h * 64 + 64] for h in range(4)),
+    ]
+    attn_out = "decoder.transformer.layers.1.mixer.qkvg_projection.weights"
+    assert json.loads(metadata[attn_out + ".spec"])["bits"] == 8
+    assert tensor_bytes(converted[attn_out + ".weights"]) == np.concatenate(rows).tobytes()
+    mlp_out = "decoder.transformer.layers.0.mlp.up_projection.weights"
+    assert json.loads(metadata[mlp_out + ".spec"])["bits"] == 8
+    assert (
+        tensor_bytes(converted[mlp_out + ".weights"])
+        == np.concatenate([codes(gate.replace("gate_proj", "up_proj"), 4), codes(gate, 8)]).tobytes()
+    )
+    # Widening integer codes leaves the original affine parameter bits intact.
+    for suffix in ("scales", "biases"):
+        originals = [tensors[gate.replace("gate_proj", "up_proj") + "." + suffix][1], tensors[gate + "." + suffix][1]]
+        assert tensor_bytes(converted[mlp_out + "." + suffix]) == np.concatenate(originals).T.tobytes()
+
+
 @pytest.mark.parametrize("plane", ("weight", "scales", "biases"))
 def test_tied_duplicate_mlx_head_requires_identical_planes(tmp_path, plane):
     source = tmp_path / "source"

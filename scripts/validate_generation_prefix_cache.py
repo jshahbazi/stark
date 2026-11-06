@@ -40,9 +40,9 @@ import sys
 import time
 from pathlib import Path
 
+from stark_convert import hybrid_prepare, template_runtime
 from stark_convert.api_tools import parse_tool_output, tool_parser_for
 from stark_convert.chat import load_template
-from stark_convert import hybrid_prepare, template_runtime
 from stark_convert.local_api import APIError
 
 WORDS = (
@@ -185,7 +185,8 @@ def download_receipt_identity(model, receipt_path):
     return {"repository": EXL3_REPOSITORY, "revision": EXL3_REVISION,
             "receipt_sha256": file_sha256(receipt_path), "content_sha256": digest_text(manifest),
             "files": identities, "total_bytes": total,
-            "verification": "Prior verified SHA-256 hashes with current size/mtime/inode guards; payloads are not rehashed."}
+            "verification": ("Prior verified SHA-256 hashes with current size/mtime/inode guards; "
+                             "payloads are not rehashed.")}
 
 
 def streaming_contract(config):
@@ -207,7 +208,7 @@ def load_validation_template(model, download_receipt=None):
     """
     config = hybrid_prepare._json(model / "config.json", 2 * 1024 * 1024)
     if not isinstance(config, dict):
-        raise ValueError("model configuration is invalid")
+        raise ValueError("model configuration is invalid")  # noqa: TRY004 - retain the metadata-validation error contract.
     if "expert_streaming" not in config:
         if download_receipt is not None:
             raise ValueError("download receipt requires the explicit EXL3 streaming pack")
@@ -219,7 +220,7 @@ def load_validation_template(model, download_receipt=None):
     tokenizer = hybrid_prepare._json(model / "tokenizer_config.json", 2 * 1024 * 1024)
     generation = hybrid_prepare._json(model / "generation_config.json")
     if not isinstance(tokenizer, dict) or not isinstance(generation, dict):
-        raise ValueError("raw tokenizer metadata is invalid")
+        raise ValueError("raw tokenizer metadata is invalid")  # noqa: TRY004 - retain the metadata-validation error contract.
     source_path = model / "chat_template.jinja"
     if source_path.stat().st_size > 256 * 1024:
         raise ValueError("missing or excessive chat template")
@@ -228,7 +229,7 @@ def load_validation_template(model, download_receipt=None):
         raise ValueError("missing or excessive chat template")
     text = config.get("text_config", config)
     if not isinstance(text, dict):
-        raise ValueError("raw text metadata is invalid")
+        raise ValueError("raw text metadata is invalid")  # noqa: TRY004 - retain the metadata-validation error contract.
     stops = hybrid_prepare._ids(text.get("eos_token_id"))
     if generation.get("eos_token_id") is not None:
         stops.extend(hybrid_prepare._ids(generation["eos_token_id"]))
@@ -599,7 +600,7 @@ def outcome(reply, tools, parser):
     return result
 
 
-def plan(turns, chunk, context, mtp_drafts):
+def plan(turns, chunk, context, mtp_drafts, *, mtp_selection_key=False):
     """The cached worker's request sequence: comparison cases and invalidating actions."""
     steps = []
 
@@ -633,6 +634,11 @@ def plan(turns, chunk, context, mtp_drafts):
     if mtp_drafts:
         case("mtp_after_plain", turns[-1], mtp_drafts=mtp_drafts)
         case("mtp_warm", turns[-1], mtp_drafts=mtp_drafts)
+        case("mtp_repeat_stochastic", turns[-1], mtp_drafts=mtp_drafts, sampling=stochastic, seed=17)
+        if mtp_selection_key and mtp_drafts > 1:
+            case("mtp_different_depth", turns[-1], mtp_drafts=1)
+            case("mtp_different_depth_warm", turns[-1], mtp_drafts=1)
+            case("mtp_depth_restored", turns[-1], mtp_drafts=mtp_drafts)
         case("plain_after_mtp", turns[-1])
         case("plain_warm", turns[-1])
     for label in (*INVALIDATIONS, "tokenize_decode"):
@@ -688,12 +694,35 @@ def comparison_key(ids, options):
     )
 
 
+def mtp_cache_value(worker, drafts):
+    key = (worker.ready.get("prefix_cache") or {}).get("key", "")
+    return (drafts or 0) if "mtp-selection" in key else bool(drafts)
+
+
+def selected_mtp_drafts(ready, requested):
+    """Use the readiness recommendation by default; bound explicit depth to its cap."""
+    mtp = ready.get("mtp") or {}
+    if requested is None:
+        return mtp.get("recommended_drafts") if mtp.get("supported") else None
+    if requested == 0:
+        return 0
+    maximum = mtp.get("max_drafts")
+    if (mtp.get("supported") is not True or type(maximum) is not int
+            or not 1 <= requested <= maximum):
+        raise SystemExit("requested MTP depth exceeds worker readiness")
+    return requested
+
+
 def report(args, **counts):
     report_stage(args.progress, **counts)
 
 
 def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=None):
     """Run every case once per distinct request (all steps on a cached worker)."""
+    requested = max((options.get("mtp_drafts", 0) or 0
+                     for kind, _, _, options in steps if kind == "case"), default=0)
+    if requested:
+        selected_mtp_drafts(worker.ready, requested)
     outcomes, observed = {}, {}
     for kind, label, ids, options in steps:
         if kind == "act":
@@ -724,7 +753,7 @@ def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=No
         cache_key = (
             scopes[options["scope"]],
             options["context"],
-            bool(options.get("mtp_drafts")),
+            mtp_cache_value(worker, options.get("mtp_drafts")),
         )
         predicted = expectation.predict(ids, cache_key)
         report(args, case_start=label, input_tokens=len(ids))
@@ -791,8 +820,7 @@ def run_exactness(args, template, codec, parser):
         if settings.get("enabled") is not True:
             raise SystemExit("candidate did not enable prefix reuse for this model")
         chunk = settings["chunk_tokens"]
-        mtp = cached.ready.get("mtp") or {}
-        mtp_drafts = mtp.get("recommended_drafts") if mtp.get("supported") else None
+        mtp_drafts = selected_mtp_drafts(cached.ready, args.mtp_drafts)
         session, turns = build_turns(
             cached,
             template,
@@ -805,7 +833,8 @@ def run_exactness(args, template, codec, parser):
             raise SystemExit("synthetic session exceeds the requested context")
         if (len(turns[0]) - 1) // chunk == 0:
             raise SystemExit("first prompt must exceed one backend reuse chunk")
-        steps = plan(turns, chunk, args.context, mtp_drafts)
+        steps = plan(turns, chunk, args.context, mtp_drafts,
+                     mtp_selection_key="mtp-selection" in settings.get("key", ""))
         expectation = Expectation(chunk, args.reuse == "boundary")
         scopes = {"main": secrets.token_hex(16), "other": secrets.token_hex(16)}
         _, observed = run_cases(
@@ -1019,7 +1048,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--download-receipt", type=Path,
-                        help="Verified pinned EXL3 flat-pack receipt; checks all file identities before and after execution")
+                        help=("Verified pinned EXL3 flat-pack receipt; "
+                              "checks file identities before and after execution"))
     parser.add_argument(
         "--baseline", required=True, help="Worker built without prefix reuse"
     )
@@ -1041,6 +1071,8 @@ def main():
     parser.add_argument("--rounds-per-block", type=int, default=2)
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--mode", choices=("all", "exactness", "timing"), default="all")
+    parser.add_argument("--mtp-drafts", type=int, choices=tuple(range(8)), default=None,
+                        help="Select dense MTP depth 0..7; default uses the worker recommendation")
     parser.add_argument(
         "--progress",
         action="store_true",

@@ -81,6 +81,9 @@ pub fn input_embedding_lookup<T: ArrayElement + Float>(
                         QuantizationMode::U4 => read_u4(values, 2 * offset + column) as f32,
                         QuantizationMode::I8 => (unsafe { *(values as *const i8).add(offset + column) }) as f32,
                         QuantizationMode::U8 => (unsafe { *values.add(offset + column) }) as f32,
+                        QuantizationMode::U3 | QuantizationMode::U5 | QuantizationMode::U6 => {
+                            unreachable!("packed three/five/six-bit input embeddings are rejected at admission")
+                        },
                     };
                     let bias = match quantization_method {
                         QuantizationMethod::ScaleBias => unsafe {

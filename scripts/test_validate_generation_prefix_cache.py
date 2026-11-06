@@ -17,6 +17,30 @@ _spec.loader.exec_module(harness)
 
 
 class PrefixQualificationTests(unittest.TestCase):
+    def test_exact_draft_selection_and_seeded_mtp_are_qualified(self):
+        dense = SimpleNamespace(ready={"prefix_cache": {"key": "model-instance+mtp-selection"}})
+        hybrid = SimpleNamespace(ready={"prefix_cache": {"key": "model-instance+mtp-enabled"}})
+        self.assertNotEqual(harness.mtp_cache_value(dense, 0), harness.mtp_cache_value(dense, 7))
+        self.assertEqual(harness.mtp_cache_value(hybrid, 1), harness.mtp_cache_value(hybrid, 3))
+        steps = harness.plan([[1, 2] * 550] * 4, 1024, 4096, 7, mtp_selection_key=True)
+        cases = {label: options for kind, label, _, options in steps if kind == "case"}
+        self.assertEqual(cases["mtp_repeat_stochastic"]["sampling"]["mode"], "stochastic")
+        self.assertEqual(cases["mtp_repeat_stochastic"]["mtp_drafts"], 7)
+        self.assertEqual(cases["mtp_different_depth"]["mtp_drafts"], 1)
+        self.assertEqual(cases["mtp_depth_restored"]["mtp_drafts"], 7)
+
+    def test_explicit_mtp_depth_is_readiness_bounded_and_default_is_recommended(self):
+        ready = {"mtp": {"supported": True, "max_drafts": 7, "recommended_drafts": 3}}
+        self.assertEqual(harness.selected_mtp_drafts(ready, None), 3)
+        self.assertEqual(harness.selected_mtp_drafts(ready, 7), 7)
+        self.assertEqual(harness.selected_mtp_drafts(ready, 0), 0)
+        with self.assertRaisesRegex(SystemExit, "requested MTP depth exceeds worker readiness"):
+            harness.selected_mtp_drafts(ready, 8)
+        with self.assertRaisesRegex(SystemExit, "requested MTP depth exceeds worker readiness"):
+            harness.selected_mtp_drafts(
+                {"mtp": {"supported": True, "max_drafts": 3, "recommended_drafts": 3}}, 7
+            )
+
     def streaming_pack(self, root):
         model = root / "model"
         model.mkdir()
@@ -25,7 +49,8 @@ class PrefixQualificationTests(unittest.TestCase):
         config = {"model_type": "glm5_next", "residents_format": "fp8_block128",
                   "text_config": {"vocab_size": 8, "eos_token_id": 1},
                   "expert_streaming": {"family": "mlx-stream", "format": "mtplx-expert-manifest-v2",
-                                       "manifest": "expert-manifest-v2.json", "runtime_manifest": "expert-manifest.json",
+                                       "manifest": "expert-manifest-v2.json",
+                                       "runtime_manifest": "expert-manifest.json",
                                        "quant": "exl3-k3-mul1"}}
         (model / "config.json").write_text(json.dumps(config))
         (model / "tokenizer_config.json").write_text(json.dumps({"eos_token": {"content": "<eos>"}}))
@@ -109,13 +134,14 @@ class PrefixQualificationTests(unittest.TestCase):
                              "synthetic<eos>")
             self.assertNotIn("bos_token", codec)
             self.assertEqual(provenance["source_template_sha256"], harness.file_sha256(model / "chat_template.jinja"))
-            self.assertEqual(provenance["native_template_executable_sha256"], harness.file_sha256(template._executable))
+            self.assertEqual(provenance["native_template_executable_sha256"],
+                             harness.file_sha256(template._executable))
             self.assertEqual(config, (model / "config.json").read_bytes())
             self.assertEqual(before, harness.download_receipt_identity(model, receipt_path))
 
     def test_streaming_contract_and_prepared_template_paths_remain_explicit(self):
         with tempfile.TemporaryDirectory() as directory:
-            model, receipt_path, _ = self.streaming_pack(Path(directory))
+            model, _receipt_path, _ = self.streaming_pack(Path(directory))
             with self.assertRaisesRegex(ValueError, "pinned download receipt"):
                 harness.load_validation_template(model)
             config = json.loads((model / "config.json").read_text())
