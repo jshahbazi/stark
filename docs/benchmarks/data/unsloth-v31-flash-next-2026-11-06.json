@@ -1,0 +1,135 @@
+{
+  "schema": "stark-unsloth-v31-flash-next-comparison-baseline-v1",
+  "date": "2026-11-06",
+  "status": "stark_baseline_complete_unsloth_download_pending",
+  "comparison_scope": {
+    "stark_artifact": {
+      "repository": "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+      "revision": "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+      "format": "Lily q4-xl",
+      "weight_shards": 55,
+      "weight_bytes": 106905155192,
+      "full_weight_verification": {
+        "passed": true,
+        "shards_verified": 55,
+        "receipt_sha256": "cc274c12d40e0869cf1bdf326ae1a5650dcd7e9629269d360ab2f2f987a4dc8a",
+        "per_shard_hashes_published": false
+      }
+    },
+    "unsloth_artifact": {
+      "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+      "revision": "d96201194f103c906994f283f504209dc8d2a10c",
+      "expected_files": 5,
+      "expected_bytes": 114121223034,
+      "download_status": "pending",
+      "benchmark_status": "not_run",
+      "quantization": "Unsloth Dynamic V3.1 UD-Q4_K_XL",
+      "base_shards": 4,
+      "base_bytes": 111334654778,
+      "mtp_module": "shared-Q8_0",
+      "mtp_bytes": 2786568256
+    },
+    "quantizations_match": false,
+    "isolates_engine_efficiency": false,
+    "cross_engine_winner": null
+  },
+  "stark_baseline": {
+    "engine_commit": "e77f2f00bea7c7984aa35b7cca48f4460b79ac75",
+    "rust": "1.98.1 (48a229cea 2026-09-01)",
+    "locked_dependencies": true,
+    "worker_sha256": "0e61789afa9aa4e12c7064414f75ca02d5bd3b211a34b4ce483c2ced3595063d",
+    "throughput_harness_sha256": "064be4bd1231d2259fa3af0af54010ca338a155407e41e5ccfbb58665355d42b",
+    "model_config_sha256": "2a91155be52ebbb0f6dff20e61dcd8ae7484154a56b4afe067246c59da46f899",
+    "native_source_receipt_sha256": "7f5c685f35fc4c5d1509f6379feb1a965cb625f7a1ce76a0b5fe69983561dd30",
+    "hardware": {
+      "model": "Apple M5 Max",
+      "gpu_cores": 40,
+      "memory_bytes": 137438953472,
+      "power_source": "AC",
+      "pmset_powermode": 2,
+      "thermal_warning_recorded": false
+    },
+    "workload": {
+      "input_tokens": 4096,
+      "output_budget": 512,
+      "context_tokens": 16384,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 20,
+      "seed": 42,
+      "reasoning_effort": "xhigh",
+      "warmups_per_route": 1,
+      "measured_requests_per_route": 3,
+      "route_order": [
+        "mtp_off",
+        "mtp_on"
+      ],
+      "randomized_or_paired": false,
+      "prefix_reuse": false,
+      "gpu_tests_serialized": true,
+      "model_downloads_paused_during_gpu_work": true,
+      "initial_three_token_screen_included": false
+    },
+    "throughput": {
+      "mtp_off": {
+        "decode_steps": 1533,
+        "decode_seconds": 21.833999959,
+        "pooled_decode_tokens_per_second": 70.21159672431416,
+        "minimum_request_decode_tokens_per_second": 69.85356109968643,
+        "maximum_request_decode_tokens_per_second": 70.85560651996579
+      },
+      "mtp_on": {
+        "drafts": 2,
+        "decode_steps": 1533,
+        "decode_seconds": 18.4786175,
+        "pooled_decode_tokens_per_second": 82.96075179866676,
+        "minimum_request_decode_tokens_per_second": 82.70362242244931,
+        "maximum_request_decode_tokens_per_second": 83.16723451835725
+      },
+      "mtp_on_change_percent": 18.158189913287636
+    },
+    "mtp_activity_observation": {
+      "requests": 1,
+      "enabled": true,
+      "drafts": 2,
+      "sampling": "exact-rejection-v1",
+      "verification": "batched-decode-exact-v1",
+      "rounds": 198,
+      "proposed": 394,
+      "accepted": 313,
+      "verified_rows": 592,
+      "draft_seconds": 0.5872079509999997,
+      "verify_seconds": 5.567351164000004,
+      "rollback_seconds": 0.1807883820000001,
+      "activity_report_sha256": "a4c9ca53fb3dd7fe12d31b5651812ac4e0ba24cd36ba22edbe601139746eb9a5"
+    },
+    "native_task_pilot": {
+      "single_seed_tasks_per_route": 6,
+      "output_cap_tokens": 4096,
+      "reasoning_effort": "xhigh",
+      "mtp_off": {
+        "completed": 1,
+        "correct": 1,
+        "truncated": 5
+      },
+      "mtp_on": {
+        "completed": 1,
+        "correct": 1,
+        "truncated": 5
+      },
+      "paired_quality_study": false
+    }
+  },
+  "claim_limits": {
+    "unsloth_speed_claim_tested": false,
+    "unsloth_accuracy_claim_tested": false,
+    "whole_model_quality_equivalence_established": false,
+    "historical_2026_10_31_qwen38_mtp_record_superseded": false
+  },
+  "public_references": {
+    "announcement": "https://x.com/unslothai/status/2118707871139696911?s=46",
+    "guide": "https://unsloth.ai/docs/models/qwen3.8-next",
+    "model_repository": "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF",
+    "llama_cpp_fork_commit": "https://github.com/danielhanchen/llama.cpp/commit/6fcaa16f4b360649933a54d1f91ad40ed35c0e11"
+  }
+}

@@ -4,6 +4,14 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Unsloth Dynamic V3.1 Qwen3.8-Flash-Next comparison (2026-11-06).** The
+three-request Stark baseline measured 70.21 tok/s with MTP off and 82.96 with
+two drafts (+18.16%) on Lily Q4-XL at 4K input/512 output. The Unsloth GGUF
+download and external-engine run are pending; there is no cross-engine result
+or winner yet. The quantization profiles differ, so a completed comparison
+will not isolate engine efficiency. See the [baseline and status report](2026-11-06-unsloth-v31-flash-next-comparison.md)
+and [public aggregate data](data/unsloth-v31-flash-next-2026-11-06.json).
+
 **Dense Qwen3.8-27B oQ4e packed-weight follow-up (2026-11-06).** The final
 host-screened run measured **51.48 useful decode tok/s median**, with all six
 768-token responses passing on their first attempt. The **70.8 tok/s target
@@ -124,6 +132,7 @@ engine throughput results remain bound to their original timing windows.
 
 | Study | Date | Status |
 | --- | --- | --- |
+| [Unsloth Dynamic V3.1 Flash-Next comparison](2026-11-06-unsloth-v31-flash-next-comparison.md) | 2026-11-06 | Pending external GGUF download and llama.cpp measurement; Stark Lily baseline only, different quantizations, no winner claimed |
 | [Qwen3.8 matched-checkpoint optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | 2026-10-30 | Current: same files and quantization, no speculation; maximum 66.81 vs 61.17 tok/s (+9.21%); numerical equivalence unestablished |
 | [Qwen3.8 same-checkpoint maximum throughput baseline](QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical baseline before the matched-checkpoint optimization: maximum 58.13 vs 60.95 tok/s; source-bound evidence retained |
 | [Earlier Qwen3.8 Stark / MLX-Serve comparison](QWEN38_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical different-pack comparison: maximum 79.52 vs 61.00 tok/s; does not isolate engine efficiency |
