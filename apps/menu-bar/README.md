@@ -53,6 +53,9 @@ It refreshes the managed connector settings and saves approval again. Quit
 OpenWork completely and reopen it after reconnecting, even if its saved settings
 already match: its running engine may still hold stale connection state. Select
 Stark and the running model in OpenWork afterward.
+The bundled connector installs its request authentication hook before publishing
+Stark's models, including when OpenCode defers provider transforms during startup.
+The first request does not need to wait for a background connection poll.
 Build provenance records are described in [PROVENANCE.md](PROVENANCE.md).
 
 Local apps display **Development build NUMBER**. The build number is a UTC
