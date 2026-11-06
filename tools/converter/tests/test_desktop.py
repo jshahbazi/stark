@@ -1847,6 +1847,7 @@ def timed_mtp_requests(desktop, model, mtp_executable, monkeypatch):
 
 def test_playground_eta_profiles_follow_mtp_toggle_and_infer_selection(desktop, timed_mtp_requests):
     identifier, drafts_seen = timed_mtp_requests
+    set_mtp(desktop, identifier, False)
 
     def generate(request_id):
         desktop.output.seek(0)
@@ -1974,7 +1975,8 @@ def test_mtp_preference_is_per_model_persistent_and_does_not_reset_chat(desktop,
     first = running(desktop, model)
     process = desktop.worker.process
     before = list(desktop.messages)
-    assert desktop.settings_summary()["mtp_enabled"] is False
+    assert "mtp_enabled" not in desktop.models[0]
+    assert desktop.settings_summary()["mtp_enabled"] is True
     set_mtp(desktop, first, True)
     assert desktop.worker.process is process and desktop.messages == before
     assert desktop.settings_summary()["mtp_enabled"] is True
@@ -2000,7 +2002,7 @@ def test_mtp_preference_is_per_model_persistent_and_does_not_reset_chat(desktop,
     second = next(m["id"] for m in desktop.models if m["id"] != first)
     desktop.dispatch({"command": "run", "model_id": second})
     finish(desktop)
-    assert desktop.settings_summary()["mtp_enabled"] is False
+    assert desktop.settings_summary()["mtp_enabled"] is True
     assert desktop.settings_summary()["mtp"]["recommended_drafts"] == 4
     set_mtp(desktop, second, True)
     with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
@@ -2084,7 +2086,72 @@ def test_mtp_preference_write_failure_stale_model_and_busy_changes_are_atomic(de
             set_mtp(desktop, identifier, True)
     finally:
         desktop.api_queue.clear()
-    assert desktop.settings_summary()["mtp_enabled"] is False
+    assert desktop.settings_summary()["mtp_enabled"] is True
+
+
+def test_legacy_model_without_mtp_preference_defaults_on_after_restart(desktop, model, mtp_executable):
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    assert "mtp_enabled" not in json.loads(desktop.registry.read_text())[0]
+    desktop.stop(quiet=True)
+    replacement = Desktop(mtp_executable, desktop.data_dir, io.StringIO(), timeout=2)
+    try:
+        replacement.dispatch({"command": "run", "model_id": identifier})
+        finish(replacement)
+        assert replacement.settings_summary()["mtp_enabled"] is True
+        with patch.object(replacement.worker, "request", wraps=replacement.worker.request) as request:
+            replacement.api_complete({"messages": [{"role": "user", "content": "fixture"}]})
+        assert request.call_args_list[-1].args[0]["mtp_drafts"] == 2
+    finally:
+        replacement.stop(quiet=True)
+
+
+def test_advanced_options_save_mtp_with_other_options_and_use_it_for_generation(desktop, model, mtp_executable):
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    for enabled in (False, True):
+        desktop.dispatch(advanced_options(model_id=identifier, mtp_enabled=enabled))
+        assert desktop.worker.process is process
+        assert json.loads(desktop.registry.read_text())[0]["mtp_enabled"] is enabled
+        assert events(desktop)[-1]["mtp_enabled"] is enabled
+        assert (desktop.context, desktop.maximum, desktop.thinking) == (2048, 128, True)
+        with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+            desktop.dispatch({"command": "generate", "text": "fixture"})
+            finish(desktop)
+        assert request.call_args_list[-1].args[0]["mtp_drafts"] == (2 if enabled else 0)
+
+
+def test_advanced_mtp_rejections_preserve_all_options_and_conversation(desktop, model, mtp_executable):
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    before = list(desktop.messages)
+    registry = desktop.registry.read_bytes()
+    with patch.object(desktop, "persist", side_effect=OSError("synthetic private failure")):
+        with pytest.raises(DesktopError, match="Cannot save"):
+            desktop.dispatch(advanced_options(model_id=identifier, mtp_enabled=False))
+    for overrides, message in (
+        ({"model_id": "stale", "mtp_enabled": False}, "Model changed"),
+        ({"model_id": identifier, "mtp_enabled": None}, "not supported"),
+        ({"mtp_enabled": False}, "Invalid advanced"),
+        ({"model_id": identifier}, "Invalid advanced"),
+        ({"model_id": identifier, "mtp_enabled": False, "context_tokens": 0}, "Invalid advanced"),
+    ):
+        with pytest.raises(DesktopError, match=message):
+            desktop.dispatch(advanced_options(**overrides))
+    desktop.api_queue.append(object())
+    try:
+        with pytest.raises(DesktopError, match="Wait for"):
+            desktop.dispatch(advanced_options(model_id=identifier, mtp_enabled=False))
+    finally:
+        desktop.api_queue.clear()
+    desktop.worker.mtp = {"supported": False}
+    with pytest.raises(DesktopError, match="not supported"):
+        desktop.dispatch(advanced_options(model_id=identifier, mtp_enabled=True))
+    assert desktop.messages == before
+    assert desktop.registry.read_bytes() == registry
+    assert "mtp_enabled" not in desktop.models[0]
+    assert (desktop.context, desktop.maximum, desktop.thinking, desktop.system_prompt) == (8192, 512, False, None)
 
 
 @pytest.mark.parametrize("invalid", [None, 0, 1, "true", [], {}])
