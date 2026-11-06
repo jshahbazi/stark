@@ -37,8 +37,8 @@
       <div class="hero-copy">
         <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> LOCAL AI <span class="eyebrow-divider">/</span> BUILT FOR APPLE SILICON</p>
         <h1 id="hero-title">Run local AI<br>on your <em>Mac.</em></h1>
-        <p class="hero-description">Run free, open-weight AI models on your Mac. Connect apps to Stark to work with those models, whether coding or writing or everyday tasks. Have a free LLM privately on your own machine - nothing is transmitted to us. Work without anyone seeing your data.</p>
-        <p class="hero-helper">Stark helps you choose a model for your Mac and runs it locally. Use built-in chat, or connect <a href="#openwork-guide">OpenWork</a> and <a href="#opencode-guide">OpenCode Desktop</a>.</p>
+        <p class="hero-description">Run free, open-weight AI models for coding, writing and everyday tasks. Stark processes prompts and responses on your Mac; nothing is transmitted to us.</p>
+        <p class="hero-helper">Use built-in chat, or connect <a href="#openwork-guide">OpenWork</a> and <a href="#opencode-guide">OpenCode Desktop</a>. Connected apps and tools have their own <a href="#privacy">data practices</a>.</p>
         <div class="hero-actions"><a class="button primary" href="https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg">Download Mac app <span aria-hidden="true">↓</span></a><a class="text-link" href="#product">See how it works <span aria-hidden="true">↓</span></a></div>
         <p class="hero-footnote">Free, open source · Signed and notarized<br>Apple silicon · macOS 26.4+ · <a href="#model-fit">Check memory requirements</a>.</p>
         <p class="hero-provenance">Experimental software. Model support and results vary; <a href="https://github.com/jshahbazi/stark/releases/latest">read the release notes</a>.</p>
@@ -55,7 +55,7 @@
       <div class="product-gallery">
         <figure class="product-shot"><a href="assets/stark-guided-setup.png" aria-label="View full screenshot of Stark Guided Setup"><img src="assets/stark-guided-setup.png" width="1624" height="1594" alt="Stark Guided Setup with writing, files and coding starting points and a five-step setup sidebar" loading="lazy" decoding="async"></a><figcaption><span class="shot-index">01 / GET STARTED</span><h3>Find a starting point.</h3><p>Beginner checks memory, GPU budget and storage before recommending a model.</p></figcaption></figure>
         <figure class="product-shot"><a href="assets/stark-model-catalog.png" aria-label="View full screenshot of Stark Model Catalog"><img src="assets/stark-model-catalog.png" width="1504" height="1546" alt="Stark Model Catalog with supported model families and tabs for installed models and source imports" loading="lazy" decoding="async"></a><figcaption><span class="shot-index">02 / MAKE IT YOURS</span><h3>Choose your model.</h3><p>Advanced gives you the model catalog, source imports and generation settings.</p></figcaption></figure>
-        <figure class="product-shot"><a href="assets/stark-playground.png" aria-label="View full screenshot of Stark Playground"><img src="assets/stark-playground.png" width="1224" height="1586" alt="Stark Playground in Chat mode with a running model, a short greeting exchange, request statistics and a switch to Decision mode" loading="lazy" decoding="async"></a><figcaption><span class="shot-index">03 / USE PLAYGROUND</span><h3>Chat and make decisions.</h3><p>Chat in Playground, or use JevK5 in Decision mode to choose among multiple options and see its confidence.</p></figcaption></figure>
+        <figure class="product-shot"><a href="assets/stark-playground.png" aria-label="View full screenshot of Stark Playground"><img src="assets/stark-playground.png" width="1224" height="1586" alt="Stark Playground in Chat mode with a running model, a short greeting exchange, request statistics and a switch to Decision mode" loading="lazy" decoding="async"></a><figcaption><span class="shot-index">03 / USE PLAYGROUND</span><h3>Try a conversation.</h3><p>Chat with your running model and explore its settings in Playground.</p></figcaption></figure>
       </div>
     </section>
 
@@ -65,15 +65,13 @@
         <div class="fit-guide" id="model-fit" aria-labelledby="fit-title">
           <div class="fit-intro"><h3 id="fit-title">What fits on your Mac?</h3><p>Check unified memory in <strong>Apple menu → About This Mac</strong>. Downloads need storage; running a model needs memory too. Longer conversations need more room.</p></div>
           <div class="memory-guide" aria-label="Suggested models by unified memory">
-            <article><h4>16 GiB</h4><p>Qwen3 0.6B · BF16<br>Qwen3 4B · 4-bit</p></article>
+            <article><h4>16 GiB</h4><p>Qwen3 4B · 4-bit<br>Qwen3 0.6B · BF16</p></article>
+            <article><h4>32 GiB</h4><p>Qwen3 14B · 4-bit</p><p class="memory-estimate">Estimated fit</p></article>
             <article><h4>64 GiB</h4><p>Qwen3 14B · BF16</p></article>
             <article><h4>128 GiB</h4><p>Qwen3.8-Flash-Next · mixed 4/8-bit<br>GLM-5.3-Flash · UD-Q2_K_XL</p></article>
           </div>
+          <p class="memory-note">These are starting points. Available memory, GPU budget and context length affect fit. The 32 GiB example is a planning estimate. Use Guided setup to check your Mac before downloading.</p>
         </div>
-        <article class="decision-feature" id="featured-decision" aria-labelledby="decision-title">
-          <div><p class="eyebrow">LOCAL DECISION MODELS</p><h3 id="decision-title">JevK5, on your Mac.</h3><p>Use a Jev-like decision model in Playground's Decision mode. Stark runs the open-weight <strong>JevK5 4B BF16</strong> model locally.</p></div>
-          <a class="text-link" href="https://huggingface.co/alibiserikbay/JevK5">Learn more about JevK5 <span aria-hidden="true">↗</span></a>
-        </article>
         <div class="model-directory">
           <div class="tool-support-note"><p><strong>Using OpenWork or OpenCode?</strong> Tool calling requires a reviewed template as well as a capable model. Stark currently parses selected Qwen3, Qwen3.5 and Qwen3.8 templates. A family name alone is not a guarantee: check <strong>“Tool use available”</strong> in Connections before starting a file or coding task.</p><a href="https://github.com/jshahbazi/stark/blob/3462a5098397cbb11c7e9f3a7c9c1cec23df214b/docs/LOCAL_API.md#function-tools">Tool support and limits <span aria-hidden="true">↗</span></a></div>
           <div class="model-category-heading"><h3>Explore all models</h3><a href="https://github.com/jshahbazi/stark/blob/main/README.md#supported-model-families">Compatibility guide <span aria-hidden="true">↗</span></a></div>
@@ -107,7 +105,7 @@
             <div class="compact-image-model"><div><p class="eyebrow">IMAGES · DENSE BF16</p><h3>Qwen3.5</h3><p>Bring one PNG or JPEG into Playground, terminal chat or the Local API. Compatible complete models and merged fine-tunes require a vision artifact and passing local image checks.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md">Image compatibility <span aria-hidden="true">↗</span></a></div>
           </div>
           <div class="model-group-panel" id="decision-models" role="tabpanel" aria-labelledby="models-tab-decision" tabindex="0">
-            <div class="compact-image-model"><div><p class="eyebrow">LOCAL DECISIONS / MODEL CONFIDENCE</p><h3>JevK5</h3><p><code>alibiserikbay/JevK5</code> · BF16 · 4B. Use Playground's Decision mode to choose among multiple options and see the model's confidence. Confidence is relative to the choices you provide.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Decision and confidence guide <span aria-hidden="true">↗</span></a></div>
+            <div class="compact-image-model"><div><p class="eyebrow">LOCAL DECISIONS / MODEL CONFIDENCE</p><h3>JevK5</h3><p>Run this open-weight 4B BF16 decision model locally in Playground's Decision mode. Choose among multiple options and see the model's confidence, relative to the choices you provide. <a href="https://huggingface.co/alibiserikbay/JevK5">Model details</a>.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Decision and confidence guide <span aria-hidden="true">↗</span></a></div>
           </div>
         </div>
       </div>
@@ -136,36 +134,12 @@
       </div>
     </section>
 
-    <section class="modes-section section-pad wrap" id="modes" aria-labelledby="modes-title">
-      <div class="modes-heading">
-        <p class="eyebrow">BEGINNER / ADVANCED</p>
-        <h2 id="modes-title">Choose how to set up Stark.</h2>
-        <p>You can switch between Beginner and Advanced from the menu bar. Both use the same engine and installed models.</p>
-      </div>
-      <div class="mode-cards">
-        <article class="mode-card" aria-labelledby="beginner-mode-title">
-          <p class="eyebrow">BEGINNER</p>
-          <h3 id="beginner-mode-title">Help choosing and setting up a model.</h3>
-          <p>Tell Stark what you want help with. It checks your Mac's memory, GPU and available storage, then suggests a model to start with.</p>
-          <ul><li>See why a model was suggested and how much space it needs.</li><li>Follow the steps to download and start it.</li><li>Chat in Stark, or follow the OpenWork setup guide to work with files.</li></ul>
-          <a class="text-link" href="#start">Beginner setup <span aria-hidden="true">↓</span></a>
-        </article>
-        <article class="mode-card" aria-labelledby="advanced-mode-title">
-          <p class="eyebrow">ADVANCED</p>
-          <h3 id="advanced-mode-title">Choose models and adjust settings.</h3>
-          <p>Browse the supported model catalog or add a model from a source you choose. Use Playground to try prompts and adjust generation settings.</p>
-          <ul><li>Download, import and manage models.</li><li>Set context length and sampling options.</li><li>Connect OpenCode Desktop or another app through Stark's local API.</li></ul>
-          <a class="text-link" href="#advanced-setup">Advanced setup <span aria-hidden="true">↓</span></a>
-        </article>
-      </div>
-      <details class="setup-help mode-recommendation"><summary>How does Beginner choose a model? <span aria-hidden="true">+</span></summary><div><p>Stark checks supported model information against your Mac's memory, GPU budget and free storage. It estimates the memory needed to run each candidate, then ranks the options using your task and preference: <strong>Balanced</strong>, <strong>Lighter model</strong> or <strong>More model capacity</strong>.</p><p>The recommendation is an estimated starting point. Speed and answer quality depend on the model and your task. Beginner considers models it can check and set up through the guide; the broader catalog is available in Advanced.</p></div></details>
-    </section>
-
     <section class="start-section section-pad wrap" id="start" aria-labelledby="start-title">
       <div class="start-heading">
         <p class="eyebrow">GET STARTED</p>
         <h2 id="start-title">Set up in Beginner.</h2>
-        <p>The guide takes you through choosing, downloading and starting a model. No Terminal needed.</p>
+        <p>The guide takes you through choosing, downloading and starting a model. No Terminal needed. To choose your own model and settings, follow the <a href="#advanced-setup">Advanced instructions</a>.</p>
+        <p class="source-install-note" id="modes">Switch between Beginner and Advanced from the menu bar. Both share your installed models.</p>
         <p class="source-install-note">You'll need an Apple silicon Mac (M1 or newer) with macOS Tahoe 26.4 or newer, plus room for a model download. Check your Mac in <strong>Apple menu → About This Mac</strong>.</p>
         <p class="source-install-note">A <strong>model</strong> is the AI you download and run. Stark is the app that runs it. You can change models later.</p>
       </div>
@@ -175,6 +149,7 @@
         <li><span aria-hidden="true">3</span><div><h3>Download and start the model.</h3><p>Review the recommendation, then click <strong>Download and set up</strong>. When setup finishes, follow the prompt to start the model or continue with one that's already running. If a suitable model is already installed, you can use it without downloading it again.</p></div></li>
         <li><span aria-hidden="true">4</span><div><h3>Try a short chat.</h3><p>Choose <strong>Chat in Stark instead</strong> in the guide, or <strong>Open chat</strong> from the menu bar. Try asking it to help draft a short email.</p><p>To work with files, continue through the guide's OpenWork steps. You'll install OpenWork separately, choose a workspace folder and allow its connection to Stark.</p><div class="start-app-links"><a href="#openwork-guide">OpenWork instructions <span aria-hidden="true">↓</span></a><a href="#opencode-guide">Connect OpenCode Desktop <span aria-hidden="true">↓</span></a></div></div></li>
       </ol>
+      <details class="setup-help model-recommendation"><summary>How does Beginner choose a model? <span aria-hidden="true">+</span></summary><div><p>Stark checks supported model information against your Mac's memory, GPU budget and free storage. It estimates the memory needed to run each candidate, then ranks the options using your task and preference: <strong>Balanced</strong>, <strong>Lighter model</strong> or <strong>More model capacity</strong>.</p><p>The recommendation is an estimated starting point. Speed and answer quality depend on the model and your task. Beginner considers models it can check and set up through the guide; the broader catalog is available in Advanced.</p></div></details>
       <div class="advanced-setup" id="advanced-setup" aria-labelledby="advanced-setup-title">
         <div><p class="eyebrow">ADVANCED</p><h3 id="advanced-setup-title">Set up a model yourself.</h3><p>Click the cat and select <strong>Advanced</strong>. Open <strong>Manage Models → Model Catalog</strong> to browse and download, or use <strong>Add from Source</strong> to import a supported model from a repository or local folder.</p></div>
         <div><p>Under <strong>Installed</strong>, click <strong>Run</strong> beside your model. Open <strong>Open Playground</strong>, choose <strong>Chat</strong> and adjust the settings for your task. Use <strong>Connections</strong> to connect other apps.</p><div class="start-app-links"><a href="#models">Supported models <span aria-hidden="true">↓</span></a><a href="#engine">API and worker documentation <span aria-hidden="true">↓</span></a></div></div>
