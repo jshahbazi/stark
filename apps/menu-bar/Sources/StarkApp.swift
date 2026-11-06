@@ -3435,7 +3435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if modelsWindow?.isVisible != true {
             let view = AdvancedModelsHost(engine: engine, navigation: modelManagement, interface: interface,
                                   selectInterface: { [weak self] in self?.selectInterface($0) },
-                                  close: { [weak self] in self?.modelsWindow?.close() },
+                                  close: { [weak self] in self?.finishManagingModels() },
                                   run: { [weak self] identifier in self?.runSavedModel(identifier) })
             if let modelsWindow = modelsWindow {
                 modelsWindow.contentViewController = NSHostingController(rootView: view)
@@ -3445,6 +3445,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         present(modelsWindow)
+    }
+
+    private func finishManagingModels() {
+        modelsWindow?.close()
+        if !menuPanel.isVisible { toggle() }
     }
 
     private func runSavedModel(_ identifier: String) {
