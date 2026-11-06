@@ -6,7 +6,8 @@ MIT License, Copyright (c) 2025 Mirai Tech Inc. No quantization is performed.
 Non-power-of-two affine packing follows the byte layout in MLX's
 mlx/backend/metal/kernels/quantized.h at
 ba8c005c1b687227ff79a55da5b8aa062d92541f. Native 4/8-bit words remain
-byte-identical. Other supported widths are widened to U8 integer codes while
+byte-identical. Native five/six-bit matrices retain those packed bytes with
+U8 backing storage; widening remains available for unsupported layouts while
 preserving their affine coefficients. No MLX implementation is imported or
 executed by this converter.
 """
@@ -154,7 +155,7 @@ def plan_mlx_matrix(
     columns = sources[0].logical_shape[1]
     if any(source.logical_shape[1] != columns for source in sources):
         raise ConversionError("MLX fused matrix columns disagree")
-    if quantization.bits not in {4, 8} or quantization.group_size not in _GROUP_SIZES:
+    if quantization.bits not in {4, 5, 6, 8} or quantization.group_size not in _GROUP_SIZES:
         raise UnsupportedConversion("Unsupported MLX affine matrix representation")
     if columns % quantization.group_size or columns * quantization.bits % 32:
         raise ConversionError("MLX matrix dimensions are not divisible by its packing and groups")
@@ -175,6 +176,8 @@ def plan_mlx_matrix(
     rows = sum(source.logical_shape[0] for source in sources)
     groups = columns // quantization.group_size
     widen = any((source.quantization or quantization).bits != quantization.bits for source in sources)
+    if widen and quantization.bits != 8:
+        raise UnsupportedConversion("MLX integer widening requires eight-bit output")
     operations = [
         TensorOperation(
             out + ".weights",

@@ -56,7 +56,10 @@ pub struct QuantInput<T: ArrayElement + Float> {
 
 fn mode_for_bits(bits: u32) -> QuantizationMode {
     match bits {
+        3 => QuantizationMode::U3,
         4 => QuantizationMode::U4,
+        5 => QuantizationMode::U5,
+        6 => QuantizationMode::U6,
         8 => QuantizationMode::U8,
         _ => unreachable!("unsupported bits: {bits}"),
     }
@@ -197,8 +200,7 @@ impl<T: ArrayElement + Float> QuantInput<T> {
         activation_scale_group_size: u32,
         sum_group_size: Option<u32>,
     ) -> Self {
-        let code_layout = Int8CodeLayout::for_right_bits(DataType::from(self.mode).size_in_bits() as u32)
-            .expect("W4/W8 quantization");
+        let code_layout = Int8CodeLayout::for_right_bits(self.mode.bits()).expect("W4/W8 quantization");
         self.with_prepared_a_layout(activation_scale_group_size, sum_group_size, code_layout)
     }
 
@@ -207,8 +209,7 @@ impl<T: ArrayElement + Float> QuantInput<T> {
         activation_scale_group_size: u32,
         sum_group_size: Option<u32>,
     ) -> (Self, Self) {
-        let code_layout = Int8CodeLayout::for_right_bits(DataType::from(self.mode).size_in_bits() as u32)
-            .expect("W4/W8 quantization");
+        let code_layout = Int8CodeLayout::for_right_bits(self.mode.bits()).expect("W4/W8 quantization");
         let reference = self.clone().with_prepared_a_layout(
             activation_scale_group_size,
             sum_group_size,
@@ -280,6 +281,31 @@ impl<T: ArrayElement + Float> QuantInput<T> {
         words
     }
 
+    /// Independent byte extraction reference for the packed-affine kernel tests.
+    pub fn widened_u8(&self) -> Self {
+        assert!(matches!(
+            self.mode,
+            QuantizationMode::U3 | QuantizationMode::U4 | QuantizationMode::U5 | QuantizationMode::U6
+        ));
+        assert!(!self.signed_codes && self.prepared_a.is_none());
+        let bits = self.mode.bits() as usize;
+        let bytes = bytemuck::cast_slice::<u32, u8>(&self.w_packed);
+        let codes = (0..self.n as usize * self.k as usize)
+            .map(|index| {
+                let mut code = 0u8;
+                for bit in 0..bits {
+                    let position = index * bits + bit;
+                    code |= ((bytes[position / 8] >> (position % 8)) & 1) << bit;
+                }
+                code
+            })
+            .collect::<Vec<_>>();
+        let mut widened = self.clone();
+        widened.w_packed = codes.chunks_exact(4).map(|row| u32::from_le_bytes(row.try_into().unwrap())).collect();
+        widened.mode = QuantizationMode::U8;
+        widened
+    }
+
     pub fn weight_buffer_bytes(&self) -> usize {
         size_of_val(self.w_packed.as_slice())
             + size_of_val(self.scales.as_slice())
@@ -310,7 +336,10 @@ impl<B: Backend, T: ArrayElement + Float> QuantBuffers<B, T> {
         let params_layout = input.params_layout;
         let params = QuantParams::new(params_layout, input.n, groups);
         let metadata_elements = params.scale_shape().into_iter().product::<u32>() as usize;
-        let zero_point_bytes = params.zero_point_shape(input.mode).into_iter().product::<u32>() as usize;
+        let zero_point_bytes = input
+            .zero_points
+            .as_ref()
+            .map_or(0, |_| params.zero_point_shape(input.mode).into_iter().product::<u32>() as usize);
         let mut buffers = Self {
             w: create_buffer_with_data::<B, u32>(context, &input.weights_for_upload()),
             scales: create_buffer_with_data::<B, T>(context, &pad(&input.scales, metadata_elements)),
@@ -370,7 +399,7 @@ impl<B: Backend, T: ArrayElement + Float> QuantBuffers<B, T> {
                 );
             },
             QuantizationMethod::ScaleZeroPoint => {
-                let correction_bits = DataType::from(input.mode).size_in_bits() as u32;
+                let correction_bits = input.mode.bits();
                 transpose_metadata(
                     self.zp.as_mut().expect("zp buffer").as_slice_mut(),
                     columns,
@@ -476,6 +505,16 @@ pub fn run_quant_metal<T: ArrayElement + Float>(
     input: &QuantInput<T>,
     dispatch: TestDispatch,
 ) -> Vec<T> {
+    run_quant_metal_policy(context, input, dispatch, None)
+}
+
+#[cfg(backend = "metal")]
+pub fn run_quant_metal_policy<T: ArrayElement + Float>(
+    context: &MetalContext,
+    input: &QuantInput<T>,
+    dispatch: TestDispatch,
+    reference_output_dim: Option<u32>,
+) -> Vec<T> {
     let mut buffers = QuantBuffers::<Metal, T>::allocate(context, input);
     let mut matmul = <<Metal as Backend>::Kernels as Kernels>::MatmulKernel::new(
         context,
@@ -484,6 +523,9 @@ pub fn run_quant_metal<T: ArrayElement + Float>(
         T::data_type(),
     )
     .expect("MatmulMetalKernel");
+    if let Some(output_dim) = reference_output_dim {
+        matmul.set_row_arithmetic_reference(output_dim);
+    }
     let mut command_buffer = context.create_command_buffer(None, None).expect("command buffer");
     let args = quant_arguments(&mut buffers, input);
     if let Some(engine) = dispatch {

@@ -292,7 +292,43 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
             if len(group_sizes) != 1:
                 raise UnsupportedConversion("Qwen3.5 affine fusion requires equal source group sizes")
             widths = {item.bits for item in source_quants}
-            bits = next(iter(widths)) if len(widths) == 1 and widths <= {4, 8} else 8
+            group_size = next(iter(group_sizes))
+            native_packed = target == "BF16" and layout == "output_input" and group_size == 64
+            if len(widths) > 1 and native_packed and not biases:
+                # Preserve contiguous output intervals and the decoder's row
+                # permutation. Coalesce adjacent equal-width intervals so a
+                # split Q/gate layout does not dispatch once per head.
+                segments = []
+                grouped_sources = []
+                for source in sources:
+                    bits = source.quantization.bits
+                    if segments and segments[-1]["bits"] == bits:
+                        segments[-1]["rows"] += source.logical_shape[0]
+                        grouped_sources[-1].append(source)
+                    else:
+                        segments.append({"rows": source.logical_shape[0], "bits": bits, "group_size": group_size})
+                        grouped_sources.append([source])
+                for index, (segment, group) in enumerate(zip(segments, grouped_sources, strict=True)):
+                    operations.extend(
+                        plan_mlx_matrix(
+                            out + f".segment_{index}",
+                            tuple(group),
+                            dtype=target,
+                            layout=layout,
+                            quantization=MLXQuantization(segment["bits"], group_size),
+                        )
+                    )
+                metadata[out + ".spec"] = json.dumps(
+                    {
+                        "type": "MLXRowPartitionedSpec",
+                        "layout": layout,
+                        "segments": segments,
+                    }
+                )
+                used_mlx = True
+                return
+            allowed_bits = {4, 5, 6, 8} if native_packed else {4, 8}
+            bits = next(iter(widths)) if len(widths) == 1 and widths <= allowed_bits else 8
             native_quantization = MLXQuantization(bits, next(iter(group_sizes)))
             operations.extend(
                 plan_mlx_matrix(out, sources, dtype=target, layout=layout, quantization=native_quantization)
@@ -579,10 +615,21 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     from .qwen35_mtp import plan_qwen35_mtp
 
     mtp_config = plan_qwen35_mtp(
-        tensors=tensors, declaration=config.get("mtp_num_hidden_layers", 0), dim=dim,
-        hidden=hidden, heads=heads, groups=groups, head_dim=head_dim, target_layers=count,
-        norm_config=norm_config, layer_configs=layer_configs, matrix_source=matrix_source,
-        matrix=matrix, norm=norm, row_range=_matrix_row_range, include_vision=include_vision,
+        tensors=tensors,
+        declaration=config.get("mtp_num_hidden_layers", 0),
+        dim=dim,
+        hidden=hidden,
+        heads=heads,
+        groups=groups,
+        head_dim=head_dim,
+        target_layers=count,
+        norm_config=norm_config,
+        layer_configs=layer_configs,
+        matrix_source=matrix_source,
+        matrix=matrix,
+        norm=norm,
+        row_range=_matrix_row_range,
+        include_vision=include_vision,
         quantization=quantization,
     )
     if mtp_config is not None:

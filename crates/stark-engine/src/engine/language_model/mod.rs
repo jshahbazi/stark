@@ -63,6 +63,7 @@ pub struct LanguageModel<B: Backend> {
     engine: Arc<Engine<B>>,
     decoder: Decoder<B>,
     dense_mtp: Option<crate::encodable_block::qwen_mtp::QwenMtp<B>>,
+    dense_draft_readout: Option<crate::encodable_block::embedding::coarse::CoarseDraftReadout<B>>,
     speculator: Option<DFlashTfmSpeculator<B>>,
     sampling: Sampling<B>,
     context_ring_update: <B::Kernels as Kernels>::ContextRingUpdateKernel,
@@ -167,6 +168,19 @@ impl<B: Backend> Engine<B> {
             })
             .transpose()?;
 
+        let dense_draft_readout = if let Some(bits) = config.mtp_config.as_ref().and_then(|mtp| mtp.draft_readout_bits)
+        {
+            Some(
+                decoder
+                    .embedding()
+                    .coarse_draft_readout(self.context.as_ref(), bits)
+                    .map_err(DecoderError::EmbeddingError)?
+                    .ok_or(crate::encodable_block::qwen_mtp::QwenMtpError::Invalid)?,
+            )
+        } else {
+            None
+        };
+
         assert!(
             speculator_path.is_none() || decoder.speculation_supported(),
             "attempted to load speculator for a model that doesn't support one"
@@ -197,6 +211,7 @@ impl<B: Backend> Engine<B> {
             engine: self.clone(),
             decoder,
             dense_mtp,
+            dense_draft_readout,
             speculator,
             sampling,
             context_ring_update,

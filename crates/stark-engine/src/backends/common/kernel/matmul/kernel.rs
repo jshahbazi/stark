@@ -22,6 +22,15 @@ pub trait MatmulKernel: Sized + Send + Sync {
         output_data_type: DataType,
     ) -> Result<Self, <Self::Backend as Backend>::Error>;
 
+    /// Preserve the widened affine matrix's row reduction policy after a
+    /// storage-only partition. CPU reduction is already independent of N and
+    /// packed width; backends with shape-dependent reductions override this.
+    fn set_row_arithmetic_reference(
+        &mut self,
+        _output_dim: u32,
+    ) {
+    }
+
     fn encode(
         &mut self,
         arguments: MatmulArguments<

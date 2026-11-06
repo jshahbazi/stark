@@ -435,6 +435,59 @@ impl<B: Backend> Transformer<B> {
         })
     }
 
+    /// Populate the owned KV cache for a single flat attention layer, without
+    /// computing its attention output or feed-forward path.
+    pub(crate) fn encode_cache_only(
+        &self,
+        input: B::ScratchBuffer,
+        batch_dim: &BatchTopology,
+        state: &mut TransformerState<B>,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), B::Error> {
+        if self.layers.len() != 1
+            || state.layer_states.len() != 1
+            || !batch_dim.is_flat()
+            || !batch_dim.full_accept()
+            || batch_dim.size() == 0
+            || batch_dim.rotary_positions().is_some()
+            || state.rotary_position_delta.is_some()
+        {
+            return Err(InvalidInput("cache-only transformer requires one flat scalar-position layer").into());
+        }
+        let (layer, rope_index) = &self.layers[0];
+        if layer.kv_source_layer_index.is_some() || !layer.supports_cache_only() {
+            return Err(InvalidInput("cache-only transformer requires owned attention KV").into());
+        }
+        let context_length = state.context_length;
+        state.prepare(context_length, batch_dim.size())?;
+        let token_positions = batch_dim
+            .heights()
+            .map(|relative| scalar_continuation_position(context_length, relative, 0).map_err(Into::into))
+            .collect::<Result<Box<[_]>, B::Error>>()?;
+        let precalculated_rope = match rope_index {
+            None => None,
+            Some(index) => {
+                #[cfg(not(feature = "rope-cache"))]
+                let rope = PrecalculatedRoPE::<B>::precalculate(&self.ropes[*index], &token_positions, command_buffer)?;
+                #[cfg(feature = "rope-cache")]
+                let rope = self.rope_tables[*index].precalculate::<B>(&token_positions, command_buffer)?;
+                Some(rope)
+            },
+        };
+        let mut shortcut = command_buffer.allocate_scratch(input.size())?;
+        let TransformerLayerStateType::Owned(layer_state) = &mut state.layer_states[0] else {
+            return Err(InvalidInput("cache-only transformer requires owned attention state").into());
+        };
+        layer.encode_cache_only(
+            input,
+            &mut shortcut,
+            precalculated_rope.as_ref(),
+            batch_dim,
+            layer_state.as_mut(),
+            command_buffer,
+        )
+    }
+
     pub fn encode(
         &self,
         input: B::ScratchBuffer,

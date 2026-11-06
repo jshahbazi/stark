@@ -15,6 +15,9 @@ pub struct QwenMtpConfig {
     pub target_layer: u32,
     pub input_norm_config: NormalizationConfig,
     pub transformer_config: TransformerConfig,
+    /// Optional draft-only approximation; target logits remain complete.
+    #[serde(default)]
+    pub draft_readout_bits: Option<u32>,
 }
 
 fn owned_full_attention(layer: &TransformerLayerConfig) -> bool {
@@ -48,6 +51,9 @@ impl QwenMtpConfig {
     }
 
     pub(crate) fn validate_predictor(&self) -> Result<(), InvalidInput> {
+        if !matches!(self.draft_readout_bits, None | Some(3 | 4)) {
+            return Err(InvalidInput("dense MTP draft readout supports only three/four-bit proposals"));
+        }
         super::validation::validate_transformer(&self.transformer_config)?;
         if self.model_dim == 0
             || self.model_dim != self.transformer_config.model_dim
@@ -96,8 +102,22 @@ mod tests {
             target_layer: 0,
             input_norm_config: transformer.output_norm_config.clone(),
             transformer_config: transformer.clone(),
+            draft_readout_bits: None,
         };
         (transformer, head)
+    }
+
+    #[stark_test]
+    fn dense_mtp_draft_readout_is_explicit_and_bounded() {
+        let (_, mut head) = fixture();
+        for bits in [None, Some(3), Some(4)] {
+            head.draft_readout_bits = bits;
+            assert!(head.validate_predictor().is_ok());
+        }
+        for bits in [0, 1, 2, 5, 8, u32::MAX] {
+            head.draft_readout_bits = Some(bits);
+            assert!(head.validate_predictor().is_err());
+        }
     }
 
     #[stark_test]

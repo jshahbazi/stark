@@ -216,7 +216,7 @@ The terminal reply:
 | `reused_input_tokens` | Present only when prefix reuse is enabled: prompt tokens taken from the retained prefix instead of prefill, a multiple of `prefix_cache.chunk_tokens` below `input_tokens` |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
-| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, acceptance, verified-row and phase-time counters when available. |
+| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, accepted-prefix-count, verified-row and phase-time counters when available. |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
 
@@ -295,6 +295,22 @@ output, matching the pinned oMLX post-normalization proposal variant. Accepted r
 recurrent and attention state; the predictor rewinds and rebuilds from the
 committed target residuals after every round. A zero-draft request still
 maintains predictor state, so its timing includes that cost.
+The round repair preserves the predictor's already-valid root KV and replays
+only accepted proposal rows using the preceding target hidden rows; root-only
+acceptance needs no replay. Zero-draft rounds prime the root through the same
+cache-only route. That route keeps embedding, hidden normalization, fusion,
+pre-attention normalization, Q/K/V projection, key normalization, RoPE and KV
+writes, while skipping unused attention output, FFN and final normalization.
+Target commit, repair and last-hidden ownership share one command completion:
+the three-draft path uses five normal command completions, down from eight.
+Completion metadata records aggregate round counts for zero through three
+accepted drafts; it contains no token or probability data.
+An optional `draft_readout_bits` model setting of three or four builds a
+coarse proposal head from the original affine vocabulary matrix. Each draft
+step proposes 64 shortlist IDs and rescores them with the original head. The
+full target vocabulary readout and exact rejection sampler are unchanged;
+omission keeps the full draft readout. Coarse-head performance and prefix
+behavior remain subject to artifact-bound qualification.
 Flat verification batches of two to four rows use serial per-row
 TreeVerify/StateAdvance arithmetic with batched projections; zero-draft
 generation uses the same verification arithmetic. This arithmetic differs from
@@ -378,12 +394,12 @@ Agent clients resend the same instructions, tool definitions and history on ever
 Eligibility and key:
 
 - Converted text models whose owned layers are all full, non-ring attention caches (for example Qwen3 dense models) rewind their attention cache.
-- Converted dense `qwen3_5` models with an admitted MTP head restore a snapshot on a 1,024-token grid. It holds each DeltaNet layer's F32 recurrence and convolution history, the BF16 normalized target hidden state, F32 next-token logits and the predictor's committed position. Full-attention prefix rows in the target and predictor remain in the retained session. The exact selected draft count is part of the reuse key.
+- Converted dense `qwen3_5` models with an admitted MTP head restore a snapshot on a 1,024-token grid. It holds each DeltaNet layer's F32 recurrence and convolution history, the BF16 normalized target hidden state, F32 next-token logits and the predictor's committed position. Full-attention prefix rows in the target and predictor remain in the retained session. The exact selected draft count is part of the reuse key; draft-readout width is immutable loaded-model configuration. The packed 27B artifact and its separately configured three/four-bit draft-head variants passed artifact-bound prefix checks on the build named in the [follow-up report](benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
 - Native GGUF GLM-5.3 resumes from a snapshot on a 1,024-token grid. The snapshot includes KDA recurrence and convolution history, plus the MLA/indexer position and incomplete pooling tail. Completed attention and indexer prefix rows remain in the loaded model's own state.
 - The ordinary [EXL3/FP8 GLM backend](validation/GLM_EXL3_BACKEND.md) resumes on a 16,384-token grid with MTP off and its head unloaded. A private native MTP candidate, enabled through a separately prepared capability stage and explicit `STARK_GLM_EXL3_VALIDATE_NATIVE=1`, snapshots the draft-head state with the native prefix state. Its native greedy, sampled and prefix mechanism/invalidation checks pass; full Rust-worker and quality validation remain pending, so production MTP is unqualified. The state-hash diagnostic build setting is separate. See the [native mechanism record](archive/runs/2026-11-04-glm-exl3-native-mtp-prefix.md) and [comparison record](benchmarks/2026-11-04-glm-mlx-stream-comparison.md).
 - The native mixed-precision Qwen3.8 backend (Lily-format, external mixed-affine and Uzu-converted Qwen3.8 artifacts) resumes from a recurrent-state snapshot on a 4,096-token grid. This includes the admitted `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` layout. Its attention, indexer and draft-head caches below the snapshot stay in the loaded model's own state.
 - Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window, speculator and image models, and for the native Flint and F32 Qwen graphs.
-- A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On Qwen3.8 and the private native EXL3 candidate, whether MTP is enabled must also match (`key` reports this).
+- A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On Qwen3.8 and the private native EXL3 candidate, whether MTP is enabled must also match (`key` reports this). Dense MTP uses the exact selected draft count; model-level coarse-readout configuration is bound by the loaded model instance.
 
 Exactness, converted models:
 

@@ -185,7 +185,8 @@ def download_receipt_identity(model, receipt_path):
     return {"repository": EXL3_REPOSITORY, "revision": EXL3_REVISION,
             "receipt_sha256": file_sha256(receipt_path), "content_sha256": digest_text(manifest),
             "files": identities, "total_bytes": total,
-            "verification": "Prior verified SHA-256 hashes with current size/mtime/inode guards; payloads are not rehashed."}
+            "verification": ("Prior verified SHA-256 hashes with current size/mtime/inode guards; "
+                             "payloads are not rehashed.")}
 
 
 def streaming_contract(config):
@@ -698,12 +699,30 @@ def mtp_cache_value(worker, drafts):
     return (drafts or 0) if "mtp-selection" in key else bool(drafts)
 
 
+def selected_mtp_drafts(ready, requested):
+    """Use the readiness recommendation by default; bound explicit depth to its cap."""
+    mtp = ready.get("mtp") or {}
+    if requested is None:
+        return mtp.get("recommended_drafts") if mtp.get("supported") else None
+    if requested == 0:
+        return 0
+    maximum = mtp.get("max_drafts")
+    if (mtp.get("supported") is not True or type(maximum) is not int
+            or not 1 <= requested <= maximum):
+        raise SystemExit("requested MTP depth exceeds worker readiness")
+    return requested
+
+
 def report(args, **counts):
     report_stage(args.progress, **counts)
 
 
 def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=None):
     """Run every case once per distinct request (all steps on a cached worker)."""
+    requested = max((options.get("mtp_drafts", 0) or 0
+                     for kind, _, _, options in steps if kind == "case"), default=0)
+    if requested:
+        selected_mtp_drafts(worker.ready, requested)
     outcomes, observed = {}, {}
     for kind, label, ids, options in steps:
         if kind == "act":
@@ -801,8 +820,7 @@ def run_exactness(args, template, codec, parser):
         if settings.get("enabled") is not True:
             raise SystemExit("candidate did not enable prefix reuse for this model")
         chunk = settings["chunk_tokens"]
-        mtp = cached.ready.get("mtp") or {}
-        mtp_drafts = mtp.get("recommended_drafts") if mtp.get("supported") else None
+        mtp_drafts = selected_mtp_drafts(cached.ready, args.mtp_drafts)
         session, turns = build_turns(
             cached,
             template,
@@ -1030,7 +1048,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--download-receipt", type=Path,
-                        help="Verified pinned EXL3 flat-pack receipt; checks all file identities before and after execution")
+                        help=("Verified pinned EXL3 flat-pack receipt; "
+                              "checks file identities before and after execution"))
     parser.add_argument(
         "--baseline", required=True, help="Worker built without prefix reuse"
     )
@@ -1052,6 +1071,8 @@ def main():
     parser.add_argument("--rounds-per-block", type=int, default=2)
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--mode", choices=("all", "exactness", "timing"), default="all")
+    parser.add_argument("--mtp-drafts", type=int, choices=tuple(range(8)), default=None,
+                        help="Select dense MTP depth 0..7; default uses the worker recommendation")
     parser.add_argument(
         "--progress",
         action="store_true",

@@ -124,6 +124,46 @@ impl<B: Backend> QwenMtp<B> {
         {
             return Err(QwenMtpError::Invalid);
         }
+        let fused = self.fuse_inputs(embedding, target_hidden, count, row_bytes, command)?;
+        let encoded = self
+            .transformer
+            .encode(fused, None::<&B::ScratchBuffer>, topology, Some((0..count).into()), None, Some(state), command)
+            .map_err(QwenMtpError::Backend)?;
+        Ok(QwenMtpOutput {
+            normalized: encoded.output.ok_or(QwenMtpError::Invalid)?,
+        })
+    }
+
+    /// Populate predictor attention KV while skipping attention output and the
+    /// unused feed-forward/output-normalization work.
+    pub fn encode_cache_only(
+        &self,
+        embedding: impl BufferRef<Backend = B>,
+        target_hidden: impl BufferRef<Backend = B>,
+        topology: &BatchTopology,
+        state: &mut TransformerState<B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), QwenMtpError<B>> {
+        let count = topology.size();
+        let row_bytes = self.model_dim as usize * DataType::BF16.size_in_bytes();
+        if count == 0
+            || embedding.size() != count as usize * row_bytes
+            || target_hidden.size() != count as usize * row_bytes
+        {
+            return Err(QwenMtpError::Invalid);
+        }
+        let fused = self.fuse_inputs(embedding, target_hidden, count, row_bytes, command)?;
+        self.transformer.encode_cache_only(fused, topology, state, command).map_err(QwenMtpError::Backend)
+    }
+
+    fn fuse_inputs(
+        &self,
+        embedding: impl BufferRef<Backend = B>,
+        target_hidden: impl BufferRef<Backend = B>,
+        count: u32,
+        row_bytes: usize,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, QwenMtpError<B>> {
         let e = self
             .embedding_norm
             .encode(embedding, 0, count, None::<&mut B::ScratchBuffer>, command)
@@ -143,13 +183,6 @@ impl<B: Backend> QwenMtp<B> {
                 joined.subrange_mut((2 * row + 1) * row_bytes..(2 * row + 2) * row_bytes),
             );
         }
-        let fused = self.fusion.encode(joined, count, command).map_err(QwenMtpError::Backend)?;
-        let encoded = self
-            .transformer
-            .encode(fused, None::<&B::ScratchBuffer>, topology, Some((0..count).into()), None, Some(state), command)
-            .map_err(QwenMtpError::Backend)?;
-        Ok(QwenMtpOutput {
-            normalized: encoded.output.ok_or(QwenMtpError::Invalid)?,
-        })
+        self.fusion.encode(joined, count, command).map_err(QwenMtpError::Backend)
     }
 }

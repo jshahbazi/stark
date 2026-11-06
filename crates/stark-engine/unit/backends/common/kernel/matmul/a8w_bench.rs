@@ -186,8 +186,7 @@ fn encode_step(
                         scales: &data.a_scales,
                         group_sums: None,
                         scale_group_size: 128,
-                        code_layout: Int8CodeLayout::for_right_bits(DataType::from(data.mode).size_in_bits() as u32)
-                            .expect("W4/W8 benchmark"),
+                        code_layout: Int8CodeLayout::for_right_bits(data.mode.bits()).expect("W4/W8 benchmark"),
                     },
                     b: MatmulB::Quantized(QuantizedB {
                         codes: &data.a8_weights,

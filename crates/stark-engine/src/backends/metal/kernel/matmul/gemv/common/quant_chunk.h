@@ -28,10 +28,26 @@ struct QuantChunk {
       float origin,
       bool signed_codes
   ) {
+    if constexpr (BITS == 3 || BITS == 5 || BITS == 6) {
+      METAL_PRAGMA_UNROLL
+      for (uint i = 0; i < VALUES; i++) {
+        const uint bit = (chunk * VALUES + i) * BITS;
+        const uint word = bit / WORD_BITS;
+        const uint shift = bit % WORD_BITS;
+        uint code = words[word / WORD_LANES][word % WORD_LANES] >> shift;
+        if (shift + BITS > WORD_BITS) {
+          code |= words[(word + 1) / WORD_LANES][(word + 1) % WORD_LANES] << (WORD_BITS - shift);
+        }
+        values[i] = as_type<float>((code & ((1u << BITS) - 1u)) | MANTISSA_BASE_BITS) - origin;
+      }
+      return;
+    }
     const uint word = chunk * (BITS == 4 ? 1u : 2u);
     const uint word0 = words[word / 4u][word % 4u];
     const uint word1 = BITS == 4 ? 0u : words[(word + 1u) / 4u][(word + 1u) % 4u];
-    decode_words(word0, word1, values, origin, signed_codes);
+    if constexpr (BITS == 4 || BITS == 8) {
+      decode_words(word0, word1, values, origin, signed_codes);
+    }
   }
 
   template <bool ALIGNED, typename AT>

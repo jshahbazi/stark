@@ -36,6 +36,17 @@ const _: () = assert!(prefix_cache::PREFILL_CHUNK_TOKENS == PREFILL_CHUNK_TOKENS
 type RetainedState = PrefixEntry<LanguageModelState<Metal>>;
 type DenseRetainedState = prefix_cache::BoundaryEntry<(DenseMtpSession<Metal>, u32)>;
 
+fn record_accepted_prefix_round(
+    counts: &mut [u64; 4],
+    accepted: usize,
+) -> bool {
+    let Some(count) = counts.get_mut(accepted) else {
+        return false;
+    };
+    *count += 1;
+    true
+}
+
 pub(crate) struct NativeBackend {
     model: NativeModel,
     vocab_size: usize,
@@ -461,6 +472,9 @@ impl NativeBackend {
         let mut rounds = 0usize;
         let mut proposed = 0usize;
         let mut accepted = 0usize;
+        // Exact aggregate accepted-prefix histogram: index j counts rounds
+        // with exactly j accepted drafts. Dense MTP supports at most 3 drafts.
+        let mut rounds_by_accepted_drafts = [0u64; 4];
         let mut verified_rows = 0usize;
         let mut draft_seconds = 0.0f64;
         let mut verify_seconds = 0.0f64;
@@ -490,6 +504,10 @@ impl NativeBackend {
                         rounds += 1;
                         proposed += round.proposed;
                         accepted += round.accepted;
+                        if !record_accepted_prefix_round(&mut rounds_by_accepted_drafts, round.accepted) {
+                            failed = true;
+                            return Some(Err("native_generation_failed"));
+                        }
                         verified_rows += round.verified_rows;
                         draft_seconds += round.draft_seconds;
                         verify_seconds += round.verify_seconds;
@@ -569,6 +587,7 @@ impl NativeBackend {
         self.last_mtp = Some(serde_json::json!({
             "enabled": options.mtp_drafts > 0, "drafts": options.mtp_drafts,
             "rounds": rounds, "proposed": proposed, "accepted": accepted,
+            "rounds_by_accepted_drafts": rounds_by_accepted_drafts,
             "verified_rows": verified_rows,
             "draft_seconds": draft_seconds, "verify_seconds": verify_seconds,
             "rollback_seconds": rollback_seconds,
@@ -749,5 +768,19 @@ impl NativeBackend {
             self.pending_prefix = Some(PrefixEntry::new(state, scope, options.context_tokens, prompt_ids));
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod dense_mtp_stats_tests {
+    #[test]
+    fn accepted_prefix_histogram_counts_rounds_by_exact_prefix_length() {
+        let accepted_per_round = [0usize, 2, 1, 3, 2, 0];
+        let mut rounds_by_accepted_drafts = [0u64; 4];
+        for accepted in accepted_per_round {
+            assert!(super::record_accepted_prefix_round(&mut rounds_by_accepted_drafts, accepted));
+        }
+        assert_eq!(rounds_by_accepted_drafts, [2, 1, 2, 1]);
+        assert!(!super::record_accepted_prefix_round(&mut rounds_by_accepted_drafts, 4));
     }
 }

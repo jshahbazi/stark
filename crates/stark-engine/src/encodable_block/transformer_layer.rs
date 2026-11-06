@@ -342,8 +342,7 @@ impl<B: Backend> TransformerLayer<B> {
 
     /// This narrow path excludes sequence-mixing layer convolutions and shared
     /// or ring KV caches. Other mixers continue through their ordinary encoder.
-    #[cfg(feature = "scoring-last-layer-pruning")]
-    pub(crate) fn supports_scoring_cache_only(&self) -> bool {
+    pub(crate) fn supports_cache_only(&self) -> bool {
         use std::any::Any;
 
         use crate::encodable_block::mixer::attention::Attention;
@@ -352,11 +351,40 @@ impl<B: Backend> TransformerLayer<B> {
             && self.kv_source_layer_index.is_none()
             && (self.mixer.as_ref() as &dyn Any)
                 .downcast_ref::<Attention<B>>()
-                .is_some_and(Attention::supports_scoring_cache_only)
+                .is_some_and(Attention::supports_cache_only)
+    }
+
+    #[cfg(feature = "scoring-last-layer-pruning")]
+    pub(crate) fn supports_scoring_cache_only(&self) -> bool {
+        self.supports_cache_only()
+    }
+
+    pub(crate) fn encode_cache_only(
+        &self,
+        input: B::ScratchBuffer,
+        shortcut: impl BufferMut<Backend = B>,
+        precalculated_rope: Option<&PrecalculatedRoPE<B>>,
+        batch_dim: &BatchTopology,
+        state: &mut dyn MixerState<B>,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), B::Error> {
+        self.encode_cache_only_inner(input, shortcut, precalculated_rope, batch_dim, state, command_buffer, false)
     }
 
     #[cfg(feature = "scoring-last-layer-pruning")]
     pub(crate) fn encode_scoring_cache_only(
+        &self,
+        input: B::ScratchBuffer,
+        shortcut: impl BufferMut<Backend = B>,
+        precalculated_rope: Option<&PrecalculatedRoPE<B>>,
+        batch_dim: &BatchTopology,
+        state: &mut dyn MixerState<B>,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), B::Error> {
+        self.encode_cache_only_inner(input, shortcut, precalculated_rope, batch_dim, state, command_buffer, true)
+    }
+
+    fn encode_cache_only_inner(
         &self,
         input: B::ScratchBuffer,
         mut shortcut: impl BufferMut<Backend = B>,
@@ -364,16 +392,21 @@ impl<B: Backend> TransformerLayer<B> {
         batch_dim: &BatchTopology,
         state: &mut dyn MixerState<B>,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        scoring: bool,
     ) -> Result<(), B::Error> {
         use std::any::Any;
 
         use crate::encodable_block::mixer::attention::{Attention, AttentionState};
 
-        assert!(self.supports_scoring_cache_only(), "unsupported scoring cache-only layer");
-        assert!(batch_dim.is_flat(), "scoring cache-only requires flat topology");
+        assert!(self.supports_cache_only(), "unsupported cache-only layer");
+        assert!(batch_dim.is_flat(), "cache-only requires flat topology");
         let attention = (self.mixer.as_ref() as &dyn Any).downcast_ref::<Attention<B>>().unwrap();
         let state = (state as &mut dyn Any).downcast_mut::<AttentionState<B>>().unwrap();
-        command_buffer.push_debug_group("scoring final-layer KV only");
+        command_buffer.push_debug_group(if scoring {
+            "scoring final-layer KV only"
+        } else {
+            "predictor KV only"
+        });
         let hidden = if let Some(pre_mixer_norm) = &self.pre_mixer_norm {
             pre_mixer_norm.encode(&input, 0, batch_dim.size(), Some(shortcut.reborrow()), command_buffer)?
         } else {
@@ -381,7 +414,14 @@ impl<B: Backend> TransformerLayer<B> {
             command_buffer.encode_copy(&input, shortcut.reborrow());
             input
         };
-        attention.encode_scoring_cache_only(hidden, precalculated_rope, batch_dim, state, command_buffer)?;
+        if scoring {
+            #[cfg(feature = "scoring-last-layer-pruning")]
+            attention.encode_scoring_cache_only(hidden, precalculated_rope, batch_dim, state, command_buffer)?;
+            #[cfg(not(feature = "scoring-last-layer-pruning"))]
+            unreachable!("scoring cache-only path is feature gated");
+        } else {
+            attention.encode_cache_only(hidden, precalculated_rope, batch_dim, state, command_buffer)?;
+        }
         command_buffer.pop_debug_group();
         Ok(())
     }

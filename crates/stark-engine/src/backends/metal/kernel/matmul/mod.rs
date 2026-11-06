@@ -36,6 +36,7 @@ pub struct MatmulMetalKernel {
     weights_data_type: DataType,
     input_data_type: DataType,
     output_data_type: DataType,
+    row_arithmetic_reference: Option<u32>,
 }
 
 enum MatmulDispatch {
@@ -165,6 +166,31 @@ impl MatmulMetalKernel {
         shape: &MatmulShape,
         context: &MetalContext,
     ) -> MatmulDispatch {
+        if let Some(reference) = self.row_arithmetic_shape(shape) {
+            if shape.m <= 4
+                && let Some(gemv) = GemvSpecialization::select_preserving_w8(
+                    shape,
+                    &reference,
+                    self.weights_data_type,
+                    self.input_data_type,
+                    self.output_data_type,
+                    context.gpu_core_count,
+                    context.apple_gpu_family,
+                )
+            {
+                return MatmulDispatch::Gemv(gemv);
+            }
+            return MatmulDispatch::Gemm(
+                GemmProblem::new(
+                    reference,
+                    self.weights_data_type,
+                    self.output_data_type,
+                    context.supports_mxu,
+                    context.apple_gpu_family,
+                )
+                .select_plan(),
+            );
+        }
         Self::choose_dispatch(
             shape,
             &context.device_name,
@@ -175,6 +201,31 @@ impl MatmulMetalKernel {
             self.input_data_type,
             self.output_data_type,
         )
+    }
+
+    fn row_arithmetic_shape(
+        &self,
+        shape: &MatmulShape,
+    ) -> Option<MatmulShape> {
+        if (self.row_arithmetic_reference.is_none() && !matches!(shape.b_bits, Some(5 | 6)))
+            || self.weights_data_type != DataType::BF16
+            || self.input_data_type != DataType::BF16
+            || self.output_data_type != DataType::BF16
+            || shape.b_prologue != GemmBPrologueKind::ScaleBiasDequant
+            || shape.b_group_size != Some(64)
+            || shape.signed_codes
+            || !shape.a_full_precision
+            || shape.gathered
+            || !shape.b_transpose
+            || shape.b_leading_dimension.is_some()
+        {
+            return None;
+        }
+        Some(MatmulShape {
+            n: self.row_arithmetic_reference.unwrap_or(shape.n),
+            b_bits: Some(8),
+            ..*shape
+        })
     }
 }
 
@@ -204,7 +255,15 @@ impl MatmulKernel for MatmulMetalKernel {
             weights_data_type,
             input_data_type,
             output_data_type,
+            row_arithmetic_reference: None,
         })
+    }
+
+    fn set_row_arithmetic_reference(
+        &mut self,
+        output_dim: u32,
+    ) {
+        self.row_arithmetic_reference = Some(output_dim);
     }
 
     fn select_activation_quantization(
@@ -212,6 +271,9 @@ impl MatmulKernel for MatmulMetalKernel {
         shape: &MatmulShape,
         context: &MetalContext,
     ) -> Option<ActivationQuantization> {
+        if self.row_arithmetic_reference.is_some() {
+            return None;
+        }
         let weight_group_size = shape.b_group_size?;
         let emit_group_sums = match shape.b_prologue {
             GemmBPrologueKind::ScaleSymmetricDequant => false,
@@ -244,6 +306,9 @@ impl MatmulKernel for MatmulMetalKernel {
         bf16_shape: &MatmulShape,
         context: &MetalContext,
     ) -> ActivationFormat {
+        if self.row_arithmetic_reference.is_some() {
+            return ActivationFormat::Bf16;
+        }
         if bf16_shape.params_layout != Some(QuantParamsLayout::GroupOutput)
             || !supports_integer_right_operand(bf16_shape)
             || matches!(self.select_dispatch(bf16_shape, context), MatmulDispatch::Gemv(_))
@@ -280,6 +345,13 @@ impl MatmulKernel for MatmulMetalKernel {
             },
             MatmulDispatch::Gemm(plan) => plan,
         };
+
+        if shape.b_bits == Some(3) {
+            return Err(MatmulError::UnsupportedLayout {
+                path: "internal three-bit draft weights require group64 BF16-to-F32 single-row GEMV",
+            }
+            .into());
+        }
 
         // TODO: remove after GatherGEMM is supported
         if arguments.gather_indices.is_some() {

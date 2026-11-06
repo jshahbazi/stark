@@ -24,6 +24,77 @@ fn write_stage(
     json!({"file":name,"shape":shape,"dtype":dtype,"sha256":format!("{:x}",Sha256::digest(bytes))})
 }
 
+/// Exercise the complete score/shortlist/rescore seam, including buffer types.
+#[ignore]
+#[stark_test]
+fn dense_mtp_coarse_head_shortlist_and_exact_rescore() {
+    let artifact = std::path::PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private artifact"));
+    let stages = std::path::PathBuf::from(std::env::var_os("STARK_DENSE_HEAD_STAGE_PATH").expect("set private stages"));
+    let output =
+        std::path::PathBuf::from(std::env::var_os("STARK_DENSE_COARSE_AUDIT_OUTPUT").expect("set private output"));
+    let manifest: Value = serde_json::from_slice(&std::fs::read(stages.join("manifest.json")).unwrap()).unwrap();
+    let engine = Engine::<Metal>::new().unwrap();
+    let model = engine.load_language_model(&artifact).unwrap();
+    let embedding = model.decoder.embedding();
+    let context = &model.engine.context;
+    let dim = embedding.model_dim() as usize;
+    let vocab = embedding.vocab_size() as usize;
+    let mut reports = Vec::new();
+    for bits in [3, 4] {
+        let coarse = embedding.coarse_draft_readout(context, bits).unwrap().unwrap();
+        let mut rows = 0;
+        let mut covered = 0;
+        let mut top1 = 0;
+        for stage in manifest["stages"].as_array().unwrap() {
+            let record = &stage["normalized_hidden"];
+            let bytes = std::fs::read(stages.join(record["file"].as_str().unwrap())).unwrap();
+            assert!(format!("{:x}", Sha256::digest(&bytes)) == record["sha256"].as_str().unwrap());
+            assert!(bytes.len().is_multiple_of(dim * 2));
+            for row in bytes.chunks_exact(dim * 2) {
+                let mut hidden = context.create_buffer(row.len()).unwrap();
+                hidden.copyin(row);
+                let mut command = context.create_command_buffer(None, None).unwrap();
+                let scores = coarse.encode_scores(&hidden, &mut command).unwrap();
+                let (ids, rescored) = coarse.encode(embedding, &hidden, &mut command).unwrap();
+                let full = embedding
+                    .encode_readout(
+                        1,
+                        &hidden,
+                        vocab as u32,
+                        None::<&<Metal as Backend>::ScratchBuffer>,
+                        true,
+                        &mut command,
+                    )
+                    .unwrap();
+                command.end_encoding().submit().wait_until_completed().unwrap();
+                let scores = scores.copyout::<f32>();
+                let selected = ids.copyout::<u32>();
+                let rescored = rescored.copyout::<bf16>();
+                let full = full.copyout::<bf16>();
+                let mut expected = (0..vocab).collect::<Vec<_>>();
+                expected.sort_unstable_by(|&a, &b| scores[b].total_cmp(&scores[a]).then_with(|| a.cmp(&b)));
+                assert!(
+                    selected.iter().copied().map(|x| x as usize).eq(expected[..64].iter().copied()),
+                    "GPU shortlist differs from F32 reference ranking"
+                );
+                assert!(
+                    selected.iter().zip(&rescored).all(|(&id, &score)| full[id as usize].to_bits() == score.to_bits()),
+                    "gathered rescore differs from full target head"
+                );
+                expected
+                    .sort_unstable_by(|&a, &b| full[b].to_f32().total_cmp(&full[a].to_f32()).then_with(|| a.cmp(&b)));
+                covered += expected[..20].iter().filter(|&&id| selected.contains(&(id as u32))).count();
+                top1 += usize::from(selected.contains(&(expected[0] as u32)));
+                rows += 1;
+            }
+        }
+        reports.push(json!({"bits":bits,"rows":rows,"top20_candidates_covered":covered,
+            "top20_candidates_total":rows*20,"top1_covered_rows":top1,
+            "shortlist_f32_ranking_exact":true,"rescore_bf16_exact":true}));
+    }
+    std::fs::write(output, serde_json::to_vec_pretty(&json!({"cases":reports})).unwrap()).unwrap();
+}
+
 // Requires the exact private native artifact and a private ignored output dir.
 #[ignore]
 #[stark_test]

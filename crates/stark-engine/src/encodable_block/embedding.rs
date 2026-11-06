@@ -2,6 +2,8 @@ use derive_more::Debug;
 use parking_lot::Mutex;
 use thiserror::Error;
 
+pub(crate) mod coarse;
+
 use crate::{
     backends::common::{
         Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,

@@ -9,8 +9,9 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{
-        Backend, Buffer, BufferCpuAccessible, BufferMut, BufferRef, CommandBufferCompleted, CommandBufferEncoding,
-        CommandBufferExecutable, CommandBufferPending, Context, gpu_types::trie::TrieNode as GpuTrieNode,
+        Backend, Buffer, BufferCpuAccessible, BufferMut, BufferRef, CommandBuffer, CommandBufferCompleted,
+        CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context,
+        gpu_types::trie::TrieNode as GpuTrieNode,
     },
     encodable_block::{
         batch_topology::BatchTopology,
@@ -239,22 +240,48 @@ where
         } else {
             None
         };
+        let mut shortlist = None;
         let logits = if read_logits {
-            Some(self.decoder.embedding().encode_readout(
-                ids.len() as u32,
-                &encoded.normalized,
-                self.decoder.embedding().vocab_size(),
-                None::<&B::ScratchBuffer>,
-                true,
-                &mut cmd,
-            )?)
+            if let Some(coarse) = &self.dense_draft_readout {
+                if ids.len() != 1 {
+                    return Err(DenseMtpError::Invalid);
+                }
+                let (candidates, exact) = coarse.encode(self.decoder.embedding(), &encoded.normalized, &mut cmd)?;
+                shortlist = Some(candidates);
+                Some(exact)
+            } else {
+                Some(self.decoder.embedding().encode_readout(
+                    ids.len() as u32,
+                    &encoded.normalized,
+                    self.decoder.embedding().vocab_size(),
+                    None::<&B::ScratchBuffer>,
+                    true,
+                    &mut cmd,
+                )?)
+            }
         } else {
             None
         };
         drop(tokens);
         let complete = cmd.end_encoding().submit().wait_until_completed().map_err(DenseMtpError::Backend)?;
-        let values =
+        let mut values =
             logits.map(|x| x.copyout::<bf16>().into_iter().map(f32::from).collect::<Vec<_>>()).unwrap_or_default();
+        if let Some(shortlist) = shortlist {
+            let candidates = shortlist.copyout::<u32>();
+            if candidates.len() != 64 || values.len() != 64 {
+                return Err(DenseMtpError::Invalid);
+            }
+            let vocab = self.decoder.embedding().vocab_size() as usize;
+            let mut expanded = vec![f32::MIN; vocab];
+            let mut seen = std::collections::HashSet::with_capacity(candidates.len());
+            for (candidate, value) in candidates.into_iter().zip(values) {
+                if candidate as usize >= vocab || !value.is_finite() || !seen.insert(candidate) {
+                    return Err(DenseMtpError::Invalid);
+                }
+                expanded[candidate as usize] = value;
+            }
+            values = expanded;
+        }
         drop(complete);
         if values.iter().any(|x| !x.is_finite()) {
             return Err(DenseMtpError::Invalid);
@@ -263,6 +290,29 @@ where
             logits: values,
             hidden: saved,
         })
+    }
+
+    fn encode_dense_predictor_cache_only(
+        &self,
+        ids: &[u32],
+        target_hidden: impl BufferRef<Backend = B>,
+        state: &mut TransformerState<B>,
+        cmd: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), DenseMtpError<B>> {
+        let head = self.dense_mtp.as_ref().ok_or(DenseMtpError::Invalid)?;
+        let row_bytes = self.decoder.embedding().model_dim() as usize * std::mem::size_of::<bf16>();
+        let hidden_bytes = ids.len().checked_mul(row_bytes).ok_or(DenseMtpError::Invalid)?;
+        if ids.is_empty() || target_hidden.size() != hidden_bytes {
+            return Err(DenseMtpError::Invalid);
+        }
+        let tokens = cmd.allocate_constant_from_slice(ids).map_err(DenseMtpError::Backend)?;
+        let embedded = self.decoder.embedding().encode_lookup(&tokens, ids.len() as u32, cmd)?;
+        let (nodes, full) = chain(ids.len(), true);
+        let batch = BatchTopology::new(&nodes, full);
+        head.encode_cache_only(&embedded, target_hidden, &batch, state, cmd)?;
+        state.encode_accept(&(0..ids.len() as u32).collect::<Vec<_>>(), cmd).map_err(DenseMtpError::Backend)?;
+        drop(tokens);
+        Ok(())
     }
 
     fn dense_copy_hidden(
@@ -295,16 +345,30 @@ where
         current: &B::GlobalBuffer,
         row_index: usize,
     ) -> Result<B::GlobalBuffer, DenseMtpError<B>> {
-        let row = self.decoder.embedding().model_dim() as usize * 2;
-        let mut saved = self.engine.context.create_buffer(row).map_err(DenseMtpError::Backend)?;
         let mut cmd = self
             .engine
             .context
             .create_command_buffer(Some("dense MTP last residual"), None)
             .map_err(DenseMtpError::Backend)?;
-        cmd.encode_copy(current.subrange(row_index * row..(row_index + 1) * row), &mut saved);
+        let saved = self.encode_dense_last_hidden(current, row_index, &mut cmd)?;
         let complete = cmd.end_encoding().submit().wait_until_completed().map_err(DenseMtpError::Backend)?;
         drop(complete);
+        Ok(saved)
+    }
+
+    fn encode_dense_last_hidden(
+        &self,
+        current: &B::GlobalBuffer,
+        row_index: usize,
+        cmd: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::GlobalBuffer, DenseMtpError<B>> {
+        let row = self.decoder.embedding().model_dim() as usize * 2;
+        let end = row_index.checked_add(1).and_then(|count| count.checked_mul(row)).ok_or(DenseMtpError::Invalid)?;
+        if end > current.size() {
+            return Err(DenseMtpError::Invalid);
+        }
+        let mut saved = self.engine.context.create_buffer(row).map_err(DenseMtpError::Backend)?;
+        cmd.encode_copy(current.subrange(end - row..end), &mut saved);
         Ok(saved)
     }
 
@@ -398,7 +462,16 @@ where
                     } else {
                         &chunk[1..]
                     };
-                    self.dense_predictor_pass(next_ids, &joined, &mut session.predictor, false)?;
+                    let pool = self.engine.context.create_allocation_pool();
+                    let mut command = self
+                        .engine
+                        .context
+                        .create_command_buffer(Some("dense MTP predictor priming"), Some(pool))
+                        .map_err(DenseMtpError::Backend)?;
+                    self.encode_dense_predictor_cache_only(next_ids, &joined, &mut session.predictor, &mut command)?;
+                    let complete =
+                        command.end_encoding().submit().wait_until_completed().map_err(DenseMtpError::Backend)?;
+                    drop(complete);
                 }
                 session.last_hidden = self.dense_last_hidden(&pass.hidden, chunk.len() - 1)?;
                 session.logits = pass.logits;
@@ -563,25 +636,44 @@ where
             }
         };
         let count = accepted + 1;
+        let verify_seconds = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        let pool = self.engine.context.create_allocation_pool();
         let mut cmd = self
             .engine
             .context
-            .create_command_buffer(Some("dense MTP commit"), None)
+            .create_command_buffer(Some("dense MTP commit and predictor repair"), Some(pool))
             .map_err(DenseMtpError::Backend)?;
         session
             .target
             .encode_accept(&(0..count as u32).collect::<Vec<_>>(), &mut cmd)
             .map_err(DenseMtpError::Backend)?;
+        if drafts == 0 {
+            self.encode_dense_predictor_cache_only(
+                &inputs[..count],
+                &session.last_hidden,
+                &mut session.predictor,
+                &mut cmd,
+            )?;
+        } else {
+            if !session.predictor.rewind(prefix.checked_add(1).ok_or(DenseMtpError::Invalid)?) {
+                return Err(DenseMtpError::Invalid);
+            }
+            if count > 1 {
+                let accepted_proposals = count - 1;
+                let row_bytes = self.decoder.embedding().model_dim() as usize * 2;
+                self.encode_dense_predictor_cache_only(
+                    &inputs[1..count],
+                    pass.hidden.subrange(..accepted_proposals * row_bytes),
+                    &mut session.predictor,
+                    &mut cmd,
+                )?;
+            }
+        }
+        let last_hidden = self.encode_dense_last_hidden(&pass.hidden, count - 1, &mut cmd)?;
         let complete = cmd.end_encoding().submit().wait_until_completed().map_err(DenseMtpError::Backend)?;
         drop(complete);
-        let verify_seconds = started.elapsed().as_secs_f64();
-        let started = Instant::now();
-        if !session.predictor.rewind(prefix) {
-            return Err(DenseMtpError::Invalid);
-        }
-        let joined = self.dense_copy_hidden(Some(&session.last_hidden), &pass.hidden, count)?;
-        self.dense_predictor_pass(&inputs[..count], &joined, &mut session.predictor, false)?;
-        session.last_hidden = self.dense_last_hidden(&pass.hidden, count - 1)?;
+        session.last_hidden = last_hidden;
         session.logits = pass.logits[(count - 1) * vocab..count * vocab].to_vec();
         Ok(DenseMtpRound {
             accepted_drafts: inputs[1..count].to_vec(),

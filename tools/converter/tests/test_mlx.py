@@ -342,8 +342,13 @@ def test_mlx_non_power_of_two_packing_preserves_every_source_bit(tmp_path, bits)
     assert tensor_bytes(converted["out.scales"]) == tensors["matrix.scales"][1].tobytes()
     with pytest.raises(ConversionError, match="representations disagree"):
         plan_mlx_matrix("out", (matrix,), dtype="F32", layout="input_output", quantization=MLXQuantization(8, 32))
-    with pytest.raises(UnsupportedConversion):
-        plan_mlx_matrix("out", (matrix,), dtype="F32", layout="input_output", quantization=quant)
+    packed_ops = plan_mlx_matrix("out", (matrix,), dtype="F32", layout="input_output", quantization=quant)
+    packed_plan = ConversionPlan(
+        {}, packed_ops, {}, sum(info.nbytes for info in infos.values()), len(infos), tuple(infos.values())
+    )
+    write_plan(packed_plan, tmp_path / "packed.safetensors", chunk_bytes=64)
+    packed = read_safetensors_header(tmp_path / "packed.safetensors")[1]
+    assert tensor_bytes(packed["out.weights"]) == payload
     # A 16-column row at 5 bits has 80 bits, not a complete U32 array.
     if bits == 5:
         with pytest.raises(ConversionError, match="packing"):

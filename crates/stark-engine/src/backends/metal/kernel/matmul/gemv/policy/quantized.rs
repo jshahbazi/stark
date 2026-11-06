@@ -16,7 +16,7 @@ const fn lane_tile(
 ) -> GemvTile {
     let pack_factor = match bits {
         4 => 8,
-        8 => 4,
+        5 | 6 | 8 => 4,
         _ => 1,
     };
     GemvTile::quantized(num_simdgroups, results_per_simdgroup, 1, 32, group / (2 * pack_factor))
@@ -35,6 +35,10 @@ pub fn gathered_tile(
     m: u32,
     n: u32,
 ) -> Option<GemvTile> {
+    if matches!(bits, 5 | 6) {
+        let tile = lane_default(bits, group);
+        return (group == 64 && m == 1 && n >= tile.rows_per_lane()).then_some(tile);
+    }
     if !matches!(bits, 4 | 8) || !matches!(group, 16 | 32 | 64 | 128) || !(1..=8).contains(&m) {
         return None;
     }
@@ -106,6 +110,18 @@ pub fn select(
     bf16_io: bool,
     qwen35_affine_layout: bool,
 ) -> Option<GemvTile> {
+    if matches!(bits, 5 | 6) {
+        if !qwen35_affine_layout || !bf16_io || group != 64 || !(1..=4).contains(&m) || !k.is_multiple_of(256) {
+            return None;
+        }
+        let mut tile = lane_default(bits, group);
+        tile.input_row_tile = if gpu_core_count >= LARGE_MIN_GPU_CORES && apple_gpu_family == MTLGPUFamily::Apple10 {
+            m
+        } else {
+            1
+        };
+        return (n >= tile.rows_per_lane()).then_some(tile);
+    }
     if !matches!(bits, 4 | 8) || !matches!(group, 16 | 32 | 64 | 128) || !(1..=8).contains(&m) {
         return None;
     }
@@ -116,8 +132,8 @@ pub fn select(
     }
 
     // Dense Qwen27 verification reuses each affine weight load across its
-    // two to four input rows. Preserve the scalar route's output geometry,
-    // K-lane partition and per-group arithmetic exactly.
+    // two to four input rows. Reuse the full verification row tile while
+    // preserving scalar output geometry, K lanes and group arithmetic.
     if qwen35_affine_layout
         && gpu_core_count >= LARGE_MIN_GPU_CORES
         && apple_gpu_family == MTLGPUFamily::Apple10

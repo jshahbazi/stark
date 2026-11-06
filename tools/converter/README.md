@@ -285,10 +285,13 @@ MLX metadata follows each profile's registered source: Qwen3 and Llama use their
 its own tokenizer and generation metadata. Its default four-bit affine scheme
 has per-module 4/5/6/8-bit overrides, with group size 64. The Qwen3.5 adapter
 resolves each matrix's complete weight/scale/bias triplet independently.
-Five- and six-bit integer values are unpacked into eight-bit storage; a fused
-projection containing differing widths is widened to eight bits as a whole.
-This preserves every source integer and BF16 coefficient without requantizing,
-at the cost of larger converted weights and greater memory traffic.
+Uniform five/six-bit matrices retain their packed U8 source bytes for BF16,
+group-64 output-input matrices. Eligible mixed-width fused projections emit
+`MLXRowPartitionedSpec` metadata with contiguous output-row segments at their
+source widths. Runtime planning preserves the original fused output dimension
+and W8 row arithmetic while multiplying each packed segment. Other layouts,
+including input-output embeddings, widen losslessly to eight-bit storage.
+No weight codes or affine coefficients are requantized.
 
 A complete, explicitly declared one-layer quantized MTP predictor is converted
 alongside the target. Once a fusion matrix identifies a predictor, every head
@@ -298,13 +301,21 @@ configuration remains subject to native tensor and graph admission. Floating
 text conversions and legacy uniform sources with declared bare `mtp.*`
 auxiliary tensors retain their existing omission policy when no complete
 predictor is identified. Omitted tensors never grant MTP capability.
+The optional MTP config may set `draft_readout_bits` to three or four, deriving
+a coarse proposal matrix from the original vocabulary head; each proposal is
+rescored over 64 selected rows with the original matrix. The full target
+readout remains unchanged. Omission keeps the full draft readout.
+Dense Qwen MTP supports up to three drafts and recommends three; the worker default
+remains zero. Coarse-readout options require artifact-bound qualification
+before use.
 `output_gate_type: "swish"` in this export is an inert annotation: the
 Qwen3.5 full-attention output gate remains sigmoid, matching the reference
 implementation. `rope_parameters.type: "default"` is admitted as the default
 RoPE alias; other unimplemented variants fail inspection.
 
 The pinned local execution and performance scope is recorded in the
-[dense 27B benchmark](../../docs/benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md).
+[original dense 27B report](../../docs/benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md)
+and [packed-weight follow-up](../../docs/benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
 
 ### Lily Qwen3.8 text
 

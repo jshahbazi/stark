@@ -109,6 +109,10 @@ select its post-normalization draft variant: the target's final normalization
 precedes the predictor's hidden-input normalization, and later draft steps
 consume the predictor's normalized output. This is a proposal-policy choice;
 exact rejection sampling still verifies against the unchanged target route.
+The coarse-head-then-exact-shortlist-rescore proposal flow is informed by the
+same pinned driver's documented strategy. Stark's optional three/four-bit
+coarse matrix is derived with its own integer midpoint and BF16 coefficient
+construction in Rust; no external quantization implementation is imported.
 
 The converter's lossless five/six-bit affine unpacking follows the documented
 MLX bit layout, inspected in `mlx/backend/metal/kernels/quantized.h` at
@@ -116,8 +120,14 @@ MLX bit layout, inspected in `mlx/backend/metal/kernels/quantized.h` at
 (MIT, Apple Inc.). It is an independent scalar implementation with integer
 and coefficient-preservation tests; no MLX kernel code is copied into that
 converter. The existing MLX MIT notice remains in `vendor/lily-core/LICENSE.mlx`.
-The row-reuse GEMV route extends inherited Stark code. Artifact-specific
-validation is recorded in the [dense 27B study](../docs/benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md).
+The typed `MLXRowPartitionedSpec` metadata and row-copy path are Stark
+implementations: segments describe contiguous fused-output rows at source
+widths, while row arithmetic retains the original fused output dimension and
+W8 planning. Eligible BF16/group-64/output-input matrices keep packed 5/6-bit
+bytes; other layouts use lossless widening. The row-reuse GEMV route extends
+inherited Stark code. Artifact-specific records are the [original dense 27B
+study](../docs/benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md) and the
+[packed-weight follow-up](../docs/benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
 
 The Rust workspace contains only the `stark-engine`, `stark-engine-macros`, `stark-score` and `stark-generate` crates. These upstream identifiers are kept on purpose:
 

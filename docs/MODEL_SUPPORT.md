@@ -32,16 +32,25 @@ direct-answer template and checkpoint checks.
 
 Dense `qwen3_5` text conversion also admits the registered
 `Jundot/Qwen3.8-27B-oQ4e-mtp` extension. Its mixed affine 4/5/6/8-bit matrices
-are preserved numerically; 5/6-bit values and mixed-width fused projections
-are widened to the existing 8-bit integer storage without requantization.
-A complete, declared one-layer quantized MTP head becomes a typed native
-graph. The worker reports its loaded capabilities, with drafting disabled by
-default, a recommendation of three drafts and a maximum of three. This dense
-model uses the Qwen3.5 graph. It has separate artifact and performance evidence
-from the Qwen3.8-Flash-Next path. See the
-[dense 27B record](benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md).
+are preserved without requantization. Uniform five/six-bit matrices retain
+their packed bytes when they use group size 64, BF16 and output-input layout.
+Eligible mixed-width fused projections use `MLXRowPartitionedSpec` to retain
+contiguous output-row segments at their original widths; runtime planning keeps
+the original fused output dimension and W8 row arithmetic. Other layouts,
+including the input-output embedding, are widened losslessly to eight-bit
+storage.
 
-Neither result establishes that a complete model has loaded or executed. Exact
+A complete, declared one-layer quantized MTP head becomes a typed native graph.
+Dense Qwen MTP supports up to three drafts, recommends three and remains
+disabled by default. The optional three/four-bit coarse draft readout uses a
+64-candidate shortlist rescored by the original head; omitting it keeps the full
+draft head. The target readout remains complete in every mode. These additions
+do not transfer qualification from Qwen3.8-Flash-Next. See the
+[original dense 27B record](benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md) and
+[packed-weight follow-up](benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
+
+Converter inspection and catalog admission alone do not establish that a
+complete model has loaded or executed. Exact
 load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
