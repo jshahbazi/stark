@@ -3153,36 +3153,45 @@ struct ChatContentView: View {
                     .disabled(engine.busy || !engine.hasConversation || engine.loadedID != engine.selectedID)
             }
             SpeedView(engine: engine)
-            ScrollViewReader { scroll in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        if engine.messages.isEmpty {
-                            VStack(spacing: 10) {
-                                Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 28)).foregroundStyle(.secondary)
-                                Text("Try a conversation").font(.headline)
-                                Text("Run a model in Manage Models, then send a message.")
-                                    .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                            }.frame(maxWidth: .infinity).padding(.vertical, 36)
+            GeometryReader { viewport in
+                ScrollViewReader { scroll in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            if engine.messages.isEmpty {
+                                VStack(spacing: 10) {
+                                    Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 28)).foregroundStyle(.secondary)
+                                    Text("Try a conversation").font(.headline)
+                                    Text("Run a model in Manage Models, then send a message.")
+                                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                                }.frame(maxWidth: .infinity).padding(.vertical, 12)
+                            }
+                            ForEach(engine.messages) { ChatBubble(message: $0) }
+                            if engine.state == "generating" {
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.small)
+                                    Text(engine.hasPlaygroundGeneration
+                                         ? (engine.imageProgress.isEmpty
+                                            ? (engine.generationProgress == nil ? "Preparing request…" : "Generating reply…")
+                                            : engine.imageProgress)
+                                         : engine.message)
+                                        .font(.callout).foregroundStyle(.secondary)
+                                    Button("Cancel", action: engine.stop)
+                                }.padding(.horizontal, 4)
+                            }
+                            if !engine.messages.isEmpty {
+                                Color.clear.frame(height: 1).id("latest")
+                            }
                         }
-                        ForEach(engine.messages) { ChatBubble(message: $0) }
-                        if engine.state == "generating" {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text(engine.hasPlaygroundGeneration
-                                     ? (engine.imageProgress.isEmpty
-                                        ? (engine.generationProgress == nil ? "Preparing request…" : "Generating reply…")
-                                        : engine.imageProgress)
-                                     : engine.message)
-                                    .font(.callout).foregroundStyle(.secondary)
-                                Button("Cancel", action: engine.stop)
-                            }.padding(.horizontal, 4)
-                        }
-                        Color.clear.frame(height: 1).id("latest")
-                    }.padding(14)
+                        .frame(width: max(0, viewport.size.width - 28))
+                        .frame(minHeight: max(0, viewport.size.height - 28),
+                               alignment: engine.messages.isEmpty ? .center : .topLeading)
+                        .padding(14)
+                    }
+                    .onChange(of: engine.messages.count) { withAnimation(.easeOut(duration: 0.15)) { scroll.scrollTo("latest", anchor: .bottom) } }
+                    .onChange(of: engine.state) { if engine.state == "generating" { scroll.scrollTo("latest", anchor: .bottom) } }
                 }
-                .onChange(of: engine.messages.count) { withAnimation(.easeOut(duration: 0.15)) { scroll.scrollTo("latest", anchor: .bottom) } }
-                .onChange(of: engine.state) { if engine.state == "generating" { scroll.scrollTo("latest", anchor: .bottom) } }
-            }.frame(maxHeight: .infinity).background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+            }.frame(minHeight: 180, maxHeight: .infinity)
+                .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
             if ["length", "context"].contains(engine.finishReason) {
                 Text("Reply reached the token limit. Clear the conversation to start fresh.").font(.caption).foregroundStyle(.orange)
             }
