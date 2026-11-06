@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#171b19">
-  <meta name="description" content="Run AI on your Apple silicon Mac with Stark. Chat in the menu bar, or launch and connect OpenWork and OpenCode Desktop with guided setup and no API key to copy.">
+  <meta name="description" content="Run AI on your Apple silicon Mac with Stark. Beginner helps you choose and set up a model. Advanced gives you the model catalog, imports, settings and local API.">
   <meta property="og:title" content="Stark — run local AI on your Mac">
-  <meta property="og:description" content="Your Mac runs the AI. You choose where to use it: Stark's own chat, OpenWork for everyday work, or OpenCode Desktop for coding. Start with the Mac app and a guided setup.">
+  <meta property="og:description" content="Beginner helps you choose and set up a model for your Mac. Advanced gives you the model catalog, imports, settings and local API. Switch modes whenever you need to.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://starkengine.app/">
   <meta property="og:image" content="https://starkengine.app/assets/stark-social-card.jpg">
@@ -38,9 +38,9 @@
         <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> LOCAL AI <span class="eyebrow-divider">/</span> BUILT FOR APPLE SILICON</p>
         <h1 id="hero-title">Run local AI<br>on your <em>Mac.</em></h1>
         <p class="hero-description">Stark runs the AI on your Mac. Chat in Stark, or launch <a href="#openwork-guide">OpenWork</a> for everyday tasks and <a href="#opencode-guide">OpenCode</a> for coding.</p>
-        <p class="hero-helper">Choose an app. Follow a few steps. No Terminal needed.</p>
+        <p class="hero-helper">Get help with setup in <a href="#modes">Beginner</a>, or choose your own models and settings in <a href="#modes">Advanced</a>.</p>
         <p class="hero-provenance">An experimental, open-source Rust/Metal engine derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a>.</p>
-        <div class="hero-actions"><a class="button primary" href="https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg">Download Mac app <span aria-hidden="true">↓</span></a><a class="text-link" href="#start">Walk me through it <span aria-hidden="true">↓</span></a></div>
+        <div class="hero-actions"><a class="button primary" href="https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg">Download Mac app <span aria-hidden="true">↓</span></a><a class="text-link" href="#modes">Compare modes <span aria-hidden="true">↓</span></a></div>
         <p class="hero-footnote">Signed and notarized · Any Apple silicon Mac · macOS Tahoe 26.4 or newer. <a href="https://github.com/jshahbazi/stark/releases/latest">Latest release notes</a>.</p>
       </div>
       <figure class="brand-figure">
@@ -50,20 +50,49 @@
       </figure>
     </section>
 
+    <section class="modes-section section-pad wrap" id="modes" aria-labelledby="modes-title">
+      <div class="modes-heading">
+        <p class="eyebrow">BEGINNER / ADVANCED</p>
+        <h2 id="modes-title">Choose how to set up Stark.</h2>
+        <p>You can switch between Beginner and Advanced from the menu bar. Both use the same engine and installed models.</p>
+      </div>
+      <div class="mode-cards">
+        <article class="mode-card" aria-labelledby="beginner-mode-title">
+          <p class="eyebrow">BEGINNER</p>
+          <h3 id="beginner-mode-title">Help choosing and setting up a model.</h3>
+          <p>Tell Stark what you want help with. It checks your Mac's memory, GPU and available storage, then suggests a model to start with.</p>
+          <ul><li>See why a model was suggested and how much space it needs.</li><li>Follow the steps to download and start it.</li><li>Chat in Stark, or follow the OpenWork setup guide to work with files.</li></ul>
+          <a class="text-link" href="#start">Beginner setup <span aria-hidden="true">↓</span></a>
+        </article>
+        <article class="mode-card" aria-labelledby="advanced-mode-title">
+          <p class="eyebrow">ADVANCED</p>
+          <h3 id="advanced-mode-title">Choose models and adjust settings.</h3>
+          <p>Browse the supported model catalog or add a model from a source you choose. Use Playground to try prompts and adjust generation settings.</p>
+          <ul><li>Download, import and manage models.</li><li>Set context length and sampling options.</li><li>Connect OpenCode Desktop or another app through Stark's local API.</li></ul>
+          <a class="text-link" href="#advanced-setup">Advanced setup <span aria-hidden="true">↓</span></a>
+        </article>
+      </div>
+      <details class="setup-help mode-recommendation"><summary>How does Beginner choose a model? <span aria-hidden="true">+</span></summary><div><p>Stark checks supported model information against your Mac's memory, GPU budget and free storage. It estimates the memory needed to run each candidate, then ranks the options using your task and preference: <strong>Balanced</strong>, <strong>Lighter model</strong> or <strong>More model capacity</strong>.</p><p>The recommendation is an estimated starting point. Speed and answer quality depend on the model and your task. Beginner considers models it can check and set up through the guide; the broader catalog is available in Advanced.</p></div></details>
+    </section>
+
     <section class="start-section section-pad wrap" id="start" aria-labelledby="start-title">
       <div class="start-heading">
         <p class="eyebrow">01 / GET STARTED</p>
-        <h2 id="start-title">Your first local AI.<br>One step at a time.</h2>
-        <p>Start with Stark. Then choose whether to chat in Stark or connect another app.</p>
+        <h2 id="start-title">Set up in Beginner.</h2>
+        <p>The guide takes you through choosing, downloading and starting a model. No Terminal needed.</p>
         <p class="source-install-note">You'll need an Apple silicon Mac (M1 or newer) with macOS Tahoe 26.4 or newer, plus room for a model download. Check your Mac in <strong>Apple menu → About This Mac</strong>.</p>
         <p class="source-install-note">A <strong>model</strong> is the AI you download and run. Stark is the app that runs it. You can change models later.</p>
       </div>
       <ol class="setup-steps">
         <li><span aria-hidden="true">1</span><div><h3>Install Stark.</h3><p>Download the Mac app, open the downloaded DMG and drag <strong>Stark</strong> into <strong>Applications</strong>. Open Stark, then look for the cat in your Mac's menu bar.</p><a class="button primary" href="https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg">Download Mac app <span aria-hidden="true">↓</span></a></div></li>
-        <li><span aria-hidden="true">2</span><div><h3>Download a model.</h3><p>Click the cat → <strong>Manage Models</strong> → <strong>Model Catalog</strong>. Choose a text model that fits your Mac's available memory and click <strong>Download</strong>. Larger models need more memory and download time.</p><a href="#models">Explore supported models <span aria-hidden="true">↓</span></a></div></li>
-        <li><span aria-hidden="true">3</span><div><h3>Run your model.</h3><p>Click the cat → <strong>Manage Models</strong> → <strong>Installed</strong> and click <strong>Run</strong> next to your model. Wait for it to finish loading.</p></div></li>
-        <li><span aria-hidden="true">4</span><div><h3>Choose where to chat.</h3><p>To test your model, click the cat → <strong>Open Playground</strong> and choose <strong>Chat</strong>. Send a short message to try it out.</p><p>Or use <strong>OpenWork</strong> for everyday tasks or <strong>OpenCode Desktop</strong> for coding. Install your chosen app and, for OpenWork, open a local workspace. In Stark, open <strong>Connections → Apps</strong> and click <strong>Connect</strong> beside it. No API key to copy.</p><div class="start-app-links"><a href="#openwork-guide">Set up OpenWork <span aria-hidden="true">↓</span></a><a href="#opencode-guide">Set up OpenCode Desktop <span aria-hidden="true">↓</span></a></div></div></li>
+        <li><span aria-hidden="true">2</span><div><h3>Open Guided setup.</h3><p>Click the cat, select <strong>Beginner</strong>, then <strong>Guided setup</strong>. Choose what you want help with and click <strong>Find a model</strong>. Stark checks your Mac and shows a recommendation.</p></div></li>
+        <li><span aria-hidden="true">3</span><div><h3>Download and start the model.</h3><p>Review the recommendation, then click <strong>Download and set up</strong>. When setup finishes, follow the prompt to start the model or continue with one that's already running. If a suitable model is already installed, you can use it without downloading it again.</p></div></li>
+        <li><span aria-hidden="true">4</span><div><h3>Try a short chat.</h3><p>Choose <strong>Chat in Stark instead</strong> in the guide, or <strong>Open chat</strong> from the menu bar. Try asking it to help draft a short email.</p><p>To work with files, continue through the guide's OpenWork steps. You'll install OpenWork separately, choose a workspace folder and allow its connection to Stark.</p><div class="start-app-links"><a href="#openwork-guide">OpenWork instructions <span aria-hidden="true">↓</span></a><a href="#opencode-guide">Connect OpenCode Desktop <span aria-hidden="true">↓</span></a></div></div></li>
       </ol>
+      <div class="advanced-setup" id="advanced-setup" aria-labelledby="advanced-setup-title">
+        <div><p class="eyebrow">ADVANCED</p><h3 id="advanced-setup-title">Set up a model yourself.</h3><p>Click the cat and select <strong>Advanced</strong>. Open <strong>Manage Models → Model Catalog</strong> to browse and download, or use <strong>Add from Source</strong> to import a supported model from a repository or local folder.</p></div>
+        <div><p>Under <strong>Installed</strong>, click <strong>Run</strong> beside your model. Open <strong>Open Playground</strong>, choose <strong>Chat</strong> and adjust the settings for your task. Use <strong>Connections</strong> to connect other apps.</p><div class="start-app-links"><a href="#models">Supported models <span aria-hidden="true">↓</span></a><a href="#engine">API and worker documentation <span aria-hidden="true">↓</span></a></div></div>
+      </div>
       <details class="terminal-install">
         <summary>Prefer Terminal? Install the app + command-line tools <span aria-hidden="true">+</span></summary>
         <p class="install-option-description">This alternative installs the app to <code>~/Applications/Stark.app</code> and the tools to <code>~/.local</code>. It includes terminal chat, the converter and workers.</p>
@@ -143,7 +172,7 @@ Content-Type: application/json
         </article>
         <div data-app-support>
           <p class="app-model-note">For tasks that read files or use tools, your model must support <strong>tool calling</strong>. In Stark's <strong>Connections</strong> window, look for “Tool use available” under the running model. Results depend on the model and the task; start small and review its work.</p>
-          <details class="setup-help"><summary>A few things that help on your first run <span aria-hidden="true">+</span></summary><div class="help-grid"><div><h3>Do I need both apps?</h3><p>Choose the one that fits your task. You can also chat directly in Stark using <strong>Open Playground</strong>, without installing either.</p></div><div><h3>Where does the AI run?</h3><p>The selected Stark model runs on your Mac. OpenWork and OpenCode are separate apps; any extra services or plugins you enable have their own data practices.</p></div><div><h3>What if my model doesn't appear?</h3><p>Keep Stark open and confirm your model is running in <strong>Chat</strong> mode. Both apps need a model with a declared context limit. Follow the message in <strong>Connections → Apps</strong>; it will explain a model limitation or ask you to reopen the app.</p></div><div><h3>How do I stop access?</h3><p>Open <strong>Connections → Apps</strong> and choose <strong>Manage → Disconnect</strong> for that app. Use <strong>Stop</strong> in Manage Models to stop the model.</p></div></div></details>
+          <details class="setup-help"><summary>A few things that help on your first run <span aria-hidden="true">+</span></summary><div class="help-grid"><div><h3>Do I need both apps?</h3><p>Choose the one that fits your task. You can also chat directly in Stark using <strong>Open chat</strong> in Beginner or <strong>Open Playground → Chat</strong> in Advanced, without installing either.</p></div><div><h3>Where does the AI run?</h3><p>The selected Stark model runs on your Mac. OpenWork and OpenCode are separate apps; any extra services or plugins you enable have their own data practices.</p></div><div><h3>What if my model doesn't appear?</h3><p>Keep Stark open and confirm your model is running in <strong>Chat</strong> mode. Both apps need a model with a declared context limit. Follow the message in <strong>Connections → Apps</strong>; it will explain a model limitation or ask you to reopen the app.</p></div><div><h3>How do I stop access?</h3><p>Open <strong>Connections → Apps</strong> and choose <strong>Manage → Disconnect</strong> for that app. Use <strong>Stop</strong> in Manage Models to stop the model.</p></div></div></details>
           <details class="setup-help manual-connect"><summary>Connecting another app or using the OpenCode terminal? <span aria-hidden="true">+</span></summary><div><p>Other compatible native apps can use the <strong>Base URL</strong>, <strong>API key</strong> and <strong>Model ID</strong> under <strong>Connections → Other apps</strong>. Choose an OpenAI-compatible provider in your app and copy those settings there. The key is stored in macOS Keychain and reused across launches; the saved port stays the same unless you change it. Keep the key private.</p><p>The guided OpenCode connection is for <strong>OpenCode Desktop</strong>. A standalone terminal engine uses the manual API-key setup. Stark's API is available only on this Mac; direct requests from web pages are unsupported.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md">API setup, supported models and limits <span aria-hidden="true">↗</span></a></div></details>
         </div>
       </div>
