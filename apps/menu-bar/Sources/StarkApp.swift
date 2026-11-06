@@ -3255,11 +3255,23 @@ struct ChatContentView: View {
                     Button("Cancel") { engine.removeImage() }
                 }
             }
-            ZStack(alignment: .topLeading) {
-                if engine.draft.isEmpty { Text("Message the model…").font(.body).foregroundStyle(.tertiary).padding(.horizontal, 9).padding(.top, 4).allowsHitTesting(false) }
-                TextEditor(text: $engine.draft).font(.body).scrollContentBackground(.hidden).frame(height: 70).padding(4)
-                    .focused($composerFocused).disabled(engine.busy).accessibilityLabel("Message")
-            }.overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+            VStack(alignment: .leading, spacing: 5) {
+                ZStack(alignment: .topLeading) {
+                    if engine.draft.isEmpty { Text("Message the model…").font(.body).foregroundStyle(.tertiary).padding(.horizontal, 9).padding(.top, 4).allowsHitTesting(false) }
+                    TextEditor(text: $engine.draft).font(.body).scrollContentBackground(.hidden).frame(height: 70).padding(4)
+                        .focused($composerFocused).disabled(engine.busy).accessibilityLabel("Message")
+                        .onKeyPress(keys: [.return], phases: .down) { press in
+                            // Let the input method confirm composed text before sending.
+                            guard press.modifiers.isEmpty,
+                                  (NSApp.keyWindow?.firstResponder as? NSTextInputClient)?.hasMarkedText() != true
+                            else { return .ignored }
+                            engine.generate()
+                            return .handled
+                        }
+                }.overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+                Text("↩ to send · ⇧↩ for a newline").font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("Return to send. Shift-Return for a newline.")
+            }
             HStack {
                 Button("Attach Image…", action: engine.selectImage)
                     .disabled(!engine.canAttachImage)
