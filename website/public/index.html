@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#171b19">
-  <meta name="description" content="Run AI locally on your Mac. Chat, connect apps for files and code, and score choices with JevK5 decision models. Guided setup helps you choose a model for your Mac.">
+  <meta name="description" content="Run AI locally on your Mac. Connect apps for files and code, or make decisions with JevK5 and see its confidence. Guided setup helps you choose a model for your Mac.">
   <meta property="og:title" content="Stark — run local AI on your Mac">
   <meta property="og:description" content="Local chat, connected apps and decision models on Apple silicon. See the Mac app, check model requirements and explore the measured performance.">
   <meta property="og:type" content="website">
@@ -37,7 +37,7 @@
       <div class="hero-copy">
         <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> LOCAL AI <span class="eyebrow-divider">/</span> BUILT FOR APPLE SILICON</p>
         <h1 id="hero-title">Run local AI<br>on your <em>Mac.</em></h1>
-        <p class="hero-description">Run free, open-weight AI models on your Mac. Connect apps to Stark to work with those models, whether coding or writing or everyday tasks. Have a free LLM privately on your own machine - nothing is transmitted to us. Download Stark and work without anyone seeing your data.</p>
+        <p class="hero-description">Run free, open-weight AI models on your Mac. Connect apps to Stark to work with those models, whether coding or writing or everyday tasks. Have a free LLM privately on your own machine - nothing is transmitted to us. Work without anyone seeing your data.</p>
         <p class="hero-helper">Stark helps you choose a model for your Mac and runs it locally. Use built-in chat, or connect <a href="#openwork-guide">OpenWork</a> and <a href="#opencode-guide">OpenCode Desktop</a>.</p>
         <div class="hero-actions"><a class="button primary" href="https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg">Download Mac app <span aria-hidden="true">↓</span></a><a class="text-link" href="#product">See how it works <span aria-hidden="true">↓</span></a></div>
         <p class="hero-footnote">Free, open source · Signed and notarized<br>Apple silicon · macOS 26.4+ · <a href="#model-fit">Check memory requirements</a>.</p>
@@ -55,7 +55,7 @@
       <div class="product-gallery">
         <figure class="product-shot"><a href="assets/stark-guided-setup.jpg" aria-label="View full screenshot of Stark Guided Setup"><img src="assets/stark-guided-setup.jpg" width="1400" height="1370" alt="Stark Guided Setup with writing, files and coding starting points and a five-step setup sidebar" loading="lazy" decoding="async"></a><figcaption><span class="shot-index">01 / GET STARTED</span><h3>Find a starting point.</h3><p>Beginner checks memory, GPU budget and storage before recommending a model.</p></figcaption></figure>
         <figure class="product-shot"><a href="assets/stark-model-catalog.jpg" aria-label="View full screenshot of Stark Model Catalog"><img src="assets/stark-model-catalog.jpg" width="1280" height="1322" alt="Stark Model Catalog with supported model families and tabs for installed models and source imports" loading="lazy" decoding="async"></a><figcaption><span class="shot-index">02 / MAKE IT YOURS</span><h3>Choose your model.</h3><p>Advanced gives you the model catalog, source imports and generation settings.</p></figcaption></figure>
-        <figure class="product-shot"><a href="assets/stark-decision.jpg" aria-label="View full screenshot of Stark Decision mode"><img src="assets/stark-decision.jpg" width="1000" height="1362" alt="Stark Playground in Decision mode with empty text and question fields, answer choices and a Run decision control" loading="lazy" decoding="async"></a><figcaption><span class="shot-index">03 / EXPLORE DECISIONS</span><h3>Score choices locally.</h3><p>Use JevK5 in Decision mode to score answer choices for your question and context.</p></figcaption></figure>
+        <figure class="product-shot"><a href="assets/stark-decision.jpg" aria-label="View full screenshot of Stark Decision mode"><img src="assets/stark-decision.jpg" width="1000" height="1362" alt="Stark Playground in Decision mode with empty text and question fields, answer choices and a Run decision control" loading="lazy" decoding="async"></a><figcaption><span class="shot-index">03 / EXPLORE DECISIONS</span><h3>Make decisions locally.</h3><p>Use JevK5 in Decision mode to choose among multiple options and see its confidence.</p></figcaption></figure>
       </div>
       <p class="capture-note">Real app windows from the 5 November 2026 development build. Setup and controls shown; no model is running. Select a screenshot to see it full size.</p>
       <div class="workflow-strip" aria-label="How Stark works with your apps">
@@ -83,7 +83,7 @@
           <p class="capture-note">Planning estimates, not per-Mac performance guarantees. Beginner may suggest other eligible models after checking their metadata. Model files, context, other apps and macOS all need room. <a href="https://github.com/jshahbazi/stark/blob/3462a5098397cbb11c7e9f3a7c9c1cec23df214b/docs/archive/runs/2026-11-05-hardware-model-recommendation-review.md">How the estimates were checked</a>.</p>
         </div>
         <article class="decision-feature" id="featured-decision" aria-labelledby="decision-title">
-          <div><p class="eyebrow">LOCAL DECISION MODELS</p><h3 id="decision-title">JevK5, on your Mac.</h3><p>Compare answer choices in Playground's Decision mode. Stark runs the open-weight <strong>JevK5 4B BF16</strong> model locally and returns candidate scores.</p><p class="model-card-note">243 recorded scoring-parity cases against frozen Uzu references. This checks implementation agreement for the recorded build and checkpoint; it does not establish decision accuracy or probability calibration.</p></div>
+          <div><p class="eyebrow">LOCAL DECISION MODELS</p><h3 id="decision-title">JevK5, on your Mac.</h3><p>Give JevK5 a question, context and multiple choices. In Playground's Decision mode, the open-weight <strong>JevK5 4B BF16</strong> model chooses an answer and shows its confidence, locally on your Mac.</p><p class="model-card-note">Confidence reflects the model's preference among your choices, not a calibrated probability of being correct. The 243 recorded scoring-parity cases check agreement with frozen Uzu references for the recorded build and checkpoint; they do not establish decision accuracy.</p></div>
           <a class="text-link" href="https://github.com/jshahbazi/stark/blob/e77f2f00bea7c7984aa35b7cca48f4460b79ac75/docs/validation/SCORING_PARITY.md">Read the scoring evidence <span aria-hidden="true">↗</span></a>
         </article>
         <div class="model-directory">
@@ -119,7 +119,7 @@
             <div class="compact-image-model"><div><p class="eyebrow">IMAGES · DENSE BF16</p><h3>Qwen3.5</h3><p>Bring one PNG or JPEG into Playground, terminal chat or the Local API. Compatible complete models and merged fine-tunes require a vision artifact and passing local image checks.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md">Image compatibility <span aria-hidden="true">↗</span></a></div>
           </div>
           <div class="model-group-panel" id="decision-models" role="tabpanel" aria-labelledby="models-tab-decision" tabindex="0">
-            <div class="compact-image-model"><div><p class="eyebrow">CANDIDATE PROBABILITY SCORING</p><h3>JevK5</h3><p><code>alibiserikbay/JevK5</code> · BF16 · 4B. Use Playground's Decision mode to compare answer choices for a question and context.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Scoring guide <span aria-hidden="true">↗</span></a></div>
+            <div class="compact-image-model"><div><p class="eyebrow">LOCAL DECISIONS / MODEL CONFIDENCE</p><h3>JevK5</h3><p><code>alibiserikbay/JevK5</code> · BF16 · 4B. Use Playground's Decision mode to choose among multiple options and see the model's confidence. Confidence is relative to the choices you provide.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Decision and confidence guide <span aria-hidden="true">↗</span></a></div>
           </div>
         </div>
       </div>
