@@ -3460,7 +3460,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow else { return }
         if closing === modelsWindow { engine.cancelModelCatalog() }
-        if closing === promptWindow, !terminating, !menuPanel.isVisible { toggle() }
+        if closing === promptWindow || closing === connectionWindow,
+           !terminating, !menuPanel.isVisible { toggle() }
     }
 
     private func showPrompt() {
@@ -3495,6 +3496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                          close: { [weak self] in self?.connectionWindow?.close() })
         if connectionWindow == nil {
             connectionWindow = window(title: "Stark — Connections", view: view, resizable: false)
+            connectionWindow?.delegate = self
         } else {
             // Reset the inspected model so each opening defaults to the running model.
             connectionWindow?.contentViewController = NSHostingController(rootView: view)
