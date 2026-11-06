@@ -1051,11 +1051,20 @@ struct GenerationTimingProgress {
 final class EngineController: ObservableObject {
     @Published var models: [InstalledModel] = []
     @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? ""
-    @Published var loadedID = ""
+    @Published var loadedID = "" {
+        didSet {
+            if loadedID != oldValue {
+                supportsMTP = false; mtpEnabled = false
+                pendingOptions = nil; pendingOptionsModelID = nil
+            }
+        }
+    }
     @Published var state = "idle" {
         didSet {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
             if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
+            if ["idle", "error", "stopping", "loading"].contains(state) { supportsMTP = false; mtpEnabled = false }
+            if ["idle", "error", "stopping", "loading"].contains(state) { pendingOptions = nil; pendingOptionsModelID = nil }
             if state != "generating" {
                 generationProgress = nil
                 if let id = apiProgressID { retiredAPIProgressID = id }
@@ -1074,6 +1083,8 @@ final class EngineController: ObservableObject {
     @Published private(set) var apiPort: Int
     @Published private(set) var supportsTools = false
     @Published private(set) var toolParser = ""
+    @Published private(set) var supportsMTP = false
+    @Published private(set) var mtpEnabled = false
     @Published var apiContextTokens = 0
     @Published var apiMaxNewTokens = 0
     @Published var messages: [ChatMessage] = []
@@ -1138,6 +1149,7 @@ final class EngineController: ObservableObject {
     private var apiProgressID: String?
     private var retiredAPIProgressID: String?
     private var pendingOptions: ChatOptions?
+    private var pendingOptionsModelID: String?
     private var pendingDecisionAnswers: [String]?
     private var attachmentStaging: AttachmentStaging?
     private var attachmentSelection = UUID()
@@ -1469,14 +1481,19 @@ final class EngineController: ObservableObject {
             loadedMode = readyMode
             applyLimits(event)
             applyImageCapabilities(event)
+            applyMTPCapabilities(event)
             state = "ready"
             message = "Ready"
         case "configured":
-            guard let configured = pendingOptions else { return }
+            guard state == "configuring", let configured = pendingOptions,
+                  pendingOptionsModelID == loadedID, loadedMode == .chat, mode == .chat,
+                  event["model_id"] == nil || event["model_id"] as? String == loadedID else { return }
             options = configured
             pendingOptions = nil
+            pendingOptionsModelID = nil
             applyLimits(event)
             applyImageCapabilities(event)
+            applyMTPCapabilities(event)
             if state == "configuring" {
                 clearConversation()
                 state = "ready"
@@ -1676,6 +1693,20 @@ final class EngineController: ObservableObject {
         }
     }
 
+    private func applyMTPCapabilities(_ event: [String: Any]) {
+        guard loadedMode == .chat, let capability = event["mtp"] as? [String: Any],
+              SupportMetadata.boolean(capability["supported"]) == true,
+              let maximum = SupportMetadata.integer(capability["max_drafts"]), maximum > 0,
+              let recommended = SupportMetadata.integer(capability["recommended_drafts"]),
+              recommended > 0, recommended <= maximum,
+              let operations = capability["operations"] as? [String], operations.contains("generate"),
+              let enabled = SupportMetadata.boolean(event["mtp_enabled"]) else {
+            supportsMTP = false; mtpEnabled = false
+            return
+        }
+        supportsMTP = true; mtpEnabled = enabled
+    }
+
     private func applyImageCapabilities(_ event: [String: Any]) {
         supportsTools = mode == .chat && event["tools"] as? Bool == true
         toolParser = supportsTools ? event["tool_parser"] as? String ?? "" : ""
@@ -1765,16 +1796,23 @@ final class EngineController: ObservableObject {
     }
 
     @discardableResult
-    func configure(_ updated: ChatOptions) -> Bool {
+    func configure(_ updated: ChatOptions, mtpEnabled: Bool? = nil, modelID: String? = nil) -> Bool {
         guard modelReady, mode == .chat else { return false }
+        if let modelID, modelID != loadedID { return false }
+        if mtpEnabled != nil && !supportsMTP { return false }
         errorMessage = nil
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "command": "configure", "context_tokens": updated.contextTokens,
             "max_new_tokens": updated.maxNewTokens, "thinking": updated.thinking,
             "system_prompt": updated.useModelSystemPrompt ? NSNull() : updated.systemPrompt as Any
         ]
+        if let mtpEnabled {
+            payload["model_id"] = loadedID
+            payload["mtp_enabled"] = mtpEnabled
+        }
         guard send(payload) else { return false }
         pendingOptions = updated
+        pendingOptionsModelID = loadedID
         state = "configuring"
         message = "Applying advanced options…"
         return true
@@ -2938,14 +2976,18 @@ struct AdvancedOptionsView: View {
     @State private var context: String
     @State private var output: String
     @State private var thinking: Bool
+    @State private var mtpEnabled: Bool
+    @State private var modelID: String
 
     init(engine: EngineController) {
         self.engine = engine
+        _modelID = State(initialValue: engine.loadedID)
         _useModelSystemPrompt = State(initialValue: engine.options.useModelSystemPrompt)
         _systemPrompt = State(initialValue: engine.options.systemPrompt)
         _context = State(initialValue: String(engine.options.contextTokens))
         _output = State(initialValue: String(engine.options.maxNewTokens))
         _thinking = State(initialValue: engine.options.thinking)
+        _mtpEnabled = State(initialValue: engine.mtpEnabled)
     }
 
     private var validation: String? {
@@ -2994,6 +3036,11 @@ struct AdvancedOptionsView: View {
             Toggle("Thinking mode", isOn: $thinking)
             Text("Enables reasoning when the model's chat template supports it.")
                 .font(.caption).foregroundStyle(.secondary)
+            if engine.supportsMTP && engine.loadedID == modelID {
+                Toggle("Multi-token prediction (MTP)", isOn: $mtpEnabled)
+                Text("Can speed up text generation by drafting and verifying extra tokens. On by default; your choice is saved for this model. Image requests run with MTP off.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
             Text(engine.contextCapacityKnown
@@ -3005,6 +3052,7 @@ struct AdvancedOptionsView: View {
                     let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit)
                     useModelSystemPrompt = defaults.useModelSystemPrompt
                     systemPrompt = defaults.systemPrompt; thinking = defaults.thinking
+                    mtpEnabled = true
                     context = String(defaults.contextTokens)
                     output = String(defaults.maxNewTokens)
                 }
@@ -3016,8 +3064,9 @@ struct AdvancedOptionsView: View {
                     options.useModelSystemPrompt = useModelSystemPrompt
                     options.systemPrompt = systemPrompt
                     options.contextTokens = count; options.maxNewTokens = maximum; options.thinking = thinking
-                    if engine.configure(options) { dismiss() }
-                }.buttonStyle(.borderedProminent).disabled(validation != nil || engine.busy || engine.state != "ready")
+                    if engine.configure(options, mtpEnabled: engine.supportsMTP ? mtpEnabled : nil, modelID: modelID) { dismiss() }
+                }.buttonStyle(.borderedProminent)
+                    .disabled(validation != nil || !engine.modelReady || engine.loadedID != modelID)
             }
         }.padding(24).frame(width: 510)
     }

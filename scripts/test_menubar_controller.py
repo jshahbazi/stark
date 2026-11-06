@@ -585,6 +585,50 @@ extension EngineController {
                   close(reused.inputSpeed, 776), reused.promptDetail == "900 (512 reused)" else { return false }
             return GenerationTimingProgress.duration(120) == "2.0 min" &&
                 GenerationTimingProgress.duration(7200) == "2.0 hr"
+        case "mtp-advanced-options":
+            engine.mode = .chat
+            let capability: [String: Any] = ["supported": true, "max_drafts": 3,
+                "recommended_drafts": 2, "default_drafts": 0, "operations": ["generate"],
+                "sampling": "exact-rejection-v1", "verification": "fixture-exact-v1"]
+            let ready: [String: Any] = ["event": "ready", "mode": "chat", "model_id": "fixture-model",
+                "max_context_tokens": 8192, "context_tokens": 8192, "max_output_tokens": 4096,
+                "max_new_tokens": 512, "mtp": capability, "mtp_enabled": true]
+            engine.apply(ready)
+            guard engine.supportsMTP, engine.mtpEnabled else { return false }
+            let options = engine.options
+            guard !engine.configure(options, mtpEnabled: false, modelID: "stale"), noCommandSent(),
+                  engine.configure(options, mtpEnabled: false, modelID: "fixture-model") else { return false }
+            let requested = command()
+            guard requested["command"] as? String == "configure",
+                  requested["model_id"] as? String == "fixture-model",
+                  requested["mtp_enabled"] as? Bool == false, engine.mtpEnabled else { return false }
+            engine.apply(["event": "error", "message": "Cannot save MTP options. Try again."])
+            guard engine.modelReady, engine.mtpEnabled,
+                  engine.configure(options, mtpEnabled: false, modelID: "fixture-model") else { return false }
+            _ = command()
+            var configured = ready
+            configured["event"] = "configured"; configured["mtp_enabled"] = false
+            configured["model_id"] = "stale"
+            engine.apply(configured)
+            guard engine.state == "configuring", engine.mtpEnabled else { return false }
+            configured["model_id"] = "fixture-model"
+            engine.apply(configured)
+            guard engine.supportsMTP, !engine.mtpEnabled, engine.modelReady else { return false }
+            guard engine.configure(options, mtpEnabled: true, modelID: "fixture-model") else { return false }
+            _ = command()
+            engine.stop()
+            _ = command()
+            configured["mtp_enabled"] = true
+            engine.apply(configured)
+            guard !engine.supportsMTP, !engine.mtpEnabled else { return false }
+            engine.apply(["event": "status", "state": "idle"])
+            var unsupported = ready
+            unsupported.removeValue(forKey: "mtp")
+            engine.apply(unsupported)
+            guard !engine.supportsMTP, !engine.mtpEnabled,
+                  !engine.configure(options, mtpEnabled: true), noCommandSent(),
+                  engine.configure(options) else { return false }
+            return command()["mtp_enabled"] == nil
         case "context-model-defaults":
             engine.mode = .chat
             for limit in [2, 512, 32_768, 262_144, 1_048_576] {
@@ -1887,6 +1931,7 @@ extension EngineController {
                   engine.imageVerificationNote.contains("Reference parity is unverified"),
                   !engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
             engine.pendingOptions = engine.options
+            engine.pendingOptionsModelID = engine.loadedID
             engine.state = "configuring"
             verified["event"] = "configured"
             engine.apply(verified)
@@ -2407,6 +2452,11 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_saved_name_sort_matches_visible_rows_after_group_filtering(self):
         self.exercise("models-visible-row-name-sort")
+
+    def test_mtp_advanced_options_use_live_support_and_acknowledged_model_preference(
+        self,
+    ):
+        self.exercise("mtp-advanced-options")
 
     def test_running_version_is_extracted_once_with_source_and_control_identity(self):
         self.exercise("models-running-version-extracted")

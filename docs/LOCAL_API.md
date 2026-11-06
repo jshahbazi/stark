@@ -98,14 +98,19 @@ enable support.
 Each backend chooses its maximum and recommended draft count. Unsupported or
 missing worker capabilities produce `supported: false`, zero counts and an
 empty operation list. Capabilities are cleared when the worker stops or the
-model changes; Decision mode does not expose MTP. These fields prepare the
-backend for a UI toggle; no new UI control is implemented here.
+model changes; Decision mode does not expose MTP. The app shows a
+**Multi-token prediction (MTP)** toggle under **Advanced Options** when the
+loaded model supports it. **Apply and New Chat** saves the choice with the other
+options; **Restore Defaults** selects MTP on.
 
 `defaults.mtp` is the active model's effective saved choice. Registered models
-start off, and each model remembers its own boolean preference in the private
-model registry across stops, switches and application restarts. The preference
-becomes inactive when the loaded worker lacks support and is retained for a
-later supported worker. Saving it does not reload the model or clear the chat.
+default to on when the loaded worker supports MTP. Each model remembers its own
+boolean preference in the private model registry across stops, switches and
+application restarts. Existing registry entries without a saved choice also
+default to on; an explicitly saved off choice stays off. The preference becomes
+inactive when the loaded worker lacks support and is retained for a later
+supported worker. The preference-only command below preserves the chat; applying
+Advanced Options starts a new chat without reloading the model.
 
 A completion may send `"mtp": true` or `"mtp": false` to override that default
 for one request. `true` selects the model's recommended count. Omission
@@ -121,8 +126,8 @@ returns 400 `mtp_not_supported`. Exact sampling and stored quantization remain
 unchanged. A supported worker's completion acknowledgement must match its
 selected mode, depth and policy; a contradiction closes that worker.
 
-The desktop's private JSON-lines backend accepts the following command for
-the future UI, using the internal `model_id` from its `ready` event:
+The desktop's private JSON-lines backend accepts the following command to save
+the preference, using the internal `model_id` from its `ready` event:
 
 ```json
 {"command":"configure_mtp","model_id":"registered-model-id","enabled":true}
@@ -135,6 +140,12 @@ unchanged. The `mtp_configured` acknowledgement includes `model_id`, `mtp`
 capabilities and `mtp_enabled`. Desktop `ready` events expose those settings
 alongside the existing limits. These private commands use library IDs;
 HTTP completions continue using the public IDs described above.
+
+The app's `configure` command can include both `model_id` and boolean
+`mtp_enabled` to save MTP with the other Advanced Options before starting a new
+chat. It validates the loaded model, live support and all options before saving;
+a save failure leaves the preference, conversation and other options unchanged.
+Omitting both fields preserves the MTP preference.
 
 ## Function tools
 
