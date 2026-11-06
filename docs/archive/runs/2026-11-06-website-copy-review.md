@@ -74,3 +74,22 @@ Mac. No generic 32B-on-32-GiB claim is added.
   recommendation disclosure opens and closes in Get started.
 - The existing artwork, screenshots and benchmark result files are unchanged.
   No inference or new performance/quality validation was run.
+
+## Publication
+
+The user approved publication after reviewing the local preview. Website
+changes were committed as `08be513b` and pushed to
+`codex/guided-openwork-reconnect`. No pull request was opened.
+
+- Sites source: `a41b8b917aff38ba3a0f438a4472c31db9a6cba8`.
+- Saved version: 48,
+  `appgprj_6ad8f59df1f4819185403a1dff22a0fb~appgver_30de4589090c8191bc53144b141df9bc`.
+- Deployment: `appgdep_6aee56e110988191a6f9e9eea9f9cd80`, succeeded at
+  `2026-11-06T22:38:29.260420+00:00`. Public access was preserved.
+- Archive SHA-256:
+  `0e8f2433769cda08c96937504e65532ff3e4c87919b7d16394c31aadb85a2c53`.
+
+[starkengine.app](https://starkengine.app/) returned HTTP 200 and the reviewed
+hero, estimated 32 GiB card and consolidated setup copy. Its stylesheet matched
+the source byte for byte, with SHA-256
+`8102769b9a685be5302befc1a21c95c94d37efe6219b887a65d3f34fea515d7b`.
