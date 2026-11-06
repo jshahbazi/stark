@@ -25,8 +25,8 @@ Release copy is evergreen. Download and release-note links use GitHub's stable `
   result remains in the repository's benchmark reports; no performance tab or
   benchmark dataset for this model is added to the website.
 - The Text directory puts Qwen3.8-Flash-Next and dense Qwen3.8-27B first in
-  publisher coding-comparison order, without displaying scores. Other families
-  remain in an explicitly unranked group. The
+  publisher coding-comparison order. Other families retain their relative order.
+  Scores and explanatory ordering/ranking copy are omitted from the page. The
   [ordering record](../docs/archive/runs/2026-11-06-website-coding-order.md)
   pins the primary model-card sources and explains the quantization/family limits.
 

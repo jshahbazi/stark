@@ -24,14 +24,16 @@ Primary sources checked on 2026-11-06:
   Benchmark Results, as a cross-check of the dense reference model.
 
 No numeric scores, score attributes, coding leaderboards or new performance
-dataset are included in the website. Its short ordering note identifies the
-publisher-reference scope and the possibility of different local quantized
-results.
+dataset are included in the website. The user subsequently requested removing
+the visible ordering/ranking explanation as well. The page therefore presents
+one Text directory without those labels; this maintainer record preserves the
+publisher-reference scope and the limits of transferring results to quantized
+artifacts.
 
 ## Other entries
 
-The remaining fourteen Text entries retain their relative order in a separate
-unranked group. Several contain multiple sizes or fine-tunes, and the inspected
+The remaining fourteen Text entries retain their relative order after those
+two models. Several contain multiple sizes or fine-tunes, and the inspected
 sources do not establish one shared benchmark rank for those entire groups.
 This does not mean they lack coding ability or published evaluations.
 
