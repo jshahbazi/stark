@@ -3460,7 +3460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow else { return }
         if closing === modelsWindow { engine.cancelModelCatalog() }
-        if closing === promptWindow || closing === connectionWindow,
+        if closing === modelsWindow || closing === promptWindow || closing === connectionWindow,
            !terminating, !menuPanel.isVisible { toggle() }
     }
 
