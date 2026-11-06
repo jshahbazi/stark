@@ -19,6 +19,12 @@ Release copy is evergreen. Download and release-note links use GitHub's stable `
 
 ## Content and interactions
 
+- The Text model group lists `Jundot/Qwen3.8-27B-oQ4e-mtp` with its mixed
+  4/5/6/8-bit format and the Advanced Model Catalog's Qwen3.5 dense family.
+  Availability is explicitly tied to a build containing PR #86. The dense 27B
+  result remains in the repository's benchmark reports; no performance tab or
+  benchmark dataset for this model is added to the website.
+
 - The original logo is retained byte-for-byte in `public/assets/stark-engine.jpg`; [brand provenance](https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/docs/brand/README.md) records its source and hash.
 - The social preview card `public/assets/stark-social-card.jpg` (1200 by 630) is rendered from the original logo by `scripts/render_social_card.swift`, which places the unmodified logo in the hero's framed card beside the headline. The Open Graph and Twitter card tags reference it; the original logo remains the favicon and hero image.
 - The footer introduces Stark, the owner's cat and the app's namesake, with the supplied photo in `public/assets/stark-cat.jpg`, resized to 480 by 360 for its 160 by 120 display box. The full-resolution original remains in Git history at commit `c21f1b74`. The photo loads lazily below the main content.
