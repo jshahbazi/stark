@@ -242,6 +242,7 @@ struct BeginnerSetupView: View {
                         session.stage = .connection
                     }.disabled(!snapshot.openWorkRunning)
                 }
+                if snapshot.openWorkApproved { reconnectOpenWorkButton }
                 if session.workspaceConfirmed {
                     Label("Workspace choice confirmed by you", systemImage: "checkmark.circle")
                         .font(.caption).foregroundStyle(.secondary)
@@ -251,6 +252,12 @@ struct BeginnerSetupView: View {
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.caption).foregroundStyle(.secondary) }
             Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
         }
+    }
+
+    private var reconnectOpenWorkButton: some View {
+        Button(snapshot.openWorkBusy ? "Reconnecting…" : "Reconnect", action: actions.connectOpenWork)
+            .disabled(snapshot.openWorkBusy || !snapshot.localAPIAvailable || !snapshot.openWorkInstalled)
+            .help("Refresh Stark’s managed connection settings. Quit and reopen OpenWork afterward if its settings changed.")
     }
 
     @ViewBuilder private var connectionStep: some View {
@@ -289,6 +296,7 @@ struct BeginnerSetupView: View {
                     .font(.callout).foregroundStyle(.secondary)
                 HStack {
                     Button("Open OpenWork", action: actions.openOpenWork)
+                    reconnectOpenWorkButton
                     Button("Check connection", action: actions.checkConnection).disabled(snapshot.openWorkBusy)
                 }
                 if !session.workspaceConfirmed {
@@ -319,8 +327,10 @@ struct BeginnerSetupView: View {
             }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
             HStack {
                 Button("Open OpenWork", action: actions.openOpenWork).buttonStyle(.borderedProminent)
+                reconnectOpenWorkButton
                 Button("Chat in Stark instead", action: actions.openChat)
             }
+            if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
             Text("Start with one small task. Models can make mistakes; review file and tool actions in OpenWork.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
