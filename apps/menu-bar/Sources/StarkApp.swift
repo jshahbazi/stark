@@ -3078,7 +3078,7 @@ struct PlaygroundView: View {
             }
             if engine.mode == .chat { ChatContentView(engine: engine) }
             else { DecisionView(engine: engine) }
-        }.padding(20).frame(minWidth: 500, minHeight: 600)
+        }.padding(20).frame(minWidth: 500, minHeight: 720)
             .onChange(of: engine.selectedID) { engine.clearDecision() }
     }
 }
@@ -3188,6 +3188,9 @@ struct ChatContentView: View {
                         .padding(14)
                     }
                     .onChange(of: engine.messages.count) { withAnimation(.easeOut(duration: 0.15)) { scroll.scrollTo("latest", anchor: .bottom) } }
+                    .onChange(of: engine.messages.last?.text) {
+                        DispatchQueue.main.async { scroll.scrollTo("latest", anchor: .bottom) }
+                    }
                     .onChange(of: engine.state) { if engine.state == "generating" { scroll.scrollTo("latest", anchor: .bottom) } }
                 }
             }.frame(minHeight: 180, maxHeight: .infinity)
@@ -3462,6 +3465,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                                        selectInterface: { [weak self] in self?.selectInterface($0) },
                                                        connection: { [weak self] in self?.showConnection() },
                                                        manage: { [weak self] in self?.showModels() }), resizable: true)
+            // Include the interface picker above the playground's own minimum.
+            promptWindow?.contentMinSize = NSSize(width: 520, height: 770)
+            promptWindow?.setContentSize(NSSize(width: 560, height: 800))
         }
         present(promptWindow)
     }
