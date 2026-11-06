@@ -49,8 +49,10 @@ repair the Stark-owned public connection entry. If the app is not set up, choose
 **Connect** instead. Quit OpenWork completely and reopen it when instructed.
 Guided Setup also offers **Reconnect** on the OpenWork, Connect and Ready steps
 for an authorized connection, including when OpenWork reports a rejected API key.
-It refreshes the managed connector settings and saves approval again; follow the
-status message and select Stark and the running model in OpenWork afterward.
+It refreshes the managed connector settings and saves approval again. Quit
+OpenWork completely and reopen it after reconnecting, even if its saved settings
+already match: its running engine may still hold stale connection state. Select
+Stark and the running model in OpenWork afterward.
 Build provenance records are described in [PROVENANCE.md](PROVENANCE.md).
 
 Local apps display **Development build NUMBER**. The build number is a UTC

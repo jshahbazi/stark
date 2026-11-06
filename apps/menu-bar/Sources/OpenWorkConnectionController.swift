@@ -254,12 +254,12 @@ final class OpenWorkConnectionController: ObservableObject {
                         return
                     }
                     switch result {
-                    case .success(let changed):
+                    case .success:
                         self.installedDirectory = directory
                         self.approved = true
-                        self.message = changed
-                            ? "Quit and reopen OpenWork to finish connecting, then select Stark and the running model. Closing its window is not enough."
-                            : "OpenWork is authorized. Select Stark in OpenWork."
+                        // Matching disk settings do not prove the running engine
+                        // has reloaded its connector or discarded stale auth state.
+                        self.message = "Connection settings refreshed. Quit and reopen OpenWork to finish connecting, then select Stark and the running model. Closing its window is not enough."
                         if let models = self.snapshot()["models"] as? [[String: Any]],
                            models.contains(where: { $0["context_capacity_known"] as? Bool == false }) {
                             self.message = "This model has no declared context limit. Run a model with a known context limit to use it in OpenWork."
