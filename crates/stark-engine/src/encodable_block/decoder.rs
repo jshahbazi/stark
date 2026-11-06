@@ -58,6 +58,15 @@ impl<B: Backend> Decoder<B> {
         &self.embedding
     }
 
+    pub(crate) fn normalize_captured_output(
+        &self,
+        hidden: impl BufferRef<Backend = B>,
+        rows: u32,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        self.transformer.normalize_captured_output(hidden, rows, command)
+    }
+
     pub fn new(
         context: &B::Context,
         config: &DecoderConfig,

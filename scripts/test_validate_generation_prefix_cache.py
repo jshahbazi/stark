@@ -17,6 +17,17 @@ _spec.loader.exec_module(harness)
 
 
 class PrefixQualificationTests(unittest.TestCase):
+    def test_exact_draft_selection_and_seeded_mtp_are_qualified(self):
+        dense = SimpleNamespace(ready={"prefix_cache": {"key": "model-instance+mtp-selection"}})
+        hybrid = SimpleNamespace(ready={"prefix_cache": {"key": "model-instance+mtp-enabled"}})
+        self.assertNotEqual(harness.mtp_cache_value(dense, 1), harness.mtp_cache_value(dense, 3))
+        self.assertEqual(harness.mtp_cache_value(hybrid, 1), harness.mtp_cache_value(hybrid, 3))
+        steps = harness.plan([[1, 2] * 550] * 4, 1024, 4096, 3, mtp_selection_key=True)
+        cases = {label: options for kind, label, _, options in steps if kind == "case"}
+        self.assertEqual(cases["mtp_repeat_stochastic"]["sampling"]["mode"], "stochastic")
+        self.assertEqual(cases["mtp_repeat_stochastic"]["mtp_drafts"], 3)
+        self.assertEqual(cases["mtp_different_depth"]["mtp_drafts"], 1)
+
     def streaming_pack(self, root):
         model = root / "model"
         model.mkdir()
@@ -115,7 +126,7 @@ class PrefixQualificationTests(unittest.TestCase):
 
     def test_streaming_contract_and_prepared_template_paths_remain_explicit(self):
         with tempfile.TemporaryDirectory() as directory:
-            model, receipt_path, _ = self.streaming_pack(Path(directory))
+            model, _receipt_path, _ = self.streaming_pack(Path(directory))
             with self.assertRaisesRegex(ValueError, "pinned download receipt"):
                 harness.load_validation_template(model)
             config = json.loads((model / "config.json").read_text())

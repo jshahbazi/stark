@@ -115,6 +115,36 @@ pub fn select(
         return (m <= 4 && n >= tile.rows_per_lane()).then_some(tile);
     }
 
+    // Dense Qwen27 verification reuses each affine weight load across its
+    // two to four input rows. Preserve the scalar route's output geometry,
+    // K-lane partition and per-group arithmetic exactly.
+    if qwen35_affine_layout
+        && gpu_core_count >= LARGE_MIN_GPU_CORES
+        && apple_gpu_family == MTLGPUFamily::Apple10
+        && group == 64
+        && (2..=4).contains(&m)
+        && matches!(
+            (n, k),
+            (5120, 17408)
+                | (34816, 5120)
+                | (16480, 5120)
+                | (5120, 6144)
+                | (14336, 5120)
+                | (248320, 5120)
+                | (5120, 10240)
+        )
+    {
+        let mut tile = lane_default(bits, group);
+        // A controlled cold-weight M5 comparison keeps the W8 down projection
+        // faster with two input rows per tile at m=4; K reduction stays fixed.
+        tile.input_row_tile = if bits == 8 && m == 4 && n == 5120 && k == 17408 {
+            2
+        } else {
+            m
+        };
+        return Some(tile);
+    }
+
     // M5 geometry for the fused Qwen3.5-2B decode projections.
     // Keep each row's K lanes and quantization-group partition unchanged;
     // increasing rows per SIMD group reuses its activation loads.

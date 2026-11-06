@@ -556,6 +556,7 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
         "LICENSE",
         "LICENSE.ggml-hybrid",
         "LICENSE.qwen38-reference",
+        "LICENSE.omlx-reference",
         "LICENSE.flint-reference",
         "provenance/UPSTREAM.md",
         "tools/converter/LICENSE.lalamo",

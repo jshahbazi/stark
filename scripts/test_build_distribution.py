@@ -573,6 +573,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "LICENSE",
                 "LICENSE.ggml-hybrid",
                 "LICENSE.qwen38-reference",
+                "LICENSE.omlx-reference",
                 "LICENSE.flint-reference",
                 "provenance/UPSTREAM.md",
                 "tools/converter/LICENSE.lalamo",
@@ -758,6 +759,7 @@ class BundleConstructionTests(unittest.TestCase):
             for name in (
                 "LICENSE.ggml-hybrid",
                 "LICENSE.qwen38-reference",
+                "LICENSE.omlx-reference",
                 "LICENSE.flint-reference",
             ):
                 self.assertEqual(

@@ -182,6 +182,51 @@ fn group_major_gemv_bf16(
     assert_eq_float(&reference, &actual, 0.05, &format!("GroupOutput GEMV W{bits} {method:?}"));
 }
 
+#[cfg(backend = "metal")]
+#[stark_test]
+fn dense_qwen27_affine_verification_matches_independent_scalar_rows() {
+    let context = MetalContext::new().expect("Metal context");
+    // Full model matrix geometries exercise all relevant loop lengths without
+    // loading model weights. Scalar rows remain the explicit baseline route.
+    for bits in [4, 8] {
+        for (n, k) in [(5120, 17408), (34816, 5120), (16480, 5120), (5120, 6144), (14336, 5120), (5120, 10240)] {
+            let input =
+                QuantInput::<bf16>::new(4, k, n, 64, bits, QuantizationMethod::ScaleBias, 37).with_group_output();
+            let buffers = QuantBuffers::<Metal, bf16>::allocate(&context, &input);
+            let row_bytes = k as usize * 2;
+            let mut reference = Vec::with_capacity(4 * n as usize);
+            for row in 0..4 {
+                reference.extend(run_gemv::<Metal, bf16>(
+                    &context,
+                    buffers.x.subrange(row * row_bytes..(row + 1) * row_bytes),
+                    buffers.matmul_b(&input),
+                    None::<&<Metal as Backend>::GlobalBuffer>,
+                    1,
+                    n as usize,
+                    k as usize,
+                    None,
+                ));
+            }
+            for m in 2..=4 {
+                let actual = run_gemv::<Metal, bf16>(
+                    &context,
+                    &buffers.x,
+                    buffers.matmul_b(&input),
+                    None::<&<Metal as Backend>::GlobalBuffer>,
+                    m,
+                    n as usize,
+                    k as usize,
+                    None,
+                );
+                assert!(
+                    actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "affine verify differs from scalar rows: W{bits}, m={m}, n={n}, k={k}"
+                );
+            }
+        }
+    }
+}
+
 #[rstest]
 #[test_attr(stark_test)]
 #[case::m1(1, 128, 64)]

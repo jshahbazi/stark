@@ -68,7 +68,7 @@ enum Phase {
     Finished,
 }
 
-pub(super) struct ExactMtpSampler<'a> {
+pub(crate) struct ExactMtpSampler<'a> {
     sampling: &'a Sampling,
     rng: &'a mut u64,
     draft_rng: u64,
@@ -83,7 +83,7 @@ pub(super) struct ExactMtpSampler<'a> {
 }
 
 impl<'a> ExactMtpSampler<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         sampling: &'a Sampling,
         rng: &'a mut u64,
         mapper: &'a mut ProbabilityMapper,
@@ -106,7 +106,7 @@ impl<'a> ExactMtpSampler<'a> {
 
     /// The prompt's first draw has no proposal. It uses exactly the ordinary
     /// sampler, before the first draft round begins.
-    pub(super) fn sample_initial(
+    pub(crate) fn sample_initial(
         &mut self,
         logits: &[f32],
     ) -> std::result::Result<u32, &'static str> {

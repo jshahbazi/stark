@@ -4,6 +4,14 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Dense Qwen3.8-27B oQ4e MTP (2026-11-06).** Native mixed-quant conversion,
+exact target verification and artifact-bound prefix checks pass. The final
+six-by-768-token diagnostic measured **46.05 tok/s** median on M5 Max 128 GiB;
+the **70.8 target was not met** and quiet-host admission failed. These are
+unscreened observations. The [dense 27B record](2026-11-06-qwen38-27b-oq4e-mtp.md)
+binds the artifact, numerical policy and rejected experiments. It does not
+supersede the separate Flash-Next results.
+
 **GLM-5.3-Flash focused prefill validation (2026-11-03).** The focused branch's
 same-binary MMA off/on comparison measured 34.90 to 40.87 prefill tok/s (+17.1%)
 and 2.970 to 2.565 seconds per warm request (13.7% lower), with four accepted

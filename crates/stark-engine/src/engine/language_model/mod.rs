@@ -26,6 +26,9 @@ use crate::{
     speculators::dflash_tfm::{DFlashSpeculatorLoadError, DFlashTfmSpeculator},
 };
 
+pub mod dense_mtp;
+#[cfg(all(test, backend = "metal"))]
+mod dense_mtp_tests;
 pub(crate) mod multimodal;
 #[cfg(test)]
 mod multimodal_tests;
@@ -59,6 +62,7 @@ pub struct LanguageModel<B: Backend> {
     pub(super) model_identity: Arc<()>,
     engine: Arc<Engine<B>>,
     decoder: Decoder<B>,
+    dense_mtp: Option<crate::encodable_block::qwen_mtp::QwenMtp<B>>,
     speculator: Option<DFlashTfmSpeculator<B>>,
     sampling: Sampling<B>,
     context_ring_update: <B::Kernels as Kernels>::ContextRingUpdateKernel,
@@ -85,6 +89,8 @@ pub enum EngineLoadLanguageModelError<B: Backend> {
     Decoder(#[from] DecoderError<B>),
     #[error("Speculator error: {0}")]
     Speculator(#[from] DFlashSpeculatorLoadError<B>),
+    #[error("Qwen MTP error: {0}")]
+    QwenMtp(#[from] crate::encodable_block::qwen_mtp::QwenMtpError<B>),
     #[error("Tokenizer error: {0}")]
     Tokenizer(#[from] tokenizers::Error),
 }
@@ -116,6 +122,13 @@ impl<B: Backend> Engine<B> {
         tokenizer: Option<Arc<Tokenizer>>,
         speculator_policy: SpeculatorPolicy,
     ) -> Result<LanguageModel<B>, EngineLoadLanguageModelError<B>> {
+        // Dense-MTP readiness promises both speculative verification and exact
+        // retained-prefix restoration. Refuse other state layouts before any
+        // decoder/head parameters are allocated on the device.
+        if let Some(mtp) = &config.mtp_config {
+            mtp.validate_for_target(&config.decoder_config.transformer_config)
+                .map_err(|_| crate::encodable_block::qwen_mtp::QwenMtpError::<B>::Invalid)?;
+        }
         // The guarded vision loader disables discovery even if a new directory
         // appears after its initial artifact admission check.
         let speculator_path = select_speculator_path(model_path, speculator_policy);
@@ -138,6 +151,21 @@ impl<B: Backend> Engine<B> {
             &weight_loader.tree().subtree("decoder"),
             data_type,
         )?;
+        let dense_mtp = config
+            .mtp_config
+            .as_ref()
+            .map(|mtp| {
+                if mtp.model_dim != config.decoder_config.transformer_config.model_dim {
+                    return Err(crate::encodable_block::qwen_mtp::QwenMtpError::Invalid);
+                }
+                crate::encodable_block::qwen_mtp::QwenMtp::new(
+                    mtp,
+                    config.decoder_config.transformer_config.layer_configs.len(),
+                    &weight_loader.tree().subtree("mtp"),
+                    self.context.as_ref(),
+                )
+            })
+            .transpose()?;
 
         assert!(
             speculator_path.is_none() || decoder.speculation_supported(),
@@ -168,6 +196,7 @@ impl<B: Backend> Engine<B> {
             model_identity: Arc::new(()),
             engine: self.clone(),
             decoder,
+            dense_mtp,
             speculator,
             sampling,
             context_ring_update,

@@ -210,9 +210,12 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             from .adapters.qwen35 import normalize_qwen35_config
 
             packing_config = normalize_qwen35_config(config)
-        quantization = parse_mlx_quantization(packing_config)
+        quantization = parse_mlx_quantization(packing_config, allow_mixed=adapter == "qwen3_5")
         if packing is not None:
             if quantization is None or quantization.bits != packing["bits"]:
+                raise ConversionError("Checkpoint packing disagrees with its catalog profile")
+            allowed_bits = set(packing.get("mixed_bits", [packing["bits"]]))
+            if any(value is not None and value.bits not in allowed_bits for _, value in quantization.overrides):
                 raise ConversionError("Checkpoint packing disagrees with its catalog profile")
         elif quantization is not None and request.metadata_profile is None:
             raise UnsupportedConversion("Packed checkpoint requires a registered compressed profile")
@@ -440,6 +443,8 @@ def convert(
                 "decoder_config": planned.tensors.decoder_config,
                 **fragments,
             }
+            if planned.tensors.mtp_config is not None:
+                root_config["mtp_config"] = planned.tensors.mtp_config
         family = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 3
         if planned.artifact_contract is not None:
             root_config["artifact_contract"] = planned.artifact_contract

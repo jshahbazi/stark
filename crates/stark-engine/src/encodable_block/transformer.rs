@@ -14,7 +14,7 @@ use crate::{
     data_type::DataType,
     encodable_block::{
         batch_topology::BatchTopology,
-        mixer::MixerState,
+        mixer::{MixerState, MixerStateSnapshot},
         normalization::{Normalization, NormalizationNewError, PostLayerScalar, ShortcutMode},
         transformer_layer::{TransformerLayer, TransformerLayerError},
     },
@@ -40,6 +40,17 @@ pub struct TransformerState<B: Backend> {
 pub struct TransformerEncodeOutput<B: Backend> {
     pub output: Option<B::ScratchBuffer>,
     pub hidden_features: Option<Box<[B::ScratchBuffer]>>,
+}
+
+pub(crate) struct TransformerPrefix<B: Backend> {
+    layers: Box<[Option<Box<dyn MixerStateSnapshot<B>>>]>,
+    position: u32,
+}
+
+impl<B: Backend> TransformerPrefix<B> {
+    pub(crate) fn payload_bytes(&self) -> usize {
+        self.layers.iter().flatten().map(|state| state.payload_bytes()).sum()
+    }
 }
 
 /// Shift rotary positions after image prefill without changing physical KV indices.
@@ -72,6 +83,64 @@ fn scoring_cache_only_requested(
 }
 
 impl<B: Backend> TransformerState<B> {
+    pub(crate) fn capture_prefix(
+        &self,
+        context: &B::Context,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<TransformerPrefix<B>>, B::Error> {
+        if self.rotary_position_delta.is_some() {
+            return Ok(None);
+        }
+        let mut layers = Vec::with_capacity(self.layer_states.len());
+        for state in &self.layer_states {
+            match state {
+                TransformerLayerStateType::Owned(state) => {
+                    let Some(snapshot) = state.capture_prefix(self.context_length, context, command)? else {
+                        return Ok(None);
+                    };
+                    layers.push(Some(snapshot));
+                },
+                TransformerLayerStateType::Shared(_) => layers.push(None),
+            }
+        }
+        Ok(Some(TransformerPrefix {
+            layers: layers.into_boxed_slice(),
+            position: self.context_length,
+        }))
+    }
+
+    pub(crate) fn can_restore_prefix(
+        &self,
+        prefix: &TransformerPrefix<B>,
+    ) -> bool {
+        self.rotary_position_delta.is_none()
+            && self.context_length >= prefix.position
+            && self.layer_states.len() == prefix.layers.len()
+            && self.layer_states.iter().zip(prefix.layers.iter()).all(|(state, saved)| match (state, saved) {
+                (TransformerLayerStateType::Owned(state), Some(saved)) => saved.can_restore(state.as_ref()),
+                (TransformerLayerStateType::Shared(_), None) => true,
+                _ => false,
+            })
+    }
+
+    pub(crate) fn restore_prefix(
+        &mut self,
+        prefix: &TransformerPrefix<B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> bool {
+        if !self.can_restore_prefix(prefix) {
+            return false;
+        }
+        for (state, saved) in self.layer_states.iter_mut().zip(prefix.layers.iter()) {
+            if let (TransformerLayerStateType::Owned(state), Some(saved)) = (state, saved)
+                && !saved.restore(state.as_mut(), command)
+            {
+                return false;
+            }
+        }
+        self.context_length = prefix.position;
+        true
+    }
     /// Allow the final attention layer to skip its query path for prompt
     /// chunks whose logits are not read. Only `score_next_token` opts a state
     /// in; the pruning additionally requires a flat batch, no requested output
@@ -186,6 +255,7 @@ pub struct Transformer<B: Backend> {
     rope_tables: Box<[super::mixer::attention::rope::RoPETableCache]>,
     layers: Box<[(TransformerLayer<B>, Option<usize>)]>,
     output_norm: Normalization<B>,
+    captured_output_norm: Normalization<B>,
     model_dim: u32,
     multimodal_positions_supported: bool,
     residual_add: <B::Kernels as Kernels>::TensorAddScaleKernel,
@@ -242,6 +312,19 @@ impl<B: Backend> Transformer<B> {
             &parameter_tree.subtree("output_norm"),
             context,
         )?;
+        // Captured residuals already include their shortcut. MTP history uses
+        // the same output RMS configuration and weights without adding that
+        // shortcut again or applying readout-only Hadamard factors.
+        let captured_output_norm = Normalization::new(
+            transformer_config.model_dim,
+            None,
+            ShortcutMode::None,
+            PostLayerScalar::None,
+            data_type,
+            &transformer_config.output_norm_config,
+            &parameter_tree.subtree("output_norm"),
+            context,
+        )?;
 
         let residual_add = <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, false)
             .map_err(TransformerNewError::Backend)?;
@@ -255,6 +338,7 @@ impl<B: Backend> Transformer<B> {
             ropes: ropes.into_boxed_slice(),
             layers,
             output_norm,
+            captured_output_norm,
             model_dim: transformer_config.model_dim,
             residual_add,
         })
@@ -271,6 +355,15 @@ impl<B: Backend> Transformer<B> {
         let elements = batch_size * self.model_dim;
         self.residual_add.encode(Some(shortcut), hidden, &mut output, elements, elements, 1.0, command_buffer);
         Ok(output)
+    }
+
+    pub(crate) fn normalize_captured_output(
+        &self,
+        hidden: impl BufferRef<Backend = B>,
+        rows: u32,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        self.captured_output_norm.encode(hidden, 0, rows, None::<&mut B::ScratchBuffer>, command)
     }
 
     pub fn speculation_supported(&self) -> bool {

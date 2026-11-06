@@ -92,6 +92,33 @@ native loading and execution do not import them. Model weights and synthetic
 reference captures remain ignored. The supported checkpoint identities and
 precision policy are recorded in [native hybrid models](../docs/NATIVE_HYBRID_MODELS.md).
 
+The dense Qwen3.5-family MTP graph follows `jundot/omlx` revision
+`2165e75726ba83d9651dbaced61c97728da77bba`, source
+`omlx/patches/mlx_lm_mtp/qwen35_model.py`, SHA-256
+`d5343f025f00538dfc4cecd158946282221236aca7ca118b4d78ca294aab385c`.
+Stark implements its embedding/target-residual normalization, fusion and
+one-layer predictor as a typed Rust/Metal graph; native inference imports no
+Python module. Converter tensor naming and the MTP graph are independent
+adaptations. The oMLX contributors' Apache-2.0 license is retained in
+`LICENSE.omlx-reference` and included in distribution notices. The dense
+target uses the existing Qwen3.5 implementation. Its sigmoid attention-output
+gate was checked against Transformers v5.8.0 `modeling_qwen3_5.py`, SHA-256
+`641da34484f6b9769e28615c680cc4e3202afbf5bdbf1da7d56d5a3d678918c7`.
+The same pinned oMLX revision's `prompt_priming.py` and `batch_generator.py`
+select its post-normalization draft variant: the target's final normalization
+precedes the predictor's hidden-input normalization, and later draft steps
+consume the predictor's normalized output. This is a proposal-policy choice;
+exact rejection sampling still verifies against the unchanged target route.
+
+The converter's lossless five/six-bit affine unpacking follows the documented
+MLX bit layout, inspected in `mlx/backend/metal/kernels/quantized.h` at
+`ml-explore/mlx` revision `ba8c005c1b687227ff79a55da5b8aa062d92541f`
+(MIT, Apple Inc.). It is an independent scalar implementation with integer
+and coefficient-preservation tests; no MLX kernel code is copied into that
+converter. The existing MLX MIT notice remains in `vendor/lily-core/LICENSE.mlx`.
+The row-reuse GEMV route extends inherited Stark code. Artifact-specific
+validation is recorded in the [dense 27B study](../docs/benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md).
+
 The Rust workspace contains only the `stark-engine`, `stark-engine-macros`, `stark-score` and `stark-generate` crates. These upstream identifiers are kept on purpose:
 
 - Uzu Git history, upstream license, revision metadata and original patch hashes.

@@ -46,6 +46,15 @@ VARIANTS(REDUCTION_LANES, 8, 16, 32)
 VARIANTS(GROUP_LANES, 1, 2, 4, 8, 16)
 VARIANTS(NUM_SIMDGROUPS, 2, 4, 8)
 
+// Independent geometry extension of the inherited affine GEMV: no unpacking,
+// FMA, coefficient, or reduction arithmetic changes. Only reuse packed weights
+// across a dense-Qwen verification batch while preserving scalar K lanes.
+#define AFFINE_VERIFY_TILE                                                                                          \
+  (B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant && GROUP_SIZE == 64 &&                                            \
+   INPUT_ROW_TILE >= 2 && INPUT_ROW_TILE <= 4 && REDUCTION_LANES == 32 &&                                              \
+   NUM_SIMDGROUPS == 8 && OUTPUT_ROW_TILE == 32 &&                                                                    \
+   ((BITS == 4 && GROUP_LANES == 4) || (BITS == 8 && GROUP_LANES == 8)))
+
 CONSTRAINT((B_PROLOGUE == GemmBPrologueKind::FullPrecision) == (BITS == 0))
 CONSTRAINT((BITS == 0) == (GROUP_SIZE == 0))
 CONSTRAINT(B_PROLOGUE == GemmBPrologueKind::FullPrecision || BT != "float")
@@ -54,14 +63,15 @@ CONSTRAINT(BITS != 0 || (INPUT_ROW_TILE == 1 && REDUCTION_LANES == 32 && NUM_SIM
 CONSTRAINT(INPUT_ROW_TILE != 1 || REDUCTION_LANES == 32)
 CONSTRAINT(
     INPUT_ROW_TILE == 1 ||
-    (K_SPLIT == 1 && INPUT_ALIGNED && AT == "bfloat" && DT == "bfloat" && GROUP_LANES == 1))
+    (K_SPLIT == 1 && INPUT_ALIGNED && AT == "bfloat" && DT == "bfloat" &&
+     (GROUP_LANES == 1 || AFFINE_VERIFY_TILE)))
 
 #define GEMV_TILE(OUTPUT_ROWS, LANES, SIMD_GROUPS)                                                                     \
   (OUTPUT_ROW_TILE == OUTPUT_ROWS && REDUCTION_LANES == LANES && NUM_SIMDGROUPS == SIMD_GROUPS)
 #define INPUT_ROWS(FIRST, LAST) (INPUT_ROW_TILE >= FIRST && INPUT_ROW_TILE <= LAST)
 
 CONSTRAINT(
-    INPUT_ROW_TILE == 1 ||
+    INPUT_ROW_TILE == 1 || AFFINE_VERIFY_TILE ||
     (((B_PROLOGUE == GemmBPrologueKind::ScaleSymmetricDequant && BITS == 8) ||
       (B_PROLOGUE == GemmBPrologueKind::ScaleZeroPointDequant && BITS == 4)) &&
      (GROUP_SIZE == 32 || GROUP_SIZE == 64) &&

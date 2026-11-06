@@ -150,7 +150,7 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 | Qwen3 | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, `POLARIS-Project/Polaris-4B-Preview` |
 | Qwen3 MLX | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}-MLX-{4bit,8bit}`; affine groups 16/32/64/128 |
 | Qwen2 | `Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
-| Qwen3.5 text | Dense `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`; extension `empero-ai/Qwen3.8-4B-Distill`. Declared vision and MTP tensors are omitted; MoE is unsupported |
+| Qwen3.5 text | Dense `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`; extensions `empero-ai/Qwen3.8-4B-Distill` and `Jundot/Qwen3.8-27B-oQ4e-mtp`. Vision and floating auxiliary MTP tensors are omitted in text mode; a complete declared quantized MTP head is retained. MoE is unsupported |
 | Qwen3.5 text MLX | `mlx-community/Qwen3.5-{0.8B,2B,4B,9B}-MLX-{4bit,8bit}`, `mlx-community/Qwen3.5-27B-{4bit,8bit}` |
 | LFM2 | Dense `LiquidAI/LFM2-{350M,700M,1.2B,2.6B}` |
 | LFM2 MLX | `mlx-community/LFM2-{350M,700M,1.2B,2.6B}-{4bit,8bit}` |
@@ -278,6 +278,33 @@ uv run --project tools/converter --locked stark-convert mlx-community/Qwen3.5-0.
 ```
 
 MLX metadata follows each profile's registered source: Qwen3 and Llama use their original repository's tokenizer and generation files, Qwen3.5 uses the official tokenizer and the Qwen3.5-27B generation file, LFM2 uses its own files, SmolLM3 and Gemma use the MLX tokenizer with official generation files, and LLaMBA uses the Llama-3.2-1B files with its registered EOS. External sources are pinned independently; a missing or gated dependency fails rather than substituting metadata. A self-contained future MLX checkpoint can use `hf-generic` with explicit stop metadata and an explicit `quantization` field.
+
+### Dense Qwen3.8-27B oQ4e MTP
+
+`Jundot/Qwen3.8-27B-oQ4e-mtp` is a registered dense `qwen3_5` extension with
+its own tokenizer and generation metadata. Its default four-bit affine scheme
+has per-module 4/5/6/8-bit overrides, with group size 64. The Qwen3.5 adapter
+resolves each matrix's complete weight/scale/bias triplet independently.
+Five- and six-bit integer values are unpacked into eight-bit storage; a fused
+projection containing differing widths is widened to eight bits as a whole.
+This preserves every source integer and BF16 coefficient without requantizing,
+at the cost of larger converted weights and greater memory traffic.
+
+A complete, explicitly declared one-layer quantized MTP predictor is converted
+alongside the target. Once a fusion matrix identifies a predictor, every head
+tensor is required. Mixed-quantization predictor namespaces also reject a
+missing fusion matrix. Its typed
+configuration remains subject to native tensor and graph admission. Floating
+text conversions and legacy uniform sources with declared bare `mtp.*`
+auxiliary tensors retain their existing omission policy when no complete
+predictor is identified. Omitted tensors never grant MTP capability.
+`output_gate_type: "swish"` in this export is an inert annotation: the
+Qwen3.5 full-attention output gate remains sigmoid, matching the reference
+implementation. `rope_parameters.type: "default"` is admitted as the default
+RoPE alias; other unimplemented variants fail inspection.
+
+The pinned local execution and performance scope is recorded in the
+[dense 27B benchmark](../../docs/benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md).
 
 ### Lily Qwen3.8 text
 

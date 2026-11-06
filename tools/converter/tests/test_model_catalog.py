@@ -328,6 +328,42 @@ def test_mlx_quantization_uses_metadata_and_does_not_call_packed_slots_parameter
     assert item["parameter_count"] is None and item["size_label"] is None
 
 
+def test_qwen35_mixed_mlx_quantization_badge_lists_declared_widths():
+    config = {
+        "model_type": "qwen3_5",
+        "quantization": {
+            "bits": 4,
+            "group_size": 64,
+            "mode": "affine",
+            "model.layers.0.mlp.up_proj": {"bits": 5, "group_size": 64, "mode": "affine"},
+            "model.layers.1.mlp.up_proj": {"bits": 6, "group_size": 64, "mode": "affine"},
+            "model.layers.2.mlp.up_proj": {"bits": 8, "group_size": 64, "mode": "affine"},
+            "model.layers.3.mlp.up_proj": False,
+        },
+    }
+    entry = {"compressed_format": {"scheme": "mlx_affine", "bits": 4, "mixed_bits": [4, 5, 6, 8]}}
+
+    assert catalog._quantization(config, {}, entry, family="qwen3_5") == "4/5/6/8-bit"
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_qwen35_uniform_mlx_quantization_badge_keeps_existing_label(bits):
+    config = {
+        "model_type": "qwen3_5",
+        "quantization": {"bits": bits, "group_size": 64, "mode": "affine"},
+    }
+    entry = {"compressed_format": {"scheme": "mlx_affine", "bits": bits}}
+
+    assert catalog._quantization(config, {}, entry, family="qwen3_5") == f"{bits}-bit"
+
+
+def test_qwen35_uniform_catalog_does_not_offer_mixed_width_source():
+    config = {"quantization": {"bits": 4, "group_size": 64,
+                               "model.layers.0.mlp.up_proj": {"bits": 8, "group_size": 64}}}
+    entry = {"compressed_format": {"scheme": "mlx_affine", "bits": 4}}
+    assert catalog._quantization(config, {}, entry, family="qwen3_5") is None
+
+
 @pytest.mark.parametrize("groups", [[], ["attn", "shared", "head", "embed"]])
 def test_lily_qwen38_badge_includes_fixed_q8_projections_beyond_default_q4(groups):
     config = {

@@ -30,6 +30,17 @@ readout and sampled-generation controls for the pinned converted artifact.
 The native loader validates tensors; generic Decision use still requires a
 direct-answer template and checkpoint checks.
 
+Dense `qwen3_5` text conversion also admits the registered
+`Jundot/Qwen3.8-27B-oQ4e-mtp` extension. Its mixed affine 4/5/6/8-bit matrices
+are preserved numerically; 5/6-bit values and mixed-width fused projections
+are widened to the existing 8-bit integer storage without requantization.
+A complete, declared one-layer quantized MTP head becomes a typed native
+graph. The worker reports its loaded capabilities, with drafting disabled by
+default, a recommendation of three drafts and a maximum of three. This dense
+model uses the Qwen3.5 graph. It has separate artifact and performance evidence
+from the Qwen3.8-Flash-Next path. See the
+[dense 27B record](benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md).
+
 Neither result establishes that a complete model has loaded or executed. Exact
 load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the

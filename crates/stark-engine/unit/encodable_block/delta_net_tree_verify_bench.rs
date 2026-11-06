@@ -9,7 +9,7 @@ use stark_engine_macros::stark_bench;
 use crate::{
     backends::{
         common::{
-            Backend, BufferMut, CommandBufferEncoding, Context, Kernels,
+            Backend, BufferMut, BufferRef, CommandBufferEncoding, Context, Kernels,
             kernel::delta_net_tree_verify::DeltaNetTreeVerify,
         },
         metal::Metal,
@@ -60,12 +60,12 @@ fn bench_delta_net_tree_verify(c: &mut Criterion) {
                 tree_verify
                     .encode(
                         TreeVerifyEncodeArguments {
-                            q: &q,
-                            k: &k,
-                            v: &v,
+                            q: q.subrange(..),
+                            k: k.subrange(..),
+                            v: v.subrange(..),
                             trie: &trie,
-                            log_decay: &log_decay,
-                            beta: &beta,
+                            log_decay: log_decay.subrange(..),
+                            beta: beta.subrange(..),
                             h0: &h0,
                             tree_size: tree_size as u32,
                         },
