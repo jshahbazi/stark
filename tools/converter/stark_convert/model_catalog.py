@@ -474,9 +474,7 @@ def _quantization(config, info, entry, family=None):
             return None
         widths = {bits}
         if family == "qwen3_5":
-            widths.update(
-                override.bits for _, override in quantization.overrides if override is not None
-            )
+            widths.update(override.bits for _, override in quantization.overrides if override is not None)
         if packing is not None and not widths <= set(packing.get("mixed_bits", [bits])):
             return None
         if len(widths) > 1:

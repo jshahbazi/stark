@@ -114,13 +114,13 @@ def partitioned_artifact(path):
         base = f"{parent}.segment_{index}"
         code_bytes = 64 * bits // 8
         header[base + ".weights"] = {
-            "dtype": "U8", "shape": [rows, code_bytes], "data_offsets": [offset, offset + rows * code_bytes]
+            "dtype": "U8",
+            "shape": [rows, code_bytes],
+            "data_offsets": [offset, offset + rows * code_bytes],
         }
         offset += rows * code_bytes
         for plane in ("scales", "biases"):
-            header[base + "." + plane] = {
-                "dtype": "BF16", "shape": [1, 4], "data_offsets": [offset, offset + 8]
-            }
+            header[base + "." + plane] = {"dtype": "BF16", "shape": [1, 4], "data_offsets": [offset, offset + 8]}
             offset += 8
     metadata[parent + ".spec"] = json.dumps(
         {
@@ -133,7 +133,9 @@ def partitioned_artifact(path):
         }
     )
     header["decoder.transformer.output_norm.scales"] = {
-        "dtype": "F32", "shape": [2], "data_offsets": [offset, offset + 8]
+        "dtype": "F32",
+        "shape": [2],
+        "data_offsets": [offset, offset + 8],
     }
     offset += 8
     header["__metadata__"] = metadata

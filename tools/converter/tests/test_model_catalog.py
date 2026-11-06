@@ -358,8 +358,9 @@ def test_qwen35_uniform_mlx_quantization_badge_keeps_existing_label(bits):
 
 
 def test_qwen35_uniform_catalog_does_not_offer_mixed_width_source():
-    config = {"quantization": {"bits": 4, "group_size": 64,
-                               "model.layers.0.mlp.up_proj": {"bits": 8, "group_size": 64}}}
+    config = {
+        "quantization": {"bits": 4, "group_size": 64, "model.layers.0.mlp.up_proj": {"bits": 8, "group_size": 64}}
+    }
     entry = {"compressed_format": {"scheme": "mlx_affine", "bits": 4}}
     assert catalog._quantization(config, {}, entry, family="qwen3_5") is None
 

@@ -595,15 +595,16 @@ impl NativeBackend {
             "target_gpu_seconds": target_gpu_seconds,
             "target_readout_seconds": target_readout_seconds,
         }));
-        if let (Some(scope), Some(position)) = (options.cache_scope, session.prefix_position()) {
-            if position == capture && position > 0 {
-                self.dense_pending_prefix = Some(prefix_cache::BoundaryEntry::new(
-                    (session, options.mtp_drafts),
-                    scope,
-                    options.context_tokens,
-                    &input[..position],
-                ));
-            }
+        if let (Some(scope), Some(position)) = (options.cache_scope, session.prefix_position())
+            && position == capture
+            && position > 0
+        {
+            self.dense_pending_prefix = Some(prefix_cache::BoundaryEntry::new(
+                (session, options.mtp_drafts),
+                scope,
+                options.context_tokens,
+                &input[..position],
+            ));
         }
         Ok(result)
     }

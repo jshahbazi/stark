@@ -35,7 +35,8 @@ def _quantized_tensor(header, name, size, *, expected_rows=None):
         or not isinstance(shape, list)
         or not 1 <= len(shape) <= 8
         or any(type(value) is not int or not 0 < value <= 2**32 - 1 for value in shape)
-        or expected_rows is not None and (len(shape) != 2 or shape[0] != expected_rows)
+        or expected_rows is not None
+        and (len(shape) != 2 or shape[0] != expected_rows)
         or not isinstance(offsets, list)
         or len(offsets) != 2
         or any(type(value) is not int for value in offsets)
@@ -60,9 +61,12 @@ def _partition_widths(header, metadata, prefix, spec, size):
             raise ValueError()
         rows, bits, group = segment["rows"], segment["bits"], segment["group_size"]
         if (
-            type(rows) is not int or not 0 < rows <= 2**32 - 1
-            or type(bits) is not int or bits not in _QUANT_BITS
-            or type(group) is not int or not 0 < group <= 2**32 - 1
+            type(rows) is not int
+            or not 0 < rows <= 2**32 - 1
+            or type(bits) is not int
+            or bits not in _QUANT_BITS
+            or type(group) is not int
+            or not 0 < group <= 2**32 - 1
         ):
             raise ValueError()
         rows_total += rows

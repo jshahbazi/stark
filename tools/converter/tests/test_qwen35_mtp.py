@@ -1,4 +1,5 @@
 """Complete predictor preservation; no frozen result is inherited by this path."""
+
 import json
 
 import numpy as np
