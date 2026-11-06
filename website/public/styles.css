@@ -1829,3 +1829,330 @@ code {
 .not-found .hero-description {
   max-width:560px
 }
+
+/* Product story and first-run guidance. */
+.story-heading {
+  max-width:790px
+}
+.story-heading>.eyebrow {
+  color:#777b70;
+  margin-bottom:18px
+}
+.story-heading h2 {
+  margin-bottom:18px
+}
+.story-heading>p:last-child {
+  max-width:680px;
+  color:var(--muted);
+  font-size:17px;
+  line-height:1.7
+}
+.product-gallery {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  align-items:start;
+  gap:22px;
+  margin-top:48px
+}
+.product-shot {
+  min-width:0
+}
+.product-shot>a {
+  display:block;
+  overflow:hidden;
+  border:1px solid #d4d6cb;
+  background:#e7e8df;
+  box-shadow:0 8px 24px rgb(23 27 25 / 7%)
+}
+.product-shot>a:hover {
+  border-color:#9b9f92
+}
+.product-shot img {
+  display:block;
+  width:100%;
+  height:auto
+}
+.product-shot figcaption {
+  padding-top:17px
+}
+.shot-index {
+  display:block;
+  margin-bottom:9px;
+  color:#777b70;
+  font:10px/1.5 var(--mono);
+  letter-spacing:.1em
+}
+.product-shot h3 {
+  margin-bottom:8px;
+  font-size:20px
+}
+.product-shot figcaption p {
+  max-width:340px;
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.7
+}
+.capture-note {
+  margin-top:18px;
+  color:var(--muted);
+  font-size:11px;
+  line-height:1.7
+}
+.fit-guide {
+  margin-top:68px;
+  padding-top:42px;
+  border-top:1px solid #bdc4b2
+}
+.fit-intro {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  align-items:end;
+  gap:36px
+}
+.fit-intro h3 {
+  font-size:clamp(25px,3vw,34px)
+}
+.fit-intro p {
+  max-width:520px;
+  color:var(--muted);
+  font-size:14px;
+  line-height:1.7
+}
+.memory-guide {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:12px;
+  margin-top:25px
+}
+.memory-guide article {
+  min-width:0;
+  padding:19px 20px;
+  border:1px solid #d2d6c8;
+  background:#f3f2eb
+}
+.memory-guide h4 {
+  margin:0 0 8px;
+  font-size:15px;
+  font-weight:550;
+  line-height:1.4
+}
+.memory-guide p {
+  color:var(--muted);
+  font-size:14px;
+  line-height:1.7
+}
+.capability-badge {
+  display:inline-flex;
+  align-items:center;
+  margin:0 6px 11px 0;
+  padding:4px 7px;
+  border:1px solid #9ca28f;
+  border-radius:2px;
+  color:#41463f;
+  font:11px/1.45 var(--mono);
+  letter-spacing:.035em
+}
+.capability-badge.unavailable {
+  border-color:#b8a080;
+  color:#725128
+}
+.capability-badge.conditional {
+  border-color:#a5a99c;
+  color:#63675f
+}
+.tool-support-note {
+  margin-top:23px;
+  padding:17px 20px;
+  border-left:2px solid #a8ad9d;
+  background:rgb(243 242 235 / 70%);
+  color:var(--muted);
+  font-size:12px;
+  line-height:1.75
+}
+.tool-support-note a {
+  display:inline-block;
+  margin-left:7px;
+  color:var(--ink)
+}
+.decision-feature {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  align-items:center;
+  gap:28px;
+  margin-top:54px;
+  padding:24px 28px;
+  background:var(--night);
+  color:var(--paper)
+}
+.decision-feature .eyebrow {
+  color:var(--gold)
+}
+.decision-feature h3 {
+  margin-bottom:6px;
+  font-size:21px
+}
+.decision-feature p {
+  color:#c3c8bb;
+  font-size:12px;
+  line-height:1.65
+}
+.decision-feature>a {
+  font-size:12px;
+  white-space:nowrap
+}
+.privacy-section {
+  border-top:1px solid var(--line);
+  background:var(--paper)
+}
+.privacy-grid {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:24px;
+  margin-top:42px
+}
+.privacy-grid article {
+  padding-top:19px;
+  border-top:1px solid #bdc4b2
+}
+.privacy-grid h3 {
+  margin-bottom:10px;
+  font-size:18px
+}
+.privacy-grid p,.privacy-boundary {
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.75
+}
+.privacy-boundary {
+  max-width:900px;
+  margin-top:32px;
+  padding-left:17px;
+  border-left:2px solid #a8ad9d
+}
+.followup-section {
+  background:var(--night);
+  color:var(--paper)
+}
+.followup-section .story-heading>.eyebrow {
+  color:var(--gold)
+}
+.followup-section .story-heading>p:last-child {
+  color:#c3c8bb
+}
+.followup-comparison {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:14px;
+  margin-top:38px
+}
+.followup-metric {
+  min-width:0;
+  padding:22px 24px;
+  border:1px solid #41463f
+}
+.followup-metric>span {
+  display:block;
+  margin-bottom:15px;
+  color:#b8bdb1;
+  font:10px/1.55 var(--mono);
+  letter-spacing:.07em;
+  text-transform:uppercase
+}
+.followup-metric strong {
+  display:block;
+  color:var(--paper);
+  font-size:clamp(32px,5vw,55px);
+  font-weight:500;
+  letter-spacing:-.05em;
+  line-height:1.05
+}
+.followup-metric strong small {
+  display:inline;
+  margin:0 0 0 2px;
+  color:currentColor;
+  font-size:.42em;
+  font-weight:500;
+  letter-spacing:-.02em;
+  vertical-align:baseline
+}
+.followup-metric p {
+  display:block;
+  margin:12px 0 0;
+  color:#c3c8bb;
+  font-size:12px;
+  line-height:1.6
+}
+.followup-metric.enabled strong {
+  color:var(--gold)
+}
+.followup-context {
+  max-width:800px;
+  margin-top:20px;
+  color:#c3c8bb;
+  font-size:12px;
+  line-height:1.75
+}
+.followup-method {
+  max-width:800px;
+  margin-top:25px;
+  border-top:1px solid #41463f;
+  border-bottom:1px solid #41463f
+}
+.followup-method summary {
+  cursor:pointer;
+  padding:14px 0;
+  color:var(--paper);
+  font-size:12px
+}
+.followup-method>p,.followup-method>a {
+  display:block;
+  margin:0 0 15px;
+  color:#c3c8bb;
+  font-size:12px;
+  line-height:1.75
+}
+.followup-links {
+  display:flex;
+  flex-wrap:wrap;
+  gap:12px 26px;
+  margin-top:25px;
+  color:var(--paper);
+  font-size:12px
+}
+
+@media(max-width:800px) {
+  .product-gallery { gap:15px }
+  .product-shot h3 { font-size:18px }
+  .fit-intro { grid-template-columns:1fr; gap:14px }
+  .decision-feature { grid-template-columns:minmax(0,1fr) auto; gap:12px 22px }
+  .decision-feature>a { grid-column:2 }
+}
+@media(max-width:600px) {
+  .story-heading>p:last-child { font-size:15px }
+  .product-gallery,.memory-guide,.privacy-grid {
+    grid-template-columns:1fr
+  }
+  .product-gallery { gap:28px; margin-top:32px }
+  .product-shot>a { max-width:460px }
+  .product-shot figcaption { padding-top:12px }
+  .fit-guide { margin-top:48px; padding-top:30px }
+  .memory-guide { gap:9px }
+  .memory-guide article { padding:16px }
+  .decision-feature { grid-template-columns:1fr; gap:13px; padding:21px }
+  .decision-feature>a { grid-column:1; justify-self:start }
+  .privacy-grid { gap:22px; margin-top:32px }
+  .privacy-grid article { padding-top:14px }
+  .followup-comparison { grid-template-columns:1fr; gap:10px; margin-top:30px }
+  .followup-metric { padding:18px 19px }
+  .followup-metric strong { font-size:42px }
+  .tool-support-note { padding:15px }
+  .tool-support-note a { margin:8px 0 0 }
+}
+
+/* Badge text in the nested model-family summary inherits oversized summary spans. */
+.model-family summary span .capability-badge {
+  display:inline-flex;
+  margin-top:8px;
+  font-size:11px;
+  vertical-align:middle
+}
