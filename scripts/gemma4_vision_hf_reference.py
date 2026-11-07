@@ -125,6 +125,10 @@ def run(args):
             )
             stages = {}
             hooks = []
+            focused = args.capture_full_attention_case is not None
+            capture = args.capture_stages and (
+                not focused or index == args.capture_full_attention_case
+            )
             original_rotary = modeling_gemma4.apply_multidimensional_rope
             rotary_calls = [0]
 
@@ -137,7 +141,17 @@ def run(args):
                 _valid=valid,
                 _index=index,
                 _stages=stages,
+                _focused=focused,
             ):
+                if _focused:
+                    if tag not in {
+                        "prepared_queries_0",
+                        "prepared_keys_0",
+                        "prepared_values_0",
+                        "attention_0",
+                    }:
+                        return
+                    full, head0 = True, False
                 value = value.detach()
                 if value.ndim >= 3:
                     value = value[0, _valid]
@@ -179,7 +193,7 @@ def run(args):
                 save_stage("v_norm_0", value)
                 save_stage("prepared_values_0", value, full=True, head0=True)
 
-            if args.capture_stages:
+            if capture:
                 hooks.append(
                     tower.patch_embedder.input_proj.register_forward_hook(
                         lambda _m, _i, value: save_stage("patch_projection", value)
@@ -250,7 +264,7 @@ def run(args):
                 encoded = tower(
                     pixel_values=batch["pixel_values"], pixel_position_ids=positions
                 ).last_hidden_state
-                if args.capture_stages:
+                if capture:
                     save_stage("standardized", encoded, full=True)
                 features = projector(encoded)
             finally:
@@ -295,6 +309,9 @@ def run(args):
         "cases": cases,
         "complete": True,
     }
+    if args.capture_full_attention_case is not None:
+        manifest["stage_focus"] = "first-layer-full-attention"
+        manifest["stage_case_index"] = args.capture_full_attention_case
     (output / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
     return {
         "passed": True,
@@ -310,7 +327,10 @@ def main():
     for name in ("source", "fixtures", "output", "reference-lock"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--capture-stages", action="store_true")
+    parser.add_argument("--capture-full-attention-case", type=int, choices=(0, 1, 2))
     args = parser.parse_args()
+    if args.capture_full_attention_case is not None and not args.capture_stages:
+        parser.error("--capture-full-attention-case requires --capture-stages")
     try:
         with (
             open(os.devnull, "w") as quiet,

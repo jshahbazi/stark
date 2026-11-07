@@ -46,3 +46,25 @@ Native CPU/Metal fixture execution and type-check are pending at this source-onl
 checkpoint. The coordinator will build the checkpoint before any larger-tower
 stage or full-feature replay. These source controls do not qualify full 31B/26B
 generation, image features or model throughput.
+
+The candidate subsequently passed both six-case native CPU/Metal fixtures on
+sealed source `32b33e16`, executable SHA-256
+`aa97099bbfc19cc87b66282d9fe45ef7c2dc25e47a2aa3d07313721c68525b12`.
+Full larger-tower feature gates remain failing, with relative RMS
+0.05385, 0.07353 and 0.04158. First-block attention prefix RMS improves to
+0.00000509, 0.00008753 and exactly zero; case 2's block-zero prefix is also
+exact. These results do not establish all-head or later-row parity. Observed
+maximum process RSS is 1,318,469,632 bytes for the stage diagnostic and
+1,242,267,648 bytes for the full feature replay; this excludes any claim about
+total GPU allocations or quiet-host performance.
+
+A new source-bound diagnostic captures all 16 heads and all 2,394 valid patch
+rows for case 1's first prepared Q/K/V and attention output. These four F32
+stage planes total 44,126,208 bytes, below the unchanged 64 MiB stage cap. All
+three original image, patch and feature hashes remain unchanged. Its manifest
+SHA-256 is
+`0c37a150fa44dfcddf17c6dd30f0418b7032d6a57eecaa4a6bd7271700667b19`.
+The new ignored Metal split test compares tower-prepared values with those source
+planes, then runs the native Flash component on the exact canonical Q/K/V. It
+prints aggregate comparisons only. Native type-check and split execution are
+pending for this diagnostic-only checkpoint; no arithmetic policy changes.
