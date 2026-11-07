@@ -118,13 +118,14 @@ fn first_block_metrics(
             metrics.push(json!({"stage_index":metrics.len(),"elements":actual.len(),"relative_rms":rms,"cosine":cosine}));
         }};
     }
-    stage!(x, "patch", "output", |pass| gemm_bf16_nt_bias(
+    stage!(x, "patch", "output", |pass| linear_bf16_bias(
         context,
         pass,
         &px,
         &weights.patch_proj_w,
         &weights.patch_proj_b,
-        &x
+        &x,
+        4
     ));
     stage!(x, "position", "output", |pass| patch_pos_embed_bf16(
         context,
@@ -143,13 +144,14 @@ fn first_block_metrics(
         &h,
         LAYERNORM_EPS
     ));
-    stage!(qkv, "qkv", "output", |pass| gemm_bf16_nt_bias(
+    stage!(qkv, "qkv", "output", |pass| linear_bf16_bias(
         context,
         pass,
         &h,
         &block.qkv_w,
         &block.qkv_b,
-        &qkv
+        &qkv,
+        32
     ));
     stage!(qkv, "rotary", "output", |pass| qkv_rope_2d_bf16(
         context,
@@ -168,13 +170,14 @@ fn first_block_metrics(
         vision.num_heads,
         (vision.head_dim() as f32).powf(-0.5)
     ));
-    stage!(tmp, "projection", "output", |pass| gemm_bf16_nt_bias(
+    stage!(tmp, "projection", "output", |pass| linear_bf16_bias(
         context,
         pass,
         &attn,
         &block.proj_w,
         &block.proj_b,
-        &tmp
+        &tmp,
+        32
     ));
     stage!(x, "norm2", "input", |pass| add_bf16(context, pass, &x, &tmp, &x));
     stage!(h, "norm2", "output", |pass| layernorm_bf16(
@@ -186,13 +189,14 @@ fn first_block_metrics(
         &h,
         LAYERNORM_EPS
     ));
-    stage!(mlp, "fc1", "output", |pass| gemm_bf16_nt_bias(
+    stage!(mlp, "fc1", "output", |pass| linear_bf16_bias(
         context,
         pass,
         &h,
         &block.fc1_w,
         &block.fc1_b,
-        &mlp
+        &mlp,
+        32
     ));
     stage!(mlp, "gelu_tanh", "output", |pass| gelu_bf16(
         context,
@@ -200,13 +204,14 @@ fn first_block_metrics(
         &mlp,
         Gelu::Tanh
     ));
-    stage!(tmp, "fc2", "output", |pass| gemm_bf16_nt_bias(
+    stage!(tmp, "fc2", "output", |pass| linear_bf16_bias(
         context,
         pass,
         &mlp,
         &block.fc2_w,
         &block.fc2_b,
-        &tmp
+        &tmp,
+        32
     ));
     stage!(x, "merger_norm", "input", |pass| add_bf16(context, pass, &x, &tmp, &x));
     stage!(h, "merger_norm", "output", |pass| layernorm_bf16(
@@ -218,13 +223,14 @@ fn first_block_metrics(
         &h,
         LAYERNORM_EPS
     ));
-    stage!(mlp4, "merger_fc1", "output", |pass| gemm_bf16_nt_bias(
+    stage!(mlp4, "merger_fc1", "output", |pass| linear_bf16_bias(
         context,
         pass,
         &h4,
         &weights.merger_fc1_w,
         &weights.merger_fc1_b,
-        &mlp4
+        &mlp4,
+        32
     ));
     stage!(mlp4, "gelu_erf", "output", |pass| gelu_bf16(
         context,
@@ -232,13 +238,14 @@ fn first_block_metrics(
         &mlp4,
         Gelu::Erf
     ));
-    stage!(merged, "merger_fc2", "output", |pass| gemm_bf16_nt_bias(
+    stage!(merged, "merger_fc2", "output", |pass| linear_bf16_bias(
         context,
         pass,
         &mlp4,
         &weights.merger_fc2_w,
         &weights.merger_fc2_b,
-        &merged
+        &merged,
+        32
     ));
     println!(
         "{}",
@@ -378,7 +385,15 @@ fn operator_metrics(
             let (reference_rms, reference_cosine) = numerical_metric(&values, &expected);
             let mismatches = values.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
             let ordinary_mismatches = actual.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
-            println!("{}", json!({"private_retained_contraction_metrics":{"patches":gh * gw,"operator_index":index,"streams":streams,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches}}));
+            let production = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
+            let pass = context.begin().unwrap();
+            linear_bf16_bias(context, &pass, &input, weight, bias, &production, streams)
+                .unwrap_or_else(|_| panic!("private production contraction execution failed"));
+            pass.commit_wait().unwrap();
+            let production = production.to_f32().unwrap();
+            let production_mismatches = production.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
+            println!("{}", json!({"private_retained_contraction_metrics":{"patches":gh * gw,"operator_index":index,"streams":streams,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches,"production_mismatch_count":production_mismatches}}));
+            assert_eq!(production_mismatches, 0, "private vision contraction exceeds exact source gate");
         }
         let norm = match name {
             "norm1" => Some((&block.norm1_w, &block.norm1_b)),

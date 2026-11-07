@@ -18,6 +18,90 @@ pub const ATTN_D: usize = 72;
 const ATTN_BQ: usize = 32;
 const ATTN_THREADS: usize = 128;
 
+/// Source-compatible contractions for the measured retained tower geometry.
+/// Other admitted geometries retain the original dense GEMM. Each dispatch
+/// covers at most32 input rows and147456 output elements, with no new buffers.
+pub(crate) fn linear_bf16_bias(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    out: &Tensor,
+    streams: usize,
+) -> Result<()> {
+    ensure!(
+        input.shape().len() == 2 && weight.shape().len() == 2,
+        "vision linear rank"
+    );
+    let (m, k, n) = (input.shape()[0], input.shape()[1], weight.shape()[0]);
+    let elements = m
+        .checked_mul(n)
+        .ok_or_else(|| anyhow::anyhow!("vision linear element overflow"))?;
+    ensure!(m > 0 && m <= 8192 && k > 0 && n > 0, "vision linear row bounds");
+    ensure!(
+        weight.shape() == [n, k] && bias.numel() == n && out.numel() == elements,
+        "vision linear shape"
+    );
+    for tensor in [input, weight, bias, out] {
+        ensure!(tensor.dtype() == DType::BF16, "vision linear dtype");
+    }
+    let measured = matches!(
+        (k, n, streams),
+        (1536, 1152, 4)
+            | (1152, 3456, 32)
+            | (1152, 1152, 32)
+            | (1152, 4304, 32)
+            | (4304, 1152, 32)
+            | (4608, 4608, 32)
+            | (4608, 2560, 32)
+    );
+    if !measured {
+        return crate::kernels::gemm::gemm_bf16_nt_bias(
+            ctx, pass, input, weight, bias, out,
+        );
+    }
+    let pipeline = ctx.pipeline(
+        "vision_contraction_bf16_bias",
+        include_str!("metal/vision_contraction.metal"),
+        MslVersion::V4_0,
+    )?;
+    for row in (0..m).step_by(32) {
+        let rows = (m - row).min(32);
+        let input_tile = input.view(
+            row.checked_mul(k)
+                .ok_or_else(|| anyhow::anyhow!("vision linear input offset"))?,
+            &[rows, k],
+        )?;
+        let output_tile = out.view(
+            row.checked_mul(n)
+                .ok_or_else(|| anyhow::anyhow!("vision linear output offset"))?,
+            &[rows, n],
+        )?;
+        let work = rows
+            .checked_mul(n)
+            .ok_or_else(|| anyhow::anyhow!("vision linear tile overflow"))?;
+        ensure!(work <= 147456, "vision linear tile work bound");
+        pass.dispatch_with(
+            &pipeline,
+            &[
+                input_tile.binding(),
+                weight.binding(),
+                bias.binding(),
+                output_tile.binding(),
+            ],
+            &[
+                Param::U32(rows as u32),
+                Param::U32(n as u32),
+                Param::U32(k as u32),
+                Param::U32(streams as u32),
+            ],
+            Grid::Threads { grid: (work, 1, 1), threadgroup: (128, 1, 1) },
+        )?;
+    }
+    Ok(())
+}
+
 /// Checks that `(gh, gw)` is a grid of `n` patches in 2 x 2 merge blocks.
 fn check_grid(n: usize, gh: usize, gw: usize) -> Result<()> {
     ensure!(
