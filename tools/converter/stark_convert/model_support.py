@@ -503,7 +503,7 @@ def preflight_model(
     # in every mode, or suggest an alternative already known to be impossible.
     if mode is not None and family["modes"][mode]["status"] == "unsupported":
         return _report(family, mode, "unsupported", "unsupported_mode", family["modes"][mode]["message"])
-    if quantized and mode == "vision-language" and architecture != "qwen3_5":
+    if quantized and mode == "vision-language" and architecture not in {"qwen3_5", "qwen3_5_moe"}:
         return _report(
             family,
             mode,
