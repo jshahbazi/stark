@@ -483,6 +483,11 @@ impl MatmulKernel for MatmulMetalKernel {
         run()
     }
 
+    #[cfg(test)]
+    fn reference_dot_witness_active() -> bool {
+        AFFINE_DOT_WITNESS.with(std::cell::Cell::get)
+    }
+
     fn select_activation_quantization(
         &self,
         shape: &MatmulShape,

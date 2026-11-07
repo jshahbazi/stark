@@ -15,7 +15,10 @@ use crate::{
     config::weight_matrix::{AnyWeightMatrixSpec, Layout},
     data_type::DataType,
     encodable_block::{
-        linear::{Gather, Linear, LinearInput, ReferenceBF16Matmul},
+        linear::{
+            Gather, Linear, LinearInput, ReferenceAffineBF16Matmul, ReferenceBF16Matmul, has_source_affine_policy,
+            is_affine_dot_witness_active,
+        },
         weight_matrix::{WeightMatrix, WeightMatrixError},
     },
     parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
@@ -44,6 +47,7 @@ pub struct LinearMatmul<B: Backend> {
     output_dim: u32,
     output_data_type: DataType,
     reference_matmul: Option<ReferenceBF16Matmul<B>>,
+    reference_affine: Option<ReferenceAffineBF16Matmul<B>>,
 }
 
 fn load_biases<B: Backend>(
@@ -63,6 +67,10 @@ fn load_biases<B: Backend>(
 }
 
 impl<B: Backend> LinearMatmul<B> {
+    #[cfg(test)]
+    pub(super) fn uses_reference_affine(&self) -> bool {
+        self.reference_affine.is_some()
+    }
     /// A row partition inherits its original fused matrix's eight-bit lane
     /// arithmetic and prefill K partitions, while retaining packed storage.
     pub(super) fn preserve_w8_row_arithmetic(
@@ -136,10 +144,36 @@ impl<B: Backend> LinearMatmul<B> {
         } else {
             None
         };
+        let use_reference_affine = weights_tree.numerical_profile() == NumericalProfile::Qwen35AffineBF16
+            && !has_source_affine_policy::<B>(matrix.matmul_b());
+        let reference_affine = if use_reference_affine {
+            if weights_data_type != DataType::BF16
+                || input_data_type != DataType::BF16
+                || !matches!(output_data_type, DataType::BF16 | DataType::F32)
+                || biases.is_some()
+                || output_hadamard_factors.is_some()
+            {
+                return Err(LinearMatmulError::UnsupportedConfiguration(
+                    "affine reference requires BF16 inputs/weights and no output transforms".into(),
+                ));
+            }
+            if matrix.quantization().is_some_and(|info| {
+                info.method != crate::backends::common::gpu_types::QuantizationMethod::ScaleBias
+                    || info.group_size != 64
+                    || !matches!(info.mode.bits(), 4 | 5 | 6 | 8)
+            }) {
+                return Err(LinearMatmulError::UnsupportedConfiguration(
+                    "affine reference requires unsigned group64 affine storage or full BF16 controls".into(),
+                ));
+            }
+            Some(ReferenceAffineBF16Matmul::new(context, output_data_type).map_err(LinearMatmulError::BackendError)?)
+        } else {
+            None
+        };
         let mut kernel =
             <B::Kernels as Kernels>::MatmulKernel::new(context, weights_data_type, input_data_type, output_data_type)
                 .map_err(LinearMatmulError::BackendError)?;
-        if weights_tree.numerical_profile() == NumericalProfile::Qwen35AffineBF16 {
+        if use_reference_affine {
             kernel.set_reference_accumulation();
         }
 
@@ -152,6 +186,7 @@ impl<B: Backend> LinearMatmul<B> {
             output_dim,
             output_data_type,
             reference_matmul,
+            reference_affine,
         })
     }
 
@@ -215,6 +250,28 @@ impl<B: Backend> LinearMatmul<B> {
                     command_buffer,
                 )
             };
+        }
+        if let Some(reference) = &self.reference_affine
+            && !is_affine_dot_witness_active::<B>()
+            && !has_source_affine_policy::<B>(self.matmul_b())
+        {
+            let MatmulA::FullPrecision {
+                values,
+                offset,
+            } = a
+            else {
+                return Err(InvalidInput("affine reference requires BF16 activations").into());
+            };
+            return reference.encode(
+                values,
+                offset,
+                self.matmul_b(),
+                gather_indices,
+                batch_dim,
+                output_dim,
+                self.input_dim,
+                command_buffer,
+            );
         }
         let mut output = command_buffer.allocate_scratch_for_shape(&[batch_dim, output_dim], self.output_data_type)?;
         self.kernel.lock().encode(
