@@ -4,7 +4,10 @@ use sha2::{Digest, Sha256};
 use stark_engine_macros::stark_test;
 
 use super::*;
-use crate::tests::helpers::{buffer_to_vec, create_buffer_with_data};
+use crate::{
+    backends::common::{Kernels, kernel::Gemma4VisionFlashQKKernel},
+    tests::helpers::{buffer_to_vec, create_buffer_with_data},
+};
 
 fn check<B: Backend>() {
     let root = std::path::PathBuf::from(std::env::var_os("STARK_GEMMA4_FLASH_FIXTURE_PATH").unwrap());
@@ -81,4 +84,70 @@ fn gemma4_larger_flash_canonical_cpu_fixture() {
 #[ignore]
 fn gemma4_larger_flash_canonical_metal_fixture() {
     check::<crate::backends::metal::Metal>();
+}
+
+fn qk_check<B: Backend>() {
+    let root = std::path::PathBuf::from(std::env::var_os("STARK_GEMMA4_FLASH_FIXTURE_PATH").unwrap());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["torch_source_revision"], "5c4886908584029761b579af026dcfb627c84070");
+    let witness = &manifest["qk_witness"];
+    assert_eq!(witness["oracle"], "single-unmasked-key-pinned-flash-logsumexp");
+    assert_eq!(witness["query_rows"], 256);
+    assert_eq!(witness["key_rows"], 1);
+    assert_eq!(witness["heads"], 1);
+    assert_eq!(witness["source_padded_key_rows"], 2520);
+    assert!(witness["legacy32_f32_differences"].as_u64().unwrap() > 0);
+    let load = |key: &str, bytes: usize| {
+        let record = &witness[key];
+        let name = record["file"].as_str().unwrap();
+        assert!(name.len() < 128 && !name.contains('/') && !name.contains('\\'));
+        let value = std::fs::read(root.join(name)).unwrap();
+        assert_eq!(value.len(), bytes);
+        assert_eq!(format!("{:x}", Sha256::digest(&value)), record["sha256"].as_str().unwrap());
+        value
+    };
+    let decode = |bytes: Vec<u8>| {
+        bytes
+            .chunks_exact(2)
+            .map(|value| bf16::from_bits(u16::from_le_bytes(value.try_into().unwrap())))
+            .collect::<Vec<_>>()
+    };
+    let context = B::Context::new().unwrap();
+    let q = create_buffer_with_data::<B, bf16>(&context, &decode(load("queries", 256 * 128 * 2)));
+    let k = create_buffer_with_data::<B, bf16>(&context, &decode(load("keys", 128 * 2)));
+    let expected = load("expected", 256 * 4)
+        .chunks_exact(4)
+        .map(|value| f32::from_le_bytes(value.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    let kernel = <B::Kernels as Kernels>::Gemma4VisionFlashQKKernel::new(&context).unwrap();
+    let mut command = context.create_command_buffer(None, None).unwrap();
+    let mut scores = command.allocate_scratch_for_shape(&[256, 512], DataType::F32).unwrap();
+    kernel.encode(&q, &k, &mut scores, 256, 1, 1, 0, &mut command);
+    let mut readback = context.create_buffer(256 * 512 * 4).unwrap();
+    command.encode_copy(&scores, &mut readback);
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    let actual = buffer_to_vec::<B, f32>(&readback);
+    let different = (0..256).filter(|row| actual[row * 512].to_bits() != expected[*row].to_bits()).count();
+    assert!(actual.chunks_exact(512).all(|row| row[1..].iter().all(|value| *value == f32::NEG_INFINITY)));
+    let report = serde_json::json!({"scope":"independent-flash-f32-qk-witness","backend":B::NAME,
+        "different_f32_elements":different,"legacy32_f32_differences":witness["legacy32_f32_differences"]});
+    std::fs::write(root.join(format!("native-flash-qk-{}.json", B::NAME)), serde_json::to_vec_pretty(&report).unwrap())
+        .unwrap();
+    println!("{report}");
+    assert_eq!(different, 0, "pinned F32 QK source score differs");
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+#[ignore]
+fn gemma4_larger_flash_qk_canonical_cpu_fixture() {
+    qk_check::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+#[ignore]
+fn gemma4_larger_flash_qk_canonical_metal_fixture() {
+    qk_check::<crate::backends::metal::Metal>();
 }

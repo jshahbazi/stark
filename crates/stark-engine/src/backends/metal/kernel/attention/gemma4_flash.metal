@@ -28,27 +28,19 @@ static bfloat gemma_flash_store_bf16(float x) {
 PUBLIC KERNEL(Gemma4VisionFlashQK)(const device bfloat* queries,const device bfloat* keys,
     device float* scores,constant uint& query_rows,constant uint& key_rows,
     constant uint& heads,constant uint& key_start,const uint i AXIS(heads*query_rows*512,32)) {
-  const uint column=i%512, plane=i/512, head=plane/query_rows, row=plane%query_rows;
+  const uint column=i%512, plane=i/512, head=plane/query_rows;
   const uint key_row=key_start+column;
   if(key_row>=key_rows) { scores[i]=-INFINITY; return; }
   const uint query=plane*128, key=(key_row*heads+head)*128;
-  float4 sums[8]={};
-  for(uint start=0;start<64;start+=32)
-    for(uint reg=0;reg<8;++reg)
-      for(uint lane=0;lane<4;++lane) {
-        const uint channel=start+reg*4+lane;
-        sums[reg][lane]=fma(float(queries[query+channel]),float(keys[key+channel]),sums[reg][lane]);
-      }
-  for(uint offset=4;offset!=0;offset>>=1)
-    for(uint reg=0;reg<offset;++reg) sums[reg]=sums[reg]+sums[reg+offset];
-  float4 tail=0.0f;
-  for(uint part=0;part<2;++part)
+  // F32-output CPUBlas gemm_no_downcast follows the four-part generic sum,
+  // not the 32-stream BF16-output Linear specialization.
+  float4 sums=0.0f;
+  for(uint start=0;start<72;start+=4)
     for(uint lane=0;lane<4;++lane) {
-      const uint channel=64+part*4+lane;
-      tail[lane]=fma(float(queries[query+channel]),float(keys[key+channel]),tail[lane]);
+      const uint channel=start+lane;
+      sums[lane]=fma(float(queries[query+channel]),float(keys[key+channel]),sums[lane]);
     }
-  const float dot=(sums[0][0]+sums[0][1])+(sums[0][2]+sums[0][3]);
-  scores[i]=dot+((tail[0]+tail[1])+(tail[2]+tail[3]));
+  scores[i]=((sums[0]+sums[1])+sums[2])+sums[3];
 }
 
 PUBLIC KERNEL(Gemma4VisionFlashExpBF16)(const device float* scores,device bfloat* exponents,
