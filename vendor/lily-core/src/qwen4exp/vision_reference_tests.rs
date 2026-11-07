@@ -247,6 +247,68 @@ fn first_block_metrics(
     Some(merged.to_f32().unwrap())
 }
 
+fn full_norm_metrics(
+    context: &MetalContext,
+    weights: &super::super::vision_weights::VisionWeights,
+    folder: &Path,
+    case: &Value,
+) {
+    let Some(records) = case["full_states"].as_array() else { return };
+    assert_eq!(records.len(), 27);
+    let mut metrics = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(record["block_index"], index);
+        let block = &weights.blocks[index];
+        for (norm_index, (name, weight, bias)) in [
+            ("norm1", &block.norm1_w, &block.norm1_b),
+            ("norm2", &block.norm2_w, &block.norm2_b),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let input_record = &record[format!("{name}_input")];
+            let expected = checked_tensor(folder, &record[format!("{name}_output")]);
+            let source = checked_tensor(folder, input_record);
+            let shape = input_record["shape"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| usize::try_from(v.as_u64().unwrap()).unwrap())
+                .collect::<Vec<_>>();
+            let input = Tensor::from_bytes(
+                context,
+                bytemuck::cast_slice(&source),
+                &shape,
+                DType::BF16,
+            )
+            .unwrap();
+            let output = Tensor::zeros(context, &shape, DType::BF16).unwrap();
+            let pass = context.begin().unwrap();
+            layernorm_bf16(
+                context,
+                &pass,
+                &input,
+                weight,
+                bias,
+                &output,
+                LAYERNORM_EPS,
+            )
+            .unwrap_or_else(|_| panic!("private full norm execution failed"));
+            pass.commit_wait()
+                .unwrap_or_else(|_| panic!("private full norm synchronization failed"));
+            let actual = output.to_f32().unwrap();
+            let (rms, cosine) = numerical_metric(&actual, &expected);
+            let mismatches = actual
+                .iter()
+                .zip(&expected)
+                .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
+                .count();
+            metrics.push(json!({"block_index":index,"norm_index":norm_index,"elements":actual.len(),"relative_rms":rms,"cosine":cosine,"mismatch_count":mismatches}));
+        }
+    }
+    println!("{}", json!({"private_retained_full_norm_metrics":{"stages":metrics}}));
+}
+
 /// Each operator gets the source's input, so accumulated error from earlier
 /// operators cannot hide the first arithmetic difference. These are private
 /// fixture controls over existing kernels; the production graph is unchanged.
@@ -449,6 +511,7 @@ fn retained_lily_tower_source_reference() {
         assert_eq!(pixels.len(), gh * gw * vision.patch_dim());
         let pixels = pixels.into_iter().map(f32::from).collect::<Vec<_>>();
         operators.push(json!({"case_index":case_index,"metrics":operator_metrics(&context, vision, &weights, &folder, case, gh, gw)}));
+        full_norm_metrics(&context, &weights, &folder, case);
         let sequence = first_block_metrics(
             &context,
             vision,
