@@ -2805,7 +2805,7 @@ struct ModelsView: View {
         if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
             let groups = CatalogBrowserInventory(items: catalog.items, query: catalogQuery, sort: catalogSort,
                                                  quantization: catalogQuantization).groups
-            LazyVStack(spacing: 12) {
+            LazyVStack(spacing: 6) {
                 if catalog.items.isEmpty {
                     Text(catalog.nextOffset == nil ? "No compatible models found" : "No compatible models found yet")
                         .font(.headline).frame(maxWidth: .infinity, minHeight: 180)
@@ -2849,47 +2849,30 @@ struct ModelsView: View {
 
     private func catalogGroup(_ group: CatalogBrowserInventory.Group) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(group.name).font(.headline)
-                Text(group.publisher).font(.caption).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-            }.padding(.bottom, 10)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(group.name).font(.callout.weight(.semibold)).lineLimit(1).truncationMode(.middle)
+                    .help(group.name).frame(maxWidth: .infinity, alignment: .leading)
+                if group.items.count == 1, let item = group.items.first,
+                   let url = URL(string: "https://huggingface.co/" + item.repo) {
+                    Link(destination: url) { Label(group.publisher, systemImage: "arrow.up.right") }
+                        .font(.caption).fixedSize().help(item.repo)
+                        .accessibilityLabel("View " + item.repo + " on Hugging Face")
+                } else {
+                    Text(group.publisher).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }.padding(.bottom, 6)
             ForEach(group.items) { item in
-                if item.id != group.items.first?.id { Divider() }
-                catalogRow(item)
+                if item.id != group.items.first?.id { Divider().padding(.vertical, 6) }
+                CatalogModelRow(item: item,
+                    artifactMode: Binding(get: { selectedMode(item) }, set: { artifactChoices[item.id] = $0 }),
+                    downloaded: engine.catalogItemIsDownloaded(item, artifactMode: selectedMode(item)),
+                    busy: engine.busy, showsRepositoryLink: group.items.count > 1) {
+                        engine.installCatalogItem(id: item.id, artifactMode: selectedMode(item))
+                    }
             }
-        }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary, lineWidth: 1))
-    }
-
-    private func catalogRow(_ item: FamilyModelCatalog.Item) -> some View {
-        HStack(spacing: 12) {
-            Text(item.sizeLabel ?? "Unknown").font(.callout.weight(.medium))
-                .frame(width: 70, alignment: .leading)
-            Text(item.quantization).font(.callout).frame(width: 48, alignment: .leading)
-            Text(item.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
-                .font(.caption).foregroundStyle(.secondary).frame(width: 80, alignment: .leading)
-            if let repositoryURL = URL(string: "https://huggingface.co/" + item.repo) {
-                Link("link", destination: repositoryURL).font(.caption).fixedSize().help(repositoryURL.absoluteString)
-            }
-            Spacer(minLength: 0)
-            if item.artifactModes.count > 1 {
-                Picker("Install", selection: Binding(get: { selectedMode(item) }, set: { artifactChoices[item.id] = $0 })) {
-                    ForEach(item.artifactModes, id: \.self) { Text($0.title).tag($0) }
-                }.labelsHidden().frame(width: 145).controlSize(.small).disabled(engine.busy)
-                    .accessibilityLabel("Version for " + item.name)
-            }
-            if engine.catalogItemIsDownloaded(item, artifactMode: selectedMode(item)) {
-                Text("Downloaded").font(.caption).foregroundStyle(.secondary).frame(width: 88)
-            } else {
-                Button("Download") { engine.installCatalogItem(id: item.id, artifactMode: selectedMode(item)) }
-                    .controlSize(.small).frame(width: 88).disabled(engine.busy || !item.downloadable)
-                    .accessibilityLabel("Download " + item.name + " " + item.quantization)
-            }
-        }.padding(.vertical, 9).help(item.repo + "\nVersion " + item.revision)
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(item.name + ", version " + item.revision.prefix(7))
+        }.padding(.horizontal, 12).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 1))
     }
 }
 
