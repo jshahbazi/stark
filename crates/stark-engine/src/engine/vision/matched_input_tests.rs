@@ -336,6 +336,7 @@ fn attention<B: Backend>(backend: &str) {
                     let result = generic
                         .encode(
                             AttentionArguments {
+                                image_span: None,
                                 queries: &queries,
                                 keys: &keys,
                                 values: &values,

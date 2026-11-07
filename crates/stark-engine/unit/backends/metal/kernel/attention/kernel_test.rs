@@ -230,6 +230,7 @@ fn run_single_pass_attention(
     let mut command_buffer = context.create_command_buffer(None, None).expect("Failed to create command buffer");
     let pooled_output = kernel.encode(
         AttentionArguments {
+            image_span: None,
             queries: &query_buffer,
             keys: &key_cache_buffer,
             values: &value_cache_buffer,
@@ -299,6 +300,7 @@ fn run_gemm_attention(
     let mut command_buffer = context.create_command_buffer(None, None).expect("Failed to create command buffer");
 
     let args = AttentionArguments {
+        image_span: None,
         queries: &query_buffer,
         keys: &key_buffer,
         values: &value_buffer,
@@ -482,6 +484,7 @@ fn run_two_pass_attention(
 
     let pooled_output = kernel.encode(
         AttentionArguments {
+            image_span: None,
             queries: &queries_buffer,
             keys: &keys_buffer,
             values: &values_buffer,
@@ -605,6 +608,7 @@ fn run_attention_with_kernel<B: Backend>(
         create_buffer_with_data::<B, u32>(context, &words)
     });
     let arguments = AttentionArguments {
+        image_span: None,
         queries: &queries,
         keys: &keys,
         values: &values,

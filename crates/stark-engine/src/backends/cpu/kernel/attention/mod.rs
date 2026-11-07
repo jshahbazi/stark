@@ -3,6 +3,7 @@ use crate::backends::common::Backend;
 pub mod ancestor_attention;
 pub mod attention_prepare;
 pub mod attention_single_pass;
+pub mod image_span;
 pub mod kv_cache_update;
 pub mod qkv_norm;
 pub mod sigmoid_gate;
@@ -49,6 +50,9 @@ impl AttentionKernel for AttentionCpuKernel {
         command_buffer: &mut CpuCommandBufferEncoding,
     ) -> Result<<Cpu as Backend>::ScratchBuffer, CpuError> {
         let config = self.config;
+        if arguments.image_span.is_some() {
+            return crate::backends::common::kernel::attention::encode_image_span(config, arguments, command_buffer);
+        }
         let mut output = command_buffer.allocate_scratch_for_shape(
             &[arguments.suffix_length, config.num_q_heads, config.head_dim],
             config.data_type,

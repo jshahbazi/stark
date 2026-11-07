@@ -91,6 +91,7 @@ fn get_output<T: ArrayElement + Float, B: Backend>(input: &Input<T>) -> Vec<T> {
 
     let segment_prefix_length = input.sequence_length - input.suffix_length;
     let args = AttentionArguments {
+        image_span: None,
         queries: &queries_buffer,
         keys: &keys_buffer,
         values: &values_buffer,
@@ -125,6 +126,7 @@ fn get_gemm_output<T: ArrayElement + Float>(input: &Input<T>) -> Vec<T> {
     let pooled = super::gemm::AttentionGemm::new(&config)
         .encode(
             AttentionArguments {
+                image_span: None,
                 queries: &queries,
                 keys: &keys,
                 values: &values,

@@ -48,6 +48,7 @@ const D256_SINGLE_PASS_KV_THRESHOLD: u32 = 150_000;
 const D128_SHORT_KV_GEMM_THRESHOLD: u32 = 2_048;
 
 pub struct AttentionMetalKernel {
+    config: AttentionKernelConfig,
     head_dim: u32,
     is_causal: bool,
     grouped: Option<gemm_grouped::AttentionGemmGrouped>,
@@ -72,6 +73,7 @@ impl AttentionKernel for AttentionMetalKernel {
             .then(|| fallback::AttentionFallback::new(&config, context))
             .transpose()?;
         Ok(Self {
+            config,
             head_dim: config.head_dim,
             is_causal: config.is_causal,
             grouped,
@@ -115,6 +117,13 @@ impl AttentionMetalKernel {
         command_buffer: &mut MetalCommandBufferEncoding,
     ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
         let suffix_length = arguments.suffix_length;
+        if arguments.image_span.is_some() {
+            return crate::backends::common::kernel::attention::encode_image_span(
+                self.config,
+                arguments,
+                command_buffer,
+            );
+        }
         let kv_length = arguments.cache.prefix_len() + suffix_length;
         let is_trie = arguments.trie.is_some();
         let is_ring = arguments.cache.ring_params().is_some();
