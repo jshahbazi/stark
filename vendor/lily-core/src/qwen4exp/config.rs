@@ -714,12 +714,22 @@ fn official_mlx_config(mut value: serde_json::Value) -> Result<serde_json::Value
     let padded = total.div_ceil(divisor) * divisor;
     ensure!(padded <= u32::MAX as u64, "official MLX PLE exceeds row-ID capacity");
     value["text_config"]["split_ngram_parts"] = json!(1);
+    let vision = match value.get("vision_config") {
+        None | Some(Value::Null) => Value::Null,
+        Some(config) => {
+            let depth = config.get("depth").and_then(Value::as_u64)
+                .filter(|depth| (1..=64).contains(depth))
+                .context("official MLX vision depth")?;
+            json!({"dtype":"bf16", "tensors":9 + 12 * depth})
+        }
+    };
     value["lily"] = json!({
         "format": FORMAT,
         "quantization": {"default":{"bits":4,"group_size":64}, "ngram_embedding":{"bits":4,"group_size":32}, "q8_groups":["attn","gdn","shared","head"]},
         "ple": {"layer_multipliers":multipliers,"ngram_heads_vocab_sizes":sizes,"ngram_heads_offsets":offsets,"padded_vocab_size":padded},
         "mtp": mtp,
-        "dropped": [VISION_PREFIX]
+        "vision": vision,
+        "dropped": if value.get("vision_config").is_some_and(|v| !v.is_null()) { json!([]) } else { json!([VISION_PREFIX]) }
     });
     Ok(value)
 }
@@ -1037,6 +1047,24 @@ impl Qwen4ExpConfig {
         let Some(v) = &self.vision else {
             return Ok(());
         };
+        // Admission precedes tensor loading and all tower allocations. Bound
+        // aggregate dimensions as well as each individual config field.
+        ensure!(
+            (1..=64).contains(&v.depth)
+                && (1..=4096).contains(&v.hidden_size)
+                && (1..=32768).contains(&v.intermediate_size)
+                && (1..=64).contains(&v.num_heads)
+                && (1..=16384).contains(&v.num_position_embeddings)
+                && (1..=16384).contains(&v.out_hidden_size)
+                && v.patch_size == 16 && v.in_channels == 3,
+            "vision geometry exceeds native admission bounds"
+        );
+        let (h, i, m, d, p) = (v.hidden_size as u64, v.intermediate_size as u64,
+            v.out_hidden_size as u64, v.depth as u64, v.num_position_embeddings as u64);
+        let elements = h * 1536 + p * h + d * (4 * h * h + 2 * h * i + 9 * h + i)
+            + 16 * h * h + 4 * h * m + 6 * h + m;
+        ensure!(elements * 2 <= 4 * 1024 * 1024 * 1024,
+            "vision weights exceed native admission budget");
         ensure!(
             v.hidden_act == "gelu_pytorch_tanh",
             "vision_config.hidden_act {:?} is not supported (lily implements gelu_pytorch_tanh)",

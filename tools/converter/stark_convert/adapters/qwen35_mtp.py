@@ -50,7 +50,10 @@ def plan_qwen35_mtp(
         # auxiliary weights remain omitted and cannot grant MTP capability.
         return None
     if include_vision:
-        raise UnsupportedConversion("Qwen3.5 MTP currently qualifies text execution only")
+        # Image artifacts deliberately omit the separately declared predictor.
+        # Image generation uses the target graph until multimodal MTP is
+        # qualified; auxiliary weights cannot enable that capability.
+        return None
     source = candidates[0]
     attention = next((layer for layer in layer_configs if layer["mixer_config"]["type"] == "AttentionConfig"), None)
     if attention is None or attention["mixer_config"]["has_qkvg_biases"]:

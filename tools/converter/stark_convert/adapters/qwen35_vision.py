@@ -19,8 +19,12 @@ def _positive(config: dict, name: str) -> int:
     return value
 
 
-def build_qwen35_vision_plan(vision_config: dict, tensors: dict[str, TensorInfo], model_dim: int):
+def build_qwen35_vision_plan(
+    vision_config: dict, tensors: dict[str, TensorInfo], model_dim: int, *, source_prefix: str = "model.visual."
+):
     """Return copy operations and consumed source names for official HF vision weights."""
+    if source_prefix not in {"model.visual.", "vision_tower."}:
+        raise ConversionError("Qwen3.5 vision namespace is unsupported")
     if not isinstance(vision_config, dict) or vision_config.get("model_type") not in ("qwen3_5", "qwen3_5_vision"):
         raise ConversionError("Qwen3.5 vision_config must declare qwen3_5")
     allowed = {
@@ -96,12 +100,18 @@ def build_qwen35_vision_plan(vision_config: dict, tensors: dict[str, TensorInfo]
     operations = []
     expected = set()
     for suffix, shape in shapes.items():
-        source_name = "model.visual." + suffix
+        source_name = source_prefix + suffix
         info = tensors.get(source_name)
         if info is None:
             raise ConversionError(f"Qwen3.5 vision checkpoint is missing {source_name}")
-        if info.dtype != "BF16" or info.shape != shape:
+        mlx_conv = source_prefix == "vision_tower." and suffix == "patch_embed.proj.weight"
+        source_shape = (hidden, temporal, patch, patch, channels) if mlx_conv else shape
+        if info.dtype != "BF16" or info.shape != source_shape:
             raise ConversionError(f"Qwen3.5 vision tensor {source_name} has invalid dtype or shape")
         expected.add(source_name)
-        operations.append(TensorOperation("vision." + suffix, (info,), "BF16", shape, "copy"))
+        operations.append(
+            TensorOperation(
+                "vision." + suffix, (info,), "BF16", shape, "vision_patch_transpose" if mlx_conv else "copy"
+            )
+        )
     return tuple(operations), frozenset(expected)

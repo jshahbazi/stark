@@ -314,12 +314,15 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             not in (
                 {"BF16", "F32"}
                 if operation.kind == "cast_f32" and operation.name.endswith((".scales", ".a_log", ".dt_bias"))
+                else {"I32", "U32"}
+                if artifact_contract["family"]["profile"] == "qwen35-dense-affine-merged-v3"
+                and operation.kind in {"mlx_repack", "mlx_widen"}
                 else {"BF16"}
             )
             for operation in tensors.operations
             for source in operation.sources
         ):
-            raise UnsupportedConversion("Vision family requires merged BF16 matrices and BF16/F32 control weights")
+            raise UnsupportedConversion("Vision family requires merged BF16 matrices or admitted affine decoder planes and BF16/F32 controls")
     if artifact_contract is not None and adapter == "qwen3_5":
         for layer in tensors.decoder_config["transformer_config"]["layer_configs"]:
             if layer["rope_config"] is not None:

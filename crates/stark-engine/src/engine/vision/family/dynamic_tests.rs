@@ -2,6 +2,27 @@ use stark_engine_macros::stark_test;
 
 use super::*;
 
+#[stark_test]
+fn affine_geometry_requires_folded_norms_and_keeps_the_exact_operation_graph() {
+    let mut decoder = decoder_profile();
+    assert!(geometry_affine(&decoder, &vision_profile()).is_err());
+    decoder["transformer_config"]["output_norm_config"]["scale_offset"] = Value::Null;
+    for layer in decoder["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+        for name in ["pre_mixer_norm_config", "pre_mlp_norm_config"] {
+            layer[name]["scale_offset"] = Value::Null;
+        }
+        if layer["mixer_config"]["type"] == "AttentionConfig" {
+            for name in ["query_norm_config", "key_norm_config"] {
+                layer["mixer_config"][name]["scale_offset"] = Value::Null;
+            }
+        }
+    }
+    assert!(geometry(&decoder, &vision_profile()).is_err());
+    assert!(geometry_affine(&decoder, &vision_profile()).unwrap().tensors.affine);
+    decoder["transformer_config"]["layer_configs"][0]["mixer_config"]["reference_bf16"] = json!(false);
+    assert!(geometry_affine(&decoder, &vision_profile()).is_err());
+}
+
 fn fixture(
     model: u32,
     hidden: u32,

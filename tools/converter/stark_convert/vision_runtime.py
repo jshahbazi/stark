@@ -31,7 +31,7 @@ _VISION_SCHEMAS = {
 }
 VISION_MODEL_TYPES = frozenset(_VISION_SCHEMAS)
 _FAMILY_VERSIONS = {FAMILY_PROFILE: 1, CONFIGURED_FAMILY_PROFILE: 2, GEMMA4_FAMILY_PROFILE: 1,
-                    GEMMA3_FAMILY_PROFILE: 1, GEMMA4_E4B_FAMILY_PROFILE: 1}
+                    GEMMA3_FAMILY_PROFILE: 1, GEMMA4_E4B_FAMILY_PROFILE: 1, "qwen35-dense-affine-merged-v3": 3}
 
 
 def supported_vision_schema(model_type: object, schema: object) -> bool:

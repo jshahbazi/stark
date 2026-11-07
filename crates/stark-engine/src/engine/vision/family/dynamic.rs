@@ -52,6 +52,21 @@ pub(super) fn geometry(
     decoder: &Value,
     vision: &Value,
 ) -> Result<Geometry, InvalidInput> {
+    geometry_with_storage(decoder, vision, false)
+}
+
+pub(super) fn geometry_affine(
+    decoder: &Value,
+    vision: &Value,
+) -> Result<Geometry, InvalidInput> {
+    geometry_with_storage(decoder, vision, true)
+}
+
+fn geometry_with_storage(
+    decoder: &Value,
+    vision: &Value,
+    affine: bool,
+) -> Result<Geometry, InvalidInput> {
     let transformer = &decoder["transformer_config"];
     let model = number(&transformer["model_dim"], 16384, 32)?;
     let hidden = number(&transformer["hidden_dim"], 131072, 32)?;
@@ -81,6 +96,9 @@ pub(super) fn geometry(
     expected["transformer_config"]["model_dim"] = json!(model);
     expected["transformer_config"]["hidden_dim"] = json!(hidden);
     expected["transformer_config"]["output_norm_config"]["epsilon"] = epsilon.clone();
+    if affine {
+        expected["transformer_config"]["output_norm_config"]["scale_offset"] = Value::Null;
+    }
     let baseline_layers = decoder_profile()["transformer_config"]["layer_configs"].as_array().unwrap().clone();
     let mut expected_layers = Vec::with_capacity(layers.len());
     let mut mixers = Vec::with_capacity(layers.len());
@@ -111,12 +129,18 @@ pub(super) fn geometry(
         .clone();
         for key in ["pre_mixer_norm_config", "pre_mlp_norm_config"] {
             expected_layer[key]["epsilon"] = epsilon.clone();
+            if affine {
+                expected_layer[key]["scale_offset"] = Value::Null;
+            }
         }
         expected_layer["mixer_config"]["num_heads"] = json!(head_count);
         expected_layer["mixer_config"]["num_groups"] = json!(group_count);
         if attention {
             for key in ["query_norm_config", "key_norm_config"] {
                 expected_layer["mixer_config"][key]["epsilon"] = epsilon.clone();
+                if affine {
+                    expected_layer["mixer_config"][key]["scale_offset"] = Value::Null;
+                }
             }
             let context = number(&layer["rope_config"]["max_sequence_length"], 1048576, 1)?;
             if context_geometry.is_some_and(|previous| previous != context) {
@@ -185,7 +209,8 @@ pub(super) fn geometry(
         layer_norm_eps: 1e-6,
     };
     tower.validate()?;
-    let tensors = tensor_contract(model, hidden, vocab, tied, &mixers, &tower)?;
+    let mut tensors = tensor_contract(model, hidden, vocab, tied, &mixers, &tower)?;
+    tensors.affine = affine;
     Ok(Geometry {
         tower,
         vocab,
@@ -299,6 +324,7 @@ fn tensor_contract(
     }
     Ok(TensorContract {
         tensors,
+        affine: false,
     })
 }
 

@@ -15,22 +15,26 @@ use serde_json::{Value, json};
 use super::{ImageTokenIds, VisionTowerConfig};
 use crate::backends::common::InvalidInput;
 
+mod affine;
 mod dynamic;
 
 pub(super) const PROFILE: &str = "qwen35-dense-bf16-merged-v1";
 pub(super) const VERSION: u32 = 1;
 pub(super) const DYNAMIC_PROFILE: &str = "qwen35-dense-bf16-merged-v2";
 pub(super) const DYNAMIC_VERSION: u32 = 2;
+pub(super) const AFFINE_PROFILE: &str = "qwen35-dense-affine-merged-v3";
 type TensorMap = BTreeMap<String, (&'static str, Vec<u32>)>;
 
 pub(super) struct TensorContract {
     tensors: TensorMap,
+    affine: bool,
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum FamilyProfile {
     FixedV1,
     DynamicV2,
+    AffineV3,
 }
 
 impl FamilyProfile {
@@ -39,6 +43,8 @@ impl FamilyProfile {
             Some(Self::FixedV1)
         } else if *value == json!({"profile":DYNAMIC_PROFILE,"version":DYNAMIC_VERSION}) {
             Some(Self::DynamicV2)
+        } else if *value == json!({"profile":AFFINE_PROFILE,"version":3}) {
+            Some(Self::AffineV3)
         } else {
             None
         }
@@ -48,13 +54,14 @@ impl FamilyProfile {
         match self {
             Self::FixedV1 => (PROFILE, VERSION),
             Self::DynamicV2 => (DYNAMIC_PROFILE, DYNAMIC_VERSION),
+            Self::AffineV3 => (AFFINE_PROFILE, 3),
         }
     }
 
     pub fn max_weight_bytes(self) -> u64 {
         match self {
             Self::FixedV1 => 2_000_000_000,
-            Self::DynamicV2 => dynamic::MAX_WEIGHT_BYTES,
+            Self::DynamicV2 | Self::AffineV3 => dynamic::MAX_WEIGHT_BYTES,
         }
     }
 
@@ -63,7 +70,7 @@ impl FamilyProfile {
         digest: &str,
     ) -> bool {
         digest == super::ARTIFACT_FILES[2].1
-            || matches!(self, Self::DynamicV2)
+            || matches!(self, Self::DynamicV2 | Self::AffineV3)
                 && digest == "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
     }
 }
@@ -212,7 +219,7 @@ fn source_valid(
         + usize::from(hashes.contains_key("processor_config.json"));
     let processor_count_supported = match profile {
         FamilyProfile::FixedV1 => processors == 1,
-        FamilyProfile::DynamicV2 => (1..=2).contains(&processors),
+        FamilyProfile::DynamicV2 | FamilyProfile::AffineV3 => (1..=2).contains(&processors),
     };
     hashes.len() == required.len() + processors + usize::from(hashes.contains_key("generation_config.json"))
         && required.iter().all(|name| hashes.contains_key(*name))
@@ -286,11 +293,16 @@ pub(super) fn admit(
                 248320,
                 TensorContract {
                     tensors: expected_tensors(),
+                    affine: false,
                 },
             )
         },
         FamilyProfile::DynamicV2 => {
             let geometry = dynamic::geometry(&config["decoder_config"], &contract["vision_config"])?;
+            (geometry.tower, geometry.vocab, geometry.tensors)
+        },
+        FamilyProfile::AffineV3 => {
+            let geometry = dynamic::geometry_affine(&config["decoder_config"], &contract["vision_config"])?;
             (geometry.tower, geometry.vocab, geometry.tensors)
         },
     };
@@ -305,7 +317,8 @@ pub(super) fn admit(
     if !hashes.get("tokenizer.json").is_some_and(|digest| profile.accepts_tokenizer(digest))
         || !hashes.get("chat_template.jinja").is_some_and(|digest| {
             TEMPLATE_HASHES.contains(&digest.as_str())
-                || matches!(profile, FamilyProfile::DynamicV2) && digest == DYNAMIC_STOCK_TEMPLATE
+                || matches!(profile, FamilyProfile::DynamicV2 | FamilyProfile::AffineV3)
+                    && digest == DYNAMIC_STOCK_TEMPLATE
         })
     {
         return Err(InvalidInput("unsupported native vision family text processing"));
@@ -375,8 +388,13 @@ pub(super) fn validate_weights(
     let mut bytes = vec![0; size as usize];
     file.read_exact(&mut bytes).map_err(|_| invalid())?;
     let header: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    let tensors = &admission.tensors.as_ref().ok_or_else(invalid)?.tensors;
-    validate_tensor_header(&header, file.metadata().map_err(|_| invalid())?.len(), size + 8, tensors)?;
+    let contract = admission.tensors.as_ref().ok_or_else(invalid)?;
+    let length = file.metadata().map_err(|_| invalid())?.len();
+    if contract.affine {
+        affine::validate_header(&header, length, size + 8, &contract.tensors)?;
+    } else {
+        validate_tensor_header(&header, length, size + 8, &contract.tensors)?;
+    }
     file.rewind().map_err(|_| invalid())?;
     Ok(())
 }
@@ -457,12 +475,22 @@ fn validate_tensor_header(
     data_start: u64,
     tensors: &TensorMap,
 ) -> Result<(), InvalidInput> {
+    validate_tensor_header_with_specs(header, file_length, data_start, tensors, None)
+}
+
+fn validate_tensor_header_with_specs(
+    header: &Value,
+    file_length: u64,
+    data_start: u64,
+    tensors: &TensorMap,
+    supplied_specs: Option<&BTreeMap<String, Value>>,
+) -> Result<(), InvalidInput> {
     let entries = header.as_object().ok_or_else(invalid)?;
     if entries.len() != tensors.len() + 1 {
         return Err(invalid());
     }
     let metadata = entries.get("__metadata__").and_then(Value::as_object).ok_or_else(invalid)?;
-    let mut specs = BTreeMap::new();
+    let mut specs = supplied_specs.cloned().unwrap_or_default();
     let mut spans = Vec::with_capacity(tensors.len());
     for (name, (dtype, shape)) in tensors {
         let entry = entries.get(name).ok_or_else(invalid)?;
@@ -478,10 +506,11 @@ fn validate_tensor_header(
         let bytes = shape
             .iter()
             .try_fold(
-                if *dtype == "F32" {
-                    4u64
-                } else {
-                    2
+                match *dtype {
+                    "F32" => 4u64,
+                    "U8" => 1,
+                    "BF16" => 2,
+                    _ => return Err(invalid()),
                 },
                 |count, width| count.checked_mul(u64::from(*width)),
             )
@@ -491,6 +520,7 @@ fn validate_tensor_header(
         }
         spans.push((begin, end));
         if let Some(prefix) = name.strip_suffix(".weights")
+            && supplied_specs.is_none()
             && *dtype == "BF16"
             && prefix.starts_with("decoder.")
         {

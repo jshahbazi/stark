@@ -7,7 +7,7 @@
 
 ## Extraction and local changes
 
-Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision; vision execution remains excluded.
+Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision. Explicitly admitted original-format image artifacts can load the retained BF16 vision tower; ordinary text loading keeps it disabled.
 
 Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary single-token decode graph. The bridge returns complete F32 vocabulary readouts to Stark's caller-owned exact sampler, without the upstream GPU sampler's 1,024-candidate cap or probability arithmetic. Draft distributions and acceptance stay request-local; head catch-up is disabled for ordinary non-MTP requests. Verification evaluates up to four positions in one layer-major graph with the ordinary decode's affine dot expressions, reductions, normalization and rounding boundaries. Recurrent state and pre-convolution inputs are retained for exact prefix rollback. The original serial verifier remains a reference. The engine adapter restores partially consumed groups when a stream stops early, without sampling during cleanup. Checkpoint quantization and the ordinary target's activation, state, cache and weight arithmetic are preserved. Numerical and performance qualification is recorded separately.
 
@@ -115,6 +115,18 @@ direct BF16 gates. Lily's affine HC, GDN, MoE and projection paths remain
 available under their existing precision and geometry admission checks.
 
 ## Validation boundary
+
+The retained vision adapter removes the extraction's two unconditional tower
+loading rejections. Config admission bounds individual dimensions and aggregate
+BF16 tower bytes before allocation. The external MLX config bridge preserves a
+declared tower and aliases `vision_tower.*` into its canonical namespace. The
+existing pinned tower, 3-axis positions and image-row overrides are reused.
+`prefill_with_vision_until` exposes the existing stop-between-chunks behavior
+with the final target readout enabled. The host bounds a single image to 4096
+patches, disables image MTP, and excludes image state from prefix snapshots.
+Cancellation waits for the submitted tower pass or text chunk to complete;
+submitted Metal commands cannot be safely interrupted. Checkpoint execution
+and numerical parity remain separately qualified.
 
 Stark bounds native shard header allocation against both a fixed maximum and
 the opened regular file's length. Native tensor admission checks offset
