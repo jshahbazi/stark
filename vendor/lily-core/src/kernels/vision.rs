@@ -182,3 +182,45 @@ pub(crate) fn attention_stages_bf16(
         },
     )
 }
+
+#[cfg(test)]
+pub(crate) fn contraction_reference_bf16_bias(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    out: &Tensor,
+    streams: usize,
+) -> Result<()> {
+    const REFERENCE_SOURCE: &str =
+        include_str!("metal/vision_contraction_reference.metal");
+    let (m, k, n) = (input.shape()[0], input.shape()[1], weight.shape()[0]);
+    ensure!(
+        m <= 256 && k <= 4608 && n <= 4608 && matches!(streams, 4 | 32),
+        "private contraction reference bounds"
+    );
+    ensure!(
+        weight.shape() == [n, k] && bias.numel() == n && out.numel() == m * n,
+        "private contraction reference shape"
+    );
+    for tensor in [input, weight, bias, out] {
+        ensure!(tensor.dtype() == DType::BF16, "private contraction reference dtype");
+    }
+    let pipeline = ctx.pipeline(
+        "vision_contraction_reference_bf16_bias",
+        REFERENCE_SOURCE,
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[input.binding(), weight.binding(), bias.binding(), out.binding()],
+        &[
+            Param::U32(m as u32),
+            Param::U32(n as u32),
+            Param::U32(k as u32),
+            Param::U32(streams as u32),
+        ],
+        Grid::Threads { grid: (m * n, 1, 1), threadgroup: (128, 1, 1) },
+    )
+}

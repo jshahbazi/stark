@@ -367,6 +367,19 @@ fn operator_metrics(
         pass.commit_wait().unwrap_or_else(|_| panic!("private operator synchronization failed"));
         let actual = output.to_f32().unwrap_or_else(|_| panic!("private operator readback failed"));
         let (rms, cosine) = numerical_metric(&actual, &expected);
+        if let Some((weight, bias)) = linear {
+            let reference = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
+            let pass = context.begin().unwrap();
+            let streams = if name == "patch" { 4 } else { 32 };
+            crate::kernels::vision::contraction_reference_bf16_bias(context, &pass, &input, weight, bias, &reference, streams)
+                .unwrap_or_else(|_| panic!("private contraction reference execution failed"));
+            pass.commit_wait().unwrap_or_else(|_| panic!("private contraction reference synchronization failed"));
+            let values = reference.to_f32().unwrap();
+            let (reference_rms, reference_cosine) = numerical_metric(&values, &expected);
+            let mismatches = values.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
+            let ordinary_mismatches = actual.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
+            println!("{}", json!({"private_retained_contraction_metrics":{"patches":gh * gw,"operator_index":index,"streams":streams,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches}}));
+        }
         if name == "attention" && record["stages"].is_object() {
             let n = input.shape()[0];
             let plane = vision.num_heads * n * n;
