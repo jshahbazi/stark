@@ -220,6 +220,11 @@ message: “This model architecture has no implemented converter.” This marks 
 conversion boundary; adding a parser alone would not make that architecture
 runnable. Successful conversion alone never enables function tools.
 
+The [tool-calling coverage matrix](TOOL_CALLING.md) separates supported protocols
+from model-bound evidence. Import completion and Installed rows assess the exact
+artifact codec and show whether tools are available, unavailable or unchecked.
+Adding a model for agent use requires the [tool acceptance checks](MODEL_ONBOARDING.md#assess-and-qualify-function-tools).
+
 ## Installation checks before weights
 
 For a raw local or Hugging Face checkpoint, the app runs a bounded, cancellable

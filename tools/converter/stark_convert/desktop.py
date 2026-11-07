@@ -60,7 +60,7 @@ from .hybrid_prepare import SOURCES as NATIVE_SOURCES
 from .hybrid_prepare import prepared_identity
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
-from .model_inventory import model_display
+from .model_inventory import model_display, model_tool_support
 from .model_removal import RemovalError, prepare_removal, removal_info, remove_model
 from .model_support import support_matrix
 from .mtp import mtp_capabilities, resolve_mtp
@@ -1692,6 +1692,7 @@ class Desktop:
                     "installed",
                     epoch,
                     model={k: previous[k] for k in ("id", "name", "path")},
+                    tool_support=model_tool_support(previous["path"]),
                     support_request_id=support_request_id,
                 )
                 self.status("ready" if self.worker else "idle", "Model already installed", epoch)
@@ -1812,6 +1813,7 @@ class Desktop:
                     "installed",
                     epoch,
                     model={k: model[k] for k in ("id", "name", "path")},
+                    tool_support=model_tool_support(model["path"]),
                     support_request_id=support_request_id,
                     **({"request_id": support_request_id} if guided_recipe is not None else {}),
                 )

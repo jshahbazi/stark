@@ -1,5 +1,10 @@
 # Adding model support
 
+Every new model family, checkpoint template and import route must assess function
+tools as well as native execution. Complete the [tool-calling acceptance
+checks](#assess-and-qualify-function-tools) below. A missing parser must have an
+explicit disposition; ordinary chat can remain available.
+
 Every new model family, native backend, conversion route or state-affecting
 inference path needs an explicit generation prefix-reuse assessment. Implement
 reuse when the backend can restore an exact prefill boundary within the model's
@@ -150,3 +155,56 @@ Put a dated, source-bound record under `docs/archive/runs/` when the evidence
 must be preserved, and link it from the current reference page. Keep existing
 records unchanged. Publish aggregate results and hashes only; keep native
 validation artifacts private and ignored.
+
+## Assess and qualify function tools
+
+Inspect the exact artifact's `token_codec_config.prompt_template`, not its
+family name, model card, catalogue flags or a claimed `supports_tools` field.
+Import completion and Installed rows report `available`, `unavailable` or
+`unchecked` from that actual codec. This reports protocol compatibility;
+`model_behavior` remains `unverified`. The loaded template and
+`/v1/capabilities` remain the authority for serving requests.
+
+For each new template:
+
+1. Pin its upstream source and revision, template hash, license and program
+   fingerprint. Preserve the original template. Review definitions, assistant
+   calls, typed arguments, tool results, result ordering and the next assistant
+   prefix. Reuse a parser only when that complete protocol conforms.
+2. Add source-bound native-rendering and parsing tests. Cover null assistant
+   content, multiple calls, results arriving out of order, all supported scalar
+   and structured argument types, multiline/Unicode strings, streaming,
+   malformed/truncated output, duplicate/unknown names, limits and tool choices.
+   Keep unknown or changed programs disabled. Marker presence is insufficient.
+3. If the model uses a different trained format, implement and test a separate
+   bounded parser. A model without tool training needs an appropriate trained
+   checkpoint or training/evaluation work; adding instructions or a template
+   does not establish that capability.
+4. Run a model-bound workflow on the actual checkpoint/quantization and worker.
+   At minimum check correct call selection/arguments, returned-result use and
+   ordinary chat. Check buffered/streamed API behavior and cancellation with a
+   real client before claiming an agent integration. Record failures honestly.
+
+The bounded native smoke command below runs synthetic requests serially, returns
+a synthetic tool result without executing external tools, and writes only
+aggregate checks and hashes. It uses greedy sampling with MTP disabled and hashes
+the actual config, tokenizer and Safetensors/GGUF payloads. Hashing a large model
+can take time. It does not support external EXL3 expert banks. Choose a new ignored
+output filename and run without another native generation workload:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python \
+  scripts/validate_tool_calling.py \
+  --model /absolute/path/to/model \
+  --worker /absolute/path/to/stark-generate \
+  --output runtime/model-tools-validation.json
+```
+
+A passing run qualifies only those three bounded checks for those sealed bytes,
+budgets and sampling settings. It does not establish broad task competence.
+Store a separate dated record with the source/build identity, device/OS, parser,
+template and artifact hashes, aggregate outcomes and remaining limitations.
+Never persist prompts, generated calls, arguments, responses or token vectors.
+Do not reuse another artifact's behavioral qualification or silently promote
+import metadata into one. Consult the [current coverage matrix](TOOL_CALLING.md)
+for implemented formats and outstanding work.

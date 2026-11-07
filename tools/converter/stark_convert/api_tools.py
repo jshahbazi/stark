@@ -1,4 +1,4 @@
-"""Bounded Chat Completions tools and reviewed Qwen tool wire formats.
+"""Bounded Chat Completions tools and reviewed model tool wire formats.
 
 Tools are requests for client execution. JSON schemas are supplied to the model
 as hints; this module does not promise schema-constrained generation. The client
@@ -29,7 +29,8 @@ _CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _PARSER = "qwen3-hermes-v1"
 _XML_PARSER = "qwen38-xml-v1"
 _QWEN35_XML_PARSER = "qwen35-xml-v1"
-_XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER})
+_GLM_PARSER = "glm53-xml-v1"
+_XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER, _GLM_PARSER})
 # Official Qwen/Qwen3-0.6B tokenizer_config.json chat_template at revision
 # c1899de289a04d12100db370d81485cdf75e47ca, verified 2026-10-31. Admission
 # binds the reviewed template program, not a model name.
@@ -38,7 +39,8 @@ QWEN3_TEMPLATE_SHA256 = "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d
 # revision 4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25, independently reviewed
 # for the same Qwen3-Hermes tool-call wire markers and history ordering.
 QWEN3_4B_TEMPLATE_SHA256 = "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5"
-_SUPPORTED_TEMPLATE_HASHES = frozenset({QWEN3_TEMPLATE_SHA256, QWEN3_4B_TEMPLATE_SHA256})
+QWEN25_TEMPLATE_SHA256 = "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f"
+_SUPPORTED_TEMPLATE_HASHES = frozenset({QWEN3_TEMPLATE_SHA256, QWEN3_4B_TEMPLATE_SHA256, QWEN25_TEMPLATE_SHA256})
 # fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl tokenizer_config.json chat_template,
 # revision 0f94842e3682b49acace4daeb4cf2e65a6f94f83. The same exact program
 # is retained in the raw checkpoint's token_codec_config. Unlike Hermes JSON,
@@ -50,13 +52,26 @@ QWEN38_XML_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa
 # synthetic history. Its top-level boolean/null values use the exact
 # literals True/False/None; nested object/array values still use JSON.
 QWEN35_XML_TEMPLATE_SHA256 = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
-# Version-1 Jinja AST fingerprints of the four hash-verified sources above.
+GLM53_TEMPLATE_SHA256 = "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891"
+FLINT_TEMPLATE_SHA256 = "7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6ae29733466"
+# Version-1 Jinja AST fingerprints of the hash-verified sources above.
 # They admit only syntax-equivalent programs, independently of model metadata.
 _SUPPORTED_TEMPLATE_PROGRAMS = {
     "2537497c84cb9ae2a885de78e7531cd44c62f38dadfcfa7565793ce9e38481ac": _PARSER,
     "813d6e292f35cf32a98357c5382ec57ae39ddb658e5b16559c957b119a2859b5": _PARSER,
+    # Qwen/Qwen2.5-0.5B-Instruct, revision
+    # 7ae557604adf67be50417f59c2c2f167def9a775. Same Hermes envelope;
+    # independently rendered definitions, typed calls and result history.
+    "8f92b77faedd343fd1d45a534e1fc93a77efb76adddd98a6819e6cd17a0b9bfa": _PARSER,
     "ece3bd43a4194cae4a2d3b6079214373b84f9083ff6258940d0b03634e93f08e": _XML_PARSER,
     "a0feb6a6a23bced6ef842bcb46dad27dc43738bf9acd5751606f24aa343610d8": _QWEN35_XML_PARSER,
+    # zai-org/GLM-5.3-Flash metadata revision
+    # 04c4e9e95c5da8862dced7e5056455116f83a7e0: bare function name and
+    # paired arg_key/arg_value tags, raw strings and JSON non-string values.
+    "55dff1823a10de87fa2f4ca4c0986498cd577ed4d495642f6c371e0abbcc243a": _GLM_PARSER,
+    # RecursiveSI/flint-int4, revision 3b93f9053b530488405ae9fca51d4900d6ce21f0.
+    # The same raw-string/JSON arg-key/value wire format; independently rendered.
+    "c61d6063b6aeb383d9a6e80cb62f48164363c6fabb4369d85005c0ae9b9237b8": _GLM_PARSER,
 }
 _XML_TYPES = frozenset({"string", "integer", "number", "boolean", "null", "object", "array"})
 _XML_UNKNOWN = object()
@@ -323,7 +338,29 @@ def tool_parser_for(codec: dict | None) -> str | None:
         return _XML_PARSER
     if digest == QWEN35_XML_TEMPLATE_SHA256:
         return _QWEN35_XML_PARSER
+    if digest in {GLM53_TEMPLATE_SHA256, FLINT_TEMPLATE_SHA256}:
+        return _GLM_PARSER
     return _SUPPORTED_TEMPLATE_PROGRAMS.get(template_program_sha256(source))
+
+
+def tool_support_for(codec: dict | None) -> dict:
+    """Report template protocol support without claiming model task competence."""
+    source = codec.get("prompt_template") if isinstance(codec, dict) else None
+    digest = None
+    if isinstance(source, str) and 0 < len(source) <= MAX_TEMPLATE_BYTES:
+        try:
+            encoded = source.encode("utf-8")
+            if len(encoded) <= MAX_TEMPLATE_BYTES:
+                digest = hashlib.sha256(encoded).hexdigest()
+        except UnicodeEncodeError:
+            pass
+    parser = tool_parser_for(codec) if digest is not None else None
+    return {
+        "status": "available" if parser else "unavailable" if digest else "unchecked",
+        "parser": parser,
+        "template_sha256": digest,
+        "model_behavior": "unverified",
+    }
 
 
 def _xml_schema_error(reason="parameter_type"):
@@ -546,11 +583,14 @@ def _tool_prefix_safe(prefix):
 
 
 def _xml_parameter_value(body, types, invalid, parser):
-    if any(marker in body for marker in _XML_RESERVED):
+    reserved = _XML_RESERVED + (
+        ("<arg_key", "</arg_key", "<arg_value", "</arg_value") if parser == _GLM_PARSER else ()
+    )
+    if any(marker in body for marker in reserved):
         raise invalid("format")
-    # The pinned renderer adds exactly one LF before and after each value.
+    # The Qwen renderers add exactly one LF before and after each value.
     # Inline values are also lossless; a half frame cannot be repaired safely.
-    if body.startswith("\n") or body.endswith("\n"):
+    if parser != _GLM_PARSER and (body.startswith("\n") or body.endswith("\n")):
         if len(body) < 2 or not (body.startswith("\n") and body.endswith("\n")):
             raise invalid("format")
         body = body[1:-1]
@@ -676,6 +716,82 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
     return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
 
 
+def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid):
+    """Decode the pinned GLM arg-key/value grammar without repairing output."""
+    schemas = _xml_tool_schemas(tools)
+    calls = []
+    cursor = start
+    while cursor < len(text):
+        if len(calls) >= MAX_CALLS:
+            raise invalid("count")
+        if not text.startswith("<tool_call>", cursor):
+            raise invalid("trailing" if calls else "format")
+        cursor += len("<tool_call>")
+        end = text.find("<", cursor, cursor + 66)
+        if end < 0:
+            raise invalid("format")
+        name = text[cursor:end]
+        if not _NAME.fullmatch(name):
+            raise invalid("format")
+        if name not in names:
+            raise invalid("tool")
+        cursor = end
+        arguments = {}
+        argument_bytes = 0
+        while text.startswith("<arg_key>", cursor):
+            cursor += len("<arg_key>")
+            end = text.find("</arg_key>", cursor, cursor + 65 + len("</arg_key>"))
+            if end < 0:
+                raise invalid("format")
+            parameter = text[cursor:end]
+            if not _NAME.fullmatch(parameter) or parameter not in schemas[name] or parameter in arguments:
+                raise invalid("argument")
+            cursor = end + len("</arg_key>")
+            if not text.startswith("<arg_value>", cursor):
+                raise invalid("format")
+            cursor += len("<arg_value>")
+            end = text.find("</arg_value>", cursor, cursor + MAX_ARGUMENT_BYTES + len("</arg_value>") + 1)
+            if end < 0:
+                raise invalid("limits" if text.find("</arg_value>", cursor) >= 0 else "format")
+            body = text[cursor:end]
+            argument_bytes += len(parameter.encode("utf-8")) + len(body.encode("utf-8"))
+            if argument_bytes > MAX_ARGUMENT_BYTES:
+                raise invalid("limits")
+            if schemas[name][parameter] is _XML_UNKNOWN:
+                raise APIError(
+                    502,
+                    "The model selected a tool argument whose schema does not determine its XML value type. "
+                    "No tool calls from this completion were released.",
+                    "tool_argument_type_unsupported",
+                )
+            try:
+                arguments[parameter] = _xml_parameter_value(body, schemas[name][parameter], invalid, _GLM_PARSER)
+                bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+            except APIError as error:
+                if error.code in {"invalid_tool_call", "tool_argument_type_unsupported"}:
+                    raise
+                raise invalid("limits") from None
+            cursor = end + len("</arg_value>")
+        if not text.startswith("</tool_call>", cursor):
+            raise invalid("format")
+        calls.append(
+            {
+                "id": f"call_{call_id_prefix}_{len(calls)}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                },
+            }
+        )
+        cursor += len("</tool_call>")
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+    if not parallel_tool_calls and len(calls) != 1:
+        raise invalid("count")
+    return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
+
+
 class ToolTextStream:
     """Stream only text before a possible call; calls require terminal validation.
 
@@ -782,6 +898,10 @@ def parse_tool_output(
 
     start = text.find("<tool_call")
     if start < 0 and "</tool_call" not in text:
+        if parser == _GLM_PARSER and any(
+            marker in text for marker in ("<arg_key", "</arg_key", "<arg_value", "</arg_value")
+        ):
+            raise invalid("markup")
         if parser in _XML_PARSERS and any(
             marker in text for marker in ("<function", "</function", "<parameter", "</parameter")
         ):
@@ -798,11 +918,17 @@ def parse_tool_output(
         raise ValueError("Invalid private tool-call ID prefix")
     if start < 0 or "</tool_call" in text[:start]:
         raise invalid("markup")
+    if parser == _GLM_PARSER and any(
+        marker in text[:start] for marker in ("<arg_key", "</arg_key", "<arg_value", "</arg_value")
+    ):
+        raise invalid("markup")
     if not _tool_prefix_safe(text[:start]):
         raise invalid("prefix")
     names = {tool["function"]["name"] for tool in tools}
     if isinstance(tool_choice, dict):
         names &= {tool_choice["function"]["name"]}
+    if parser == _GLM_PARSER:
+        return _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid)
     if parser in _XML_PARSERS:
         return _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser)
     calls = []

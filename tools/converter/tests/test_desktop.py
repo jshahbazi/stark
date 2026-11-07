@@ -157,6 +157,25 @@ def installed(desktop, model):
     return desktop.models[0]["id"]
 
 
+@pytest.mark.parametrize("fixture", ["glm53", "qwen25", "flint", None])
+def test_import_and_existing_install_report_actual_tool_protocol_without_loading(desktop, model, fixture):
+    if fixture is not None:
+        config = json.loads((model / "config.json").read_text())
+        config["token_codec_config"]["prompt_template"] = (
+            Path(__file__).parent / "fixtures" / f"{fixture}_chat_template.jinja"
+        ).read_text()
+        (model / "config.json").write_text(json.dumps(config))
+    installed(desktop, model)
+    assessment = next(e["tool_support"] for e in events(desktop) if e["event"] == "installed")
+    assert assessment["status"] == ("available" if fixture else "unavailable")
+    assert assessment["model_behavior"] == "unverified"
+    assert desktop.worker is None
+    installed(desktop, model)
+    assert [e["tool_support"] for e in events(desktop) if e["event"] == "installed"] == [assessment, assessment]
+    display = next(e for e in events(desktop) if e["event"] == "models")["models"][0]["display"]
+    assert display["tool_support"] == assessment
+
+
 def running(desktop, model):
     identifier = installed(desktop, model)
     desktop.dispatch({"command": "run", "model_id": identifier})
@@ -419,7 +438,7 @@ def test_playground_rejects_invalid_request_identifiers(desktop, request_id):
         desktop.dispatch({"command": "generate", "text": "timing fixture", "request_id": request_id})
 
 
-@pytest.fixture(params=["qwen3-hermes-v1", "qwen38-xml-v1", "qwen35-xml-v1"])
+@pytest.fixture(params=["qwen3-hermes-v1", "qwen38-xml-v1", "qwen35-xml-v1", "glm53-xml-v1"])
 def tool_desktop(desktop, model, monkeypatch, request):
     from jinja2.sandbox import ImmutableSandboxedEnvironment
 
@@ -430,6 +449,8 @@ def tool_desktop(desktop, model, monkeypatch, request):
         "text": (
             '<tool_call>{"name":"lookup","arguments":{"value":3}}</tool_call>'
             if parser == "qwen3-hermes-v1"
+            else "<tool_call>lookup<arg_key>value</arg_key><arg_value>3</arg_value></tool_call>"
+            if parser == "glm53-xml-v1"
             else "<tool_call>\n<function=lookup>\n<parameter=value>\n3\n</parameter>\n</function>\n</tool_call>"
         ),
         "input_tokens": 24,
