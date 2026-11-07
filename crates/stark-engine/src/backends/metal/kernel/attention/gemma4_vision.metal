@@ -23,7 +23,44 @@ PUBLIC KERNEL(Gemma4VisionNormBF16)(const device bfloat* input, const device bfl
     device bfloat* output, constant uint& rows, constant uint& width, constant float& epsilon,
     constant uint& has_scale, const uint row AXIS(rows,32)) {
   float sum=0.0f;
-  for(uint j=0;j<width;++j) { const float x=float(input[row*width+j]); sum += x*x; }
+  if(width==72 || width==1152) {
+    // Larger Gemma vision only. ATen cascade sum; see CPU implementation and
+    // scripts/licenses/distribution/pytorch-LICENSE. Logical72 has an 8-tail.
+    const uint count=width/16;
+    const uint power=max(4u,(32u-clz(count-1))/4u), step=1u<<power, mask=step-1;
+    float4 levels[4][4]={};
+    uint index=0;
+    while(index+step<=count) {
+      for(uint j=0;j<step;++j,++index)
+        for(uint reg=0;reg<4;++reg)
+          for(uint lane=0;lane<4;++lane) {
+            const float x=float(input[row*width+index*16+reg*4+lane]);
+            levels[0][reg][lane]+=x*x;
+          }
+      for(uint level=1;level<4;++level) {
+        for(uint reg=0;reg<4;++reg) { levels[level][reg]+=levels[level-1][reg]; levels[level-1][reg]=0.0f; }
+        if((index&(mask<<(level*power)))!=0) break;
+      }
+    }
+    for(;index<count;++index)
+      for(uint reg=0;reg<4;++reg)
+        for(uint lane=0;lane<4;++lane) {
+          const float x=float(input[row*width+index*16+reg*4+lane]);
+          levels[0][reg][lane]+=x*x;
+        }
+    for(uint level=1;level<4;++level)
+      for(uint reg=0;reg<4;++reg) levels[0][reg]+=levels[level][reg];
+    for(uint tail=count*16;tail<width;tail+=4)
+      for(uint lane=0;lane<4;++lane) {
+        const float x=float(input[row*width+tail+lane]);
+        levels[0][0][lane]+=x*x;
+      }
+    float4 lanes=levels[0][0];
+    for(uint reg=1;reg<4;++reg) lanes+=levels[0][reg];
+    for(uint lane=0;lane<4;++lane) sum+=lanes[lane];
+  } else {
+    for(uint j=0;j<width;++j) { const float x=float(input[row*width+j]); sum += x*x; }
+  }
   const float scale=1.0f/metal::precise::sqrt(sum/float(width)+epsilon);
   for(uint j=0;j<width;++j) {
     const float x=float(input[row*width+j])*scale;

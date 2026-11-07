@@ -55,9 +55,76 @@ pub fn gemma4_vision_norm_bf16(
     let width = width as usize;
     for row in 0..rows as usize {
         let mut sum = 0.0f32;
-        for j in 0..width {
-            let value = unsafe { (*input.add(row * width + j)).to_f32() };
-            sum += value * value;
+        if width == 72 || width == 1152 {
+            // Larger Gemma vision only: ATen SumKernel.cpp row_sum/cascade
+            // schedule (5c4886908584029761b579af026dcfb627c84070).
+            // Width 72 has two whole-vector tails, added to ILP register zero
+            // before the register reduction. Padding is never part of RMS.
+            let count = width / 16;
+            let power = 4usize.max((usize::BITS - (count - 1).leading_zeros()) as usize / 4);
+            let step = 1usize << power;
+            let mask = step - 1;
+            let mut levels = [[[0.0f32; 4]; 4]; 4];
+            let mut index = 0usize;
+            while index + step <= count {
+                for _ in 0..step {
+                    for register in 0..4 {
+                        for lane in 0..4 {
+                            let x = unsafe { (*input.add(row * width + index * 16 + register * 4 + lane)).to_f32() };
+                            levels[0][register][lane] += x * x;
+                        }
+                    }
+                    index += 1;
+                }
+                for level in 1..4 {
+                    for register in 0..4 {
+                        for lane in 0..4 {
+                            levels[level][register][lane] += levels[level - 1][register][lane];
+                            levels[level - 1][register][lane] = 0.0;
+                        }
+                    }
+                    if index & (mask << (level * power)) != 0 {
+                        break;
+                    }
+                }
+            }
+            while index < count {
+                for register in 0..4 {
+                    for lane in 0..4 {
+                        let x = unsafe { (*input.add(row * width + index * 16 + register * 4 + lane)).to_f32() };
+                        levels[0][register][lane] += x * x;
+                    }
+                }
+                index += 1;
+            }
+            for level in 1..4 {
+                for register in 0..4 {
+                    for lane in 0..4 {
+                        levels[0][register][lane] += levels[level][register][lane];
+                    }
+                }
+            }
+            for tail in (count * 16..width).step_by(4) {
+                for lane in 0..4 {
+                    let x = unsafe { (*input.add(row * width + tail + lane)).to_f32() };
+                    levels[0][0][lane] += x * x;
+                }
+            }
+            let mut lanes = levels[0][0];
+            for register in 1..4 {
+                for lane in 0..4 {
+                    lanes[lane] += levels[0][register][lane];
+                }
+            }
+            for lane in lanes {
+                sum += lane;
+            }
+        } else {
+            // Preserve the qualified E2B/E4B and unified-12B schedules.
+            for j in 0..width {
+                let value = unsafe { (*input.add(row * width + j)).to_f32() };
+                sum += value * value;
+            }
         }
         let scale = (sum / width as f32 + epsilon).sqrt().recip();
         for j in 0..width {

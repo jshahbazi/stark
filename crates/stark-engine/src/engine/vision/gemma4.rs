@@ -32,6 +32,8 @@ use crate::{
 
 #[cfg(all(test, backend = "cpu"))]
 mod nople_diagnostics;
+#[cfg(test)]
+mod norm_reference_tests;
 mod preprocess;
 #[cfg(all(test, backend = "metal"))]
 mod reference_tests;

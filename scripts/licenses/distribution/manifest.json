@@ -167,6 +167,25 @@
       ],
       "adaptation": "Exact-artifact BF16 ordinary, final and packed Q/K RMS normalization. The F32 sum uses SumKernel multi_row_sum/row_sum cascade and lane fold; mean follows CPU sum then divide; reciprocal square root follows the pinned ARM NEON sqrt then reciprocal sequence. F32 affine operations remain separate before final BF16 cast. Selected only by Qwen35ReferenceBF16 numerical profile; legacy text normalization unchanged."
     },
+    "pytorch-gemma4-larger-vision-rms": {
+      "license": "BSD-3-Clause",
+      "license_file": "pytorch-LICENSE",
+      "license_sha256": "bd018feef8825e88181c84eb7e3aa4eafb8f08a20d9fd6ef948569610c4a3e43",
+      "repository": "https://github.com/pytorch/pytorch",
+      "source_tag": "v2.14.1",
+      "source_revision": "5c4886908584029761b579af026dcfb627c84070",
+      "source_files": [
+        {
+          "path": "aten/src/ATen/native/cpu/SumKernel.cpp",
+          "sha256": "9b88aa14e626dd708e50816a5ca89acfc66798226dc82501cf1857caebe96f95"
+        },
+        {
+          "path": "aten/src/ATen/native/ReduceOps.cpp",
+          "sha256": "dbfcefea8d87011c4530e08ae6c130321294eac05300b0d1f0b1baabad637fac"
+        }
+      ],
+      "adaptation": "Larger Gemma 4 vision RMS only: logical72 and hidden1152 F32 sum cascade, sequential lane fold and mean division. Logical72 whole-vector tails enter ILP accumulator zero before accumulator combination. E2B/E4B, unified12B and text normalization schedules are unchanged."
+    },
     "pytorch-qwen35-reference-silu": {
       "license": "BSD-3-Clause",
       "license_file": "pytorch-LICENSE",
