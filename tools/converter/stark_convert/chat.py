@@ -192,6 +192,8 @@ def load_template(model, *, expected_hashes=None):
             }
             if config["type"] == "Gemma4VisionLanguageModelConfig":
                 template_hashes = {"0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"}
+            elif config["type"] == "Gemma3VisionLanguageModelConfig":
+                template_hashes = {"7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"}
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
             if (

@@ -18,8 +18,19 @@ _ARTIFACT = "7c5960e7225b3b36844fa397a85c5e20d281d732e382475062f552c0737c79d4"
 FAMILY_PROFILE = "qwen35-dense-bf16-merged-v1"
 CONFIGURED_FAMILY_PROFILE = "qwen35-dense-bf16-merged-v2"
 GEMMA4_FAMILY_PROFILE = "gemma4-e2b-bf16-v1"
-VISION_MODEL_TYPES = frozenset({"Qwen35VisionLanguageModelConfig", "Gemma4VisionLanguageModelConfig"})
-_FAMILY_VERSIONS = {FAMILY_PROFILE: 1, CONFIGURED_FAMILY_PROFILE: 2, GEMMA4_FAMILY_PROFILE: 1}
+GEMMA3_FAMILY_PROFILE = "gemma3-siglip-bf16-v1"
+_VISION_SCHEMAS = {
+    "Qwen35VisionLanguageModelConfig": (2, 3),
+    "Gemma4VisionLanguageModelConfig": (4,),
+    "Gemma3VisionLanguageModelConfig": (5,),
+}
+VISION_MODEL_TYPES = frozenset(_VISION_SCHEMAS)
+_FAMILY_VERSIONS = {FAMILY_PROFILE: 1, CONFIGURED_FAMILY_PROFILE: 2, GEMMA4_FAMILY_PROFILE: 1,
+                    GEMMA3_FAMILY_PROFILE: 1}
+
+
+def supported_vision_schema(model_type: object, schema: object) -> bool:
+    return isinstance(model_type, str) and type(schema) is int and schema in _VISION_SCHEMAS.get(model_type, ())
 _ARTIFACT_HASHES = {
     "artifact_sha256",
     "config_sha256",
@@ -81,7 +92,7 @@ def image_input_contract(value: object) -> dict | None:
         or type(value.get("max_images")) is not int
         or value["max_images"] != 1
         or type(value.get("artifact_schema_version")) is not int
-        or value["artifact_schema_version"] not in (2, 3, 4)
+        or value["artifact_schema_version"] not in (2, 3, 4, 5)
         or any(not isinstance(value.get(key), str) or _HASH.fullmatch(value[key]) is None for key in _ARTIFACT_HASHES)
         or not isinstance(operations, list)
         or any(not isinstance(item, str) for item in operations)
@@ -114,6 +125,8 @@ def image_input_contract(value: object) -> dict | None:
         return None
     if (value["artifact_schema_version"] == 4) != (value.get("family_profile") == GEMMA4_FAMILY_PROFILE):
         return None
+    if (value["artifact_schema_version"] == 5) != (value.get("family_profile") == GEMMA3_FAMILY_PROFILE):
+        return None
     return dict(value)
 
 
@@ -123,6 +136,13 @@ def family_image_input_contract(value: object) -> bool:
         return False
     source, revision = value.get("model_source"), value.get("model_revision")
     gemma = value.get("family_profile") == GEMMA4_FAMILY_PROFILE
+    if value.get("family_profile") == GEMMA3_FAMILY_PROFILE and (
+        value.get("artifact_schema_version") != 5
+        or value.get("max_patches") != 4096
+        or value.get("max_image_tokens") != 256
+        or value.get("max_processed_pixels") != 802816
+    ):
+        return False
     if gemma and (
         value.get("artifact_schema_version") != 4
         or source != "google/gemma-4-E2B-it"
@@ -162,11 +182,13 @@ def artifact_image_family(config: object) -> dict | None:
     if not isinstance(contract, dict):
         return None
     family = contract.get("family")
+    if config["type"] == "Gemma3VisionLanguageModelConfig":
+        return dict(family) if contract.get("schema_version") == 5 and family == {"profile": GEMMA3_FAMILY_PROFILE, "version": 1} else None
     if config["type"] == "Gemma4VisionLanguageModelConfig":
         if contract.get("schema_version") == 4 and family == {"id": GEMMA4_FAMILY_PROFILE, "version": 1}:
             return {"profile": GEMMA4_FAMILY_PROFILE, "version": 1}
         return None
-    return family if supported_image_family(family) and family["profile"] != GEMMA4_FAMILY_PROFILE else None
+    return family if supported_image_family(family) and family["profile"] not in {GEMMA4_FAMILY_PROFILE, GEMMA3_FAMILY_PROFILE} else None
 
 
 def supported_image_family(value: object) -> bool:

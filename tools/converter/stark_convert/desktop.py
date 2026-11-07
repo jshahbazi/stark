@@ -71,7 +71,7 @@ from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
 from .sources import huggingface_repository
-from .vision_runtime import VISION_MODEL_TYPES, artifact_image_family, supported_image_family
+from .vision_runtime import VISION_MODEL_TYPES, artifact_image_family, supported_image_family, supported_vision_schema
 
 MAX_COMMAND_BYTES = 1024 * 1024
 MAX_PROGRESS_BYTES = 4096
@@ -159,9 +159,7 @@ def model_valid(path):
             contract = config.get("artifact_contract")
             if (
                 not isinstance(contract, dict)
-                or type(contract.get("schema_version")) is not int
-                or contract["schema_version"]
-                not in ((4,) if config["type"] == "Gemma4VisionLanguageModelConfig" else (2, 3))
+                or not supported_vision_schema(config["type"], contract.get("schema_version"))
             ):
                 return False
             return (
@@ -1836,7 +1834,7 @@ class Desktop:
         if (
             config.get("type") not in VISION_MODEL_TYPES
             or not isinstance(contract, dict)
-            or contract.get("schema_version") not in (3, 4)
+            or contract.get("schema_version") not in (3, 4, 5)
         ):
             return None
         family = artifact_image_family(config)

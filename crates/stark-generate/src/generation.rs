@@ -171,7 +171,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        matches!(self.schema_version, 2 | 3 | 4)
+        matches!(self.schema_version, 2 | 3 | 4 | 5 | 6)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
@@ -183,6 +183,49 @@ impl ImageArtifactIdentity<'_> {
             .all(|value| {
                 value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             })
+    }
+}
+
+/// Bind each implementation profile to its artifact schema and actual geometry.
+/// Capability recognition never implies that an artifact has been qualified.
+fn image_family_limits(
+    profile: &str,
+    version: u32,
+    schema: u32,
+    geometry: (u32, u32),
+) -> Option<(u32, u32, u32)> {
+    let (expected_geometry, patches, tokens) = match (profile, version, schema) {
+        ("qwen35-dense-bf16-merged-v1", 1, 2 | 3)
+        | ("qwen35-dense-bf16-merged-v2", 2, 3)
+        | ("qwen35-dense-affine-merged-v3", 3, 3)
+        | ("qwen38-lily-retained-bf16-vision-v1", 1, 6) => ((16, 2), 4096, 1024),
+        ("gemma4-e2b-bf16-v1" | "gemma4-e4b-bf16-v1", 1, 4) => ((16, 3), 2520, 280),
+        ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
+        _ => return None,
+    };
+    (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
+}
+
+#[cfg(test)]
+mod image_family_tests {
+    use super::image_family_limits;
+
+    #[test]
+    fn family_handshakes_require_matching_schema_version_and_geometry() {
+        for (profile, version, schema, geometry, expected) in [
+            ("qwen35-dense-bf16-merged-v2", 2, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-dense-affine-merged-v3", 3, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, (16, 2), (4096, 1024, 1048576)),
+            ("gemma4-e2b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-e4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma3-siglip-bf16-v1", 1, 5, (14, 4), (4096, 256, 802816)),
+        ] {
+            assert_eq!(image_family_limits(profile, version, schema, geometry), Some(expected));
+            assert_eq!(image_family_limits(profile, version + 1, schema, geometry), None);
+            assert_eq!(image_family_limits(profile, version, 1, geometry), None);
+            assert_eq!(image_family_limits(profile, version, schema, (1, 1)), None);
+        }
+        assert_eq!(image_family_limits("unimplemented", 1, 5, (14, 4)), None);
     }
 }
 
@@ -1103,40 +1146,22 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             .filter(ImageArtifactIdentity::valid)
             .ok_or("invalid_model_config")?;
         let runtime_identity = worker.backend.runtime_identity().ok_or("invalid_model_config")?;
-        let (family_profile, family_version) = worker
-            .backend
-            .image_family_profile()
-            .filter(|(profile, version)| {
-                matches!(
-                    (*profile, *version),
-                    ("qwen35-dense-bf16-merged-v1", 1) | ("qwen35-dense-bf16-merged-v2", 2) | ("gemma4-e2b-bf16-v1", 1)
-                )
-            })
-            .ok_or("invalid_model_config")?;
+        let (family_profile, family_version) = worker.backend.image_family_profile().ok_or("invalid_model_config")?;
         let (model_source, model_revision) = worker.backend.image_source_identity().ok_or("invalid_model_config")?;
-        let gemma = family_profile == "gemma4-e2b-bf16-v1";
-        if (gemma && (identity.schema_version != 4 || worker.backend.image_geometry() != (16, 3)))
-            || (!gemma && (!matches!(identity.schema_version, 2 | 3) || worker.backend.image_geometry() != (16, 2)))
-        {
-            return Err("invalid_model_config");
-        }
-        let max_patches = if gemma {
-            2520
-        } else {
-            4096
-        };
-        let max_image_tokens = if gemma {
-            280
-        } else {
-            1024
-        };
+        let (max_patches, max_image_tokens, max_processed_pixels) = image_family_limits(
+            family_profile,
+            family_version,
+            identity.schema_version,
+            worker.backend.image_geometry(),
+        )
+        .ok_or("invalid_model_config")?;
         readiness["image_input"] = json!({
             "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],
             "formats":["image/jpeg","image/png"],"max_images":1,
             "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":32_000_000,
             "max_source_dimension":16_384,
-            "max_processed_pixels":max_patches * 256,"max_patches":max_patches,"max_image_tokens":max_image_tokens,
+            "max_processed_pixels":max_processed_pixels,"max_patches":max_patches,"max_image_tokens":max_image_tokens,
             "artifact_schema_version":identity.schema_version,"model_source":model_source,
             "model_revision":model_revision,"family_profile":family_profile,"family_version":family_version,
             "artifact_sha256":identity.artifact_sha256,"config_sha256":identity.config_sha256,

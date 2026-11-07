@@ -20,6 +20,7 @@ use stark_engine::{
         },
         vision::{
             NativeVisionErrorKind, PreparedVisionImage, VisionLanguageModel,
+            gemma3::{Gemma3VisionLanguageModel, PreparedGemma3Image},
             gemma4::{Gemma4VisionLanguageModel, PreparedGemmaImage},
         },
     },
@@ -71,11 +72,13 @@ enum NativeModel {
     Text(Box<LanguageModel<Metal>>),
     Vision(Box<VisionLanguageModel<Metal>>),
     Gemma4Vision(Box<Gemma4VisionLanguageModel<Metal>>),
+    Gemma3Vision(Box<Gemma3VisionLanguageModel<Metal>>),
 }
 
 enum PreparedImagePayload {
     Qwen(PreparedVisionImage),
     Gemma4(PreparedGemmaImage),
+    Gemma3(PreparedGemma3Image),
 }
 
 pub(crate) struct NativePreparedImage {
@@ -146,7 +149,11 @@ impl NativeBackend {
                 return Err("invalid_model_config");
             }
             let hint: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid_model_config")?;
-            if hint.get("type").and_then(Value::as_str) == Some("Gemma4VisionLanguageModelConfig") {
+            if hint.get("type").and_then(Value::as_str) == Some("Gemma3VisionLanguageModelConfig") {
+                NativeModel::Gemma3Vision(Box::new(
+                    engine.load_gemma3_vision_language_model(path).map_err(|_| "model_load_failed")?,
+                ))
+            } else if hint.get("type").and_then(Value::as_str) == Some("Gemma4VisionLanguageModelConfig") {
                 NativeModel::Gemma4Vision(Box::new(
                     engine.load_gemma4_vision_language_model(path).map_err(|_| "model_load_failed")?,
                 ))
@@ -160,10 +167,12 @@ impl NativeBackend {
             NativeModel::Text(model) => (model.tokenizer(), &model.generation_config().stop_token_ids),
             NativeModel::Vision(model) => (model.tokenizer(), &model.generation_config().stop_token_ids),
             NativeModel::Gemma4Vision(model) => (model.tokenizer(), &model.generation_config().stop_token_ids),
+            NativeModel::Gemma3Vision(model) => (model.tokenizer(), &model.generation_config().stop_token_ids),
         };
         let (vocab_size, codec_eos) = match &model {
             NativeModel::Vision(model) => (model.vocab_size() as usize, model.codec_eos_token()),
             NativeModel::Gemma4Vision(model) => (model.vocab_size() as usize, model.codec_eos_token()),
+            NativeModel::Gemma3Vision(model) => (model.vocab_size() as usize, model.codec_eos_token()),
             NativeModel::Text(_) => (
                 text_vocab.ok_or("invalid_model_config")?,
                 config
@@ -226,6 +235,7 @@ impl GenerationBackend for NativeBackend {
             NativeModel::Text(model) => model.max_context_length(),
             NativeModel::Vision(model) => model.max_context_length(),
             NativeModel::Gemma4Vision(model) => model.max_context_length(),
+            NativeModel::Gemma3Vision(model) => model.max_context_length(),
         }
     }
     fn eos_token_ids(&self) -> &[u32] {
@@ -240,6 +250,7 @@ impl GenerationBackend for NativeBackend {
             NativeModel::Text(model) => model.tokenizer(),
             NativeModel::Vision(model) => model.tokenizer(),
             NativeModel::Gemma4Vision(model) => model.tokenizer(),
+            NativeModel::Gemma3Vision(model) => model.tokenizer(),
         };
         tokenizer.encode(text, special).map(|encoding| encoding.get_ids().to_vec()).map_err(|_| "tokenization_failed")
     }
@@ -252,6 +263,7 @@ impl GenerationBackend for NativeBackend {
             NativeModel::Text(model) => model.tokenizer(),
             NativeModel::Vision(model) => model.tokenizer(),
             NativeModel::Gemma4Vision(model) => model.tokenizer(),
+            NativeModel::Gemma3Vision(model) => model.tokenizer(),
         }
         .decode(ids, skip_special)
         .map_err(|_| "decoding_failed")
@@ -271,11 +283,13 @@ impl GenerationBackend for NativeBackend {
     }
 
     fn supports_images(&self) -> bool {
-        matches!(self.model, NativeModel::Vision(_) | NativeModel::Gemma4Vision(_))
+        matches!(self.model, NativeModel::Vision(_) | NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_))
     }
 
     fn image_geometry(&self) -> (u32, u32) {
-        if matches!(self.model, NativeModel::Gemma4Vision(_)) {
+        if matches!(self.model, NativeModel::Gemma3Vision(_)) {
+            (14, 4)
+        } else if matches!(self.model, NativeModel::Gemma4Vision(_)) {
             (16, 3)
         } else {
             (16, 2)
@@ -296,6 +310,7 @@ impl GenerationBackend for NativeBackend {
         let identity = match &self.model {
             NativeModel::Vision(model) => model.artifact_identity(),
             NativeModel::Gemma4Vision(model) => model.artifact_identity(),
+            NativeModel::Gemma3Vision(model) => model.artifact_identity(),
             NativeModel::Text(_) => return None,
         };
         Some(ImageArtifactIdentity {
@@ -312,6 +327,7 @@ impl GenerationBackend for NativeBackend {
         match &self.model {
             NativeModel::Vision(model) => Some(model.family_profile()),
             NativeModel::Gemma4Vision(model) => Some(model.family_profile()),
+            NativeModel::Gemma3Vision(model) => Some(model.family_profile()),
             NativeModel::Text(_) => None,
         }
     }
@@ -320,6 +336,7 @@ impl GenerationBackend for NativeBackend {
         match &self.model {
             NativeModel::Vision(model) => Some(model.source_identity()),
             NativeModel::Gemma4Vision(model) => Some(model.source_identity()),
+            NativeModel::Gemma3Vision(model) => Some(model.source_identity()),
             NativeModel::Text(_) => None,
         }
     }
@@ -391,6 +408,7 @@ impl GenerationBackend for NativeBackend {
         match &mut self.model {
             NativeModel::Vision(model) => prepare_for_model!(model, PreparedImagePayload::Qwen),
             NativeModel::Gemma4Vision(model) => prepare_for_model!(model, PreparedImagePayload::Gemma4),
+            NativeModel::Gemma3Vision(model) => prepare_for_model!(model, PreparedImagePayload::Gemma3),
             NativeModel::Text(_) => Err("images_not_supported"),
         }
     }
@@ -686,6 +704,7 @@ impl NativeBackend {
             NativeModel::Text(model) => model.tokenizer().clone(),
             NativeModel::Vision(model) => model.tokenizer().clone(),
             NativeModel::Gemma4Vision(model) => model.tokenizer().clone(),
+            NativeModel::Gemma3Vision(model) => model.tokenizer().clone(),
         };
         // Take the retained entry. A request that cannot reuse it drops it
         // before allocating, so two request states never coexist.
@@ -721,6 +740,12 @@ impl NativeBackend {
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?
             },
+            (NativeModel::Gemma3Vision(model), retained) => {
+                drop(retained);
+                model
+                    .create_empty_state(Some(options.context_tokens), options.seed)
+                    .map_err(|_| "native_generation_failed")?
+            },
         };
         let prompt_ids = input;
         let input: Vec<u64> = input.iter().map(|id| u64::from(*id)).collect();
@@ -729,6 +754,7 @@ impl NativeBackend {
             NativeModel::Text(model) => model.default_stream_options(),
             NativeModel::Vision(model) => model.default_stream_options(),
             NativeModel::Gemma4Vision(model) => model.default_stream_options(),
+            NativeModel::Gemma3Vision(model) => model.default_stream_options(),
         };
         stream_options.sampling_method = match &options.sampling {
             Sampling::Greedy {} => SamplingMethod::Greedy,
@@ -754,6 +780,9 @@ impl NativeBackend {
                 model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma4Vision(model), None) => {
+                model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
+            },
+            (NativeModel::Gemma3Vision(model), None) => {
                 model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Vision(model), Some(image)) => {
@@ -818,6 +847,37 @@ impl NativeBackend {
                         }
                     })?
             },
+            (NativeModel::Gemma3Vision(model), Some(image)) => {
+                let PreparedImagePayload::Gemma3(prepared) = image.image else {
+                    return Err("invalid_image_request");
+                };
+                let mut channel_error = false;
+                model
+                    .stream_prepared_image_controlled(
+                        image.tokens,
+                        prepared,
+                        image.token_start,
+                        options.context_tokens,
+                        &mut state,
+                        stream_options,
+                        || match cancelled() {
+                            Ok(value) => value,
+                            Err(_) => {
+                                channel_error = true;
+                                true
+                            },
+                        },
+                    )
+                    .map_err(|error| {
+                        if channel_error {
+                            "cancel_channel_failed"
+                        } else if error.kind() == NativeVisionErrorKind::Cancelled {
+                            "generation_cancelled"
+                        } else {
+                            "native_generation_failed"
+                        }
+                    })?
+            },
             (NativeModel::Text(_), Some(_)) => return Err("images_not_supported"),
         };
         let tokens = stream.map(|token| token.map_err(|_| "native_generation_failed"));
@@ -849,6 +909,7 @@ impl NativeBackend {
         let fenced = match &self.model {
             NativeModel::Vision(model) => model.is_fenced(),
             NativeModel::Gemma4Vision(model) => model.is_fenced(),
+            NativeModel::Gemma3Vision(model) => model.is_fenced(),
             NativeModel::Text(_) => false,
         };
         let mut result = native_result_after_cleanup(result, fenced)?;
