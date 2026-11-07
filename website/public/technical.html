@@ -195,7 +195,7 @@ Content-Type: application/json
               </tbody>
             </table>
           </div>
-          <p class="table-note qwen38-conditions">Pooled rates count 255 decode advances after the first output per request and exclude input processing. Each study used one loaded worker, paired on/off requests after warmup, and the same weights and quantization within each pair. The MTP head stayed in memory for both routes. <strong>MTP is opt-in and remains disabled by default.</strong></p>
+          <p class="table-note qwen38-conditions">Pooled rates count 255 decode advances after the first output per request and exclude input processing. Each study used one loaded worker, paired on/off requests after warmup, and the same weights and quantization within each pair. The MTP head stayed in memory for both routes. <strong>The app enables MTP by default for supported models and remembers your choice per model. Connected apps inherit that setting unless they override it. Terminal chat and direct worker requests default MTP off; image requests keep it off.</strong></p>
           <p class="qwen38-precision"><strong>Checkpoint and sampling conditions matter.</strong> These packs have different quantization profiles and were timed in separate windows. Desktop GPU activity and clock drift were uncontrolled. The Lily study's nucleus sampling without top-k gained 1.70% (74.53 versus 73.28 tok/s), with essentially unchanged whole-call latency. These MTP studies did not rerun MLX-Serve and do not establish performance across arbitrary workloads.</p>
           <div class="measurement-notes qwen38-method">
             <details><summary>MTP checkpoints and measurement details <span aria-hidden="true">+</span></summary><div>
