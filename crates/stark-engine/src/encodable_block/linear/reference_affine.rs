@@ -143,6 +143,9 @@ impl<B: Backend> ReferenceAffineBF16Matmul<B> {
     ) -> Result<B::ScratchBuffer, B::Error> {
         let invalid = || InvalidInput("invalid Qwen affine reference buffers or metadata");
         let plan = ReferenceAffinePlan::new(m, n, k)?;
+        if has_source_affine_policy::<B>(weights) {
+            return Err(InvalidInput("explicit source affine policies require their existing backend route").into());
+        }
         let (weights, scales, biases, bits, strides) = match weights {
             MatmulB::FullPrecision {
                 b,

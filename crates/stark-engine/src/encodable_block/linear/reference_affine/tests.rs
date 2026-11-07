@@ -237,9 +237,26 @@ fn explicit_source_policy<B: Backend>() {
     let codes = create_buffer_with_data::<B, u8>(&context, &[0; 32]);
     let plane = create_buffer_with_data::<B, bf16>(&context, &[bf16::ONE; 4]);
     let params = QuantParams::new(QuantParamsLayout::GroupOutput, 1, 1);
+    let input = create_buffer_with_data::<B, bf16>(&context, &[bf16::ONE; 64]);
+    let reference = ReferenceAffineBF16Matmul::<B>::new(&context, DataType::BF16).unwrap();
+    let mut commands = context.create_command_buffer(None, None).unwrap();
     assert!(!has_source_affine_policy::<B>(quantized::<B>(&codes, &plane, &plane, 64, false, params)));
     for params in [params.with_materialized_affine_input_sum(true), params.with_source_output_widths(&[1]).unwrap()] {
         assert!(has_source_affine_policy::<B>(quantized::<B>(&codes, &plane, &plane, 64, false, params)));
+        assert!(
+            reference
+                .encode(
+                    &input,
+                    0,
+                    quantized::<B>(&codes, &plane, &plane, 64, false, params),
+                    None::<&B::GlobalBuffer>,
+                    1,
+                    1,
+                    64,
+                    &mut commands
+                )
+                .is_err()
+        );
     }
 }
 
