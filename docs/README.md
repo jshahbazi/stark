@@ -16,6 +16,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Optional GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) | Pinned MLX core, explicit experimental BF16 native profile, worker defaults and source-bound prefix validation |
 | [Native hybrid sampling](NUMERICAL_SAMPLING.md) | Exact nucleus-prefix proof, reference-order fallbacks, precision and scratch lifetime |
 | [OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) | Native text paths, Gemma 4 E2B BF16 image artifact, conversion commands, precision policy and validation boundaries |
+| [Gemma 3 images](GEMMA3_IMAGES.md) | Source-bound SigLIP image artifacts, 4B/12B/27B admission, exact processor semantics and qualification boundaries |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
 | [Local API](LOCAL_API.md) | The loopback OpenAI-style chat API: authentication, endpoints, parameters, limits, error codes, tested clients |

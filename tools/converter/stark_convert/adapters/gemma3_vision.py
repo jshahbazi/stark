@@ -63,6 +63,13 @@ def gemma3_config(config: dict) -> tuple[dict, dict]:
     if any(type(text.get(key, defaults[key])) is not int or text.get(key, defaults[key]) != value
            for key, value in zip(keys, TEXT_GEOMETRIES[model_dim], strict=True)):
         raise UnsupportedConversion("Gemma 3 decoder geometry disagrees with its image size profile")
+    standard = {"sliding_window": 1024, "sliding_window_pattern": 6, "_sliding_window_pattern": 6,
+        "max_position_embeddings": 131072, "vocab_size": 262208, "rope_theta": 1000000.0,
+        "rope_local_base_freq": 10000.0, "rope_scaling": {"factor": 8.0, "rope_type": "linear"},
+        "rms_norm_eps": 1e-6, "tie_word_embeddings": True, "attention_bias": False, "mlp_bias": False,
+        "attention_dropout": 0.0, "attn_logit_softcapping": None, "final_logit_softcapping": None}
+    if any(text.get(key, value) != value for key, value in standard.items()):
+        raise UnsupportedConversion("Gemma 3 image decoder operations differ from the implemented profile")
     normalized = {**text, "architectures": ["Gemma3ForCausalLM"]}
     # The complete decoder planner independently admits all remaining fields.
     return normalized, {**VISION, **VISION_DEFAULTS}

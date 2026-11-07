@@ -314,6 +314,24 @@ The Rust workspace contains only the `stark-engine`, `stark-engine-macros`, `sta
 
 The menu bar app is built with `swiftc` directly. Inherited self-hosted CI, benchmark deployments, package publishing and cloud artifact destinations are disabled.
 
+## Gemma 3 image execution
+
+The Gemma 3 image adapter, native SigLIP tower and projector independently
+implement the original Google/Hugging Face checkpoint layout and equations in
+Transformers v4.53.3 `models/gemma3` and `models/siglip` (Apache-2.0; Google and
+Hugging Face copyright notices are retained in the source references). The
+private canonical replay imports unchanged Transformers 5.15.1 with Torch
+2.14.1 and records hashes of both model implementation modules. Model weights
+remain subject to Google's Gemma terms and are never committed.
+
+The fixed-resolution bilinear resizer follows Pillow's documented half-pixel
+antialias convention and 22-bit normalized coefficient quantization. The
+spatial average-pooling CPU/Metal kernels, processor admission, opaque image
+ownership, staged transport and artifact contracts are Stark implementations.
+Existing source-bound BF16 normalization, activation and matrix primitives keep
+their existing PyTorch/SLEEF notices and attribution. See
+[Gemma 3 image artifacts](../docs/GEMMA3_IMAGES.md) for exact profile boundaries.
+
 ## Removed inherited code
 
 On 2026-10-25 the inherited Uzu code that no product component used was removed, together with the dependencies only it needed:
