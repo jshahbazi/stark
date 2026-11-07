@@ -228,6 +228,33 @@ Torch Welford/affine and GELU bodies on source operator inputs. These
 observations have no production norm or activation selector. No LayerNorm
 or GELU policy has been promoted pending the contraction-only tower result.
 
+The contraction-only production replay at integrated source `42efacbf`, seal
+SHA256 `4c80351d09903d83702606b075adb591f5f1b99aabef41e11e7bfddd4bcfb016`,
+passed exact source-bit checks for all 14 production linears, tight attention,
+and both observer checks. Case 1 at zero blocks became bit exact. Full tower
+relative RMS remained 0.02534985 / 0.01829176, so case 0 still failed the
+frozen 2% gate. All 10 independent canonical norm/GELU controls were bit
+exact against source, providing the separate evidence for the next policy.
+
+Vision-only norm candidate `fc79b28e` adopts the measured Welford/affine body
+at width 1,152, with at most 8,192 rows and checked shapes/types/spans. Other
+widths retain the original norm. Separate activation candidate `6b197e41`
+adopts the measured GELU bodies, bounding rows at 8,192 and elements at
+`8192 * 4608`, with 262,144-element dispatch tiles and existing in-place
+storage. Wider rows retain the original activation. Text kernels are
+unchanged. Production norm and GELU outputs must match source bits in the
+same-input controls; independent test-only bodies remain available.
+
+Optional test checkpoint `21dbb8af` seals an all-finite BF16 GELU oracle from
+the exact Torch revision. It covers every one of 65,280 finite BF16 input
+patterns for erf and tanh forms, including signed zero and subnormals. The
+392,422-byte private fixture manifest SHA256 is
+`78f542f4bb6f10a760927ef5501ba5d9884d0f1c78bc430ecd5646f77c037644`.
+Only the ignored unit reads `STARK_LILY_GELU_REFERENCE_PATH`; release code has
+no diagnostic selector. The domain control requires zero source-bit
+mismatches and zero nonfinite outputs for both forms. This source fixture
+does not itself qualify native execution.
+
 Native candidate qualification is pending the root-owned build/replay at the
 time of this source checkpoint. Repository policy checks and `git diff
 --check` pass. Rust sources were formatted with nightly-2026-10-01. Native
