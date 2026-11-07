@@ -153,7 +153,10 @@ pub(super) fn forward_with(
         let v = config;
         let (hid, patch_dim, heads) = (v.hidden_size, v.patch_dim(), v.num_heads);
         let merge = v.spatial_merge_size * v.spatial_merge_size;
-        let n = gh * gw;
+        let n = gh
+            .checked_mul(gw)
+            .ok_or_else(|| anyhow::anyhow!("vision grid size overflow"))?;
+        ensure!(n > 0 && n <= 8192, "vision grid exceeds native patch budget");
         ensure!(
             gh >= 2 && gw >= 2 && gh.is_multiple_of(2) && gw.is_multiple_of(2),
             "grid ({gh}, {gw}) is not made of 2 x 2 merge blocks"
