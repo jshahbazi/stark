@@ -855,7 +855,13 @@ def family_catalog(
                 config = _json(read(config_repo, rule["filename"], config_revision, MAX_CONFIG_BYTES))
                 if not isinstance(config, dict) or not _generation_architecture(config, family):
                     return None
-                base_mode = "vision-language" if family == "gemma3" else "text"
+                text_config = config.get("text_config", config)
+                bf16_qwen_moe = family == "qwen3_5_moe" and not any(
+                    scope.get(key) is not None
+                    for scope in (config, text_config)
+                    for key in ("quantization", "quantization_config")
+                )
+                base_mode = "vision-language" if family == "gemma3" or bf16_qwen_moe else "text"
                 verdict = preflight_model(config, mode=base_mode, expected_architecture=family)
                 if verdict["status"] != "conditional":
                     return None
@@ -882,7 +888,7 @@ def family_catalog(
                         names,
                         lambda filename, maximum: read(repo, filename, revision, maximum),
                     )
-                    if family == "gemma3" and (quantization != "BF16" or not image_metadata):
+                    if base_mode == "vision-language" and (quantization != "BF16" or not image_metadata):
                         return None
                     if base_mode != "vision-language" and image_metadata:
                         modes.append("vision-language")

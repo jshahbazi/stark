@@ -55,6 +55,15 @@ load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
 
+Complete BF16 `qwen3_5_moe` wrappers have an image-only conversion route using
+`qwen35-moe-bf16-merged-v5`, schema 3. Catalog discovery requires the source's
+supported processor and reviewed template before offering that mode; BF16 MoE
+text/Decision conversion remains unsupported. This is structural implementation
+coverage. Full official 35B execution and reference parity are unverified; each
+artifact still needs native admission and local image checks. The
+[vision family contract](VISION_FAMILY_CONTRACT.md) records the numerical policy,
+source layout, limits and disabled prefix-reuse disposition.
+
 New model and inference paths follow the [model onboarding workflow](MODEL_ONBOARDING.md),
 including generation prefix-reuse implementation where exact restoration is
 possible and a recorded blocker where it is unavailable. The family registry

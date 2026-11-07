@@ -125,8 +125,10 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
         experts = _positive_int(config, "num_experts")
         active = _positive_int(config, "num_experts_per_tok")
         expert_hidden = _positive_int(config, "moe_intermediate_size")
-        if experts > 1024 or active > min(experts, 32) or expert_hidden > 131072 or quantization is None:
-            raise UnsupportedConversion("Qwen3.5 MoE requires bounded affine expert banks")
+        if experts > 1024 or active > min(experts, 32) or expert_hidden > 131072:
+            raise UnsupportedConversion("Qwen3.5 MoE requires bounded expert banks")
+        if quantization is None and not include_vision:
+            raise UnsupportedConversion("Qwen3.5 BF16 MoE requires the image artifact reference policy")
         if not _bool(config, "norm_topk_prob", True):
             raise UnsupportedConversion("Qwen3.5 MoE requires normalized selected expert probabilities")
         if target != "BF16":
@@ -302,7 +304,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     def expert_source(name: str, rows: int, columns: int):
         """Flatten only the declared stacked expert axis; retain byte identity."""
         module = name.removesuffix(".weight")
-        quant = quantization.for_module(module)
+        quant = quantization.for_module(module) if quantization is not None else None
         names = (name, module + ".scales", module + ".biases")
         packed = any(key in tensors for key in names[1:])
         if packed:
@@ -517,18 +519,32 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
                     TensorOperation(out + ".mixer." + output_name, (info,), "F32", (linear_heads,), "cast_f32")
                 )
         if moe:
-            bank = src + ".mlp.switch_mlp"
-            up = expert_source(bank + ".up_proj.weight", expert_hidden, dim)
-            gate = expert_source(bank + ".gate_proj.weight", expert_hidden, dim)
-            interleaved = tuple(
-                _matrix_row_range(value, expert * expert_hidden, expert_hidden)
-                for expert in range(experts)
-                for value in (up, gate)
-            )
+            if quantization is None:
+                # Official Transformers v5.8.0 stores [expert, gate+up, input].
+                # Native dense experts consume [expert, up+gate, input]. Each
+                # row view retains the source file, byte range and signature.
+                bank = src + ".mlp.experts"
+                fused = expert_source(bank + ".gate_up_proj", 2 * expert_hidden, dim)
+                interleaved = tuple(
+                    _matrix_row_range(fused, (2 * expert + branch) * expert_hidden, expert_hidden)
+                    for expert in range(experts)
+                    for branch in (1, 0)
+                )
+                down_name = bank + ".down_proj"
+            else:
+                bank = src + ".mlp.switch_mlp"
+                up = expert_source(bank + ".up_proj.weight", expert_hidden, dim)
+                gate = expert_source(bank + ".gate_proj.weight", expert_hidden, dim)
+                interleaved = tuple(
+                    _matrix_row_range(value, expert * expert_hidden, expert_hidden)
+                    for expert in range(experts)
+                    for value in (up, gate)
+                )
+                down_name = bank + ".down_proj.weight"
             matrix(out + ".mlp.experts.up_projection.weights", interleaved, (experts * 2 * expert_hidden, dim))
             matrix(
                 out + ".mlp.experts.down_projection.weights",
-                (expert_source(bank + ".down_proj.weight", dim, expert_hidden),),
+                (expert_source(down_name, dim, expert_hidden),),
                 (experts * dim, expert_hidden),
             )
             matrix(

@@ -7,6 +7,54 @@
 use half::bf16;
 use stark_engine_macros::kernel;
 
+/// Indexed equivalent of the aligned contiguous reference dot below. Read the
+/// selected bank row directly; scratch storage never contains weight matrices.
+#[kernel(ReferenceGatherMatmulBF16)]
+pub fn reference_gather_matmul_bf16(
+    input: *const bf16,
+    weights: *const bf16,
+    indices: *const u32,
+    output: *mut f32,
+    m: u32,
+    n: u32,
+    k: u32,
+    bank_rows: u32,
+) {
+    for row in 0..m as usize {
+        for column in 0..n as usize {
+            let selected = unsafe { *indices.add(row * n as usize + column) };
+            let result = if selected < bank_rows {
+                let mut sums = [[0.0f32; 4]; 8];
+                for start in (0..k as usize).step_by(32) {
+                    for (register, lanes) in sums.iter_mut().enumerate() {
+                        for (lane, sum) in lanes.iter_mut().enumerate() {
+                            let inner = start + register * 4 + lane;
+                            let (a, b) = unsafe {
+                                (
+                                    (*input.add(row * k as usize + inner)).to_f32(),
+                                    (*weights.add(selected as usize * k as usize + inner)).to_f32(),
+                                )
+                            };
+                            *sum = a.mul_add(b, *sum);
+                        }
+                    }
+                }
+                for offset in [4, 2, 1] {
+                    for register in 0..offset {
+                        for lane in 0..4 {
+                            sums[register][lane] += sums[register + offset][lane];
+                        }
+                    }
+                }
+                (sums[0][0] + sums[0][1]) + (sums[0][2] + sums[0][3])
+            } else {
+                f32::NAN
+            };
+            unsafe { *output.add(row * n as usize + column) = result };
+        }
+    }
+}
+
 /// Reproduce the pinned BF16 operation's FP32 accumulation before its final cast.
 /// Contiguous dot products use eight four-lane registers; the non-transposed
 /// strided and Conv3d paths use four independent scalar partial sums.

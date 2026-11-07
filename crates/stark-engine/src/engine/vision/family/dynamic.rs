@@ -69,6 +69,15 @@ pub(super) fn geometry_moe(
     geometry_with_storage(decoder, vision, true, true)
 }
 
+/// Full BF16 expert banks retain zero-centered norms and the reference image
+/// activation policy. Packed affine storage has its own versioned admission.
+pub(super) fn geometry_bf16_moe(
+    decoder: &Value,
+    vision: &Value,
+) -> Result<Geometry, InvalidInput> {
+    geometry_with_storage(decoder, vision, false, true)
+}
+
 fn geometry_with_storage(
     decoder: &Value,
     vision: &Value,
@@ -140,7 +149,15 @@ fn geometry_with_storage(
             let actual = &layer["mlp_config"];
             let experts = number(&actual["num_routed_experts"], 1024, 1)?;
             let active = number(&actual["num_active_routed_experts"], 32, 1)?;
-            let expert_hidden = number(&actual["expert_hidden_dim"], 131072, 64)?;
+            let expert_hidden = number(
+                &actual["expert_hidden_dim"],
+                131072,
+                if affine {
+                    64
+                } else {
+                    32
+                },
+            )?;
             let shape = (experts, active, expert_hidden);
             if active > experts || expert_geometry.is_some_and(|previous| previous != shape) {
                 return Err(invalid());

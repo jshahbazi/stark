@@ -134,3 +134,66 @@ fn selected_banks<B: Backend>() {
 fn routed_experts_select_only_the_requested_full_and_packed_bank_rows() {
     for_each_backend!(|B| selected_banks::<B>());
 }
+
+fn bf16_reference_banks<B: Backend>() {
+    let context = B::Context::new().unwrap();
+    let file = banks(false);
+    let loader = ParameterLoader::new(&file, &*context)
+        .unwrap()
+        .with_numerical_profile(crate::parameters::NumericalProfile::Qwen35ReferenceBF16);
+    let config = DenseMLPConfig::unclipped(
+        serde_json::from_value(json!({})).unwrap(),
+        serde_json::from_value(json!({"type":"SiLU","alpha":1.0})).unwrap(),
+        false,
+        false,
+    );
+    let experts = RoutedExperts::<B>::new(
+        &context,
+        64,
+        64,
+        4,
+        4,
+        &config,
+        &loader.tree(),
+        true,
+        RoutingPrecision {
+            round_logits_bf16: true,
+            round_weights_bf16: true,
+            round_products_bf16: true,
+            sort_expert_ids: true,
+            round_accumulator_bf16: true,
+        },
+    )
+    .unwrap();
+    let input = create_buffer_with_data::<B, bf16>(&context, &vec![bf16::ONE; 128]);
+    // Ranking differs from expert ID order and differs between tokens. This
+    // exercises full bank gathers, route/weight pairing and BF16 partial sums.
+    let logits = [0.5f32, 2.0, 1.0, 3.0, 2.0, 3.0, 0.5, 1.0];
+    let router = create_buffer_with_data::<B, f32>(&context, &logits);
+    let mut commands = context.create_command_buffer(None, None).unwrap();
+    let output = experts.encode(&input, &router, 2, &mut commands).unwrap();
+    let mut result = context.create_buffer(128 * 2).unwrap();
+    commands.encode_copy(&output, &mut result);
+    commands.end_encoding().submit().wait_until_completed().unwrap();
+    let actual = buffer_to_vec::<B, bf16>(&result);
+    let round = |x| bf16::from_f32(x).to_f32();
+    let silu = round(1.0 / (1.0 + (-1.0f32).exp()));
+    for row in 0..2 {
+        let source = &logits[row * 4..(row + 1) * 4];
+        let denominator: f32 = source.iter().map(|x| (x - 3.0).exp()).sum();
+        let mut expected = 0.0f32;
+        for (expert, logit) in source.iter().enumerate() {
+            let weight = round((logit - 3.0).exp() / denominator);
+            let activated = round(silu * ((expert + 1) as f32 * 0.25));
+            expected = round(expected + round(activated * weight));
+        }
+        for value in &actual[row * 64..(row + 1) * 64] {
+            assert!((value.to_f32() - expected).abs() <= 0.004, "reference full bank row {row}");
+        }
+    }
+}
+
+#[stark_test]
+fn full_bf16_expert_banks_apply_reference_routes_products_and_partial_sums() {
+    for_each_backend!(|B| bf16_reference_banks::<B>());
+}

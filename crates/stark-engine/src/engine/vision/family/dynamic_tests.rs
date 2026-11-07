@@ -2,6 +2,52 @@ use stark_engine_macros::stark_test;
 
 use super::*;
 
+fn bf16_moe_decoder() -> (Value, Value) {
+    let (mut decoder, vision) = fixture(2048, 512, 40, 16, 2, 32, 16, false, 27, 1152, 4304, 16);
+    for layer in decoder["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+        layer["mlp_config"] = json!({"type":"MixtureOfExpertsConfig","expert_config":layer["mlp_config"],
+            "router_config":{},"routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":256,
+            "num_active_routed_experts":8,"router_has_biases":false,"num_shared_experts":1,
+            "expert_hidden_dim":512,"gate_config":{}});
+    }
+    (decoder, vision)
+}
+
+#[stark_test]
+fn bf16_moe_geometry_admits_official_dimensions_with_unfolded_norms_and_full_banks() {
+    let (decoder, vision) = bf16_moe_decoder();
+    let geometry = geometry_bf16_moe(&decoder, &vision).unwrap();
+    assert!(!geometry.tensors.affine);
+    assert_eq!(
+        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.experts.up_projection.weights.weights"],
+        ("BF16", vec![262144, 2048])
+    );
+    assert_eq!(
+        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.experts.down_projection.weights.weights"],
+        ("BF16", vec![524288, 512])
+    );
+    assert!(geometry_moe(&decoder, &vision).is_err());
+    assert!(geometry(&decoder, &vision).is_err());
+    for (pointer, value) in [
+        ("/transformer_config/output_norm_config/scale_offset", Value::Null),
+        ("/transformer_config/layer_configs/0/mixer_config/reference_bf16", json!(false)),
+        ("/transformer_config/layer_configs/0/mlp_config/num_active_routed_experts", json!(257)),
+        ("/transformer_config/layer_configs/0/mlp_config/num_shared_experts", json!(2)),
+        ("/transformer_config/layer_configs/0/mlp_config/gate_config", Value::Null),
+        ("/transformer_config/layer_configs/0/mlp_config/expert_hidden_dim", json!(513)),
+    ] {
+        let mut changed = decoder.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        assert!(geometry_bf16_moe(&changed, &vision).is_err(), "accepted {pointer}");
+    }
+    // Full banks are constrained by u32 indexing and aggregate storage before allocation.
+    let mut huge = decoder.clone();
+    for layer in huge["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+        layer["mlp_config"]["expert_hidden_dim"] = json!(131072);
+    }
+    assert!(geometry_bf16_moe(&huge, &vision).is_err());
+}
+
 #[stark_test]
 fn moe_geometry_binds_selected_experts_shared_branch_and_flattened_banks() {
     let mut decoder = decoder_profile();

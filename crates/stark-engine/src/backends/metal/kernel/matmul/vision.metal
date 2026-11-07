@@ -10,6 +10,32 @@
 #pragma METAL fp math_mode(safe)
 #pragma METAL fp contract(off)
 
+// Same aligned reference reduction, indexing selected bank rows directly.
+PUBLIC KERNEL(ReferenceGatherMatmulBF16)(
+    const device bfloat* input, const device bfloat* weights,
+    const device uint* indices, device float* output,
+    constant uint& m, constant uint& n, constant uint& k, constant uint& bank_rows,
+    const uint index AXIS(m * n, 32)
+) {
+  const uint row = index / n;
+  const uint selected = indices[index];
+  if (selected >= bank_rows) { output[index] = NAN; return; }
+  float4 sums[8] = {};
+  for (uint start = 0; start < k; start += 32) {
+    for (uint reg = 0; reg < 8; ++reg) {
+      for (uint lane = 0; lane < 4; ++lane) {
+        const uint inner = start + reg * 4 + lane;
+        sums[reg][lane] = fma(float(input[row * k + inner]),
+                            float(weights[selected * k + inner]), sums[reg][lane]);
+      }
+    }
+  }
+  for (uint offset = 4; offset != 0; offset >>= 1) {
+    for (uint reg = 0; reg < offset; ++reg) { sums[reg] = sums[reg] + sums[reg + offset]; }
+  }
+  output[index] = (sums[0][0] + sums[0][1]) + (sums[0][2] + sums[0][3]);
+}
+
 PUBLIC KERNEL(VisionMatmulBF16)(
     const device bfloat* input,
     const device bfloat* weights,

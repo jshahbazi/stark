@@ -732,6 +732,44 @@ def test_qwen35_quantized_and_unknown_processing_sources_remain_text_only(tmp_pa
     assert len(items) == 2 and all(item["artifact_modes"] == ["text"] for item in items)
 
 
+@pytest.mark.parametrize("complete_processing", [False, True])
+def test_bf16_qwen_moe_catalog_requires_image_metadata_and_never_offers_text(
+    tmp_path, monkeypatch, complete_processing
+):
+    from test_vision_bf16_moe import moe_geometry
+
+    from stark_convert import vision_family
+
+    template = b"synthetic reviewed BF16 MoE template"
+    monkeypatch.setattr(vision_family, "_TEMPLATE_SHA256", hashlib.sha256(template).hexdigest())
+    sidecars = (
+        {
+            "preprocessor_config.json": vision_family._PROCESSOR,
+            "chat_template.jinja": template,
+            "tokenizer_config.json": {},
+        }
+        if complete_processing
+        else {}
+    )
+    hub = Hub()
+    repo = "someone/BF16-MoE"
+    hub.add(
+        tmp_path,
+        repo,
+        moe_geometry(),
+        names={"model.safetensors": 70_000_000_000, "config.json": 100, **{key: 100 for key in sidecars}},
+        sidecars=sidecars,
+    )
+    hub.discovered["qwen3_5_moe"] = [repo]
+    items = catalog.family_catalog("qwen3_5_moe", hub=hub)["items"]
+    if complete_processing:
+        assert len(items) == 1 and items[0]["artifact_modes"] == ["vision-language"]
+        assert items[0]["default_artifact_mode"] == "vision-language"
+    else:
+        assert not items
+    assert not any(event[0] in {"head", "download"} and event[-1].endswith(".safetensors") for event in hub.events)
+
+
 def test_oversized_config_stops_at_head_and_never_reaches_download(tmp_path):
     hub = Hub()
     root = hub.add(tmp_path, "someone/Large", {"model_type": "qwen3"})
