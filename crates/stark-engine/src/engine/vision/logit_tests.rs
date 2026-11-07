@@ -25,6 +25,86 @@ fn u32_values(bytes: &[u8]) -> Vec<u32> {
     bytes.chunks_exact(4).map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())).collect()
 }
 
+fn affine_dot_bitplanes<B: Backend>() {
+    use crate::{
+        backends::common::{
+            CommandBufferExecutable, CommandBufferPending, Context, Kernels,
+            kernel::{
+                QwenAffineReferenceMatmulBF16Kernel, VisionCastBF16Kernel, VisionMatmulBF16Kernel,
+                matmul::{QuantParams, QuantParamsLayout},
+            },
+        },
+        tests::helpers::{buffer_to_vec, create_buffer_with_data},
+    };
+    let context = B::Context::new().unwrap();
+    let (m, n, k) = (3_u32, 5_u32, 128_u32);
+    for bits in [4_u32, 5, 6, 8] {
+        for layout in [QuantParamsLayout::OutputGroup, QuantParamsLayout::GroupOutput] {
+            let params = QuantParams::new(layout, n, k / 64);
+            let strides = params.scale_strides();
+            let scale_shape = params.scale_shape();
+            let mut scales = vec![bf16::ZERO; (scale_shape[0] * scale_shape[1]) as usize];
+            let mut biases = scales.clone();
+            let row_bytes = (k * bits / 8) as usize;
+            let mut packed = vec![0_u8; n as usize * row_bytes];
+            let mut dense = vec![bf16::ZERO; (n * k) as usize];
+            for row in 0..n {
+                for inner in 0..k {
+                    let group = row * strides.output_stride + inner / 64 * strides.group_stride;
+                    let scale = bf16::from_f32(0.1 + row as f32 / 32.0 + (inner / 64) as f32 / 64.0);
+                    let bias = bf16::from_f32(-0.2 - row as f32 / 16.0);
+                    scales[group as usize] = scale;
+                    biases[group as usize] = bias;
+                    let code = (row * 19 + inner * 7 + inner / 11) % (1 << bits);
+                    let bit = inner * bits;
+                    let offset = row as usize * row_bytes + (bit / 8) as usize;
+                    packed[offset] |= (code << (bit % 8)) as u8;
+                    if bit % 8 + bits > 8 {
+                        packed[offset + 1] |= (code >> (8 - bit % 8)) as u8;
+                    }
+                    dense[(row * k + inner) as usize] = bf16::from_f32(code as f32 * scale.to_f32() + bias.to_f32());
+                }
+            }
+            let input = (0..m * k).map(|index| bf16::from_f32((index % 31) as f32 / 16.0 - 1.0)).collect::<Vec<_>>();
+            let input = create_buffer_with_data::<B, bf16>(&context, &input);
+            let codes = create_buffer_with_data::<B, u8>(&context, &packed);
+            let scales = create_buffer_with_data::<B, bf16>(&context, &scales);
+            let biases = create_buffer_with_data::<B, bf16>(&context, &biases);
+            let dense = create_buffer_with_data::<B, bf16>(&context, &dense);
+            let mut actual = context.create_buffer((m * n * 2) as usize).unwrap();
+            let mut expected = context.create_buffer((m * n * 2) as usize).unwrap();
+            let mut accumulated = context.create_buffer((m * n * 4) as usize).unwrap();
+            let packed_dot = <B::Kernels as Kernels>::QwenAffineReferenceMatmulBF16Kernel::new(&context).unwrap();
+            let dense_dot = <B::Kernels as Kernels>::VisionMatmulBF16Kernel::new(&context).unwrap();
+            let cast = <B::Kernels as Kernels>::VisionCastBF16Kernel::new(&context).unwrap();
+            let mut commands = context.create_command_buffer(None, None).unwrap();
+            packed_dot.encode(
+                &input,
+                &codes,
+                &scales,
+                &biases,
+                &mut actual,
+                m,
+                n,
+                k,
+                bits,
+                strides.output_stride,
+                strides.group_stride,
+                &mut commands,
+            );
+            dense_dot.encode(&input, &dense, &mut accumulated, m, n, k, k, 1, 32, &mut commands);
+            cast.encode(&accumulated, &mut expected, m * n, &mut commands);
+            commands.end_encoding().submit().wait_until_completed().unwrap();
+            assert_eq!(buffer_to_vec::<B, bf16>(&actual), buffer_to_vec::<B, bf16>(&expected));
+        }
+    }
+}
+
+#[stark_test]
+fn qwen_affine_dot_decodes_group64_bitplanes_before_contraction() {
+    crate::tests::helpers::for_each_backend!(affine_dot_bitplanes);
+}
+
 fn reference<B: Backend>(backend: &str) {
     let path = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private exact artifact path"));
     let root = PathBuf::from(
@@ -235,10 +315,17 @@ fn qwen35_vision_last_prompt_logit_reference_metal() {
 fn qwen35_affine_projection_reference_metal() {
     use crate::{
         backends::{
-            common::{BufferMut, CommandBufferExecutable, CommandBufferPending, Context},
+            common::{
+                BufferMut, CommandBufferExecutable, CommandBufferPending, Context, Kernels,
+                kernel::{QwenAffineReferenceMatmulBF16Kernel, matmul::MatmulB},
+            },
             metal::Metal,
         },
-        encodable_block::linear::{Gather, LinearMatmul},
+        config::weight_matrix::Layout,
+        encodable_block::{
+            linear::{Gather, LinearMatmul},
+            weight_matrix::WeightMatrix,
+        },
         parameters::{NumericalProfile, ParameterLoader},
     };
     let artifact = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private exact artifact path"));
@@ -272,6 +359,7 @@ fn qwen35_affine_projection_reference_metal() {
         .unwrap_or_else(|_| panic!("private affine parameter setup failed"))
         .with_numerical_profile(NumericalProfile::Qwen35AffineBF16);
     let mut metrics = Vec::new();
+    let exact_dot = std::env::var_os("STARK_QWEN_AFFINE_DOT_WITNESS").is_some();
     for (case_index, case) in manifest["cases"].as_array().expect("invalid private affine cases").iter().enumerate() {
         let folder = root.join(case["name"].as_str().expect("invalid private affine case name"));
         for stage in case["projection_stages"].as_array().expect("missing private affine projection controls") {
@@ -293,36 +381,82 @@ fn qwen35_affine_projection_reference_metal() {
                 "private affine shape differs"
             );
             let tree = loader.tree().subtree(stage["tree"].as_str().expect("invalid private affine parameter tree"));
-            let matrix = LinearMatmul::<Metal>::load(
-                &context,
-                tree.metadata("spec").unwrap_or_else(|_| panic!("private affine matrix metadata unavailable")),
-                k,
-                n,
-                DataType::BF16,
-                DataType::BF16,
-                DataType::BF16,
-                &tree,
-                None,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("private affine matrix loading failed"));
+            let reference_weights = exact_dot.then(|| {
+                WeightMatrix::<Metal>::load(
+                    &tree,
+                    tree.metadata("spec").unwrap_or_else(|_| panic!("private affine witness metadata unavailable")),
+                    Layout::OutputInput,
+                    n,
+                    k,
+                    DataType::BF16,
+                )
+                .unwrap_or_else(|_| panic!("private affine witness weights unavailable"))
+            });
+            let matrix = (!exact_dot).then(|| {
+                LinearMatmul::<Metal>::load(
+                    &context,
+                    tree.metadata("spec").unwrap_or_else(|_| panic!("private affine matrix metadata unavailable")),
+                    k,
+                    n,
+                    DataType::BF16,
+                    DataType::BF16,
+                    DataType::BF16,
+                    &tree,
+                    None,
+                    None,
+                )
+                .unwrap_or_else(|_| panic!("private affine matrix loading failed"))
+            });
             let mut values =
                 context.create_buffer(input.len()).unwrap_or_else(|_| panic!("private affine input allocation failed"));
             (&mut values).copyin(&input);
             let mut commands = context
                 .create_command_buffer(None, None)
                 .unwrap_or_else(|_| panic!("private affine commands unavailable"));
-            let output = matrix
-                .encode_with_a(
-                    crate::backends::common::kernel::matmul::MatmulA::FullPrecision {
-                        values: &values,
-                        offset: 0,
-                    },
+            let output = if let Some(weights) = &reference_weights {
+                let MatmulB::Quantized(quantized) = weights.matmul_b() else {
+                    panic!("private affine witness requires packed weights");
+                };
+                assert!(
+                    quantized.group_size == 64
+                        && !quantized.signed_codes
+                        && matches!(quantized.mode.bits(), 4 | 5 | 6 | 8)
+                );
+                let biases = quantized.biases().expect("private affine witness requires affine biases");
+                let strides = quantized.params.scale_strides();
+                let mut output = commands.allocate_scratch_for_shape(&[m, n], DataType::BF16).unwrap();
+                let dot = <<Metal as Backend>::Kernels as Kernels>::QwenAffineReferenceMatmulBF16Kernel::new(&context)
+                    .unwrap_or_else(|_| panic!("private packed dot witness setup failed"));
+                dot.encode(
+                    &values,
+                    quantized.codes,
+                    quantized.scales,
+                    biases,
+                    &mut output,
                     m,
-                    None::<Gather<&<Metal as Backend>::GlobalBuffer>>,
+                    n,
+                    k,
+                    quantized.mode.bits(),
+                    strides.output_stride,
+                    strides.group_stride,
                     &mut commands,
-                )
-                .unwrap_or_else(|_| panic!("private affine encoding failed"));
+                );
+                output
+            } else {
+                matrix
+                    .as_ref()
+                    .unwrap()
+                    .encode_with_a(
+                        crate::backends::common::kernel::matmul::MatmulA::FullPrecision {
+                            values: &values,
+                            offset: 0,
+                        },
+                        m,
+                        None::<Gather<&<Metal as Backend>::GlobalBuffer>>,
+                        &mut commands,
+                    )
+                    .unwrap_or_else(|_| panic!("private affine encoding failed"))
+            };
             let mut readback =
                 context.create_buffer(expected.len()).unwrap_or_else(|_| panic!("private affine readback unavailable"));
             commands.encode_copy(&output, &mut readback);
@@ -341,7 +475,7 @@ fn qwen35_affine_projection_reference_metal() {
                 square += e * e;
                 mismatches += usize::from(actual.to_bits() != expected.to_bits());
             }
-            metrics.push(json!({"case_index":case_index,"stage":stage["name"],"elements":actual.len(),
+            metrics.push(json!({"case_index":case_index,"stage":stage["name"],"elements":actual.len(),"exact_dot_witness":exact_dot,
                 "relative_rms":(error/square).sqrt(),"bf16_mismatches":mismatches}));
         }
     }

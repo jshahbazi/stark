@@ -82,3 +82,53 @@ PUBLIC KERNEL(VisionMatmulBF16)(
   }
   output[index] = result;
 }
+
+// Source-contraction witness: packed unsigned affine group64 coefficients
+// are rounded once to BF16 without allocating a dequantized weight bank.
+PUBLIC KERNEL(QwenAffineReferenceMatmulBF16)(
+    const device bfloat* input,
+    const device uchar* codes,
+    const device bfloat* scales,
+    const device bfloat* biases,
+    device bfloat* output,
+    constant uint& m,
+    constant uint& n,
+    constant uint& k,
+    constant uint& bits,
+    constant uint& scale_output_stride,
+    constant uint& scale_group_stride,
+    const uint index AXIS(m * n, 32)
+) {
+  if ((bits != 4 && bits != 5 && bits != 6 && bits != 8) || k % 64 != 0) {
+    output[index] = bfloat(NAN);
+    return;
+  }
+  const uint row = index / n;
+  const uint column = index % n;
+  const ulong row_bytes = ulong(k) * bits / 8;
+  float4 sums[8] = {};
+  for (uint start = 0; start < k; start += 32) {
+    for (uint reg = 0; reg < 8; ++reg) {
+      for (uint lane = 0; lane < 4; ++lane) {
+        const uint inner = start + reg * 4 + lane;
+        const uint bit = inner * bits;
+        const uint shift = bit % 8;
+        const ulong offset = ulong(column) * row_bytes + bit / 8;
+        uint packed = codes[offset];
+        if (shift + bits > 8) {
+          packed |= uint(codes[offset + 1]) << 8;
+        }
+        const uint code = (packed >> shift) & ((1u << bits) - 1u);
+        const ulong group = ulong(column) * scale_output_stride + ulong(inner / 64) * scale_group_stride;
+        const float weight = float(bfloat(float(code) * float(scales[group]) + float(biases[group])));
+        sums[reg][lane] = fma(float(input[ulong(row) * k + inner]), weight, sums[reg][lane]);
+      }
+    }
+  }
+  for (uint offset = 4; offset != 0; offset >>= 1) {
+    for (uint reg = 0; reg < offset; ++reg) {
+      sums[reg] = sums[reg] + sums[reg + offset];
+    }
+  }
+  output[index] = bfloat((sums[0][0] + sums[0][1]) + (sums[0][2] + sums[0][3]));
+}
