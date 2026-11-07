@@ -82,6 +82,7 @@ const COMPONENTS: [&str; 4] =
 const TEMPLATE_HASHES: [&str; 2] =
     [super::ARTIFACT_FILES[4].1, "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67"];
 const DYNAMIC_STOCK_TEMPLATE: &str = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715";
+const DYNAMIC_QWEN38_TEMPLATE: &str = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041";
 
 pub(super) struct FamilyAdmission {
     pub tower: VisionTowerConfig,
@@ -318,7 +319,7 @@ pub(super) fn admit(
         || !hashes.get("chat_template.jinja").is_some_and(|digest| {
             TEMPLATE_HASHES.contains(&digest.as_str())
                 || matches!(profile, FamilyProfile::DynamicV2 | FamilyProfile::AffineV3)
-                    && digest == DYNAMIC_STOCK_TEMPLATE
+                    && [DYNAMIC_STOCK_TEMPLATE, DYNAMIC_QWEN38_TEMPLATE].contains(&digest.as_str())
         })
     {
         return Err(InvalidInput("unsupported native vision family text processing"));
