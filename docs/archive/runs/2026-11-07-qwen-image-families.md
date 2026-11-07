@@ -88,8 +88,24 @@ the instance.
 - Repository policy, Rust formatting, Python lint/formatting and diff whitespace
   checks passed.
 
-The Qwen3.5 MoE decoder still requires a native expert MLP implementation;
-removing its converter rejection would not provide image execution.
+## Shared sparse expert primitives
+
+`encodable_block::mlp::routed::RoutedExperts` executes flattened expert banks
+with the existing canonical full-precision or affine matrix kernels. Device
+routing selects stable top-k IDs, expands them into bounded weight-row gathers,
+and accumulates only selected expert outputs. The helper receives separately
+normalized BF16 expert inputs and F32 router logits, allowing architectures to
+own their router normalization. Router-logit, probability and weighted-product
+BF16 boundaries are explicit policy fields. Shapes, buffer extents and expert
+bank indexing are checked before command encoding. Non-finite router values
+publish safe expert IDs and non-finite weights, allowing the existing target
+readout guard to reject the request without unsafe gathers.
+
+The Qwen MLP wrapper adds its sigmoid-gated shared expert. A two-row, four-expert
+CPU fixture passed with both BF16 and packed Q4 banks; rows select different
+expert pairs and ties have a defined lower-ID ordering. Production generator
+type-check passed with the new CPU/Metal kernel bindings. Full-model Qwen3.5
+MoE conversion admission and numerical qualification remain pending.
 
 ## Primary references
 
