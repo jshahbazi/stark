@@ -41,6 +41,7 @@ pub struct GemvSpecialization {
     signed_codes: bool,
     full_tile: bool,
     materialized_source: bool,
+    reference_bf16_weights: bool,
 }
 
 impl GemvSpecialization {
@@ -198,12 +199,17 @@ impl GemvSpecialization {
             signed_codes: shape.signed_codes,
             full_tile: full_tile(shape, tile),
             materialized_source: false,
+            reference_bf16_weights: false,
         };
         Some(specialization)
     }
 
     pub fn output_row_tile(&self) -> u32 {
         self.output_row_tile
+    }
+
+    pub(crate) fn set_reference_bf16_weights(&mut self) {
+        self.reference_bf16_weights = true;
     }
 
     pub fn fuses_rht(&self) -> bool {
@@ -237,6 +243,7 @@ impl GemvSpecialization {
             self.gathered,
             self.signed_codes,
             self.full_tile,
+            self.reference_bf16_weights,
         )
     }
 }

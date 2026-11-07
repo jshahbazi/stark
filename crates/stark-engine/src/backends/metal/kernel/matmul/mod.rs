@@ -226,6 +226,18 @@ impl MatmulMetalKernel {
     ) -> MatmulDispatch {
         let dispatch = self.select_dispatch_inner(shape, context);
         match dispatch {
+            MatmulDispatch::Gemv(mut tile)
+                if self.reference_accumulation
+                    && self.weights_data_type == DataType::BF16
+                    && self.input_data_type == DataType::BF16
+                    && shape.b_prologue == GemmBPrologueKind::ScaleBiasDequant
+                    && shape.b_group_size == Some(64)
+                    && matches!(shape.b_bits, Some(4 | 5 | 6 | 8))
+                    && !shape.signed_codes =>
+            {
+                tile.set_reference_bf16_weights();
+                MatmulDispatch::Gemv(tile)
+            },
             MatmulDispatch::Gemm(mut plan) if self.reference_accumulation => {
                 // Optimized split-K stores partials in the public output
                 // dtype. BF16 partition casts change the reference graph.
