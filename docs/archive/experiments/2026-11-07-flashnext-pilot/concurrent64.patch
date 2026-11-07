@@ -1,0 +1,13 @@
+diff --git a/vendor/lily-core/src/qwen4exp/model.rs b/vendor/lily-core/src/qwen4exp/model.rs
+index 4b5e2e48..34887602 100644
+--- a/vendor/lily-core/src/qwen4exp/model.rs
++++ b/vendor/lily-core/src/qwen4exp/model.rs
+@@ -128,7 +128,7 @@ pub enum Encoder {
+ }
+ 
+ /// Row count up to which the batched graph is encoded concurrently.
+-const CONCURRENT_ROWS_MAX: usize = 16;
++const CONCURRENT_ROWS_MAX: usize = 64;
+ 
+ fn encoder_for(rows: usize) -> Encoder {
+     if rows <= CONCURRENT_ROWS_MAX { Encoder::Concurrent } else { Encoder::Serial }

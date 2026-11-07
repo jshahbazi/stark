@@ -322,12 +322,12 @@ def _atomic_report(path: Path, report: dict) -> None:
 
 @contextlib.contextmanager
 def _profile_env_removed():
-    previous = os.environ.pop("STARK_QWEN38_PROFILE_OUTPUT", None)
+    names = ("STARK_QWEN38_PROFILE_OUTPUT", "STARK_NATIVE_PROFILE_OUTPUT")
+    previous = {name: os.environ.pop(name) for name in names if name in os.environ}
     try:
         yield
     finally:
-        if previous is not None:
-            os.environ["STARK_QWEN38_PROFILE_OUTPUT"] = previous
+        os.environ.update(previous)
 
 
 def run(
@@ -386,11 +386,13 @@ def run(
             "quiet_admission": "benchmark_glm_mlx_serve.quiet_admission",
             "screen_attempt": "benchmark_glm_mlx_serve.screen_attempt",
             "pair_policy": "Both arms must be eligible; no selective arm removal or retries.",
+            "quiet_admission_enabled": screened,
         }
     report.update(checkpoint_metadata(args))
     env = dict(os.environ)
     env.pop("STARK_QWEN38_PROFILE_OUTPUT", None)
-    report["environment_policy"] = {"profile_output_removed": True}
+    env.pop("STARK_NATIVE_PROFILE_OUTPUT", None)
+    report["environment_policy"] = {"profile_output_removed": True, "native_profile_output_removed": True}
     if worker_factory is Worker:
         # Worker inherits the parent environment internally. Remove profiling
         # only while it starts its subprocess, then restore the caller state.

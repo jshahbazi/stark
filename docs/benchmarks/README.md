@@ -4,6 +4,17 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Qwen3.8-Flash-Next optimization harness pilot (2026-11-07).** Eighteen cells
+and 144 measured requests passed bounded repeatability/candidate-hash checks.
+Draft depths one through three and a 16-to-64-row concurrent-encoder cutoff
+were tested on the pinned Lily artifact, with an independent corpus/seed case
+and separate stage diagnostics. Host interference prevented timing qualification;
+the encoder candidate is not promoted and no production default changed.
+See the [pilot report](2026-11-07-flashnext-optimization-pilot.md) and
+[aggregate results](data/flashnext-optimization-pilot-2026-11-07.json).
+This is separate evidence and does not supersede the qualified historical
+Flash-Next MTP records below.
+
 **Dense Qwen3.8-27B oQ4e packed-weight follow-up (2026-11-06).** The final
 host-screened run measured **51.48 useful decode tok/s median**, with all six
 768-token responses passing on their first attempt. The **70.8 tok/s target

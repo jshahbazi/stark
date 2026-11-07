@@ -458,6 +458,16 @@ with profiling disabled remains valid uninstrumented throughput evidence for
 its named executable. The [MTP optimization study](benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md)
 records the profile and longer on/off measurements at fixed quantization.
 
+`scripts/benchmark_qwen38_pilot.py` extends that paired harness with bounded
+input-length/draft-depth grids and optional candidate-worker ABBA sessions.
+Use `--screened` for quiet admission and request-time host qualification.
+`--observe-host` records interference without quiet admission and always leaves
+timings unqualified. Candidate comparisons require matching same-route output
+hashes; this gate is intended for scheduling changes that preserve the existing
+numerical policy. See the [Flash-Next pilot](benchmarks/2026-11-07-flashnext-optimization-pilot.md)
+for the measured source identities, artifact guards, reproduction commands and
+limitations. The runner never promotes a setting automatically.
+
 The context benchmark supports greedy and stochastic generation; `--top-k 0`
 omits top-k filtering. It emits counts, hashes and timing aggregates. The
 benchmark study records the separate pinned corpus used for its exact workload.

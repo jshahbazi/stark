@@ -42,7 +42,8 @@ def weight_guard(model, receipt_path):
 @contextlib.contextmanager
 def clean_environment():
     prefixes = ("STARK_QWEN38_", "STARK_GLM53_", "STARK_HYBRID_")
-    removed = {key: value for key, value in os.environ.items() if key.startswith(prefixes)}
+    removed = {key: value for key, value in os.environ.items()
+               if key.startswith(prefixes) or key == "STARK_NATIVE_PROFILE_OUTPUT"}
     for key in removed:
         del os.environ[key]
     try:

@@ -105,11 +105,41 @@ def test_host_screen_failure_prevents_timing_qualification(tmp_path, monkeypatch
 
 def test_environment_removed_and_restored_on_failure(monkeypatch):
     monkeypatch.setenv("STARK_QWEN38_PROFILE_OUTPUT", "private-path")
+    monkeypatch.setenv("STARK_NATIVE_PROFILE_OUTPUT", "native-private-path")
     with pytest.raises(RuntimeError):
         with pilot.clean_environment():
             assert "STARK_QWEN38_PROFILE_OUTPUT" not in os.environ
+            assert "STARK_NATIVE_PROFILE_OUTPUT" not in os.environ
             raise RuntimeError()
     assert os.environ["STARK_QWEN38_PROFILE_OUTPUT"] == "private-path"
+    assert os.environ["STARK_NATIVE_PROFILE_OUTPUT"] == "native-private-path"
+
+
+def test_paired_harness_restores_both_profiler_aliases(monkeypatch):
+    names = ("STARK_QWEN38_PROFILE_OUTPUT", "STARK_NATIVE_PROFILE_OUTPUT")
+    for name in names:
+        monkeypatch.setenv(name, "private-path")
+    with mtp._profile_env_removed():
+        assert all(name not in os.environ for name in names)
+    assert all(os.environ[name] == "private-path" for name in names)
+
+
+def test_observation_mode_records_screens_without_admission(tmp_path):
+    args = make_args(tmp_path)
+    args.observe_host = True
+
+    class Monitor:
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def set_phase(self, _phase): pass
+
+    report = mtp.run(args, worker_factory=FakeWorker, monitor_factory=Monitor,
+                     paging_reader=lambda: {},
+                     admission_fn=lambda _: pytest.fail("must not seek quiet admission"),
+                     screen_fn=lambda *_: {"eligible": True})
+    assert report["passed"] and not report["timing_eligible"]
+    assert all(item["host_screen"]["eligible"] for item in report["requests"])
+    assert report["screening_policy"]["quiet_admission_enabled"] is False
 
 
 def test_entire_grid_validated_before_running(tmp_path, monkeypatch):
