@@ -147,6 +147,7 @@ fn operator_metrics(
             let ordinary = actual.iter().map(|value| bf16::from_f32(*value)).collect::<Vec<_>>();
             let (trace_rms, _) = numerical_metric(&traced, &ordinary);
             println!("{}", json!({"private_retained_attention_stage_metrics":{"patches":n,"stages":stage_metrics,"trace_to_ordinary_relative_rms":trace_rms,"trace_ordinary_mismatch_count":mismatches}}));
+            assert_eq!(mismatches, 0, "private attention trace perturbs ordinary arithmetic");
         }
         json!({"operator_index":index,"elements":actual.len(),"relative_rms":rms,"cosine":cosine})
     }).collect()
