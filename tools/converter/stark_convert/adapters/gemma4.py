@@ -449,6 +449,7 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
                     "reference_bf16": target == "BF16",
                 } if ple_dim else None,
                 "has_post_layer_scalar": True,
+                "materialize_post_layer_scalar": ple_dim == 0 and target == "BF16",
                 "kv_source_layer_index": owner,
                 "rope_config": rope_configs[kind],
             }

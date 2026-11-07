@@ -623,6 +623,93 @@ mod contract_tests {
 
     use super::*;
 
+    #[cfg(backend = "cpu")]
+    #[stark_test]
+    #[ignore]
+    fn gemma_nople_canonical_cpu_fixture() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("STARK_GEMMA4_DENSE_FIXTURE_PATH").expect("set private no-PLE fixture"),
+        );
+        let path = std::path::PathBuf::from(
+            std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private no-PLE native model"),
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        assert!(
+            manifest["reference_profile"] == "transformers-canonical"
+                && manifest["source_sha256"] == "4f874549f79deda4bb9ce7fb7d7b8e7349122be1711f733f7a4157e46ed10cc3",
+            "private reference identity changed"
+        );
+        let engine = Engine::<crate::backends::cpu::Cpu>::new().unwrap();
+        let model = engine.load_language_model(&path).unwrap_or_else(|_| panic!("private no-PLE model loading failed"));
+        let mut cases = Vec::new();
+        let mut passed = true;
+        let compare = |actual: &[f32], reference: &[f32]| {
+            assert!(actual.len() == reference.len() && !actual.is_empty());
+            let n = actual.len() as f64;
+            let mean = actual.iter().zip(reference).map(|(a, b)| f64::from(*a) - f64::from(*b)).sum::<f64>() / n;
+            let ref_mean = reference.iter().map(|v| f64::from(*v)).sum::<f64>() / n;
+            let centered = (actual
+                .iter()
+                .zip(reference)
+                .map(|(a, b)| (f64::from(*a) - f64::from(*b) - mean).powi(2))
+                .sum::<f64>()
+                / n)
+                .sqrt();
+            let ref_rms = (reference.iter().map(|v| (f64::from(*v) - ref_mean).powi(2)).sum::<f64>() / n).sqrt();
+            let max = actual
+                .iter()
+                .zip(reference)
+                .map(|(a, b)| (f64::from(*a) - f64::from(*b) - mean).abs())
+                .fold(0.0, f64::max);
+            let greedy = |values: &[f32]| values.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+            let greedy_agreement = greedy(actual) == greedy(reference);
+            let accepted = actual.iter().all(|v| v.is_finite())
+                && centered <= 1.0 / 128.0 + 0.08 * ref_rms
+                && max <= 0.1
+                && greedy_agreement;
+            (
+                accepted,
+                serde_json::json!({"centered_rms":centered,"reference_centered_rms":ref_rms,
+                "centered_maximum_absolute_error":max,"greedy_agreement":greedy_agreement}),
+            )
+        };
+        for (index, case) in manifest["cases"].as_array().unwrap().iter().enumerate() {
+            let tokens: Vec<u32> = serde_json::from_value(case["tokens"].clone()).unwrap();
+            let bytes = std::fs::read(root.join(case["logits"].as_str().unwrap())).unwrap();
+            let reference =
+                bytes.chunks_exact(4).map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect::<Vec<_>>();
+            let actual =
+                model.score_next_token(&tokens, 128).unwrap_or_else(|_| panic!("private no-PLE scoring failed"));
+            let (accepted, metrics) = compare(&actual.logits, &reference);
+            passed &= accepted;
+            cases.push(serde_json::json!({"case_index":index,"passed":accepted,"metrics":metrics}));
+        }
+        drop(model);
+        let mut negative_rejected = None;
+        if let Some(control) = std::env::var_os("STARK_GEMMA4_CONTROL_MODEL_PATH") {
+            let model = engine
+                .load_language_model(Path::new(&control))
+                .unwrap_or_else(|_| panic!("private control loading failed"));
+            let mut rejected = false;
+            for case in manifest["cases"].as_array().unwrap() {
+                let tokens: Vec<u32> = serde_json::from_value(case["tokens"].clone()).unwrap();
+                let bytes = std::fs::read(root.join(case["logits"].as_str().unwrap())).unwrap();
+                let reference =
+                    bytes.chunks_exact(4).map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect::<Vec<_>>();
+                let actual = model.score_next_token(&tokens, 128).unwrap();
+                rejected |= !compare(&actual.logits, &reference).0;
+            }
+            negative_rejected = Some(rejected);
+            passed &= rejected;
+        }
+        let report = serde_json::json!({"passed":passed,"backend":"cpu","scope":manifest["scope"],"cases":cases,
+            "legacy_distributed_scalar_control_rejected":negative_rejected});
+        std::fs::write(root.join("native-cpu-metrics.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        println!("{report}");
+        assert!(passed, "private no-PLE canonical gates failed");
+    }
+
     fn config() -> serde_json::Value {
         serde_json::json!({
             "type":"Gemma4VisionLanguageModelConfig",

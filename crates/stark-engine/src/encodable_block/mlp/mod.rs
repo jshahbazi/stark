@@ -17,6 +17,20 @@ use crate::{
 };
 
 pub trait Mlp<B: Backend>: Send + Sync {
+    fn requires_residual_input(&self) -> bool {
+        false
+    }
+
+    fn encode_with_residual(
+        &self,
+        input: B::ScratchBuffer,
+        _residual: Option<B::ScratchBuffer>,
+        batch_dim: u32,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        self.encode(input, batch_dim, command_buffer)
+    }
+
     fn encode(
         &self,
         input: B::ScratchBuffer,

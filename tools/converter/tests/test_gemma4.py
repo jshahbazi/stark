@@ -123,6 +123,7 @@ def test_dense_no_ple_global_k_equals_v_keeps_independent_normalization_inputs(t
     layers = plan.decoder_config["transformer_config"]["layer_configs"]
     assert [layer["mixer_config"]["num_groups"] for layer in layers] == [2,1,2,1,2,1]
     assert all(layer["ple_config"] is None and layer["kv_source_layer_index"] is None for layer in layers)
+    assert all(layer["materialize_post_layer_scalar"] for layer in layers)
     global_qkv = next(op for op in plan.operations if op.name == "decoder.transformer.layers.1.mixer.qkvg_projection.weights.weights")
     _, source_tensors = read_safetensors_header(source / "model.safetensors")
     assert global_qkv.sources == tuple(source_tensors[name] for name in (
