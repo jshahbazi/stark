@@ -31,6 +31,11 @@ pub trait MatmulKernel: Sized + Send + Sync {
     ) {
     }
 
+    /// Keep one F32 contraction before the declared output cast. Backends
+    /// whose optimized reductions round partial outputs override this hook.
+    /// This is enabled only by an explicitly admitted numerical profile.
+    fn set_reference_accumulation(&mut self) {}
+
     fn encode(
         &mut self,
         arguments: MatmulArguments<
