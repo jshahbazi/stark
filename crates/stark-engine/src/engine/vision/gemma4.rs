@@ -57,23 +57,38 @@ struct ImageProfile {
     revision: &'static str,
     family: &'static str,
     tokenizer: &'static str,
+    template: &'static str,
     model_dim: u32,
+    bidirectional: bool,
 }
 
-const PROFILES: [ImageProfile; 2] = [
+const PROFILES: [ImageProfile; 3] = [
     ImageProfile {
         repo: REPO,
         revision: REVISION,
         family: "gemma4-e2b-bf16-v1",
         tokenizer: TOKENIZER,
+        template: TEMPLATE,
         model_dim: MODEL,
+        bidirectional: false,
     },
     ImageProfile {
         repo: "google/gemma-4-E4B-it",
         revision: "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c",
         family: "gemma4-e4b-bf16-v1",
         tokenizer: "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc",
+        template: TEMPLATE,
         model_dim: 2560,
+        bidirectional: false,
+    },
+    ImageProfile {
+        repo: "google/gemma-4-31B-it",
+        revision: "842da3794eaa0b77d5f08bae87a17459d91ff475",
+        family: "gemma4-31b-bf16-v1",
+        tokenizer: TOKENIZER,
+        template: "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+        model_dim: 5376,
+        bidirectional: true,
     },
 ];
 
@@ -122,7 +137,11 @@ fn validate_contract(raw: &serde_json::Value) -> Result<ImageProfile, InvalidInp
         || contract["transport"] != "mediaref-v1"
         || contract["runtime_supported"] != true
         || contract["input_modalities"] != serde_json::json!(["text", "image"])
-        || raw["decoder_config"]["gemma4_image_embeddings"] != true
+        || raw["decoder_config"]["gemma4_image_embeddings"] != !profile.bidirectional
+        || (profile.bidirectional
+            && (raw["decoder_config"]["scalar_image_embeddings"] != true
+                || raw["decoder_config"]["bidirectional_image_attention"] != true
+                || !raw["decoder_config"]["ple_model_config"].is_null()))
         || raw["decoder_config"]["vocab_size"] != VOCAB
         || contract["token_ids"]
             != serde_json::json!({"image":IMAGE,"vision_start":START,"vision_end":END,"video":VIDEO,"audio":AUDIO})
@@ -134,13 +153,62 @@ fn validate_contract(raw: &serde_json::Value) -> Result<ImageProfile, InvalidInp
         return Err(InvalidInput("Gemma vision declares unsupported configuration fields"));
     }
     for (key, value) in [
-        ("hidden_size", 768),
-        ("num_hidden_layers", 16),
-        ("num_attention_heads", 12),
-        ("num_key_value_heads", 12),
-        ("head_dim", 64),
-        ("global_head_dim", 64),
-        ("intermediate_size", 3072),
+        (
+            "hidden_size",
+            if profile.bidirectional {
+                1152
+            } else {
+                768
+            },
+        ),
+        (
+            "num_hidden_layers",
+            if profile.bidirectional {
+                27
+            } else {
+                16
+            },
+        ),
+        (
+            "num_attention_heads",
+            if profile.bidirectional {
+                16
+            } else {
+                12
+            },
+        ),
+        (
+            "num_key_value_heads",
+            if profile.bidirectional {
+                16
+            } else {
+                12
+            },
+        ),
+        (
+            "head_dim",
+            if profile.bidirectional {
+                72
+            } else {
+                64
+            },
+        ),
+        (
+            "global_head_dim",
+            if profile.bidirectional {
+                72
+            } else {
+                64
+            },
+        ),
+        (
+            "intermediate_size",
+            if profile.bidirectional {
+                4304
+            } else {
+                3072
+            },
+        ),
         ("patch_size", 16),
         ("pooling_kernel_size", 3),
         ("position_embedding_size", 10240),
@@ -152,9 +220,9 @@ fn validate_contract(raw: &serde_json::Value) -> Result<ImageProfile, InvalidInp
     }
     if vision["model_type"] != "gemma4_vision"
         || vision["rms_norm_eps"] != 1e-6
-        || vision["standardize"] != false
+        || vision["standardize"] != profile.bidirectional
         || vision["attention_bias"] != false
-        || vision["use_clipped_linears"] != true
+        || vision["use_clipped_linears"] != !profile.bidirectional
         || vision["hidden_activation"] != "gelu_pytorch_tanh"
         || vision["rope_parameters"] != serde_json::json!({"rope_theta":100.0,"rope_type":"default"})
     {
@@ -176,7 +244,7 @@ impl<B: Backend> Engine<B> {
         let mut components = BTreeMap::new();
         for (name, limit) in [
             ("config.json", 1_048_576),
-            ("model.safetensors", 20 * 1024 * 1024 * 1024u64),
+            ("model.safetensors", 72 * 1024 * 1024 * 1024u64),
             ("tokenizer.json", 67_108_864),
             ("preprocessor_config.json", 65_536),
             ("chat_template.jinja", 262_144),
@@ -206,6 +274,8 @@ impl<B: Backend> Engine<B> {
         // needs its own bound; neither profile permits unbounded components.
         let weight_limit_gib = if profile.model_dim == MODEL {
             12
+        } else if profile.bidirectional {
+            72
         } else {
             20
         };
@@ -215,7 +285,7 @@ impl<B: Backend> Engine<B> {
         for (name, expected) in [
             ("tokenizer.json", profile.tokenizer),
             ("preprocessor_config.json", PROCESSOR),
-            ("chat_template.jinja", TEMPLATE),
+            ("chat_template.jinja", profile.template),
         ] {
             if hashes.get(name).map(String::as_str) != Some(expected) {
                 return Err(InvalidInput("Gemma image processing identity mismatch").into());
@@ -382,35 +452,56 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
         capacity: u32,
     ) -> Result<MultimodalPrefill, NativeVisionError<B>> {
         self.validate_image(image)?;
-        Ok(MultimodalPrefill::try_new_gemma4(
-            tokens,
-            ProjectedImage {
-                model_identity: self.language_model.model_identity.clone(),
-                model_dim: self.profile.model_dim,
-                data_type: DataType::BF16,
-                grid: ImageGrid {
-                    temporal: 1,
-                    height: image.patches.grid[1],
-                    width: image.patches.grid[2],
-                    merge_size: 3,
+        if tokens.iter().any(|token| matches!(*token, AUDIO | VIDEO)) {
+            return Err(InvalidInput("audio and video are outside Gemma image execution").into());
+        }
+        let projected = ProjectedImage {
+            model_identity: self.language_model.model_identity.clone(),
+            model_dim: self.profile.model_dim,
+            data_type: DataType::BF16,
+            grid: ImageGrid {
+                temporal: 1,
+                height: image.patches.grid[1],
+                width: image.patches.grid[2],
+                merge_size: 3,
+            },
+            token_start: start,
+            features: vec![bf16::ZERO; (image.image_token_count() * self.profile.model_dim) as usize]
+                .into_boxed_slice(),
+        };
+        let limit = capacity.min(self.max_context_length().unwrap_or(capacity));
+        let input = if self.profile.bidirectional {
+            MultimodalPrefill::try_new_scalar_bidirectional(
+                tokens,
+                projected,
+                IMAGE,
+                START,
+                END,
+                &self.language_model.model_identity,
+                self.profile.model_dim,
+                DataType::BF16,
+                VOCAB,
+                limit,
+            )
+        } else {
+            MultimodalPrefill::try_new_gemma4(
+                tokens,
+                projected,
+                ImageTokenIds {
+                    image: IMAGE,
+                    vision_start: START,
+                    vision_end: END,
+                    video: VIDEO,
                 },
-                token_start: start,
-                features: vec![bf16::ZERO; (image.image_token_count() * self.profile.model_dim) as usize]
-                    .into_boxed_slice(),
-            },
-            ImageTokenIds {
-                image: IMAGE,
-                vision_start: START,
-                vision_end: END,
-                video: VIDEO,
-            },
-            AUDIO,
-            &self.language_model.model_identity,
-            self.profile.model_dim,
-            DataType::BF16,
-            VOCAB,
-            capacity.min(self.max_context_length().unwrap_or(capacity)),
-        )?)
+                AUDIO,
+                &self.language_model.model_identity,
+                self.profile.model_dim,
+                DataType::BF16,
+                VOCAB,
+                limit,
+            )
+        };
+        Ok(input?)
     }
     pub fn prepare_prompt(
         &self,
@@ -587,5 +678,40 @@ mod contract_tests {
         e4b["decoder_config"]["transformer_config"]["model_dim"] = profile.model_dim.into();
         e4b["artifact_contract"]["source"]["revision"] = REVISION.into();
         assert!(validate_contract(&e4b).is_err());
+    }
+
+    #[stark_test]
+    fn gemma_31b_contract_requires_standardized_tower_and_bidirectional_no_ple_decoder() {
+        let mut larger = config();
+        let profile = PROFILES[2];
+        larger["artifact_contract"]["family"]["id"] = profile.family.into();
+        larger["artifact_contract"]["source"]["repo"] = profile.repo.into();
+        larger["artifact_contract"]["source"]["revision"] = profile.revision.into();
+        larger["decoder_config"]["transformer_config"]["model_dim"] = profile.model_dim.into();
+        larger["decoder_config"]["gemma4_image_embeddings"] = false.into();
+        larger["decoder_config"]["scalar_image_embeddings"] = true.into();
+        larger["decoder_config"]["bidirectional_image_attention"] = true.into();
+        for (name, value) in [
+            ("hidden_size", 1152),
+            ("num_hidden_layers", 27),
+            ("num_attention_heads", 16),
+            ("num_key_value_heads", 16),
+            ("head_dim", 72),
+            ("global_head_dim", 72),
+            ("intermediate_size", 4304),
+        ] {
+            larger["artifact_contract"]["vision_config"][name] = value.into();
+        }
+        larger["artifact_contract"]["vision_config"]["standardize"] = true.into();
+        larger["artifact_contract"]["vision_config"]["use_clipped_linears"] = false.into();
+        assert!(validate_contract(&larger).is_ok());
+        let mut changed = larger.clone();
+        changed["decoder_config"]["bidirectional_image_attention"] = false.into();
+        assert!(validate_contract(&changed).is_err());
+        let mut changed = larger.clone();
+        changed["decoder_config"]["ple_model_config"] = serde_json::json!({"ple_dim":256});
+        assert!(validate_contract(&changed).is_err());
+        larger["artifact_contract"]["vision_config"]["standardize"] = false.into();
+        assert!(validate_contract(&larger).is_err());
     }
 }

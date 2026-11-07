@@ -191,7 +191,12 @@ def load_template(model, *, expected_hashes=None):
                 "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
             }
             if config["type"] == "Gemma4VisionLanguageModelConfig":
-                template_hashes = {"0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"}
+                descriptor = config.get("artifact_contract", {}).get("family", {})
+                template_hashes = (
+                    {"ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"}
+                    if descriptor == {"id":"gemma4-31b-bf16-v1", "version":1}
+                    else {"0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"}
+                )
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
             if (

@@ -138,11 +138,180 @@ pub fn gemma4_vision_pool_bf16(
     }
 }
 
+/// Pad the 72-wide larger vision heads to an existing online-attention width.
+/// K/V remain independent and zero padding contributes no dot/value terms.
+#[kernel(Gemma4VisionPreparePaddedBF16)]
+pub fn gemma4_vision_prepare_padded_bf16(
+    q: *const bf16,
+    k: *const bf16,
+    v: *const bf16,
+    queries: *mut bf16,
+    keys: *mut bf16,
+    values: *mut bf16,
+    cosines: *const bf16,
+    sines: *const bf16,
+    rows: u32,
+    num_heads: u32,
+    head_dim: u32,
+    padded_dim: u32,
+) {
+    let (rows, heads, dim, padded) = (rows as usize, num_heads as usize, head_dim as usize, padded_dim as usize);
+    for row in 0..rows {
+        for head in 0..heads {
+            for channel in 0..padded {
+                let destination = (row * heads + head) * padded + channel;
+                let query_destination = (head * rows + row) * padded + channel;
+                unsafe {
+                    if channel >= dim {
+                        *queries.add(query_destination) = bf16::ZERO;
+                        *keys.add(destination) = bf16::ZERO;
+                        *values.add(destination) = bf16::ZERO;
+                        continue;
+                    }
+                    let axis_width = dim / 2;
+                    let half = axis_width / 2;
+                    let local = channel % axis_width;
+                    let paired = (channel / axis_width) * axis_width + (local + half) % axis_width;
+                    let base = (row * heads + head) * dim;
+                    let rotate = |source: *const bf16| {
+                        let a = bf16::from_f32(
+                            (*source.add(base + channel)).to_f32() * (*cosines.add(row * dim + channel)).to_f32(),
+                        );
+                        let sign = if local < half {
+                            -1.0
+                        } else {
+                            1.0
+                        };
+                        let b = bf16::from_f32(
+                            sign * (*source.add(base + paired)).to_f32() * (*sines.add(row * dim + channel)).to_f32(),
+                        );
+                        bf16::from_f32(a.to_f32() + b.to_f32())
+                    };
+                    *queries.add(query_destination) = rotate(q);
+                    *keys.add(destination) = rotate(k);
+                    *values.add(destination) = *v.add(base + channel);
+                }
+            }
+        }
+    }
+}
+
+#[kernel(Gemma4VisionUnpadBF16)]
+pub fn gemma4_vision_unpad_bf16(
+    input: *const bf16,
+    output: *mut bf16,
+    length: u32,
+    head_dim: u32,
+    padded_dim: u32,
+) {
+    for index in 0..length as usize {
+        let source = index / head_dim as usize * padded_dim as usize + index % head_dim as usize;
+        unsafe { *output.add(index) = *input.add(source) };
+    }
+}
+
+/// Preserve BF16 mean pooling, then F32 square-root scaling and learned
+/// standardization before the only final BF16 store (Transformers v5.15.1).
+#[kernel(Gemma4VisionPoolStandardizedBF16)]
+pub fn gemma4_vision_pool_standardized_bf16(
+    input: *const bf16,
+    bias: *const bf16,
+    scale: *const bf16,
+    output: *mut bf16,
+    grid_width: u32,
+    grid_height: u32,
+    width: u32,
+) {
+    let (gw, gh, width) = (grid_width as usize, grid_height as usize, width as usize);
+    for y in 0..gh / 3 {
+        for x in 0..gw / 3 {
+            for channel in 0..width {
+                let mut sum = 0.0f32;
+                for dy in 0..3 {
+                    for dx in 0..3 {
+                        sum +=
+                            unsafe { (*input.add(((y * 3 + dy) * gw + x * 3 + dx) * width + channel)).to_f32() } / 9.0;
+                    }
+                }
+                let pooled = bf16::from_f32(sum).to_f32() * (width as f32).sqrt();
+                unsafe {
+                    *output.add((y * (gw / 3) + x) * width + channel) =
+                        bf16::from_f32((pooled - (*bias.add(channel)).to_f32()) * (*scale.add(channel)).to_f32());
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn larger_vision_standardization_retains_f32_scaled_value() {
+        let width = 1152;
+        let input = vec![bf16::ONE; 9 * width];
+        let bias = vec![bf16::from_f32(34.0); width];
+        let scale = vec![bf16::from_f32(128.0); width];
+        let mut output = vec![bf16::ZERO; width];
+        gemma4_vision_pool_standardized_bf16(
+            input.as_ptr(),
+            bias.as_ptr(),
+            scale.as_ptr(),
+            output.as_mut_ptr(),
+            3,
+            3,
+            width as u32,
+        );
+        let expected = bf16::from_f32(((width as f32).sqrt() - 34.0) * 128.0);
+        let early_rounded = bf16::from_f32((bf16::from_f32((width as f32).sqrt()).to_f32() - 34.0) * 128.0);
+        assert_ne!(expected, early_rounded, "control must distinguish an early BF16 store");
+        assert!(output.iter().all(|value| *value == expected));
+    }
+
+    #[stark_test]
+    fn larger_vision_head_padding_preserves_each_head_and_clears_tail() {
+        let (rows, heads, dim, padded) = (2usize, 2usize, 72usize, 128usize);
+        let input = (0..rows * heads * dim).map(|index| bf16::from_f32(index as f32 / 32.0)).collect::<Vec<_>>();
+        let cos = vec![bf16::ONE; rows * dim];
+        let sin = vec![bf16::ZERO; rows * dim];
+        let mut queries = vec![bf16::NAN; rows * heads * padded];
+        let mut keys = queries.clone();
+        let mut values = queries.clone();
+        gemma4_vision_prepare_padded_bf16(
+            input.as_ptr(),
+            input.as_ptr(),
+            input.as_ptr(),
+            queries.as_mut_ptr(),
+            keys.as_mut_ptr(),
+            values.as_mut_ptr(),
+            cos.as_ptr(),
+            sin.as_ptr(),
+            rows as u32,
+            heads as u32,
+            dim as u32,
+            padded as u32,
+        );
+        for row in 0..rows {
+            for head in 0..heads {
+                for channel in 0..padded {
+                    let expected = if channel < dim {
+                        input[(row * heads + head) * dim + channel]
+                    } else {
+                        bf16::ZERO
+                    };
+                    assert_eq!(queries[(head * rows + row) * padded + channel], expected);
+                    assert_eq!(keys[(row * heads + head) * padded + channel], expected);
+                    assert_eq!(values[(row * heads + head) * padded + channel], expected);
+                }
+            }
+        }
+        let mut restored = vec![bf16::NAN; input.len()];
+        gemma4_vision_unpad_bf16(values.as_ptr(), restored.as_mut_ptr(), input.len() as u32, dim as u32, padded as u32);
+        assert_eq!(restored, input);
+    }
 
     #[stark_test]
     fn gemma_vision_norm_matches_independent_float64_rms() {

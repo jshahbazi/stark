@@ -36,6 +36,17 @@ GEMMA4_E4B_HASHES = {
     "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
 }
 
+GEMMA4_31B_REPO = "google/gemma-4-31B-it"
+GEMMA4_31B_REVISION = "842da3794eaa0b77d5f08bae87a17459d91ff475"
+GEMMA4_31B_HASHES = {
+    "config.json": "e967dd38bc5cfd38bd09a995a7bf4a754075df2b46aba68f7fbb5a791e6d8dd1",
+    "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+    "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+    "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+    "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c"
+}
+
 
 def profile_extension(
     entries: list[dict],
@@ -343,7 +354,13 @@ def export(reference: Path) -> dict:
     gemma4_e4b["catalog_origin"] = "pinned_builtin"
     entries[:] = [gemma4_e4b if entry["repo"] == GEMMA4_E4B_REPO else entry for entry in entries]
 
-    extensions = []
+    gemma4_31b = profile_extension(
+        entries, repo=GEMMA4_31B_REPO, revision=GEMMA4_31B_REVISION,
+        reference_repo="google/gemma-3-4b-it", config_class="HFGemma4TextConfig",
+        adapter="gemma4_text", family="Gemma-4", vendor="Google", size="31B",
+        file_hashes=GEMMA4_31B_HASHES,
+    )
+    extensions = [gemma4_31b]
     for repository, reference_repo, family in (
         ("unsloth/Llama-3.2-1B-Instruct", "meta-llama/Llama-3.2-1B-Instruct", "Llama-3.2"),
         ("mistralai/Mistral-7B-Instruct-v0.2", "mistralai/Codestral-22B-v0.1", "Mistral-7B"),

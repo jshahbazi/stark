@@ -174,8 +174,49 @@ def test_registered_image_profiles_keep_execution_unverified(repo):
     assert capability(ConversionRequest(repo, dtype="float16", artifact_mode="vision-language")).conversion == "unsupported"
 
 
-@pytest.mark.parametrize("model_dim", [2816, 3840, 5376])
+@pytest.mark.parametrize("model_dim", [2816, 3840])
 def test_larger_architectures_do_not_inherit_efficient_family_image_conversion(tmp_path, model_dim):
     source(tmp_path, model_dim)
-    with pytest.raises(UnsupportedConversion, match="PLE text decoder"):
+    with pytest.raises(UnsupportedConversion, match="implemented dense text decoder"):
         vision.gemma4_vision_contract(tmp_path)
+
+
+def test_31b_vision_inventory_requires_standardization_and_plain_linear_weights(tmp_path, monkeypatch):
+    config, _ = source(tmp_path, 5376)
+    config["vision_config"] = dict(vision.LARGE_GEOMETRY)
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    contract = vision.gemma4_vision_contract(tmp_path)
+    assert contract["family"]["id"] == "gemma4-31b-bf16-v1"
+    # Header-only source binds the complete 27-layer tower without allocating
+    # the real 31B checkpoint or inheriting its execution qualification.
+    tensors = {}
+    for name, info in inventory(5376).items():
+        if ".encoder.layers." in name:
+            continue
+        shape = tuple(1152 if dim == 768 else dim for dim in info.shape)
+        tensors[name] = TensorInfo(info.path, "BF16", shape, 0, math.prod(shape) * 2, (0,0,0,0))
+    for layer in range(27):
+        prefix = f"model.vision_tower.encoder.layers.{layer}"
+        shapes = {f"{norm}.weight": (1152,) for norm in (
+            "input_layernorm", "post_attention_layernorm", "pre_feedforward_layernorm", "post_feedforward_layernorm")}
+        shapes.update({"self_attn.q_norm.weight": (72,), "self_attn.k_norm.weight": (72,)})
+        for projection, shape in (("self_attn.q_proj", (1152,1152)), ("self_attn.k_proj", (1152,1152)),
+                                  ("self_attn.v_proj", (1152,1152)), ("self_attn.o_proj", (1152,1152)),
+                                  ("mlp.gate_proj", (4304,1152)), ("mlp.up_proj", (4304,1152)), ("mlp.down_proj", (1152,4304))):
+            shapes[projection + ".weight"] = shape
+        for suffix, shape in shapes.items():
+            tensors[prefix + "." + suffix] = TensorInfo(Path("header-only"), "BF16", shape, 0, math.prod(shape)*2, (0,0,0,0))
+    tensors["model.vision_tower.patch_embedder.input_proj.weight"] = TensorInfo(Path("header-only"), "BF16", (1152,768), 0, 1152*768*2, (0,0,0,0))
+    for name in ("std_bias", "std_scale"):
+        tensors["model.vision_tower." + name] = TensorInfo(Path("header-only"), "BF16", (1152,), 0, 2304, (0,0,0,0))
+    base = ConversionPlan({"vocab_size":262144}, (), {}, 0, len(tensors), tuple(tensors.values()))
+    monkeypatch.setattr(vision, "build_gemma4_plan", lambda *_a, **_k: base)
+    monkeypatch.setattr(vision, "load_checkpoint", lambda _p: tensors)
+    plan = vision.build_gemma4_vision_plan(tmp_path)
+    assert plan.decoder_config["scalar_image_embeddings"] is True
+    assert plan.decoder_config["bidirectional_image_attention"] is True
+    assert plan.decoder_config["gemma4_image_embeddings"] is False
+    assert len(plan.operations) == 356
+    tensors.pop("model.vision_tower.std_scale")
+    with pytest.raises(UnsupportedConversion, match="inventory"):
+        vision.build_gemma4_vision_plan(tmp_path)

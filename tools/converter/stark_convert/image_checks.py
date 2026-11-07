@@ -24,6 +24,7 @@ from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
     GEMMA4_FAMILY_PROFILE,
     GEMMA4_E4B_FAMILY_PROFILE,
+    GEMMA4_31B_FAMILY_PROFILE,
     _current_os_version,
     artifact_image_family,
     family_image_input_contract,
@@ -415,7 +416,7 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             if not _valid_reply(reply, maximum) or reply["input_tokens"] + maximum > context:
                 raise ImageCheckError("The model did not pass the image execution check.")
             image_tokens = getattr(worker, "_last_image_tokens", None)
-            gemma = identity["family_profile"] in {GEMMA4_FAMILY_PROFILE, GEMMA4_E4B_FAMILY_PROFILE}
+            gemma = identity["family_profile"] in {GEMMA4_FAMILY_PROFILE, GEMMA4_E4B_FAMILY_PROFILE, GEMMA4_31B_FAMILY_PROFILE}
             expected_image_tokens = 256 if gemma else 64
             expected_delta = expected_image_tokens + 1 if gemma else expected_image_tokens - 1
             if (

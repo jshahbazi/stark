@@ -200,3 +200,110 @@ fn gemma4_image_full_reference_metal() {
     println!("{report}");
     assert!(passed, "private Gemma image reference gates failed");
 }
+
+/// Source-extracted larger tower qualification does not load a text decoder and
+/// never confers full-checkpoint generation qualification.
+#[stark_test]
+#[ignore]
+fn gemma4_larger_tower_reference_metal() {
+    let root = PathBuf::from(std::env::var_os("STARK_GEMMA4_FIXTURE_PATH").expect("set private Gemma fixture path"));
+    let weights = PathBuf::from(std::env::var_os("STARK_GEMMA4_TOWER_PATH").expect("set extracted private tower path"));
+    let manifest: Value =
+        serde_json::from_slice(&read(&root, "manifest.json")).expect("invalid private tower manifest");
+    assert!(
+        manifest["scope"] == "vision-features-only"
+            && manifest["model_dim"] == 5376
+            && manifest["model_revision"] == PROFILES[2].revision
+            && manifest["source_sha256"] == "4f874549f79deda4bb9ce7fb7d7b8e7349122be1711f733f7a4157e46ed10cc3",
+        "private larger tower reference identity changed"
+    );
+    let engine =
+        Engine::<crate::backends::metal::Metal>::new().unwrap_or_else(|_| panic!("private tower context failed"));
+    let file = File::open(weights).unwrap_or_else(|_| panic!("private tower weights unavailable"));
+    let loader =
+        ParameterLoader::new(&file, &*engine.context).unwrap_or_else(|_| panic!("private tower loading failed"));
+    let tower = Gemma4VisionTower::<crate::backends::metal::Metal>::new(
+        &*engine.context,
+        &loader.tree().subtree("vision"),
+        5376,
+    )
+    .unwrap_or_else(|_| panic!("private tower construction failed"));
+    loader.tree().assert_all_tensors_validated().unwrap_or_else(|_| panic!("unconsumed private tower tensor"));
+    let mut reports = Vec::new();
+    let mut passed = true;
+    for (index, case) in manifest["cases"].as_array().expect("private tower cases missing").iter().enumerate() {
+        let patches = preprocess::prepare(&read(&root, case["image"].as_str().unwrap()))
+            .unwrap_or_else(|_| panic!("private larger image preprocessing failed"));
+        let expected_grid: [u32; 3] = serde_json::from_value(case["grid"].clone()).unwrap();
+        assert_eq!(patches.grid, expected_grid, "private tower grid differs");
+        let patch_metrics = compare(&patches.patches, &floats(&read(&root, case["patches"].as_str().unwrap())));
+        let mut commands = engine
+            .context
+            .create_command_buffer(Some("private larger tower"), None)
+            .unwrap_or_else(|_| panic!("private tower command creation failed"));
+        let output = tower
+            .encode(&patches.patches, patches.grid, &mut commands)
+            .unwrap_or_else(|_| panic!("private tower execution failed"));
+        let mut readback = engine.context.create_buffer((&output).size()).unwrap();
+        commands.encode_copy(&output, &mut readback);
+        commands
+            .end_encoding()
+            .submit()
+            .wait_until_completed()
+            .unwrap_or_else(|_| panic!("private tower submission failed"));
+        let actual = (&readback).as_slice::<bf16>();
+        let metrics = compare(actual, &floats(&read(&root, case["features"].as_str().unwrap())));
+        let feature_pass = metrics["relative_rms_error"].as_f64().unwrap() <= 0.02
+            && metrics["cosine_similarity"].as_f64().unwrap() >= 0.999;
+        let patch_pass = patch_metrics["maximum_absolute_error"] == 0.0;
+        passed &= feature_pass && patch_pass;
+        reports.push(json!({"case_index":index,"features":metrics,"patches":patch_metrics,
+            "features_passed":feature_pass,"patch_exact":patch_pass}));
+    }
+    let report = json!({"passed":passed,"scope":"vision-features-only","backend":"metal",
+        "model_revision":PROFILES[2].revision,"cases":reports});
+    std::fs::write(root.join("native-tower-metrics.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    println!("{report}");
+    assert!(passed, "private larger tower reference gates failed");
+}
+
+#[stark_test]
+#[ignore]
+fn gemma4_completed_projection_cancellation_preserves_loaded_instance() {
+    let root = PathBuf::from(std::env::var_os("STARK_GEMMA4_FIXTURE_PATH").expect("set private Gemma fixture path"));
+    let model_path = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private Gemma model path"));
+    let manifest: Value = serde_json::from_slice(&read(&root, "manifest.json")).unwrap();
+    let case = &manifest["cases"][0];
+    let encoded = read(&root, case["image"].as_str().unwrap());
+    let engine = Engine::<crate::backends::metal::Metal>::new().unwrap();
+    let mut model = engine
+        .load_gemma4_vision_language_model(&model_path)
+        .unwrap_or_else(|_| panic!("private cancellation model loading failed"));
+    let error = model.prepare_image_controlled(&encoded, || true).err().expect("preparation must cancel");
+    assert_eq!(error.kind(), super::super::NativeVisionErrorKind::Cancelled);
+    assert!(!model.is_fenced());
+    let image = model.prepare_image(&encoded).unwrap();
+    let tokens: Vec<u64> = serde_json::from_value(case["unexpanded_tokens"].clone()).unwrap();
+    let capacity = case["context_tokens"].as_u64().unwrap() as u32;
+    let (tokens, start) = model.prepare_prompt(tokens.into_boxed_slice(), &image, capacity).unwrap();
+    let mut state = model.create_empty_state(Some(capacity), 0).unwrap();
+    let options = model.default_stream_options();
+    let mut calls = 0;
+    let error = model
+        .stream_prepared_image_controlled(tokens, image, start, capacity, &mut state, options, || {
+            calls += 1;
+            calls == 2
+        })
+        .err()
+        .expect("completed projection must cancel");
+    assert_eq!(calls, 2);
+    assert_eq!(error.kind(), super::super::NativeVisionErrorKind::Cancelled);
+    assert!(!model.is_fenced(), "completed immutable tower projection must preserve the loaded model");
+    drop(state);
+    let mut text_state = model.create_empty_state(Some(capacity), 0).unwrap();
+    let options = model.default_stream_options();
+    let mut stream = model.stream(&[2], &mut text_state, options).unwrap();
+    assert!(stream.next().is_some_and(|result| result.is_ok()), "same instance must recover for text");
+    drop(stream);
+    assert!(!model.is_fenced());
+}

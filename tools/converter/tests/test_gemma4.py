@@ -99,6 +99,47 @@ def gemma4_fixture(path, *, wrapper=True, double_wide=True, redundant=True, dim=
     return outer, tensors
 
 
+def test_dense_no_ple_global_k_equals_v_keeps_independent_normalization_inputs(tmp_path):
+    source = tmp_path / "source"
+    config, tensors = gemma4_fixture(source, wrapper=False, double_wide=False)
+    config.update(hidden_size_per_layer_input=0, num_kv_shared_layers=0, num_key_value_heads=2,
+                  attention_k_eq_v=True, num_global_key_value_heads=1,
+                  use_bidirectional_attention="vision")
+    tensors = {name: tensor for name, tensor in tensors.items()
+               if not any(part in name for part in ("embed_tokens_per_layer", "per_layer_model_projection",
+                         "per_layer_projection_norm", "per_layer_input_gate", "per_layer_projection",
+                         "post_per_layer_input_norm"))
+               and not (".layers." in name and int(name.split(".layers.")[1].split(".")[0]) % 2
+                        and name.endswith(".self_attn.v_proj.weight"))}
+    for layer in (0,2,4):
+        for branch in ("k", "v"):
+            name = f"model.layers.{layer}.self_attn.{branch}_proj.weight"
+            dtype, values = tensors[name]
+            tensors[name] = (dtype, np.concatenate([values, values], axis=0))
+    (source / "config.json").write_text(json.dumps(config))
+    save_tensors(source / "model.safetensors", tensors)
+    plan = build_gemma4_plan(source)
+    assert plan.decoder_config["ple_model_config"] is None
+    layers = plan.decoder_config["transformer_config"]["layer_configs"]
+    assert [layer["mixer_config"]["num_groups"] for layer in layers] == [2,1,2,1,2,1]
+    assert all(layer["ple_config"] is None and layer["kv_source_layer_index"] is None for layer in layers)
+    global_qkv = next(op for op in plan.operations if op.name == "decoder.transformer.layers.1.mixer.qkvg_projection.weights.weights")
+    _, source_tensors = read_safetensors_header(source / "model.safetensors")
+    assert global_qkv.sources == tuple(source_tensors[name] for name in (
+        "model.layers.1.self_attn.q_proj.weight", "model.layers.1.self_attn.k_proj.weight", "model.layers.1.self_attn.k_proj.weight"
+    ))
+    local_qkv = next(op for op in plan.operations if op.name == "decoder.transformer.layers.0.mixer.qkvg_projection.weights.weights")
+    assert local_qkv.sources[-1] == source_tensors["model.layers.0.self_attn.v_proj.weight"]
+    output = tmp_path / "output.safetensors"
+    write_plan(plan, output, chunk_bytes=96)
+    _, converted = read_safetensors_header(output)
+    assert tensor_bytes(converted[global_qkv.name]) == b"".join(
+        tensors[name][1].tobytes() for name in (
+            "model.layers.1.self_attn.q_proj.weight", "model.layers.1.self_attn.k_proj.weight", "model.layers.1.self_attn.k_proj.weight"
+        )
+    )
+
+
 @pytest.mark.parametrize("wrapper,redundant,double_wide", [(True, True, True), (False, False, False)])
 def test_gemma4_native_topology_and_payloads(tmp_path, wrapper, redundant, double_wide):
     source = tmp_path / "source"

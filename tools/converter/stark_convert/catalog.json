@@ -1,8 +1,71 @@
 {
   "entry_count": 110,
   "exporter": "tools/converter/scripts/export_conversion_catalog.py",
-  "extension_count": 7,
+  "extension_count": 8,
   "extensions": [
+    {
+      "adapter": "qwen3_5",
+      "catalog_origin": "stark_extension",
+      "compressed_format": {
+        "bits": 4,
+        "mixed_bits": [
+          4,
+          5,
+          6,
+          8
+        ],
+        "scheme": "mlx_affine"
+      },
+      "config_class": "HFQwen35Config",
+      "container": ".safetensors",
+      "family": "Qwen3.8",
+      "files": {
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": "qwen_think_end",
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": "optional_thinking",
+        "reasoning_id": "boolean_default_on",
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "qwen3_5",
+      "model_kind": "LanguageModelSpec",
+      "name": "Qwen3.8-27B oQ4e MTP",
+      "origin": "HuggingFaceOrigin",
+      "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp",
+      "size": "27B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "Alibaba"
+    },
     {
       "adapter": "olmo3",
       "catalog_origin": "stark_extension",
@@ -194,6 +257,81 @@
       "vendor": "Google"
     },
     {
+      "adapter": "gemma4_text",
+      "catalog_origin": "stark_extension",
+      "compressed_format": null,
+      "config_class": "HFGemma4TextConfig",
+      "container": ".safetensors",
+      "family": "Gemma-4",
+      "files": {
+        "chat_template": {
+          "filename": "chat_template.jinja",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "processor_config": {
+          "filename": "processor_config.json",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "google/gemma-4-31B-it"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": null,
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": null,
+        "reasoning_id": null,
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "gemma4_text",
+      "model_kind": "LanguageModelSpec",
+      "name": "gemma-4-31B-it",
+      "origin": "HuggingFaceOrigin",
+      "profile_reference": "google/gemma-3-4b-it",
+      "profile_source": {
+        "files_sha256": {
+          "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+          "config.json": "e967dd38bc5cfd38bd09a995a7bf4a754075df2b46aba68f7fbb5a791e6d8dd1",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+          "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633"
+        },
+        "repo": "google/gemma-4-31B-it",
+        "revision": "842da3794eaa0b77d5f08bae87a17459d91ff475"
+      },
+      "repo": "google/gemma-4-31B-it",
+      "size": "31B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "Google"
+    },
+    {
       "adapter": "mistral",
       "catalog_origin": "stark_extension",
       "compressed_format": null,
@@ -357,69 +495,6 @@
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
-    },
-    {
-      "adapter": "qwen3_5",
-      "catalog_origin": "stark_extension",
-      "compressed_format": {
-        "bits": 4,
-        "mixed_bits": [
-          4,
-          5,
-          6,
-          8
-        ],
-        "scheme": "mlx_affine"
-      },
-      "config_class": "HFQwen35Config",
-      "container": ".safetensors",
-      "family": "Qwen3.8",
-      "files": {
-        "generation_config": {
-          "filename": "generation_config.json",
-          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
-        },
-        "model_config": {
-          "filename": "config.json",
-          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
-        },
-        "tokenizer": {
-          "filename": "tokenizer.json",
-          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
-        },
-        "tokenizer_config": {
-          "filename": "tokenizer_config.json",
-          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
-        }
-      },
-      "metadata": {
-        "end_of_thinking_id": "qwen_think_end",
-        "generation_config": null,
-        "generation_params_overrides": null,
-        "grammar_start_tokens_count": 0,
-        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-        "inline_sources": {},
-        "parser_id": "optional_thinking",
-        "reasoning_id": "boolean_default_on",
-        "roles": {
-          "assistant": "assistant",
-          "system": "system",
-          "user": "user"
-        }
-      },
-      "metadata_profile": "qwen3_5",
-      "model_kind": "LanguageModelSpec",
-      "name": "Qwen3.8-27B oQ4e MTP",
-      "origin": "HuggingFaceOrigin",
-      "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp",
-      "size": "27B",
-      "status": {
-        "access": "not_assessed",
-        "conversion": "implemented",
-        "qualification": "pending",
-        "runtime": "not_assessed"
-      },
-      "vendor": "Alibaba"
     }
   ],
   "models": [

@@ -1,4 +1,4 @@
-"""Bounded native Gemma 4 E2B/E4B text checkpoint planning.
+"""Bounded native Gemma 4 dense text checkpoint planning.
 
 Architecture and tensor conventions independently implemented from Google's
 Gemma 4 E2B checkpoint 3e22461f65e89153144f8adb70e3b8c2cc9845a7
@@ -132,9 +132,9 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
         raise ConversionError("Gemma 4 wrapper and text quantization disagree")
     if set(config) - _KEYS:
         raise UnsupportedConversion("Gemma 4 text config has unimplemented options")
-    for key in ("attention_bias", "mlp_bias", "attention_k_eq_v", "enable_moe_block", "rope_traditional"):
+    for key in ("attention_bias", "mlp_bias", "enable_moe_block", "rope_traditional"):
         if _boolean(config, key, False):
-            raise UnsupportedConversion("Gemma 4 E2B/E4B text coverage excludes bias, MoE and K=V variants")
+            raise UnsupportedConversion("Gemma 4 dense text coverage excludes bias and MoE variants")
     if not _boolean(config, "tie_word_embeddings", True):
         raise UnsupportedConversion("Gemma 4 text coverage requires tied embeddings")
     if config.get("hidden_activation", "gelu_pytorch_tanh") != "gelu_pytorch_tanh":
@@ -150,9 +150,9 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
         raise UnsupportedConversion("Gemma 4 rotary parameters must be declared per attention type")
     if config.get("attention_dropout", 0.0) != 0.0:
         raise UnsupportedConversion("Gemma 4 dropout is outside inference coverage")
-    if config.get("use_bidirectional_attention") not in (None, False):
+    if config.get("use_bidirectional_attention") not in (None, False, "vision"):
         raise UnsupportedConversion("Gemma 4 text coverage requires causal attention")
-    for key in ("num_experts", "top_k_experts", "expert_intermediate_size", "num_global_key_value_heads"):
+    for key in ("num_experts", "top_k_experts", "expert_intermediate_size"):
         if config.get(key) is not None:
             raise UnsupportedConversion("Gemma 4 E2B/E4B config declares an unsupported architecture")
     dim = _integer(config, "hidden_size")
@@ -170,7 +170,20 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
     if heads % groups or local_dim % 2 or global_dim % 2:
         raise ConversionError("Gemma 4 attention dimensions must be positive and divisible")
     vocab = _integer(config, "vocab_size")
-    ple_dim = _integer(config, "hidden_size_per_layer_input")
+    ple_dim = config.get("hidden_size_per_layer_input")
+    if type(ple_dim) is not int or ple_dim < 0:
+        raise ConversionError("Gemma 4 PLE width must be a nonnegative integer")
+    k_eq_v = _boolean(config, "attention_k_eq_v", False)
+    global_groups = config.get("num_global_key_value_heads")
+    if k_eq_v:
+        if ple_dim or type(global_groups) is not int or global_groups < 1 or heads % global_groups or shared_count:
+            raise UnsupportedConversion("Gemma 4 global K=V requires a no-PLE decoder without shared layers")
+        if quantization is not None or target != "BF16":
+            raise UnsupportedConversion("Gemma 4 no-PLE global K=V currently requires canonical BF16")
+    elif not ple_dim or global_groups is not None:
+        raise UnsupportedConversion("Gemma 4 no-PLE decoder requires its explicit global K=V profile")
+    if ple_dim and config.get("use_bidirectional_attention") == "vision":
+        raise UnsupportedConversion("Gemma 4 PLE images require causal attention")
     ple_vocab = _integer(config, "vocab_size_per_layer_input")
     if ple_vocab != vocab:
         raise UnsupportedConversion("Gemma 4 text and PLE vocabularies must agree")
@@ -291,18 +304,19 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
 
     matrix("decoder.embedding.embedding", (prefix + ".embed_tokens.weight",), ((vocab, dim),), "input_output")
     norm("decoder.transformer.output_norm", prefix + ".norm.weight", dim)
-    matrix(
-        "decoder.per_layer_embedding.token_embedding",
-        (prefix + ".embed_tokens_per_layer.weight",),
-        ((ple_vocab, count * ple_dim),),
-        "input_output",
-    )
-    matrix(
-        "decoder.per_layer_embedding.model_projection.weights",
-        (prefix + ".per_layer_model_projection.weight",),
-        ((count * ple_dim, dim),),
-    )
-    norm("decoder.per_layer_embedding.projection_norm", prefix + ".per_layer_projection_norm.weight", ple_dim)
+    if ple_dim:
+        matrix(
+            "decoder.per_layer_embedding.token_embedding",
+            (prefix + ".embed_tokens_per_layer.weight",),
+            ((ple_vocab, count * ple_dim),),
+            "input_output",
+        )
+        matrix(
+            "decoder.per_layer_embedding.model_projection.weights",
+            (prefix + ".per_layer_model_projection.weight",),
+            ((count * ple_dim, dim),),
+        )
+        norm("decoder.per_layer_embedding.projection_norm", prefix + ".per_layer_projection_norm.weight", ple_dim)
     # Tied heads may be serialized by text exporters. Admit only byte-identical
     # copies, including every packed affine plane.
     for head in ("lm_head.weight", "language_model.lm_head.weight"):
@@ -362,11 +376,14 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
             )
         )
         norm(out + ".mixer.query_norm", src + ".self_attn.q_norm.weight", width)
-        branches = ("q", "k", "v") if owner is None else ("q",)
+        layer_groups = global_groups if k_eq_v and kind == "full_attention" else groups
+        # Global K=V shares the raw projection only. Duplicate its source rows
+        # before the existing independent learned K RMS/RoPE and weightless V RMS.
+        branches = ("q", "k", "k" if k_eq_v and kind == "full_attention" else "v") if owner is None else ("q",)
         matrix(
             out + ".mixer.qkvg_projection.weights",
             tuple(src + f".self_attn.{branch}_proj.weight" for branch in branches),
-            tuple((heads * width if branch == "q" else groups * width, dim) for branch in branches),
+            tuple((heads * width if branch == "q" else layer_groups * width, dim) for branch in branches),
         )
         if owner is None:
             norm(out + ".mixer.key_norm", src + ".self_attn.k_norm.weight", width)
@@ -387,9 +404,10 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
             ((intermediate, dim), (intermediate, dim)),
         )
         matrix(out + ".mlp.down_projection.weights", (src + ".mlp.down_proj.weight",), ((dim, intermediate),))
-        matrix(out + ".ple.gate.weights", (src + ".per_layer_input_gate.weight",), ((ple_dim, dim),))
-        matrix(out + ".ple.projection.weights", (src + ".per_layer_projection.weight",), ((dim, ple_dim),))
-        norm(out + ".ple.norm", src + ".post_per_layer_input_norm.weight", dim)
+        if ple_dim:
+            matrix(out + ".ple.gate.weights", (src + ".per_layer_input_gate.weight",), ((ple_dim, dim),))
+            matrix(out + ".ple.projection.weights", (src + ".per_layer_projection.weight",), ((dim, ple_dim),))
+            norm(out + ".ple.norm", src + ".post_per_layer_input_norm.weight", dim)
         mixer = {
             "type": "AttentionConfig",
             "qkvg_projection_config": {},
@@ -397,7 +415,7 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
             "query_norm_config": head_norm_config,
             "key_norm_config": head_norm_config if owner is None else None,
             "num_heads": heads,
-            "num_groups": groups,
+            "num_groups": layer_groups,
             "head_dim": width,
             "is_causal": True,
             "scale": 1.0,
@@ -429,7 +447,7 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
                     "ple_dim": ple_dim,
                     "activation": activation,
                     "reference_bf16": target == "BF16",
-                },
+                } if ple_dim else None,
                 "has_post_layer_scalar": True,
                 "kv_source_layer_index": owner,
                 "rope_config": rope_configs[kind],
@@ -480,7 +498,7 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
             "linear_config": {},
             "norm_config": norm_config,
             "reference_bf16": target == "BF16",
-        },
+        } if ple_dim else None,
     }
     return ConversionPlan(
         decoder,

@@ -28,7 +28,7 @@ _FAMILY_DEFINITIONS = (
     ("mistral", "Mistral dense", "HFMistralConfig", ()),
     ("gemma2", "Gemma 2 dense", "HFGemma2Config", ()),
     ("gemma3_text", "Gemma 3 text", "HFGemma3TextConfig", ()),
-    ("gemma4_text", "Gemma 4 dense PLE", "HFGemma4TextConfig", ("gemma4",)),
+    ("gemma4_text", "Gemma 4 dense", "HFGemma4TextConfig", ("gemma4",)),
     ("olmo3", "OLMo 3 dense", "HFOlmo3Config", ()),
     ("phi3", "Phi-3 dense", "HFPhi3Config", ()),
     ("granite", "Granite dense", "HFGraniteConfig", ()),
@@ -72,7 +72,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         if supported and architecture in {"phi3", "gemma2", "gemma3_text", "gemma4_text"}:
             caveats.append("tied_embeddings_required")
         if supported and architecture == "gemma4_text" and mode != "vision-language":
-            caveats.extend(["dense_ple_text_only", "image_and_audio_towers_excluded"])
+            caveats.extend(["native_dense_text_geometry", "image_and_audio_towers_excluded"])
         modes[mode] = {"status": "conditional" if supported else "unsupported", "message": message, "caveats": caveats}
     formats = [] if architecture == "qwen4_exp" else ["safetensors-float"]
     if architecture in _MLX:
@@ -342,7 +342,9 @@ def preflight_model(
                 "unsupported_moe",
                 "Gemma 4 MoE operations are outside implemented dense PLE coverage.",
             )
-        if text.get("hidden_size_per_layer_input") == 0:
+        if text.get("hidden_size_per_layer_input") == 0 and not (
+            text.get("hidden_size") == 5376 and text.get("attention_k_eq_v") is True
+        ):
             return _report(
                 family,
                 mode,
@@ -441,18 +443,19 @@ def preflight_model(
             "Image input requires merged BF16 weights; the declared MLX format is limited to text paths.",
         )
     if mode == "vision-language" and architecture == "gemma4_text":
-        from .adapters.gemma4_vision import GEOMETRY, TOKENS
+        from .adapters.gemma4_vision import GEOMETRY, LARGE_GEOMETRY, TOKENS
 
         vision = config.get("vision_config")
         if not isinstance(vision, dict):
             return _report(family, mode, "unsupported", "vision_tower_missing", "This checkpoint has no vision tower.")
         if raw_architecture != "gemma4" or not isinstance(config.get("text_config"), dict):
             return _report(
-                family, mode, "unsupported", "unsupported_vision_wrapper", "Gemma images require a full E2B/E4B wrapper."
+                family, mode, "unsupported", "unsupported_vision_wrapper", "Gemma images require an implemented full dense wrapper."
             )
+        geometry = LARGE_GEOMETRY if text.get("hidden_size") == 5376 else GEOMETRY
         if (
-            any(vision.get(key) != value for key, value in GEOMETRY.items())
-            or (text.get("hidden_size"), text.get("num_hidden_layers")) not in {(1536, 35), (2560, 42)}
+            any(vision.get(key) != value for key, value in geometry.items())
+            or (text.get("hidden_size"), text.get("num_hidden_layers")) not in {(1536, 35), (2560, 42), (5376, 60)}
             or any(
                 config.get(key) != TOKENS[token]
                 for key, token in (
@@ -469,7 +472,7 @@ def preflight_model(
                 mode,
                 "unsupported",
                 "unsupported_vision_geometry",
-                "Native Gemma images require a pinned E2B/E4B BF16 vision and decoder geometry.",
+                "Native Gemma images require a pinned implemented BF16 vision and decoder geometry.",
             )
     elif mode == "vision-language":
         if not isinstance(config.get("vision_config"), dict):
@@ -850,7 +853,7 @@ def preflight_source(
                     (
                         "chat_template.jinja",
                         262144,
-                        "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+                        gemma_profiles[repo]["template_sha256"],
                     ),
                 ):
                     if hashlib.sha256(read({"repo": repo, "filename": filename}, maximum)).hexdigest() != expected:
