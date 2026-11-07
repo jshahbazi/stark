@@ -111,7 +111,14 @@ def operator_capture(tower, namespace, folder, record):
                          for tensor in (query, key, value)], dim=-1)
         record.append({"operator": "attention",
                        "input": save(folder, "attention_input", qkv),
-                       "output": save(folder, "attention_output", result[0].reshape(-1, 1152))})
+                       "output": save(folder, "attention_output", result[0].reshape(-1, 1152)),
+                       "stages": {}})
+        scores = torch.matmul(query, key.transpose(2, 3))
+        record[-1]["stages"]["qk"] = save(folder, "attention_qk", scores[0])
+        scores = scores * kwargs["scaling"]
+        record[-1]["stages"]["scaled"] = save(folder, "attention_scaled", scores[0])
+        probabilities = scores.softmax(-1, dtype=torch.float32).to(query.dtype)
+        record[-1]["stages"]["probabilities"] = save(folder, "attention_probabilities", probabilities[0])
         return result
 
     namespace["eager_attention_forward"] = eager

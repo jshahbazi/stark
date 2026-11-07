@@ -146,3 +146,39 @@ pub fn attention_full_bf16(
         },
     )
 }
+
+/// Test-only same-input observations over the production arithmetic body.
+#[cfg(test)]
+pub(crate) fn attention_stages_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    out: &Tensor,
+    stages: &Tensor,
+    heads: usize,
+    scale: f32,
+) -> Result<()> {
+    const TRACE_SOURCE: &str = concat!(
+        include_str!("metal/vision.metal"),
+        "\n",
+        include_str!("metal/vision_trace.metal")
+    );
+    let n = qkv.shape()[0];
+    let h = qkv.shape()[1] / 3;
+    ensure!(n <= 256 && heads * ATTN_D == h, "private attention trace shape");
+    ensure!(
+        stages.dtype() == DType::F32 && stages.numel() == 3 * heads * n * n,
+        "private attention trace size"
+    );
+    let pipeline =
+        ctx.pipeline("vision_attn_trace_nax_d72", TRACE_SOURCE, MslVersion::V4_0)?;
+    pass.dispatch_with(
+        &pipeline,
+        &[qkv.binding(), out.binding(), stages.binding()],
+        &[Param::U32(n as u32), Param::U32(h as u32), Param::F32(scale)],
+        Grid::Threadgroups {
+            groups: (n.div_ceil(ATTN_BQ), heads, 1),
+            threadgroup: (ATTN_THREADS, 1, 1),
+        },
+    )
+}
