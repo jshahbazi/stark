@@ -6,9 +6,9 @@ use stark_engine_macros::stark_test;
 
 use super::*;
 use crate::{
-    backends::common::{BufferMut, CommandBufferExecutable, CommandBufferPending, Context},
+    backends::common::{CommandBufferExecutable, CommandBufferPending, Context},
     parameters::{NumericalProfile, ParameterLoader},
-    tests::helpers::{buffer_to_vec, for_each_backend},
+    tests::helpers::{buffer_to_vec, create_buffer_with_data, for_each_backend},
 };
 
 fn fixture() -> std::fs::File {
@@ -90,8 +90,9 @@ fn fixture() -> std::fs::File {
 fn full_qwen_reference<B: Backend>() {
     let context = B::Context::new().unwrap();
     let file = fixture();
-    let loader =
-        ParameterLoader::new(&file, &context).unwrap().with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+    let loader = ParameterLoader::new(&file, context.as_ref())
+        .unwrap()
+        .with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
     let config = serde_json::from_value(json!({"expert_config":{"linear_config":{},
         "activation":{"type":"SiLU","alpha":1.0},"has_up_biases":false,"has_down_biases":false,
         "up_clipping":null,"gate_clipping":null},"router_config":{},
@@ -105,7 +106,8 @@ fn full_qwen_reference<B: Backend>() {
     let mut input = commands.allocate_scratch_for_shape(&[4, 64], DataType::BF16).unwrap();
     let values: Vec<bf16> =
         [1.0f32, 0.5, -0.5, -1.0].into_iter().flat_map(|x| std::iter::repeat_n(bf16::from_f32(x), 64)).collect();
-    (&mut input).copyin(bytemuck::cast_slice(&values));
+    let source = create_buffer_with_data::<B, bf16>(&context, &values);
+    commands.encode_copy(&source, &mut input);
     let output = model.encode(input, 4, &mut commands).unwrap();
     let mut result = context.create_buffer(4 * 64 * 2).unwrap();
     commands.encode_copy(&output, &mut result);
@@ -152,8 +154,9 @@ fn qwen_bf16_moe_reference_scratch_stays_bounded_across_rows_and_routes() {
 
     let context = <Cpu as Backend>::Context::new().unwrap();
     let file = fixture();
-    let loader =
-        ParameterLoader::new(&file, &context).unwrap().with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+    let loader = ParameterLoader::new(&file, context.as_ref())
+        .unwrap()
+        .with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
     let config = serde_json::from_value(json!({"expert_config":{"linear_config":{},
         "activation":{"type":"SiLU","alpha":1.0},"has_up_biases":false,"has_down_biases":false,
         "up_clipping":null,"gate_clipping":null},"router_config":{},
@@ -165,7 +168,8 @@ fn qwen_bf16_moe_reference_scratch_stays_bounded_across_rows_and_routes() {
     let pool = context.create_allocation_pool();
     let mut commands = context.create_command_buffer(None, Some(pool.clone())).unwrap();
     let mut input = commands.allocate_scratch_for_shape(&[32, 64], DataType::BF16).unwrap();
-    (&mut input).copyin(bytemuck::cast_slice(&vec![bf16::ONE; 32 * 64]));
+    let source = create_buffer_with_data::<Cpu, bf16>(&context, &vec![bf16::ONE; 32 * 64]);
+    commands.encode_copy(&source, &mut input);
     let output = model.encode(input, 32, &mut commands).unwrap();
     // Count every scratch request in this command buffer, including retained
     // routes, outputs and activation buffers. Materializing up/down matrices

@@ -16,14 +16,14 @@ fn bf16_moe_decoder() -> (Value, Value) {
 #[stark_test]
 fn bf16_moe_geometry_admits_official_dimensions_with_unfolded_norms_and_full_banks() {
     let (decoder, vision) = bf16_moe_decoder();
-    let geometry = geometry_bf16_moe(&decoder, &vision).unwrap();
-    assert!(!geometry.tensors.affine);
+    let admitted = geometry_bf16_moe(&decoder, &vision).unwrap();
+    assert!(!admitted.tensors.affine);
     assert_eq!(
-        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.experts.up_projection.weights.weights"],
+        admitted.tensors.tensors["decoder.transformer.layers.0.mlp.experts.up_projection.weights.weights"],
         ("BF16", vec![262144, 2048])
     );
     assert_eq!(
-        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.experts.down_projection.weights.weights"],
+        admitted.tensors.tensors["decoder.transformer.layers.0.mlp.experts.down_projection.weights.weights"],
         ("BF16", vec![524288, 512])
     );
     assert!(geometry_moe(&decoder, &vision).is_err());
