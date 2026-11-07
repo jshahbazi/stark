@@ -1,8 +1,9 @@
 # Qwen retained image execution paths
 
-The implementation adds two explicit paths. Execution qualification is pending
-at this record's first revision; model-free checks establish conversion and
-admission behavior only.
+The implementation adds dense and sparse affine native paths and an explicit
+retained Flash-Next path. The three representative artifacts below passed local
+worker image lifecycle checks. Full decoder numerical qualification remains
+in progress; the small packed reference currently fails the unchanged gate.
 
 ## Dense affine Qwen3.5 and Qwen3.8-27B
 
@@ -26,7 +27,7 @@ including all 333 BF16 visual tensors, and 17,675,742,688 payload bytes. This
 planning check was followed by a complete offline conversion. The published
 artifact is 17,676,008,168 bytes; its weights SHA256 is
 `dff4809e84a628f772183293be7f6ba69d276ee5cf34571298dda04af5e84fa1`.
-Native execution remains unverified at this revision.
+Local native execution and worker lifecycle checks passed as recorded below.
 
 The exact Qwen3.8 template was reviewed separately: image serialization still
 emits one start/pad/end run, while assistant reasoning can be preserved and
@@ -128,21 +129,35 @@ After explicit resource admission, the single streaming output completed in
 The converter reported an 8 MiB transform workspace and 585,678,848-byte peak
 RSS. Free disk remained 52.48 GiB. No duplicate source payload was created.
 
-## Full-model checks in progress
+## Local execution and remaining numerical gate
 
-The source-bound dense 27B artifact reaches readiness with the sealed worker
-`32816d8494e29d0a5ca6858f4bf60f6203c18fec256befd4d3de5eda738f9449`.
-Its first automatic **text** generation check returns `native_generation_failed`.
-This happens before image execution. The worker is reaped after each failed
-check; the artifact has no successful local image qualification receipt.
-Further full-model retries are held for a typed, content-free native diagnostic.
+The initial dense 27B automatic text check failed before image execution. A
+14-row diagnostic isolated the reference BF16 MLP gate's downstream advisory
+Int8 activation preference. The reference policy now forces its declared BF16
+output; ordinary text defaults remain unchanged. The exact multirow MXU
+admission regression and eight-step native text continuation passed on source
+`224a112b`, engine executable SHA256
+`4ee7629d07ed425efa2d0f7d9d4fa501d3e2ba783665b9030e92935687801859`.
+
+The dense 27B, MoE 35B and retained Lily artifacts each passed the real worker's
+automatic local checks and the same private lifecycle harness on source
+`7f8b8379`, executable SHA256
+`41baf746b8e0c112479c39cebff9322ae00ccd235347db0e41b12759e2fce53a`.
+Each completed two distinct image cases with correct color responses, observed
+cancellation requested after a real streamed delta, removed staged files,
+recovered through an image-to-text request and a fresh image request, and kept
+the worker healthy. Workers were reaped normally after qualification. These
+are functional checks with greedy sampling and image MTP disabled; they do not
+establish decoder parity or performance gains. Private receipts are
+`qwen38-27b-7f8b8379-v2-image-qualification.json`,
+`qwen35-moe-7f8b8379-image-qualification.json` and
+`qwen38-lily-7f8b8379-image-qualification.json` in the ignored runtime folder.
 
 The private logit replay now accepts dynamic admitted vocabulary and width.
 New manifests bind all five admitted artifact hashes, exact source/revision,
 family profile, greedy sampling and disabled MTP. Optional per-layer traces
 have a 512 MiB aggregate allocation cap. The original immutable 0.8B replay
-contract remains supported. Native type-check of this replay-only update is
-pending the coordinated integrated build.
+contract remains supported. The integrated replay compiled and executed.
 
 Original-checkpoint CPU vision references are ready for dense 27B and MoE 35B.
 Each has a normal 256 by 256 RGB fixture and a small 32 by 32 numerical stress
@@ -155,9 +170,32 @@ including the independent MLX Conv3D transpose check. Private manifest hashes:
 - Dense 27B: `4c49cf1bedb0188b6f7ef7f195cb03f31c5b910de99b5f6b1e91c962e598f468`.
 - MoE 35B: `6975234c15579f62d8286db6c86297dc34514d0e0699fb91c6377e3c755a3630`.
 
-Native tower replay, full decoder numerical parity, and worker image lifecycle
-qualification remain pending. Converter and fixture checks do not establish
-end-to-end image support for these particular artifacts.
+Native tower replay on the sealed `224a112b` engine passed all 60 stages for
+each artifact bit-for-bit: zero RMS and absolute error, cosine one. This
+qualifies the retained tower independently of the packed decoder.
+
+The bounded full-decoder control uses
+`mlx-community/Qwen3.5-0.8B-MLX-4bit` at revision
+`5d894f8cc4ef3e6c88537bf3746ed262f549da6a`. Its original 625,229,487-byte
+source shard has SHA256
+`f5a0d9dd3efa73510542a8023d610ff26be2b4b020d181cfc4bedaa1fcc5dd9e`;
+the 626,210,248-byte converted artifact has SHA256
+`7e127dfb8c78f22b94edd35e52717f50e3d70398fe3668abd2290d088b5b1343`.
+The CPU producer retains the pinned Transformers graph, replaces every
+parameter from the quantized checkpoint, binds operational text and vision
+configuration, verifies reversible normalization gains, and hashes the actual
+BF16 pixel tensor consumed. Its explicit comparison policy computes affine
+weights in F32 and casts once to BF16 before each linear operation.
+
+The two last-prompt logit comparisons on source `7f8b8379` produced relative
+RMS errors 0.054535 and 0.030942. Both retained the same top prediction, but
+both fail the fixed 0.02 RMS gate. First-layer output RMS already differs by
+about 0.0018 and grows across the decoder. Failed references remain preserved.
+Same-input GDN and MLP projection fixtures isolate packed matrix arithmetic;
+their native replay is pending. A tiny independent stock-MLX control verified
+131,072 dequantized weights bit-for-bit against the single-cast BF16 policy,
+and stock regular matmul agreed with Torch. Stock quantized matmul differed
+from both, so no alternative full-model reference policy has been promoted.
 
 ## Retained Lily memory preflight
 
@@ -180,9 +218,13 @@ the 4,096-patch cap, 1 GiB for the paged-table working set, and another 8 GiB fo
 driver, allocator and host-memory drift. Unknown identities retain the original
 full-file-payload plus 2 GiB observation check.
 
-This is a static allocation estimate, not a measured peak or a memory
-reservation. Native payload admission and operation-specific bounds still
-apply, and actual available memory must be refreshed before a full load.
+The static bound totals 86,215,737,056 bytes. During the successful retained
+Lily worker lifecycle run, peak observed worker RSS was 55,519,461,376 bytes
+and minimum observed available memory was 38,891,159,552 bytes. These sampled
+measurements support the conservative bound and do not replace memory
+admission or an allocator-level peak measurement. Native payload admission and
+operation-specific bounds still apply, and actual available memory must be
+refreshed before a full load.
 
 ## Primary references
 
