@@ -112,7 +112,11 @@ kernel void vision_qkv_rope_bf16(device bfloat*       qkv   [[buffer(0)]],
 }
 
 // Full bidirectional attention over the N patches of one image, one query
-// tile and head per threadgroup, online softmax in float32: the tensor-op
+// tile and head per threadgroup. The pinned eager source rounds QK to BF16,
+// scales and rounds again, then casts globally normalized probabilities to
+// BF16 before PV. Two QK passes retain those boundaries without an N x N
+// allocation: first the global softmax statistics, then normalized P and PV.
+// The tensor-op
 // flash kernel of attention.metal without the causal limit and the KV cache,
 // reading q, k and v straight out of the fused qkv rows (row stride 3H) and
 // writing out [N, H]. Copied rather than shared so the text path's kernel
@@ -131,7 +135,6 @@ static void vision_attn_body(device bfloat* qkv,
                              threadgroup bfloat* p_tile,
                              threadgroup float* row_max,
                              threadgroup float* row_sum,
-                             threadgroup float* row_alpha,
                              uint2 tg,
                              uint tid,
                              uint2 tg_size) {
@@ -209,7 +212,8 @@ static void vision_attn_body(device bfloat* qkv,
         float local = prev_max;
         for (uint j = j0; j < j0 + cols; ++j) {
             if (int(j) < limit) {
-                local = max(local, s_tile[row * BK + j] * scale);
+                const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
+                local = max(local, score);
             }
         }
         for (uint off = 1u; off < LANES; off <<= 1) {
@@ -219,10 +223,8 @@ static void vision_attn_body(device bfloat* qkv,
         const float alpha = exp(prev_max - mx);
         float psum = 0.0f;
         for (uint j = j0; j < j0 + cols; ++j) {
-            const float p = int(j) < limit
-                ? exp(s_tile[row * BK + j] * scale - mx)
-                : 0.0f;
-            p_tile[row * BK + j] = bfloat(p);
+            const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
+            const float p = int(j) < limit ? exp(score - mx) : 0.0f;
             psum += p;
         }
         for (uint off = 1u; off < LANES; off <<= 1) {
@@ -231,16 +233,29 @@ static void vision_attn_body(device bfloat* qkv,
         if (lane == 0u) {
             row_sum[row] = row_sum[row] * alpha + psum;
             row_max[row] = mx;
-            row_alpha[row] = alpha;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (uint16_t i = 0; i < acc.get_capacity(); ++i) {
-            if (acc.is_valid_element(i)) {
-                auto ix = acc.get_multidimensional_index(i);
-                acc[i] *= row_alpha[ix[1]];
-            }
+    }
+
+    // A normalized probability is rounded exactly once, after the full row's
+    // denominator is known. Rounding unnormalized tile exponentials and
+    // dividing the completed PV changes the source's BF16 operation graph.
+    for (int k0 = 0; k0 < len; k0 += BK) {
+        auto kSlice = tK.slice(0, k0);
+        auto vSlice = tV.slice(0, k0);
+        auto sT = qk_op.template get_destination_cooperative_tensor<decltype(tQ), KSlice, float>();
+        qk_op.run(tQ, kSlice, sT);
+        sT.store(tS);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const int limit = min(len - k0, BK);
+        for (uint j = j0; j < j0 + cols; ++j) {
+            const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
+            const float probability = int(j) < limit
+                ? exp(score - row_max[row]) / row_sum[row] : 0.0f;
+            p_tile[row * BK + j] = bfloat(probability);
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
         pv_op.run(tP, vSlice, acc);
         // Finish tensor ops before reusing p_tile and s_tile.
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -251,7 +266,7 @@ static void vision_attn_body(device bfloat* qkv,
             auto ix = acc.get_multidimensional_index(i);
             const int r = ix[1], col = ix[0];
             if (q0 + r < len) {
-                out[(ulong)(q0 + r) * H + head * D + col] = bfloat(acc[i] / row_sum[r]);
+                out[(ulong)(q0 + r) * H + head * D + col] = bfloat(acc[i]);
             }
         }
     }
@@ -268,9 +283,9 @@ kernel void NAME(device bfloat* qkv   [[buffer(0)]],                            
                  uint2 tg_size [[threads_per_threadgroup]]) {                            \
     threadgroup float  s_tile[(BQ) * (BK)];                                              \
     threadgroup bfloat p_tile[(BQ) * (BK)];                                              \
-    threadgroup float  row_max[(BQ)], row_sum[(BQ)], row_alpha[(BQ)];                    \
+    threadgroup float  row_max[(BQ)], row_sum[(BQ)];                                    \
     vision_attn_body<(D), (BQ), (BK), (SG)>(                                             \
-        qkv, out, N, H, scale, s_tile, p_tile, row_max, row_sum, row_alpha,              \
+        qkv, out, N, H, scale, s_tile, p_tile, row_max, row_sum,                         \
         tg, tid, tg_size);                                                               \
 }
 

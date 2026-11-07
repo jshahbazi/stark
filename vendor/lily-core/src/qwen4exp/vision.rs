@@ -18,13 +18,15 @@
 //!    block) read as one `[N / 4, 4 H]` row, `fc1`, the exact erf GELU, `fc2`
 //!    into the text model's hidden size.
 //!
-//! Attention is a fused online-softmax kernel (design (b) of the plan) rather
+//! Attention uses bounded-memory two-pass tiled softmax rather
 //! than a score matrix through the GEMM: the engine already had a tensor-op
 //! flash kernel for the text path to derive it from, and materialising
 //! `[N, N]` scores per head costs about 0.5 GB of traffic per head and layer
 //! at 8 192 patches, 230 GB for the tower, which alone would take the
-//! latency budget. The kernel is a copy with the causal limit and the KV
-//! cache removed, so the text path's numerics are untouched.
+//! latency budget. It rounds QK and scaled scores to BF16, computes softmax
+//! statistics in F32, and rounds normalized probabilities to BF16 before PV,
+//! matching the pinned eager source. The second QK pass avoids an N x N
+//! allocation. The text path uses separate kernels.
 //!
 //! Everything runs in one serial pass per image; intermediates live in a
 //! [`VisionScratch`] that grows to the largest patch count seen.
