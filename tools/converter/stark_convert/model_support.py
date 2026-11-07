@@ -960,7 +960,7 @@ def preflight_source(
                     (
                         "processor_config.json",
                         65536,
-                        "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+                        gemma_profiles[repo]["source_processor_sha256"],
                     ),
                     (
                         "chat_template.jinja",
