@@ -125,7 +125,7 @@ kernel void vision_qkv_rope_bf16(device bfloat*       qkv   [[buffer(0)]],
 #include <metal_tensor>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 
-template <int D, int BQ, int BK, int SG>
+template <int D, int BQ, int BK, int SG, bool TRACE = false>
 static void vision_attn_body(device bfloat* qkv,
                              device bfloat* out,
                              uint N,
@@ -135,6 +135,7 @@ static void vision_attn_body(device bfloat* qkv,
                              threadgroup bfloat* p_tile,
                              threadgroup float* row_max,
                              threadgroup float* row_sum,
+                             device float* stages,
                              uint2 tg,
                              uint tid,
                              uint2 tg_size) {
@@ -223,7 +224,16 @@ static void vision_attn_body(device bfloat* qkv,
         float psum = 0.0f;
         for (uint j = j0; j < j0 + cols; ++j) {
             if (int(j) < limit) {
-                const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
+                const float qk = float(bfloat(s_tile[row * BK + j]));
+                const float score = float(bfloat(qk * scale));
+                if constexpr (TRACE) {
+                    if (q0 + int(row) < len) {
+                        const ulong index = ((ulong)head * N + q0 + row) * N + k0 + j;
+                        const ulong plane = (ulong)(H / D) * N * N;
+                        stages[index] = qk;
+                        stages[plane + index] = score;
+                    }
+                }
                 psum += exp(score - mx);
             }
         }
@@ -258,6 +268,17 @@ static void vision_attn_body(device bfloat* qkv,
             p_tile[row * BK + j] = bfloat(probability);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        if constexpr (TRACE) {
+            if (q0 + int(row) < len) {
+                const ulong plane = (ulong)(H / D) * N * N;
+                for (uint j = j0; j < j0 + cols; ++j) {
+                    if (int(j) < limit) {
+                        const ulong index = ((ulong)head * N + q0 + row) * N + k0 + j;
+                        stages[2 * plane + index] = float(p_tile[row * BK + j]);
+                    }
+                }
+            }
+        }
         pv_op.run(tP, vSlice, acc);
         // Finish tensor ops before reusing p_tile and s_tile.
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -287,7 +308,7 @@ kernel void NAME(device bfloat* qkv   [[buffer(0)]],                            
     threadgroup bfloat p_tile[(BQ) * (BK)];                                              \
     threadgroup float  row_max[(BQ)], row_sum[(BQ)];                                    \
     vision_attn_body<(D), (BQ), (BK), (SG)>(                                             \
-        qkv, out, N, H, scale, s_tile, p_tile, row_max, row_sum,                         \
+        qkv, out, N, H, scale, s_tile, p_tile, row_max, row_sum, nullptr,                \
         tg, tid, tg_size);                                                               \
 }
 

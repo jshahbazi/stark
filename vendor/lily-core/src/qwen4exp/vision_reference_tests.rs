@@ -127,6 +127,27 @@ fn operator_metrics(
         pass.commit_wait().unwrap_or_else(|_| panic!("private operator synchronization failed"));
         let actual = output.to_f32().unwrap_or_else(|_| panic!("private operator readback failed"));
         let (rms, cosine) = numerical_metric(&actual, &expected);
+        if name == "attention" && record["stages"].is_object() {
+            let n = input.shape()[0];
+            let plane = vision.num_heads * n * n;
+            let stages = Tensor::zeros(context, &[3, vision.num_heads, n, n], DType::F32).unwrap();
+            let traced = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
+            let pass = context.begin().unwrap();
+            crate::kernels::vision::attention_stages_bf16(context, &pass, &input, &traced, &stages, vision.num_heads, (vision.head_dim() as f32).powf(-0.5))
+                .unwrap_or_else(|_| panic!("private attention trace execution failed"));
+            pass.commit_wait().unwrap_or_else(|_| panic!("private attention trace synchronization failed"));
+            let values = stages.to_f32().unwrap();
+            let stage_metrics = ["qk", "scaled", "probabilities"].iter().enumerate().map(|(stage_index, key)| {
+                let expected = checked_tensor(folder, &record["stages"][key]);
+                let (rms, cosine) = numerical_metric(&values[stage_index * plane..(stage_index + 1) * plane], &expected);
+                json!({"stage_index":stage_index,"elements":plane,"relative_rms":rms,"cosine":cosine})
+            }).collect::<Vec<_>>();
+            let traced = traced.to_f32().unwrap();
+            let mismatches = traced.iter().zip(&actual).filter(|(a,b)| a.to_bits() != b.to_bits()).count();
+            let ordinary = actual.iter().map(|value| bf16::from_f32(*value)).collect::<Vec<_>>();
+            let (trace_rms, _) = numerical_metric(&traced, &ordinary);
+            println!("{}", json!({"private_retained_attention_stage_metrics":{"patches":n,"stages":stage_metrics,"trace_to_ordinary_relative_rms":trace_rms,"trace_ordinary_mismatch_count":mismatches}}));
+        }
         json!({"operator_index":index,"elements":actual.len(),"relative_rms":rms,"cosine":cosine})
     }).collect()
 }
