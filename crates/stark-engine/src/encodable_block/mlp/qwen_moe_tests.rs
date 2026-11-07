@@ -87,19 +87,26 @@ fn fixture() -> std::fs::File {
     file
 }
 
+fn reference_config() -> MixtureOfExpertsConfig {
+    // The MLP superclass adds required tags to both configs. LinearConfig is
+    // untagged; its empty router/gate objects match the emitted converter graph.
+    serde_json::from_value(json!({"type":"MixtureOfExpertsConfig",
+        "expert_config":{"type":"DenseMLPConfig","linear_config":{},
+        "activation":{"type":"SiLU","alpha":1.0},"has_up_biases":false,"has_down_biases":false,
+        "up_clipping":null,"gate_clipping":null},"router_config":{},
+        "routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":4,
+        "num_active_routed_experts":3,"router_has_biases":false,"num_shared_experts":1,
+        "expert_hidden_dim":64,"gate_config":{}}))
+    .unwrap()
+}
+
 fn full_qwen_reference<B: Backend>() {
     let context = B::Context::new().unwrap();
     let file = fixture();
     let loader = ParameterLoader::new(&file, context.as_ref())
         .unwrap()
         .with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
-    let config = serde_json::from_value(json!({"expert_config":{"linear_config":{},
-        "activation":{"type":"SiLU","alpha":1.0},"has_up_biases":false,"has_down_biases":false,
-        "up_clipping":null,"gate_clipping":null},"router_config":{},
-        "routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":4,
-        "num_active_routed_experts":3,"router_has_biases":false,"num_shared_experts":1,
-        "expert_hidden_dim":64,"gate_config":{}}))
-    .unwrap();
+    let config = reference_config();
     let model = QwenMoe::<B>::new(&config, 64, 64, &context, &loader.tree(), DataType::BF16).unwrap();
     loader.tree().assert_all_tensors_validated().unwrap();
     let mut commands = context.create_command_buffer(None, None).unwrap();
@@ -157,13 +164,7 @@ fn qwen_bf16_moe_reference_scratch_stays_bounded_across_rows_and_routes() {
     let loader = ParameterLoader::new(&file, context.as_ref())
         .unwrap()
         .with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
-    let config = serde_json::from_value(json!({"expert_config":{"linear_config":{},
-        "activation":{"type":"SiLU","alpha":1.0},"has_up_biases":false,"has_down_biases":false,
-        "up_clipping":null,"gate_clipping":null},"router_config":{},
-        "routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":4,
-        "num_active_routed_experts":3,"router_has_biases":false,"num_shared_experts":1,
-        "expert_hidden_dim":64,"gate_config":{}}))
-    .unwrap();
+    let config = reference_config();
     let model = QwenMoe::<Cpu>::new(&config, 64, 64, &context, &loader.tree(), DataType::BF16).unwrap();
     let pool = context.create_allocation_pool();
     let mut commands = context.create_command_buffer(None, Some(pool.clone())).unwrap();
