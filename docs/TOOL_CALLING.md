@@ -15,8 +15,8 @@ it does not prove that every checkpoint using it chooses tools reliably.
 | Dense Qwen3.8-27B oQ4e MTP | Qwen XML, `qwen38-xml-v1` | The pinned production conversion passed the three native smoke checks and 17 HTTP API checks at 32K context with the app's default three-draft MTP. Exact artifact/build scope is recorded below. |
 | Qwen3.8 Flash Next Lily Q4-XL | Qwen XML, `qwen38-xml-v1` | The pinned native-source artifact passed the three native smoke checks and 17 HTTP API checks at 8K context with the app's default two-draft MTP. |
 | Matching Qwen3.8 Flash Next PipeNetwork mixed export | Qwen XML, `qwen38-xml-v1` | Protocol support is established; Lily's behavior and prefix-reuse results do not qualify this separate F32 execution path. |
-| Native GLM-5.3 Flash | GLM argument-key/value XML, `glm53-xml-v1` | The pinned native-preparation template is admitted. Synthetic rendering, parser and API tests pass; model-generated workflow qualification is pending. |
-| Native Flint INT4 | GLM argument-key/value XML, `glm53-xml-v1` | The pinned Flint template shares the grammar; native rendering/history tests pass. Model-generated workflow qualification is pending. |
+| Native GLM-5.3 Flash | GLM argument-key/value XML, `glm53-xml-v1` | The pinned UD-Q2_K_XL GGUF artifact passed 3/3 native smoke and 17/17 HTTP checks at 8K context, including 1,024-token prefix reuse and cancellation recovery. MTP is unavailable on this path. The separate EXL3/FP8 build and full GLM-5.3 architecture retain their own qualification limits. |
+| Native Flint INT4 | GLM argument-key/value XML, `glm53-xml-v1` | The pinned INT4 artifact passed 3/3 native smoke and 17/17 HTTP checks at 8K context, including streaming and cancellation recovery. This backend advertises prefix caching disabled; its fresh-request qualification does not establish prefix restoration. |
 | Mistral-7B-Instruct-v0.3 | JSON list after `[TOOL_CALLS]`, `mistral-json-v1` | Reviewed serializer correction and render-only nine-character ID mapping. Public API IDs are preserved. Model-generated qualification is pending. |
 | Llama 3.1 / 3.2 Instruct matching reviewed templates | JSON object, `llama-json-v1` | One call per assistant turn; mixed call/text history is rejected. Source templates were obtained from pinned public mirrors; qualification does not transfer between artifacts. |
 | Granite 3.0 / 3.1 / 3.3 Instruct | JSON list, `granite30-json-v1` / `granite33-json-v1` | Native call/result roles and content are adapted per template. Model-generated qualification is pending. |
@@ -43,10 +43,11 @@ Existing records establish narrow tool-result workflows for exact artifacts:
 - MLX Qwen3-4B 4-bit: [bounded OpenWork task](archive/runs/OPENWORK_KEYCHAIN_E2E_2026_10_31.md).
 - Qwen3.8 Flash Next Lily Q4-XL: [bounded OpenWork acceptance](archive/runs/2026-11-01-openwork-lily-acceptance.md).
 - Dense Qwen3.8-27B oQ4e MTP and Qwen3.8 Flash Next Lily: [current-build native and HTTP tool workflows](archive/runs/2026-11-07-recommended-model-tool-qualification.md), including default MTP, streaming, exact-prefix reuse and cancellation recovery.
+- GLM-5.3 Flash UD-Q2_K_XL and Flint INT4: [current-build native and HTTP tool workflows](archive/runs/2026-11-07-glm-flint-tool-qualification.md) at 8K context, including GLM prefix reuse, Flint fresh-request behavior, completed repeated replies and cancellation recovery.
 
 These records retain their original model/build identities and limitations.
-They do not qualify all models in those families. Newly admitted Qwen2.5, GLM
-and Flint programs still require their own model-generated runs.
+They do not qualify all models in those families. Programs without an
+artifact-bound result in the table still require their own model-generated runs.
 
 The [additional-format validation record](archive/runs/2026-11-07-additional-tool-protocols.md)
 records native rendering, parser/API checks, the LFM2-350M partial behavioral

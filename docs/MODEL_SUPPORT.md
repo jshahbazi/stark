@@ -30,6 +30,13 @@ readout and sampled-generation controls for the pinned converted artifact.
 The native loader validates tensors; generic Decision use still requires a
 direct-answer template and checkpoint checks.
 
+This native GLM path covers Flash's `glm5_next` architecture. Full GLM-5.3 uses
+`glm_moe_dsa` and needs separate backend onboarding. A
+[dated recent-model intake](archive/runs/2026-11-07-glm-flint-tool-qualification.md#recent-release-intake)
+also records the unsupported architecture contracts for DeepSeek V4.1, Kimi
+K3.1, Beam, Nemotron 3.5 Bolt and Gemma 4. Metadata discovery does not provide
+native execution or tool qualification for those models.
+
 Dense `qwen3_5` text conversion also admits the registered
 `Jundot/Qwen3.8-27B-oQ4e-mtp` extension. Its mixed affine 4/5/6/8-bit matrices
 are preserved without requantization. Uniform five/six-bit matrices retain
