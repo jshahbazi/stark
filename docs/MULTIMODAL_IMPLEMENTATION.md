@@ -9,7 +9,7 @@ profile. Loading verifies that contract before publishing image capability.
 | --- | --- | --- |
 | Dense Qwen BF16 | Schema 2 exact reference or schema 3 family v1/v2 | Original reference qualification below; changed checkpoints require separate checks |
 | Dense affine Qwen 3.5/3.8 | Schema 3, `qwen35-dense-affine-merged-v3` | Supported packed decoder matrices with a complete BF16 tower |
-| Qwen 3.5 MoE | Schema 3, `qwen35-moe-affine-merged-v4` for affine-quantized source weights; `qwen35-moe-bf16-merged-v5` for BF16 source weights | Bounded selected experts, shared expert and complete BF16 tower; both emit BF16 artifacts, with exact checkpoint qualification separate |
+| Qwen 3.5 MoE | Schema 3, `qwen35-moe-affine-merged-v4` for affine-quantized source weights; `qwen35-moe-bf16-merged-v5` for BF16 source weights | Bounded selected experts, shared expert and complete BF16 tower; v4 retains packed decoder matrices with BF16 activations, while v5 uses BF16 decoder weights; qualification is separate |
 | Retained Qwen Flash Next | Schema 6, `stark-image-artifact.json` | Exact supported original-format source pins and immutable shard inventory |
 | Gemma 3 | Schema 5, `gemma3-siglip-bf16-v1` | Original 4B/12B/27B BF16 wrappers; fixed SigLIP processing |
 | Gemma 4 | Schema 4, exact per-size family profile | E2B/E4B, 12B encoder-free, 26B-A4B MoE and 31B dense BF16 layouts |
@@ -344,7 +344,8 @@ opaque files in that pinned directory. Hard-killing both processes before claim
 can leave a staging file; there is no shared-temporary-directory scan.
 
 The model installer offers **Enable image input when converting** for supported
-merged BF16 Qwen3.5 checkpoints. Existing converted folders are detected
+Qwen3.5 checkpoints with a complete BF16 vision tower and an admitted decoder
+profile, including supported packed affine decoder matrices. Existing converted folders are detected
 automatically. Schema-3 installations stop the running model and pass local
 checks before entering the library. Run validates the admitted identity and
 reuses a matching private receipt or runs the checks again. The default
@@ -353,12 +354,14 @@ report the running worker's image capability and evidence level.
 
 ## Remaining dependencies and acceptance
 
-1. **Coverage:** config-derived dense geometry remains bounded by the implemented
-   attention/DeltaNet/tower operations, indexing and storage limits, merged BF16
-   weights and recognized metadata. A size name does not establish runtime
-   qualification. MoE, quantized vision models, alternate operations and new
-   architectures require implementation and validation. A local execution pass
-   does not inherit official quality or parity.
+1. **Coverage:** config-derived geometry remains bounded by implemented
+   attention/DeltaNet/tower operations, indexing and storage limits, recognized
+   metadata, and a complete BF16 vision tower. Supported Qwen profiles may use
+   packed affine decoder matrices. Qwen3.5 MoE has bounded affine-v4 and
+   BF16-source-v5 image profiles. Quantized vision towers, other MoE variants,
+   alternate operations and new architectures require implementation and
+   validation. A size name does not establish runtime qualification. A local
+   execution pass does not inherit official quality or parity.
 2. **Distribution:** each delivered worker signature is a different executable
    identity. A changed worker requires matching reference evidence or fresh
    local checks. Public distribution also

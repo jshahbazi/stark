@@ -75,7 +75,10 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         elif mode == "decision":
             message = "Decision scoring needs a direct-answer template, single-token labels and checkpoint checks."
         elif mode == "vision-language" and architecture == "gemma4_text":
-            message = "Image input requires a pinned Gemma 4 E2B, E4B, 12B, 26B-A4B or 31B BF16 image artifact and local execution checks."
+            message = (
+                "Image input requires a pinned Gemma 4 E2B, E4B, 12B, 26B-A4B or 31B BF16 image artifact "
+                "and local execution checks."
+            )
         elif mode == "vision-language":
             message = (
                 "Image input requires complete supported tensors, reviewed processing metadata and local image checks."

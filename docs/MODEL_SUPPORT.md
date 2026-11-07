@@ -105,9 +105,10 @@ direction or model size ascending or descending. Unknown numeric values sort las
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
 Conversion-only families are omitted. Cards offer text or image artifacts when
-both are available, with image output selected by default only when the full
-Qwen3.5 BF16 model's vision configuration and processing metadata pass inspection.
-An image choice still needs the normal installation and local runtime checks.
+both are available. Image output is selected by default only when metadata
+confirms a supported Qwen3.5 vision wrapper, BF16 vision tower and reviewed
+processor; decoder weights may use a supported affine profile. An image choice
+still needs the normal installation and local runtime checks.
 The download and preparation progress remain in the browser. Completion adds
 the model to the library without selecting it for use.
 
@@ -143,8 +144,10 @@ registration. Download progress remains indeterminate until the stored byte
 total is verified. GLM image input and Decision mode are unavailable.
 Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
 its fixed Q8 control projections. Embedding/reranking tasks, known internal test
-models, quantized vision, MoE architectures outside the implemented Qwen3.5 and
-Qwen3.8 paths, adapter-only and unsupported packed formats are excluded. The
+models, quantized vision towers, MoE architectures outside the implemented
+Qwen3.5 and Qwen3.8 paths, adapter-only and unsupported packed formats are
+excluded. Qwen image profiles can retain supported packed decoder matrices
+alongside a complete BF16 vision tower. The
 implemented Qwen3.8 text path includes its MoE graph; Qwen3.5 BF16 MoE image
 conversion is a separate image-only path.
 An uncatalogued compatible fine-tune can appear. This is
