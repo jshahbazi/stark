@@ -130,6 +130,30 @@ def operator_capture(tower, namespace, folder, record):
     return close
 
 
+def full_state_capture(tower, folder, records):
+    """Observe full-depth norm and residual states under the fixture size cap."""
+    handles = []
+    for index, block in enumerate(tower.blocks):
+        record = {"block_index": index}
+        records.append(record)
+
+        def capture(name, index, record):
+            def hook(module, inputs, output):
+                prefix = "block_" + str(index) + "_" + name
+                record[name + "_input"] = save(folder, prefix + "_input", inputs[0])
+                record[name + "_output"] = save(folder, prefix + "_output", output)
+            return hook
+
+        handles.append(block.norm1.register_forward_hook(capture("norm1", index, record)))
+        handles.append(block.norm2.register_forward_hook(capture("norm2", index, record)))
+        handles.append(block.register_forward_hook(capture("residual", index, record)))
+
+    def close():
+        for handle in handles:
+            handle.remove()
+    return close
+
+
 def main(args):
     global PHASE
     assert sys.platform == "darwin" and torch.__version__ == "2.14.1"
@@ -320,6 +344,10 @@ def main(args):
                 if args.operators and depth == 1:
                     record["operators"] = []
                     close = operator_capture(tower, ns, folder, record["operators"])
+                close_full = None
+                if args.full_states and depth == 27:
+                    record["full_states"] = []
+                    close_full = full_state_capture(tower, folder, record["full_states"])
                 with torch.inference_mode():
                     output = tower(
                         pixels, grid_thw=torch.tensor([case["grid"]], dtype=torch.long)
@@ -338,6 +366,8 @@ def main(args):
                             "input": operators[before[0]][before[1]],
                             "output": operators[after[0]][after[1]],
                         })
+                if close_full:
+                    close_full()
                 record["stages"].append(
                     {
                         "blocks": depth,
@@ -373,6 +403,8 @@ if __name__ == "__main__":
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--operators", action="store_true",
                         help="save same-input source operator controls at one block")
+    parser.add_argument("--full-states", action="store_true",
+                        help="save bounded full-depth source norm and residual states")
     try:
         main(parser.parse_args())
     except BaseException as error:  # noqa: BLE001 - content-free private diagnostic
