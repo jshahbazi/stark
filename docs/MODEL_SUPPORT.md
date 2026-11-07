@@ -15,7 +15,9 @@ GLM repositories remain outside generic converter preflight. The registry also
 includes a `qwen4_exp` converter for Lily-format Qwen3.8 text models. It writes
 a self-contained typed `Qwen38LanguageModelConfig` artifact with canonical
 MLX storage and unchanged mixed quantization, sharing the existing specialized
-Qwen kernels. Vision and MTP tensors are omitted from this converter path. The
+Qwen kernels. Vision and MTP tensors are omitted from this typed text-converter
+path. Retained Lily checkpoints have a separate pinned native image path; that
+image support does not come from the `qwen4_exp` text artifact. The
 ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
 backend has an unchanged `headless-reference` default and a separately staged
 `--profile bf16-native-experimental` profile that includes the BF16 draft head,
@@ -55,8 +57,10 @@ load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
 
-Complete BF16 `qwen3_5_moe` wrappers have an image-only conversion route using
-`qwen35-moe-bf16-merged-v5`, schema 3. Catalog discovery requires the source's
+Qwen3.5 MoE image conversion has two schema-3 profiles: affine-quantized source
+weights use `qwen35-moe-affine-merged-v4`, while complete BF16 source weights
+use `qwen35-moe-bf16-merged-v5`. Both produce BF16 artifacts; the BF16-source
+route is image-only. Catalog discovery requires the source's
 supported processor and reviewed template before offering that mode; BF16 MoE
 text/Decision conversion remains unsupported. This is structural implementation
 coverage. Full official 35B execution and reference parity are unverified; each
@@ -71,15 +75,16 @@ does not grant this runtime capability or transfer qualification between
 checkpoints and quantizations.
 [OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) use the ordinary native Metal text path.
 OLMo 3 adds whole-projection Q/K normalization and post-norm residual branches.
-Gemma 4 text coverage is bounded to dense PLE E2B/E4B layouts. A separate
-schema-4 image artifact supports the pinned official E2B/E4B BF16 checkpoints, with a
-Gemma-specific processor, vision tower and native execution path. Its CLI,
-terminal chat, desktop and runtime family gates are wired. For E2B, the canonical HF CPU
-feature comparison passes the 2% gate on three images. Bounded generation-worker
-lifecycle checks and local cold/cached chat-client checks pass. Installed
-desktop UI execution and image performance are unmeasured. Audio, video, 31B, 26B MoE and unified 12B are unsupported. Exact checkpoint
-execution and numerical evidence remain tied to their reference profiles and
-engine builds. E4B execution qualification is separate from E2B. See the
+Gemma 4 text paths include dense PLE E2B/E4B and bounded no-PLE 31B layouts.
+Pinned schema-4 BF16 image profiles cover E2B, E4B, 12B unified, 26B-A4B and
+31B. Audio and video execution remain unsupported. E2B has a canonical HF CPU
+image-feature comparison within the 2% gate on three fixtures plus bounded
+worker and chat-client lifecycle checks; E4B has separate source and execution
+validation. The 12B embedder and 26B MoE paths have component checks, while the
+31B feature gate currently fails. Full 12B/26B/31B checkpoint generation is
+unqualified. Installed desktop UI execution and image performance are
+unmeasured. Exact checkpoint evidence remains tied to its reference profile and
+engine build. See the
 [original E2B validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md).
 
 ## Browsing and removing models
@@ -138,9 +143,10 @@ registration. Download progress remains indeterminate until the stored byte
 total is verified. GLM image input and Decision mode are unavailable.
 Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
 its fixed Q8 control projections. Embedding/reranking tasks, known internal test
-models, quantized vision, unsupported MoE families, adapter-only and unsupported
-packed formats are excluded. The implemented Qwen3.8 text path includes its
-MoE graph.
+models, quantized vision, MoE architectures outside the implemented Qwen3.5 and
+Qwen3.8 paths, adapter-only and unsupported packed formats are excluded. The
+implemented Qwen3.8 text path includes its MoE graph; Qwen3.5 BF16 MoE image
+conversion is a separate image-only path.
 An uncatalogued compatible fine-tune can appear. This is
 a metadata-filtered list of compatible candidates; gated, inaccessible or unsupported
 repositories may be omitted.

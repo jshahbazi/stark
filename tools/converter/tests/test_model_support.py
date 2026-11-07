@@ -71,6 +71,17 @@ def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification(
     assert support_matrix()["families"][0]["modes"]["text"]["status"] == "conditional"
 
 
+def test_gemma4_image_family_advertises_all_pinned_profiles_without_qualification():
+    family = next(item for item in support_matrix()["families"] if item["family_id"] == "gemma4_text")
+    image = family["modes"]["vision-language"]
+    assert image["status"] == "conditional"
+    assert image["message"] == (
+        "Image input requires a pinned Gemma 4 E2B, E4B, 12B, 26B-A4B or 31B BF16 image artifact "
+        "and local execution checks."
+    )
+    assert "gemma4_pinned_bf16_image_geometry" in image["caveats"]
+
+
 def test_native_glm_is_listed_without_generic_architecture_admission():
     family = next(item for item in support_matrix()["families"] if item["family_id"] == "glm5_next")
     assert family["conversion"]["containers"] == [".gguf"]

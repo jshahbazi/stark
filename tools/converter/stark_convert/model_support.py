@@ -75,7 +75,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         elif mode == "decision":
             message = "Decision scoring needs a direct-answer template, single-token labels and checkpoint checks."
         elif mode == "vision-language" and architecture == "gemma4_text":
-            message = "Image input requires a pinned Gemma 4 E2B/E4B BF16 image artifact and local execution checks."
+            message = "Image input requires a pinned Gemma 4 E2B, E4B, 12B, 26B-A4B or 31B BF16 image artifact and local execution checks."
         elif mode == "vision-language":
             message = (
                 "Image input requires complete supported tensors, reviewed processing metadata and local image checks."
@@ -88,7 +88,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         if supported and mode == "vision-language" and architecture in {"qwen3_5", "qwen3_5_moe"}:
             caveats.extend(["qwen35_vision_geometry", "reviewed_processing_programs", "local_image_checks"])
         if supported and mode == "vision-language" and architecture == "gemma4_text":
-            caveats.extend(["gemma4_e2b_e4b_bf16_geometry", "pinned_processing_metadata", "local_image_checks"])
+            caveats.extend(["gemma4_pinned_bf16_image_geometry", "pinned_processing_metadata", "local_image_checks"])
         if supported and architecture in {"phi3", "gemma2", "gemma3_text", "gemma4_text"}:
             caveats.append("tied_embeddings_required")
         if supported and architecture == "gemma4_text" and mode != "vision-language":
