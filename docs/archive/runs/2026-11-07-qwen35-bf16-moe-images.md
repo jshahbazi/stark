@@ -58,6 +58,17 @@ and contiguous dots bitwise over multiple rows and noncontiguous IDs, exercise
 invalid IDs and geometry, and run full banks with the actual
 `Qwen35ReferenceBF16` profile and source-ordered BF16 accumulation.
 
+A whole-Qwen MoE synthetic component additionally loads the actual reference
+profile and exercises router BF16/F32 storage, three selected experts with mixed
+signs, four input rows and the separate sigmoid-gated shared branch against an
+independent scalar BF16-boundary calculation. It is a bounded component control,
+not a substitute for official trained weights or image-worker execution.
+
+Local converter/preflight/catalog/geometry and existing Qwen regression checks:
+512 passed. Repository policy, scoped Ruff, Rust formatting and diff whitespace
+checks passed. Native tests were authored but not compiled or executed in this
+worktree; the integration owner runs them in its existing warmed build.
+
 The indexed dot allocates only `[rows, selected_outputs]` F32 accumulation and
 BF16/F32 output, independent of bank row count and inner width. RoutedExperts
 still queues its existing route/index/activation/output scratch per selected

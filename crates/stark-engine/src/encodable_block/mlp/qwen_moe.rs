@@ -15,6 +15,10 @@ use crate::{
     parameters::ParameterTree,
 };
 
+#[cfg(test)]
+#[path = "qwen_moe_tests.rs"]
+mod tests;
+
 pub(super) struct QwenMoe<B: Backend> {
     router: LinearMatmul<B>,
     experts: RoutedExperts<B>,
