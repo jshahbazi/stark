@@ -102,7 +102,7 @@ fn affine_dot_bitplanes<B: Backend>() {
 
 #[stark_test]
 fn qwen_affine_dot_decodes_group64_bitplanes_before_contraction() {
-    crate::tests::helpers::for_each_backend!(affine_dot_bitplanes);
+    crate::tests::helpers::for_each_backend!(|B| affine_dot_bitplanes::<B>());
 }
 
 fn reference<B: Backend>(backend: &str) {
