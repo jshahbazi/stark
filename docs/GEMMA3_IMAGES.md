@@ -6,7 +6,7 @@ are text models and do not acquire image support through this adapter.
 
 | Size | Decoder width | Decoder layers | Vision tower | Execution evidence |
 | --- | ---: | ---: | --- | --- |
-| 4B | 2560 | 34 | SigLIP, 27 layers, width 1152 | Requires the exact artifact and native build checks below |
+| 4B | 2560 | 34 | SigLIP, 27 layers, width 1152 | Exact BF16 artifact passed native parity and worker/API replay; see the [run record](archive/runs/2026-11-07-gemma3-images.md) |
 | 12B | 3840 | 48 | Same tower | Structural admission; full execution has not been qualified |
 | 27B | 5376 | 62 | Same tower | Structural admission; full execution has not been qualified |
 
@@ -109,6 +109,8 @@ The initial fixed gates require exact BF16 preprocessing, feature relative RMS
 error at most 0.02 and cosine at least 0.999, centered logit relative RMS error
 at most 0.1, reference-to-native KL at most 0.03 and identical greedy decisions.
 Checkpoint execution and worker lifecycle results belong in a dated run record.
+The [2026-11-07 4B run](archive/runs/2026-11-07-gemma3-images.md) binds the
+qualified artifact/builds, frozen numerical gates and actual HTTP lifecycle.
 
 `scripts/gemma3_vision_stage_reference.py` loads only the original vision
 weights for first-block diagnostics. It verifies the preserved full-source
