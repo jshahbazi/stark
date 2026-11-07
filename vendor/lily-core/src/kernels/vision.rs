@@ -224,3 +224,53 @@ pub(crate) fn contraction_reference_bf16_bias(
         Grid::Threads { grid: (m * n, 1, 1), threadgroup: (128, 1, 1) },
     )
 }
+
+#[cfg(test)]
+pub(crate) fn layernorm_reference_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    out: &Tensor,
+    eps: f32,
+) -> Result<()> {
+    let width = *input.shape().last().unwrap();
+    let rows = input.numel() / width;
+    ensure!(rows <= 256 && width <= 4608 && width > 0, "private norm reference bounds");
+    let pipeline = ctx.pipeline(
+        "vision_layernorm_reference_bf16",
+        include_str!("metal/vision_nonlinear_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[input.binding(), weight.binding(), bias.binding(), out.binding()],
+        &[Param::U32(rows as u32), Param::U32(width as u32), Param::F32(eps)],
+        Grid::Threads { grid: (rows, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn gelu_reference_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    values: &Tensor,
+    tanh: bool,
+) -> Result<()> {
+    ensure!(
+        values.numel() <= 256 * 4608 && values.dtype() == DType::BF16,
+        "private gelu reference bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_gelu_reference_bf16",
+        include_str!("metal/vision_nonlinear_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[values.binding()],
+        &[Param::U32(values.numel() as u32), Param::U32(u32::from(tanh))],
+        Grid::Threads { grid: (values.numel(), 1, 1), threadgroup: (128, 1, 1) },
+    )
+}

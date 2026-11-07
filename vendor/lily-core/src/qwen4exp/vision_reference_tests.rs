@@ -380,6 +380,29 @@ fn operator_metrics(
             let ordinary_mismatches = actual.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
             println!("{}", json!({"private_retained_contraction_metrics":{"patches":gh * gw,"operator_index":index,"streams":streams,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches}}));
         }
+        let norm = match name {
+            "norm1" => Some((&block.norm1_w, &block.norm1_b)),
+            "norm2" => Some((&block.norm2_w, &block.norm2_b)),
+            "merger_norm" => Some((&weights.merger_norm_w, &weights.merger_norm_b)),
+            _ => None,
+        };
+        if norm.is_some() || matches!(name, "gelu_tanh" | "gelu_erf") {
+            let reference = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
+            let pass = context.begin().unwrap();
+            let result = if let Some((weight, bias)) = norm {
+                crate::kernels::vision::layernorm_reference_bf16(context, &pass, &input, weight, bias, &reference, LAYERNORM_EPS)
+            } else {
+                reference.write_bytes(bytemuck::cast_slice(&source)).unwrap();
+                crate::kernels::vision::gelu_reference_bf16(context, &pass, &reference, name == "gelu_tanh")
+            };
+            result.unwrap_or_else(|_| panic!("private nonlinear reference execution failed"));
+            pass.commit_wait().unwrap_or_else(|_| panic!("private nonlinear reference synchronization failed"));
+            let values = reference.to_f32().unwrap();
+            let (reference_rms, reference_cosine) = numerical_metric(&values, &expected);
+            let mismatches = values.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
+            let ordinary_mismatches = actual.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
+            println!("{}", json!({"private_retained_nonlinear_metrics":{"patches":gh * gw,"operator_index":index,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches}}));
+        }
         if name == "attention" && record["stages"].is_object() {
             let n = input.shape()[0];
             let plane = vision.num_heads * n * n;
