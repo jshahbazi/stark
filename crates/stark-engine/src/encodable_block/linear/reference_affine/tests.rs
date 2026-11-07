@@ -105,15 +105,15 @@ fn source_boundaries<B: Backend>() {
     let input_values = (0..m * k).map(|index| bf16::from_f32((index % 31) as f32 / 16.0 - 1.0)).collect::<Vec<_>>();
     let mut prefixed = vec![bf16::from_f32(-99.0); 2];
     prefixed.extend(input_values);
-    let input = create_buffer_with_data::<B, bf16>(&context, &prefixed);
-    let baseline = ReferenceBF16Matmul::<B>::new(&context).unwrap();
+    let input = create_buffer_with_data::<B, bf16>(context.as_ref(), &prefixed);
+    let baseline = ReferenceBF16Matmul::<B>::new(context.as_ref()).unwrap();
     for bits in [0, 4, 5, 6, 8] {
         for layout in [QuantParamsLayout::OutputGroup, QuantParamsLayout::GroupOutput] {
             let data = bank(rows, k, bits.max(4), layout);
-            let codes = create_buffer_with_data::<B, u8>(&context, &data.codes);
-            let scales = create_buffer_with_data::<B, bf16>(&context, &data.scales);
-            let biases = create_buffer_with_data::<B, bf16>(&context, &data.biases);
-            let dense = create_buffer_with_data::<B, bf16>(&context, &data.dense);
+            let codes = create_buffer_with_data::<B, u8>(context.as_ref(), &data.codes);
+            let scales = create_buffer_with_data::<B, bf16>(context.as_ref(), &data.scales);
+            let biases = create_buffer_with_data::<B, bf16>(context.as_ref(), &data.biases);
+            let dense = create_buffer_with_data::<B, bf16>(context.as_ref(), &data.dense);
             for gathered in [false, true] {
                 let n = if gathered {
                     5
@@ -123,9 +123,9 @@ fn source_boundaries<B: Backend>() {
                 let selected = (0..m)
                     .flat_map(|row| (0..n).map(move |column| (row * 3 + column * 2) % rows))
                     .collect::<Vec<u32>>();
-                let selected = create_buffer_with_data::<B, u32>(&context, &selected);
+                let selected = create_buffer_with_data::<B, u32>(context.as_ref(), &selected);
                 for dtype in [DataType::BF16, DataType::F32] {
-                    let reference = ReferenceAffineBF16Matmul::<B>::new(&context, dtype).unwrap();
+                    let reference = ReferenceAffineBF16Matmul::<B>::new(context.as_ref(), dtype).unwrap();
                     let mut commands = context.create_command_buffer(None, None).unwrap();
                     let b = if bits == 0 {
                         MatmulB::FullPrecision {
@@ -188,14 +188,14 @@ fn cancellation_tree<B: Backend>() {
     // returns 0. The second row must round 1+1/256 to BF16 before F32 storage.
     input[64] = bf16::ONE;
     input[65] = bf16::from_f32(1.0 / 256.0);
-    let input = create_buffer_with_data::<B, bf16>(&context, &input);
-    let full = create_buffer_with_data::<B, bf16>(&context, &[bf16::ONE; 64]);
+    let input = create_buffer_with_data::<B, bf16>(context.as_ref(), &input);
+    let full = create_buffer_with_data::<B, bf16>(context.as_ref(), &[bf16::ONE; 64]);
     for bits in [0, 4, 5, 6, 8] {
-        let codes = create_buffer_with_data::<B, u8>(&context, &vec![0; (64 * bits / 8).max(1)]);
+        let codes = create_buffer_with_data::<B, u8>(context.as_ref(), &vec![0; (64 * bits / 8).max(1)]);
         let params = QuantParams::new(QuantParamsLayout::GroupOutput, 1, 1);
         let shape = params.scale_shape();
         let plane = vec![bf16::ONE; (shape[0] * shape[1]) as usize];
-        let plane = create_buffer_with_data::<B, bf16>(&context, &plane);
+        let plane = create_buffer_with_data::<B, bf16>(context.as_ref(), &plane);
         let b = if bits == 0 {
             MatmulB::FullPrecision {
                 b: &full,
@@ -217,7 +217,7 @@ fn cancellation_tree<B: Backend>() {
                 signed_codes: false,
             })
         };
-        let reference = ReferenceAffineBF16Matmul::<B>::new(&context, DataType::F32).unwrap();
+        let reference = ReferenceAffineBF16Matmul::<B>::new(context.as_ref(), DataType::F32).unwrap();
         let mut commands = context.create_command_buffer(None, None).unwrap();
         let output = reference.encode(&input, 0, b, None::<&B::GlobalBuffer>, 2, 1, 64, &mut commands).unwrap();
         let mut actual = context.create_buffer(8).unwrap();
@@ -234,11 +234,11 @@ fn affine_reference_preserves_source_tree_and_rounds_before_router_widening() {
 
 fn explicit_source_policy<B: Backend>() {
     let context = B::Context::new().unwrap();
-    let codes = create_buffer_with_data::<B, u8>(&context, &[0; 32]);
-    let plane = create_buffer_with_data::<B, bf16>(&context, &[bf16::ONE; 4]);
+    let codes = create_buffer_with_data::<B, u8>(context.as_ref(), &[0; 32]);
+    let plane = create_buffer_with_data::<B, bf16>(context.as_ref(), &[bf16::ONE; 4]);
     let params = QuantParams::new(QuantParamsLayout::GroupOutput, 1, 1);
-    let input = create_buffer_with_data::<B, bf16>(&context, &[bf16::ONE; 64]);
-    let reference = ReferenceAffineBF16Matmul::<B>::new(&context, DataType::BF16).unwrap();
+    let input = create_buffer_with_data::<B, bf16>(context.as_ref(), &[bf16::ONE; 64]);
+    let reference = ReferenceAffineBF16Matmul::<B>::new(context.as_ref(), DataType::BF16).unwrap();
     let mut commands = context.create_command_buffer(None, None).unwrap();
     assert!(!has_source_affine_policy::<B>(&quantized::<B>(&codes, &plane, &plane, 64, false, params)));
     for params in [params.with_materialized_affine_input_sum(true), params.with_source_output_widths(&[1]).unwrap()] {
@@ -267,17 +267,17 @@ fn affine_reference_excludes_explicit_source_numerical_markers() {
 
 fn malformed<B: Backend>() {
     let context = B::Context::new().unwrap();
-    let reference = ReferenceAffineBF16Matmul::<B>::new(&context, DataType::F32).unwrap();
+    let reference = ReferenceAffineBF16Matmul::<B>::new(context.as_ref(), DataType::F32).unwrap();
     let data = bank(7, 128, 4, QuantParamsLayout::GroupOutput);
-    let codes = create_buffer_with_data::<B, u8>(&context, &data.codes);
-    let short_codes = create_buffer_with_data::<B, u8>(&context, &data.codes[..data.codes.len() - 1]);
-    let scales = create_buffer_with_data::<B, bf16>(&context, &data.scales);
-    let short_scales = create_buffer_with_data::<B, bf16>(&context, &data.scales[..data.scales.len() - 2]);
-    let biases = create_buffer_with_data::<B, bf16>(&context, &data.biases);
-    let input = create_buffer_with_data::<B, bf16>(&context, &vec![bf16::ONE; 3 * 128]);
-    let short_indices = create_buffer_with_data::<B, u32>(&context, &[0; 14]);
-    let unaligned_indices = create_buffer_with_data::<B, u32>(&context, &[0; 16]);
-    let unaligned_input = create_buffer_with_data::<B, bf16>(&context, &vec![bf16::ONE; 3 * 128 + 1]);
+    let codes = create_buffer_with_data::<B, u8>(context.as_ref(), &data.codes);
+    let short_codes = create_buffer_with_data::<B, u8>(context.as_ref(), &data.codes[..data.codes.len() - 1]);
+    let scales = create_buffer_with_data::<B, bf16>(context.as_ref(), &data.scales);
+    let short_scales = create_buffer_with_data::<B, bf16>(context.as_ref(), &data.scales[..data.scales.len() - 2]);
+    let biases = create_buffer_with_data::<B, bf16>(context.as_ref(), &data.biases);
+    let input = create_buffer_with_data::<B, bf16>(context.as_ref(), &vec![bf16::ONE; 3 * 128]);
+    let short_indices = create_buffer_with_data::<B, u32>(context.as_ref(), &[0; 14]);
+    let unaligned_indices = create_buffer_with_data::<B, u32>(context.as_ref(), &[0; 16]);
+    let unaligned_input = create_buffer_with_data::<B, bf16>(context.as_ref(), &vec![bf16::ONE; 3 * 128 + 1]);
     let mut commands = context.create_command_buffer(None, None).unwrap();
     for (code_buffer, scale_buffer, group_size, signed, params, offset) in [
         (&short_codes, &scales, 64, false, data.params, 0),
@@ -347,7 +347,7 @@ fn malformed<B: Backend>() {
     );
     let mut selected = vec![0_u32; 15];
     selected[0] = u32::MAX;
-    let selected = create_buffer_with_data::<B, u32>(&context, &selected);
+    let selected = create_buffer_with_data::<B, u32>(context.as_ref(), &selected);
     let output = reference
         .encode(
             &input,
@@ -418,8 +418,9 @@ fn mixed_partitions<B: Backend>() {
     file.write_all(&(encoded.len() as u64).to_le_bytes()).unwrap();
     file.write_all(&encoded).unwrap();
     file.write_all(&payload).unwrap();
-    let loader =
-        ParameterLoader::<B>::new(&file, &context).unwrap().with_numerical_profile(NumericalProfile::Qwen35AffineBF16);
+    let loader = ParameterLoader::<B>::new(&file, context.as_ref())
+        .unwrap()
+        .with_numerical_profile(NumericalProfile::Qwen35AffineBF16);
     // Numerical markers are independent of mixed-width storage. The same
     // admitted matrix selects the new encoder only while unmarked; both
     // explicit source-policy variants retain the existing backend route.
@@ -427,7 +428,7 @@ fn mixed_partitions<B: Backend>() {
         let mut spec = MLXSpec::new(4, 64, Layout::OutputInput);
         spec.materialize_affine_input_sum = marked;
         let mut route = LinearMatmul::<B>::load(
-            &context,
+            context.as_ref(),
             AnyWeightMatrixSpec::MLXSpec(spec),
             128,
             5,
@@ -447,7 +448,7 @@ fn mixed_partitions<B: Backend>() {
         panic!("mixed fixture spec differs")
     };
     let matrix = RowPartitionedLinear::load(
-        &context,
+        context.as_ref(),
         spec,
         128,
         12,
@@ -459,10 +460,10 @@ fn mixed_partitions<B: Backend>() {
     )
     .unwrap();
     loader.tree().assert_all_tensors_validated().unwrap();
-    let baseline = ReferenceBF16Matmul::<B>::new(&context).unwrap();
-    let weights = create_buffer_with_data::<B, bf16>(&context, &expected_weights);
+    let baseline = ReferenceBF16Matmul::<B>::new(context.as_ref()).unwrap();
+    let weights = create_buffer_with_data::<B, bf16>(context.as_ref(), &expected_weights);
     let values = (0..3 * 128).map(|i| bf16::from_f32((i % 19) as f32 / 8.0 - 1.0)).collect::<Vec<_>>();
-    let source = create_buffer_with_data::<B, bf16>(&context, &values);
+    let source = create_buffer_with_data::<B, bf16>(context.as_ref(), &values);
     let mut commands = context.create_command_buffer(None, None).unwrap();
     let expected = baseline.encode(&source, 0, &weights, 3, 12, 128, &mut commands).unwrap();
     let mut input = commands.allocate_scratch_for_shape(&[3, 128], DataType::BF16).unwrap();
@@ -546,25 +547,26 @@ fn embedding_factory<B: Backend>() {
         file.write_all(&(encoded.len() as u64).to_le_bytes()).unwrap();
         file.write_all(&encoded).unwrap();
         file.write_all(&payload).unwrap();
-        let loader = ParameterLoader::<B>::new(&file, &context)
+        let loader = ParameterLoader::<B>::new(&file, context.as_ref())
             .unwrap()
             .with_numerical_profile(NumericalProfile::Qwen35AffineBF16);
         let config: AnyEmbeddingConfig = serde_json::from_value(json!({"type":if tied {"TiedEmbeddingConfig"} else {"UntiedEmbeddingConfig"}, "input_scale":null,"logit_soft_cap":null,"logit_scale":null})).unwrap();
-        let (embedding, factors) = Embedding::new(&context, vocab, k, &config, &loader.tree(), DataType::BF16).unwrap();
+        let (embedding, factors) =
+            Embedding::new(context.as_ref(), vocab, k, &config, &loader.tree(), DataType::BF16).unwrap();
         assert!(factors.is_none());
         loader.tree().assert_all_tensors_validated().unwrap();
         let values = (0..m * k).map(|i| bf16::from_f32((i % 23) as f32 / 8.0 - 1.0)).collect::<Vec<_>>();
-        let values = create_buffer_with_data::<B, bf16>(&context, &values);
-        let tokens = create_buffer_with_data::<B, u32>(&context, &[6, 0, 3]);
+        let values = create_buffer_with_data::<B, bf16>(context.as_ref(), &values);
+        let tokens = create_buffer_with_data::<B, u32>(context.as_ref(), &[6, 0, 3]);
         let weights = create_buffer_with_data::<B, bf16>(
-            &context,
+            context.as_ref(),
             if tied {
                 &input.dense
             } else {
                 &readout.dense
             },
         );
-        let baseline = ReferenceBF16Matmul::<B>::new(&context).unwrap();
+        let baseline = ReferenceBF16Matmul::<B>::new(context.as_ref()).unwrap();
         let mut commands = context.create_command_buffer(None, None).unwrap();
         let expected = baseline.encode(&values, 0, &weights, m, vocab, k, &mut commands).unwrap();
         let actual =
