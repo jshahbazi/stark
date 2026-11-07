@@ -30,6 +30,8 @@ use crate::{
     parameters::ParameterLoader,
 };
 
+#[cfg(all(test, backend = "cpu"))]
+mod nople_diagnostics;
 mod preprocess;
 #[cfg(all(test, backend = "metal"))]
 mod reference_tests;
