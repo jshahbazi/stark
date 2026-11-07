@@ -2004,6 +2004,33 @@ code {
   margin-left:7px;
   color:var(--ink)
 }
+.tool-support-note p + p { margin-top:12px }
+.tool-qualification {
+  margin-top:16px;
+  padding:20px 24px;
+  border:1px solid var(--line);
+  color:var(--muted);
+  scroll-margin-top:110px
+}
+.tool-qualification summary {
+  display:flex;
+  justify-content:space-between;
+  gap:16px;
+  color:var(--ink);
+  font-size:14px;
+  cursor:pointer;
+  list-style:none
+}
+.tool-qualification summary::-webkit-details-marker { display:none }
+.tool-qualification[open] summary > span { transform:rotate(45deg) }
+.tool-qualification p { margin-top:16px;font-size:13px;line-height:1.75 }
+.tool-qualification a { color:var(--ink);text-decoration:underline;text-underline-offset:3px }
+.tool-qualification-scroll { max-width:100%;margin-top:18px;overflow-x:auto }
+.tool-qualification table { width:100%;min-width:560px;border-collapse:collapse;font-size:12px;line-height:1.6 }
+.tool-qualification caption { padding-bottom:12px;text-align:left;font-size:11px }
+.tool-qualification th,.tool-qualification td { padding:12px 10px;border-bottom:1px solid var(--line);text-align:left }
+.tool-qualification th { color:var(--ink);font-weight:500 }
+.tool-qualification td:last-child { white-space:nowrap }
 .privacy-section {
   border-top:1px solid var(--line);
   background:var(--paper)

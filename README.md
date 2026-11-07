@@ -56,7 +56,7 @@ Conversion downloads the model; use a new output directory each time. Chat loads
 
 ### Use Stark from another app
 
-Stark serves an OpenAI-style chat API for clients on the same Mac. Run a model in Chat mode, open **Connections** from Stark's menu, and use **Apps** to connect OpenWork or OpenCode Desktop without copying a key. For other native clients, choose **Connect your own app** and copy the **Base URL**, **API key** and **Model ID** into an OpenAI-compatible provider. The master key persists in macOS Keychain until you explicitly regenerate it. Streaming is supported. Qualified models and templates can return validated function calls for the client to execute under its own approval policy; Stark does not execute functions. Browser-origin requests, remote devices, embeddings and structured output are unsupported. See the [local API contract](docs/LOCAL_API.md) and [tested clients](docs/LOCAL_API.md#client-compatibility).
+Stark serves an OpenAI-style chat API for clients on the same Mac. Run a model in Chat mode, open **Connections** from Stark's menu, and use **Apps** to connect OpenWork or OpenCode Desktop without copying a key. For other native clients, choose **Connect your own app** and copy the **Base URL**, **API key** and **Model ID** into an OpenAI-compatible provider. The master key persists in macOS Keychain until you explicitly regenerate it. Streaming is supported. [Qualified models and templates](docs/TOOL_CALLING.md) can return validated function calls for the client to execute under its own approval policy; Stark does not execute functions. Browser-origin requests, remote devices, embeddings and structured output are unsupported. See the [local API contract](docs/LOCAL_API.md) and [tested clients](docs/LOCAL_API.md#client-compatibility).
 
 The [native image path](docs/MULTIMODAL_IMPLEMENTATION.md) accepts one PNG/JPEG through the CLI, Local API, and Swift attachments. Compatible dense Qwen3.5 BF16 models and merged fine-tunes use the [configuration-driven family contract](docs/VISION_FAMILY_CONTRACT.md), with automatic local checks before image input is enabled. Reference qualification is separately recorded for an exact 0.8B artifact, worker, device and macOS tuple. The app supports attachment selection, drop, paste, preview, removal, and image conversations.
 
@@ -91,6 +91,21 @@ For models using the converter, supported floating Safetensors layouts produce n
 Qwen3.8-Flash-Next, GLM-5.3-Flash and Flint use native Rust/Metal paths for prepared quantized checkpoints. Use the [pinned preparation commands](docs/NATIVE_HYBRID_MODELS.md); see [Flint setup and limits](docs/FLINT.md). Lily-format Qwen3.8 also converts to a self-contained typed Uzu text artifact with canonical MLX storage and the same specialized Qwen kernels. It preserves quantization and omits vision and MTP. The [Uzu-format study](docs/benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records exact readout and sampled-generation controls for the pinned artifact. Their current Stark paths accept text input.
 
 The dense `Jundot/Qwen3.8-27B-oQ4e-mtp` checkpoint uses the converted Qwen3.5-family path, retaining its mixed affine precision and complete quantized MTP predictor. It is separate from Qwen3.8-Flash-Next. See [preparation and admission](tools/converter/README.md#dense-qwen38-27b-oq4e-mtp) and the [packed-weight validation follow-up](docs/benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
+
+#### Function tools
+
+The installed model list reports **Tools available**, **Tools unavailable** or **Tools unchecked** for each installed or imported artifact, based on its exact chat-template compatibility. These labels and expanded coverage were merged after v0.18.0; packaged releases can have an earlier set of templates. See [tool-calling coverage](docs/TOOL_CALLING.md) for supported protocols and limits.
+
+These bounded workflows passed native and HTTP checks on the named artifacts; they do not establish family-wide support or general agent reliability.
+
+| Qualified artifact | Native checks | HTTP checks | HTTP context |
+| --- | ---: | ---: | ---: |
+| Dense Qwen3.8-27B oQ4e MTP | 3/3 | 17/17 | 32K |
+| Qwen3.8 Flash Next Lily Q4-XL | 3/3 | 17/17 | 8K |
+| GLM-5.3 Flash UD-Q2_K_XL GGUF | 3/3 | 17/17 | 8K |
+| Recursive Flint INT4 | 3/3 | 17/17 | 8K |
+
+See the [Qwen3.8 qualification record](docs/archive/runs/2026-11-07-recommended-model-tool-qualification.md) and [GLM/Flint qualification record](docs/archive/runs/2026-11-07-glm-flint-tool-qualification.md). Qwen3-32B remains partial: 2/3 native checks and 14/17 HTTP checks, with exact plain-text response checks failing.
 
 #### Images
 
