@@ -51,6 +51,20 @@ The independent test-only witness remains unchanged; production bit agreement
 and the unchanged full-tower numerical gate are separate checks. Text kernels
 are unchanged by this vision policy.
 
+`src/kernels/metal/vision_nonlinear.metal` retains the main engine's measured
+Torch BF16 Welford/affine and GELU arithmetic bodies, with only binding wrappers
+adapted. Source lineage is Torch `5c4886908584029761b579af026dcfb627c84070`
+`moments_utils.h`, `layer_norm_kernel.cpp`, `Gelu.h`, SLEEF
+`5a1d179df9cf652951b59010a2d2075372d67f68` tanh/df helpers, and the pinned
+Arm NEON erf polynomial. Existing BSD/Boost/Arm notices remain in
+`scripts/licenses/distribution`. Only the vision graph selects these helpers.
+The measured 1,152-wide norm checks at most 8,192 rows; other widths retain
+the old norm. GELU checks the same row budget and at most `8192 * 4608`
+elements, dispatching at most 262,144 elements per tile; wider rows retain the
+old activation. Independent test-only copies and source-input bit assertions
+remain separate from the production path. The optional all-finite BF16 GELU
+fixture and its environment selector exist only inside the ignored unit test.
+
 Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision. Explicitly admitted original-format image artifacts can load the retained BF16 vision tower; ordinary text loading keeps it disabled.
 
 Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary single-token decode graph. The bridge returns complete F32 vocabulary readouts to Stark's caller-owned exact sampler, without the upstream GPU sampler's 1,024-candidate cap or probability arithmetic. Draft distributions and acceptance stay request-local; head catch-up is disabled for ordinary non-MTP requests. Verification evaluates up to four positions in one layer-major graph with the ordinary decode's affine dot expressions, reductions, normalization and rounding boundaries. Recurrent state and pre-convolution inputs are retained for exact prefix rollback. The original serial verifier remains a reference. The engine adapter restores partially consumed groups when a stream stops early, without sampling during cleanup. Checkpoint quantization and the ordinary target's activation, state, cache and weight arithmetic are preserved. Numerical and performance qualification is recorded separately.

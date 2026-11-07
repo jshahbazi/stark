@@ -441,3 +441,36 @@ pub(crate) fn gelu_reference_bf16(
         Grid::Threads { grid: (values.numel(), 1, 1), threadgroup: (128, 1, 1) },
     )
 }
+
+#[cfg(test)]
+pub(crate) fn patch_pos_reference_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    values: &Tensor,
+    table: &Tensor,
+    gh: usize,
+    gw: usize,
+) -> Result<()> {
+    ensure!(
+        values.shape() == [gh * gw, 1152]
+            && gh * gw <= 256
+            && table.shape() == [2304, 1152],
+        "private position reference bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_patch_pos_reference_bf16",
+        include_str!("metal/vision_position_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[values.binding(), table.binding()],
+        &[
+            Param::U32(1152),
+            Param::U32(gh as u32),
+            Param::U32(gw as u32),
+            Param::U32(48),
+        ],
+        Grid::Threads { grid: (1152, gh * gw, 1), threadgroup: (256, 1, 1) },
+    )
+}
