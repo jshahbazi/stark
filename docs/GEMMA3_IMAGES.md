@@ -91,6 +91,14 @@ and an eight-step greedy trajectory. The opt-in native replay test is
 `STARK_TEST_MODEL_PATH`. Fixture data stays in ignored private directories;
 only aggregate metrics and hashes may be published.
 
+When the preserved reference directory contains completed red/blue trajectories
+and all three feature files, `--resume-fixture` with `--source-manifest` resumes
+the missing pattern trajectory into a new output directory. It hashes the
+preserved files, verifies every selected source payload and uses hardlinks for
+completed evidence. A forward hook verifies that the unchanged full pattern
+forward reproduces the preserved projector features exactly. Existing evidence
+is never overwritten; the final manifest binds the resume-input receipt.
+
 The initial fixed gates require exact BF16 preprocessing, feature relative RMS
 error at most 0.02 and cosine at least 0.999, centered logit relative RMS error
 at most 0.1, reference-to-native KL at most 0.03 and identical greedy decisions.
