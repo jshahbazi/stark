@@ -19,6 +19,8 @@ Release copy is evergreen. Download and release-note links use GitHub's stable `
 
 ## Content and interactions
 
+Both pages begin the footer with a contact invitation for questions, feature ideas and model requests. The visible `john@starkengine.app` address links to `mailto:john@starkengine.app`, opening the visitor's email app. The callout wraps on narrow screens.
+
 The homepage links to `technical.html` (Technical details), which contains developer integration, the model/memory catalog, conversation prefix reuse and benchmark sections. The reference page has a dedicated introduction and numbered section navigation that stays available while scrolling and wraps into two columns on narrow screens. Each section distinguishes setup guidance, capability limits and supporting evidence. The manual Advanced setup block has been removed. Cross-page fragments preserve links between setup and technical content.
 
 - The hero introduces free, open-weight models for coding, writing and everyday tasks in two sentences. Its privacy claim covers Stark's local processing and says nothing is transmitted to us; the helper links to the separate data practices of connected apps and tools. Its CTA links to the latest signed, notarized Mac app and the product walkthrough. “Open source” describes Stark's engine; downloadable model weights are open-weight and individual model licenses vary. The page retains the large original cat artwork without placing upstream provenance copy above the download CTA.
