@@ -8,7 +8,9 @@ import io
 import json
 import resource
 import shutil
+import struct
 import sys
+import zlib
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -43,6 +45,23 @@ OPERATIONAL_TEXT_FIELDS = (
     "attention_bias",
     "hidden_act",
     "layer_types",
+)
+OPERATIONAL_VISION_FIELDS = (
+    "hidden_size",
+    "intermediate_size",
+    "depth",
+    "num_heads",
+    "num_position_embeddings",
+    "out_hidden_size",
+    "patch_size",
+    "spatial_merge_size",
+    "temporal_patch_size",
+    "in_channels",
+    "hidden_act",
+    "deepstack_visual_indexes",
+)
+PIXEL_MANIFEST_SHA256 = (
+    "e5dceac11aa5fd42bea86ca50b4aa1a9d48d8bfd99f08cd43c5fe950225330ae"
 )
 
 
@@ -92,6 +111,39 @@ def sha(path):
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
+def fixed_fixture_rgb(encoded, width, height):
+    """Decode only this hash-pinned corpus's RGB8, filter-zero PNG recipe."""
+    assert encoded[:8] == b"\x89PNG\r\n\x1a\n"
+    offset, compressed, header = 8, [], None
+    while offset < len(encoded):
+        length = struct.unpack(">I", encoded[offset : offset + 4])[0]
+        kind = encoded[offset + 4 : offset + 8]
+        payload = encoded[offset + 8 : offset + 8 + length]
+        assert len(payload) == length
+        crc = struct.unpack(">I", encoded[offset + 8 + length : offset + 12 + length])[
+            0
+        ]
+        assert zlib.crc32(kind + payload) == crc
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", payload)
+        elif kind == b"IDAT":
+            compressed.append(payload)
+        offset += length + 12
+    assert header == (width, height, 8, 2, 0, 0, 0) and offset == len(encoded)
+    expected = height * (width * 3 + 1)
+    decoder = zlib.decompressobj()
+    decoded = decoder.decompress(b"".join(compressed), expected + 1)
+    assert (
+        decoder.eof
+        and not decoder.unused_data
+        and not decoder.unconsumed_tail
+        and len(decoded) == expected
+    )
+    rows = np.frombuffer(decoded, dtype=np.uint8).reshape(height, width * 3 + 1)
+    assert np.all(rows[:, 0] == 0)
+    return rows[:, 1:].reshape(height, width, 3).copy()
+
+
 def dequant(source, name):
     packed = source.get_tensor(name)
     scales = source.get_tensor(name.removesuffix(".weight") + ".scales")
@@ -132,6 +184,11 @@ def main():
         "output",
     ):
         parser.add_argument("--" + flag, type=Path, required=True)
+    parser.add_argument(
+        "--capture-layers",
+        action="store_true",
+        help="Save private BF16 layer outputs for drift isolation",
+    )
     args = parser.parse_args()
     import transformers
 
@@ -166,6 +223,16 @@ def main():
     text = raw_config["text_config"]
     for key in OPERATIONAL_TEXT_FIELDS:
         assert getattr(model.config.text_config, key) == text[key]
+    vision = raw_config["vision_config"]
+    assert vision["model_type"] in {"qwen3_5", "qwen3_5_vision"}
+    for key in OPERATIONAL_VISION_FIELDS:
+        assert getattr(model.config.vision_config, key) == vision[key]
+    assert set(vision) <= set(OPERATIONAL_VISION_FIELDS) | {
+        "model_type",
+        "initializer_range",
+        "dtype",
+        "torch_dtype",
+    }
     parameters = dict(model.named_parameters())
     consumed, converted = set(), set()
     PHASE = "assign_source_quantized_weights"
@@ -232,6 +299,10 @@ def main():
         contract["source"]["repo"] == SOURCE_REPO
         and contract["source"]["revision"] == SOURCE_REVISION
     )
+    assert sha(SOURCE / "config.json") == contract["source"]["hashes"]["config.json"]
+    pixel_root = args.transformers_source / "eager_fp32_buffers"
+    assert sha(pixel_root / "reference-manifest.json") == PIXEL_MANIFEST_SHA256
+    pixel_manifest = json.loads((pixel_root / "reference-manifest.json").read_bytes())
     identity = {
         "artifact_schema_version": contract["schema_version"],
         "config_sha256": sha(ARTIFACT / "config.json"),
@@ -254,6 +325,14 @@ def main():
         "transformers": transformers.__version__,
         "structure_trained_weights_discarded": True,
         "operational_text_config_fields_checked": list(OPERATIONAL_TEXT_FIELDS),
+        "operational_vision_config_fields_checked": list(OPERATIONAL_VISION_FIELDS),
+        "source_config_sha256": sha(SOURCE / "config.json"),
+        "pixel_reference_manifest_sha256": PIXEL_MANIFEST_SHA256,
+        "vision_fixed_operations": {
+            "rope_type": "axial",
+            "rope_theta": 10000.0,
+            "layer_norm_epsilon": 1e-6,
+        },
         "reference": "actual pinned Transformers full model with independently BF16-dequantized source affine weights",
         "reference_weight_policy": "group64 unsignedQ4 F32(code*BF16scale+BF16bias), round effective weight to BF16",
         "source_weight_sha256": sha(SOURCE / "model.safetensors"),
@@ -266,6 +345,7 @@ def main():
         "generator_sha256": sha(__file__),
         "vocab_size": model.config.text_config.vocab_size,
         "context_capacity": 512,
+        "captures_decoder_layers": args.capture_layers,
         "cases": [],
     }
     for old_case in old["cases"]:
@@ -290,14 +370,71 @@ def main():
             if case["name"] == "square_256"
             else "tower_processed_rgb_47x81"
         )
-        tower_folder = args.transformers_source / "eager_fp32_buffers" / tower_name
-        tower_meta = json.loads((tower_folder / "metadata.json").read_bytes())
+        tower_folder = pixel_root / tower_name
+        tower_meta = next(
+            item for item in pixel_manifest["tower"] if item["name"] == tower_name
+        )
+        assert tower_meta["grid"] == case["grid"]
+        patch_record = tower_meta["patches"]
+        patch_bytes = (tower_folder / patch_record["file"]).read_bytes()
+        assert hashlib.sha256(patch_bytes).hexdigest() == patch_record["sha256"]
+        assert patch_record["dtype"] == "bf16" and len(patch_bytes) == 2 * int(
+            np.prod(patch_record["shape"])
+        )
+        image_bytes = (folder / case["image"]["file"]).read_bytes()
+        assert hashlib.sha256(image_bytes).hexdigest() == case["image"]["sha256"]
+        rgb_record = tower_meta["source_rgb"]
+        rgb = fixed_fixture_rgb(image_bytes, rgb_record["width"], rgb_record["height"])
+        assert rgb.shape == (rgb_record["height"], rgb_record["width"], 3)
+        assert hashlib.sha256(rgb.tobytes()).hexdigest() == rgb_record["sha256"]
+        (folder / "pixel_values.bf16").write_bytes(patch_bytes)
+        case["files"]["pixel_values"] = {**patch_record, "file": "pixel_values.bf16"}
         pixels = torch.frombuffer(
-            bytearray((tower_folder / tower_meta["patches"]["file"]).read_bytes()),
+            bytearray(patch_bytes),
             dtype=torch.bfloat16,
-        ).reshape(tower_meta["patches"]["shape"])
+        ).reshape(patch_record["shape"])
         mask = torch.ones_like(ids)
         types = (ids == 248056).to(torch.int32)
+        handles, layer_files = [], []
+        if args.capture_layers:
+            for index, layer in enumerate(model.model.language_model.layers):
+
+                def capture(
+                    _module,
+                    _arguments,
+                    output,
+                    *,
+                    layer_index=index,
+                    rows=ids.shape[1],
+                    case_folder=folder,
+                    files=layer_files,
+                ):
+                    hidden = output[0] if isinstance(output, tuple) else output
+                    assert hidden.dtype == torch.bfloat16 and hidden.shape == (
+                        1,
+                        rows,
+                        text["hidden_size"],
+                    )
+                    data = (
+                        hidden.detach()
+                        .cpu()
+                        .contiguous()
+                        .view(torch.uint16)
+                        .numpy()
+                        .astype("<u2", copy=False)
+                        .tobytes()
+                    )
+                    filename = f"layer_{layer_index}.bf16"
+                    (case_folder / filename).write_bytes(data)
+                    files.append(
+                        {
+                            "layer": layer_index,
+                            "file": filename,
+                            "sha256": hashlib.sha256(data).hexdigest(),
+                        }
+                    )
+
+                handles.append(layer.register_forward_hook(capture))
         with (
             torch.no_grad(),
             redirect_stdout(io.StringIO()),
@@ -324,6 +461,11 @@ def main():
                 logits_to_keep=1,
                 return_dict=True,
             )
+        for handle in handles:
+            handle.remove()
+        if args.capture_layers:
+            assert len(layer_files) == text["num_hidden_layers"]
+            case["decoder_layer_outputs"] = layer_files
         logits = result.logits[0, -1].detach().cpu()
         assert logits.dtype == torch.bfloat16 and torch.isfinite(logits).all()
         data = logits.float().numpy().astype("<f4", copy=False).tobytes()
