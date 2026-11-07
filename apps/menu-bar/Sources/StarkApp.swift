@@ -1935,6 +1935,8 @@ final class EngineController: ObservableObject {
     @discardableResult
     func run() -> Bool {
         guard !selectedID.isEmpty, !busy else { return false }
+        // A new run becomes the restart target even if loading later fails.
+        stoppedModel = nil
         UserDefaults.standard.set(selectedID, forKey: "selectedModel")
         errorMessage = nil
         clearConversation()

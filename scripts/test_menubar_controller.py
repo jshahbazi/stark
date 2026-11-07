@@ -1111,6 +1111,38 @@ extension EngineController {
             return restart["command"] as? String == "run" && restart["model_id"] as? String == current.id &&
                 restart["mode"] as? String == "decision" && engine.selectedID == current.id &&
                 engine.mode == .decision && engine.state == "loading"
+        case "restart-controls-explicit-target-after-failed-start":
+            let stopped = variant("fixture-model", name: "Stopped A", display: nil)
+            let selected = variant("other-model", name: "Selected B", display: nil)
+            engine.models = [stopped, selected]
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.loadedID = stopped.id; engine.selectedID = stopped.id; engine.state = "ready"
+            engine.stopModel(id: stopped.id)
+            guard command()["command"] as? String == "stop", engine.stoppedModel?.id == stopped.id else {
+                return false
+            }
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            guard engine.stoppedModel?.id == stopped.id, engine.state == "idle" else { return false }
+
+            // A rejected busy run must preserve the valid restart target.
+            engine.state = "generating"
+            guard !engine.run(), engine.stoppedModel?.id == stopped.id, noCommandSent() else { return false }
+            engine.state = "idle"
+
+            guard engine.runModel(id: selected.id) else { return false }
+            let firstAttempt = command()
+            guard firstAttempt["command"] as? String == "run",
+                  firstAttempt["model_id"] as? String == selected.id,
+                  firstAttempt["mode"] as? String == "chat", engine.selectedID == selected.id else { return false }
+            engine.apply(["event": "error", "message": "Synthetic startup failure"])
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            guard engine.state == "idle", engine.loadedID.isEmpty,
+                  engine.stoppedModel?.id != stopped.id,
+                  engine.startableModel?.id == selected.id, engine.canStartModel else { return false }
+            engine.startModel()
+            let retry = command()
+            return retry["command"] as? String == "run" && retry["model_id"] as? String == selected.id &&
+                retry["mode"] as? String == "chat" && engine.selectedID == selected.id && engine.state == "loading"
         case "restart-controls-running-busy-and-deleted-target":
             let current = variant("fixture-model", name: "Current", display: nil)
             engine.models = [current, variant("other-model", name: "Other", display: nil)]
@@ -2549,6 +2581,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_restart_controls_stop_exact_model_and_restart_in_stopped_mode(self):
         self.exercise("restart-controls-stop-and-start")
+
+    def test_explicit_failed_start_retries_selected_model_without_clearing_on_busy_run(self):
+        self.exercise("restart-controls-explicit-target-after-failed-start")
 
     def test_restart_controls_reject_running_busy_and_deleted_targets(self):
         self.exercise("restart-controls-running-busy-and-deleted-target")
