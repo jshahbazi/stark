@@ -144,3 +144,35 @@ fn full_qwen_reference<B: Backend>() {
 fn qwen_bf16_moe_reference_profile_executes_router_selected_banks_and_shared_gate() {
     for_each_backend!(|B| full_qwen_reference::<B>());
 }
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn qwen_bf16_moe_reference_scratch_stays_bounded_across_rows_and_routes() {
+    use crate::backends::cpu::Cpu;
+
+    let context = <Cpu as Backend>::Context::new().unwrap();
+    let file = fixture();
+    let loader =
+        ParameterLoader::new(&file, &context).unwrap().with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+    let config = serde_json::from_value(json!({"expert_config":{"linear_config":{},
+        "activation":{"type":"SiLU","alpha":1.0},"has_up_biases":false,"has_down_biases":false,
+        "up_clipping":null,"gate_clipping":null},"router_config":{},
+        "routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":4,
+        "num_active_routed_experts":3,"router_has_biases":false,"num_shared_experts":1,
+        "expert_hidden_dim":64,"gate_config":{}}))
+    .unwrap();
+    let model = QwenMoe::<Cpu>::new(&config, 64, 64, &context, &loader.tree(), DataType::BF16).unwrap();
+    let pool = context.create_allocation_pool();
+    let mut commands = context.create_command_buffer(None, Some(pool.clone())).unwrap();
+    let mut input = commands.allocate_scratch_for_shape(&[32, 64], DataType::BF16).unwrap();
+    (&mut input).copyin(bytemuck::cast_slice(&vec![bf16::ONE; 32 * 64]));
+    let output = model.encode(input, 32, &mut commands).unwrap();
+    // Count every scratch request in this command buffer, including retained
+    // routes, outputs and activation buffers. Materializing up/down matrices
+    // for each of the 96 routes would alone request over 2 MiB here.
+    assert!(pool.requested_bytes() < 512 * 1024, "reference MoE scratch expanded into weight matrices");
+    let mut result = context.create_buffer(32 * 64 * 2).unwrap();
+    commands.encode_copy(&output, &mut result);
+    commands.end_encoding().submit().wait_until_completed().unwrap();
+    assert!(buffer_to_vec::<Cpu, bf16>(&result).iter().all(|value| value.is_finite()));
+}
