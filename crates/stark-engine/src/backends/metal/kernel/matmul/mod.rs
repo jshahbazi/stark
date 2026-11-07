@@ -47,6 +47,11 @@ enum MatmulDispatch {
     Gemm(GemmPlan),
 }
 
+#[cfg(test)]
+thread_local! {
+    static AFFINE_DOT_WITNESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub struct MatmulOutputWork {
     output_rht: ActivationTransform<Metal>,
     output_rht_with_bias: ActivationTransform<Metal>,
@@ -92,6 +97,112 @@ fn supports_integer_right_operand(shape: &MatmulShape) -> bool {
 }
 
 impl MatmulMetalKernel {
+    #[cfg(test)]
+    fn encode_reference_dot_witness(
+        &self,
+        arguments: MatmulArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferMut<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        commands: &mut MetalCommandBufferEncoding,
+    ) -> Result<(), MetalError> {
+        use crate::backends::common::{
+            Kernels,
+            kernel::{
+                QwenAffineReferenceMatmulBF16Kernel,
+                matmul::{MatmulA, MatmulB},
+            },
+        };
+        let invalid = || MatmulError::<Metal>::UnsupportedLayout {
+            path: "bounded private Qwen affine contraction witness",
+        };
+        let MatmulArguments {
+            a,
+            b,
+            mut d,
+            m,
+            n,
+            k,
+            b_transpose,
+            b_leading_dimension,
+            d_transform,
+            gather_indices,
+        } = arguments;
+        let work = u64::from(m).checked_mul(u64::from(n)).and_then(|x| x.checked_mul(u64::from(k)));
+        if self.weights_data_type != DataType::BF16
+            || self.input_data_type != DataType::BF16
+            || self.output_data_type != DataType::BF16
+            || !b_transpose
+            || b_leading_dimension.is_some()
+            || !d_transform.mask().is_empty()
+            || gather_indices.is_some()
+            || m == 0
+            || m > 128
+            || n == 0
+            || n > 248320
+            || k == 0
+            || k > 3584
+            || !k.is_multiple_of(64)
+            || work.is_none_or(|x| x > 1024_u64.pow(3))
+        {
+            return Err(invalid().into());
+        }
+        let MatmulA::FullPrecision {
+            values,
+            offset,
+        } = a
+        else {
+            return Err(invalid().into());
+        };
+        let MatmulB::Quantized(quantized) = b else {
+            return Err(invalid().into());
+        };
+        if quantized.mode.bits() != 4 || quantized.group_size != 64 || quantized.signed_codes {
+            return Err(invalid().into());
+        }
+        let biases = quantized.biases().ok_or_else(invalid)?;
+        let strides = quantized.params.scale_strides();
+        let input_bytes = m as usize * k as usize * 2;
+        let input_end = offset.checked_add(input_bytes).ok_or_else(invalid)?;
+        let code_bytes = n as usize * k as usize / 2;
+        let output_bytes = m as usize * n as usize * 2;
+        let last_scale = (n as usize - 1)
+            .checked_mul(strides.output_stride as usize)
+            .and_then(|x| x.checked_add((k as usize / 64 - 1) * strides.group_stride as usize))
+            .and_then(|x| x.checked_add(1))
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(invalid)?;
+        if input_end > values.size()
+            || code_bytes > quantized.codes.size()
+            || output_bytes > d.size()
+            || last_scale > quantized.scales.size()
+            || last_scale > biases.size()
+        {
+            return Err(invalid().into());
+        }
+        let dot =
+            <<Metal as Backend>::Kernels as Kernels>::QwenAffineReferenceMatmulBF16Kernel::new(commands.context())?;
+        dot.encode(
+            values.subrange(offset..input_end),
+            quantized.codes,
+            quantized.scales,
+            biases,
+            d.reborrow(),
+            m,
+            n,
+            k,
+            4,
+            strides.output_stride,
+            strides.group_stride,
+            commands,
+        );
+        Ok(())
+    }
+
     fn prefer_gemm_over_gemv(
         shape: MatmulShape,
         plan: GemmPlan,
@@ -303,6 +414,18 @@ impl MatmulKernel for MatmulMetalKernel {
         self.reference_accumulation = true;
     }
 
+    #[cfg(test)]
+    fn with_reference_dot_witness<R>(run: impl FnOnce() -> R) -> R {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                AFFINE_DOT_WITNESS.with(|flag| flag.set(self.0));
+            }
+        }
+        let _restore = Restore(AFFINE_DOT_WITNESS.with(|flag| flag.replace(true)));
+        run()
+    }
+
     fn select_activation_quantization(
         &self,
         shape: &MatmulShape,
@@ -375,6 +498,10 @@ impl MatmulKernel for MatmulMetalKernel {
         >,
         command_buffer: &mut MetalCommandBufferEncoding,
     ) -> Result<(), MetalError> {
+        #[cfg(test)]
+        if self.reference_accumulation && AFFINE_DOT_WITNESS.with(std::cell::Cell::get) {
+            return self.encode_reference_dot_witness(arguments, command_buffer);
+        }
         let shape = MatmulShape::from_arguments(&arguments);
         let plan = match self.select_dispatch(&shape, command_buffer.context()) {
             MatmulDispatch::Gemv(gemv) => {

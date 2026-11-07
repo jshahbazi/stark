@@ -36,6 +36,13 @@ pub trait MatmulKernel: Sized + Send + Sync {
     /// This is enabled only by an explicitly admitted numerical profile.
     fn set_reference_accumulation(&mut self) {}
 
+    /// Isolated test-only contraction witness. Production builds omit this
+    /// scope; backends without the witness keep their ordinary implementation.
+    #[cfg(test)]
+    fn with_reference_dot_witness<R>(run: impl FnOnce() -> R) -> R {
+        run()
+    }
+
     fn encode(
         &mut self,
         arguments: MatmulArguments<
