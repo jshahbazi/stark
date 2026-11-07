@@ -346,7 +346,12 @@ impl<B: Backend> Transformer<B> {
                 && ropes.iter().all(|rope| matches!(rope, AnyRoPEConfig::Qwen35MRoPEConfig(_))),
             scalar_image_positions_supported: !ropes.is_empty()
                 && ropes.iter().all(|rope| {
-                    matches!(rope, AnyRoPEConfig::UnscaledRoPEConfig(_) | AnyRoPEConfig::ProportionalRoPEConfig(_))
+                    matches!(
+                        rope,
+                        AnyRoPEConfig::UnscaledRoPEConfig(_)
+                            | AnyRoPEConfig::ProportionalRoPEConfig(_)
+                            | AnyRoPEConfig::LinearScalingRoPEConfig(_)
+                    )
                 })
                 && transformer_config.layer_configs.iter().all(|layer| {
                     matches!(
