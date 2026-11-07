@@ -283,6 +283,30 @@ final class BeginnerSetupSession: ObservableObject {
         stage = .ready
     }
 
+    func canNavigate(to target: BeginnerSetupStage, snapshot: BeginnerSetupSnapshot) -> Bool {
+        guard !snapshot.installPhase.inProgress, installingChoiceID == nil,
+              startRequestedModelID == nil, !snapshot.modelStarting else { return false }
+        if target == .ready {
+            return canFinish(snapshot: snapshot) || keepsCompletedSetupWhileGenerating(snapshot: snapshot)
+        }
+        if target == .task { return true }
+        if target == .recommendation || target == .retry { return task != nil }
+        if target == .installation {
+            return snapshot.installChoiceID != nil || snapshot.installedResultID != nil
+                || selectedChoiceID != nil || canFinish(snapshot: snapshot)
+        }
+        if target == .openWork || target == .connection {
+            return (snapshot.modelReady || keepsCompletedSetupWhileGenerating(snapshot: snapshot))
+                && !snapshot.runningModelID.isEmpty
+        }
+        return false
+    }
+
+    func navigate(to target: BeginnerSetupStage, snapshot: BeginnerSetupSnapshot) {
+        guard canNavigate(to: target, snapshot: snapshot) else { return }
+        stage = target
+    }
+
     func continueAfterModel(snapshot: BeginnerSetupSnapshot) {
         guard snapshot.modelReady, !snapshot.runningModelID.isEmpty else { return }
         startRequestedModelID = nil

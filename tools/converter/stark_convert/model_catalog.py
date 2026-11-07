@@ -74,6 +74,76 @@ class _MalformedMetadata(Exception):
     """A bounded metadata document is invalid and cannot be retried usefully."""
 
 
+def _read_revision_metadata(hub, repo, filename, revision, maximum):
+    """Read pinned metadata, reusing a validated file in the HF disk cache when present."""
+    try:
+        # Only immutable full revisions can bypass the metadata HEAD request.
+        # Hugging Face's cache lookup resolves precisely that snapshot; the
+        # existing reader still verifies file type, size, stable identity and
+        # that snapshot/blob symlinks remain within the authorized cache roots.
+        cached_path = None
+        if _REVISION.fullmatch(revision):
+            lookup = getattr(hub, "try_to_load_from_cache", None)
+            if lookup is None:
+                try:
+                    from huggingface_hub import try_to_load_from_cache as lookup
+                except ImportError:
+                    lookup = None
+            if lookup is not None:
+                try:
+                    candidate = lookup(repo, filename, revision=revision)
+                    if isinstance(candidate, (str, os.PathLike)):
+                        cached_path = Path(candidate)
+                except Exception:
+                    # A broken cache index must not turn a cache miss into a
+                    # permanent error; fall back to the ordinary pinned read.
+                    cached_path = None
+        if cached_path is not None:
+            authority = cached_path
+            for _part in PurePosixPath(filename).parts:
+                authority = authority.parent
+            if (
+                authority.name != revision
+                or authority.parent.name != "snapshots"
+                or authority.parent.parent.name != "models--" + repo.replace("/", "--")
+            ):
+                cached_path = None
+        if cached_path is not None:
+            authority = cached_path
+            for _part in PurePosixPath(filename).parts:
+                authority = authority.parent
+            return read_metadata_bytes(cached_path, root=authority, maximum=maximum)
+
+        metadata = hub.get_hf_file_metadata(
+            hub.hf_hub_url(repo_id=repo, filename=filename, revision=revision), timeout=5
+        )
+        if type(metadata.size) is int and metadata.size > maximum:
+            raise _Inaccessible()
+        if type(metadata.size) is not int or metadata.size <= 0:
+            raise _Unavailable()
+        if _field(metadata, "commit_hash") not in (None, revision):
+            raise _Unavailable()
+        selected = Path(
+            hub.hf_hub_download(
+                repo_id=repo,
+                filename=filename,
+                revision=revision,
+                local_files_only=False,
+                etag_timeout=5,
+            )
+        )
+        authority = selected
+        for _part in PurePosixPath(filename).parts:
+            authority = authority.parent
+        return read_metadata_bytes(selected, root=authority, maximum=maximum)
+    except (_Inaccessible, _Unavailable):
+        raise
+    except Exception as error:
+        if _hub_source_unavailable(error):
+            raise _Inaccessible() from None
+        raise _Unavailable() from None
+
+
 def _hub_source_unavailable(error):
     try:
         from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
@@ -676,28 +746,7 @@ def family_catalog(
         def read(repo, filename, revision, maximum):
             remaining()
             try:
-                metadata = hub.get_hf_file_metadata(
-                    hub.hf_hub_url(repo_id=repo, filename=filename, revision=revision), timeout=5
-                )
-                if type(metadata.size) is int and metadata.size > maximum:
-                    raise _Inaccessible()
-                if type(metadata.size) is not int or metadata.size <= 0:
-                    raise _Unavailable()
-                if _field(metadata, "commit_hash") not in (None, revision):
-                    raise _Unavailable()
-                selected = Path(
-                    hub.hf_hub_download(
-                        repo_id=repo,
-                        filename=filename,
-                        revision=revision,
-                        local_files_only=False,
-                        etag_timeout=5,
-                    )
-                )
-                authority = selected
-                for _part in PurePosixPath(filename).parts:
-                    authority = authority.parent
-                return read_metadata_bytes(selected, root=authority, maximum=maximum)
+                return _read_revision_metadata(hub, repo, filename, revision, maximum)
             except _Inaccessible:
                 raise
             except Exception as error:

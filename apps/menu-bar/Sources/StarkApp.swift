@@ -1157,6 +1157,8 @@ final class EngineController: ObservableObject {
     private var installErrorMessage: String?
     private var catalogRequestID: String?
     private var pendingCatalogOffset: Int64?
+    private var loadRemainingCatalog = false
+    private var stoppedModel: (id: String, mode: PlaygroundMode)?
     private var activeInstallRequestID: String?
     private var beginnerRequestID: String?
     private var beginnerInstallRequestID: String?
@@ -1226,6 +1228,18 @@ final class EngineController: ObservableObject {
     }
     var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
     var activeName: String { activeModel?.name ?? "No model running" }
+    var startableModel: InstalledModel? {
+        if let stoppedModel, let model = models.first(where: { $0.id == stoppedModel.id }) { return model }
+        return models.first { $0.id == selectedID }
+    }
+    var canStartModel: Bool { !busy && loadedID.isEmpty && startableModel != nil }
+    var canStopCurrentModel: Bool { canStopModel(id: modelControlID) }
+
+    func startModel() {
+        guard canStartModel, let model = startableModel else { return }
+        if let stoppedModel, stoppedModel.id == model.id { changeMode(stoppedModel.mode) }
+        runModel(id: model.id)
+    }
     var gpuMemoryFraction: Double? {
         guard let bytes = gpuMemoryBytes, let budget = gpuMemoryBudgetBytes, budget > 0 else { return nil }
         return Double(bytes) / Double(budget)
@@ -1428,7 +1442,9 @@ final class EngineController: ObservableObject {
             } else if pendingOffset == 0 { catalog = result }
             catalogLoading = false; pendingCatalogOffset = nil
             catalogError = result.status == .ready ? nil : (result.message.isEmpty ? "Could not load these models. Try again." : result.message)
-            if result.status == .ready, !addedItems, result.nextOffset != nil { requestMoreModelCatalog() }
+            if result.status == .ready, result.nextOffset != nil, loadRemainingCatalog || !addedItems {
+                requestMoreModelCatalog(loadRemaining: loadRemainingCatalog)
+            }
         case "model_removed", "model_remove_error":
             guard let expected = removalRequestID, event["request_id"] as? String == expected,
                   event["model_id"] as? String == removingModelID else { return }
@@ -2088,10 +2104,11 @@ final class EngineController: ObservableObject {
         }
     }
 
-    func requestMoreModelCatalog() {
-        guard !catalogLoading, !busy, let requestID = catalogRequestID, let familyID = catalogFamilyID,
+    func requestMoreModelCatalog(loadRemaining: Bool = true) {
+        guard !catalogLoading, (!busy || loadRemainingCatalog), let requestID = catalogRequestID, let familyID = catalogFamilyID,
               let catalog, catalog.familyID == familyID, catalog.status == .ready,
               let offset = catalog.nextOffset else { return }
+        loadRemainingCatalog = loadRemaining
         catalogLoading = true; pendingCatalogOffset = offset; catalogError = nil
         if !send(["command": "catalog", "family_id": familyID, "request_id": requestID, "offset": offset]) {
             catalogLoading = false; pendingCatalogOffset = nil
@@ -2104,6 +2121,7 @@ final class EngineController: ObservableObject {
             send(["command": "catalog_cancel", "request_id": requestID])
         }
         catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil; pendingCatalogOffset = nil
+        loadRemainingCatalog = false
     }
 
     func catalogItemIsDownloaded(_ item: FamilyModelCatalog.Item, artifactMode: ModelArtifactMode) -> Bool {
@@ -2229,6 +2247,9 @@ final class EngineController: ObservableObject {
     }
 
     func stop() {
+        if let model = models.first(where: { $0.id == modelControlID }) {
+            stoppedModel = (model.id, loadedMode ?? mode)
+        }
         errorMessage = nil
         clearInstallSupport()
         if state == "installing" { endInstallProgress("cancelled") }
@@ -2369,7 +2390,8 @@ struct RunningModelLabel: View {
     @ObservedObject var engine: EngineController
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(engine.activeName).lineLimit(1).truncationMode(.middle)
+            Text(engine.activeModel?.name ?? engine.startableModel?.name ?? engine.activeName)
+                .lineLimit(1).truncationMode(.middle)
             if !engine.activeVersionDetails.isEmpty {
                 Text(engine.activeVersionDetails).font(.caption).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
@@ -2398,22 +2420,22 @@ struct MenuView: View {
                 }
                 Spacer()
             }
-            StarkInterfacePicker(preferences: interface)
+            StarkInterfacePicker(preferences: interface).frame(maxWidth: .infinity)
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 StatusLine(engine: engine)
                 if interface.mode == .advanced { GPUMemoryView(engine: engine) }
             }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            Button(interface.mode == .beginner ? "Guided setup" : "Manage Models", action: manage).buttonStyle(.borderedProminent)
+            HStack(spacing: 8) {
+                Button(interface.mode == .beginner ? "Guided setup" : "Manage Models", action: manage)
+                    .buttonStyle(.borderedProminent)
+                Button("Start model", action: engine.startModel).disabled(!engine.canStartModel)
+                    .help(engine.startableModel.map { "Start " + $0.name } ?? "Choose a model first")
+                Button("Stop model", action: engine.stop).disabled(!engine.canStopCurrentModel)
+            }.controlSize(.small)
             if interface.mode == .advanced && engine.mode == .chat { SpeedView(engine: engine) }
-            if engine.busy || !engine.loadedID.isEmpty {
-                HStack {
-                    Spacer()
-                    Button("Stop", action: engine.stop).disabled(engine.state == "stopping")
-                }
-            }
             Divider()
-            Button(interface.mode == .beginner ? "OpenWork setup" : "Connections", action: connection)
+            Button(interface.mode == .beginner ? "Adjust Setup" : "Connections", action: connection)
                 .frame(maxWidth: .infinity, alignment: .leading)
             AppUpdateView(updater: updater)
             HStack {
@@ -2566,6 +2588,10 @@ struct ModelsView: View {
                         ForEach(browserScope.sorts, id: \.self) { Text($0.title).tag($0) }
                     }.labelsHidden().frame(width: 178).accessibilityLabel("Sort models")
                 }
+                if selectedFamily == nil && navigation.tab == .download {
+                    Label("Scroll to browse all model families", systemImage: "arrow.down")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 ScrollView {
                     if let family = selectedFamily { catalogContent(family) }
                     else if navigation.tab == .installed {
@@ -2609,7 +2635,11 @@ struct ModelsView: View {
                         Text("Available families will appear when Stark is ready.")
                             .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 300)
                     }
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                }.scrollIndicators(.visible)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
             }
             if let installation = engine.catalogInstallation {
                 VStack(alignment: .leading, spacing: 9) {
@@ -2782,17 +2812,23 @@ struct ModelsView: View {
                     ForEach(groups) { group in catalogGroup(group) }
                 }
                 if engine.catalogLoading {
-                    HStack(spacing: 10) { ProgressView().controlSize(.small); Text("Finding more models…").foregroundStyle(.secondary) }
+                    HStack(spacing: 10) {
+                        ProgressView().controlSize(.small)
+                        Text("Finding remaining models… \(catalog.items.count) available so far").foregroundStyle(.secondary)
+                    }
                 } else if let message = engine.catalogError {
                     Text(message).font(.callout).foregroundStyle(.secondary)
-                    Button("Retry loading more") { engine.requestMoreModelCatalog() }.disabled(engine.busy)
+                    Text("The list is incomplete. Models already found are still available.").font(.caption).foregroundStyle(.secondary)
+                    Button("Retry remaining models") { engine.requestMoreModelCatalog() }.disabled(engine.busy)
                 } else if catalog.nextOffset != nil {
                     if !catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Text("Search filters the models loaded so far.").font(.caption).foregroundStyle(.secondary)
                     }
-                    Button(catalog.items.isEmpty ? "Check more models" : "Load more models") {
+                    Button("Load more models") {
                         engine.requestMoreModelCatalog()
                     }.disabled(engine.busy)
+                    Text("Checks all remaining results automatically. You can browse models as they arrive.")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else if catalog.items.isEmpty {
                     Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
                 }
@@ -2877,11 +2913,34 @@ struct InstallView: View {
     @Binding var kind: String
     @Binding var source: String
     @Binding var visionConversion: Bool
+    @State private var supportNotice = false
     var body: some View {
         ScrollView { form }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
             .onChange(of: visionConversion) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
+            .onChange(of: engine.installSupportReport?.status) { _, status in
+                supportNotice = status == .unsupported || status == .inconclusive
+            }
+            .sheet(isPresented: $supportNotice) {
+                if let report = engine.installSupportReport {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(report.status == .unsupported ? "This model isn’t supported" : "Model support couldn’t be verified")
+                            .font(.title2.weight(.semibold))
+                        InstallSupportView(report: report)
+                        if report.reasons.contains("unsupported_architecture") {
+                            Text("Stark needs an implemented engine and conversion path for this model family. Converting the files cannot add family support. Choose a supported family in Model Catalog.")
+                                .font(.callout)
+                        } else {
+                            Text("Stark stopped this installation. Check the source and format, or choose a compatible model from Model Catalog.")
+                                .font(.callout)
+                        }
+                        Text("Chat and tool use are checked separately. A converted model needs a working chat template; tool use also needs a format Stark recognizes. OpenWork requires tool support.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        HStack { Spacer(); Button("OK") { supportNotice = false }.keyboardShortcut(.defaultAction) }
+                    }.padding(24).frame(width: 460)
+                }
+            }
     }
 
     private var form: some View {
@@ -2916,6 +2975,11 @@ struct InstallView: View {
             }
             Text("Models stay on this Mac. Conversion may take several minutes.")
                 .font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Chat and tool compatibility").font(.callout.weight(.medium))
+                Text("Conversion prepares supported model weights and preserves the source’s chat template when available. It cannot add a missing template or teach a model to use tools. Stark enables tool use only for recognized tool formats; check the running model in Connections before using OpenWork.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if engine.catalogInstallation == nil {
                 if let report = engine.installSupportReport { InstallSupportView(report: report) }
                 VStack(spacing: 14) {
@@ -3327,6 +3391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var connectionWindow: NSWindow?
     private var beginnerWindow: NSWindow?
     private var beginnerChatWindow: NSWindow?
+    private var windowParents: [ObjectIdentifier: NSWindow] = [:]
     private var terminating = false
 
     init(engine: EngineController = EngineController(), interface: StarkInterfacePreferences? = nil) {
@@ -3428,7 +3493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return event }
             if event.type == .keyDown {
                 if event.keyCode == 53 { self.dismissMenu(); return nil }
-            } else if event.window !== self.menuPanel && event.window !== self.status.button?.window {
+            } else if event.window !== self.menuPanel && event.window !== self.status?.button?.window {
                 self.dismissMenu()
             }
             return event
@@ -3439,11 +3504,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func updateMenuHighlight() {
-        status.button?.highlight(menuPanel.isVisible)
+        status?.button?.highlight(menuPanel.isVisible)
         // AppKit clears the button's tracking highlight after dispatching its action.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.status.button?.highlight(self.menuPanel.isVisible)
+            self.status?.button?.highlight(self.menuPanel.isVisible)
         }
     }
 
@@ -3472,12 +3537,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         presentModels()
     }
 
-    private func presentModels(tab: ModelsSheetTab? = nil) {
+    private func presentModels(tab: ModelsSheetTab? = nil, parent: NSWindow? = nil) {
+        let origin = parent ?? navigationSource
         if tab != nil {
             interface.select(.advanced)
             beginnerWindow?.orderOut(nil); beginnerChatWindow?.orderOut(nil)
         }
-        if interface.mode == .beginner, tab == nil { showBeginner(); return }
+        if interface.mode == .beginner, tab == nil { showBeginner(parent: origin); return }
         dismissMenu()
         if let tab = tab { modelManagement.tab = tab }
         else if modelsWindow?.isVisible != true { modelManagement.tab = .initial }
@@ -3494,12 +3560,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 modelsWindow?.delegate = self
             }
         }
-        present(modelsWindow)
+        present(modelsWindow, from: origin)
     }
 
     private func finishManagingModels() {
         modelsWindow?.close()
-        if !menuPanel.isVisible { toggle() }
     }
 
     private func runSavedModel(_ identifier: String) {
@@ -3509,12 +3574,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow else { return }
         if closing === modelsWindow { engine.cancelModelCatalog() }
-        if closing === modelsWindow || closing === promptWindow || closing === connectionWindow,
-           !terminating, !menuPanel.isVisible { toggle() }
+        let parent = removeWindowParent(of: closing)
+        guard !terminating, let parent else { return }
+        if parent === menuPanel {
+            if !menuPanel.isVisible { toggle() }
+        } else if parent.isVisible {
+            present(parent)
+        } else if !menuPanel.isVisible { toggle() }
+    }
+
+    private func removeWindowParent(of closing: NSWindow) -> NSWindow? {
+        let parent = windowParents.removeValue(forKey: ObjectIdentifier(closing))
+        // Closing an ancestor must not later resurrect it when its child closes.
+        for (identifier, candidate) in windowParents where candidate === closing {
+            windowParents[identifier] = parent ?? menuPanel
+        }
+        return parent
     }
 
     private func showPrompt() {
         if interface.mode == .beginner { showBeginnerChat(); return }
+        let origin = navigationSource
         dismissMenu()
         if promptWindow == nil {
             promptWindow = window(title: "Stark — Playground",
@@ -3527,16 +3607,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             promptWindow?.setContentSize(NSSize(width: 560, height: 800))
             promptWindow?.delegate = self
         }
-        present(promptWindow)
+        present(promptWindow, from: origin)
     }
 
     private func showConnection() {
+        let origin = navigationSource
         if interface.mode == .beginner {
             beginnerOpenWork.refresh(engine: engine)
             if beginnerSession.stage == .task, engine.modelReady, engine.loadedMode == .chat {
                 beginnerSession.continueAfterModel(snapshot: beginnerHost.snapshot)
             }
-            showBeginner()
+            showBeginner(parent: origin)
             return
         }
         dismissMenu()
@@ -3550,7 +3631,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Reset the inspected model so each opening defaults to the running model.
             connectionWindow?.contentViewController = NSHostingController(rootView: view)
         }
-        present(connectionWindow)
+        present(connectionWindow, from: origin)
     }
 
     private var beginnerHost: BeginnerSetupHost {
@@ -3560,15 +3641,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             openChat: { [weak self] in self?.showBeginnerChat() })
     }
 
-    private func showBeginner() {
+    private func showBeginner(parent: NSWindow? = nil) {
+        let origin = parent ?? navigationSource
         dismissMenu()
         if beginnerWindow == nil {
             beginnerWindow = window(title: "Stark — Guided Setup", view: beginnerHost, resizable: true)
         }
-        present(beginnerWindow)
+        present(beginnerWindow, from: origin)
     }
 
     private func showBeginnerChat() {
+        let origin = navigationSource
         dismissMenu()
         if beginnerChatWindow == nil {
             let view = BeginnerChatView(engine: engine, interface: interface,
@@ -3582,17 +3665,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 })
             beginnerChatWindow = window(title: "Stark — Chat", view: view, resizable: true)
         }
-        present(beginnerChatWindow)
+        present(beginnerChatWindow, from: origin)
     }
 
     private func selectInterface(_ mode: StarkInterfaceMode) {
         interface.select(mode)
         if mode == .beginner {
             modelsWindow?.orderOut(nil); promptWindow?.orderOut(nil); connectionWindow?.orderOut(nil)
-            showBeginner()
+            showBeginner(parent: menuPanel)
         } else {
             beginnerWindow?.orderOut(nil); beginnerChatWindow?.orderOut(nil)
-            presentModels()
+            presentModels(parent: menuPanel)
         }
     }
 
@@ -3603,12 +3686,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         result.isReleasedWhenClosed = false
         result.isRestorable = false
         result.disableSnapshotRestoration()
+        result.delegate = self
         result.center()
         return result
     }
 
-    private func present(_ window: NSWindow?) {
+    private var navigationSource: NSWindow? {
+        if menuPanel.isVisible { return menuPanel }
+        let managed = [modelsWindow, promptWindow, connectionWindow, beginnerWindow, beginnerChatWindow].compactMap { $0 }
+        return managed.first { $0 === NSApplication.shared.keyWindow && $0.isVisible }
+            ?? managed.first { $0 === NSApplication.shared.mainWindow && $0.isVisible }
+    }
+
+    private func rememberWindowParent(_ window: NSWindow, from parent: NSWindow) {
+        guard parent !== window else { return }
+        let previousParent = windowParents[ObjectIdentifier(window)] ?? menuPanel
+        var ancestor = parent
+        var visited = Set<ObjectIdentifier>()
+        while visited.insert(ObjectIdentifier(ancestor)).inserted,
+              let next = windowParents[ObjectIdentifier(ancestor)] {
+            if next === window {
+                // Reopening an ancestor from its child reverses that link.
+                windowParents[ObjectIdentifier(ancestor)] = previousParent
+                break
+            }
+            ancestor = next
+        }
+        windowParents[ObjectIdentifier(window)] = parent
+    }
+
+    private func present(_ window: NSWindow?, from parent: NSWindow? = nil) {
         guard let window else { return }
+        if let parent { rememberWindowParent(window, from: parent) }
         // Select the requested key/main window before activation. AppKit's
         // default activation brings those windows forward; never activate all.
         window.makeKeyAndOrderFront(nil)

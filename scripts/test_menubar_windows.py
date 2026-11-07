@@ -77,6 +77,38 @@ extension EngineController {
 }
 
 extension AppDelegate {
+    static func exerciseParentNavigation() -> Bool {
+        _ = NSApplication.shared
+        let suite = "stark.parent-window-test." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let credentials = APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage())
+        let delegate = AppDelegate(engine: EngineController(apiCredentials: credentials, apiDefaults: defaults))
+        let setup = delegate.window(title: "Setup fixture", view: EmptyView(), resizable: true)
+        let chat = delegate.window(title: "Chat fixture", view: EmptyView(), resizable: true)
+        let models = delegate.window(title: "Models fixture", view: EmptyView(), resizable: false)
+        defer { setup.close(); chat.close(); models.close() }
+        guard setup.delegate === delegate, chat.delegate === delegate, models.delegate === delegate else { return false }
+        delegate.rememberWindowParent(setup, from: delegate.menuPanel)
+        delegate.rememberWindowParent(chat, from: setup)
+        delegate.rememberWindowParent(models, from: chat)
+        guard delegate.removeWindowParent(of: models) === chat else { return false }
+        // Reopening an existing ancestor from its child must not create a cycle.
+        delegate.rememberWindowParent(setup, from: chat)
+        guard delegate.removeWindowParent(of: setup) === chat,
+              delegate.removeWindowParent(of: chat) === delegate.menuPanel else { return false }
+        delegate.rememberWindowParent(setup, from: delegate.menuPanel)
+        delegate.rememberWindowParent(chat, from: setup)
+        delegate.rememberWindowParent(models, from: chat)
+        // Closing a parent first redirects its surviving child to the ancestor.
+        guard delegate.removeWindowParent(of: chat) === setup,
+              delegate.removeWindowParent(of: models) === setup,
+              delegate.removeWindowParent(of: setup) === delegate.menuPanel,
+              delegate.removeWindowParent(of: setup) == nil,
+              delegate.windowParents.isEmpty else { return false }
+        return !setup.isVisible && !chat.isVisible && !models.isVisible && !delegate.menuPanel.isVisible
+    }
+
     static func exerciseAdvancedOptionsLayouts() -> Bool {
         let suite = "stark.advanced-window-test." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
@@ -218,15 +250,28 @@ extension AppDelegate {
         return observation.running && observation.liveConnection && snapshot.openWorkRunning
             && snapshot.runningModelID == "window-fixture-other" && !snapshot.openWorkClientActive
     }
+
+    static func exerciseApplicationScanThreading() -> Bool {
+        _ = DesktopApplicationIdentity.candidates(.openWork)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            _ = DesktopApplicationIdentity.running(.openWork, configurationRoot: nil, candidates: [])
+            finished.signal()
+        }
+        return finished.wait(timeout: .now() + 5) == .success
+    }
 }
 
 @main
 struct WindowChecks {
     @MainActor static func main() {
         switch CommandLine.arguments.dropFirst().first {
+        case "parents": exit(AppDelegate.exerciseParentNavigation() ? 0 : 1)
         case "lifecycle": exit(AppDelegate.exerciseWindowLifecycle() ? 0 : 1)
         case "connections": exit(AppDelegate.exerciseConnectionLayouts() ? 0 : 1)
         case "beginner-discovery": exit(AppDelegate.exerciseCurrentModelDiscovery() ? 0 : 1)
+        case "beginner-queued-scan": exit(BeginnerOpenWorkStatus.queuedScanFixture() ? 0 : 1)
+        case "application-scan-threading": exit(AppDelegate.exerciseApplicationScanThreading() ? 0 : 1)
         case "advanced-options": exit(AppDelegate.exerciseAdvancedOptionsLayouts() ? 0 : 1)
         default: exit(2)
         }
@@ -262,12 +307,59 @@ extension ConnectionDetailsView {
 
 BEGINNER_CONNECTION_FIXTURE = r"""
 
+@MainActor
+final class PendingScanCallbackFixture {
+    var currentCount = 0
+    var pendingCount = 0
+    var staleCount = 0
+    var currentValue: Bool?
+    var pendingValue: Bool?
+}
+
 extension BeginnerOpenWorkStatus {
     static func staleWindowFixture() -> BeginnerOpenWorkStatus {
         let result = BeginnerOpenWorkStatus()
         result.running = true
         result.liveConnection = true
         return result
+    }
+
+    static func queuedScanFixture() -> Bool {
+        let status = BeginnerOpenWorkStatus()
+        let callbacks = PendingScanCallbackFixture()
+        let activeID = UUID()
+        status.refreshID = activeID
+        status.refreshInFlight = true
+        let input = ScanInput(previousURL: nil, shouldResolveApplication: false, profile: nil,
+            candidates: [], hasDiscoveredModel: false, discoveryScope: "pending-scope",
+            brokerPath: "pending-broker", apiBaseURL: "pending-api")
+        status.pendingRefresh = (input, [{ value in
+            callbacks.pendingCount += 1
+            callbacks.pendingValue = value
+        }])
+        let initialScope = status.scope
+        let stale = ScanResult(applicationURL: URL(fileURLWithPath: "/stale"), applicationVerified: true,
+            running: true, liveConnection: true, verifiedClientBasis: "stale",
+            connectionBasis: "stale")
+        status.apply(stale, requestID: UUID(), completions: [{ _ in callbacks.staleCount += 1 }])
+        guard status.applicationURL == nil, !status.running, callbacks.staleCount == 0 else { return false }
+
+        status.apply(stale, requestID: activeID, completions: [{ value in
+            callbacks.currentCount += 1
+            callbacks.currentValue = value
+        }])
+        guard status.applicationURL == nil, !status.running,
+              status.refreshInFlight, status.refreshID != activeID else { return false }
+        status.apply(stale, requestID: activeID, completions: [{ _ in callbacks.staleCount += 1 }])
+        guard status.applicationURL == nil, !status.running, callbacks.staleCount == 0 else { return false }
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline && (status.refreshInFlight || callbacks.currentCount != 1 || callbacks.pendingCount != 1) {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        return !status.refreshInFlight && status.applicationURL == nil && !status.running
+            && status.scope == initialScope && callbacks.currentCount == 1 && callbacks.pendingCount == 1
+            && callbacks.staleCount == 0 && callbacks.currentValue == false && callbacks.pendingValue == false
     }
 }
 """
@@ -359,11 +451,20 @@ class WindowLifecycleTests(unittest.TestCase):
     def test_reopen_and_background_updates_do_not_present_retained_windows(self):
         self.run_check("lifecycle")
 
+    def test_nested_window_returns_and_reopened_ancestors_do_not_form_cycles(self):
+        self.run_check("parents")
+
     def test_connection_sections_fit_across_model_lifecycle_states(self):
         self.run_check("connections")
 
     def test_beginner_snapshot_rejects_cached_discovery_after_model_switch(self):
         self.run_check("beginner-discovery")
+
+    def test_forced_scan_queues_callbacks_and_discards_stale_result(self):
+        self.run_check("beginner-queued-scan")
+
+    def test_application_enumeration_and_verification_use_separate_queues(self):
+        self.run_check("application-scan-threading")
 
     def test_advanced_options_fit_with_and_without_mtp_support(self):
         self.run_check("advanced-options")

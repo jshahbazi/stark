@@ -25,6 +25,7 @@ class Hub:
     def __init__(self):
         self.repos = {}
         self.discovered = {}
+        self.cached = {}
         self.events = []
 
     def add(
@@ -74,6 +75,10 @@ class Hub:
     def hf_hub_url(self, *, repo_id, filename, revision):
         return repo_id, filename, revision
 
+    def try_to_load_from_cache(self, repo_id, filename, *, revision):
+        self.events.append(("cache", repo_id, filename, revision))
+        return self.cached.get((repo_id, filename, revision))
+
     def get_hf_file_metadata(self, url, **kwargs):
         repo, filename, revision = url
         assert not filename.endswith((".safetensors", ".gguf", ".bin"))
@@ -112,6 +117,91 @@ def test_live_compatible_fine_tune_has_pinned_download_identity_and_real_sizes(t
     assert len(item["model_group"]["id"]) == 32
     assert len(item["id"]) == 32
     assert [event[2] for event in hub.events if event[0] == "download"] == ["config.json"]
+
+
+def test_catalog_reuses_pinned_huggingface_disk_cache_across_requests(tmp_path):
+    hub = Hub()
+    hub.add(tmp_path, "someone/Stable", {"model_type": "qwen3", "torch_dtype": "float16"})
+    hub.discovered["qwen3"] = ["someone/Stable"]
+
+    first = catalog.family_catalog("qwen3", hub=hub)
+    cached_root = tmp_path / "hf" / "models--someone--Stable" / "snapshots" / PIN
+    cached_root.mkdir(parents=True)
+    cached_config = cached_root / "config.json"
+    cached_config.write_bytes((hub.repos["someone/Stable"][0] / "config.json").read_bytes())
+    hub.cached[("someone/Stable", "config.json", PIN)] = str(cached_config)
+    second = catalog.family_catalog("qwen3", hub=hub)
+
+    assert first["items"] == second["items"]
+    assert [event for event in hub.events if event[0] == "head"] == [("head", "someone/Stable", "config.json")]
+    assert [event for event in hub.events if event[0] == "download"] == [("download", "someone/Stable", "config.json")]
+    assert len([event for event in hub.events if event[0] == "cache"]) == 2
+
+    # A changed immutable revision cannot select the previous snapshot entry.
+    hub.repos["someone/Stable"][1].sha = "b" * 40
+    third = catalog.family_catalog("qwen3", hub=hub)
+    assert third["items"][0]["revision"] == "b" * 40
+    assert len([event for event in hub.events if event[0] == "head"]) == 2
+    assert len([event for event in hub.events if event[0] == "download"]) == 2
+
+
+def test_catalog_rejects_cached_path_outside_huggingface_snapshot(tmp_path):
+    hub = Hub()
+    root = hub.add(tmp_path, "someone/Outside", {"model_type": "qwen3", "torch_dtype": "float16"})
+    hub.discovered["qwen3"] = ["someone/Outside"]
+    other_snapshot = tmp_path / "hf" / "models--someone--Other" / "snapshots" / PIN
+    other_snapshot.mkdir(parents=True)
+    cached_config = other_snapshot / "config.json"
+    cached_config.write_bytes((root / "config.json").read_bytes())
+    hub.cached[("someone/Outside", "config.json", PIN)] = str(cached_config)
+
+    report = catalog.family_catalog("qwen3", hub=hub)
+
+    assert report["status"] == "ready" and len(report["items"]) == 1
+    assert [event for event in hub.events if event[0] == "head"] == [("head", "someone/Outside", "config.json")]
+
+
+@pytest.mark.parametrize(
+    "cache_content,expected_status",
+    [
+        (b"{", "ready"),
+        (b"x" * (catalog.MAX_CONFIG_BYTES + 1), "error"),
+    ],
+)
+def test_catalog_does_not_trust_malformed_or_oversized_cached_metadata(tmp_path, cache_content, expected_status):
+    hub = Hub()
+    hub.add(tmp_path, "someone/CachedBad", {"model_type": "qwen3", "torch_dtype": "float16"})
+    hub.discovered["qwen3"] = ["someone/CachedBad"]
+    cached_root = tmp_path / "hf" / "models--someone--CachedBad" / "snapshots" / PIN
+    cached_root.mkdir(parents=True)
+    cached_config = cached_root / "config.json"
+    cached_config.write_bytes(cache_content)
+    hub.cached[("someone/CachedBad", "config.json", PIN)] = str(cached_config)
+
+    report = catalog.family_catalog("qwen3", hub=hub)
+
+    assert report["status"] == expected_status
+    assert report["items"] == []
+    assert not [event for event in hub.events if event[0] in {"head", "download"}]
+
+
+def test_catalog_rejects_cached_snapshot_file_escaping_to_another_directory(tmp_path):
+    hub = Hub()
+    hub.add(tmp_path, "someone/Escaping", {"model_type": "qwen3", "torch_dtype": "float16"})
+    hub.discovered["qwen3"] = ["someone/Escaping"]
+    cached_root = tmp_path / "hf" / "models--someone--Escaping" / "snapshots" / PIN
+    cached_root.mkdir(parents=True)
+    outside = tmp_path / "outside-config.json"
+    outside.write_text(json.dumps({"model_type": "qwen3", "torch_dtype": "float16"}))
+    cached_config = cached_root / "config.json"
+    cached_config.symlink_to(outside)
+    hub.cached[("someone/Escaping", "config.json", PIN)] = str(cached_config)
+
+    report = catalog.family_catalog("qwen3", hub=hub)
+
+    assert report["status"] == "error"
+    assert report["items"] == []
+    assert not [event for event in hub.events if event[0] in {"head", "download"}]
 
 
 def test_planning_is_opt_in_and_exposes_sanitized_dense_geometry(tmp_path):

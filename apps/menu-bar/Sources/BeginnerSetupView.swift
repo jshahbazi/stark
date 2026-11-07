@@ -40,19 +40,28 @@ struct BeginnerSetupView: View {
             Text("Set up your assistant").font(.headline)
             VStack(alignment: .leading, spacing: 5) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, title in
-                    HStack(spacing: 9) {
-                        Text(String(index + 1))
-                            .font(.caption.monospacedDigit())
-                            .frame(width: 22, height: 22)
-                            .background(session.stage.step == index ? Color.primary : Color.secondary.opacity(0.1), in: Circle())
-                            .foregroundStyle(session.stage.step == index ? Color(nsColor: .windowBackgroundColor) : .secondary)
-                        Text(title).font(.callout)
-                        Spacer(minLength: 0)
+                    let target = navigationTarget(for: index)
+                    let enabled = session.canNavigate(to: target, snapshot: snapshot)
+                    Button {
+                        session.navigate(to: target, snapshot: snapshot)
+                    } label: {
+                        HStack(spacing: 9) {
+                            Text(String(index + 1))
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 22, height: 22)
+                                .background(session.stage.step == index ? Color.primary : Color.secondary.opacity(0.1), in: Circle())
+                                .foregroundStyle(session.stage.step == index ? Color(nsColor: .windowBackgroundColor) : .secondary)
+                            Text(title).font(.callout)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 9).padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(session.stage.step == index ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 7))
+                        .foregroundStyle(session.stage.step == index ? .primary : .secondary)
                     }
-                    .padding(.vertical, 9).padding(.horizontal, 8)
-                    .background(session.stage.step == index ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 7))
-                    .foregroundStyle(session.stage.step == index ? .primary : .secondary)
-                    .accessibilityElement(children: .combine)
+                    .buttonStyle(.plain)
+                    .disabled(!enabled)
+                    .help(navigationHelp(for: target))
                     .accessibilityAddTraits(session.stage.step == index ? .isSelected : [])
                 }
             }
@@ -62,7 +71,6 @@ struct BeginnerSetupView: View {
                       systemImage: snapshot.modelReady || snapshot.modelGenerating ? "checkmark.circle" : "circle")
                 if !snapshot.runningModelName.isEmpty { Text(snapshot.runningModelName) }
             }.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Button("Advanced settings", action: actions.showAdvanced).buttonStyle(.link).font(.caption)
         }
         .padding(16)
         .frame(maxHeight: .infinity, alignment: .topLeading)
@@ -384,6 +392,36 @@ struct BeginnerSetupView: View {
         session.selectedChoiceID = nil
         let preference = session.retryPreference == .speed ? "speed" : session.retryPreference == .answers ? "answers" : session.modelPriority.rawValue
         actions.refreshChoices(task, session.excludedModelID, preference)
+    }
+
+    private func navigationTarget(for index: Int) -> BeginnerSetupStage {
+        switch index {
+        case 0: return .task
+        case 1: return .installation
+        case 2: return .openWork
+        case 3: return .connection
+        default: return .ready
+        }
+    }
+
+    private func navigationHelp(for target: BeginnerSetupStage) -> String {
+        if session.installingChoiceID != nil || snapshot.installPhase.inProgress || snapshot.modelStarting {
+            return "Wait for the current model setup or startup to finish."
+        }
+        switch target {
+        case .task: return "Choose or change the kind of help you need."
+        case .recommendation, .retry:
+            return session.task == nil ? "Choose a task first." : "Review model choices for your selected task."
+        case .installation:
+            return snapshot.installChoiceID != nil || snapshot.installedResultID != nil || session.selectedChoiceID != nil
+                ? "Review the selected model setup." : "Choose a model first."
+        case .openWork, .connection:
+            return snapshot.modelReady || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot)
+                ? "Continue OpenWork setup." : "Start a model first."
+        case .ready:
+            return session.canFinish(snapshot: snapshot) || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot)
+                ? "Review completed setup." : "Complete and confirm OpenWork setup first."
+        }
     }
 
     private func start(_ choice: BeginnerModelChoice) {

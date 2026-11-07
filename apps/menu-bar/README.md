@@ -4,6 +4,8 @@ A native macOS menu bar application for installing, running and chatting with co
 
 The status dot is red when idle or in error, orange during work, and green when ready.
 
+The menu offers **Guided setup** in Beginner mode or **Manage Models** in Advanced mode, plus a **Start model** action when a model can be started and a **Stop model** action while one is starting or running. Beginner setup can be reopened from the menu; **Adjust Setup** returns to its choices so you can revisit earlier steps. Guide steps explain their prerequisites, and returning to a parent window preserves the guide for later.
+
 The main menu and playground show **GPU memory** as a percentage and compact usage bar beside the status in both modes. Green indicates usage below 75% of Metal's recommended memory budget, orange starts at 75%, and red starts at 90%. Whole percentages round down so the label agrees with the color thresholds. Hover for the allocated bytes and budget. It refreshes about once a second, including during model loading and requests. Apple silicon uses shared memory; the percentage measures the model worker's Metal resource allocation against the device's recommended working-set size, excluding CPU-only allocations and other applications. This budget is a performance guideline. The bar fills at 100%; percentages above the budget remain visible. If the budget is unavailable, the readout shows allocated bytes with an empty neutral bar. A dash means no measurement is available. Stop clears the readout.
 
 ## Build and install
@@ -95,8 +97,14 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 families; Add from Source accepts a local folder or a Hugging Face repository name or URL
 such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model
 is registered in place; a supported local checkpoint is converted offline; a
-Hugging Face checkpoint is downloaded and converted. Supported models are
-governed by the [converter](../../tools/converter/README.md). The third tab shows
+Hugging Face checkpoint is downloaded and converted. If the source architecture
+has no implemented converter, Add from Source stops before downloading weights
+and explains: **This model architecture has no implemented converter.** This
+means the selected conversion path is unsupported; unavailable or inconclusive
+metadata has a separate explanation. Supported models are governed by the
+[converter](../../tools/converter/README.md). Conversion support alone does not
+guarantee that Stark can render a model's chat template or parse its function
+tool calls. The third tab shows
 Download and Conversion progress; **Cancel Installation** cancels. Command-I
 opens that tab in the same window.
 
@@ -166,11 +174,13 @@ the running model for their required local checks.
 The catalogue starts with known sources, then follows the family's Hugging Face
 architecture search through successive pages. Each request checks up to 30
 distinct candidates; there is no fixed total result ceiling. **Load more models**
-continues discovery while preserving the rows already loaded. Pages that add no
-new models are checked automatically until a new result appears, discovery ends,
-or a request fails. An initially empty catalogue follows the same process.
-Failed continuations can be retried without losing earlier rows. Search and
-quantization filters apply to the models loaded so far.
+continues discovery through all remaining pages automatically, preserving rows
+already loaded. Pages that add no new models are checked until a new result
+appears, discovery ends, or a request fails. An initially empty catalogue uses
+the same process. If a later page fails, partial results remain visible and the
+failed continuation can be retried. Search and quantization filters apply to
+models loaded so far. Results appear in a bordered, scrollable area so long
+catalogues remain navigable.
 Compatible quantizations from one publisher can share a card across model sizes;
 Base, Instruct, Thinking, context-length variants and fine-tunes remain distinct.
 Selected registered quantized exports may join their registered base model
@@ -244,7 +254,12 @@ The guide checks a bounded window of candidates in each supported catalog
 family using metadata only. Every candidate retains its exact source revision
 and quantization. A new catalog choice needs complete dense attention geometry,
 at least 32,768 tokens of published context, a usable chat template and a
-supported tool parser for OpenWork. Candidates with unknown memory layouts,
+supported tool parser for OpenWork. These are separate capabilities: conversion
+handles recognized architecture/configuration and weight layouts; chat requires
+a template Stark can load and render; tool calling additionally requires a
+reviewed template wire format with a matching parser. Tool capability comes from
+the loaded artifact's template/parser check. Converting a model does not add a
+parser or enable tools. Candidates with unknown memory layouts,
 including recurrent/hybrid and native expert routes without a guide planner,
 remain available through Advanced. Catalog compatibility describes metadata
 support; it does not inherit another model's native qualification.
