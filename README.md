@@ -31,7 +31,7 @@ Use an **Apple silicon Mac with macOS 26.4 or newer** in a native arm64 terminal
 
 ### Install the app
 
-Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest) and open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop: copy `Stark.app` into Applications, quit the old app, then open the installed copy. Click the cat icon and choose **Manage Models**. Use **Model Catalog** or **Add from Source** to add a model, choose **Run** in **Installed**, then **Open Playground** to chat. [Menu bar guide](apps/menu-bar/README.md)
+Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest) and open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop: copy `Stark.app` into Applications, quit the old app, then open the installed copy. Click the cat icon, select **Beginner**, then **Guided setup**. Choose a task, review the model recommendation for your Mac, and follow the steps to download, start and chat with the model. The guide can also help connect OpenWork. To choose your own model and settings, select **Advanced** and open **Manage Models**; **Model Catalog** and **Add from Source** remain available. Both interfaces share installed models. [Menu bar guide](apps/menu-bar/README.md)
 
 ### Install the app and terminal tools
 
@@ -75,7 +75,7 @@ The tables below include named checkpoints and fine-tunes as well as their imple
 | **Recursive Flint** | `RecursiveSI/flint-int4` |
 | Qwen3 dense | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, **Polaris-4B-Preview** (`POLARIS-Project/Polaris-4B-Preview`) |
 | Qwen2 dense | **Qwen2.5-Coder** (`Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`), **DeepSeek-R1-Distill-Qwen-1.5B** (`deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B`) |
-| Qwen3.5 dense | `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`, **Qwen3.8-4B-Distill** (`empero-ai/Qwen3.8-4B-Distill`), **JevK5** (see Decision below) |
+| Qwen3.5 dense | `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`, **Qwen3.8-4B-Distill** (`empero-ai/Qwen3.8-4B-Distill`), **JevK5** (see Decision below), **Qwen3.8-27B oQ4e MTP** (`Jundot/Qwen3.8-27B-oQ4e-mtp`, mixed 4/5/6/8-bit with a quantized MTP head) |
 | Llama dense | `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-{1B,3B}-Instruct`, `unsloth/Llama-3.2-1B-Instruct`, **SmolLM2** (`HuggingFaceTB/SmolLM2-1.7B-Instruct`), **Nanbeige4.1** (`Nanbeige/Nanbeige4.1-3B`), **Reka Flash 3.1** (`RekaAI/reka-flash-3.1`) |
 | Mistral dense | **Mistral 7B Instruct** (`mistralai/Mistral-7B-Instruct-{v0.2,v0.3}`), **Codestral** (`mistralai/Codestral-22B-v0.1`), **Devstral Small** (`mistralai/Devstral-Small-2505`) |
 | Gemma 2 | `google/gemma-2-2b-it` |
@@ -89,6 +89,8 @@ The tables below include named checkpoints and fine-tunes as well as their imple
 For models using the converter, supported floating Safetensors layouts produce native BF16 artifacts. Existing MLX affine 4/8-bit exports are also supported for Qwen3, Qwen3.5, Lily-format Qwen3.8 text, Llama, Gemma 3 text, SmolLM3, LFM2 and LLaMBA, subject to each adapter's layout and group-size constraints. The [converter coverage table](tools/converter/README.md#catalog-coverage-and-qualification) lists the registered export names. Compatible complete checkpoints and merged fine-tunes can use generic conversion even when absent from the catalog.
 
 Qwen3.8-Flash-Next, GLM-5.3-Flash and Flint use native Rust/Metal paths for prepared quantized checkpoints. Use the [pinned preparation commands](docs/NATIVE_HYBRID_MODELS.md); see [Flint setup and limits](docs/FLINT.md). Lily-format Qwen3.8 also converts to a self-contained typed Uzu text artifact with canonical MLX storage and the same specialized Qwen kernels. It preserves quantization and omits vision and MTP. The [Uzu-format study](docs/benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records exact readout and sampled-generation controls for the pinned artifact. Their current Stark paths accept text input.
+
+The dense `Jundot/Qwen3.8-27B-oQ4e-mtp` checkpoint uses the converted Qwen3.5-family path, retaining its mixed affine precision and complete quantized MTP predictor. It is separate from Qwen3.8-Flash-Next. See [preparation and admission](tools/converter/README.md#dense-qwen38-27b-oq4e-mtp) and the [packed-weight validation follow-up](docs/benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
 
 #### Images
 
@@ -163,7 +165,11 @@ Separate 2026-10-31 Stark-only MTP studies on the same Mac measured pooled decod
 | Lily Q4-XL | 72.97 | **82.85** | +13.54% |
 | Mixed 4/8-bit | 56.69 | **65.02** | +14.69% |
 
-These compare MTP on and off within each checkpoint. MLX-Serve was not rerun. The two quantization profiles were measured in separate windows, with desktop GPU activity and clock drift uncontrolled. Lily nucleus sampling without top-k gained 1.70%. MTP remains off by default, and these results do not establish performance across arbitrary workloads or a sustained throughput floor. Reports: [Lily](docs/benchmarks/QWEN38_MTP_COMBINATION_2026_10_31.md) and [mixed 4/8-bit](docs/benchmarks/QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md).
+These compare MTP on and off within each checkpoint. MLX-Serve was not rerun. The two quantization profiles were measured in separate windows, with desktop GPU activity and clock drift uncontrolled. Lily nucleus sampling without top-k gained 1.70%. These results do not establish performance across arbitrary workloads or a sustained throughput floor. The app enables MTP by default for supported models unless a per-model choice is saved; connected apps inherit that setting unless they override it. Terminal chat and direct worker requests default MTP off. Image requests keep MTP off. See [MTP settings](apps/menu-bar/README.md#models-and-requests). Reports: [Lily](docs/benchmarks/QWEN38_MTP_COMBINATION_2026_10_31.md) and [mixed 4/8-bit](docs/benchmarks/QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md).
+
+### Dense Qwen3.8-27B oQ4e MTP
+
+The 2026-11-06 packed-weight follow-up recorded **51.48 useful decode tok/s median** in its final host-screened run, with all six 768-token responses passing on their first attempt. The **70.8 tok/s target remains unmet**. Numerical, scoring and separate prefix-reuse checks passed for the recorded artifacts and builds; the result does not apply to Flash-Next checkpoints. See the [source-bound follow-up and limits](docs/benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
 
 ### Qwen3.5-2B
 
@@ -178,7 +184,7 @@ Qwen3.5-2B (4-bit), Apple M5 Max (40 GPU cores, 128 GiB), one request at a time,
 | TensorFold (drafting on) | 1.1.1 | 125.6 |
 | TensorFold (drafting off) | 1.1.1 | 118.5 |
 
-Stark led all six workloads with 12.2% higher aggregate throughput than MLX-LM. Rates include input processing, generation, transport and cleanup, and exclude loading and warmup; the aggregate is the geometric mean of six workload rates from four loads and three repeats each. Results vary with system load, model and hardware, and apply to the recorded builds. [Interactive comparison](https://starkengine.app/#benchmarks) · [Method and versions](docs/benchmarks/QWEN35_ENGINE_COMPARISON_2026_10_22.md) · [All benchmarks](docs/benchmarks/README.md) · [Conversion benchmarks](docs/benchmarks/CONVERSION_BENCHMARKS.md)
+Stark led all six workloads with 12.2% higher aggregate throughput than MLX-LM. Rates include input processing, generation, transport and cleanup, and exclude loading and warmup; the aggregate is the geometric mean of six workload rates from four loads and three repeats each. Results vary with system load, model and hardware, and apply to the recorded builds. [Interactive comparison](https://starkengine.app/technical.html#benchmarks) · [Method and versions](docs/benchmarks/QWEN35_ENGINE_COMPARISON_2026_10_22.md) · [All benchmarks](docs/benchmarks/README.md) · [Conversion benchmarks](docs/benchmarks/CONVERSION_BENCHMARKS.md)
 
 ## Project and provenance
 

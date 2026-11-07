@@ -1,3 +1,14 @@
+// Keep incoming links to the former homepage developer panel useful.
+function followMovedIntegration() {
+  if (!document.body.classList.contains('technical-page') &&
+      ['#engine', '#engine-title', '#tab-integrate'].includes(location.hash)) {
+    location.replace('technical.html#engine');
+  }
+}
+followMovedIntegration();
+window.addEventListener('hashchange', followMovedIntegration);
+document.body.classList.add('is-enhanced');
+
 const commands = {
   "http": "POST /v1/chat/completions\nAuthorization: Bearer <API_KEY>\nContent-Type: application/json\n\n{\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Reply with OK.\"}\n  ],\n  \"stream\": true,\n  \"max_tokens\": 128,\n  \"temperature\": 0\n}",
   "generate": "{\"operation\":\"generate\",\"rendered_prompt\":\"<complete rendered chat template>\",\"context_tokens\":8192,\"max_new_tokens\":128,\"sampling\":{\"mode\":\"greedy\"},\"stream\":true,\"request_id\":1}",
@@ -82,7 +93,6 @@ function selectApp(tab, updateHash = false) {
     item.tabIndex = selected ? 0 : -1;
     document.getElementById(item.dataset.appPanel).hidden = !selected;
   }
-  document.querySelector('[data-app-support]').hidden = tab.dataset.appPanel === 'engine';
   if (updateHash) history.replaceState(null, '', '#' + tab.dataset.appPanel);
 }
 for (const tab of appTabs) {
@@ -112,16 +122,17 @@ if (appTabs.length) {
 }
 
 const modelTabs = [...document.querySelectorAll('[data-model-group]')];
-function selectModelGroup(tab) {
+function selectModelGroup(tab, updateHash = false) {
   for (const item of modelTabs) {
     const selected = item === tab;
     item.setAttribute('aria-selected', String(selected));
     item.tabIndex = selected ? 0 : -1;
     document.getElementById(item.dataset.modelGroup).hidden = !selected;
   }
+  if (updateHash) history.replaceState(null, '', '#' + tab.dataset.modelGroup);
 }
 for (const tab of modelTabs) {
-  tab.addEventListener('click', () => selectModelGroup(tab));
+  tab.addEventListener('click', () => selectModelGroup(tab, true));
   tab.addEventListener('keydown', (event) => {
     const index = modelTabs.indexOf(tab);
     const next = event.key === 'ArrowRight' ? (index + 1) % modelTabs.length
@@ -129,17 +140,20 @@ for (const tab of modelTabs) {
         : event.key === 'Home' ? 0 : event.key === 'End' ? modelTabs.length - 1 : null;
     if (next === null) return;
     event.preventDefault();
-    selectModelGroup(modelTabs[next]);
+    selectModelGroup(modelTabs[next], true);
     modelTabs[next].focus();
   });
 }
-function selectLinkedModelGroup() {
-  const linked = modelTabs.find(tab => '#' + tab.dataset.modelGroup === location.hash);
-  selectModelGroup(linked || modelTabs[0]);
+function selectLinkedModelGroup(initial = false) {
+  const target = document.getElementById(location.hash.slice(1));
+  const panelId = target?.closest('.model-group-panel')?.id;
+  const linked = modelTabs.find(tab => tab.dataset.modelGroup === panelId);
+  if (linked || initial) selectModelGroup(linked || modelTabs[0]);
+  if (linked && !initial) target.scrollIntoView({ block: 'start' });
 }
 if (modelTabs.length) {
-  selectLinkedModelGroup();
-  window.addEventListener('hashchange', selectLinkedModelGroup);
+  selectLinkedModelGroup(true);
+  window.addEventListener('hashchange', () => selectLinkedModelGroup());
 }
 const engineRows = [...document.querySelectorAll('[data-engine-rates]')];
 const workloadSelect = document.querySelector('#benchmark-workload');
@@ -170,14 +184,14 @@ function renderBenchmark() {
   document.querySelector('#benchmark-caption').textContent =
     label + ': Qwen3.5-2B generation speed on Apple M5 Max.';
 }
-workloadSelect.addEventListener('change', renderBenchmark);
+workloadSelect?.addEventListener('change', renderBenchmark);
 for (const button of viewButtons) {
   button.addEventListener('click', () => {
     relativeView = button.dataset.view === 'relative';
     renderBenchmark();
   });
 }
-renderBenchmark();
+if (workloadSelect) renderBenchmark();
 
 const benchmarkTabs = [...document.querySelectorAll('[data-benchmark-panel]')];
 function selectBenchmarkModel(tab, updateHash = false) {
@@ -209,6 +223,7 @@ function selectLinkedBenchmark(initial = false) {
   if (linked || initial || location.hash === '#benchmarks') {
     selectBenchmarkModel(linked || benchmarkTabs[0]);
   }
+  if (linked && !initial) target.scrollIntoView({ block: 'start' });
 }
 if (benchmarkTabs.length) {
   selectLinkedBenchmark(true);

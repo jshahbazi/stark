@@ -131,8 +131,8 @@ draw(line2, x: columnX, top: headlineTop + lineHeight)
 // Description and address.
 let descriptionFont = font("HelveticaNeue", 27, fallbackWeight: .regular)
 let descriptionTop = headlineTop + 2 * lineHeight + 34
-draw(attributed("Menu bar app, terminal chat and a local", font: descriptionFont, color: body, tracking: 0), x: columnX, top: descriptionTop)
-draw(attributed("OpenAI-style API. Open-source Rust/Metal.", font: descriptionFont, color: body, tracking: 0), x: columnX, top: descriptionTop + 40)
+draw(attributed("Run free, open-weight AI models", font: descriptionFont, color: body, tracking: 0), x: columnX, top: descriptionTop)
+draw(attributed("for coding, writing and everyday tasks.", font: descriptionFont, color: body, tracking: 0), x: columnX, top: descriptionTop + 40)
 
 let addressFont = NSFont.monospacedSystemFont(ofSize: 16, weight: .regular)
 let address = attributed("starkengine.app", font: addressFont, color: muted, tracking: 0.8)
