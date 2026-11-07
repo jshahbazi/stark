@@ -109,6 +109,14 @@ fn gemma3_image_full_reference_metal() {
             && manifest["transformers"] == "5.15.1",
         "private Gemma 3 reference identity changed"
     );
+    assert!(
+        manifest["reference_hashes"]
+            == json!({
+                "modeling_gemma3.py":"0d8d5dff8e72b1207e54edce0bd2b22a34b3194edfa114996b04cef1acf4ef6a",
+                "modeling_siglip.py":"0a0d2b55f4fcb977b74549540211e42a3c3f41d0d446dc474dcc244a925791aa"
+            }),
+        "private Gemma 3 reference implementation changed"
+    );
     let engine = Engine::<crate::backends::metal::Metal>::new()
         .unwrap_or_else(|_| panic!("private Gemma 3 engine setup failed"));
     let mut model = engine

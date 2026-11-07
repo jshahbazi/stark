@@ -10,7 +10,6 @@ numerical implementation and request lifecycle; it does not measure quality.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
 import inspect
 import json
@@ -20,6 +19,10 @@ from pathlib import Path
 
 REVISION = "093f9f388b31de276ce2de164bdc2081324b9767"
 TEMPLATE_HASH = "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"
+REFERENCE_HASHES = {
+    "modeling_gemma3.py": "0d8d5dff8e72b1207e54edce0bd2b22a34b3194edfa114996b04cef1acf4ef6a",
+    "modeling_siglip.py": "0a0d2b55f4fcb977b74549540211e42a3c3f41d0d446dc474dcc244a925791aa",
+}
 PHASE = "startup"
 
 
@@ -48,6 +51,10 @@ def run(args):
 
     if torch.__version__.split("+")[0] != "2.14.1" or transformers.__version__ != "5.15.1":
         raise ValueError("reference_versions_changed")
+    reference_hashes = {"modeling_gemma3.py": digest(Path(inspect.getfile(modeling_gemma3))),
+        "modeling_siglip.py": digest(Path(inspect.getfile(modeling_siglip)))}
+    if reference_hashes != REFERENCE_HASHES:
+        raise ValueError("reference_implementation_changed")
     source, output = args.source.resolve(strict=True), args.output.resolve()
     repo = Path(__file__).resolve().parents[1]
     if source.name != REVISION or output.exists() or subprocess.run(
@@ -133,8 +140,7 @@ def run(args):
         "reference_profile": "transformers-canonical-eager-bf16", "torch": torch.__version__.split("+")[0],
         "transformers": transformers.__version__, "tokens_per_case": args.tokens,
         "source_hashes": {path.name: digest(path) for path in (source / "config.json", source / "model.safetensors.index.json")},
-        "reference_hashes": {"modeling_gemma3.py": digest(Path(inspect.getfile(modeling_gemma3))),
-            "modeling_siglip.py": digest(Path(inspect.getfile(modeling_siglip)))}, "cases": definitions}
+        "reference_hashes": reference_hashes, "cases": definitions}
     write_json(output / "manifest.json", manifest)
     return {"passed": True, "cases": len(definitions), "tokens_per_case": args.tokens,
         "manifest_sha256": digest(output / "manifest.json"), "reference_hashes": manifest["reference_hashes"]}
