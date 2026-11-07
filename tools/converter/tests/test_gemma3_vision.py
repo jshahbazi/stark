@@ -1,6 +1,7 @@
 """Gemma 3 image inventory, size admission and streamed conversion checks."""
 
-from copy import deepcopy
+import hashlib
+import json
 
 import ml_dtypes
 import numpy as np
@@ -97,3 +98,37 @@ def test_vision_streaming_fuses_qkv_and_retains_source_bound_norm(tmp_path):
                     {name: info for name, info in selected.items() if name != next(iter(selected))}):
         with pytest.raises(ConversionError):
             plan_vision_tensors(changed, 8, shapes=shapes)
+
+
+def test_gemma3_source_selects_own_processor_and_replays_complete_provenance(tmp_path, monkeypatch):
+    from stark_convert import gemma3_contract
+    from stark_convert.sources import resolve_source
+
+    source = tmp_path / "source"
+    source.mkdir()
+    template = "{% for message in messages %}{{message.content}}{% endfor %}"
+    # This substitutes only the review identity for a tiny source-selection
+    # fixture. It does not qualify a template or any native model execution.
+    monkeypatch.setattr(gemma3_contract, "TEMPLATE_SHA256", hashlib.sha256(template.encode()).hexdigest())
+    (source / "config.json").write_text(json.dumps(config_for_size(2560)))
+    (source / "tokenizer.json").write_text("{}")
+    (source / "tokenizer_config.json").write_text(json.dumps({"chat_template": template}))
+    (source / "preprocessor_config.json").write_text(json.dumps({**PROCESSOR, "do_convert_rgb": None, "do_pan_and_scan": None}))
+    (source / "generation_config.json").write_text(json.dumps({"eos_token_id": [1, 106]}))
+    (source / "model.safetensors").write_bytes(b"source-selection-only")
+    snapshot = resolve_source(source, repo="google/gemma-3-4b-it", revision="1" * 40,
+        artifact_mode="vision-language", architecture="gemma3")
+    assert snapshot.conversion_profile == {"architecture": "gemma3", "metadata_profile": "hf-generic"}
+    assert not (source / "chat_template.jinja").exists()
+    contract = gemma3_contract.validate_gemma3_source(snapshot, "bfloat16")
+    assert contract["source"]["hashes"]["generation_config.json"] == hashlib.sha256((source / "generation_config.json").read_bytes()).hexdigest()
+    assert contract["source"]["hashes"]["chat_template.jinja"] == hashlib.sha256(template.encode()).hexdigest()
+    assert contract["processor_config"] == PROCESSOR
+    manifest = tmp_path / "source.json"
+    snapshot.write_manifest(manifest)
+    replay = resolve_source("google/gemma-3-4b-it", source_manifest=manifest, artifact_mode="vision-language",
+        offline=True, hub=object())
+    assert replay.receipt() == snapshot.receipt()
+    (source / "preprocessor_config.json").write_text("{}")
+    with pytest.raises(ConversionError):
+        replay.assert_unchanged()

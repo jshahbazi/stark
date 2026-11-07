@@ -88,7 +88,9 @@ def validate_gemma3_source(snapshot, dtype: str) -> dict:
         "type": "Gemma3VisionLanguageArtifact", "schema_version": SCHEMA_VERSION, "family": dict(FAMILY),
         "input_modalities": ["text", "image"], "dtype": dtype,
         "source": {"repo": snapshot.repo or "local", "revision": snapshot.revision,
-            "hashes": {name: hashlib.sha256(data).hexdigest() for name, data in payloads.items()},
+            "hashes": {**{record["filename"]: record["sha256"] for record in records
+                           if record["role"] not in {"weights", "weight_index"}},
+                       **{name: hashlib.sha256(data).hexdigest() for name, data in payloads.items()}},
             "weight_files": weights},
         "special_token_ids": dict(TOKENS), "vision_config": vision, "processor_config": processor,
         "decoder_model_dim": text["hidden_size"], "tensor_layout": "hf-gemma3-siglip-v1",

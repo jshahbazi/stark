@@ -34,6 +34,8 @@ use crate::{
 };
 
 mod preprocess;
+#[cfg(all(test, backend = "metal"))]
+mod reference_tests;
 mod tower;
 use preprocess::Gemma3Patches;
 use tower::Gemma3VisionTower;
@@ -213,6 +215,10 @@ fn validate_decoder(
     };
     let transformer = &decoder["transformer_config"];
     let configs = transformer["layer_configs"].as_array().ok_or(InvalidInput("Gemma 3 decoder layers are missing"))?;
+    let norm = serde_json::json!({"epsilon":1e-6,"scale_offset":1.0,"upcast_mode":"full_layer",
+        "subtract_mean":false,"has_scale":true,"has_biases":false});
+    let mlp = serde_json::json!({"type":"DenseMLPConfig","linear_config":{},"activation":{"type":"GELU","approximate":true},
+        "has_up_biases":false,"has_down_biases":false,"gate_clipping":null,"up_clipping":null});
     if configs.len() != layers
         || transformer["hidden_dim"] != hidden
         || decoder["embedding_config"]["type"] != "TiedEmbeddingConfig"
@@ -221,6 +227,9 @@ fn validate_decoder(
             .is_none_or(|scale| (scale - f64::from(model_dim).sqrt()).abs() > 1e-8)
         || !decoder["embedding_norm_config"].is_null()
         || !decoder["ple_model_config"].is_null()
+        || !decoder["embedding_config"]["logit_soft_cap"].is_null()
+        || !decoder["embedding_config"]["logit_scale"].is_null()
+        || transformer["output_norm_config"] != norm
     {
         return Err(InvalidInput("unsupported Gemma 3 image decoder configuration"));
     }
@@ -255,6 +264,20 @@ fn validate_decoder(
                     "LinearScalingRoPEConfig"
                 }
             || (!local && rope["scaling_factor"] != 8.0)
+            || mixer["query_norm_config"] != norm
+            || mixer["key_norm_config"] != norm
+            || !mixer["logit_soft_cap"].is_null()
+            || ["has_sinks", "has_qkvg_biases", "has_out_biases", "has_gate", "normalize_values", "is_kv_sharing"]
+                .iter()
+                .any(|&key| mixer[key] != false)
+            || ["pre_mixer_norm_config", "post_mixer_norm_config", "pre_mlp_norm_config", "post_mlp_norm_config"]
+                .iter()
+                .any(|&key| layer[key] != norm)
+            || ["mixer_conv_config", "mlp_conv_config", "hidden_dim", "ple_config", "kv_source_layer_index"]
+                .iter()
+                .any(|&key| !layer[key].is_null())
+            || layer["has_post_layer_scalar"] != false
+            || layer["mlp_config"] != mlp
         {
             return Err(InvalidInput("Gemma 3 image decoder attention differs from its profile"));
         }
@@ -615,6 +638,9 @@ fn expand_prompt(
     tokens: &[u64],
     capacity: u32,
 ) -> Result<(Box<[u64]>, usize), InvalidInput> {
+    if tokens.is_empty() || tokens.len() >= capacity as usize {
+        return Err(InvalidInput("Gemma 3 raw prompt exceeds requested context"));
+    }
     // The reviewed source template renders a single BOI marker. The HF
     // processor replaces that marker with BOI + 256 soft-image slots + EOI.
     if tokens.iter().filter(|&&token| token == START).count() != 1 || tokens.contains(&IMAGE) || tokens.contains(&END) {

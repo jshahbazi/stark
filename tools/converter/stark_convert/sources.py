@@ -478,7 +478,8 @@ def _replay(
             raise ValueError()
         names = tuple(record["filename"] for record in manifest["files"] if record["repo"] == primary)
         rules = (
-            (family_source_files if schema == 3 else generic_files)(
+            (gemma3_source_files if schema == 3 and profile["architecture"] == "gemma3"
+             else family_source_files if schema == 3 else generic_files)(
                 primary, tuple(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
             )
             if profile is not None
