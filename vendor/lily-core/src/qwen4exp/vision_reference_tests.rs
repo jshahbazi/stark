@@ -135,7 +135,7 @@ fn first_block_metrics(
         gh,
         gw
     ));
-    stage!(h, "norm1", "output", |pass| layernorm_bf16(
+    stage!(h, "norm1", "output", |pass| layernorm_vision_bf16(
         context,
         pass,
         &x,
@@ -180,7 +180,7 @@ fn first_block_metrics(
         32
     ));
     stage!(x, "norm2", "input", |pass| add_bf16(context, pass, &x, &tmp, &x));
-    stage!(h, "norm2", "output", |pass| layernorm_bf16(
+    stage!(h, "norm2", "output", |pass| layernorm_vision_bf16(
         context,
         pass,
         &x,
@@ -214,7 +214,7 @@ fn first_block_metrics(
         32
     ));
     stage!(x, "merger_norm", "input", |pass| add_bf16(context, pass, &x, &tmp, &x));
-    stage!(h, "merger_norm", "output", |pass| layernorm_bf16(
+    stage!(h, "merger_norm", "output", |pass| layernorm_vision_bf16(
         context,
         pass,
         &x,
@@ -416,7 +416,17 @@ fn operator_metrics(
             let (reference_rms, reference_cosine) = numerical_metric(&values, &expected);
             let mismatches = values.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
             let ordinary_mismatches = actual.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
-            println!("{}", json!({"private_retained_nonlinear_metrics":{"patches":gh * gw,"operator_index":index,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches}}));
+            let mut production_mismatches = None;
+            if let Some((weight, bias)) = norm {
+                let production = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
+                let pass = context.begin().unwrap();
+                layernorm_vision_bf16(context, &pass, &input, weight, bias, &production, LAYERNORM_EPS).unwrap();
+                pass.commit_wait().unwrap();
+                let production = production.to_f32().unwrap();
+                production_mismatches = Some(production.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count());
+            }
+            println!("{}", json!({"private_retained_nonlinear_metrics":{"patches":gh * gw,"operator_index":index,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches,"production_mismatch_count":production_mismatches}}));
+            assert!(production_mismatches.is_none_or(|count| count == 0), "private vision norm exceeds exact source gate");
         }
         if name == "attention" && record["stages"].is_object() {
             let n = input.shape()[0];

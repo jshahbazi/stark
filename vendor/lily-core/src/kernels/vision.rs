@@ -18,6 +18,47 @@ pub const ATTN_D: usize = 72;
 const ATTN_BQ: usize = 32;
 const ATTN_THREADS: usize = 128;
 
+/// The measured retained-width Torch Welford/affine operation, vision only.
+pub(crate) fn layernorm_vision_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    out: &Tensor,
+    eps: f32,
+) -> Result<()> {
+    ensure!(input.shape().len() == 2, "vision norm rank");
+    let (rows, width) = (input.shape()[0], input.shape()[1]);
+    ensure!(rows > 0 && rows <= 8192 && width > 0, "vision norm row bound");
+    ensure!(
+        weight.numel() == width
+            && bias.numel() == width
+            && out.numel() == input.numel(),
+        "vision norm shape"
+    );
+    for tensor in [input, weight, bias, out] {
+        ensure!(tensor.dtype() == DType::BF16, "vision norm dtype");
+    }
+    if width != 1152 {
+        return crate::kernels::norm::layernorm_bf16(
+            ctx, pass, input, weight, bias, out, eps,
+        );
+    }
+    ensure!(eps.is_finite() && eps >= 0.0, "vision norm epsilon");
+    let pipeline = ctx.pipeline(
+        "vision_layernorm_bf16_compat",
+        include_str!("metal/vision_nonlinear.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[input.binding(), weight.binding(), bias.binding(), out.binding()],
+        &[Param::U32(rows as u32), Param::U32(width as u32), Param::F32(eps)],
+        Grid::Threads { grid: (rows, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
 /// Source-compatible contractions for the measured retained tower geometry.
 /// Other admitted geometries retain the original dense GEMM. Each dispatch
 /// covers at most32 input rows and147456 output elements, with no new buffers.
