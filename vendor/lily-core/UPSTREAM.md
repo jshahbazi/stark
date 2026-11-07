@@ -17,6 +17,29 @@ Qwen4Exp vision arithmetic from Transformers revision
 the full 27-block output use frozen pixels and numerical gates; qualification
 results remain separate from this test's presence.
 
+Stark changes `src/kernels/metal/vision.metal` attention to follow that pinned
+Transformers eager operation graph: BF16 QK output, a separate BF16 scaled-score
+boundary, F32 softmax statistics, and globally normalized BF16 probabilities
+before PV. Two tiled QK passes bound scratch independently of the image's
+quadratic attention matrix. This replaces the upstream online policy that
+rounded unnormalized exponentials before dividing accumulated PV. Text attention
+uses separate shaders. Optional CPU producer hooks observe unchanged source
+operators on their exact inputs; private ignored native controls replay those
+inputs and retain aggregate metrics. Intermediate BF16 boundaries use explicit
+integer RNE barriers, following the existing Stark GDN policy, because native
+promotion can erase floating BF16 constructors. Test-only stage observers must
+match ordinary attention output exactly. See the [source-bound numerical record](../../docs/archive/runs/2026-11-07-retained-lily-vision-numerics.md).
+
+The test-only `src/kernels/metal/vision_contraction_reference.metal` adapts
+Stark's main-engine reference four-stream patch/32-stream dense contraction
+bodies from PyTorch `5c4886908584029761b579af026dcfb627c84070`,
+`BlasKernel.cpp`, `ReducedPrecisionFloatGemvFastPathKernel.cpp` and
+`functional_base.h`. This matches the CPU fixture's exact Torch revision.
+The existing BSD/MIT notices are retained in
+`scripts/licenses/distribution/pytorch-LICENSE` and `ggml-LICENSE` at the
+repository root. It has no production selector; actual source-input controls
+record its BF16 output agreement separately from the retained NAX path.
+
 Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision. Explicitly admitted original-format image artifacts can load the retained BF16 vision tower; ordinary text loading keeps it disabled.
 
 Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary single-token decode graph. The bridge returns complete F32 vocabulary readouts to Stark's caller-owned exact sampler, without the upstream GPU sampler's 1,024-candidate cap or probability arithmetic. Draft distributions and acceptance stay request-local; head catch-up is disabled for ordinary non-MTP requests. Verification evaluates up to four positions in one layer-major graph with the ordinary decode's affine dot expressions, reductions, normalization and rounding boundaries. Recurrent state and pre-convolution inputs are retained for exact prefix rollback. The original serial verifier remains a reference. The engine adapter restores partially consumed groups when a stream stops early, without sampling during cleanup. Checkpoint quantization and the ordinary target's activation, state, cache and weight arithmetic are preserved. Numerical and performance qualification is recorded separately.
@@ -41,15 +64,16 @@ These host changes alter no GPU arithmetic or checkpoint precision.
 
 Upstream environment-variable selection and diagnostics are disabled in the Stark integration. Precision is selected per operation: BF16 inputs and activations, F32 reductions, F32 logit buffers and F32 GDN recurrent state, plus explicitly selected Q8 attention K/V. Official head values are rounded to BF16 before widening into the F32 buffer. This policy description does not itself establish numerical equivalence or answer quality; source-bound component and model controls are recorded separately.
 
-The upstream Metal shaders originate at the pinned revision. Stark modifies five of those files:
+The upstream Metal shaders originate at the pinned revision. Stark modifies six of those files:
 
 - `src/kernels/metal/hc.metal` adds cached-activation up/mix and row-axis verifier entry points reusing the original single-row bodies. These preserve weight staging, dot/reduction expressions and the BF16 activation boundary. Ordinary decode keeps its original dispatches.
+- `src/kernels/metal/vision.metal` uses the source-bound BF16 attention boundaries and bounded two-pass softmax described above.
 - `src/kernels/metal/gdn.metal` keeps the gated output's explicit BF16 round in a thread-local value. Its verifier scan retains one F32 state column per thread across up to four positions, preserving the decode expression order and recording F32 states for rollback. The ordinary recurrent-state helper and norm reduction remain unchanged.
 - `src/kernels/metal/attention.metal` adds row-axis query/key preparation copied from the decode bodies, preserving the norm reduction, BF16 rotary rounding and existing BF16/Q8 cache formats. Verifier attention retains the decode SDPA/QSA reductions.
 - `src/kernels/metal/quant.metal` adds GDN Q4 two-row input projection with a convolution epilogue. It calls the existing packed dot helper, preserves the BF16 projection boundary and copies the original convolution expression, tap order and window update. Other layouts retain separate projection and convolution.
 - `src/kernels/metal/moe.metal` adds a decode down/combine entry point whose row owner also performs the following hyperconnection injection. It copies the original dot and slot-ordered combine, retains the BF16 branch output, and applies the original F32 injection expression to that rounded branch. Decode orders both the branch output and residual streams before their next consumers. The original down/combine and injection kernels remain available for reference controls.
 
-The other nine upstream shader files retain their pinned source bytes. `stark_decode_rows.metal` and `stark_moe_decode_rows.metal` add verifier entry points compiled after the unchanged generic projection and expert shader bodies. Batch row is the fast grid axis, exposing parallel work and weight-cache reuse while retaining each row's original arithmetic. The original HC and generic projection/convolution entry points remain available for reference controls. These patches do not change checkpoint quantization or the selected precision policy. Numerical and performance qualification is recorded separately in the [kernel study](../../docs/benchmarks/QWEN38_KERNELS_2026_10_29.md) and [injection fusion study](../../docs/benchmarks/QWEN38_FUSION_2026_10_29.md).
+The other eight upstream shader files retain their pinned source bytes. `stark_decode_rows.metal` and `stark_moe_decode_rows.metal` add verifier entry points compiled after the unchanged generic projection and expert shader bodies. Batch row is the fast grid axis, exposing parallel work and weight-cache reuse while retaining each row's original arithmetic. The original HC and generic projection/convolution entry points remain available for reference controls. These patches do not change checkpoint quantization or the selected precision policy. Numerical and performance qualification is recorded separately in the [kernel study](../../docs/benchmarks/QWEN38_KERNELS_2026_10_29.md) and [injection fusion study](../../docs/benchmarks/QWEN38_FUSION_2026_10_29.md).
 
 `stark_packed_rows.metal` extends the pinned Q4 packed-dot expression to independent short token rows while sharing raw weight loads. `stark_gdn_projection_rows.metal` adds the guarded verifier projection/convolution/scatter entry points. They preserve the 16-lane reduction, BF16 projection boundary and runtime convolution tap order, retain the original window, write its alternate, and capture projected inputs for rollback. Ordinary decode and unsupported layouts keep their existing routes. These original Stark extensions retain Apache-2.0 licensing; `quant.metal` is unchanged by this addition. The host verifier also batches up to four sparse queries through the existing QSA split kernels, using independent query scratch and per-query visibility; dense queries retain ordinary decode. Source-bound qualification is in the [MTP optimization study](../../docs/benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md).
 
