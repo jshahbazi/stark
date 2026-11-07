@@ -44,6 +44,7 @@ const END: u64 = 256000;
 const VOCAB: u32 = 262208;
 const TOKENS: u32 = 256;
 const PROFILE: &str = "gemma3-siglip-bf16-v1";
+const TEMPLATE: &str = "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4";
 
 /// Opaque request-owned patches, bound to the loaded model that prepared them.
 pub struct PreparedGemma3Image {
@@ -311,6 +312,7 @@ impl<B: Backend> Engine<B> {
         }
         let actual_processor: serde_json::Value = serde_json::from_slice(&components["preprocessor_config.json"])?;
         if actual_processor != processor()
+            || hashes.get("chat_template.jinja").map(String::as_str) != Some(TEMPLATE)
             || raw["artifact_contract"]["source"]["hashes"]["chat_template.jinja"].as_str()
                 != hashes.get("chat_template.jinja").map(String::as_str)
         {
@@ -497,7 +499,7 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
         capacity: u32,
     ) -> Result<(Box<[u64]>, usize), NativeVisionError<B>> {
         self.validate_image(image)?;
-        let (expanded, start) = expand_prompt(&tokens, capacity)?;
+        let (expanded, start) = expand_prompt(self.tokenizer(), &tokens, capacity)?;
         let input = self.preflight(expanded, image, start, capacity)?;
         Ok((input.tokens, start))
     }
@@ -609,30 +611,44 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
 }
 
 fn expand_prompt(
+    tokenizer: &tokenizers::Tokenizer,
     tokens: &[u64],
     capacity: u32,
 ) -> Result<(Box<[u64]>, usize), InvalidInput> {
     // The reviewed source template renders a single BOI marker. The HF
     // processor replaces that marker with BOI + 256 soft-image slots + EOI.
-    let index = tokens
-        .iter()
-        .position(|&token| token == START)
-        .ok_or(InvalidInput("Gemma 3 prompt requires one start-of-image marker"))?;
-    if tokens[index + 1..].contains(&START) || tokens.contains(&IMAGE) || tokens.contains(&END) {
+    if tokens.iter().filter(|&&token| token == START).count() != 1 || tokens.contains(&IMAGE) || tokens.contains(&END) {
         return Err(InvalidInput("Gemma 3 prompt contains surplus or already-expanded image markers"));
     }
-    let length = tokens
-        .len()
-        .checked_add(TOKENS as usize + 1)
-        .filter(|length| *length < capacity as usize)
-        .ok_or(InvalidInput("Gemma 3 image prompt exceeds requested context"))?;
-    let mut expanded = Vec::with_capacity(length);
-    expanded.extend_from_slice(&tokens[..=index]);
-    let start = expanded.len();
-    expanded.extend(std::iter::repeat_n(IMAGE, TOKENS as usize));
-    expanded.push(END);
-    expanded.extend_from_slice(&tokens[index + 1..]);
-    Ok((expanded.into_boxed_slice(), start))
+    let ids: Vec<u32> = tokens
+        .iter()
+        .map(|&token| u32::try_from(token))
+        .collect::<Result<_, _>>()
+        .map_err(|_| InvalidInput("Gemma 3 prompt token exceeds tokenizer range"))?;
+    let rendered = tokenizer.decode(&ids, false).map_err(|_| InvalidInput("Gemma 3 prompt decoding failed"))?;
+    let roundtrip =
+        tokenizer.encode(rendered.as_str(), false).map_err(|_| InvalidInput("Gemma 3 prompt retokenization failed"))?;
+    if roundtrip.get_ids() != ids.as_slice() {
+        return Err(InvalidInput("Gemma 3 prompt cannot preserve source processing"));
+    }
+    let full_image_sequence =
+        format!("\n\n<start_of_image>{}<end_of_image>\n\n", "<image_soft_token>".repeat(TOKENS as usize));
+    let expanded = rendered.replace("<start_of_image>", &full_image_sequence);
+    let expanded = tokenizer
+        .encode(expanded.as_str(), false)
+        .map_err(|_| InvalidInput("Gemma 3 image prompt tokenization failed"))?;
+    if expanded.len() >= capacity as usize {
+        return Err(InvalidInput("Gemma 3 image prompt exceeds requested context"));
+    }
+    let expanded: Box<[u64]> = expanded.get_ids().iter().copied().map(u64::from).collect();
+    let start = expanded
+        .iter()
+        .position(|&token| token == IMAGE)
+        .ok_or(InvalidInput("Gemma 3 processor produced no image slots"))?;
+    if expanded.iter().filter(|&&token| token == IMAGE).count() != TOKENS as usize {
+        return Err(InvalidInput("Gemma 3 processor image span differs from its profile"));
+    }
+    Ok((expanded, start))
 }
 
 #[cfg(test)]
@@ -642,18 +658,10 @@ mod tests {
     use super::*;
 
     #[stark_test]
-    fn gemma3_official_boi_placeholder_expands_once_with_exact_accounting() {
-        let original = [2, 105, START, 104, 17];
-        let (expanded, start) = expand_prompt(&original, 512).unwrap();
-        assert_eq!(expanded.len() - original.len(), 257);
-        assert_eq!(start, 3);
-        assert_eq!(&expanded[..3], &original[..3]);
-        assert!(expanded[start..start + 256].iter().all(|&token| token == IMAGE));
-        assert_eq!(expanded[start + 256], END);
-        assert_eq!(&expanded[start + 257..], &original[3..]);
-        assert!(expand_prompt(&original, expanded.len() as u32).is_err());
-        for malformed in [vec![2, 17], vec![START, START], vec![START, IMAGE], vec![START, END], expanded.to_vec()] {
-            assert!(expand_prompt(&malformed, 1024).is_err());
+    fn gemma3_processor_rejects_surplus_and_expanded_markers_before_decoding() {
+        let tokenizer = tokenizers::Tokenizer::new(tokenizers::models::wordlevel::WordLevel::default());
+        for malformed in [vec![2, 17], vec![START, START], vec![START, IMAGE], vec![START, END]] {
+            assert!(expand_prompt(&tokenizer, &malformed, 1024).is_err());
         }
     }
 }
