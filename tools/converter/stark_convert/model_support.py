@@ -543,6 +543,7 @@ def check_vision_processing_metadata(names, read) -> None:
     """Validate the selected small vision sidecars without fetching tensors."""
     from .vision_family import (
         _MAPPING_TEMPLATE_SHA256,
+        _PRESERVED_THINKING_TEMPLATE_SHA256,
         _TEMPLATE_SHA256,
         _THINKING_TEMPLATE_SHA256,
         family_processor_filenames,
@@ -562,6 +563,7 @@ def check_vision_processing_metadata(names, read) -> None:
         _TEMPLATE_SHA256,
         _MAPPING_TEMPLATE_SHA256,
         _THINKING_TEMPLATE_SHA256,
+        _PRESERVED_THINKING_TEMPLATE_SHA256,
     }:
         raise UnsupportedConversion("Vision family tokenizer or template is outside the implemented profile")
     tokenizer_config = json.loads(read("tokenizer_config.json", 1024 * 1024), object_pairs_hook=_unique_object)

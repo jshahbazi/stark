@@ -23,7 +23,18 @@ A header-only plan of the existing local
 `Jundot/Qwen3.8-27B-oQ4e-mtp` source (revision
 `7dd276b77fcb27c982ebd8d8a434539345713fea`) has 1,613 output operations,
 including all 333 BF16 visual tensors, and 17,675,742,688 payload bytes. This
-planning check does not establish complete conversion or native execution.
+planning check was followed by a complete offline conversion. The published
+artifact is 17,676,008,168 bytes; its weights SHA256 is
+`dff4809e84a628f772183293be7f6ba69d276ee5cf34571298dda04af5e84fa1`.
+Native execution remains unverified at this revision.
+
+The exact Qwen3.8 template was reviewed separately: image serialization still
+emits one start/pad/end run, while assistant reasoning can be preserved and
+the existing boolean thinking control defaults on. Its SHA256 is
+`c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`.
+The source tokenizer differs from the existing reviewed tokenizer only in
+merge serialization. Tokenizers normalizes it to the already admitted output
+hash `87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4`.
 
 ## Original-format Flash-Next
 
