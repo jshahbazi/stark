@@ -28,6 +28,7 @@ def run(args):
     import transformers
     from safetensors.torch import save_file
     from tokenizers import Tokenizer, models
+    from torch.nn.attention import SDPBackend, sdpa_kernel
     from transformers.models.gemma4 import modeling_gemma4
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
@@ -154,8 +155,24 @@ def run(args):
         )
     )
     cases = []
-    with torch.inference_mode():
+    captured = []
+
+    def capture_layer(_module, _inputs, value):
+        captured.append(value.detach().clone())
+
+    hooks = (
+        [layer.register_forward_hook(capture_layer) for layer in model.model.layers]
+        if args.capture_layers
+        else []
+    )
+    attention_policy = (
+        sdpa_kernel(SDPBackend.MATH)
+        if args.attention_backend == "math"
+        else contextlib.nullcontext()
+    )
+    with torch.inference_mode(), attention_policy:
         for index, length in enumerate([1, 9, 31, 63]):
+            captured.clear()
             tokens = [2] + [
                 (position * 17 + index * 3) % 124 + 4 for position in range(length - 1)
             ]
@@ -173,6 +190,16 @@ def run(args):
                     "greedy_token": int(result.argmax()),
                 }
             )
+            if args.capture_layers:
+                cases[-1]["hidden_features"] = []
+                for layer, feature in enumerate(captured):
+                    name = f"case-{index}-layer-{layer}.f32"
+                    (output / name).write_bytes(
+                        feature.float().numpy().astype("<f4").tobytes()
+                    )
+                    cases[-1]["hidden_features"].append(name)
+    for hook in hooks:
+        hook.remove()
     manifest = {
         "scope": "synthetic-nople-moe" if args.moe else "synthetic-nople-dense",
         "reference_profile": "transformers-canonical",
@@ -182,6 +209,9 @@ def run(args):
         "layer_scalars": scalars,
         "model_dim": args.model_dim,
         "query_key_norm_scale": args.query_key_norm_scale,
+        "attention_backend": "torch-sdpa-math"
+        if args.attention_backend == "math"
+        else "torch-sdpa-default",
         "cases": cases,
         "complete": True,
     }
@@ -202,6 +232,10 @@ def main():
     parser.add_argument("--layers", type=int, default=6)
     parser.add_argument("--model-dim", type=int, default=64)
     parser.add_argument("--query-key-norm-scale", type=float, default=0.125)
+    parser.add_argument(
+        "--attention-backend", choices=("default", "math"), default="default"
+    )
+    parser.add_argument("--capture-layers", action="store_true")
     args = parser.parse_args()
     try:
         with (

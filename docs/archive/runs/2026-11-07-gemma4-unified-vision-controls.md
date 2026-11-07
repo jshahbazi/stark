@@ -69,3 +69,19 @@ canonical Gemma. A separately retained Torch SDPA math reference still fails
 (0.276836/0.259122). A direct text-mask probe matches the native lower-window
 predicate. These observations narrow the investigation without attributing
 the complete drift to a single intermediate precision choice.
+
+The opt-in layerwise CPU diagnostic captures raw post-layer residuals through
+the existing decoder feature API. All six one-token residuals are exact. The
+nine-token first layer is exact, increasing to relative residual RMS 0.0271 at
+layer five. For length 31, the first-layer relative RMS is 0.001935 and grows to
+0.51951 at layer five. First differences occur at row one, including 1,381
+elements in the first 16 rows; they do not begin precisely at the window
+boundary. These fixtures disable shared KV layers and start from fresh state.
+This narrows the investigation without ruling out later cache or numerical
+effects. The diagnostic reports measurements and does not apply a parity gate.
+
+The retained E4B source provides a separate trained-scale calibration: its first
+six learned query-norm RMS values are approximately 0.949–1.023, local key-norm
+values 0.123–0.132, and the sixth/global key norm 0.0610. Both-unit Q/K synthetic
+stress and both-0.125 topology controls should therefore remain distinct from
+trained-scale component evidence and from any full no-PLE checkpoint claim.
