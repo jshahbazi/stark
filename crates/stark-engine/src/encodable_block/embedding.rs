@@ -16,7 +16,10 @@ use crate::{
     data_type::DataType,
     encodable_block::{
         embedding_table::{EmbeddingTable, EmbeddingTableError, read_output_signs},
-        linear::{Gather, LinearMatmulError, ReferenceBF16Matmul, UntiedReadout},
+        linear::{
+            Gather, LinearMatmulError, ReferenceAffineBF16Matmul, ReferenceBF16Matmul, UntiedReadout,
+            has_source_affine_policy, is_affine_dot_witness_active,
+        },
     },
     parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
 };
@@ -40,6 +43,7 @@ enum EmbeddingTying<B: Backend> {
         table: EmbeddingTable<B>,
         readout: Mutex<<B::Kernels as Kernels>::MatmulKernel>,
         reference_matmul: Option<ReferenceBF16Matmul<B>>,
+        reference_affine: Option<ReferenceAffineBF16Matmul<B>>,
     },
     Untied {
         input_table: EmbeddingTable<B>,
@@ -103,6 +107,21 @@ impl<B: Backend> Embedding<B> {
                 } else {
                     None
                 };
+                let use_reference_affine = parameter_tree.numerical_profile() == NumericalProfile::Qwen35AffineBF16
+                    && !has_source_affine_policy::<B>(table.as_matrix().unwrap().matmul_b());
+                let reference_affine = if use_reference_affine {
+                    if data_type != DataType::BF16 {
+                        return Err(EmbeddingError::UnsupportedConfiguration(
+                            "affine reference readout requires BF16".into(),
+                        ));
+                    }
+                    Some(
+                        ReferenceAffineBF16Matmul::new(context, DataType::BF16)
+                            .map_err(EmbeddingError::BackendError)?,
+                    )
+                } else {
+                    None
+                };
                 // The output norm fuses the readout's input rotation, so it needs its own copy of the factors.
                 let readout_input_hadamard_factors =
                     if let AnyWeightMatrixSpec::HybridSpec(_) = embedding_tree.metadata("spec")? {
@@ -113,12 +132,9 @@ impl<B: Backend> Embedding<B> {
                 (
                     EmbeddingTying::Tied {
                         table,
-                        readout: readout_kernel(
-                            context,
-                            data_type,
-                            parameter_tree.numerical_profile() == NumericalProfile::Qwen35AffineBF16,
-                        )?,
+                        readout: readout_kernel(context, data_type, use_reference_affine)?,
                         reference_matmul,
+                        reference_affine,
                     },
                     readout_input_hadamard_factors,
                 )
@@ -242,6 +258,7 @@ impl<B: Backend> Embedding<B> {
                 table,
                 readout,
                 reference_matmul,
+                reference_affine,
             } => {
                 if let Some(reference) = reference_matmul {
                     if gather_indices.is_some() || output_dim != self.vocab_size {
@@ -259,6 +276,22 @@ impl<B: Backend> Embedding<B> {
                     };
                     reference
                         .encode(input_buffer, 0, b, batch_dim, output_dim, self.model_dim, command_buffer)
+                        .map_err(EmbeddingError::BackendError)?
+                } else if let Some(reference) = reference_affine
+                    && !is_affine_dot_witness_active::<B>()
+                    && !has_source_affine_policy::<B>(table.as_matrix().expect("tied table must be matrix").matmul_b())
+                {
+                    reference
+                        .encode(
+                            input_buffer,
+                            0,
+                            table.as_matrix().expect("tied table must be matrix").matmul_b(),
+                            gather_indices,
+                            batch_dim,
+                            output_dim,
+                            self.model_dim,
+                            command_buffer,
+                        )
                         .map_err(EmbeddingError::BackendError)?
                 } else {
                     let mut output = command_buffer

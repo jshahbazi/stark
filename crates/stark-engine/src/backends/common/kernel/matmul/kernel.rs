@@ -43,6 +43,11 @@ pub trait MatmulKernel: Sized + Send + Sync {
         run()
     }
 
+    #[cfg(test)]
+    fn reference_dot_witness_active() -> bool {
+        false
+    }
+
     fn encode(
         &mut self,
         arguments: MatmulArguments<

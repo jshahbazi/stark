@@ -226,6 +226,63 @@ admission or an allocator-level peak measurement. Native payload admission and
 operation-specific bounds still apply, and actual available memory must be
 refreshed before a full load.
 
+## Affine decoder contraction follow-up
+
+The original failed packed references remain preserved. Single-partition F32
+GEMM accumulation removed BF16 scratch-partition rounding, and the explicit
+affine GEMV coefficient boundary reduced the single-row projection controls
+to three BF16 mismatches. Production full-decoder RMS still measured 0.054045
+and 0.022619 on source `2eb2ad96`, so that implementation failed the fixed
+0.02 gate.
+
+A separate scalar packed-dot witness retains the pinned eight-by-four F32
+contraction after materializing each effective coefficient in BF16. It matches
+all frozen same-input projections exactly. A test-only, exact-artifact-bound
+full-model override on source `202269cd` also matches both complete
+248,320-element last-prompt readouts bit-for-bit: zero RMS and absolute error,
+cosine one. Its executable SHA256 is
+`70ad27c38886c838d9dd98a7ed92c62d5045cec40b8926aa8de83f620e32da9d`.
+This establishes the remaining contraction boundary for this frozen policy.
+
+The production affine-reference encoder is being qualified separately. It
+handles unsigned group-64 4/5/6/8-bit coefficients, both metadata strides,
+direct gathered bank rows, full-BF16 control matrices, and BF16 results widened
+to F32 for routing. The pinned
+[Qwen3.5 MoE router](https://github.com/huggingface/transformers/blob/2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397/src/transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py)
+uses a linear operation in the activation/weight dtype and requests F32 only
+for softmax. This supports the BF16-result boundary under the admitted BF16
+activation and effective-weight policy.
+
+The encoder validates shape, byte extents, metadata strides, alignment, total
+work and dispatch counts before allocating its sole output. It tiles output
+coordinates while retaining complete K contractions. Each dispatch has at most
+2^30 multiply terms and 65,536 output dots; each encode has at most 2^38 terms,
+1,024 dispatches and 64 Mi output elements. The latter permits at most 128 MiB
+of BF16 output or 256 MiB of widened F32 output. There is no dequantized weight
+bank or accumulation scratch. Mixed row partitions include their existing copy
+dispatches in the aggregate bound. Native prefill remains at its existing
+1,024-token units, including the selected-expert expansion. Existing lifecycle
+and cancellation boundaries remain in place.
+
+Metal maps the 32 source partial sums onto one SIMD group, preserving the
+stride-32 FMA chains and the source reduction tree. The scalar test witness
+remains independent. The new path is selected only by `Qwen35AffineBF16`;
+ordinary Legacy dispatch stays unchanged. Production numerical and lifecycle
+replays are pending; no performance gain is claimed.
+
+Explicit `materialize_affine_input_sum` or `source_output_widths` numerical
+markers retain their existing backend route, including its original fold and
+partition selection; neither the new encoder nor the earlier reference
+accumulation/GEMV hook applies to those matrices. Plain mixed-width storage
+partitions are eligible for the new encoder. A header-only inspection of the
+27B artifact found 209 MLX specs and 49 mixed row-partition specs, with no
+explicit source arithmetic markers. Its input lookup is Q8 `input_output`
+storage `[248320,5120]`; the separate readout is Q6 `output_input` packed
+storage `[248320,3840]` with BF16 metadata `[80,248320]`. Input lookup retains
+its existing implementation, and the separate readout and unmarked decoder
+matrices select the new contraction. A small factory fixture covers that
+untied layout and a tied input-output table; native replay remains required.
+
 ## Primary references
 
 - [Official Qwen3.8-27B configuration](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json):
