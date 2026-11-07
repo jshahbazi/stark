@@ -912,7 +912,7 @@ extension EngineController {
                   engine.loadedID == "fixture-model", !engine.supportsImages else { return false }
             let inventory = ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: nil)
             guard inventory.groups.count == 1, inventory.groups[0].name == "Base", inventory.groups[0].family == "Qwen3",
-                  inventory.groups[0].models[0].isRunning, inventory.models[0].detailLabels.count == 3,
+                  inventory.groups[0].models[0].isRunning, inventory.models[0].detailLabels.count == 4,
                   inventory.models[0].detailLabels.first == "BF16",
                   inventory.models[0].detailLabels.last == "Version aaaaaaa" else { return false }
             var unknown = modelDisplay()
@@ -938,9 +938,23 @@ extension EngineController {
                 guard let model = engine.models.first, model.display == nil else { return false }
                 let inventory = ModelsInventory(models: engine.models, loadedID: "", registry: nil)
                 guard inventory.groups.count == 1, inventory.groups[0].name == "Saved name 4-bit",
-                      inventory.groups[0].family == nil, inventory.models[0].detailLabels.isEmpty else { return false }
+                      inventory.groups[0].family == nil, inventory.models[0].detailLabels == ["Tools unchecked"] else { return false }
             }
             return true
+        case "models-tool-support-labels":
+            let previousSupport = engine.supportsTools
+            for (status, expected) in [("available", "Tools available"), ("unavailable", "Tools unavailable"),
+                                       ("unchecked", "Tools unchecked"), ("unknown", "Tools unchecked")] {
+                var raw = modelDisplay()
+                raw["tool_support"] = ["status": status, "model_behavior": "unverified"]
+                engine.apply(["event": "models", "models": [
+                    ["id": "fixture-model", "name": "Exact saved name", "path": "/private/model", "display": raw]
+                ]])
+                let inventory = ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: nil)
+                guard inventory.models.first?.toolSupport.title == expected,
+                      engine.supportsTools == previousSupport else { return false }
+            }
+            return ModelToolSupport(nil) == .unchecked && ModelToolSupport(["status": true]) == .unchecked
         case "models-grouped-variants":
             var compact = modelDisplay()
             compact["quantization"] = "4-bit"; compact["weight_bytes"] = Int64(300_000_000)
@@ -2511,6 +2525,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_model_display_metadata_cannot_change_runtime_capabilities(self):
         self.exercise("models-display-event")
+
+    def test_tool_labels_distinguish_protocol_support_and_never_grant_live_capabilities(self):
+        self.exercise("models-tool-support-labels")
 
     def test_malformed_display_keeps_exact_model_name_without_guessed_badges(self):
         self.exercise("models-display-malformed")

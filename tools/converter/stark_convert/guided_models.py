@@ -25,6 +25,7 @@ from pathlib import Path
 import psutil
 
 from ._build_metadata import _signature, open_regular
+from .api_tools import TOOL_PARSERS
 from .model_inventory import MAX_HEADER_BYTES, _weights
 from .registry import get_model
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, read_safetensors_header
@@ -37,6 +38,8 @@ PREFERENCES = frozenset({"balanced", "speed", "answers", "task", "unsure"})
 DENSE_ARCHITECTURES = frozenset(
     {"qwen3", "qwen2", "llama", "mistral", "phi3", "granite", "gemma2", "gemma3_text", "smollm3"}
 )
+# FunctionGemma requires a task-specific workflow and native loading qualification.
+GUIDED_TOOL_PARSERS = TOOL_PARSERS - {"functiongemma-v1"}
 
 
 @dataclass(frozen=True)
@@ -206,7 +209,7 @@ def _recipe_from_catalog(item):
         or "text" not in modes
         or plan.get("chat_template_available") is not True
         or plan.get("supports_tools") is not True
-        or plan.get("tool_parser") not in ("qwen3-hermes-v1", "qwen38-xml-v1", "qwen35-xml-v1")
+        or plan.get("tool_parser") not in GUIDED_TOOL_PARSERS
     ):
         return None
     bounds = {

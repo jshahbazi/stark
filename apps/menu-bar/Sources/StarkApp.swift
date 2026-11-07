@@ -146,6 +146,33 @@ final class AttachmentStaging {
     }
 }
 
+enum ModelToolSupport: String {
+    case available, unavailable, unchecked
+
+    init(_ value: Any?) {
+        guard let raw = value as? [String: Any],
+              let status = raw["status"] as? String,
+              let parsed = Self(rawValue: status) else { self = .unchecked; return }
+        self = parsed
+    }
+
+    var title: String {
+        switch self {
+        case .available: return "Tools available"
+        case .unavailable: return "Tools unavailable"
+        case .unchecked: return "Tools unchecked"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .available: return "Stark supports this model’s tool-call format. Tool-use quality needs a separate model test."
+        case .unavailable: return "This model’s template has no reviewed tool-call parser in Stark."
+        case .unchecked: return "Stark could not inspect this model’s tool-call format."
+        }
+    }
+}
+
 struct InstalledModelDisplay: Equatable {
     let groupID: String
     let groupName: String
@@ -153,6 +180,7 @@ struct InstalledModelDisplay: Equatable {
     let quantization: String?
     let weightBytes: Int64?
     let sourceRevision: String?
+    let toolSupport: ModelToolSupport
 
     var repositoryURL: URL? {
         guard groupID.hasPrefix("repo:") else { return nil }
@@ -183,6 +211,7 @@ struct InstalledModelDisplay: Equatable {
         }
         self.groupID = groupID; self.groupName = groupName; self.familyID = familyID
         self.quantization = quantization; weightBytes = bytes; sourceRevision = revision
+        toolSupport = ModelToolSupport(value["tool_support"])
     }
 
     private static func text(_ value: Any?, maximum: Int) -> String? {
@@ -803,11 +832,13 @@ struct ModelsInventory {
         let artifactMode: ModelArtifactMode?
         let sourceName: String
         let repositoryURL: URL?
+        let toolSupport: ModelToolSupport
 
         var detailLabels: [String] {
             [quantization,
              weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
              artifactMode == .visionLanguage ? "Text and images" : nil,
+             toolSupport.title,
              sourceRevision.map { "Version " + $0.prefix(7) }].compactMap { $0 }
         }
     }
@@ -838,7 +869,8 @@ struct ModelsInventory {
             Model(id: model.id, name: model.name, isRunning: !loadedID.isEmpty && model.id == loadedID,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
                   sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode,
-                  sourceName: model.display?.groupID ?? model.apiID, repositoryURL: model.display?.repositoryURL)
+                  sourceName: model.display?.groupID ?? model.apiID, repositoryURL: model.display?.repositoryURL,
+                  toolSupport: model.display?.toolSupport ?? .unchecked)
         }
         let allModels = models.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }.map(row)
         let candidates = Dictionary(grouping: models) { model in model.display.map { "source:" + $0.groupID } ?? "model:" + model.id }
@@ -2742,6 +2774,8 @@ struct ModelsView: View {
                 .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
             Text(model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
                 .font(.caption).foregroundStyle(.secondary).frame(width: 76, alignment: .leading)
+            Text(model.toolSupport.title).font(.caption).foregroundStyle(.secondary)
+                .frame(width: 100, alignment: .leading).help(model.toolSupport.help)
             modelRepositoryLink(model).frame(width: 28, alignment: .leading)
             Group {
                 if model.id == engine.modelControlID {
@@ -2762,6 +2796,7 @@ struct ModelsView: View {
         var details = [model.name]
         if let family = family { details.append(family) }
         details.append(contentsOf: model.detailLabels.filter { !$0.hasPrefix("Version ") })
+        details.append(model.toolSupport.help)
         if let revision = model.sourceRevision { details.append("Version " + revision) }
         return details.joined(separator: "\n")
     }

@@ -7,6 +7,7 @@ AST field remain part of the fingerprint; source locations are diagnostics.
 
 import hashlib
 import json
+import re
 from functools import lru_cache
 
 from jinja2 import nodes
@@ -16,6 +17,12 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 MAX_TEMPLATE_BYTES = 256 * 1024
 MAX_TEMPLATE_NODES = 16384
 MAX_TEMPLATE_DEPTH = 128
+GENERATION_BLOCK_TAG = re.compile(r"{%-?\s*(?:generation|endgeneration)\s*-?%}")
+
+
+def normalize_chat_template(source):
+    """Match the converter's removal of Transformers-only tracking tags."""
+    return GENERATION_BLOCK_TAG.sub("", source)
 
 
 def chat_template_environment():
