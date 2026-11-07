@@ -62,8 +62,9 @@ def preflight_family_memory(model: Path, config: dict) -> None:
 
         retained = prepared_image_identity(model)
         if retained is not None:
-            size = sum(item["size"] for item in retained["weight_files"].values())
-            if psutil.virtual_memory().available < size + 2 * 1024**3:
+            from .hybrid_image_memory import retained_check_memory
+
+            if psutil.virtual_memory().available < retained_check_memory(retained):
                 raise ImageCheckError("Not enough available memory to check this image model.")
         return
     family = artifact_image_family(config) if contract.get("schema_version") == 4 else contract.get("family")
@@ -165,6 +166,7 @@ def check_identity(worker) -> dict:
         "chat.py",
         "vision_runtime.py",
         "hybrid_vision.py",
+        "hybrid_image_memory.py",
         "media.py",
         "_build_metadata.py",
     ):
