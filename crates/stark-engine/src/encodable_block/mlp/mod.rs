@@ -1,5 +1,6 @@
 mod dense;
 mod gate_act_mul;
+mod gemma4_moe;
 mod qwen_moe;
 pub(crate) mod routed;
 
@@ -45,6 +46,8 @@ pub enum MlpBlockError<B: Backend> {
     BackendError(#[source] B::Error),
     #[error("Linear block error: {0}")]
     LinearBlockError(#[from] LinearBlockError<B>),
+    #[error("Normalization error: {0}")]
+    Normalization(#[from] crate::encodable_block::normalization::NormalizationNewError<B>),
     #[error("Mixture of experts is not supported")]
     UnsupportedMixtureOfExperts,
 }
@@ -59,6 +62,17 @@ impl<B: Backend> dyn Mlp<B> {
         data_type: DataType,
     ) -> Result<(Box<dyn Mlp<B>>, Option<B::GlobalBuffer>), MlpBlockError<B>> {
         match config {
+            AnyMLPConfig::Gemma4MoeConfig(config) => Ok((
+                Box::new(gemma4_moe::Gemma4Moe::new(
+                    config,
+                    model_dimension,
+                    hidden_dimension,
+                    context,
+                    parameter_tree,
+                    data_type,
+                )?),
+                None,
+            )),
             AnyMLPConfig::DenseMLPConfig(dense_config) => {
                 let (up_projection, up_input_hadamard_factors) = <dyn Linear<B>>::new_with_input_rht(
                     model_dimension,

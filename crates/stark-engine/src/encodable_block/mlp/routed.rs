@@ -9,7 +9,7 @@ use crate::{
     backends::common::{
         Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput,
         kernel::{
-            Kernels, MoeAccumulateKernel, MoeGatherRowsKernel, MoeRouteKernel,
+            Kernels, MoeAccumulateKernel, MoeAdjustRoutesKernel, MoeGatherRowsKernel, MoeRouteKernel,
             matmul::{ActivationFormat, MatmulA},
         },
     },
@@ -19,11 +19,13 @@ use crate::{
     parameters::ParameterTree,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct RoutingPrecision {
     pub round_logits_bf16: bool,
     pub round_weights_bf16: bool,
     pub round_products_bf16: bool,
+    pub round_accumulator_bf16: bool,
+    pub sort_expert_ids: bool,
 }
 
 #[cfg(test)]
@@ -37,6 +39,7 @@ pub(crate) struct RoutedExperts<B: Backend> {
     route: <B::Kernels as Kernels>::MoeRouteKernel,
     gather: <B::Kernels as Kernels>::MoeGatherRowsKernel,
     accumulate: <B::Kernels as Kernels>::MoeAccumulateKernel,
+    adjust: <B::Kernels as Kernels>::MoeAdjustRoutesKernel,
     model: u32,
     hidden: u32,
     experts: u32,
@@ -131,6 +134,8 @@ impl<B: Backend> RoutedExperts<B> {
             gather: <B::Kernels as Kernels>::MoeGatherRowsKernel::new(context).map_err(MlpBlockError::BackendError)?,
             accumulate: <B::Kernels as Kernels>::MoeAccumulateKernel::new(context)
                 .map_err(MlpBlockError::BackendError)?,
+            adjust: <B::Kernels as Kernels>::MoeAdjustRoutesKernel::new(context)
+                .map_err(MlpBlockError::BackendError)?,
         })
     }
 
@@ -143,6 +148,17 @@ impl<B: Backend> RoutedExperts<B> {
         rows: u32,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
+        self.encode_scaled(input, router_logits, None, rows, commands)
+    }
+
+    pub(crate) fn encode_scaled(
+        &self,
+        input: impl BufferRef<Backend = B>,
+        router_logits: impl BufferRef<Backend = B>,
+        expert_scales: Option<&B::GlobalBuffer>,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
         let elements = rows.checked_mul(self.model).ok_or(InvalidInput("expert output indexing overflow"))?;
         if rows == 0
             || rows > 1024
@@ -150,6 +166,9 @@ impl<B: Backend> RoutedExperts<B> {
             || router_logits.size() != rows as usize * self.experts as usize * 4
         {
             return Err(InvalidInput("routed expert buffer geometry").into());
+        }
+        if expert_scales.is_some_and(|scales| scales.size() != self.experts as usize * 4) {
+            return Err(InvalidInput("routed expert gain geometry").into());
         }
         let mut ids = commands.allocate_scratch_for_shape(&[rows, self.active], DataType::U32)?;
         let mut weights = commands.allocate_scratch_for_shape(&[rows, self.active], DataType::F32)?;
@@ -164,6 +183,21 @@ impl<B: Backend> RoutedExperts<B> {
             u32::from(self.precision.round_logits_bf16),
             commands,
         );
+        if let Some(scales) = expert_scales {
+            self.adjust.encode(
+                &mut ids,
+                &mut weights,
+                scales,
+                rows,
+                self.experts,
+                self.active,
+                u32::from(self.precision.sort_expert_ids),
+                commands,
+            );
+        } else if self.precision.sort_expert_ids {
+            let unit = commands.allocate_constant_from_slice(&vec![1.0f32; self.experts as usize])?;
+            self.adjust.encode(&mut ids, &mut weights, &unit, rows, self.experts, self.active, 1, commands);
+        }
         let mut accumulator = commands.allocate_scratch_for_shape(&[rows, self.model], DataType::F32)?;
         let mut output = commands.allocate_scratch_for_shape(&[rows, self.model], DataType::BF16)?;
         for row in 0..rows {
@@ -214,6 +248,7 @@ impl<B: Backend> RoutedExperts<B> {
                     u32::from(rank == 0),
                     u32::from(rank + 1 == self.active),
                     u32::from(self.precision.round_products_bf16),
+                    u32::from(self.precision.round_accumulator_bf16),
                     commands,
                 );
             }

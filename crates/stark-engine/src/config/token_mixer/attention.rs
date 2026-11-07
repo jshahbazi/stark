@@ -32,6 +32,10 @@ pub struct AttentionConfig {
     /// Preserve the pinned BF16 coefficient and product boundaries in RoPE.
     #[serde(default)]
     pub reference_bf16: bool,
+    /// Materialize BF16 rotary coefficients and both products without selecting
+    /// a different attention-score implementation.
+    #[serde(default)]
+    pub materialize_rope_bf16: bool,
     /// Preserve source BF16 scores/probabilities for blocks of 9 through 1023
     /// queries and D512 decode with fewer than 1024 keys. Legacy routing stays the same.
     #[serde(default)]

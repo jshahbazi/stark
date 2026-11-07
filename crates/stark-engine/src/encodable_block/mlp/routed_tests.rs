@@ -102,6 +102,7 @@ fn selected_banks<B: Backend>() {
                 round_logits_bf16: true,
                 round_weights_bf16: true,
                 round_products_bf16: true,
+                ..Default::default()
             },
         )
         .unwrap();

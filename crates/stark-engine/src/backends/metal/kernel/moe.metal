@@ -1,6 +1,13 @@
 #include <metal_stdlib>
 #include "common/dsl.h"
 
+PUBLIC KERNEL(GemmaMoeRouterScaleBF16)(const device bfloat* input,const device bfloat* scales,
+    device bfloat* output,constant uint& width,constant uint& length,constant float& root_scale,
+    const uint index AXIS(length,128)) {
+    float learned=float(bfloat(float(input[index])*float(scales[index%width])));
+    output[index]=bfloat(learned*root_scale);
+}
+
 // Stable softmax/top-k. One bounded expert row per thread; only selected
 // expert IDs leave this kernel, and every published ID is in range.
 PUBLIC KERNEL(MoeRoute)(
@@ -66,14 +73,34 @@ PUBLIC KERNEL(MoeAccumulate)(
     constant uint& initialize,
     constant uint& finalize,
     constant uint& round_product,
+    constant uint& round_accumulator,
     const uint position AXIS(length, 32)
 ) {
     float product = float(input[position]) * weights[weight_offset];
     if (round_product != 0) { product = float(bfloat(product)); }
     uint out = output_offset + position;
     float value = (initialize != 0 ? 0.0f : accumulator[out]) + product;
+    if (round_accumulator != 0) { value = float(bfloat(value)); }
     accumulator[out] = value;
     if (finalize != 0) { output[out] = bfloat(value); }
+}
+
+PUBLIC KERNEL(MoeAdjustRoutes)(device uint* ids, device float* weights, const device float* scales,
+    constant uint& rows,constant uint& experts,constant uint& active,constant uint& sort_ids,
+    const uint row AXIS(rows,1)) {
+    uint base=row*active;
+    for(uint rank=0;rank<active;++rank) {
+        uint id=ids[base+rank];
+        weights[base+rank]=id<experts ? weights[base+rank]*scales[id] : NAN;
+    }
+    if(sort_ids!=0) for(uint rank=1;rank<active;++rank) {
+        uint index=rank;
+        while(index>0 && ids[base+index]<ids[base+index-1]) {
+            uint id=ids[base+index];ids[base+index]=ids[base+index-1];ids[base+index-1]=id;
+            float weight=weights[base+index];weights[base+index]=weights[base+index-1];weights[base+index-1]=weight;
+            --index;
+        }
+    }
 }
 
 PUBLIC KERNEL(MoeSharedAdd)(

@@ -89,7 +89,11 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
             "status": "implemented",
             "containers": [".safetensors"],
             "source_formats": formats,
-            "output_dtypes": ["bfloat16"] if architecture == "qwen4_exp" else ["bfloat16", "float32"] if architecture == "olmo3" else ["bfloat16", "float16", "float32"],
+            "output_dtypes": ["bfloat16"]
+            if architecture == "qwen4_exp"
+            else ["bfloat16", "float32"]
+            if architecture == "olmo3"
+            else ["bfloat16", "float16", "float32"],
         },
         "modes": modes,
     }
@@ -334,17 +338,25 @@ def preflight_model(
                 "unsupported_embedding_layout",
                 "Gemma 4 text currently requires tied embeddings.",
             )
-        if text.get("enable_moe_block") is True:
+        bounded_moe = (
+            text.get("hidden_size_per_layer_input") == 0
+            and text.get("attention_k_eq_v") is True
+            and type(text.get("num_experts")) is int
+            and 1 <= text["num_experts"] <= 1024
+            and type(text.get("top_k_experts")) is int
+            and 1 <= text["top_k_experts"] <= min(32, text["num_experts"])
+            and type(text.get("moe_intermediate_size")) is int
+            and 1 <= text["moe_intermediate_size"] <= 131072
+        )
+        if text.get("enable_moe_block") is True and not bounded_moe:
             return _report(
                 family,
                 mode,
                 "unsupported",
                 "unsupported_moe",
-                "Gemma 4 MoE operations are outside implemented dense PLE coverage.",
+                "Gemma 4 MoE requires the bounded no-PLE K=V expert layout.",
             )
-        if text.get("hidden_size_per_layer_input") == 0 and not (
-            text.get("hidden_size") == 5376 and text.get("attention_k_eq_v") is True
-        ):
+        if text.get("hidden_size_per_layer_input") == 0 and text.get("attention_k_eq_v") is not True:
             return _report(
                 family,
                 mode,
@@ -371,7 +383,7 @@ def preflight_model(
             "custom_model_code",
             "Custom model code is outside implemented conversion coverage.",
         )
-    if any(
+    if not (architecture == "gemma4_text" and text.get("enable_moe_block") is True and bounded_moe) and any(
         value not in (None, 0)
         for key in (
             "num_experts",
@@ -450,7 +462,11 @@ def preflight_model(
             return _report(family, mode, "unsupported", "vision_tower_missing", "This checkpoint has no vision tower.")
         if raw_architecture != "gemma4" or not isinstance(config.get("text_config"), dict):
             return _report(
-                family, mode, "unsupported", "unsupported_vision_wrapper", "Gemma images require an implemented full dense wrapper."
+                family,
+                mode,
+                "unsupported",
+                "unsupported_vision_wrapper",
+                "Gemma images require an implemented full dense wrapper.",
             )
         geometry = LARGE_GEOMETRY if text.get("hidden_size") == 5376 else GEOMETRY
         if (

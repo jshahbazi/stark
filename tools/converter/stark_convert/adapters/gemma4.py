@@ -13,6 +13,7 @@ The decoder uses Stark's native PLE, shared-KV and Metal execution blocks.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import math
 from pathlib import Path
 
@@ -37,6 +38,7 @@ _KEYS = _COMMON_KEYS | {
     "attention_k_eq_v",
     "enable_moe_block",
     "expert_intermediate_size",
+    "moe_intermediate_size",
     "final_logit_softcapping",
     "global_head_dim",
     "global_partial_rotary_factor",
@@ -132,7 +134,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
         raise ConversionError("Gemma 4 wrapper and text quantization disagree")
     if set(config) - _KEYS:
         raise UnsupportedConversion("Gemma 4 text config has unimplemented options")
-    for key in ("attention_bias", "mlp_bias", "enable_moe_block", "rope_traditional"):
+    moe = _boolean(config, "enable_moe_block", False)
+    for key in ("attention_bias", "mlp_bias", "rope_traditional"):
         if _boolean(config, key, False):
             raise UnsupportedConversion("Gemma 4 dense text coverage excludes bias and MoE variants")
     if not _boolean(config, "tie_word_embeddings", True):
@@ -152,8 +155,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
         raise UnsupportedConversion("Gemma 4 dropout is outside inference coverage")
     if config.get("use_bidirectional_attention") not in (None, False, "vision"):
         raise UnsupportedConversion("Gemma 4 text coverage requires causal attention")
-    for key in ("num_experts", "top_k_experts", "expert_intermediate_size"):
-        if config.get(key) is not None:
+    for key in ("num_experts", "top_k_experts", "expert_intermediate_size", "moe_intermediate_size"):
+        if not moe and config.get(key) is not None:
             raise UnsupportedConversion("Gemma 4 E2B/E4B config declares an unsupported architecture")
     dim = _integer(config, "hidden_size")
     hidden = _integer(config, "intermediate_size")
@@ -184,6 +187,22 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
         raise UnsupportedConversion("Gemma 4 no-PLE decoder requires its explicit global K=V profile")
     if ple_dim and config.get("use_bidirectional_attention") == "vision":
         raise UnsupportedConversion("Gemma 4 PLE images require causal attention")
+    expert_count = active_experts = expert_hidden = None
+    if moe:
+        expert_count, active_experts, expert_hidden = (
+            config.get(key) for key in ("num_experts", "top_k_experts", "moe_intermediate_size")
+        )
+        if (
+            not k_eq_v
+            or ple_dim
+            or any(type(value) is not int or value < 1 for value in (expert_count, active_experts, expert_hidden))
+            or expert_count > 1024
+            or active_experts > min(32, expert_count)
+            or expert_hidden > 131072
+        ):
+            raise UnsupportedConversion("Gemma MoE requires bounded no-PLE K=V routing and explicit expert dimensions")
+        if config.get("expert_intermediate_size") not in (None, expert_hidden):
+            raise ConversionError("Gemma expert width aliases disagree")
     ple_vocab = _integer(config, "vocab_size_per_layer_input")
     if ple_vocab != vocab:
         raise UnsupportedConversion("Gemma 4 text and PLE vocabularies must agree")
@@ -398,12 +417,61 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
             if name in tensors:
                 tensor(name, (width,))
         matrix(out + ".mixer.out_projection.weights", (src + ".self_attn.o_proj.weight",), ((dim, heads * width),))
+        dense_out = out + (".mlp.dense" if moe else ".mlp")
         matrix(
-            out + ".mlp.up_projection.weights",
+            dense_out + ".up_projection.weights",
             (src + ".mlp.up_proj.weight", src + ".mlp.gate_proj.weight"),
             ((intermediate, dim), (intermediate, dim)),
         )
-        matrix(out + ".mlp.down_projection.weights", (src + ".mlp.down_proj.weight",), ((dim, intermediate),))
+        matrix(dense_out + ".down_projection.weights", (src + ".mlp.down_proj.weight",), ((dim, intermediate),))
+        if moe:
+            for destination, origin in (
+                ("dense_output_norm", "post_feedforward_layernorm_1"),
+                ("expert_input_norm", "pre_feedforward_layernorm_2"),
+                ("expert_output_norm", "post_feedforward_layernorm_2"),
+            ):
+                norm(out + ".mlp." + destination, src + "." + origin + ".weight", dim)
+            matrix(out + ".mlp.router.weights", (src + ".router.proj.weight",), ((expert_count, dim),))
+            for destination, origin, size, output_dtype, operation in (
+                ("router_scale", "scale", dim, target, "copy"),
+                ("expert_scales", "per_expert_scale", expert_count, "F32", "cast_f32"),
+            ):
+                info = tensor(src + ".router." + origin, (size,))
+                operation_kind = operation if info.dtype == output_dtype or output_dtype == "F32" else "cast"
+                operations.append(
+                    TensorOperation(out + ".mlp." + destination, (info,), output_dtype, (size,), operation_kind)
+                )
+            gate_up = tensor(src + ".experts.gate_up_proj", (expert_count, 2 * expert_hidden, dim))
+            row_bytes = expert_hidden * dim * gate_up.itemsize
+            ordered = []
+            for expert in range(expert_count):
+                base = gate_up.offset + expert * 2 * row_bytes
+                # HF stores gate then up; native gated MLP consumes up then gate.
+                for offset in (base + row_bytes, base):
+                    ordered.append(replace(gate_up, shape=(expert_hidden, dim), offset=offset, nbytes=row_bytes))
+            bank = out + ".mlp.experts.up_projection.weights"
+            operations.append(
+                TensorOperation(
+                    bank + ".weights",
+                    tuple(ordered),
+                    target,
+                    (expert_count * 2 * expert_hidden, dim),
+                    "fuse" if gate_up.dtype == target else "fuse_cast",
+                )
+            )
+            metadata[bank + ".spec"] = json.dumps({"type": "FullPrecisionSpec", "layout": "output_input"})
+            down = tensor(src + ".experts.down_proj", (expert_count, dim, expert_hidden))
+            bank = out + ".mlp.experts.down_projection.weights"
+            operations.append(
+                TensorOperation(
+                    bank + ".weights",
+                    (replace(down, shape=(expert_count * dim, expert_hidden)),),
+                    target,
+                    (expert_count * dim, expert_hidden),
+                    "copy" if down.dtype == target else "cast",
+                )
+            )
+            metadata[bank + ".spec"] = json.dumps({"type": "FullPrecisionSpec", "layout": "output_input"})
         if ple_dim:
             matrix(out + ".ple.gate.weights", (src + ".per_layer_input_gate.weight",), ((ple_dim, dim),))
             matrix(out + ".ple.projection.weights", (src + ".per_layer_projection.weight",), ((dim, ple_dim),))
@@ -430,6 +498,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
         }
         if mlx_bf16:
             mixer["materialize_prefill_scores"] = True
+        elif target == "BF16" and ple_dim == 0:
+            mixer["materialize_rope_bf16"] = True
         layers.append(
             {
                 "pre_mixer_norm_config": norm_config,
@@ -438,7 +508,17 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
                 "post_mixer_norm_config": norm_config,
                 "pre_mlp_norm_config": norm_config,
                 "mlp_conv_config": None,
-                "mlp_config": mlp,
+                "mlp_config": {
+                    "type": "Gemma4MoeConfig",
+                    "expert_config": mlp,
+                    "norm_config": norm_config,
+                    "num_experts": expert_count,
+                    "active_experts": active_experts,
+                    "expert_hidden_dim": expert_hidden,
+                    "router_root_scale": dim**-0.5,
+                }
+                if moe
+                else mlp,
                 "post_mlp_norm_config": norm_config,
                 "hidden_dim": intermediate if intermediate != hidden else None,
                 "ple_config": {
@@ -447,7 +527,9 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
                     "ple_dim": ple_dim,
                     "activation": activation,
                     "reference_bf16": target == "BF16",
-                } if ple_dim else None,
+                }
+                if ple_dim
+                else None,
                 "has_post_layer_scalar": True,
                 "materialize_post_layer_scalar": ple_dim == 0 and target == "BF16",
                 "kv_source_layer_index": owner,
@@ -499,7 +581,9 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
             "linear_config": {},
             "norm_config": norm_config,
             "reference_bf16": target == "BF16",
-        } if ple_dim else None,
+        }
+        if ple_dim
+        else None,
     }
     return ConversionPlan(
         decoder,

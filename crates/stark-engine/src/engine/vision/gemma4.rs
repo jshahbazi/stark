@@ -623,10 +623,11 @@ mod contract_tests {
 
     use super::*;
 
-    #[cfg(backend = "cpu")]
-    #[stark_test]
-    #[ignore]
-    fn gemma_nople_canonical_cpu_fixture() {
+    #[cfg(any(backend = "cpu", backend = "metal"))]
+    fn run_nople_canonical_fixture<B: Backend>(backend: &str)
+    where
+        B::ScratchBuffer: crate::backends::common::BufferCpuAccessible,
+    {
         let root = std::path::PathBuf::from(
             std::env::var_os("STARK_GEMMA4_DENSE_FIXTURE_PATH").expect("set private no-PLE fixture"),
         );
@@ -640,7 +641,7 @@ mod contract_tests {
                 && manifest["source_sha256"] == "4f874549f79deda4bb9ce7fb7d7b8e7349122be1711f733f7a4157e46ed10cc3",
             "private reference identity changed"
         );
-        let engine = Engine::<crate::backends::cpu::Cpu>::new().unwrap();
+        let engine = Engine::<B>::new().unwrap();
         let model = engine.load_language_model(&path).unwrap_or_else(|_| panic!("private no-PLE model loading failed"));
         let mut cases = Vec::new();
         let mut passed = true;
@@ -703,11 +704,29 @@ mod contract_tests {
             negative_rejected = Some(rejected);
             passed &= rejected;
         }
-        let report = serde_json::json!({"passed":passed,"backend":"cpu","scope":manifest["scope"],"cases":cases,
+        let report = serde_json::json!({"passed":passed,"backend":backend,"scope":manifest["scope"],"cases":cases,
             "legacy_distributed_scalar_control_rejected":negative_rejected});
-        std::fs::write(root.join("native-cpu-metrics.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        std::fs::write(
+            root.join(format!("native-{backend}-metrics.json")),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
         println!("{report}");
         assert!(passed, "private no-PLE canonical gates failed");
+    }
+
+    #[cfg(backend = "cpu")]
+    #[stark_test]
+    #[ignore]
+    fn gemma_nople_canonical_cpu_fixture() {
+        run_nople_canonical_fixture::<crate::backends::cpu::Cpu>("cpu");
+    }
+
+    #[cfg(backend = "metal")]
+    #[stark_test]
+    #[ignore]
+    fn gemma_nople_canonical_metal_fixture() {
+        run_nople_canonical_fixture::<crate::backends::metal::Metal>("metal");
     }
 
     fn config() -> serde_json::Value {

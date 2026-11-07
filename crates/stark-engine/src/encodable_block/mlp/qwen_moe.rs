@@ -73,6 +73,7 @@ impl<B: Backend> QwenMoe<B> {
                 round_logits_bf16: true,
                 round_weights_bf16: true,
                 round_products_bf16: true,
+                ..Default::default()
             },
         )?;
         let dense = AnyMLPConfig::DenseMLPConfig(config.expert_config.clone());
