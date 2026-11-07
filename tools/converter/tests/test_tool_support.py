@@ -4,7 +4,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -107,6 +109,36 @@ def test_native_render_typed_call_roundtrip_and_parallel_result_history(fixture)
     assert history.endswith(
         {"glm53": "<think>", "flint": "<|assistant|>", "qwen25": "<|im_start|>assistant\n"}[fixture]
     )
+
+
+@pytest.mark.parametrize("fixture", ["glm53", "flint", "qwen25"])
+def test_generated_suffix_uses_actual_prompt_thinking_state(fixture):
+    source = (FIXTURES / f"{fixture}_chat_template.jinja").read_text()
+    template = _ChatTemplate(source)
+    prompt = template.render(
+        messages=[{"role": "user", "content": "Synthetic request"}],
+        tools=[TOOL],
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    initial_thinking = prompt.endswith("<think>")
+    assert initial_thinking is (fixture == "glm53")
+    call = (
+        '<tool_call>{"name":"lookup","arguments":{"key":"synthetic"}}</tool_call>' if fixture == "qwen25" else OUTPUT
+    )
+    suffix = "Synthetic reasoning</think>" + call
+    options = dict(parser=tool_parser_for({"prompt_template": source}), finish_reason="eos", call_id_prefix="test")
+    if initial_thinking:
+        message, reason = parse_tool_output(suffix, [TOOL], initial_thinking=True, **options)
+        assert reason == "tool_calls" and len(message["tool_calls"]) == 1
+        # A call inside the still-open thought block is never executable.
+        with pytest.raises(APIError):
+            parse_tool_output(call, [TOOL], initial_thinking=True, **options)
+    else:
+        with pytest.raises(APIError):
+            parse_tool_output(suffix, [TOOL], **options)
+    with pytest.raises(APIError):
+        parse_tool_output(suffix, [TOOL], initial_thinking=False, **options)
 
 
 @pytest.mark.parametrize(
@@ -227,7 +259,17 @@ def validator_module():
 
 
 @pytest.mark.parametrize(
-    "failure", [None, "wrong_argument", "wrong_result", "truncated_call", "native_error", "cancelled_result"]
+    "failure",
+    [
+        None,
+        "wrong_argument",
+        "wrong_result",
+        "truncated_call",
+        "native_error",
+        "cancelled_result",
+        "unclosed_answer",
+        "call_inside_thinking",
+    ],
 )
 def test_qualification_checks_behavior_and_never_returns_model_content(failure):
     module = validator_module()
@@ -241,14 +283,25 @@ def test_qualification_checks_behavior_and_never_returns_model_content(failure):
             self.requests.append(payload)
             index = len(self.requests)
             if index == 1:
-                text = OUTPUT.replace("synthetic", "wrong" if failure == "wrong_argument" else "alpha")
+                text = "Synthetic reasoning</think>" + OUTPUT.replace(
+                    "synthetic", "wrong" if failure == "wrong_argument" else "alpha"
+                )
+                if failure == "call_inside_thinking":
+                    text = text.removeprefix("Synthetic reasoning</think>")
                 if failure == "native_error":
                     raise ValueError("private native diagnostic")
-            elif index == 2 and failure not in {"wrong_argument", "truncated_call", "native_error"}:
+            elif index == 2 and failure not in {
+                "wrong_argument",
+                "truncated_call",
+                "native_error",
+                "call_inside_thinking",
+            }:
                 assert "K7V3M9" in payload["rendered_prompt"] and "<|observation|>" in payload["rendered_prompt"]
-                text = "wrong" if failure == "wrong_result" else "K7V3M9"
+                text = "Synthetic reasoning</think>" + ("wrong" if failure == "wrong_result" else "K7V3M9")
             else:
-                text = "HELLO"
+                text = "Synthetic reasoning</think>HELLO"
+            if failure == "unclosed_answer" and index > 1:
+                text = text.removeprefix("Synthetic reasoning</think>")
             finish = "length" if failure == "truncated_call" and index == 1 else "eos"
             if failure == "cancelled_result" and index == 2:
                 finish = "cancelled"
@@ -259,10 +312,21 @@ def test_qualification_checks_behavior_and_never_returns_model_content(failure):
     assert all(checks.values()) == (failure is None)
     assert set(checks) == {"single_call_and_arguments", "tool_result_use", "ordinary_chat"}
     assert all(type(v) is bool for v in checks.values())
-    assert checks["ordinary_chat"]
+    assert checks["ordinary_chat"] is (failure != "unclosed_answer")
 
 
-@pytest.mark.parametrize("mutated", [False, True])
+@pytest.mark.parametrize(
+    "mutated",
+    [
+        None,
+        "model.safetensors",
+        "generation_config.json",
+        "tokenizer_config.json",
+        "model.safetensors.index.json",
+        "new_metadata",
+        "helper",
+    ],
+)
 def test_qualification_seals_inputs_closes_worker_and_writes_only_private_aggregate(
     tmp_path, monkeypatch, capsys, mutated
 ):
@@ -273,8 +337,12 @@ def test_qualification_seals_inputs_closes_worker_and_writes_only_private_aggreg
     )
     (tmp_path / "tokenizer.json").write_text("{}")
     (tmp_path / "model.safetensors").write_bytes(b"synthetic weight bytes")
+    for name in ("generation_config.json", "tokenizer_config.json", "model.safetensors.index.json"):
+        (tmp_path / name).write_bytes(b"synthetic original data")
     executable = tmp_path / "worker"
     executable.write_bytes(b"synthetic worker")
+    helper = tmp_path / "template-helper"
+    helper.write_bytes(b"synthetic original data")
     output = tmp_path / "result.json"
     closed = []
 
@@ -284,9 +352,12 @@ def test_qualification_seals_inputs_closes_worker_and_writes_only_private_aggreg
 
         def read(self):
             if mutated:
-                weights = tmp_path / "model.safetensors"
+                if mutated == "new_metadata":
+                    (tmp_path / "processor_config.json").write_text("{}")
+                    return {"ready": True, "mode": "text-generation-v1"}
+                weights = helper if mutated == "helper" else tmp_path / mutated
                 before = weights.stat()
-                weights.write_bytes(b"different weight bytes")
+                weights.write_bytes(b"x" * before.st_size)
                 os.utime(weights, ns=(before.st_atime_ns, before.st_mtime_ns))
             return {"ready": True, "mode": "text-generation-v1"}
 
@@ -294,6 +365,10 @@ def test_qualification_seals_inputs_closes_worker_and_writes_only_private_aggreg
             closed.append(True)
 
     monkeypatch.setattr(module, "Worker", SyntheticWorker)
+    monkeypatch.setattr(module, "_template_executable", lambda: helper)
+    monkeypatch.setattr(
+        module, "load_template", lambda model: ({"prompt_template": source}, SimpleNamespace(_executable=helper))
+    )
     monkeypatch.setattr(
         module,
         "run_checks",
@@ -310,3 +385,65 @@ def test_qualification_seals_inputs_closes_worker_and_writes_only_private_aggreg
     assert "K7V3M9" not in capsys.readouterr().out
     with pytest.raises(FileExistsError):
         module.main()
+    assert closed == [True]
+
+
+def test_qualification_rejects_external_streaming_even_without_root_bank_files(tmp_path, monkeypatch, capsys):
+    module = validator_module()
+    (tmp_path / "config.json").write_text('{"expert_streaming":{"manifest":"nested/manifest.json"}}')
+    (tmp_path / "tokenizer.json").write_text("{}")
+    (tmp_path / "model.safetensors").write_bytes(b"synthetic")
+    output = tmp_path / "report.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["validator", "--model", str(tmp_path), "--worker", str(tmp_path / "absent-worker"), "--output", str(output)],
+    )
+    monkeypatch.setattr(
+        module, "Worker", lambda *args: pytest.fail("External streaming must be rejected before launch")
+    )
+    assert module.main() == 1
+    assert json.loads(output.read_text())["passed"] is False
+    assert "manifest.json" not in output.read_text() and "manifest.json" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("fixture", ["glm53", "flint", "qwen25"])
+def test_qualification_end_to_end_uses_native_renderer_and_real_private_worker_pipe(
+    tmp_path, monkeypatch, capsys, fixture
+):
+    module = validator_module()
+    source = (FIXTURES / f"{fixture}_chat_template.jinja").read_text()
+    (tmp_path / "config.json").write_text(
+        json.dumps({"token_codec_config": {"type": "ChatCodecConfig", "prompt_template": source}})
+    )
+    (tmp_path / "tokenizer.json").write_text("{}")
+    (tmp_path / "model.safetensors").write_bytes(b"synthetic weight bytes")
+    call = (
+        '<tool_call>{"name":"lookup","arguments":{"key":"alpha"}}</tool_call>'
+        if fixture == "qwen25"
+        else OUTPUT.replace("synthetic", "alpha")
+    )
+    prefix = "Synthetic reasoning</think>" if fixture == "glm53" else ""
+    replies = [prefix + call, prefix + "K7V3M9", prefix + "HELLO"]
+    executable = tmp_path / "synthetic-worker"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        + "import json,sys\n"
+        + "print(json.dumps({'ready':True,'mode':'text-generation-v1'}),flush=True)\n"
+        + "replies="
+        + repr(replies)
+        + "\n"
+        + "for line in sys.stdin:\n"
+        + "    request=json.loads(line)\n"
+        + "    assert request['operation']=='generate'\n"
+        + "    print(json.dumps({'text':replies.pop(0),'finish_reason':'eos'}),flush=True)\n"
+    )
+    executable.chmod(0o700)
+    output = tmp_path / "report.json"
+    monkeypatch.setattr(
+        "sys.argv", ["validator", "--model", str(tmp_path), "--worker", str(executable), "--output", str(output)]
+    )
+    assert module.main() == 0
+    report = json.loads(output.read_text())
+    assert report["passed"] and report["artifact_unchanged"] and all(report["checks"].values())
+    assert report["template_executable_sha256"] == module.sha256(module._template_executable())
+    assert "K7V3M9" not in output.read_text() and "Synthetic reasoning" not in capsys.readouterr().out

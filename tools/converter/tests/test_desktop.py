@@ -758,6 +758,69 @@ def test_tool_http_stream_matches_buffered_calls_and_never_duplicates(tool_deskt
         api.close()
 
 
+@pytest.mark.parametrize("fixture", ["glm53", "flint", "qwen25"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("closed", [False, True])
+def test_tool_parsing_uses_rendered_generation_prefix_not_worker_claim(
+    desktop, model, monkeypatch, fixture, stream, closed
+):
+    from stark_convert.chat import _ChatTemplate
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    source = (Path(__file__).parent / "fixtures" / f"{fixture}_chat_template.jinja").read_text()
+    desktop.codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    desktop.template = _ChatTemplate(source)
+    call = (
+        '<tool_call>{"name":"lookup","arguments":{"value":3}}</tool_call>'
+        if fixture == "qwen25"
+        else "<tool_call>lookup<arg_key>value</arg_key><arg_value>3</arg_value></tool_call>"
+    )
+    # This closing tag belongs to the input only for GLM. The worker lies about
+    # initial state to verify that the host's own rendered prompt is decisive.
+    generated = ("Synthetic reasoning</think>" if closed else "") + call
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            assert payload["text"].endswith("<think>") is (fixture == "glm53")
+            return {"token_count": 24, "token_ids": [2] * 24}
+        if deliver := options.get("on_delta"):
+            for character in generated:
+                deliver(character)
+        return {
+            "text": generated,
+            "finish_reason": "eos",
+            "input_tokens": 24,
+            "output_tokens": 17,
+            "_tool_initial_thinking": fixture != "glm53",
+        }
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    payload = {
+        "messages": [{"role": "user", "content": "Synthetic request"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object", "properties": {"value": {"type": "integer"}}},
+                },
+            }
+        ],
+    }
+    deltas = []
+    if closed is (fixture == "glm53"):
+        result = desktop.api_complete(payload, on_delta=deltas.append if stream else None)
+        assert result["choices"][0]["finish_reason"] == "tool_calls"
+        assert json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]) == {"value": 3}
+    else:
+        with pytest.raises(APIError) as error:
+            desktop.api_complete(payload, on_delta=deltas.append if stream else None)
+        assert error.value.code == "invalid_tool_call"
+    assert "<tool_call>" not in "".join(deltas)
+    assert desktop.worker is not None and desktop.job is None
+
+
 def test_tool_buffered_stream_disconnect_keeps_worker_aligned(tool_desktop):
     from stark_convert.local_api import APIError
 

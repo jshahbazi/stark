@@ -19,12 +19,42 @@ from stark_convert.api_tools import (
     tool_parser_for,
     validate_parser_tools,
 )
-from stark_convert.chat import Worker, load_template, render_template
+from stark_convert.chat import Worker, load_template, read_model_config, render_template
+from stark_convert.template_runtime import _template_executable
 
 
 def sha256(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def artifact_files(model):
+    """Bind optional runtime metadata and shard selection as well as payloads."""
+    optional = (
+        "generation_config.json",
+        "tokenizer_config.json",
+        "model.safetensors.index.json",
+        "chat_template.jinja",
+        "preprocessor_config.json",
+        "processor_config.json",
+        "ngram_table.bin",
+    )
+    return sorted(
+        {
+            model / "config.json",
+            model / "tokenizer.json",
+            *(model / name for name in optional if (model / name).exists()),
+            *model.rglob("*.safetensors"),
+            *model.rglob("*.gguf"),
+        }
+    )
+
+
+def final_text(message, *, initial_thinking):
+    content = message.get("content") or ""
+    if initial_thinking and "</think>" not in content:
+        return None
+    return content.split("</think>")[-1].strip()
 
 
 def run_checks(worker, template, codec, *, context, maximum):
@@ -70,7 +100,7 @@ def run_checks(worker, template, codec, *, context, maximum):
             or reply.get("finish_reason") not in {"eos", "stop_token", "stop"}
         ):
             raise ValueError("generation_failed")
-        return parse_tool_output(
+        message, reason = parse_tool_output(
             reply["text"],
             definitions,
             parser=parser,
@@ -78,7 +108,9 @@ def run_checks(worker, template, codec, *, context, maximum):
             call_id_prefix="qualification",
             parallel_tool_calls=False,
             tool_choice=choice,
+            initial_thinking=prompt.endswith("<think>"),
         )
+        return message, reason, prompt.endswith("<think>")
 
     messages = [
         {
@@ -92,7 +124,7 @@ def run_checks(worker, template, codec, *, context, maximum):
         "ordinary_chat": False,
     }
     try:
-        assistant, reason = generate(messages, tools, "required")
+        assistant, reason, _ = generate(messages, tools, "required")
         calls = assistant.get("tool_calls", [])
         checks["single_call_and_arguments"] = (
             reason == "tool_calls"
@@ -113,19 +145,19 @@ def run_checks(worker, template, codec, *, context, maximum):
                     "content": "Reply with only the exact lookup result code. Do not call tools.",
                 },
             ]
-            answer, reason = generate(messages, tools, "none")
-            visible = (answer.get("content") or "").split("</think>")[-1].strip()
+            answer, reason, initial_thinking = generate(messages, tools, "none")
+            visible = final_text(answer, initial_thinking=initial_thinking)
             checks["tool_result_use"] = reason == "stop" and visible == "K7V3M9"
     except Exception:  # noqa: BLE001 - discard native/model diagnostics, never log them.
         # Model output and native errors are never included in the report.
         checks["tool_result_use"] = False
     try:
-        answer, reason = generate(
+        answer, reason, initial_thinking = generate(
             [{"role": "user", "content": "Reply with only HELLO."}], [], "none"
         )
         checks["ordinary_chat"] = (
             reason == "stop"
-            and (answer.get("content") or "").split("</think>")[-1].strip() == "HELLO"
+            and final_text(answer, initial_thinking=initial_thinking) == "HELLO"
         )
     except Exception:  # noqa: BLE001 - discard native/model diagnostics, never log them.
         checks["ordinary_chat"] = False
@@ -141,6 +173,8 @@ def main():
     args_parser.add_argument("--max-new-tokens", type=int, default=2048)
     args_parser.add_argument("--timeout", type=float, default=300)
     args = args_parser.parse_args()
+    if os.path.lexists(args.output):
+        raise FileExistsError("Choose a new validation output path.")
     if (
         not 0 < args.max_new_tokens < args.context_tokens
         or not 0 < args.timeout <= 3600
@@ -161,24 +195,14 @@ def main():
     }
     try:
         # Seal actual bytes, not saved model names or an unverified receipt.
-        files = sorted(
-            {
-                args.model / "config.json",
-                args.model / "tokenizer.json",
-                *(
-                    [args.model / "ngram_table.bin"]
-                    if (args.model / "ngram_table.bin").is_file()
-                    else []
-                ),
-                *args.model.rglob("*.safetensors"),
-                *args.model.rglob("*.gguf"),
-            }
-        )
+        files = artifact_files(args.model)
         if not any(p.suffix in {".safetensors", ".gguf"} for p in files):
             raise ValueError("weights_unavailable")
-        if (args.model / "experts.bin").exists() or (
-            args.model / "mtp-experts-nvfp4.bin"
-        ).exists():
+        if (
+            (args.model / "experts.bin").exists()
+            or (args.model / "mtp-experts-nvfp4.bin").exists()
+            or read_model_config(args.model).get("expert_streaming") is not None
+        ):
             raise ValueError("external_expert_banks_need_separate_validation")
 
         def identity(path):
@@ -190,7 +214,12 @@ def main():
         report["artifact_sha256"] = hashlib.sha256(
             json.dumps(digests, sort_keys=True).encode()
         ).hexdigest()
+        helper = _template_executable()
+        helper_stat = identity(helper)
+        report["template_executable_sha256"] = sha256(helper)
         codec, template = load_template(args.model)
+        if template._executable != helper:
+            raise ValueError("template_executable_changed")
         parser = tool_parser_for(codec)
         if parser is None:
             raise ValueError("tools_unsupported")
@@ -223,11 +252,14 @@ def main():
         unchanged = (
             all(identity(p) == previous for p, previous in identities.items())
             and identity(args.worker) == worker_stat
+            and identity(helper) == helper_stat
+            and artifact_files(args.model) == files
         )
         unchanged = (
             unchanged
             and {str(p.relative_to(args.model)): sha256(p) for p in files} == digests
             and sha256(args.worker) == report["worker_sha256"]
+            and sha256(helper) == report["template_executable_sha256"]
         )
         report["artifact_unchanged"] = unchanged
         report["passed"] = unchanged and all(report["checks"].values())

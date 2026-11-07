@@ -203,6 +203,13 @@ Qwen/Qwen3-0.6B with unquantized BF16 weights completed a narrowly prompted two-
 
 The pinned MLX Qwen3-4B 4-bit/group-64 artifact completed a bounded two-read task in OpenWork, including client-side execution, result return and a correct final calculation. A looser variant repeated a read until cancelled. Use explicit task limits and client approvals; this is a narrow workflow qualification. The [desktop validation record](archive/runs/OPENWORK_KEYCHAIN_E2E_2026_10_31.md) separates protocol, model behavior and signed-package evidence.
 
+When the rendered generation prompt opens a thinking block, the host carries
+that state into tool-call validation. Generated text must close the block before
+an executable call. The flag comes from the rendered prompt; client parameters
+and worker reply fields cannot enable it. Templates such as Flint that do not
+open a thinking block continue to reject unmatched closing tags. Generated
+pre-call text retains the existing content/streaming representation.
+
 ## Limits, queueing and cancellation
 
 - The server accepts at most 16 concurrent connections. Excess connections receive a bare 429 with `Retry-After: 1` and no `X-Request-Id` header.

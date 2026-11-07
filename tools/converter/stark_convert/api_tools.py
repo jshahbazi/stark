@@ -513,7 +513,11 @@ def validate_parser_tools(tools: list[dict], parser: str | None) -> None:
         _xml_tool_schemas(tools)
 
 
-def _tool_prefix_safe(prefix):
+def _tool_prefix_safe(prefix, *, initial_thinking=False):
+    if initial_thinking:
+        # The trusted renderer may have opened this block in the input prompt.
+        # Generated text must close it before an executable call can begin.
+        prefix = "<think>" + prefix
     visible = []
     cursor = 0
     while cursor < len(prefix):
@@ -871,6 +875,7 @@ def parse_tool_output(
     parallel_tool_calls: bool = True,
     call_id_prefix: str,
     tool_choice: str | dict = "auto",
+    initial_thinking: bool = False,
 ) -> tuple[dict, str]:
     """Parse only complete calls after generation; never repair model output.
 
@@ -922,7 +927,7 @@ def parse_tool_output(
         marker in text[:start] for marker in ("<arg_key", "</arg_key", "<arg_value", "</arg_value")
     ):
         raise invalid("markup")
-    if not _tool_prefix_safe(text[:start]):
+    if not _tool_prefix_safe(text[:start], initial_thinking=initial_thinking):
         raise invalid("prefix")
     names = {tool["function"]["name"] for tool in tools}
     if isinstance(tool_choice, dict):

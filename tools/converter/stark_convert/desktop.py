@@ -2372,7 +2372,8 @@ class Desktop:
             raise ValueError
         if capability["supported"]:
             self.validate_mtp_reply(reply, capability, drafts)
-        return reply
+        # Bind output parsing to the actual prompt, never a worker/client claim.
+        return {**reply, "_tool_initial_thinking": prompt.endswith("<think>")}
 
     def api_cache_scope(self, principal):
         """Return the random reuse scope for one API session and credential."""
@@ -2733,6 +2734,7 @@ class Desktop:
                         parallel_tool_calls=request["parallel_tool_calls"],
                         call_id_prefix=uuid.uuid4().hex,
                         tool_choice=request["tool_choice"],
+                        initial_thinking=reply.get("_tool_initial_thinking", False),
                     )
                     if tool_request
                     else (

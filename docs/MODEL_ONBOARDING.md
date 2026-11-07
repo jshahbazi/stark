@@ -188,9 +188,12 @@ For each new template:
 The bounded native smoke command below runs synthetic requests serially, returns
 a synthetic tool result without executing external tools, and writes only
 aggregate checks and hashes. It uses greedy sampling with MTP disabled and hashes
-the actual config, tokenizer and Safetensors/GGUF payloads. Hashing a large model
-can take time. It does not support external EXL3 expert banks. Choose a new ignored
-output filename and run without another native generation workload:
+the actual config, tokenizer, stopping metadata, shard index and Safetensors/GGUF
+payloads, along with the generation worker and native template helper. It checks
+bytes and the optional file set again after execution. Hashing a large model
+can take time. It rejects external expert-streaming configurations and EXL3 banks.
+Choose a new ignored output filename and run without another native generation
+workload:
 
 ```sh
 uv run --project tools/converter --locked --python 3.13.13 python \

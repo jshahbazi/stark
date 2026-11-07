@@ -58,3 +58,5 @@ The exact registered sources, schemas, streaming rules and tool-choice contract
 are in the [Function tools reference](LOCAL_API.md#function-tools).
 The [2026-11-07 validation record](archive/runs/2026-11-07-tool-calling-coverage.md)
 records the new registrations, tests and pending model-bound checks.
+The [follow-up review](archive/runs/2026-11-07-tool-calling-review.md) records
+corrections to GLM generation-prefix handling and qualification provenance.
