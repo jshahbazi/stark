@@ -158,12 +158,27 @@ impl<B: Backend> Gemma3VisionTower<B> {
         patches: &[bf16],
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, VisionTowerError<B>> {
+        self.encode_initial_with_observer(patches, commands, &mut |_, _, _| Ok(()))
+    }
+
+    pub(crate) fn encode_initial_with_observer<F>(
+        &self,
+        patches: &[bf16],
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        observer: &mut F,
+    ) -> Result<B::ScratchBuffer, VisionTowerError<B>>
+    where
+        F: FnMut(&str, &B::ScratchBuffer, &mut <B::CommandBuffer as CommandBuffer>::Encoding) -> Result<(), B::Error>,
+    {
         if patches.len() != (PATCH_ROWS * PATCH_WIDTH) as usize || patches.iter().any(|value| !value.is_finite()) {
             return Err(InvalidInput("Gemma 3 patches have invalid shape or nonfinite values").into());
         }
         let patches = commands.allocate_constant_from_slice(patches).map_err(VisionTowerError::Backend)?;
         let hidden = self.patch.encode(&patches, PATCH_ROWS, commands).map_err(VisionTowerError::Backend)?;
-        self.residual(&hidden, &self.positions, commands).map_err(VisionTowerError::Backend)
+        observer("patch", &hidden, commands).map_err(VisionTowerError::Backend)?;
+        let output = self.residual(&hidden, &self.positions, commands).map_err(VisionTowerError::Backend)?;
+        observer("embeddings", &output, commands).map_err(VisionTowerError::Backend)?;
+        Ok(output)
     }
 
     pub(crate) fn encode_block(
@@ -172,13 +187,28 @@ impl<B: Backend> Gemma3VisionTower<B> {
         hidden: impl BufferRef<Backend = B>,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, VisionTowerError<B>> {
+        self.encode_block_with_observer(index, hidden, commands, &mut |_, _, _| Ok(()))
+    }
+
+    pub(crate) fn encode_block_with_observer<F>(
+        &self,
+        index: usize,
+        hidden: impl BufferRef<Backend = B>,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        observer: &mut F,
+    ) -> Result<B::ScratchBuffer, VisionTowerError<B>>
+    where
+        F: FnMut(&str, &B::ScratchBuffer, &mut <B::CommandBuffer as CommandBuffer>::Encoding) -> Result<(), B::Error>,
+    {
         let block = self.blocks.get(index).ok_or(InvalidInput("Gemma 3 image block index is invalid"))?;
         let mut input = commands
             .allocate_scratch_for_shape(&[PATCH_ROWS, WIDTH], DataType::BF16)
             .map_err(VisionTowerError::Backend)?;
         commands.encode_copy(hidden, &mut input);
         let normalized = block.norm1.encode(&input, PATCH_ROWS, commands).map_err(VisionTowerError::Backend)?;
+        observer("norm1", &normalized, commands).map_err(VisionTowerError::Backend)?;
         let qkv = block.qkv.encode(&normalized, PATCH_ROWS, commands).map_err(VisionTowerError::Backend)?;
+        observer("qkv", &qkv, commands).map_err(VisionTowerError::Backend)?;
         let mut queries = commands
             .allocate_scratch_for_shape(&[HEADS, PATCH_ROWS, WIDTH / HEADS], DataType::BF16)
             .map_err(VisionTowerError::Backend)?;
@@ -210,13 +240,21 @@ impl<B: Backend> Gemma3VisionTower<B> {
         );
         let attention =
             self.attention.encode(&queries, &keys, &values, PATCH_ROWS, commands).map_err(VisionTowerError::Backend)?;
+        observer("attention", &attention, commands).map_err(VisionTowerError::Backend)?;
         let attention = block.projection.encode(&attention, PATCH_ROWS, commands).map_err(VisionTowerError::Backend)?;
+        observer("projection", &attention, commands).map_err(VisionTowerError::Backend)?;
         let hidden = self.residual(&input, &attention, commands).map_err(VisionTowerError::Backend)?;
         let normalized = block.norm2.encode(&hidden, PATCH_ROWS, commands).map_err(VisionTowerError::Backend)?;
+        observer("norm2", &normalized, commands).map_err(VisionTowerError::Backend)?;
         let mut up = block.fc1.encode(&normalized, PATCH_ROWS, commands).map_err(VisionTowerError::Backend)?;
+        observer("fc1", &up, commands).map_err(VisionTowerError::Backend)?;
         self.activation.encode(&mut up, PATCH_ROWS * INNER, 1, commands);
+        observer("activation", &up, commands).map_err(VisionTowerError::Backend)?;
         let down = block.fc2.encode(&up, PATCH_ROWS, commands).map_err(VisionTowerError::Backend)?;
-        self.residual(&hidden, &down, commands).map_err(VisionTowerError::Backend)
+        observer("fc2", &down, commands).map_err(VisionTowerError::Backend)?;
+        let output = self.residual(&hidden, &down, commands).map_err(VisionTowerError::Backend)?;
+        observer("block", &output, commands).map_err(VisionTowerError::Backend)?;
+        Ok(output)
     }
 
     pub(crate) fn encode_finish(

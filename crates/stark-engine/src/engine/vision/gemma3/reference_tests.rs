@@ -246,3 +246,59 @@ fn gemma3_completed_tower_cancel_keeps_model_usable_metal() {
     std::fs::write(root.join("native-cancellation-metrics.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     println!("{report}");
 }
+
+#[cfg(backend = "metal")]
+#[stark_test]
+#[ignore]
+fn gemma3_first_block_stage_reference_metal() {
+    type B = crate::backends::metal::Metal;
+    let root = PathBuf::from(std::env::var_os("STARK_GEMMA3_STAGE_FIXTURE_PATH").expect("set private stage fixture"));
+    let model_path = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private Gemma 3 artifact"));
+    let manifest: Value = serde_json::from_slice(&read(&root, "manifest.json")).unwrap();
+    assert_eq!(manifest["source_revision"], "093f9f388b31de276ce2de164bdc2081324b9767");
+    assert_eq!(manifest["retained_rows"], 64);
+    let engine = Engine::<B>::new().unwrap();
+    let mut model = engine.load_gemma3_vision_language_model(&model_path).unwrap();
+    let image_root = PathBuf::from(std::env::var_os("STARK_GEMMA3_FIXTURE_PATH").expect("set private image fixture"));
+    let image_bytes = read(&image_root, "pattern.png");
+    assert_eq!(format!("{:x}", Sha256::digest(&image_bytes)), manifest["image_sha256"].as_str().unwrap());
+    let image = model.prepare_image(&image_bytes).unwrap();
+    let mut captures: Vec<(String, <B as Backend>::GlobalBuffer)> = Vec::new();
+    let mut observe =
+        |name: &str,
+         buffer: &<B as Backend>::ScratchBuffer,
+         commands: &mut <<B as Backend>::CommandBuffer as crate::backends::common::CommandBuffer>::Encoding| {
+            let stage = manifest["stages"].as_array().unwrap().iter().find(|entry| entry["name"] == name).unwrap();
+            let count = stage["elements"].as_u64().unwrap() as usize;
+            assert!(count > 0 && count <= 1_048_576, "private stage exceeds bounded prefix");
+            let mut readback = engine.context.create_buffer(count * size_of::<bf16>())?;
+        commands.encode_copy(buffer.subrange(0..count * size_of::<bf16>()), &mut readback);
+            captures.push((name.to_owned(), readback));
+            Ok(())
+        };
+    let mut hidden = engine.context.create_buffer(4096 * 1152 * size_of::<bf16>()).unwrap();
+    let mut commands = engine.context.create_command_buffer(Some("Gemma 3 private initial stages"), None).unwrap();
+    let initial =
+        model.tower.encode_initial_with_observer(&image.patches.patches, &mut commands, &mut observe).unwrap();
+    commands.encode_copy(&initial, &mut hidden);
+    commands.end_encoding().submit().wait_until_completed().unwrap();
+    let mut commands = engine.context.create_command_buffer(Some("Gemma 3 private first block"), None).unwrap();
+    model.tower.encode_block_with_observer(0, &hidden, &mut commands, &mut observe).unwrap();
+    commands.end_encoding().submit().wait_until_completed().unwrap();
+    drop(observe);
+    let reports = captures
+        .into_iter()
+        .map(|(name, buffer)| {
+            let stage = manifest["stages"].as_array().unwrap().iter().find(|entry| entry["name"] == name).unwrap();
+            let bytes = read(&root, stage["filename"].as_str().unwrap());
+            assert_eq!(format!("{:x}", Sha256::digest(&bytes)), stage["sha256"].as_str().unwrap());
+            json!({"stage":name,"metrics":compare((&buffer).as_slice::<bf16>(), &floats(&bytes))})
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 11, "private stage observer coverage changed");
+    let report = json!({"scope":"diagnostic-first-block-prefix-only","stages":reports,
+        "artifact_sha256":model.artifact_identity().artifact_sha256,
+        "reference_manifest_sha256":format!("{:x}",Sha256::digest(read(&root,"manifest.json")))});
+    std::fs::write(root.join("native-stage-metrics.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    println!("{report}");
+}
