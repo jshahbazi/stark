@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ._build_metadata import open_regular
 from .hybrid_prepare import prepared_identity
+from .hybrid_vision import prepared_image_identity
 from .model_support import normalize_architecture
 from .streaming import authorize_source_path
 from .vision_runtime import VISION_MODEL_TYPES
@@ -351,6 +352,8 @@ def model_display(model):
             weight_bytes=hybrid["weight_bytes"],
             source_revision=hybrid["revision"],
         )
+        if prepared_image_identity(root) is not None:
+            result["artifact_mode"] = "vision-language"
         return result
     try:
         result["weight_bytes"], result["quantization"] = _weights(root)
@@ -370,7 +373,8 @@ def model_display(model):
         receipt = _json(_small_file(root, "conversion.json"))
         if (
             not isinstance(parsed, dict)
-            or parsed.get("type") not in {"LanguageModelConfig", "ClassifierModelConfig", "Qwen38LanguageModelConfig", *VISION_MODEL_TYPES}
+            or parsed.get("type")
+            not in {"LanguageModelConfig", "ClassifierModelConfig", "Qwen38LanguageModelConfig", *VISION_MODEL_TYPES}
             or not isinstance(receipt, dict)
         ):
             return result

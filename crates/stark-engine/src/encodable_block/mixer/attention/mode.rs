@@ -316,6 +316,12 @@ impl<B: Backend> Attention<B> {
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
         if let Some(reference) = &self.reference {
+            if arguments.image_span.is_some() {
+                return Err(crate::backends::common::InvalidInput(
+                    "reference BF16 causal score materialization does not implement bidirectional image attention",
+                )
+                .into());
+            }
             if arguments.trie.is_some() || arguments.sinks.is_some() || arguments.cache.ring_params().is_some() {
                 return Err(
                     crate::backends::common::InvalidInput("reference BF16 attention requires flat full cache").into()

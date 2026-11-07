@@ -16,6 +16,119 @@ MANIFEST = "stark-image-artifact.json"
 PROCESSOR_BYTES = (json.dumps(_PROCESSOR, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate native image metadata key")
+        result[key] = value
+    return result
+
+
+def prepared_image_identity(directory: Path) -> dict | None:
+    """Inspect a retained-image descriptor without claiming payload validation.
+
+    The native loader verifies every recorded shard hash before loading. This
+    bounded host inspection binds metadata and checks the on-disk inventory;
+    it never hashes a hundred-gigabyte checkpoint during model-list refreshes.
+    """
+    from .hybrid_prepare import SOURCES, prepared_identity
+
+    try:
+        base = prepared_identity(directory)
+        if base is None or not any(
+            base["repo"] == SOURCES[choice]["weights_repo"] and base["revision"] == SOURCES[choice]["weights_revision"]
+            for choice in ("qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed")
+        ):
+            return None
+        value = json.loads(_read(directory / MANIFEST, 262144), object_pairs_hook=_unique_object)
+        hashes = {
+            "config_sha256",
+            "artifact_sha256",
+            "tokenizer_sha256",
+            "processor_sha256",
+            "template_sha256",
+            "index_sha256",
+        }
+        keys = hashes | {
+            "kind",
+            "schema_version",
+            "family_profile",
+            "family_version",
+            "model_source",
+            "model_revision",
+            "weight_files",
+        }
+        if (
+            not isinstance(value, dict)
+            or set(value) != keys
+            or value["kind"] != "Qwen38RetainedVisionArtifact"
+            or type(value["schema_version"]) is not int
+            or value["schema_version"] != 6
+            or value["family_profile"] != PROFILE
+            or type(value["family_version"]) is not int
+            or value["family_version"] != 1
+            or (value["model_source"], value["model_revision"]) != (base["repo"], base["revision"])
+        ):
+            return None
+
+        def digest(value):
+            return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+        if not all(digest(value[key]) for key in hashes):
+            return None
+        metadata = {}
+        for name, key, maximum in (
+            ("config.json", "config_sha256", 1048576),
+            ("tokenizer.json", "tokenizer_sha256", 67108864),
+            ("preprocessor_config.json", "processor_sha256", 65536),
+            ("chat_template.jinja", "template_sha256", 262144),
+            ("model.safetensors.index.json", "index_sha256", 16777216),
+        ):
+            data = _read(directory / name, maximum)
+            if hashlib.sha256(data).hexdigest() != value[key]:
+                return None
+            metadata[name] = data
+        config = json.loads(metadata["config.json"], object_pairs_hook=_unique_object)
+        if (
+            metadata["preprocessor_config.json"] != PROCESSOR_BYTES
+            or metadata["chat_template.jinja"].decode() != config.get("token_codec_config", {}).get("prompt_template")
+            or not isinstance(config.get("vision_config"), dict)
+        ):
+            return None
+        records = value["weight_files"]
+        if not isinstance(records, dict) or not 1 <= len(records) <= 256:
+            return None
+        aggregate = hashlib.sha256()
+        for name, record in sorted(records.items()):
+            if (
+                not isinstance(name, str)
+                or Path(name).name != name
+                or name in {".", ".."}
+                or not (name.endswith(".safetensors") or name == "ngram_table.bin")
+                or not isinstance(record, dict)
+                or set(record) != {"size", "sha256"}
+                or type(record["size"]) is not int
+                or record["size"] <= 0
+                or not digest(record["sha256"])
+            ):
+                return None
+            with open_regular(directory / name) as stream:
+                if stream.seek(0, 2) != record["size"]:
+                    return None
+            aggregate.update(name.encode() + b"\0" + record["sha256"].encode())
+        index = json.loads(metadata["model.safetensors.index.json"], object_pairs_hook=_unique_object)
+        if (
+            aggregate.hexdigest() != value["artifact_sha256"]
+            or set(index.get("weight_map", {}).values()) != {name for name in records if name.endswith(".safetensors")}
+            or sum(record["size"] for record in records.values()) != base["weight_bytes"]
+        ):
+            return None
+        return value
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return None
+
+
 def _read(path: Path, maximum: int) -> bytes:
     with open_regular(path) as stream:
         if stream.seek(0, 2) > maximum:

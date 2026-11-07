@@ -29,9 +29,11 @@ from .template_runtime import (
 )
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
+    LILY_FAMILY_PROFILE,
     VISION_MODEL_TYPES,
     family_image_input_contract,
     image_input_contract,
+    model_image_family,
     qualified_image_worker,
     supported_image_family,
 )
@@ -183,25 +185,33 @@ def load_template(model, *, expected_hashes=None):
         source = codec["prompt_template"]
         if codec.get("type") != "ChatCodecConfig" or not isinstance(source, str) or not source:
             raise ValueError
-        if config.get("type") in VISION_MODEL_TYPES:
+        image_family = model_image_family(config, model)
+        if config.get("type") in VISION_MODEL_TYPES or image_family is not None:
             # Only the recognized program may reach Jinja compilation. An
             # immutable sandbox does not bound arbitrary template computation.
             template_hashes = {
                 "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
                 "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
             }
-            if config["type"] == "Gemma4VisionLanguageModelConfig":
+            if config.get("type") == "Gemma4VisionLanguageModelConfig":
                 template_hashes = {"0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"}
-            elif config["type"] == "Gemma3VisionLanguageModelConfig":
+            elif config.get("type") == "Gemma3VisionLanguageModelConfig":
                 template_hashes = {"7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"}
+            elif image_family == {"profile": LILY_FAMILY_PROFILE, "version": 1}:
+                template_hashes = {
+                    "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+                    "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+                }
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
             if (
-                config["type"] == "Qwen35VisionLanguageModelConfig"
+                config.get("type") == "Qwen35VisionLanguageModelConfig"
                 and supported_image_family(family)
-                and family["profile"] == CONFIGURED_FAMILY_PROFILE
+                and family["profile"] in {CONFIGURED_FAMILY_PROFILE, "qwen35-dense-affine-merged-v3"}
             ):
                 template_hashes.add("a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715")
+                if family["profile"] == "qwen35-dense-affine-merged-v3":
+                    template_hashes.add("c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041")
             copied = _chat_file(model / "chat_template.jinja", 256 * 1024)
             if (
                 len(data) > 1024 * 1024
@@ -255,7 +265,9 @@ class Worker:
             config = read_model_config(Path(model))
         except (OSError, ValueError, ConversionError):
             config = {}
-        if isinstance(config, dict) and config.get("type") in VISION_MODEL_TYPES:
+        if isinstance(config, dict) and (
+            config.get("type") in VISION_MODEL_TYPES or model_image_family(config, Path(model)) is not None
+        ):
             from .image_checks import ImageCheckError, preflight_family_memory
 
             try:

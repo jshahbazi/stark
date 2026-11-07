@@ -22,9 +22,9 @@ from .media import ImageData
 from .vision_runtime import (
     _ARTIFACT_HASHES,
     CONFIGURED_FAMILY_PROFILE,
-    GEMMA4_FAMILY_PROFILE,
-    GEMMA4_E4B_FAMILY_PROFILE,
     GEMMA3_FAMILY_PROFILE,
+    GEMMA4_E4B_FAMILY_PROFILE,
+    GEMMA4_FAMILY_PROFILE,
     _current_os_version,
     artifact_image_family,
     family_image_input_contract,
@@ -57,6 +57,13 @@ def preflight_family_memory(model: Path, config: dict) -> None:
     """
     contract = config.get("artifact_contract", {})
     if not isinstance(contract, dict) or contract.get("schema_version") not in (3, 4, 5):
+        from .hybrid_vision import prepared_image_identity
+
+        retained = prepared_image_identity(model)
+        if retained is not None:
+            size = sum(item["size"] for item in retained["weight_files"].values())
+            if psutil.virtual_memory().available < size + 2 * 1024**3:
+                raise ImageCheckError("Not enough available memory to check this image model.")
         return
     family = artifact_image_family(config) if contract.get("schema_version") == 4 else contract.get("family")
     if not supported_image_family(family):
@@ -113,7 +120,8 @@ def _configured_check_memory(config: dict) -> int:
         vision = config["artifact_contract"]["vision_config"]
         gemma3 = config["artifact_contract"].get("family", {}).get("profile") == GEMMA3_FAMILY_PROFILE
         vision_width, vision_hidden, vision_heads = (
-            integer(vision, key) for key in ("hidden_size", "intermediate_size", "num_attention_heads" if gemma3 else "num_heads")
+            integer(vision, key)
+            for key in ("hidden_size", "intermediate_size", "num_attention_heads" if gemma3 else "num_heads")
         )
         # The profile keeps the 256x256 RGB check and 16-pixel patch recipe.
         # FP32 storage factors deliberately overestimate BF16 arrays. Layer
@@ -151,7 +159,14 @@ def check_identity(worker) -> dict:
         raise ImageCheckError("Cannot identify this image runtime.")
     package = Path(__file__).parent
     checker = hashlib.sha256()
-    for name in ("image_checks.py", "chat.py", "vision_runtime.py", "media.py", "_build_metadata.py"):
+    for name in (
+        "image_checks.py",
+        "chat.py",
+        "vision_runtime.py",
+        "hybrid_vision.py",
+        "media.py",
+        "_build_metadata.py",
+    ):
         checker.update(name.encode())
         checker.update(bytes.fromhex(file_hash(package / name)))
     return {
@@ -421,9 +436,18 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             if not _valid_reply(reply, maximum) or reply["input_tokens"] + maximum > context:
                 raise ImageCheckError("The model did not pass the image execution check.")
             image_tokens = getattr(worker, "_last_image_tokens", None)
-            gemma = identity["family_profile"] in {GEMMA4_FAMILY_PROFILE, GEMMA4_E4B_FAMILY_PROFILE, GEMMA3_FAMILY_PROFILE}
+            gemma = identity["family_profile"] in {
+                GEMMA4_FAMILY_PROFILE,
+                GEMMA4_E4B_FAMILY_PROFILE,
+                GEMMA3_FAMILY_PROFILE,
+            }
             expected_image_tokens = 256 if gemma else 64
             expected_delta = expected_image_tokens + 1 if gemma else expected_image_tokens - 1
+            if identity["family_profile"] == GEMMA3_FAMILY_PROFILE:
+                # Pinned HF Gemma3Processor adds separators around the block;
+                # re-tokenization merges its leading newline with the template.
+                # This fixed image-first check is 15 -> 273 tokens upstream.
+                expected_delta = 258
             if (
                 type(image_tokens) is not int
                 or image_tokens != expected_image_tokens

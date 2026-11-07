@@ -3,13 +3,14 @@
 use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
 
 use rayon::prelude::*;
-use stark_engine::engine::hybrid::{Model, NativeSampling, PrefixSnapshot, finite_guard, profile};
+use stark_engine::engine::hybrid::{Model, NativeSampling, PrefixSnapshot, PreparedHybridImage, finite_guard, profile};
 
 use crate::{
     cancel::CancelSignal,
     generation::{
-        GeneratedTokens, GenerationBackend, GenerationOptions, MtpCapabilities, ProgressCallback, Sampling,
-        TextCallback, collect_tokens_controlled, native_result_after_cleanup,
+        GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity, MtpCapabilities,
+        PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, collect_tokens_controlled,
+        native_result_after_cleanup,
     },
     prefix_cache::{self, BoundaryEntry},
     text_stop::StopFilter,
@@ -56,6 +57,12 @@ pub(crate) struct HybridBackend {
     prefix_cache: Option<BoundaryEntry<PrefixSnapshot>>,
     /// The last successful request's snapshot, until its reply is written.
     pending_prefix: Option<BoundaryEntry<PrefixSnapshot>>,
+    image_runtime_identity: Option<stark_engine::engine::MetalDeviceIdentity>,
+}
+
+pub(crate) struct HybridPreparedRequest {
+    image: PreparedHybridImage,
+    tokens: Box<[u32]>,
 }
 
 const PARALLEL_PROBABILITY_MIN_CANDIDATES: usize = 65_536;
@@ -285,12 +292,44 @@ impl HybridBackend {
         path: &Path,
         cancellation: Option<CancelSignal>,
     ) -> Result<Self, &'static str> {
+        Self::load_model(path, cancellation, false)
+    }
+
+    pub(crate) fn load_vision(
+        path: &Path,
+        cancellation: Option<CancelSignal>,
+    ) -> Result<Self, &'static str> {
+        Self::load_model(path, cancellation, true)
+    }
+
+    fn load_model(
+        path: &Path,
+        cancellation: Option<CancelSignal>,
+        images: bool,
+    ) -> Result<Self, &'static str> {
         let qwen_profile_path = std::env::var_os("STARK_QWEN38_PROFILE_OUTPUT");
         let native_profile_path = std::env::var_os("STARK_NATIVE_PROFILE_OUTPUT");
         let profile_mode = aggregate_profile_mode(qwen_profile_path.is_some(), native_profile_path.is_some())?;
         let profile_path = qwen_profile_path.or(native_profile_path);
         let profile_output = profile_path.map(|path| ProfileOutput::open(Path::new(&path))).transpose()?;
-        let mut model = Model::load_with_native_decode(path, true).map_err(|_| "hybrid_model_load_failed")?;
+        let mut model = if images {
+            Model::load_with_image_support(path, false)
+        } else {
+            Model::load_with_native_decode(path, true)
+        }
+        .map_err(|_| "hybrid_model_load_failed")?;
+        let image_runtime_identity = if images {
+            if !model.supports_images() {
+                return Err("images_not_supported");
+            }
+            Some(
+                stark_engine::engine::Engine::<stark_engine::backends::metal::Metal>::new()
+                    .map_err(|_| "metal_initialization_failed")?
+                    .metal_device_identity(),
+            )
+        } else {
+            None
+        };
         if profile_mode.is_some_and(AggregateProfileMode::enables_bf16_stage_profile) {
             model.set_bf16_stage_profiling(true).map_err(|_| "native_profile_initialization_failed")?;
         }
@@ -308,6 +347,7 @@ impl HybridBackend {
             last_mtp: None,
             prefix_cache: None,
             pending_prefix: None,
+            image_runtime_identity,
         })
     }
 
@@ -333,11 +373,13 @@ impl HybridBackend {
         reused: usize,
         retained: Option<&PrefixSnapshot>,
         capture: Option<usize>,
+        image: Option<PreparedHybridImage>,
         options: &GenerationOptions,
         mut on_text: Option<&mut TextCallback<'_>>,
         on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         let started = Instant::now();
+        let is_image = image.is_some();
         if reused > 0 {
             let snapshot =
                 retained.filter(|snapshot| snapshot.position() == reused).ok_or("native_generation_failed")?;
@@ -348,13 +390,17 @@ impl HybridBackend {
         }
         let tokenizer = self.model.tokenizer().clone();
         let vocab_size = self.model.vocab_size();
-        let native_policy = self
-            .model
-            .mtp_capabilities()
-            .filter(|caps| caps.sampling == "native-target-draw-match-v1")
-            .and_then(|_| native_sampling(options));
+        let native_policy = if is_image {
+            None
+        } else {
+            self.model
+                .mtp_capabilities()
+                .filter(|caps| caps.sampling == "native-target-draw-match-v1")
+                .and_then(|_| native_sampling(options))
+        };
         let native_decode = native_policy.is_some();
-        let gpu_greedy = options.mtp_drafts == 0
+        let gpu_greedy = !is_image
+            && options.mtp_drafts == 0
             && matches!(options.sampling, Sampling::Greedy {})
             && self.model.supports_greedy_readout();
         let sampled_decode =
@@ -371,29 +417,50 @@ impl HybridBackend {
         let mut greedy_token = None;
         let mut native_first = None;
         let mut prefill_control_error = None;
-        let prefix = input.get(reused..input.len() - 1).ok_or("native_generation_failed")?;
-        let prefill = self.model.ingest_prefix(prefix, || {
-            let control = match cancelled() {
-                Ok(false) => return Ok(()),
-                Ok(true) => "generation_cancelled",
-                Err(error) => error,
+        if let Some(image) = image {
+            let result = self.model.prefill_image_controlled(input, image, || match cancelled() {
+                Ok(cancelled) => cancelled,
+                Err(error) => {
+                    prefill_control_error = Some(error);
+                    true
+                },
+            });
+            logits = match result {
+                Ok(logits) => logits,
+                Err(stark_engine::engine::hybrid::Error::Cancelled) => {
+                    return Err(prefill_control_error.unwrap_or("generation_cancelled"));
+                },
+                Err(_) => return Err("native_generation_failed"),
             };
-            prefill_control_error = Some(control);
-            Err(stark_engine::engine::hybrid::Error::Invalid("prefill control stopped"))
-        });
-        if prefill.is_err() {
-            return Err(prefill_control_error.unwrap_or("native_generation_failed"));
-        }
-        if cancelled()? {
-            return Err("generation_cancelled");
-        }
-        let token = input[input.len() - 1];
-        if let Some(policy) = native_policy {
-            native_first = Some(self.model.step_native_initial(token, policy).map_err(|_| "native_generation_failed")?);
-        } else if gpu_greedy {
-            greedy_token = Some(self.model.step_greedy(token).map_err(|_| "native_generation_failed")?);
+            if cancelled()? {
+                return Err("generation_cancelled");
+            }
         } else {
-            logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
+            let prefix = input.get(reused..input.len() - 1).ok_or("native_generation_failed")?;
+            let prefill = self.model.ingest_prefix(prefix, || {
+                let control = match cancelled() {
+                    Ok(false) => return Ok(()),
+                    Ok(true) => "generation_cancelled",
+                    Err(error) => error,
+                };
+                prefill_control_error = Some(control);
+                Err(stark_engine::engine::hybrid::Error::Invalid("prefill control stopped"))
+            });
+            if prefill.is_err() {
+                return Err(prefill_control_error.unwrap_or("native_generation_failed"));
+            }
+            if cancelled()? {
+                return Err("generation_cancelled");
+            }
+            let token = input[input.len() - 1];
+            if let Some(policy) = native_policy {
+                native_first =
+                    Some(self.model.step_native_initial(token, policy).map_err(|_| "native_generation_failed")?);
+            } else if gpu_greedy {
+                greedy_token = Some(self.model.step_greedy(token).map_err(|_| "native_generation_failed")?);
+            } else {
+                logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
+            }
         }
         // Native-only diagnostics add one request boundary. Qwen's existing
         // BF16 diagnostic schema/stage hooks and profiling-off work stay intact.
@@ -515,7 +582,112 @@ impl HybridBackend {
 }
 
 impl GenerationBackend for HybridBackend {
-    type PreparedImage = ();
+    type PreparedImage = HybridPreparedRequest;
+
+    fn supports_images(&self) -> bool {
+        self.image_runtime_identity.is_some() && self.model.supports_images()
+    }
+
+    fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
+        let identity = self.model.image_artifact_identity()?;
+        Some(ImageArtifactIdentity {
+            schema_version: identity.schema_version,
+            artifact_sha256: &identity.artifact_sha256,
+            config_sha256: &identity.config_sha256,
+            tokenizer_sha256: &identity.tokenizer_sha256,
+            processor_sha256: &identity.processor_sha256,
+            template_sha256: &identity.template_sha256,
+        })
+    }
+
+    fn image_family_profile(&self) -> Option<(&str, u32)> {
+        self.model.image_family_profile()
+    }
+    fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
+        self.model.image_source_identity()
+    }
+
+    fn prepare_image(
+        &mut self,
+        input: Vec<u32>,
+        encoded: &[u8],
+        context: u32,
+        request_id: u64,
+    ) -> Result<(HybridPreparedRequest, PreparedImageMetadata), &'static str> {
+        self.clear_prefix_cache();
+        if !self.supports_images() {
+            return Err("images_not_supported");
+        }
+        if self.cancelled(request_id)? {
+            return Err("generation_cancelled");
+        }
+        let image = self.model.prepare_image(encoded).map_err(|_| "invalid_image_request")?;
+        let tokens = self.model.prepare_image_prompt(&input, &image, context).map_err(|_| "invalid_image_request")?;
+        if self.cancelled(request_id)? {
+            return Err("generation_cancelled");
+        }
+        let metadata = PreparedImageMetadata {
+            input_tokens: tokens.len(),
+            image_tokens: image.image_token_count(),
+            grid: image.grid(),
+            processed_dimensions: image.processed_dimensions(),
+        };
+        Ok((
+            HybridPreparedRequest {
+                image,
+                tokens,
+            },
+            metadata,
+        ))
+    }
+
+    fn generate_image(
+        &mut self,
+        prepared: HybridPreparedRequest,
+        options: &GenerationOptions,
+        on_text: Option<&mut TextCallback<'_>>,
+        on_progress: Option<&mut ProgressCallback<'_>>,
+    ) -> Result<GeneratedTokens, &'static str> {
+        self.clear_prefix_cache();
+        self.last_mtp = None;
+        self.nucleus_sampler.clear();
+        if options.mtp_drafts != 0 {
+            return Err("mtp_not_supported");
+        }
+        let _activity = stark_engine::engine::hybrid::activity::InferenceActivity::begin()
+            .map_err(|_| "inference_activity_unavailable")?;
+        if self.profile_output.is_some() {
+            profile::reset();
+            self.native_prefill_snapshot = None;
+        }
+        self.model.reset();
+        self.model.set_mtp_enabled(false).map_err(|_| "mtp_not_supported")?;
+        if self.profile_output.as_ref().is_some_and(|output| output.failed) {
+            return Err("native_profile_output_failed");
+        }
+        let input_tokens = prepared.tokens.len();
+        let result =
+            self.generate_inner(&prepared.tokens, 0, None, None, Some(prepared.image), options, on_text, on_progress);
+        self.model.reset();
+        let result = native_result_after_cleanup(result, self.model.is_fenced());
+        self.nucleus_sampler.clear();
+        if let Some(output) = self.profile_output.as_mut() {
+            let counters = profile::snapshot();
+            let native_phase_counters =
+                native_phase_counters(self.profile_mode, self.native_prefill_snapshot.take(), &counters);
+            output.write(&AggregateProfile {
+                schema_version: 1,
+                scope: self.profile_mode.expect("profile output has mode").scope(),
+                success: result.is_ok(),
+                input_tokens,
+                sampled_tokens: result.as_ref().ok().map(|tokens| tokens.sampled_tokens),
+                output_tokens: result.as_ref().ok().map(|tokens| tokens.generated_token_ids.len()),
+                counters,
+                native_phase_counters,
+            })?;
+        }
+        result
+    }
     fn vocab_size(&self) -> usize {
         self.model.vocab_size()
     }
@@ -568,7 +740,8 @@ impl GenerationBackend for HybridBackend {
             return Err("native_profile_output_failed");
         }
         let boundary = self.prefix_boundary(input, options);
-        let mut result = self.generate_inner(input, reused, retained.as_ref(), boundary, options, on_text, on_progress);
+        let mut result =
+            self.generate_inner(input, reused, retained.as_ref(), boundary, None, options, on_text, on_progress);
         // Host cancellation, callbacks and text decoding can fail after a
         // native iterator has closed successfully. Invalidate its native epoch
         // as well as the worker's retained entry before another request.
@@ -639,9 +812,17 @@ impl GenerationBackend for HybridBackend {
         }
     }
     fn runtime_identity(&self) -> Option<serde_json::Value> {
+        if let Some(identity) = &self.image_runtime_identity {
+            return Some(serde_json::json!({"backend":identity.backend,"device_name":identity.device_name,
+                "apple_gpu_family":identity.apple_gpu_family,"gpu_core_count":identity.gpu_core_count,
+                "supports_mxu":identity.supports_mxu}));
+        }
         Some(serde_json::json!({"backend":"stark_native_hybrid_metal","execution":"autoregressive"}))
     }
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
+        if self.image_runtime_identity.is_some() {
+            return None;
+        }
         self.model.mtp_capabilities().map(|capabilities| MtpCapabilities {
             max_drafts: capabilities.max_drafts,
             recommended_drafts: capabilities.recommended_drafts,
@@ -653,6 +834,9 @@ impl GenerationBackend for HybridBackend {
         self.last_mtp.clone()
     }
     fn default_mtp_drafts(&self) -> u32 {
+        if self.image_runtime_identity.is_some() {
+            return 0;
+        }
         self.model.default_mtp_drafts()
     }
     fn effective_mtp_drafts(

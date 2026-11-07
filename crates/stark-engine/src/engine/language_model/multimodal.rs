@@ -313,13 +313,29 @@ impl MultimodalPrefill {
     /// unsupported modality markers before constructing this request.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_new_scalar_bidirectional(
-        tokens: Box<[u64]>, image: ProjectedImage,
-        image_id: u64, start_id: u64, end_id: u64,
-        expected_identity: &Arc<()>, expected_model_dim: u32,
-        expected_dtype: DataType, vocab_size: u32, context_capacity: u32,
+        tokens: Box<[u64]>,
+        image: ProjectedImage,
+        image_id: u64,
+        start_id: u64,
+        end_id: u64,
+        expected_identity: &Arc<()>,
+        expected_model_dim: u32,
+        expected_dtype: DataType,
+        vocab_size: u32,
+        context_capacity: u32,
     ) -> Result<Self, InvalidInput> {
-        Self::try_new_gemma3(tokens, image, image_id, start_id, end_id, expected_identity,
-            expected_model_dim, expected_dtype, vocab_size, context_capacity)
+        Self::try_new_gemma3(
+            tokens,
+            image,
+            image_id,
+            start_id,
+            end_id,
+            expected_identity,
+            expected_model_dim,
+            expected_dtype,
+            vocab_size,
+            context_capacity,
+        )
     }
 
     pub(crate) fn bidirectional_image_range(&self) -> Option<Range<usize>> {

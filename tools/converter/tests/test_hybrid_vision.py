@@ -7,7 +7,7 @@ import pytest
 from test_hybrid_prepare import metadata
 
 from stark_convert import hybrid_prepare as hybrid
-from stark_convert.hybrid_vision import MANIFEST, PROCESSOR_BYTES, prepare_image_artifact
+from stark_convert.hybrid_vision import MANIFEST, PROCESSOR_BYTES, prepare_image_artifact, prepared_image_identity
 
 
 def fixture(tmp_path, monkeypatch):
@@ -52,3 +52,35 @@ def test_image_upgrade_requires_complete_declared_tower_and_regular_metadata(tmp
         prepare_image_artifact(tmp_path, "qwen38-lily-q4-xl")
     with pytest.raises(ValueError, match="supported Qwen"):
         prepare_image_artifact(tmp_path, "qwen38-mixed")
+
+
+def test_retained_image_host_inspection_binds_metadata_and_inventory(tmp_path, monkeypatch):
+    fixture(tmp_path, monkeypatch)
+    assert prepared_image_identity(tmp_path) is None
+    manifest = prepare_image_artifact(tmp_path, "qwen38-lily-q4-xl")
+    assert prepared_image_identity(tmp_path) == manifest
+    # Payload admission belongs to the native loader. Host refresh still checks
+    # the exact inventory and size, without streaming checkpoint payloads.
+    (tmp_path / "model.safetensors").write_bytes(b"shorter")
+    assert prepared_image_identity(tmp_path) is None
+
+
+@pytest.mark.parametrize("field,value", [("schema_version", True), ("family_version", True),
+                                       ("artifact_sha256", "0" * 64), ("model_revision", "0" * 40)])
+def test_retained_image_host_inspection_rejects_descriptor_drift(tmp_path, monkeypatch, field, value):
+    fixture(tmp_path, monkeypatch)
+    manifest = prepare_image_artifact(tmp_path, "qwen38-lily-q4-xl")
+    manifest[field] = value
+    (tmp_path / MANIFEST).write_text(json.dumps(manifest))
+    assert prepared_image_identity(tmp_path) is None
+
+
+def test_retained_image_host_inspection_rejects_component_changes_and_duplicate_keys(tmp_path, monkeypatch):
+    fixture(tmp_path, monkeypatch)
+    manifest = prepare_image_artifact(tmp_path, "qwen38-lily-q4-xl")
+    path = tmp_path / MANIFEST
+    path.write_text(json.dumps(manifest)[:-1] + ', "family_version":1}')
+    assert prepared_image_identity(tmp_path) is None
+    path.write_text(json.dumps(manifest))
+    (tmp_path / "preprocessor_config.json").write_bytes(b"{}")
+    assert prepared_image_identity(tmp_path) is None

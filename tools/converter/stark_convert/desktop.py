@@ -71,7 +71,12 @@ from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
 from .sources import huggingface_repository
-from .vision_runtime import VISION_MODEL_TYPES, artifact_image_family, supported_image_family, supported_vision_schema
+from .vision_runtime import (
+    VISION_MODEL_TYPES,
+    model_image_family,
+    supported_image_family,
+    supported_vision_schema,
+)
 
 MAX_COMMAND_BYTES = 1024 * 1024
 MAX_PROGRESS_BYTES = 4096
@@ -157,9 +162,8 @@ def model_valid(path):
         if config.get("type") in VISION_MODEL_TYPES:
             codec = config.get("token_codec_config", {})
             contract = config.get("artifact_contract")
-            if (
-                not isinstance(contract, dict)
-                or not supported_vision_schema(config["type"], contract.get("schema_version"))
+            if not isinstance(contract, dict) or not supported_vision_schema(
+                config["type"], contract.get("schema_version")
             ):
                 return False
             return (
@@ -1625,7 +1629,7 @@ class Desktop:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
             if converted:
                 config = read_model_config(path)
-                stored_mode = "vision-language" if config.get("type") in VISION_MODEL_TYPES else "text"
+                stored_mode = "vision-language" if model_image_family(config, path) is not None else "text"
                 if artifact_mode is not None and selected_mode != stored_mode:
                     raise DesktopError("The selected conversion mode does not match this Stark artifact.")
                 selected_mode = stored_mode
@@ -1642,10 +1646,10 @@ class Desktop:
             if (
                 native_item is None
                 or expected_revision != native_item["revision"]
-                or selected_mode != "text"
-                or support_mode not in (None, "text")
+                or selected_mode not in native_item["artifact_modes"]
+                or support_mode not in (None, selected_mode)
             ):
-                raise DesktopError("Choose a pinned native text model from the catalogue.")
+                raise DesktopError("Choose a pinned native model from the catalogue.")
             source_key, name, converted = "huggingface:" + native_item["repo"], native_item["name"], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
@@ -1730,6 +1734,8 @@ class Desktop:
                 command = [sys.executable, "-I", "-B", "-m"]
                 if kind == "native":
                     command.extend(["stark_convert.hybrid_prepare", source, "--output", str(output)])
+                    if selected_mode == "vision-language":
+                        command.extend(["--artifact-mode", "vision-language"])
                 else:
                     command.extend(
                         [
@@ -1831,13 +1837,16 @@ class Desktop:
         """Check a family artifact before publishing it, with one loaded worker."""
         config = read_model_config(path)
         contract = config.get("artifact_contract", {})
+        family = model_image_family(config, path)
         if (
-            config.get("type") not in VISION_MODEL_TYPES
+            family is None
             or not isinstance(contract, dict)
-            or contract.get("schema_version") not in (3, 4, 5)
+            or (
+                family.get("profile") != "qwen38-lily-retained-bf16-vision-v1"
+                and contract.get("schema_version") not in (3, 4, 5)
+            )
         ):
             return None
-        family = artifact_image_family(config)
         if not supported_image_family(family):
             raise DesktopError("This image model family is not supported.")
         with self.lock:
@@ -1883,7 +1892,7 @@ class Desktop:
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
-        vision = read_model_config(Path(model["path"])).get("type") in VISION_MODEL_TYPES
+        vision = model_image_family(read_model_config(Path(model["path"])), Path(model["path"])) is not None
         codec, template = (None, None) if vision else load_template(Path(model["path"]))
         if mode == "decision" and vision:
             raise DesktopError("Vision-language artifacts support Chat mode only.")

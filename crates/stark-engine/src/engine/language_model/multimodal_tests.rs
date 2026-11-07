@@ -101,6 +101,27 @@ impl TinyModel {
         fixture
     }
 
+    fn scalar_bidirectional_images(
+        model_dim: u32,
+        reference: bool,
+    ) -> Self {
+        let fixture = Self::gemma4_images(model_dim);
+        let path = fixture.directory.join("config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["decoder_config"]["gemma4_image_embeddings"] = json!(false);
+        config["decoder_config"]["scalar_image_embeddings"] = json!(true);
+        config["decoder_config"]["bidirectional_image_attention"] = json!(true);
+        for layer in config["decoder_config"]["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+            layer["rope_config"] = json!({
+                "type":"LinearScalingRoPEConfig", "base":100.0, "head_dim":4,
+                "max_sequence_length":CAPACITY, "scaling_factor":8.0,
+            });
+            layer["mixer_config"]["reference_bf16"] = json!(reference);
+        }
+        fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        fixture
+    }
+
     fn with_rope_mix(
         model_dim: u32,
         mixed_scalar_rope: bool,
@@ -884,4 +905,49 @@ fn native_image_fusion_matches_lookup_and_chunked_decoder_metal() {
     // Metal attention instantiates head widths 64 and larger. Rotate the same
     // four-channel prefix while exercising its actual GPU feature copy path.
     fusion_and_cache_parity::<crate::backends::metal::Metal>(128);
+}
+
+fn scalar_bidirectional_linear_rope_stream<B: Backend>() {
+    for reference in [false, true] {
+        let fixture = TinyModel::scalar_bidirectional_images(128, reference);
+        let engine = Engine::<B>::new().unwrap();
+        let model = engine.load_language_model(&fixture.directory).unwrap();
+        assert!(model.decoder.scalar_multimodal_supported());
+        let old = fixture.prefill(&model, 0);
+        let input = MultimodalPrefill::try_new_gemma3(
+            old.tokens,
+            old.image,
+            SPECIAL_IDS.image,
+            SPECIAL_IDS.vision_start,
+            SPECIAL_IDS.vision_end,
+            &model.model_identity,
+            128,
+            DataType::BF16,
+            VOCAB,
+            64,
+        )
+        .unwrap();
+        let mut state = model.create_empty_state(Some(64), 0).unwrap();
+        let result = model.stream_multimodal(&input, &mut state, greedy_options(&model));
+        if reference {
+            assert!(result.is_err(), "causal-only eager score path must reject image masks");
+        } else {
+            let generated = result.unwrap().take(2).collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(generated.len(), 2);
+            assert!(state.has_multimodal_context());
+            assert_eq!(state.transformer_state.rotary_position_delta(), None);
+        }
+    }
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn scalar_bidirectional_linear_rope_image_stream_cpu() {
+    scalar_bidirectional_linear_rope_stream::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn scalar_bidirectional_linear_rope_image_stream_metal() {
+    scalar_bidirectional_linear_rope_stream::<crate::backends::metal::Metal>();
 }
