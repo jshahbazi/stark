@@ -593,7 +593,8 @@ def resolve_source(
                 raise UnsupportedConversion("Vision conversion requires the pinned official checkpoint")
             revision = VISION_REVISION
         else:
-            if entry is not None and entry.get("adapter") != "qwen3_5":
+            gemma3 = architecture == "gemma3" or repo in {"google/gemma-3-4b-it", "google/gemma-3-12b-it", "google/gemma-3-27b-it"}
+            if entry is not None and entry.get("adapter") != "qwen3_5" and not gemma3:
                 raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
             # Vision family sources always bind their own metadata, even when
             # the text catalog has external metadata rules for this repository.
