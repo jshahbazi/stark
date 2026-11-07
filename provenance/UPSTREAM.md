@@ -324,8 +324,14 @@ private canonical replay imports unchanged Transformers 5.15.1 with Torch
 2.14.1 and records hashes of both model implementation modules. Model weights
 remain subject to Google's Gemma terms and are never committed.
 
-The fixed-resolution bilinear resizer follows Pillow's documented half-pixel
-antialias convention and 22-bit normalized coefficient quantization. The
+The fixed-resolution bilinear resizer follows the pinned Torchvision CPU
+processor's half-pixel antialias convention and adaptive signed-int16
+coefficient quantization from PyTorch `UpSampleKernel.cpp` at
+`5c4886908584029761b579af026dcfb627c84070`, source SHA-256
+`3130e86b56234a8da4c6347d973721d49845d1c7cdbdad2e27dd11f4f869d708`.
+The existing PyTorch BSD notice and supplemental distribution manifest retain
+its license and adaptation scope. Fixed Pillow 22-bit coefficients are not
+numerically identical for nonuniform images. This policy is Gemma3-specific. The
 spatial average-pooling CPU/Metal kernels, processor admission, opaque image
 ownership, staged transport and artifact contracts are Stark implementations.
 Existing source-bound BF16 normalization, activation and matrix primitives keep

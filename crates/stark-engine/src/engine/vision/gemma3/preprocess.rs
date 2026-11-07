@@ -1,7 +1,7 @@
 //! Bounded Gemma 3 fixed-resolution image preprocessing.
 //!
-//! Follows Google/Hugging Face Transformers v4.53.3 Gemma3ImageProcessor:
-//! upright RGB, alpha discarded, PIL antialiased bilinear uint8 resize to
+//! Follows the pinned Transformers 5.15.1 CPU Gemma3ImageProcessor backend:
+//! upright RGB, alpha discarded, Torchvision antialiased bilinear uint8 resize to
 //! 896 square, rescale by 1/255, normalize by mean/std 0.5. Pan-and-scan is
 //! disabled in this versioned profile. Conv2d patches use channel/y/x order.
 
@@ -30,11 +30,14 @@ fn dimensions(
     Ok(())
 }
 
-// Pillow 11.x Resample.c uses 22-bit normalized coefficients, a half-pixel
-// center and antialias filter support widened by the downsampling factor.
+// The pinned CPU Torchvision backend uses a half-pixel center and widens
+// antialias support for downsampling. Its uint8 kernel quantizes coefficients
+// into signed int16, selecting one precision per axis from the maximum weight.
+// Fixed Pillow 22-bit coefficients differ on nonuniform images.
 struct Coefficients {
     start: usize,
     weights: Vec<i32>,
+    precision: u32,
 }
 
 fn coefficients(
@@ -46,24 +49,38 @@ fn coefficients(
     }
     let scale = f64::from(input) / f64::from(output);
     let filter_scale = scale.max(1.0);
-    let mut result = Vec::with_capacity(output as usize);
+    let mut rows = Vec::with_capacity(output as usize);
+    let mut maximum = 0.0f64;
     for index in 0..output {
         let center = (f64::from(index) + 0.5) * scale;
         let start = ((center - filter_scale + 0.5) as i64).max(0) as usize;
         let end = ((center + filter_scale + 0.5) as i64).min(i64::from(input)).max(start as i64) as usize;
-        let weights: Vec<f64> = (start..end)
-            .map(|position| (1.0 - ((position as f64 - center + 0.5) / filter_scale).abs()).max(0.0))
-            .collect();
+        let invscale = if scale >= 1.0 {
+            1.0 / scale
+        } else {
+            1.0
+        };
+        let mut weights: Vec<f64> =
+            (start..end).map(|position| (1.0 - ((position as f64 - center + 0.5) * invscale).abs()).max(0.0)).collect();
         let total: f64 = weights.iter().sum();
         if total <= 0.0 {
             return Err(InvalidInput("Gemma 3 resize has empty coefficients"));
         }
-        result.push(Coefficients {
-            start,
-            weights: weights.into_iter().map(|weight| (0.5 + weight / total * f64::from(1 << 22)) as i32).collect(),
-        });
+        for weight in &mut weights {
+            *weight /= total;
+            maximum = maximum.max(*weight);
+        }
+        rows.push((start, weights));
     }
-    Ok(result)
+    let precision = (0..22).find(|bits| (0.5 + maximum * f64::from(1 << (bits + 1))) as i32 >= (1 << 15)).unwrap_or(22);
+    Ok(rows
+        .into_iter()
+        .map(|(start, weights)| Coefficients {
+            start,
+            weights: weights.into_iter().map(|weight| (0.5 + weight * f64::from(1 << precision)) as i32).collect(),
+            precision,
+        })
+        .collect())
 }
 
 pub(crate) fn resize_rgb(image: &RgbImage) -> Result<Vec<u8>, InvalidInput> {
@@ -76,13 +93,13 @@ pub(crate) fn resize_rgb(image: &RgbImage) -> Result<Vec<u8>, InvalidInput> {
         for y in 0..image.height() as usize {
             for (x, row) in coefficients.iter().enumerate() {
                 for channel in 0..3 {
-                    let mut sum = 1i64 << 21;
+                    let mut sum = 1i64 << (row.precision - 1);
                     for (index, weight) in row.weights.iter().enumerate() {
                         sum +=
                             i64::from(image.pixels()[(y * image.width() as usize + row.start + index) * 3 + channel])
                                 * i64::from(*weight);
                     }
-                    pixels[(y * SIDE as usize + x) * 3 + channel] = (sum >> 22).clamp(0, 255) as u8;
+                    pixels[(y * SIDE as usize + x) * 3 + channel] = (sum >> row.precision).clamp(0, 255) as u8;
                 }
             }
         }
@@ -96,12 +113,12 @@ pub(crate) fn resize_rgb(image: &RgbImage) -> Result<Vec<u8>, InvalidInput> {
     for (y, row) in coefficients.iter().enumerate() {
         for x in 0..SIDE as usize {
             for channel in 0..3 {
-                let mut sum = 1i64 << 21;
+                let mut sum = 1i64 << (row.precision - 1);
                 for (index, weight) in row.weights.iter().enumerate() {
                     sum += i64::from(horizontal[((row.start + index) * SIDE as usize + x) * 3 + channel])
                         * i64::from(*weight);
                 }
-                pixels[(y * SIDE as usize + x) * 3 + channel] = (sum >> 22).clamp(0, 255) as u8;
+                pixels[(y * SIDE as usize + x) * 3 + channel] = (sum >> row.precision).clamp(0, 255) as u8;
             }
         }
     }
@@ -137,6 +154,7 @@ pub(crate) fn prepare_rgb(image: &RgbImage) -> Result<Gemma3Patches, InvalidInpu
 #[cfg(test)]
 mod tests {
     use image::ImageEncoder;
+    use sha2::{Digest, Sha256};
     use stark_engine_macros::stark_test;
 
     use super::*;
@@ -168,5 +186,36 @@ mod tests {
         assert!(dimensions(8000, 8000).is_err());
         assert!(prepare(b"invalid image").is_err());
         assert!(coefficients(0, 896).is_err());
+    }
+
+    #[stark_test]
+    fn gemma3_nonuniform_resize_matches_pinned_torchvision_cpu() {
+        // Original CPU processor, Transformers 5.15.1 / Torch 2.14.1. Hashes
+        // cover every BF16 patch converted to little-endian FP32, including
+        // upsampling, antialiased downsampling and each unchanged-size axis.
+        for (width, height, expected) in [
+            (111, 79, "b4000b96dc6cd6eed18564b526bcdb6b476ae6f941b3d07013833b30f4dd3687"),
+            (1793, 1297, "b3f03bdd12c6c1fc15349e1603d4a7bec4fb0f2e1e54dfd71a57b1f4b505f0c2"),
+            (896, 79, "ebee190f73267d4c561fbfd8162bd03c4b32722626901e624959446845b16d5e"),
+            (111, 896, "a4197804a4280661063a14b978d8124e7e8de34d8a7e99cd6da06af314bcf0fc"),
+        ] {
+            let mut pixels = Vec::with_capacity((width * height * 3) as usize);
+            for y in 0..height {
+                for x in 0..width {
+                    pixels.extend_from_slice(&[
+                        ((x * 17 + y * 3) % 256) as u8,
+                        ((x * 5 + y * 19) % 256) as u8,
+                        ((x * 11 + y * 7) % 256) as u8,
+                    ]);
+                }
+            }
+            let image = RgbImage::try_new(width, height, pixels, &PreprocessLimits::default()).unwrap();
+            let patches = prepare_rgb(&image).unwrap();
+            let mut hash = Sha256::new();
+            for value in &patches.patches {
+                hash.update(value.to_f32().to_le_bytes());
+            }
+            assert_eq!(format!("{:x}", hash.finalize()), expected, "pinned nonuniform processor differs");
+        }
     }
 }
