@@ -73,6 +73,56 @@ def save(folder, name, value):
     }
 
 
+def operator_capture(tower, namespace, folder, record):
+    """Observe unchanged source operators on their own inputs, without recoding them."""
+    handles = []
+    block = tower.blocks[0]
+    modules = {
+        "patch": tower.patch_embed,
+        "norm1": block.norm1,
+        "qkv": block.attn.qkv,
+        "projection": block.attn.proj,
+        "norm2": block.norm2,
+        "fc1": block.mlp.linear_fc1,
+        "fc2": block.mlp.linear_fc2,
+        "merger_norm": tower.merger.norm,
+        "merger_fc1": tower.merger.linear_fc1,
+        "merger_fc2": tower.merger.linear_fc2,
+    }
+
+    def capture(name):
+        def hook(module, inputs, output):
+            value = inputs[0]
+            if name == "patch":
+                value = value.reshape(-1, 1536)
+            record.append({"operator": name,
+                           "input": save(folder, name + "_input", value),
+                           "output": save(folder, name + "_output", output)})
+        return hook
+
+    for name, module in modules.items():
+        handles.append(module.register_forward_hook(capture(name)))
+    original = namespace["eager_attention_forward"]
+
+    def eager(*args, **kwargs):
+        result = original(*args, **kwargs)
+        _, query, key, value = args[:4]
+        qkv = torch.cat([tensor[0].transpose(0, 1).reshape(-1, 1152)
+                         for tensor in (query, key, value)], dim=-1)
+        record.append({"operator": "attention",
+                       "input": save(folder, "attention_input", qkv),
+                       "output": save(folder, "attention_output", result[0].reshape(-1, 1152))})
+        return result
+
+    namespace["eager_attention_forward"] = eager
+
+    def close():
+        namespace["eager_attention_forward"] = original
+        for handle in handles:
+            handle.remove()
+    return close
+
+
 def main(args):
     global PHASE
     assert sys.platform == "darwin" and torch.__version__ == "2.14.1"
@@ -259,10 +309,28 @@ def main(args):
             }
             for depth in (0, 1, 27):
                 tower.blocks = original_blocks[:depth]
+                close = None
+                if args.operators and depth == 1:
+                    record["operators"] = []
+                    close = operator_capture(tower, ns, folder, record["operators"])
                 with torch.inference_mode():
                     output = tower(
                         pixels, grid_thw=torch.tensor([case["grid"]], dtype=torch.long)
                     )
+                if close:
+                    close()
+                    operators = {item["operator"]: item for item in record["operators"]}
+                    for name, before, after in (
+                        ("position", ("patch", "output"), ("norm1", "input")),
+                        ("rotary", ("qkv", "output"), ("attention", "input")),
+                        ("gelu_tanh", ("fc1", "output"), ("fc2", "input")),
+                        ("gelu_erf", ("merger_fc1", "output"), ("merger_fc2", "input")),
+                    ):
+                        record["operators"].append({
+                            "operator": name,
+                            "input": operators[before[0]][before[1]],
+                            "output": operators[after[0]][after[1]],
+                        })
                 record["stages"].append(
                     {
                         "blocks": depth,
@@ -296,6 +364,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     for name in ("model", "sources", "helpers", "pixels", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--operators", action="store_true",
+                        help="save same-input source operator controls at one block")
     try:
         main(parser.parse_args())
     except BaseException as error:  # noqa: BLE001 - content-free private diagnostic

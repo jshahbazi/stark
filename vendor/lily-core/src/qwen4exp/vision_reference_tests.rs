@@ -54,6 +54,83 @@ fn check_weight(record: &Value, name: &str, tensor: &Tensor) {
     );
 }
 
+fn numerical_metric(actual: &[f32], expected: &[bf16]) -> (f64, f64) {
+    assert_eq!(actual.len(), expected.len());
+    let (mut error, mut reference_norm, mut actual_norm, mut dot) =
+        (0_f64, 0_f64, 0_f64, 0_f64);
+    for (&a, &b) in actual.iter().zip(expected) {
+        let (a, b) = (f64::from(a), f64::from(f32::from(b)));
+        assert!(a.is_finite() && b.is_finite());
+        error += (a - b).powi(2);
+        reference_norm += b * b;
+        actual_norm += a * a;
+        dot += a * b;
+    }
+    ((error / reference_norm).sqrt(), dot / (actual_norm * reference_norm).sqrt())
+}
+
+/// Each operator gets the source's input, so accumulated error from earlier
+/// operators cannot hide the first arithmetic difference. These are private
+/// fixture controls over existing kernels; the production graph is unchanged.
+fn operator_metrics(
+    context: &MetalContext,
+    vision: &super::super::config::VisionConfig,
+    weights: &super::super::vision_weights::VisionWeights,
+    folder: &Path,
+    case: &Value,
+    gh: usize,
+    gw: usize,
+) -> Vec<Value> {
+    let Some(operators) = case["operators"].as_array() else { return Vec::new() };
+    let block = &weights.blocks[0];
+    operators.iter().enumerate().map(|(index, record)| {
+        let name = record["operator"].as_str().expect("private operator name missing");
+        let source = checked_tensor(folder, &record["input"]);
+        let expected = checked_tensor(folder, &record["output"]);
+        let shape = |key: &str| record[key]["shape"].as_array().unwrap().iter()
+            .map(|value| usize::try_from(value.as_u64().unwrap()).unwrap()).collect::<Vec<_>>();
+        let input = Tensor::from_bytes(context, bytemuck::cast_slice(&source), &shape("input"), DType::BF16).unwrap();
+        let output = Tensor::zeros(context, &shape("output"), DType::BF16).unwrap();
+        let pass = context.begin().unwrap();
+        let linear = match name {
+            "patch" => Some((&weights.patch_proj_w, &weights.patch_proj_b)),
+            "qkv" => Some((&block.qkv_w, &block.qkv_b)),
+            "projection" => Some((&block.proj_w, &block.proj_b)),
+            "fc1" => Some((&block.fc1_w, &block.fc1_b)),
+            "fc2" => Some((&block.fc2_w, &block.fc2_b)),
+            "merger_fc1" => Some((&weights.merger_fc1_w, &weights.merger_fc1_b)),
+            "merger_fc2" => Some((&weights.merger_fc2_w, &weights.merger_fc2_b)),
+            _ => None,
+        };
+        let result = if let Some((weight, bias)) = linear {
+            gemm_bf16_nt_bias(context, &pass, &input, weight, bias, &output)
+        } else {
+            match name {
+                "norm1" => layernorm_bf16(context, &pass, &input, &block.norm1_w, &block.norm1_b, &output, LAYERNORM_EPS),
+                "norm2" => layernorm_bf16(context, &pass, &input, &block.norm2_w, &block.norm2_b, &output, LAYERNORM_EPS),
+                "merger_norm" => layernorm_bf16(context, &pass, &input, &weights.merger_norm_w, &weights.merger_norm_b, &output, LAYERNORM_EPS),
+                "attention" => attention_full_bf16(context, &pass, &input, &output, vision.num_heads, (vision.head_dim() as f32).powf(-0.5)),
+                "position" | "rotary" | "gelu_tanh" | "gelu_erf" => {
+                    // These kernels operate in place; preserve the exact fixture input.
+                    output.write_bytes(bytemuck::cast_slice(&source)).unwrap();
+                    match name {
+                        "position" => patch_pos_embed_bf16(context, &pass, &output, &weights.pos_embed, gh, gw),
+                        "rotary" => qkv_rope_2d_bf16(context, &pass, &output, vision.num_heads, gh, gw, ROPE_THETA),
+                        "gelu_tanh" => gelu_bf16(context, &pass, &output, Gelu::Tanh),
+                        _ => gelu_bf16(context, &pass, &output, Gelu::Erf),
+                    }
+                },
+                _ => panic!("private operator unsupported"),
+            }
+        };
+        result.unwrap_or_else(|_| panic!("private operator execution failed"));
+        pass.commit_wait().unwrap_or_else(|_| panic!("private operator synchronization failed"));
+        let actual = output.to_f32().unwrap_or_else(|_| panic!("private operator readback failed"));
+        let (rms, cosine) = numerical_metric(&actual, &expected);
+        json!({"operator_index":index,"elements":actual.len(),"relative_rms":rms,"cosine":cosine})
+    }).collect()
+}
+
 #[test]
 #[ignore = "requires an explicitly selected retained artifact, source-bound fixture and GPU lease"]
 fn retained_lily_tower_source_reference() {
@@ -150,6 +227,7 @@ fn retained_lily_tower_source_reference() {
     }
     let mut scratch = None;
     let mut metrics = Vec::new();
+    let mut operators = Vec::new();
     for (case_index, case) in
         manifest["cases"].as_array().expect("private cases missing").iter().enumerate()
     {
@@ -170,6 +248,7 @@ fn retained_lily_tower_source_reference() {
         let pixels = checked_tensor(&folder, &case["pixels"]);
         assert_eq!(pixels.len(), gh * gw * vision.patch_dim());
         let pixels = pixels.into_iter().map(f32::from).collect::<Vec<_>>();
+        operators.push(json!({"case_index":case_index,"metrics":operator_metrics(&context, vision, &weights, &folder, case, gh, gw)}));
         for stage in case["stages"].as_array().unwrap() {
             let depth = usize::try_from(stage["blocks"].as_u64().unwrap()).unwrap();
             assert!(matches!(depth, 0 | 1 | 27));
@@ -189,23 +268,12 @@ fn retained_lily_tower_source_reference() {
                 .merged
                 .to_f32()
                 .unwrap_or_else(|_| panic!("private retained tower readback failed"));
-            assert_eq!(actual.len(), expected.len());
-            let (mut error, mut reference_norm, mut actual_norm, mut dot) =
-                (0_f64, 0_f64, 0_f64, 0_f64);
-            for (&a, b) in actual.iter().zip(expected) {
-                let (a, b) = (f64::from(a), f64::from(f32::from(b)));
-                assert!(a.is_finite() && b.is_finite());
-                error += (a - b).powi(2);
-                reference_norm += b * b;
-                actual_norm += a * a;
-                dot += a * b;
-            }
-            let rms = (error / reference_norm).sqrt();
-            let cosine = dot / (actual_norm * reference_norm).sqrt();
+            let (rms, cosine) = numerical_metric(&actual, &expected);
             metrics.push(json!({"case_index":case_index,"blocks":depth,"elements":actual.len(),"relative_rms":rms,"cosine":cosine}));
         }
     }
     println!("{}", json!({"private_retained_tower_metrics":metrics}));
+    println!("{}", json!({"private_retained_operator_metrics":operators}));
     assert!(
         metrics.iter().all(|metric| metric["relative_rms"].as_f64().unwrap() <= 0.02
             && metric["cosine"].as_f64().unwrap() >= 0.999),
