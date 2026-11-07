@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .gemma3_contract import gemma3_source_files, normalize_processor
 from .model_support import (
     check_hub_metadata_size,
     check_vision_processing_metadata,
@@ -35,7 +36,6 @@ from .vision_contract import REPO as VISION_REPO
 from .vision_contract import REVISION as VISION_REVISION
 from .vision_contract import source_rules
 from .vision_family import family_source_files, read_family_config
-from .gemma3_contract import gemma3_source_files, normalize_processor
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _HASH = re.compile(r"[0-9a-f]{64}")

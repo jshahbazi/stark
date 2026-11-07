@@ -19,6 +19,7 @@ from functools import partial
 from pathlib import Path
 
 from . import __version__
+from .adapters.gemma4_vision import PROFILES as GEMMA4_IMAGE_PROFILES
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
 from .model_support import MODES, preflight_source, support_matrix
 from .profiles import GENERIC_PROFILE, generic_entry
@@ -34,7 +35,6 @@ from .registry import (
 )
 from .sources import SourceSnapshot, huggingface_repository, resolve_source
 from .streaming import ConversionError, UnsupportedConversion, read_json, read_regular_bytes, write_plan
-from .adapters.gemma4_vision import PROFILES as GEMMA4_IMAGE_PROFILES
 from .vision_contract import REPO as VISION_REPO
 from .vision_contract import source_rules, validate_vision_source
 from .vision_family import (
