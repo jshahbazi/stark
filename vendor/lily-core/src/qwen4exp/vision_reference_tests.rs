@@ -69,6 +69,184 @@ fn numerical_metric(actual: &[f32], expected: &[bf16]) -> (f64, f64) {
     ((error / reference_norm).sqrt(), dot / (actual_norm * reference_norm).sqrt())
 }
 
+/// Bounded first-block sequence, using the same scratch layout and production
+/// kernels. Readbacks are aggregate comparisons only. The caller separately
+/// requires the final merged bits to equal the ordinary one-pass graph.
+fn first_block_metrics(
+    context: &MetalContext,
+    vision: &super::super::config::VisionConfig,
+    weights: &super::super::vision_weights::VisionWeights,
+    scratch: &mut Option<VisionScratch>,
+    folder: &Path,
+    case: &Value,
+    pixels: &[f32],
+    gh: usize,
+    gw: usize,
+) -> Option<Vec<f32>> {
+    let records = case["operators"].as_array()?;
+    let expected = |operator: &str, field: &str| {
+        let record = records
+            .iter()
+            .find(|record| record["operator"] == operator)
+            .expect("private sequence reference missing");
+        checked_tensor(folder, &record[field])
+    };
+    let (n, hid, merge_dim) = (gh * gw, vision.hidden_size, vision.merge_dim());
+    VisionTower::ensure_scratch(context, scratch, vision, n).unwrap();
+    let s = scratch.as_ref().unwrap();
+    let px = s.pixels.view(0, &[n, vision.patch_dim()]).unwrap();
+    let x = s.x.view(0, &[n, hid]).unwrap();
+    let h = s.h.view(0, &[n, hid]).unwrap();
+    let qkv = s.qkv.view(0, &[n, 3 * hid]).unwrap();
+    let attn = s.attn.view(0, &[n, hid]).unwrap();
+    let tmp = s.tmp.view(0, &[n, hid]).unwrap();
+    let mlp = s.mlp.view(0, &[n, vision.intermediate_size]).unwrap();
+    let h4 = s.h.view(0, &[n / 4, merge_dim]).unwrap();
+    let mlp4 = s.mlp.view(0, &[n / 4, merge_dim]).unwrap();
+    let merged = s.merged.view(0, &[n / 4, vision.out_hidden_size]).unwrap();
+    let cast = pixels.iter().map(|value| bf16::from_f32(*value)).collect::<Vec<_>>();
+    px.write_bytes(bytemuck::cast_slice(&cast)).unwrap();
+    let block = &weights.blocks[0];
+    let mut metrics = Vec::new();
+    macro_rules! stage {
+        ($tensor:expr, $operator:expr, $field:expr, $dispatch:expr) => {{
+            let pass = context.begin().unwrap();
+            ($dispatch)(&pass).unwrap_or_else(|_: anyhow::Error| panic!("private sequence execution failed"));
+            pass.commit_wait().unwrap_or_else(|_| panic!("private sequence synchronization failed"));
+            let actual = $tensor.to_f32().unwrap();
+            let (rms, cosine) = numerical_metric(&actual, &expected($operator, $field));
+            metrics.push(json!({"stage_index":metrics.len(),"elements":actual.len(),"relative_rms":rms,"cosine":cosine}));
+        }};
+    }
+    stage!(x, "patch", "output", |pass| gemm_bf16_nt_bias(
+        context,
+        pass,
+        &px,
+        &weights.patch_proj_w,
+        &weights.patch_proj_b,
+        &x
+    ));
+    stage!(x, "position", "output", |pass| patch_pos_embed_bf16(
+        context,
+        pass,
+        &x,
+        &weights.pos_embed,
+        gh,
+        gw
+    ));
+    stage!(h, "norm1", "output", |pass| layernorm_bf16(
+        context,
+        pass,
+        &x,
+        &block.norm1_w,
+        &block.norm1_b,
+        &h,
+        LAYERNORM_EPS
+    ));
+    stage!(qkv, "qkv", "output", |pass| gemm_bf16_nt_bias(
+        context,
+        pass,
+        &h,
+        &block.qkv_w,
+        &block.qkv_b,
+        &qkv
+    ));
+    stage!(qkv, "rotary", "output", |pass| qkv_rope_2d_bf16(
+        context,
+        pass,
+        &qkv,
+        vision.num_heads,
+        gh,
+        gw,
+        ROPE_THETA
+    ));
+    stage!(attn, "attention", "output", |pass| attention_full_bf16(
+        context,
+        pass,
+        &qkv,
+        &attn,
+        vision.num_heads,
+        (vision.head_dim() as f32).powf(-0.5)
+    ));
+    stage!(tmp, "projection", "output", |pass| gemm_bf16_nt_bias(
+        context,
+        pass,
+        &attn,
+        &block.proj_w,
+        &block.proj_b,
+        &tmp
+    ));
+    stage!(x, "norm2", "input", |pass| add_bf16(context, pass, &x, &tmp, &x));
+    stage!(h, "norm2", "output", |pass| layernorm_bf16(
+        context,
+        pass,
+        &x,
+        &block.norm2_w,
+        &block.norm2_b,
+        &h,
+        LAYERNORM_EPS
+    ));
+    stage!(mlp, "fc1", "output", |pass| gemm_bf16_nt_bias(
+        context,
+        pass,
+        &h,
+        &block.fc1_w,
+        &block.fc1_b,
+        &mlp
+    ));
+    stage!(mlp, "gelu_tanh", "output", |pass| gelu_bf16(
+        context,
+        pass,
+        &mlp,
+        Gelu::Tanh
+    ));
+    stage!(tmp, "fc2", "output", |pass| gemm_bf16_nt_bias(
+        context,
+        pass,
+        &mlp,
+        &block.fc2_w,
+        &block.fc2_b,
+        &tmp
+    ));
+    stage!(x, "merger_norm", "input", |pass| add_bf16(context, pass, &x, &tmp, &x));
+    stage!(h, "merger_norm", "output", |pass| layernorm_bf16(
+        context,
+        pass,
+        &x,
+        &weights.merger_norm_w,
+        &weights.merger_norm_b,
+        &h,
+        LAYERNORM_EPS
+    ));
+    stage!(mlp4, "merger_fc1", "output", |pass| gemm_bf16_nt_bias(
+        context,
+        pass,
+        &h4,
+        &weights.merger_fc1_w,
+        &weights.merger_fc1_b,
+        &mlp4
+    ));
+    stage!(mlp4, "gelu_erf", "output", |pass| gelu_bf16(
+        context,
+        pass,
+        &mlp4,
+        Gelu::Erf
+    ));
+    stage!(merged, "merger_fc2", "output", |pass| gemm_bf16_nt_bias(
+        context,
+        pass,
+        &mlp4,
+        &weights.merger_fc2_w,
+        &weights.merger_fc2_b,
+        &merged
+    ));
+    println!(
+        "{}",
+        json!({"private_retained_sequence_metrics":{"patches":n,"stages":metrics}})
+    );
+    Some(merged.to_f32().unwrap())
+}
+
 /// Each operator gets the source's input, so accumulated error from earlier
 /// operators cannot hide the first arithmetic difference. These are private
 /// fixture controls over existing kernels; the production graph is unchanged.
@@ -271,6 +449,17 @@ fn retained_lily_tower_source_reference() {
         assert_eq!(pixels.len(), gh * gw * vision.patch_dim());
         let pixels = pixels.into_iter().map(f32::from).collect::<Vec<_>>();
         operators.push(json!({"case_index":case_index,"metrics":operator_metrics(&context, vision, &weights, &folder, case, gh, gw)}));
+        let sequence = first_block_metrics(
+            &context,
+            vision,
+            &weights,
+            &mut scratch,
+            &folder,
+            case,
+            &pixels,
+            gh,
+            gw,
+        );
         for stage in case["stages"].as_array().unwrap() {
             let depth = usize::try_from(stage["blocks"].as_u64().unwrap()).unwrap();
             assert!(matches!(depth, 0 | 1 | 27));
@@ -291,6 +480,23 @@ fn retained_lily_tower_source_reference() {
                 .to_f32()
                 .unwrap_or_else(|_| panic!("private retained tower readback failed"));
             let (rms, cosine) = numerical_metric(&actual, &expected);
+            if depth == 1 {
+                if let Some(sequence) = &sequence {
+                    let mismatches = actual
+                        .iter()
+                        .zip(sequence)
+                        .filter(|(a, b)| a.to_bits() != b.to_bits())
+                        .count();
+                    println!(
+                        "{}",
+                        json!({"private_retained_sequence_observer":{"case_index":case_index,"mismatch_count":mismatches}})
+                    );
+                    assert_eq!(
+                        mismatches, 0,
+                        "private sequence readbacks perturb ordinary graph"
+                    );
+                }
+            }
             metrics.push(json!({"case_index":case_index,"blocks":depth,"elements":actual.len(),"relative_rms":rms,"cosine":cosine}));
         }
     }
