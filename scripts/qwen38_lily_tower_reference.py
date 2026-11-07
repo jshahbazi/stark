@@ -162,6 +162,28 @@ def main(args):
         assert digest(Path(sys.modules[name].__file__)) == expected
     torch.set_num_threads(4)
     torch.set_num_interop_threads(1)
+    if args.gelu_domain:
+        assert torch.version.git_version == "5c4886908584029761b579af026dcfb627c84070"
+        bits = torch.arange(65536, dtype=torch.int32)
+        bits = bits[(bits & 0x7F80) != 0x7F80].to(torch.uint16)
+        values = bits.view(torch.bfloat16).reshape(255, 256)
+        args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
+        record = {"kind": "RetainedLilyGeluDomainReference",
+                  "torch": torch.__version__, "torch_git": torch.version.git_version,
+                  "finite_inputs": values.numel(),
+                  "generator_sha256": digest(Path(__file__)),
+                  "input": save(args.output, "input", values)}
+        for name, approximate in (("erf", "none"), ("tanh", "tanh")):
+            output = torch.nn.functional.gelu(values, approximate=approximate)
+            assert torch.isfinite(output).all()
+            record[name] = save(args.output, name, output)
+        (args.output / "manifest.json").write_text(json.dumps(record, indent=2) + "\n")
+        total = sum(path.stat().st_size for path in args.output.iterdir())
+        assert total < 1024**2
+        print(json.dumps({"gelu_domain_complete": True,
+                          "finite_inputs": values.numel(), "reference_bytes": total,
+                          "manifest_sha256": digest(args.output / "manifest.json")}))
+        return
     for name, expected in HELPER_HASHES.items():
         assert digest(args.helpers / name) == expected
     assert digest(args.sources / "modeling_qwen4_exp.py") == SOURCE_SHA
@@ -405,6 +427,8 @@ if __name__ == "__main__":
                         help="save same-input source operator controls at one block")
     parser.add_argument("--full-states", action="store_true",
                         help="save bounded full-depth source norm and residual states")
+    parser.add_argument("--gelu-domain", action="store_true",
+                        help="produce a model-free all-finite-BF16 GELU reference only")
     try:
         main(parser.parse_args())
     except BaseException as error:  # noqa: BLE001 - content-free private diagnostic
