@@ -459,10 +459,11 @@ def _planning_metadata(family, config, info, names, sizes, *, chat_template=None
     if layers is None or heads is None or kv_heads is None or head_dim is None or kv_heads > heads:
         blockers.append("attention_geometry_incomplete")
     from .api_tools import tool_parser_for
-    from .template_compat import template_program_sha256
+    from .template_compat import normalize_chat_template, template_program_sha256
 
-    chat_template_available = isinstance(chat_template, str) and template_program_sha256(chat_template) is not None
-    tool_parser = tool_parser_for({"prompt_template": chat_template}) if chat_template_available else None
+    native_template = normalize_chat_template(chat_template) if isinstance(chat_template, str) else None
+    chat_template_available = template_program_sha256(native_template) is not None
+    tool_parser = tool_parser_for({"prompt_template": native_template}) if chat_template_available else None
     supports_tools = tool_parser is not None
     if not chat_template_available:
         blockers.append(chat_template_blocker or "chat_template_unavailable")

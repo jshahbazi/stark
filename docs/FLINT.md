@@ -60,8 +60,16 @@ decode megakernel; its published throughput does not describe Stark.
 Each request starts with fresh state. Errors clear the full request state.
 Raw candidate scoring uses the existing scorer and cache rules; Decision mode
 still requires a suitable direct-answer template and independent calibration.
-This path provides text generation and scoring. It does not add structured tool
-call parsing to the existing API.
+This path provides text generation and scoring. The reviewed pinned template has
+function-tool support through the `glm53-xml-v1` parser and native call/result history. The
+loaded template must match a reviewed program; see the
+[function tools contract](LOCAL_API.md#function-tools).
+
+Cross-request prefix reuse is currently unavailable for Flint. Its full and
+sliding F32 key/value state and logical position have no worker snapshot/restore
+implementation. Qualification therefore checks fresh-request behavior and
+cancellation recovery separately from the reuse-enabled model paths. Zero
+reused tokens do not establish successful prefix restoration.
 
 ## Numerical checks and provenance
 
@@ -94,3 +102,6 @@ with distribution notices. Native loading never imports repository Python.
 Related: [native model preparation and worker behavior](NATIVE_HYBRID_MODELS.md).
 
 Recorded checks: [2026-10-28 validation](archive/runs/2026-10-28-flint-native-support.md).
+The [2026-11-07 tool qualification](archive/runs/2026-11-07-glm-flint-tool-qualification.md)
+records 3/3 native smoke and 17/17 HTTP checks for the pinned INT4 artifact at
+8K context, with prefix caching disabled and successful cancellation recovery.

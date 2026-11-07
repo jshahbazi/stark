@@ -132,6 +132,18 @@ def test_unaccounted_resource_fails_instead_of_omitting_input(project):
         toolchain_provenance(project)
 
 
+def test_reviewed_runtime_template_resource_is_part_of_conversion_identity(project):
+    baseline = toolchain_provenance(project)
+    folder = project / "stark_convert" / "chat_templates"
+    folder.mkdir()
+    template = folder / "reviewed.jinja"
+    template.write_text("{{ tools | tojson }}")
+    first = toolchain_provenance(project)
+    assert first != baseline
+    template.write_text("{{ tools | tojson }} ")
+    assert toolchain_provenance(project) != first
+
+
 def test_all_conversion_imports_are_independent_of_heavy_reference_frameworks():
     modules = (
         "stark_convert.cli",

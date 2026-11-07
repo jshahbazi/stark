@@ -153,10 +153,35 @@ Omitting both fields preserves the MTP preference.
 
 | Parser | Supported template sources | Template SHA-256 |
 | --- | --- | --- |
+| `qwen3-hermes-v1` | Qwen/Qwen2.5-0.5B-Instruct, revision `7ae557604adf67be50417f59c2c2f167def9a775`; matching program in reviewed Qwen2.5-Coder-3B-Instruct | `cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f` |
 | `qwen3-hermes-v1` | Official Qwen3-0.6B | `a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8` |
 | `qwen3-hermes-v1` | `mlx-community/Qwen3-4B-4bit`, revision `4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25` | `87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5` |
 | `qwen38-xml-v1` | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83`; identical template in installed `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit` | `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041` |
 | `qwen35-xml-v1` | `alibiserikbay/JevK5`, revision `c4f7fdb3aeab5582336406e78d3bef11bf98833d` | `a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715` |
+| `glm53-xml-v1` | `zai-org/GLM-5.3-Flash`, revision `04c4e9e95c5da8862dced7e5056455116f83a7e0`, used by native preparation | `34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891` |
+| `glm53-xml-v1` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | `7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6ae29733466` |
+
+Additional reviewed sources use the protocols below. Full pinned revisions,
+original and normalized hashes, program fingerprints and licenses are in the
+[source fixture manifest](../tools/converter/tests/fixtures/tool_templates/README.md).
+
+| Parser | Reviewed sources | Framing |
+| --- | --- | --- |
+| `mistral-json-v1` | Mistral-7B-Instruct-v0.3 | `[TOOL_CALLS]` followed by a JSON list |
+| `llama-json-v1` | Llama-3.1-8B-Instruct and Llama-3.2-1B-Instruct public-mirror templates | Bare JSON object with `name` and `parameters`; optional `<\|python_tag\|>` |
+| `granite30-json-v1` / `granite33-json-v1` | Granite 3.0, 3.1 and 3.3 Instruct | `<\|tool_call\|>` followed by a JSON list |
+| `smollm2-json-v1` | SmolLM2-1.7B-Instruct | JSON list inside `<tool_call>`; empty list means no call |
+| `smollm3-hermes-v1` | SmolLM3-3B | Hermes objects inside `<tool_call>` |
+| `lfm2-pythonic-v1` | LFM2-1.2B and LFM2.5-1.2B-Instruct / 350M template programs | `<\|tool_call_start\|>[name(key=value)]<\|tool_call_end\|>` |
+| `phi4-json-v1` | Phi-4-mini-instruct | Bare JSON list or `<\|tool_call\|>` / `<\|/tool_call\|>` |
+| `functiongemma-v1` | FunctionGemma-270M public-mirror templates | `<start_function_call>call:name{key:<escape>value<escape>}<end_function_call>` |
+| `qwen3-hermes-v1` | rnj-1-instruct | Hermes objects inside `<tool_call>` |
+
+The [coverage matrix](TOOL_CALLING.md) lists family boundaries and separately
+recorded task evidence. Newly admitted Qwen2.5, GLM and Flint programs have native
+template, parser and synthetic API coverage; model-generated workflow
+qualification is pending. Their unchanged upstream fixtures and licenses are
+recorded in [fixture provenance](../tools/converter/tests/fixtures/tool_template_additions.provenance.md).
 
 The compatibility check parses templates using the same locked Jinja version, immutable sandbox and whitespace settings as chat rendering. A versioned program fingerprint ignores source locations, comments, equivalent string quoting/escapes, redundant parentheses and expression spacing. Adjacent literal text split by a comment is joined without changing its contents. Newline/indentation changes are accepted only when Jinja produces the same program. Literal output, tool instructions/markers, emitted whitespace, values, lookup style, filters, calls, branches, loops and their ordering remain part of the fingerprint. Changed instructions or a new tool format still require review and an updated registration or parser; model names and marker presence never establish support. Matching does not compile or execute the candidate. Sources are limited to 256 KiB of UTF-8, with bounded traversal work/depth and an eight-entry in-memory template cache; malformed or over-limit candidates remain unsupported.
 
@@ -166,9 +191,12 @@ The 4B template is preserved as an upstream fixture with source and license prov
 - `tool_choice` accepts `auto`, `none`, `required`, or `{"type":"function","function":{"name":"supplied_name"}}`. Named choice renders only that definition. Required/named output is checked after generation; failure returns `tool_choice_not_satisfied`, without synthesizing a call. `none` omits definitions from rendering and rejects generated tool markers.
 - `parallel_tool_calls` is a boolean, default true. False permits at most one generated call; a violation fails the completion. At most 16 calls are returned, in generation order, with distinct stable IDs within the response and JSON-object argument strings.
 - Assistant history may contain null or omitted text alongside `tool_calls`. Each call requires `id`, `type: function`, and a function name/argument string. Tool-result messages require string/text-part content and the matching `tool_call_id`. All outstanding results must be returned before another assistant/user turn. Duplicate, orphaned and incomplete transactions are rejected. The loaded template receives complete history, argument objects, definitions, and results ordered by their call IDs.
-- Hermes calls contain JSON objects inside `<tool_call>`. XML calls contain `<function=NAME>` and named `<parameter=NAME>` blocks. Only complete calls from a normally terminated generation become executable requests. Duplicate keys/parameters, nonfinite numbers, unknown names, invalid argument representations, truncated markers, quoted examples, extra trailing text and limit violations fail. Code fences, blockquotes, HTML comments and HTML code/quotation containers in the visible prefix are rejected conservatively, including completed blocks. Balanced inline-code mentions and completed thinking before an actual call remain supported. No guessed repairs occur. Malformed output does not unload an otherwise aligned worker.
+- Hermes calls contain JSON objects inside `<tool_call>`. Qwen XML calls contain `<function=NAME>` and named `<parameter=NAME>` blocks. GLM calls place the function name directly after `<tool_call>`, followed by paired `<arg_key>`/`<arg_value>` blocks; strings retain exact contents and non-string values use JSON. Only complete calls from a normally terminated generation become executable requests. Duplicate keys/parameters, nonfinite numbers, unknown names, invalid argument representations, truncated markers, quoted examples, extra trailing text and limit violations fail. Code fences, blockquotes, HTML comments and HTML code/quotation containers in the visible prefix are rejected conservatively, including completed blocks. Balanced inline-code mentions and completed thinking before an actual call remain supported. No guessed repairs occur. Malformed output does not unload an otherwise aligned worker.
 - XML schemas require directly named root properties. Parameters can declare types, constrain types through JSON `enum`/`const` literals, or use typed `anyOf`/`oneOf` alternatives or bounded local JSON Pointer references. Parameter names use the same bounded ASCII identifier syntax as function names. Root references/composition, dynamic parameter names, malformed schemas, remote/cyclic/unresolved references and resolution-budget exhaustion return `tool_schema_unsupported` before generation, with a fixed unsupported-form category.
 - Empty or annotation-only parameter schemas are forwarded unchanged as model hints, so an unused unconstrained parameter does not block ordinary chat or other tool calls. XML cannot determine the representation of a generated unconstrained value: using such a parameter fails the entire completion with `tool_argument_type_unsupported`, without returning any calls. Types are never guessed from generated text.
+- Mistral v0.3 rendering applies a hash-checked packaged correction to its upstream JSON serializer. Render-only IDs use nine alphanumeric characters and results are JSON-escaped; API IDs retain their original values. Llama permits one call per assistant turn. Mistral, Llama and Granite reject history combining visible text with a call when the native template cannot retain both, using `tool_history_unsupported` before queue admission.
+- LFM Pythonic syntax is parsed as bounded data and never executed. Attribute access, nested calls, positional arguments, unpacking and executable expressions are rejected. Function and root parameter names must be Python identifiers. Its documented trailing prose is returned as text; other formats require clean call framing. Llama holds a possible initial JSON object during streaming; Phi holds a possible initial JSON list.
+- FunctionGemma requires concrete parameter types and representable named keys. References, schema composition, dynamic properties, reserved schema-key parameter names and native delimiter strings are rejected with `tool_schema_unsupported` or `tool_history_unsupported`. Its required response marker is tokenized to one native stop-token ID for tool requests, preserving the allowance of four client stop strings. An incompatible tokenizer returns `tool_tokenizer_unsupported`. Protocol compatibility does not establish native model loading: the tested BF16 artifact currently fails that step.
 - XML strings retain their original contents; structured values use JSON. The Qwen3.5 template's top-level boolean/null scalars use its canonical `True`/`False`/`None` representation. Ambiguous string/non-string union values and strings containing reserved wire delimiters are rejected rather than coerced. These checks decode types; clients still validate the complete schema before executing anything.
 - Definitions together are limited to 256 KiB; each argument object to 64 KiB; each tool result to 256 KiB; parsed tool output to 512 KiB. JSON depth is limited to 32 and item count to 16,384. The ordinary 1 MiB body/worker-line limits and model context limits also apply. Tool use and image input cannot be combined.
 
@@ -193,6 +221,13 @@ An agent client can still take longer to produce its first token than a short Pl
 Qwen/Qwen3-0.6B with unquantized BF16 weights completed a narrowly prompted two-tool result-use task locally. Looser variants failed through an unwanted parallel call or premature stopping; this checkpoint is not a general-purpose agent recommendation. Protocol fixtures and task-competence evidence are recorded separately.
 
 The pinned MLX Qwen3-4B 4-bit/group-64 artifact completed a bounded two-read task in OpenWork, including client-side execution, result return and a correct final calculation. A looser variant repeated a read until cancelled. Use explicit task limits and client approvals; this is a narrow workflow qualification. The [desktop validation record](archive/runs/OPENWORK_KEYCHAIN_E2E_2026_10_31.md) separates protocol, model behavior and signed-package evidence.
+
+When the rendered generation prompt opens a thinking block, the host carries
+that state into tool-call validation. Generated text must close the block before
+an executable call. The flag comes from the rendered prompt; client parameters
+and worker reply fields cannot enable it. Templates such as Flint that do not
+open a thinking block continue to reject unmatched closing tags. Generated
+pre-call text retains the existing content/streaming representation.
 
 ## Limits, queueing and cancellation
 
