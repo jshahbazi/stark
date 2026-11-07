@@ -1,4 +1,4 @@
-//! Native, model-bound Gemma 4 E2B image execution. Static image decoding,
+//! Native, model-bound Gemma 4 E2B/E4B image execution. Static image decoding,
 //! preprocessing, vision inference and text generation do not invoke Python.
 
 use std::{
@@ -51,6 +51,32 @@ const AUDIO: u64 = 258881;
 const MODEL: u32 = 1536;
 const VOCAB: u32 = 262144;
 
+#[derive(Clone, Copy)]
+struct ImageProfile {
+    repo: &'static str,
+    revision: &'static str,
+    family: &'static str,
+    tokenizer: &'static str,
+    model_dim: u32,
+}
+
+const PROFILES: [ImageProfile; 2] = [
+    ImageProfile {
+        repo: REPO,
+        revision: REVISION,
+        family: "gemma4-e2b-bf16-v1",
+        tokenizer: TOKENIZER,
+        model_dim: MODEL,
+    },
+    ImageProfile {
+        repo: "google/gemma-4-E4B-it",
+        revision: "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c",
+        family: "gemma4-e4b-bf16-v1",
+        tokenizer: "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc",
+        model_dim: 2560,
+    },
+];
+
 /// Opaque CPU patches bound to the loaded model that prepared them.
 pub struct PreparedGemmaImage {
     model_identity: Arc<()>,
@@ -76,21 +102,28 @@ pub struct Gemma4VisionLanguageModel<B: Backend> {
     failed: bool,
     identity: VisionArtifactIdentity,
     codec_eos_token: Option<String>,
+    profile: ImageProfile,
 }
 
-fn validate_contract(raw: &serde_json::Value) -> Result<(), InvalidInput> {
+fn validate_contract(raw: &serde_json::Value) -> Result<ImageProfile, InvalidInput> {
     let contract = &raw["artifact_contract"];
+    let profile = PROFILES
+        .iter()
+        .copied()
+        .find(|profile| {
+            contract["family"] == serde_json::json!({"id": profile.family, "version": 1})
+                && contract["source"]["repo"] == profile.repo
+                && contract["source"]["revision"] == profile.revision
+                && raw["decoder_config"]["transformer_config"]["model_dim"] == profile.model_dim
+        })
+        .ok_or(InvalidInput("unsupported Gemma image source and decoder profile"))?;
     if raw["type"] != "Gemma4VisionLanguageModelConfig"
         || contract["schema_version"] != 4
         || contract["transport"] != "mediaref-v1"
         || contract["runtime_supported"] != true
         || contract["input_modalities"] != serde_json::json!(["text", "image"])
-        || contract["family"] != serde_json::json!({"id":"gemma4-e2b-bf16-v1","version":1})
-        || contract["source"]["repo"] != REPO
-        || contract["source"]["revision"] != REVISION
         || raw["decoder_config"]["gemma4_image_embeddings"] != true
         || raw["decoder_config"]["vocab_size"] != VOCAB
-        || raw["decoder_config"]["transformer_config"]["model_dim"] != MODEL
         || contract["token_ids"]
             != serde_json::json!({"image":IMAGE,"vision_start":START,"vision_end":END,"video":VIDEO,"audio":AUDIO})
     {
@@ -127,7 +160,7 @@ fn validate_contract(raw: &serde_json::Value) -> Result<(), InvalidInput> {
     {
         return Err(InvalidInput("unsupported Gemma vision operations"));
     }
-    Ok(())
+    Ok(profile)
 }
 
 impl<B: Backend> Engine<B> {
@@ -143,7 +176,7 @@ impl<B: Backend> Engine<B> {
         let mut components = BTreeMap::new();
         for (name, limit) in [
             ("config.json", 1_048_576),
-            ("model.safetensors", 12 * 1024 * 1024 * 1024u64),
+            ("model.safetensors", 20 * 1024 * 1024 * 1024u64),
             ("tokenizer.json", 67_108_864),
             ("preprocessor_config.json", 65_536),
             ("chat_template.jinja", 262_144),
@@ -167,15 +200,27 @@ impl<B: Backend> Engine<B> {
             hashes.insert(name, hash);
             selected.insert(name, file);
         }
-        for (name, expected) in
-            [("tokenizer.json", TOKENIZER), ("preprocessor_config.json", PROCESSOR), ("chat_template.jinja", TEMPLATE)]
-        {
+        let raw: serde_json::Value = serde_json::from_slice(&components["config.json"])?;
+        let profile = validate_contract(&raw)?;
+        // E2B retains its original admission cap. E4B's larger PLE decoder
+        // needs its own bound; neither profile permits unbounded components.
+        let weight_limit_gib = if profile.model_dim == MODEL {
+            12
+        } else {
+            20
+        };
+        if selected["model.safetensors"].metadata()?.len() > weight_limit_gib * 1024 * 1024 * 1024u64 {
+            return Err(InvalidInput("Gemma image weights exceed the selected profile bound").into());
+        }
+        for (name, expected) in [
+            ("tokenizer.json", profile.tokenizer),
+            ("preprocessor_config.json", PROCESSOR),
+            ("chat_template.jinja", TEMPLATE),
+        ] {
             if hashes.get(name).map(String::as_str) != Some(expected) {
                 return Err(InvalidInput("Gemma image processing identity mismatch").into());
             }
         }
-        let raw: serde_json::Value = serde_json::from_slice(&components["config.json"])?;
-        validate_contract(&raw)?;
         let declared = raw["artifact_contract"]["component_hashes"]
             .as_object()
             .ok_or(InvalidInput("Gemma artifact component hashes are missing"))?;
@@ -207,7 +252,7 @@ impl<B: Backend> Engine<B> {
         let language: LanguageModelConfig = serde_json::from_value(serde_json::json!({"type":"LanguageModelConfig",
             "decoder_config":config.decoder_config,"token_codec_config":config.token_codec_config,"generation_config":config.generation_config}))?;
         let loader = ParameterLoader::new(&selected["model.safetensors"], &*self.context)?;
-        let tower = Gemma4VisionTower::new(&*self.context, &loader.tree().subtree("vision"))?;
+        let tower = Gemma4VisionTower::new(&*self.context, &loader.tree().subtree("vision"), profile.model_dim)?;
         let language_model =
             self.language_model_from_config(path, language, &loader, Some(tokenizer), SpeculatorPolicy::Disabled)?;
         loader.tree().assert_all_tensors_validated()?;
@@ -226,6 +271,7 @@ impl<B: Backend> Engine<B> {
             tower,
             failed: false,
             codec_eos_token,
+            profile,
             identity: VisionArtifactIdentity {
                 schema_version: 4,
                 config_sha256: hash("config.json")?,
@@ -243,10 +289,10 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
         &self.identity
     }
     pub fn family_profile(&self) -> (&'static str, u32) {
-        ("gemma4-e2b-bf16-v1", 1)
+        (self.profile.family, 1)
     }
     pub fn source_identity(&self) -> (&str, Option<&str>) {
-        (REPO, Some(REVISION))
+        (self.profile.repo, Some(self.profile.revision))
     }
     pub fn vocab_size(&self) -> u32 {
         VOCAB
@@ -340,7 +386,7 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
             tokens,
             ProjectedImage {
                 model_identity: self.language_model.model_identity.clone(),
-                model_dim: MODEL,
+                model_dim: self.profile.model_dim,
                 data_type: DataType::BF16,
                 grid: ImageGrid {
                     temporal: 1,
@@ -349,7 +395,8 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
                     merge_size: 3,
                 },
                 token_start: start,
-                features: vec![bf16::ZERO; (image.image_token_count() * MODEL) as usize].into_boxed_slice(),
+                features: vec![bf16::ZERO; (image.image_token_count() * self.profile.model_dim) as usize]
+                    .into_boxed_slice(),
             },
             ImageTokenIds {
                 image: IMAGE,
@@ -359,7 +406,7 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
             },
             AUDIO,
             &self.language_model.model_identity,
-            MODEL,
+            self.profile.model_dim,
             DataType::BF16,
             VOCAB,
             capacity.min(self.max_context_length().unwrap_or(capacity)),
@@ -413,7 +460,7 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
         let mut commands =
             context.create_command_buffer(Some("Gemma vision"), None).map_err(NativeVisionError::backend)?;
         let output = self.tower.encode(&image.patches.patches, image.patches.grid, &mut commands)?;
-        let count = (image.image_token_count() * MODEL) as usize;
+        let count = (image.image_token_count() * self.profile.model_dim) as usize;
         let bytes = count * size_of::<bf16>();
         if (&output).size() != bytes {
             return Err(InvalidInput("Gemma vision output shape mismatch").into());
@@ -522,5 +569,23 @@ mod contract_tests {
         let mut changed = original.clone();
         changed["artifact_contract"]["token_ids"]["image"] = 1.into();
         assert!(validate_contract(&changed).is_err());
+    }
+
+    #[stark_test]
+    fn gemma_e4b_contract_requires_matching_decoder_and_source() {
+        let mut e4b = config();
+        let profile = PROFILES[1];
+        e4b["artifact_contract"]["family"]["id"] = profile.family.into();
+        e4b["artifact_contract"]["source"]["repo"] = profile.repo.into();
+        e4b["artifact_contract"]["source"]["revision"] = profile.revision.into();
+        e4b["decoder_config"]["transformer_config"]["model_dim"] = profile.model_dim.into();
+        let selected = validate_contract(&e4b).expect("matching E4B profile rejected");
+        assert_eq!(selected.model_dim, 2560);
+        assert_eq!(selected.family, profile.family);
+        e4b["decoder_config"]["transformer_config"]["model_dim"] = MODEL.into();
+        assert!(validate_contract(&e4b).is_err());
+        e4b["decoder_config"]["transformer_config"]["model_dim"] = profile.model_dim.into();
+        e4b["artifact_contract"]["source"]["revision"] = REVISION.into();
+        assert!(validate_contract(&e4b).is_err());
     }
 }

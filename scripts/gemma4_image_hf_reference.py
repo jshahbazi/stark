@@ -20,7 +20,10 @@ from pathlib import Path
 
 from gemma4_hf_reference import digest, metrics
 
-MODEL_REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
+MODEL_PROFILES = {
+    "3e22461f65e89153144f8adb70e3b8c2cc9845a7": ("google/gemma-4-E2B-it", 1536),
+    "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c": ("google/gemma-4-E4B-it", 2560),
+}
 PHASE = "startup"
 
 
@@ -56,7 +59,7 @@ def run(args) -> dict:
     )
     root = Path(__file__).resolve().parents[1]
     if (
-        source.name != MODEL_REVISION
+        source.name not in MODEL_PROFILES
         or output.exists()
         or subprocess.run(
             ["git", "check-ignore", "--quiet", "--", str(output)], cwd=root, check=False
@@ -68,6 +71,13 @@ def run(args) -> dict:
     if [case["name"] for case in original["cases"]] != ["red", "blue", "pattern"]:
         raise ValueError("unexpected_rgb_fixture_cases")
     config = json.loads((source / "config.json").read_text())
+    repo, model_dim = MODEL_PROFILES[source.name]
+    if config["text_config"]["hidden_size"] != model_dim:
+        raise ValueError("canonical_decoder_profile_changed")
+    from tokenizers import Tokenizer
+
+    tokenizer = Tokenizer.from_file(str(source / "tokenizer.json"))
+    same_source = original.get("model_revision") == source.name
     vision_config = Gemma4VisionConfig(**config["vision_config"])
     vision_config._attn_implementation = "sdpa"
     text_config = Gemma4TextConfig(**config["text_config"])
@@ -121,7 +131,9 @@ def run(args) -> dict:
         "reference_revision": "transformers-" + transformers.__version__,
         "source_sha256": digest(Path(modeling_gemma4.__file__)),
         "image_processor_sha256": digest(Path(image_processing_gemma4.__file__)),
-        "model_revision": MODEL_REVISION,
+        "model_revision": source.name,
+        "model_repo": repo,
+        "model_dim": model_dim,
         "reference_device": "cpu",
         "attention": "sdpa",
         "torch": torch.__version__,
@@ -167,7 +179,7 @@ def run(args) -> dict:
                 ).last_hidden_state
             )
             values = features.float().numpy().astype("<f4")
-            if values.shape != (image_tokens, 1536) or not np.isfinite(values).all():
+            if values.shape != (image_tokens, model_dim) or not np.isfinite(values).all():
                 raise ValueError("canonical_feature_output_invalid")
             feature_path = output / f"case-{index}-features.f32"
             feature_path.write_bytes(values.tobytes())
@@ -177,12 +189,25 @@ def run(args) -> dict:
             old_patches = np.frombuffer(
                 (existing / old["patches"]).read_bytes(), dtype="<f4"
             ).reshape(normalized.shape)
-            old_features = np.frombuffer(
-                (existing / old["features"]).read_bytes(), dtype="<f4"
-            ).reshape(values.shape)
+            # Re-tokenize the exact fixture prompt using this checkpoint's
+            # tokenizer. An E4B run never inherits E2B tokenization or outputs.
+            unexpanded = tokenizer.encode(old["rendered_prompt"], add_special_tokens=False).ids
+            placeholder = unexpanded.index(config["image_token_id"])
+            if unexpanded.count(config["image_token_id"]) != 1:
+                raise ValueError("canonical_fixture_placeholder_count_changed")
+            wrapped = (placeholder > 0 and unexpanded[placeholder - 1] == config["boi_token_id"]
+                       and unexpanded[placeholder + 1:placeholder + 2] == [config["eoi_token_id"]])
+            before = unexpanded[:placeholder] + ([] if wrapped else [config["boi_token_id"]])
+            after = ([] if wrapped else [config["eoi_token_id"]]) + unexpanded[placeholder + 1:]
+            tokens = before + [config["image_token_id"]] * image_tokens + after
+            if same_source and (unexpanded != old["unexpanded_tokens"] or tokens != old["tokens"]):
+                raise ValueError("canonical_fixture_tokenization_changed")
             definitions.append(
                 {
                     **old,
+                    "unexpanded_tokens": unexpanded,
+                    "tokens": tokens,
+                    "token_start": len(before),
                     "image": target.name,
                     "patches": patch_path.name,
                     "positions": position_path.name,
@@ -206,9 +231,9 @@ def run(args) -> dict:
                         ),
                         "max_abs_error": float(np.abs(normalized - old_patches).max()),
                     },
-                    "features_vs_mlx_profile": metrics(
-                        values.reshape(-1), old_features.reshape(-1)
-                    ),
+                    **({"features_vs_mlx_profile": metrics(
+                        values.reshape(-1), np.frombuffer((existing / old["features"]).read_bytes(), dtype="<f4")
+                    )} if same_source else {}),
                 }
             )
         write_json(
@@ -291,11 +316,12 @@ def run(args) -> dict:
                     logits = result.logits[0, -1]
             case["reference_tokens"] = generated
             case["logits_sha256"] = digest(logit_path)
-            old = original["cases"][index]
-            old_logits = np.frombuffer(
-                (existing / old["logits"]).read_bytes(), dtype="<f4"
-            )
-            controls[index]["logits_vs_mlx_profile"] = metrics(values, old_logits)
+            if same_source:
+                old = original["cases"][index]
+                old_logits = np.frombuffer(
+                    (existing / old["logits"]).read_bytes(), dtype="<f4"
+                )
+                controls[index]["logits_vs_mlx_profile"] = metrics(values, old_logits)
     manifest = {
         **source_identity,
         "forward_profile": "native-prefix-then-last-token",

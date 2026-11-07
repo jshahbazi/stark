@@ -63,3 +63,17 @@ def test_stored_family_descriptor_has_no_cross_family_fallback():
     config["type"] = "Gemma4VisionLanguageModelConfig"
     config["artifact_contract"]["schema_version"] = 3
     assert vision_runtime.artifact_image_family(config) is None
+
+
+def test_e4b_capability_requires_its_own_source_profile_and_never_inherits_qualification(tmp_path):
+    value = gemma_contract(
+        model_source="google/gemma-4-E4B-it",
+        model_revision="4ecc2ba63bcac23ba4a767fc87025b1450f84c9c",
+        family_profile=vision_runtime.GEMMA4_E4B_FAMILY_PROFILE,
+    )
+    assert vision_runtime.image_input_contract(value) == value
+    assert vision_runtime.image_input_contract({**value, "family_profile": vision_runtime.GEMMA4_FAMILY_PROFILE}) is None
+    assert vision_runtime.image_input_contract({**gemma_contract(), "family_profile": vision_runtime.GEMMA4_E4B_FAMILY_PROFILE}) is None
+    binary = tmp_path / "worker"
+    binary.write_bytes(b"unqualified synthetic worker")
+    assert not vision_runtime.qualified_image_worker(value, binary)

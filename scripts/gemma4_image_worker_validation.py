@@ -17,7 +17,7 @@ import tempfile
 from pathlib import Path
 
 from stark_convert.media import ImageData, PrivateMediaStore
-from stark_convert.vision_runtime import GEMMA4_FAMILY_PROFILE, image_input_contract
+from stark_convert.vision_runtime import GEMMA4_FAMILY_PROFILE, GEMMA4_E4B_FAMILY_PROFILE, image_input_contract
 from test_hybrid_workers import CheckFailed, digest, require, worker_process
 
 
@@ -38,6 +38,8 @@ async def run(args):
     cases = manifest["cases"]
     require(isinstance(cases, list) and 2 <= len(cases) <= 8, "invalid_case_count")
     model = args.model.resolve(strict=True)
+    family = json.loads((model / "config.json").read_text())["artifact_contract"]["family"]["id"]
+    require(family in {GEMMA4_FAMILY_PROFILE, GEMMA4_E4B_FAMILY_PROFILE}, "unsupported_gemma_fixture_family")
     executable = args.worker.resolve(strict=True)
     results = []
     observed = []
@@ -146,7 +148,8 @@ async def run(args):
             capabilities = image_input_contract(ready.get("image_input"))
             require(
                 capabilities is not None
-                and capabilities["family_profile"] == GEMMA4_FAMILY_PROFILE,
+                and capabilities["family_profile"] == family
+                and capabilities["model_revision"] == manifest["model_revision"],
                 "gemma_image_capability_missing",
             )
             for case in cases:
