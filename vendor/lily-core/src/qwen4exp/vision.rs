@@ -44,6 +44,10 @@ use crate::tensor::{DType, Tensor};
 use super::config::VisionConfig;
 use super::vision_weights::VisionWeights;
 
+#[cfg(test)]
+#[path = "vision_reference_tests.rs"]
+mod reference_tests;
+
 /// The rotary base of `Qwen4ExpVisionRotaryEmbedding`, a constructor default
 /// the checkpoint's config does not carry (VISION.md "Rotary").
 const ROPE_THETA: f32 = 10000.0;

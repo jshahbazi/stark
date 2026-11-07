@@ -7,6 +7,16 @@
 
 ## Extraction and local changes
 
+Stark adds an ignored in-module retained-vision source replay in
+`src/qwen4exp/vision_reference_tests.rs`. It uses the existing private tower
+loader and graph, reads only the 333 BF16 visual tensors, and exports no
+production API. Its CPU producer binds the exact retained artifact and the
+Qwen4Exp vision arithmetic from Transformers revision
+`2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397`, following the pinned upstream
+`tools/reference/hf_vision_reference.py` recipe. Prefix-depth observations and
+the full 27-block output use frozen pixels and numerical gates; qualification
+results remain separate from this test's presence.
+
 Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision. Explicitly admitted original-format image artifacts can load the retained BF16 vision tower; ordinary text loading keeps it disabled.
 
 Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary single-token decode graph. The bridge returns complete F32 vocabulary readouts to Stark's caller-owned exact sampler, without the upstream GPU sampler's 1,024-candidate cap or probability arithmetic. Draft distributions and acceptance stay request-local; head catch-up is disabled for ordinary non-MTP requests. Verification evaluates up to four positions in one layer-major graph with the ordinary decode's affine dot expressions, reductions, normalization and rounding boundaries. Recurrent state and pre-convolution inputs are retained for exact prefix rollback. The original serial verifier remains a reference. The engine adapter restores partially consumed groups when a stream stops early, without sampling during cleanup. Checkpoint quantization and the ordinary target's activation, state, cache and weight arithmetic are preserved. Numerical and performance qualification is recorded separately.
