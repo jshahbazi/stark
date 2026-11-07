@@ -34,14 +34,16 @@
 use anyhow::{Result, ensure};
 use half::bf16;
 
-use crate::kernels::elementwise::{Gelu, add_bf16, gelu_bf16};
+#[cfg(test)]
+use crate::kernels::elementwise::gelu_bf16;
+use crate::kernels::elementwise::{Gelu, add_bf16};
 #[cfg(test)]
 use crate::kernels::gemm::gemm_bf16_nt_bias;
 #[cfg(test)]
 use crate::kernels::norm::layernorm_bf16;
 use crate::kernels::vision::{
-    attention_full_bf16, layernorm_vision_bf16, linear_bf16_bias, patch_pos_embed_bf16,
-    qkv_rope_2d_bf16,
+    attention_full_bf16, gelu_vision_bf16, layernorm_vision_bf16, linear_bf16_bias,
+    patch_pos_embed_bf16, qkv_rope_2d_bf16,
 };
 use crate::metal::MetalContext;
 use crate::tensor::{DType, Tensor};
@@ -221,7 +223,7 @@ pub(super) fn forward_with(
                 LAYERNORM_EPS,
             )?;
             linear_bf16_bias(ctx, &pass, &h, &b.fc1_w, &b.fc1_b, &mlp, 32)?;
-            gelu_bf16(ctx, &pass, &mlp, Gelu::Tanh)?;
+            gelu_vision_bf16(ctx, &pass, &mlp, Gelu::Tanh)?;
             linear_bf16_bias(ctx, &pass, &mlp, &b.fc2_w, &b.fc2_b, &tmp, 32)?;
             add_bf16(ctx, &pass, &x, &tmp, &x)?;
         }
@@ -237,7 +239,7 @@ pub(super) fn forward_with(
             LAYERNORM_EPS,
         )?;
         linear_bf16_bias(ctx, &pass, &h4, &w.merger_fc1_w, &w.merger_fc1_b, &mlp4, 32)?;
-        gelu_bf16(ctx, &pass, &mlp4, Gelu::Erf)?;
+        gelu_vision_bf16(ctx, &pass, &mlp4, Gelu::Erf)?;
         linear_bf16_bias(
             ctx,
             &pass,

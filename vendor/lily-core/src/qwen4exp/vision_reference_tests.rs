@@ -198,7 +198,7 @@ fn first_block_metrics(
         &mlp,
         32
     ));
-    stage!(mlp, "gelu_tanh", "output", |pass| gelu_bf16(
+    stage!(mlp, "gelu_tanh", "output", |pass| gelu_vision_bf16(
         context,
         pass,
         &mlp,
@@ -232,7 +232,7 @@ fn first_block_metrics(
         &mlp4,
         32
     ));
-    stage!(mlp4, "gelu_erf", "output", |pass| gelu_bf16(
+    stage!(mlp4, "gelu_erf", "output", |pass| gelu_vision_bf16(
         context,
         pass,
         &mlp4,
@@ -421,6 +421,14 @@ fn operator_metrics(
                 let production = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
                 let pass = context.begin().unwrap();
                 layernorm_vision_bf16(context, &pass, &input, weight, bias, &production, LAYERNORM_EPS).unwrap();
+                pass.commit_wait().unwrap();
+                let production = production.to_f32().unwrap();
+                production_mismatches = Some(production.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count());
+            } else {
+                let production = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
+                production.write_bytes(bytemuck::cast_slice(&source)).unwrap();
+                let pass = context.begin().unwrap();
+                gelu_vision_bf16(context, &pass, &production, if name == "gelu_tanh" { Gelu::Tanh } else { Gelu::Erf }).unwrap();
                 pass.commit_wait().unwrap();
                 let production = production.to_f32().unwrap();
                 production_mismatches = Some(production.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count());

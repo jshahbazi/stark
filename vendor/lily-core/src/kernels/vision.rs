@@ -59,6 +59,48 @@ pub(crate) fn layernorm_vision_bf16(
     )
 }
 
+/// Source-compatible pointwise activation; bounded row/element work, vision only.
+pub(crate) fn gelu_vision_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    values: &Tensor,
+    kind: crate::kernels::elementwise::Gelu,
+) -> Result<()> {
+    ensure!(
+        values.shape().len() == 2 && values.dtype() == DType::BF16,
+        "vision GELU shape/type"
+    );
+    let (rows, width) = (values.shape()[0], values.shape()[1]);
+    ensure!(rows > 0 && rows <= 8192 && width > 0, "vision GELU row bound");
+    if width > 4608 {
+        return crate::kernels::elementwise::gelu_bf16(ctx, pass, values, kind);
+    }
+    let elements = rows
+        .checked_mul(width)
+        .ok_or_else(|| anyhow::anyhow!("vision GELU element overflow"))?;
+    ensure!(elements <= 8192 * 4608, "vision GELU element bound");
+    let approximate = match kind {
+        crate::kernels::elementwise::Gelu::Tanh => 1,
+        crate::kernels::elementwise::Gelu::Erf => 0,
+    };
+    let pipeline = ctx.pipeline(
+        "vision_gelu_bf16_compat",
+        include_str!("metal/vision_nonlinear.metal"),
+        MslVersion::V4_0,
+    )?;
+    for start in (0..elements).step_by(262144) {
+        let count = (elements - start).min(262144);
+        let tile = values.view(start, &[count])?;
+        pass.dispatch_with(
+            &pipeline,
+            &[tile.binding()],
+            &[Param::U32(count as u32), Param::U32(approximate)],
+            Grid::Threads { grid: (count, 1, 1), threadgroup: (128, 1, 1) },
+        )?;
+    }
+    Ok(())
+}
+
 /// Source-compatible contractions for the measured retained tower geometry.
 /// Other admitted geometries retain the original dense GEMM. Each dispatch
 /// covers at most32 input rows and147456 output elements, with no new buffers.
