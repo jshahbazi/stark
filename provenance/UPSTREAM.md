@@ -55,6 +55,16 @@ source entry cover this adaptation. E2B/E4B and unified-12B RMS schedules retain
 their previous selection. Independent model-free expected values come directly
 from Transformers 5.15.1 `Gemma4RMSNorm` on pinned Torch 2.14.1.
 
+The same larger Gemma vision profiles adapt pinned Torch CPU
+[`FlashAttentionKernel.cpp`](https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/aten/src/ATen/native/cpu/FlashAttentionKernel.cpp)
+(`2e77b79c6f340fe01b15e442ea9dd319649087579a31906c08f6afe2c86ec482`)
+and its NEON `fexp_u20` approximation for 512-key tiles. QK remains F32;
+unnormalized exponential values cross an integer-RNE physical BF16 buffer before
+PV, while denominator/output accumulation remains F32. The Rust/Metal adaptation
+uses fixed reused planes with linear memory in query count. Source and license
+hashes are retained in `pytorch-gemma4-larger-vision-flash`; the existing PyTorch
+BSD notice applies. E2B/E4B, unified12B and text attention retain their dispatch.
+
 The explicit BF16 affine-Q4 source profile adapts MLX v0.32.3 at
 [`64ea011cb65f14d9ce2737e60db9a4ae91ed7441`](https://github.com/ml-explore/mlx/tree/64ea011cb65f14d9ce2737e60db9a4ae91ed7441).
 Its native QMV arithmetic preserves BF16 four-value bias sums, four-product

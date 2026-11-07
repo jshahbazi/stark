@@ -201,6 +201,33 @@
       ],
       "adaptation": "Larger Gemma 4 vision RMS only: logical72 and hidden1152 F32 sum cascade, sequential lane fold and mean division. Logical72 whole-vector tails enter ILP accumulator zero before accumulator combination. E2B/E4B, unified12B and text normalization schedules are unchanged."
     },
+    "pytorch-gemma4-larger-vision-flash": {
+      "license": "BSD-3-Clause",
+      "license_file": "pytorch-LICENSE",
+      "license_sha256": "bd018feef8825e88181c84eb7e3aa4eafb8f08a20d9fd6ef948569610c4a3e43",
+      "repository": "https://github.com/pytorch/pytorch",
+      "source_tag": "v2.14.1",
+      "source_revision": "5c4886908584029761b579af026dcfb627c84070",
+      "source_files": [
+        {
+          "path": "aten/src/ATen/native/cpu/FlashAttentionKernel.cpp",
+          "sha256": "2e77b79c6f340fe01b15e442ea9dd319649087579a31906c08f6afe2c86ec482"
+        },
+        {
+          "path": "aten/src/ATen/cpu/vec/vec128/vec128_float_neon.h",
+          "sha256": "25f93cfc8d8bf6e2cbde45915fa3c920a954c07b2a1c3017433e8490a2ddc63d"
+        },
+        {
+          "path": "aten/src/ATen/cpu/vec/vec_n.h",
+          "sha256": "c64250b0b9708a1e026278eca2de4a7fb254e788b6603b9fc7fd3df66b04f3e5"
+        },
+        {
+          "path": "aten/src/ATen/cpu/vec/functional_base.h",
+          "sha256": "94e5875c338b5ac9471587e2b82535e13d5beed8a6483c0f503d782d71000d8c"
+        }
+      ],
+      "adaptation": "Larger Gemma 4 vision only: logical 72 F32 QK, 512-key online tiles, pinned NEON third-degree fexp_u20 with BF16 unnormalized exponential stores, eight-lane F32 denominator fold, four-stream BF16/F32 PV and final reciprocal. Fixed reused scratch replaces quadratic score storage. E2B/E4B, unified 12B and text attention dispatch are unchanged."
+    },
     "pytorch-qwen35-reference-silu": {
       "license": "BSD-3-Clause",
       "license_file": "pytorch-LICENSE",

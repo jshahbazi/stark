@@ -5,7 +5,7 @@
 
 use half::bf16;
 
-use super::super::tower::VisionTowerError;
+use super::{super::tower::VisionTowerError, flash::FlashAttention};
 use crate::{
     backends::common::{
         Backend, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
@@ -164,6 +164,7 @@ pub(crate) struct Gemma4VisionTower<B: Backend> {
     add: <B::Kernels as Kernels>::TensorAddScaleKernel,
     gelu: <B::Kernels as Kernels>::VisionGeluBF16Kernel,
     attention: <B::Kernels as Kernels>::AttentionSinglePassKernel,
+    source_attention: Option<FlashAttention<B>>,
 }
 
 impl<B: Backend> Gemma4VisionTower<B> {
@@ -229,6 +230,11 @@ impl<B: Backend> Gemma4VisionTower<B> {
             mlp,
             padded_dim,
             standardization,
+            source_attention: if matches!(model_dim, 2816 | 5376) {
+                Some(FlashAttention::new(context).map_err(VisionTowerError::Backend)?)
+            } else {
+                None
+            },
             prepare_padded: <B::Kernels as Kernels>::Gemma4VisionPreparePaddedBF16Kernel::new(context)
                 .map_err(VisionTowerError::Backend)?,
             unpad: <B::Kernels as Kernels>::Gemma4VisionUnpadBF16Kernel::new(context)
@@ -278,6 +284,9 @@ impl<B: Backend> Gemma4VisionTower<B> {
         rows: u32,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
+        if let Some(attention) = &self.source_attention {
+            return attention.encode(q, k, v, rows, rows, self.heads, commands);
+        }
         let mut output = commands.allocate_scratch_for_shape(&[rows, self.heads * self.padded_dim], DataType::BF16)?;
         // Reuse the native online-softmax kernel: no quadratic score storage
         // and no intermediate BF16 probability materialization.

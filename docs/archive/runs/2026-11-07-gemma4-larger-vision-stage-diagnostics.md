@@ -96,3 +96,12 @@ cascade control matches all expected elements exactly. Fixture manifest SHA-256:
 Native CPU/Metal fixture execution, type-check and larger-tower replay are
 pending for this source-only arithmetic checkpoint; the coordinator owns its
 next batch build. No private checkpoint activations are committed.
+
+The normalization candidate subsequently passed both exact CPU/Metal fixtures
+on sealed source `fcadc29f`, SHA-256
+`44e301616290a147d2f74fa4d2bdfbb3c86257842323395c19f3a8ba612ebc94`.
+All captured raw/normalized first-block prefixes and full prepared head-zero
+Q/K/V now match exactly. The first measured difference moves to attention.
+Full feature gates still fail: relative RMS 0.07462, 0.10354 and 0.04970. The
+normalization correction is retained and these failures remain separate from
+the [next Flash source-policy controls](2026-11-07-gemma4-larger-flash-controls.md).
