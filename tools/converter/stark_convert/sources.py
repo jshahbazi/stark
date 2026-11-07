@@ -583,13 +583,13 @@ def resolve_source(
                 raise UnsupportedConversion("Vision conversion requires the pinned official checkpoint")
             revision = VISION_REVISION
         else:
-            if entry is not None and entry.get("adapter") != "qwen3_5":
+            if entry is not None and entry.get("adapter") not in {"qwen3_5", "qwen3_5_moe"}:
                 raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
             # Vision family sources always bind their own metadata, even when
             # the text catalog has external metadata rules for this repository.
             entry = None
             metadata_profile = metadata_profile or GENERIC_PROFILE
-            if architecture not in {None, "qwen3_5"}:
+            if architecture not in {None, "qwen3_5", "qwen3_5_moe"}:
                 raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
     if metadata_profile not in {None, GENERIC_PROFILE} or metadata_profile is not None and entry is not None:
         raise UnsupportedConversion("Generic metadata requires an uncatalogued source")
@@ -703,7 +703,7 @@ def resolve_source(
             read_family_config(config_path) if artifact_mode == "vision-language" else read_json(config_path),
             architecture,
         )
-        if artifact_mode == "vision-language" and detected != "qwen3_5":
+        if artifact_mode == "vision-language" and detected not in {"qwen3_5", "qwen3_5_moe"}:
             raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
         profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
         if artifact_mode == "vision-language":

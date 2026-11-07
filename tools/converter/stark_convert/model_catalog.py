@@ -532,7 +532,7 @@ def _quantization(config, info, entry, family=None):
         from .compressed import parse_mlx_quantization
 
         try:
-            quantization = parse_mlx_quantization(merged, allow_mixed=family == "qwen3_5")
+            quantization = parse_mlx_quantization(merged, allow_mixed=family in {"qwen3_5", "qwen3_5_moe"})
         except Exception:
             return None
         if quantization is None:
@@ -543,7 +543,7 @@ def _quantization(config, info, entry, family=None):
         ):
             return None
         widths = {bits}
-        if family == "qwen3_5":
+        if family in {"qwen3_5", "qwen3_5_moe"}:
             widths.update(override.bits for _, override in quantization.overrides if override is not None)
         if packing is not None and not widths <= set(packing.get("mixed_bits", [bits])):
             return None
@@ -616,6 +616,7 @@ def _generation_architecture(config, family):
         and (
             name.endswith("ForCausalLM")
             or (family == "qwen3_5" and name == "Qwen3_5ForConditionalGeneration")
+            or (family == "qwen3_5_moe" and name == "Qwen3_5MoeForConditionalGeneration")
             or (family == "qwen4_exp" and name == "Qwen4ExpForConditionalGeneration")
         )
         for name in declared
@@ -812,7 +813,7 @@ def family_catalog(
                     return None
                 weight_bytes = _weight_bytes(selected, sizes)
                 modes = ["text"]
-                if family == "qwen3_5" and quantization == "BF16":
+                if family in {"qwen3_5", "qwen3_5_moe"}:
                     vision = preflight_model(config, mode="vision-language", expected_architecture=family)
                     if vision["status"] == "conditional":
                         try:

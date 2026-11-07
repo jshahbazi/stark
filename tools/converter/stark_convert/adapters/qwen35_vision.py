@@ -25,7 +25,12 @@ def build_qwen35_vision_plan(
     """Return copy operations and consumed source names for official HF vision weights."""
     if source_prefix not in {"model.visual.", "vision_tower."}:
         raise ConversionError("Qwen3.5 vision namespace is unsupported")
-    if not isinstance(vision_config, dict) or vision_config.get("model_type") not in ("qwen3_5", "qwen3_5_vision"):
+    if not isinstance(vision_config, dict) or vision_config.get("model_type") not in (
+        "qwen3_5",
+        "qwen3_5_vision",
+        "qwen3_5_moe",
+        "qwen3_5_moe_vision",
+    ):
         raise ConversionError("Qwen3.5 vision_config must declare qwen3_5")
     allowed = {
         "model_type",

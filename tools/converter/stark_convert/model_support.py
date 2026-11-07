@@ -20,7 +20,7 @@ SCHEMA_VERSION = 1
 MODES = ("text", "decision", "vision-language")
 _QUALIFICATION = {"status": "not_assessed", "scope": "checkpoint_and_build", "calibration": "not_assessed"}
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
-_MLX = {"qwen3", "llama", "gemma3_text", "smollm3", "qwen3_5", "qwen4_exp", "lfm2", "llamba"}
+_MLX = {"qwen3", "llama", "gemma3_text", "smollm3", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "lfm2", "llamba"}
 _FAMILY_DEFINITIONS = (
     ("qwen3", "Qwen3 dense", "HFQwen3Config", ()),
     ("qwen2", "Qwen2 dense", "HFQwen2Config", ()),
@@ -32,6 +32,7 @@ _FAMILY_DEFINITIONS = (
     ("granite", "Granite dense", "HFGraniteConfig", ()),
     ("smollm3", "SmolLM3 dense", "HFSmolLM3Config", ()),
     ("qwen3_5", "Qwen3.5 dense", "HFQwen35Config", ("qwen3_5_text",)),
+    ("qwen3_5_moe", "Qwen3.5 MoE", "HFQwen35MoeConfig", ()),
     ("qwen4_exp", "Qwen3.8 Flash Next", "HFQwen38Config", ()),
     ("lfm2", "LFM2", "HFLFM2Config", ()),
     ("llamba", "LLaMBA", "HFLlambaConfig", ()),
@@ -47,29 +48,31 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
     classifier = architecture == "modernbert"
     modes = {}
     for mode in MODES:
-        supported = not classifier and (mode != "vision-language" or architecture == "qwen3_5")
+        supported = not classifier and (mode != "vision-language" or architecture in {"qwen3_5", "qwen3_5_moe"})
         if classifier:
             message = "Classifier conversion is implemented; the app has no text, Decision or image workflow for it."
         elif mode == "vision-language" and not supported:
-            message = "Image input is implemented only for the supported Qwen3.5 dense BF16 family."
+            message = "Image input requires a supported Qwen vision-language architecture."
         elif mode == "decision":
             message = "Decision scoring needs a direct-answer template, single-token labels and checkpoint checks."
         elif mode == "vision-language":
-            message = "Image input requires dense BF16 tensors, reviewed processing metadata and local image checks."
+            message = (
+                "Image input requires complete supported tensors, reviewed processing metadata and local image checks."
+            )
         else:
             message = "Text generation requires supported tensors, metadata and a successful native load."
         caveats = ["tensor_and_operation_validation", "checkpoint_specific_execution"] if supported else []
         if supported and mode == "decision":
             caveats.extend(["direct_answer_template", "unique_single_token_labels", "calibration_not_inherited"])
         if supported and mode == "vision-language":
-            caveats.extend(["qwen35_dense_bf16_geometry", "reviewed_processing_programs", "local_image_checks"])
+            caveats.extend(["qwen35_vision_geometry", "reviewed_processing_programs", "local_image_checks"])
         if supported and architecture in {"phi3", "gemma2", "gemma3_text"}:
             caveats.append("tied_embeddings_required")
         modes[mode] = {"status": "conditional" if supported else "unsupported", "message": message, "caveats": caveats}
-    formats = [] if architecture == "qwen4_exp" else ["safetensors-float"]
+    formats = [] if architecture in {"qwen4_exp", "qwen3_5_moe"} else ["safetensors-float"]
     if architecture in _MLX:
         formats.extend(["mlx-affine-4bit", "mlx-affine-8bit"])
-    if architecture == "qwen3_5":
+    if architecture in {"qwen3_5", "qwen3_5_moe"}:
         formats.append("mlx-affine-mixed")
     return {
         "family_id": architecture,
@@ -81,7 +84,9 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
             "status": "implemented",
             "containers": [".safetensors"],
             "source_formats": formats,
-            "output_dtypes": ["bfloat16"] if architecture == "qwen4_exp" else ["bfloat16", "float16", "float32"],
+            "output_dtypes": ["bfloat16"]
+            if architecture in {"qwen4_exp", "qwen3_5_moe"}
+            else ["bfloat16", "float16", "float32"],
         },
         "modes": modes,
     }
@@ -286,7 +291,7 @@ def preflight_model(
             "Qwen3.8 text conversion preserves MLX quantization; exact artifact runtime checks remain unverified.",
             ("Text conversion omits vision and MTP tensors; speculation is disabled.",),
         )
-    if architecture != "qwen3_5" and "text_config" in config:
+    if architecture not in {"qwen3_5", "qwen3_5_moe"} and "text_config" in config:
         return _report(
             family,
             mode,
@@ -294,11 +299,16 @@ def preflight_model(
             "unsupported_nested_architecture",
             "This family does not implement a nested text wrapper.",
         )
-    text = config.get("text_config", config) if architecture == "qwen3_5" else config
+    text = config.get("text_config", config) if architecture in {"qwen3_5", "qwen3_5_moe"} else config
     if not isinstance(text, dict):
         return _report(family, mode, "unsupported", "invalid_model_metadata", "Nested model metadata is invalid.")
-    if architecture == "qwen3_5":
-        if text is not config and text.get("model_type") not in (None, "qwen3_5", "qwen3_5_text"):
+    if architecture in {"qwen3_5", "qwen3_5_moe"}:
+        nested = (
+            (None, "qwen3_5_moe", "qwen3_5_moe_text")
+            if architecture == "qwen3_5_moe"
+            else (None, "qwen3_5", "qwen3_5_text")
+        )
+        if text is not config and text.get("model_type") not in nested:
             return _report(
                 family,
                 mode,
@@ -326,7 +336,7 @@ def preflight_model(
             "custom_model_code",
             "Custom model code is outside implemented conversion coverage.",
         )
-    if any(
+    if architecture != "qwen3_5_moe" and any(
         value not in (None, 0)
         for key in (
             "num_experts",
@@ -345,6 +355,19 @@ def preflight_model(
             "Mixture-of-experts operations are outside implemented dense coverage.",
         )
     quantized = any(text.get(key) is not None for key in ("quantization", "quantization_config"))
+    if architecture == "qwen3_5_moe" and text.get("num_experts") is not None:
+        try:
+            from .vision_family import validate_family_geometry
+
+            validate_family_geometry(config)
+        except (ConversionError, UnsupportedConversion, KeyError, TypeError, ValueError, OverflowError):
+            return _report(
+                family,
+                mode,
+                "unsupported",
+                "unsupported_moe_geometry",
+                "This MoE source requires bounded affine experts and the supported Qwen geometry.",
+            )
     if quantized:
         if architecture not in _MLX:
             return _report(
@@ -357,7 +380,7 @@ def preflight_model(
         try:
             from .compressed import parse_mlx_quantization
 
-            parse_mlx_quantization(text, allow_mixed=architecture == "qwen3_5")
+            parse_mlx_quantization(text, allow_mixed=architecture in {"qwen3_5", "qwen3_5_moe"})
         except (ConversionError, UnsupportedConversion):
             return _report(
                 family,
@@ -369,7 +392,7 @@ def preflight_model(
     warnings = []
     if config.get("vision_config") is not None and mode in {None, "text", "decision"}:
         warnings.append("Text conversion omits this checkpoint's vision tower.")
-    if mode is not None and architecture == "qwen3_5":
+    if mode is not None and architecture in {"qwen3_5", "qwen3_5_moe"}:
         from .vision_family import _DELTA_HEAD_DIM
 
         if any(
@@ -402,7 +425,12 @@ def preflight_model(
                 "vision_metadata_incomplete",
                 "The full vision wrapper metadata is incomplete.",
             )
-        if raw_architecture != "qwen3_5" or config["architectures"] != ["Qwen3_5ForConditionalGeneration"]:
+        expected_wrapper = (
+            "Qwen3_5MoeForConditionalGeneration"
+            if architecture == "qwen3_5_moe"
+            else "Qwen3_5ForConditionalGeneration"
+        )
+        if raw_architecture not in {"qwen3_5", "qwen3_5_moe"} or config["architectures"] != [expected_wrapper]:
             return _report(
                 family,
                 mode,
@@ -422,6 +450,13 @@ def preflight_model(
             "layer_types",
             "rope_parameters",
         }
+        if architecture == "qwen3_5_moe":
+            required_text = (required_text - {"intermediate_size"}) | {
+                "num_experts",
+                "num_experts_per_tok",
+                "moe_intermediate_size",
+                "shared_expert_intermediate_size",
+            }
         required_vision = set(_VISION_BOUNDS) | {
             "model_type",
             "in_channels",

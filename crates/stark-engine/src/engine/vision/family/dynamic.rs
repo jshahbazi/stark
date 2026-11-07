@@ -52,20 +52,28 @@ pub(super) fn geometry(
     decoder: &Value,
     vision: &Value,
 ) -> Result<Geometry, InvalidInput> {
-    geometry_with_storage(decoder, vision, false)
+    geometry_with_storage(decoder, vision, false, false)
 }
 
 pub(super) fn geometry_affine(
     decoder: &Value,
     vision: &Value,
 ) -> Result<Geometry, InvalidInput> {
-    geometry_with_storage(decoder, vision, true)
+    geometry_with_storage(decoder, vision, true, false)
+}
+
+pub(super) fn geometry_moe(
+    decoder: &Value,
+    vision: &Value,
+) -> Result<Geometry, InvalidInput> {
+    geometry_with_storage(decoder, vision, true, true)
 }
 
 fn geometry_with_storage(
     decoder: &Value,
     vision: &Value,
     affine: bool,
+    moe: bool,
 ) -> Result<Geometry, InvalidInput> {
     let transformer = &decoder["transformer_config"];
     let model = number(&transformer["model_dim"], 16384, 32)?;
@@ -103,6 +111,7 @@ fn geometry_with_storage(
     let mut expected_layers = Vec::with_capacity(layers.len());
     let mut mixers = Vec::with_capacity(layers.len());
     let (mut attention_geometry, mut delta_geometry, mut context_geometry) = (None, None, None);
+    let mut expert_geometry = None;
     for layer in layers {
         let mixer = &layer["mixer_config"];
         let (head_count, group_count) = heads(mixer)?;
@@ -127,6 +136,22 @@ fn geometry_with_storage(
             0
         }]
         .clone();
+        if moe {
+            let actual = &layer["mlp_config"];
+            let experts = number(&actual["num_routed_experts"], 1024, 1)?;
+            let active = number(&actual["num_active_routed_experts"], 32, 1)?;
+            let expert_hidden = number(&actual["expert_hidden_dim"], 131072, 64)?;
+            let shape = (experts, active, expert_hidden);
+            if active > experts || expert_geometry.is_some_and(|previous| previous != shape) {
+                return Err(invalid());
+            }
+            expert_geometry = Some(shape);
+            expected_layer["mlp_config"] = json!({"type":"MixtureOfExpertsConfig",
+                "expert_config":expected_layer["mlp_config"],"router_config":{},
+                "routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":experts,
+                "num_active_routed_experts":active,"router_has_biases":false,"num_shared_experts":1,
+                "expert_hidden_dim":expert_hidden,"gate_config":{}});
+        }
         for key in ["pre_mixer_norm_config", "pre_mlp_norm_config"] {
             expected_layer[key]["epsilon"] = epsilon.clone();
             if affine {
@@ -210,6 +235,44 @@ fn geometry_with_storage(
     };
     tower.validate()?;
     let mut tensors = tensor_contract(model, hidden, vocab, tied, &mixers, &tower)?;
+    if let Some((experts, _, expert_hidden)) = expert_geometry {
+        let up_rows = experts.checked_mul(expert_hidden).and_then(|n| n.checked_mul(2)).ok_or_else(invalid)?;
+        let down_rows = experts.checked_mul(model).ok_or_else(invalid)?;
+        up_rows.checked_mul(model).ok_or_else(invalid)?;
+        down_rows.checked_mul(expert_hidden).ok_or_else(invalid)?;
+        for index in 0..mixers.len() {
+            let prefix = format!("decoder.transformer.layers.{index}.mlp");
+            for (name, shape) in [
+                ("shared_expert.up_projection.weights.weights", vec![2 * hidden, model]),
+                ("shared_expert.down_projection.weights.weights", vec![model, hidden]),
+                ("experts.up_projection.weights.weights", vec![up_rows, model]),
+                ("experts.down_projection.weights.weights", vec![down_rows, expert_hidden]),
+                ("router.weights.weights", vec![experts, model]),
+                ("shared_gate.weights.weights", vec![1, model]),
+            ] {
+                tensors.tensors.insert(format!("{prefix}.{name}"), ("BF16", shape));
+            }
+            tensors.tensors.remove(&format!("{prefix}.up_projection.weights.weights"));
+            tensors.tensors.remove(&format!("{prefix}.down_projection.weights.weights"));
+        }
+        let mut bytes = 0u64;
+        for (dtype, shape) in tensors.tensors.values() {
+            let elements = shape.iter().try_fold(1u32, |n, width| n.checked_mul(*width)).ok_or_else(invalid)?;
+            bytes = bytes
+                .checked_add(
+                    u64::from(elements)
+                        * if *dtype == "F32" {
+                            4
+                        } else {
+                            2
+                        },
+                )
+                .ok_or_else(invalid)?;
+        }
+        if bytes > MAX_WEIGHT_BYTES {
+            return Err(invalid());
+        }
+    }
     tensors.affine = affine;
     Ok(Geometry {
         tower,

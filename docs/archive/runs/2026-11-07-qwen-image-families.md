@@ -104,8 +104,25 @@ readout guard to reject the request without unsafe gathers.
 The Qwen MLP wrapper adds its sigmoid-gated shared expert. A two-row, four-expert
 CPU fixture passed with both BF16 and packed Q4 banks; rows select different
 expert pairs and ties have a defined lower-ID ordering. Production generator
-type-check passed with the new CPU/Metal kernel bindings. Full-model Qwen3.5
-MoE conversion admission and numerical qualification remain pending.
+type-check passed with the new CPU/Metal kernel bindings.
+
+The versioned `qwen35-moe-affine-merged-v4` artifact profile now admits the
+explicit Qwen3.5 MoE architecture, group-64 packed affine BF16 execution, its
+normalized selected-expert probabilities and one sigmoid-gated shared expert.
+The converter flattens the three-dimensional MLX expert banks, interleaves
+up/gate rows per expert, and retains the ordinary BF16 vision tower. Native
+geometry checks independently reconstruct every expert/shared/router bank and
+validate bounded dimensions and physical tensor headers. Image requests omit
+MTP and use the existing private prepared-image flow.
+
+The full converter suite passed 6,158 tests with 90 skips. Native production
+type-check and four focused CPU sparse-expert/geometry tests passed. The exact
+source `mlx-community/Qwen3.5-35B-A3B-4bit` at revision
+`1e20fd8d42056f870933bf98ca6211024744f7ec` was downloaded once (20,418,624,545
+bytes). Header-only conversion planning admitted 1,520 operations, including
+333 BF16 vision tensors, for a 20,393,738,208-byte output payload. Full-model
+conversion and numerical qualification remain pending storage admission;
+these implementation and fixture checks do not establish end-to-end parity.
 
 ## Primary references
 

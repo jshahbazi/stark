@@ -55,6 +55,8 @@ _KEYS = _COMMON_KEYS | {
     "partial_rotary_factor",
     "language_model_only",
     "output_gate_type",
+    "shared_expert_intermediate_size",
+    "norm_topk_prob",
 }
 
 
@@ -100,9 +102,11 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     outer = read_json(source / "config.json")
     text = outer.get("text_config", {})
     config = normalize_qwen35_config(outer)
-    if text and text.get("model_type", "qwen3_5_text") not in {"qwen3_5", "qwen3_5_text"}:
+    moe = config.get("model_type") == "qwen3_5_moe"
+    nested_types = {"qwen3_5_moe", "qwen3_5_moe_text"} if moe else {"qwen3_5", "qwen3_5_text"}
+    if text and text.get("model_type", next(iter(nested_types))) not in nested_types:
         raise UnsupportedConversion("Qwen3.5 dense adapter does not support a different nested text architecture")
-    if config.get("model_type") != "qwen3_5":
+    if config.get("model_type") not in {"qwen3_5", "qwen3_5_moe"}:
         raise UnsupportedConversion("Qwen3.5 dense adapter requires model_type qwen3_5")
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Qwen3.5 supports BF16, F16 and F32 output")
@@ -116,7 +120,17 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     quantization = parse_mlx_quantization(config, allow_mixed=True)
     unsupported: list[str] = []
     dim = _positive_int(config, "hidden_size")
-    hidden = _positive_int(config, "intermediate_size")
+    hidden = _positive_int(config, "shared_expert_intermediate_size" if moe else "intermediate_size")
+    if moe:
+        experts = _positive_int(config, "num_experts")
+        active = _positive_int(config, "num_experts_per_tok")
+        expert_hidden = _positive_int(config, "moe_intermediate_size")
+        if experts > 1024 or active > min(experts, 32) or expert_hidden > 131072 or quantization is None:
+            raise UnsupportedConversion("Qwen3.5 MoE requires bounded affine expert banks")
+        if not _bool(config, "norm_topk_prob", True):
+            raise UnsupportedConversion("Qwen3.5 MoE requires normalized selected expert probabilities")
+        if target != "BF16":
+            raise UnsupportedConversion("Qwen3.5 MoE currently requires BF16 activations")
     count = _positive_int(config, "num_hidden_layers")
     vocab = _positive_int(config, "vocab_size")
     heads = _positive_int(config, "num_attention_heads")
@@ -185,6 +199,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     architectures = (
         (["Qwen3_5ForCausalLM"],) if text_only else (["Qwen3_5ForConditionalGeneration"], ["Qwen3_5ForCausalLM"])
     )
+    if moe:
+        architectures = (["Qwen3_5MoeForConditionalGeneration"], ["Qwen3_5MoeForCausalLM"])
     if config.get("architectures", architectures[0]) not in architectures:
         unsupported.append("Qwen3.5 architecture is outside implemented text coverage")
     if config.get("hidden_act", "silu") != "silu" or _bool(config, "mlp_bias", False):
@@ -222,8 +238,10 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     if config.get("rope_scaling") is not None:
         unsupported.append("Qwen3.5 scaled RoPE is outside implemented coverage")
     for field in ("num_experts", "num_experts_per_tok", "moe_intermediate_size"):
-        if config.get(field) not in (None, 0):
+        if not moe and config.get(field) not in (None, 0):
             unsupported.append("Qwen3.5 MoE/MTP variants are outside implemented dense coverage")
+    if not moe and any(field in config for field in ("shared_expert_intermediate_size", "norm_topk_prob")):
+        unsupported.append("Qwen3.5 routed expert options require the MoE architecture wrapper")
     if "mtp_num_hidden_layers" in config and (
         type(config["mtp_num_hidden_layers"]) is not int or config["mtp_num_hidden_layers"] < 0
     ):
@@ -280,6 +298,27 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
             expected.update((name, prefix + ".scales", prefix + ".biases"))
             return info
         return tensor(name, shape)
+
+    def expert_source(name: str, rows: int, columns: int):
+        """Flatten only the declared stacked expert axis; retain byte identity."""
+        module = name.removesuffix(".weight")
+        quant = quantization.for_module(module)
+        names = (name, module + ".scales", module + ".biases")
+        packed = any(key in tensors for key in names[1:])
+        if packed:
+            if quant is None:
+                raise ConversionError("MoE expert plane contradicts its quantization description")
+            shapes = ((experts, rows, columns * quant.bits // 32), (experts, rows, columns // quant.group_size))
+            flattened = {}
+            for key, shape in zip(names, (shapes[0], shapes[1], shapes[1]), strict=True):
+                info = tensors.get(key)
+                if info is None or info.shape != shape:
+                    raise ConversionError("MoE stacked expert planes disagree with the declared geometry")
+                expected.add(key)
+                flattened[key] = replace(info, shape=(experts * rows, shape[-1]))
+            return read_mlx_matrix(flattened, name, (experts * rows, columns), quant)
+        info = tensor(name, (experts, rows, columns))
+        return replace(info, shape=(experts * rows, columns))
 
     def matrix(out: str, sources, shape: tuple[int, ...], layout="output_input"):
         nonlocal used_mlx
@@ -477,14 +516,39 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
                 operations.append(
                     TensorOperation(out + ".mixer." + output_name, (info,), "F32", (linear_heads,), "cast_f32")
                 )
+        if moe:
+            bank = src + ".mlp.switch_mlp"
+            up = expert_source(bank + ".up_proj.weight", expert_hidden, dim)
+            gate = expert_source(bank + ".gate_proj.weight", expert_hidden, dim)
+            interleaved = tuple(
+                _matrix_row_range(value, expert * expert_hidden, expert_hidden)
+                for expert in range(experts)
+                for value in (up, gate)
+            )
+            matrix(out + ".mlp.experts.up_projection.weights", interleaved, (experts * 2 * expert_hidden, dim))
+            matrix(
+                out + ".mlp.experts.down_projection.weights",
+                (expert_source(bank + ".down_proj.weight", dim, expert_hidden),),
+                (experts * dim, expert_hidden),
+            )
+            matrix(
+                out + ".mlp.router.weights", (matrix_source(src + ".mlp.gate.weight", (experts, dim)),), (experts, dim)
+            )
+            matrix(
+                out + ".mlp.shared_gate.weights",
+                (matrix_source(src + ".mlp.shared_expert_gate.weight", (1, dim)),),
+                (1, dim),
+            )
+        dense_source = src + (".mlp.shared_expert" if moe else ".mlp")
+        dense_output = out + (".mlp.shared_expert" if moe else ".mlp")
         matrix(
-            out + ".mlp.up_projection.weights",
-            tuple(matrix_source(src + f".mlp.{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
+            dense_output + ".up_projection.weights",
+            tuple(matrix_source(dense_source + f".{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
             (2 * hidden, dim),
         )
         matrix(
-            out + ".mlp.down_projection.weights",
-            (matrix_source(src + ".mlp.down_proj.weight", (dim, hidden)),),
+            dense_output + ".down_projection.weights",
+            (matrix_source(dense_source + ".down_proj.weight", (dim, hidden)),),
             (dim, hidden),
         )
     norm("decoder.transformer.output_norm", prefix + ".norm.weight", dim)
@@ -545,6 +609,19 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
         "up_clipping": None,
         "gate_clipping": None,
     }
+    if moe:
+        mlp = {
+            "type": "MixtureOfExpertsConfig",
+            "expert_config": mlp,
+            "router_config": {},
+            "routing_function": {"type": "SoftmaxRouting"},
+            "num_routed_experts": experts,
+            "num_active_routed_experts": active,
+            "router_has_biases": False,
+            "num_shared_experts": 1,
+            "expert_hidden_dim": expert_hidden,
+            "gate_config": {},
+        }
     rope = {"type": "UnscaledRoPEConfig", "base": base, "max_sequence_length": context, "head_dim": rotary}
     layer_configs = []
     for layer in layers:

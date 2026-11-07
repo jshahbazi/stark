@@ -55,14 +55,18 @@ def capability(request: ConversionRequest) -> CapabilityResult:
         official = request.repo == VISION_REPO
         supported = (
             request.artifact_mode == "vision-language"
-            and (official or get_model(request.repo) is None or get_model(request.repo).get("adapter") == "qwen3_5")
+            and (
+                official
+                or get_model(request.repo) is None
+                or get_model(request.repo).get("adapter") in {"qwen3_5", "qwen3_5_moe"}
+            )
             and request.dtype == "bfloat16"
             and request.model_kind == "language"
-            and request.architecture in {None, "qwen3_5"}
+            and request.architecture in {None, "qwen3_5", "qwen3_5_moe"}
             and request.metadata_profile in ({None} if official else {None, GENERIC_PROFILE})
         )
         return CapabilityResult(
-            adapter="qwen3_5" if supported else None,
+            adapter=(request.architecture or "qwen3_5") if supported else None,
             model_kind=request.model_kind,
             conversion="implemented" if supported else "unsupported",
             native_loading=("supported_layout_unverified_tuple" if official else "supported_family_unverified")
@@ -200,17 +204,17 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             raise ConversionError("Requested architecture disagrees with catalog profile")
     if request.model_kind != model_kind_for_architecture(adapter):
         raise UnsupportedConversion("Checkpoint architecture disagrees with the requested model kind")
-    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2"}:
+    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "qwen3_5_moe", "lfm2"}:
         from .compressed import parse_mlx_quantization
 
         entry = get_model(request.repo)
         packing = entry.get("compressed_format") if entry else None
         packing_config = config
-        if adapter == "qwen3_5":
+        if adapter in {"qwen3_5", "qwen3_5_moe"}:
             from .adapters.qwen35 import normalize_qwen35_config
 
             packing_config = normalize_qwen35_config(config)
-        quantization = parse_mlx_quantization(packing_config, allow_mixed=adapter == "qwen3_5")
+        quantization = parse_mlx_quantization(packing_config, allow_mixed=adapter in {"qwen3_5", "qwen3_5_moe"})
         if packing is not None:
             if quantization is None or quantization.bits != packing["bits"]:
                 raise ConversionError("Checkpoint packing disagrees with its catalog profile")
@@ -241,6 +245,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         "granite": build_granite_plan,
         "smollm3": build_smollm3_plan,
         "qwen3_5": partial(build_qwen35_plan, include_vision=request.artifact_mode == "vision-language"),
+        "qwen3_5_moe": partial(build_qwen35_plan, include_vision=request.artifact_mode == "vision-language"),
         "qwen4_exp": build_qwen38_plan,
         "lfm2": build_lfm2_plan,
         "llamba": partial(
@@ -259,7 +264,8 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
                 {"BF16", "F32"}
                 if operation.kind == "cast_f32" and operation.name.endswith((".scales", ".a_log", ".dt_bias"))
                 else {"I32", "U32"}
-                if artifact_contract["family"]["profile"] == "qwen35-dense-affine-merged-v3"
+                if artifact_contract["family"]["profile"]
+                in {"qwen35-dense-affine-merged-v3", "qwen35-moe-affine-merged-v4"}
                 and operation.kind in {"mlx_repack", "mlx_widen"}
                 else {"BF16"}
             )
@@ -277,7 +283,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
                     "type": "Qwen35MRoPEConfig",
                     **artifact_contract["position_contract"],
                 }
-    if adapter == "qwen3_5":
+    if adapter in {"qwen3_5", "qwen3_5_moe"}:
         from .adapters.qwen35 import normalize_qwen35_config
 
         config = normalize_qwen35_config(config)

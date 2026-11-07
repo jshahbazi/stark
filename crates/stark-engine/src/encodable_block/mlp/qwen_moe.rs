@@ -37,7 +37,6 @@ impl<B: Backend> QwenMoe<B> {
             || config.router_has_biases
             || config.num_shared_experts != 1
             || config.gate_config.is_none()
-            || !tree.numerical_profile().qwen35_bf16_activations()
         {
             return Err(MlpBlockError::UnsupportedMixtureOfExperts);
         }
@@ -68,7 +67,7 @@ impl<B: Backend> QwenMoe<B> {
             config.num_active_routed_experts,
             &config.expert_config,
             &tree.subtree("experts"),
-            true,
+            tree.numerical_profile().qwen35_bf16_activations(),
             RoutingPrecision {
                 round_logits_bf16: true,
                 round_weights_bf16: true,
