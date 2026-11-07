@@ -274,6 +274,24 @@ fn retained_lily_tower_source_reference() {
     }
     println!("{}", json!({"private_retained_tower_metrics":metrics}));
     println!("{}", json!({"private_retained_operator_metrics":operators}));
+    // Independent same-input source control: this is tight enough to reject
+    // the former unnormalized-BF16-P online policy (~0.4% RMS) while retaining
+    // room for F32 reduction order and BF16 halfway rounding across devices.
+    for (case, result) in manifest["cases"].as_array().unwrap().iter().zip(&operators) {
+        if let Some(records) = case["operators"].as_array() {
+            for (record, metric) in
+                records.iter().zip(result["metrics"].as_array().unwrap())
+            {
+                if record["operator"] == "attention" {
+                    assert!(
+                        metric["relative_rms"].as_f64().unwrap() <= 0.001
+                            && metric["cosine"].as_f64().unwrap() >= 0.999999,
+                        "private retained attention exceeds same-input source gate"
+                    );
+                }
+            }
+        }
+    }
     assert!(
         metrics.iter().all(|metric| metric["relative_rms"].as_f64().unwrap() <= 0.02
             && metric["cosine"].as_f64().unwrap() >= 0.999),

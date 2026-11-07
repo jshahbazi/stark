@@ -110,7 +110,9 @@ pub fn qkv_rope_2d_bf16(
 /// Full bidirectional attention over all `N` rows of `qkv` `[N, 3H]`
 /// (q | k | v, `heads` heads of [`ATTN_D`]), softmax in f32, into `out`
 /// `[N, H]`. One tensor-op threadgroup per 32-query tile and head, walking
-/// 64-key tiles with an online softmax.
+/// 64-key tiles twice. QK and scaled scores round to BF16; softmax statistics
+/// are F32; globally normalized probabilities round to BF16 before PV, matching
+/// the pinned eager source without allocating an N x N attention matrix.
 pub fn attention_full_bf16(
     ctx: &MetalContext,
     pass: &ComputePass<'_>,
