@@ -15,7 +15,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Experimental GLM batched matrices](validation/GLM_BATCHED_MATRICES.md) | Dense-wide, grouped expert and MLA matrix batching selectors and qualification requirements |
 | [Optional GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) | Pinned MLX core, explicit experimental BF16 native profile, worker defaults and source-bound prefix validation |
 | [Native hybrid sampling](NUMERICAL_SAMPLING.md) | Exact nucleus-prefix proof, reference-order fallbacks, precision and scratch lifetime |
-| [OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) | Native text paths, Gemma 4 E2B/E4B BF16 image artifacts, conversion commands, precision policy and validation boundaries |
+| [OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) | Native text paths, Gemma 4 BF16 image profiles, encoder-free and MoE paths, precision policy and validation boundaries |
 | [Gemma 3 images](GEMMA3_IMAGES.md) | Source-bound SigLIP image artifacts, 4B/12B/27B admission, exact processor semantics and qualification boundaries |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
@@ -27,7 +27,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | --- | --- |
 | [Worker protocols](WORKER_PROTOCOLS.md) | Conventions shared by both workers: framing, readiness and version tags, error classes, privacy |
 | [Text generation](GENERATION.md) | `stark-generate` requests, replies, streaming, stop sequences, cancellation, error codes, and the terminal chat client |
-| [Native image implementation](MULTIMODAL_IMPLEMENTATION.md) | Native Qwen3.5 conversion, preprocessing, tower, fusion and image transport |
+| [Native image implementation](MULTIMODAL_IMPLEMENTATION.md) | Qwen and Gemma image profiles, preprocessing, tower, fusion, transport and qualification boundaries |
 | [Vision model families](VISION_FAMILY_CONTRACT.md) | Merged BF16 Qwen3.5 admission, automatic installation checks and evidence levels |
 | [Probability scoring](SCORING.md) | `stark-score` requests, replies, the consecutive cache, error codes and the digest probe |
 

@@ -1,5 +1,35 @@
 # Native image support implementation
 
+The native worker, terminal client, macOS app and Local API share a bounded
+single-image workflow for compatible Qwen and Gemma artifacts. Each artifact
+binds its processing program, tokenizer, model source and native implementation
+profile. Loading verifies that contract before publishing image capability.
+
+| Implementation | Stored contract | Checkpoint boundaries |
+| --- | --- | --- |
+| Dense Qwen BF16 | Schema 2 exact reference or schema 3 family v1/v2 | Original reference qualification below; changed checkpoints require separate checks |
+| Dense affine Qwen 3.5/3.8 | Schema 3, `qwen35-dense-affine-merged-v3` | Supported packed decoder matrices with a complete BF16 tower |
+| Qwen 3.5 MoE | Schema 3, `qwen35-moe-affine-merged-v4` | Bounded selected experts, shared expert and complete BF16 tower |
+| Retained Qwen Flash Next | Schema 6, `stark-image-artifact.json` | Exact supported original-format source pins and immutable shard inventory |
+| Gemma 3 | Schema 5, `gemma3-siglip-bf16-v1` | Original 4B/12B/27B BF16 wrappers; fixed SigLIP processing |
+| Gemma 4 | Schema 4, exact per-size family profile | E2B/E4B, 12B encoder-free, 26B-A4B MoE and 31B dense BF16 layouts |
+
+Conversion and native admission establish implemented operations. Automatic
+local checks establish functional evidence labeled `locally_tested`. Numerical
+qualification remains bound to the exact artifact, reference, executable and
+runtime. The affine Qwen decoder and larger Gemma paths retain open numerical
+qualification work; a family entry does not establish answer quality or speed.
+
+See [Qwen retained and affine paths](archive/runs/2026-11-07-qwen-image-families.md),
+[Gemma 3 processing and qualification](GEMMA3_IMAGES.md), and
+[Gemma 4 profiles](OLMO3_GEMMA4.md) for their source identities and current limits.
+Gemma 3 global layers permit same-image attention; local layers retain the
+sliding lower bound. The larger Gemma 4 profiles keep global layers causal and
+permit same-image attention inside the local sliding bound. These choices are
+explicit per-attention policies and do not change ordinary text dispatch.
+
+## Original Qwen reference qualification
+
 The first target is one static image with the official BF16 `Qwen/Qwen3.5-0.8B`
 checkpoint at `2fc06364715b967f1860aea9cf38778875588b17`. The implementation
 follows the native Rust/Metal tower and decoder route. The converter has an
@@ -26,7 +56,7 @@ The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift
 records production-controller checks, delivered-GUI image execution, recovery,
 cleanup, source/notice audits, and the remaining public-release boundary.
 
-## Implemented conversion boundary
+## Qwen BF16 conversion boundary
 
 `stark-convert --artifact-mode vision-language` is opt-in and accepts the exact
 reference checkpoint or a merged BF16 dense Qwen3.5 model that passes the
