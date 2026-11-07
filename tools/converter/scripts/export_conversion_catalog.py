@@ -44,8 +44,37 @@ GEMMA4_31B_HASHES = {
     "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
     "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
     "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
-    "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c"
+    "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
 }
+
+GEMMA4_ADDITIONAL_PROFILES = [
+    {
+        "repo": "google/gemma-4-12B-it",
+        "revision": "43c9d014b231474fa7212dbb48a762566c2b255d",
+        "hashes": {
+            "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+            "config.json": "478c46e8d2c52d5c2d85bf67e3b3e8c90e7c9d91086cee27e3c267907e936bd9",
+            "generation_config.json": "a8349d9bd64cc5841297fcb5002f0fdc4749c473c8f1b10ea337f9ce4ee7014e",
+            "processor_config.json": "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9",
+            "tokenizer.json": "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb",
+            "tokenizer_config.json": "a62f4e85a47c0c136edaaa3a4f591fd6783717299a9def47e5ad03a49f6a5eb9",
+        },
+        "size": "12B",
+    },
+    {
+        "repo": "google/gemma-4-26B-A4B-it",
+        "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+        "hashes": {
+            "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+            "config.json": "ed0c1eb3633de771906e9ba004a44cc5635bcc06ee2062077c3d2e88a50707d3",
+            "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+            "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+            "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+            "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+        },
+        "size": "26B-A4B",
+    },
+]
 
 
 def profile_extension(
@@ -355,12 +384,33 @@ def export(reference: Path) -> dict:
     entries[:] = [gemma4_e4b if entry["repo"] == GEMMA4_E4B_REPO else entry for entry in entries]
 
     gemma4_31b = profile_extension(
-        entries, repo=GEMMA4_31B_REPO, revision=GEMMA4_31B_REVISION,
-        reference_repo="google/gemma-3-4b-it", config_class="HFGemma4TextConfig",
-        adapter="gemma4_text", family="Gemma-4", vendor="Google", size="31B",
+        entries,
+        repo=GEMMA4_31B_REPO,
+        revision=GEMMA4_31B_REVISION,
+        reference_repo="google/gemma-3-4b-it",
+        config_class="HFGemma4TextConfig",
+        adapter="gemma4_text",
+        family="Gemma-4",
+        vendor="Google",
+        size="31B",
         file_hashes=GEMMA4_31B_HASHES,
     )
     extensions = [gemma4_31b]
+    for profile in GEMMA4_ADDITIONAL_PROFILES:
+        extensions.append(
+            profile_extension(
+                entries,
+                repo=profile["repo"],
+                revision=profile["revision"],
+                reference_repo="google/gemma-3-4b-it",
+                config_class="HFGemma4TextConfig",
+                adapter="gemma4_text",
+                family="Gemma-4",
+                vendor="Google",
+                size=profile["size"],
+                file_hashes=profile["hashes"],
+            )
+        )
     for repository, reference_repo, family in (
         ("unsloth/Llama-3.2-1B-Instruct", "meta-llama/Llama-3.2-1B-Instruct", "Llama-3.2"),
         ("mistralai/Mistral-7B-Instruct-v0.2", "mistralai/Codestral-22B-v0.1", "Mistral-7B"),

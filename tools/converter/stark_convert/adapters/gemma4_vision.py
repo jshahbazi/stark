@@ -28,9 +28,26 @@ PROFILES = {
         "family": {"id": "gemma4-31b-bf16-v1", "version": 1},
     },
 }
+PROFILES.update(
+    {
+        "google/gemma-4-26B-A4B-it": {
+            "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+            "model_dim": 2816,
+            "family": {"id": "gemma4-26b-a4b-bf16-v1", "version": 1},
+        },
+        "google/gemma-4-12B-it": {
+            "revision": "43c9d014b231474fa7212dbb48a762566c2b255d",
+            "model_dim": 3840,
+            "family": {"id": "gemma4-12b-bf16-v1", "version": 1},
+        },
+    }
+)
 for _profile in PROFILES.values():
-    _profile["template_sha256"] = ("ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
-        if _profile["model_dim"] == 5376 else "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5")
+    _profile["template_sha256"] = (
+        "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
+        if _profile["model_dim"] not in (1536, 2560)
+        else "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"
+    )
 TOKENS = {"image": 258880, "vision_start": 255999, "vision_end": 258882, "video": 258884, "audio": 258881}
 GEOMETRY = {
     "model_type": "gemma4_vision",
@@ -52,10 +69,30 @@ GEOMETRY = {
     "hidden_activation": "gelu_pytorch_tanh",
     "rope_parameters": {"rope_theta": 100.0, "rope_type": "default"},
 }
-LARGE_GEOMETRY = {**GEOMETRY, "num_hidden_layers": 27, "hidden_size": 1152,
-                  "num_attention_heads": 16, "num_key_value_heads": 16,
-                  "head_dim": 72, "global_head_dim": 72, "intermediate_size": 4304,
-                  "standardize": True, "use_clipped_linears": False}
+LARGE_GEOMETRY = {
+    **GEOMETRY,
+    "num_hidden_layers": 27,
+    "hidden_size": 1152,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 16,
+    "head_dim": 72,
+    "global_head_dim": 72,
+    "intermediate_size": 4304,
+    "standardize": True,
+    "use_clipped_linears": False,
+}
+
+UNIFIED_GEOMETRY = {
+    "model_type": "gemma4_unified_vision",
+    "mm_embed_dim": 3840,
+    "mm_posemb_size": 1120,
+    "model_patch_size": 48,
+    "num_soft_tokens": 280,
+    "output_proj_dims": 3840,
+    "patch_size": 16,
+    "pooling_kernel_size": 3,
+    "rms_norm_eps": 1e-6,
+}
 
 _VISION_ANNOTATIONS = {
     "_name_or_path",
@@ -77,21 +114,56 @@ _VISION_DEFAULTS = {
 }
 
 
+def _unified_operations(tensors):
+    expected = {
+        "model.vision_embedder.patch_dense.weight": (3840, 6912),
+        "model.vision_embedder.patch_dense.bias": (3840,),
+        "model.vision_embedder.pos_embedding": (1120, 2, 3840),
+        "model.embed_vision.embedding_projection.weight": (3840, 3840),
+    }
+    for norm, width in (("patch_ln1", 6912), ("patch_ln2", 3840), ("pos_norm", 3840)):
+        for plane in ("weight", "bias"):
+            expected[f"model.vision_embedder.{norm}.{plane}"] = (width,)
+    actual = {name for name in tensors if name.startswith(("model.vision_embedder.", "model.embed_vision."))}
+    if actual != set(expected):
+        raise UnsupportedConversion("Unified Gemma vision inventory differs from the pinned source layout")
+    operations = []
+    for name, shape in expected.items():
+        tensor = tensors[name]
+        if tensor.shape != shape or tensor.dtype != "BF16":
+            raise ConversionError("Unified Gemma vision requires its exact BF16 tensor geometry")
+        output = (
+            name.removeprefix("model.vision_embedder.")
+            if name.startswith("model.vision_embedder.")
+            else name.removeprefix("model.")
+        )
+        operations.append(TensorOperation("vision." + output, (tensor,), "BF16", shape))
+    return operations
+
+
 def gemma4_vision_contract(source: Path, repo: str | None = None, revision: str | None = None) -> dict:
     config = read_json(source / "config.json")
     if any(config.get(key) is not None for key in ("quantization", "quantization_config")):
         raise UnsupportedConversion("Native Gemma image conversion requires merged BF16 source weights")
     vision = config.get("vision_config")
-    geometry = LARGE_GEOMETRY if config.get("text_config", {}).get("hidden_size") == 5376 else GEOMETRY
+    model_dim = config.get("text_config", {}).get("hidden_size")
+    unified = model_dim == 3840
+    geometry = UNIFIED_GEOMETRY if unified else LARGE_GEOMETRY if model_dim in (2816, 5376) else GEOMETRY
     if not isinstance(vision, dict) or any(vision.get(key) != value for key, value in geometry.items()):
         raise UnsupportedConversion("Native Gemma images require the declared BF16 vision geometry")
-    if set(vision) - (set(GEOMETRY) | _VISION_ANNOTATIONS | set(_VISION_DEFAULTS)):
+    if set(vision) - (set(geometry) | _VISION_ANNOTATIONS | set(_VISION_DEFAULTS)):
         raise UnsupportedConversion("Gemma vision configuration declares unimplemented options")
     if any(vision.get(key, default) != default for key, default in _VISION_DEFAULTS.items()):
         raise UnsupportedConversion("Gemma vision configuration changes an unsupported operation")
-    profile = next((value for value in PROFILES.values()
-                    if value["model_dim"] == config.get("text_config", {}).get("hidden_size")), None)
-    if config.get("model_type") != "gemma4" or profile is None:
+    profile = next(
+        (
+            value
+            for value in PROFILES.values()
+            if value["model_dim"] == config.get("text_config", {}).get("hidden_size")
+        ),
+        None,
+    )
+    if config.get("model_type") != ("gemma4_unified" if unified else "gemma4") or profile is None:
         raise UnsupportedConversion("Native Gemma images require an implemented dense text decoder")
     if repo is not None and (PROFILES.get(repo) != profile or revision != profile["revision"]):
         raise UnsupportedConversion("Native Gemma image source differs from its pinned official profile")
@@ -120,6 +192,11 @@ def gemma4_vision_contract(source: Path, repo: str | None = None, revision: str 
         "image_mean": [0.0, 0.0, 0.0],
         "image_std": [1.0, 1.0, 1.0],
     }
+    if unified:
+        required.pop("image_seq_length")
+        required["image_processor_type"] = "Gemma4UnifiedImageProcessor"
+        if read_json(source / "processor_config.json").get("image_seq_length") != 280:
+            raise UnsupportedConversion("Unified Gemma requires 280 image soft tokens")
     if not isinstance(processor, dict) or processor != required:
         raise UnsupportedConversion("Gemma image processing metadata differs from the admitted profile")
     return {
@@ -144,6 +221,19 @@ def build_gemma4_vision_plan(source: Path, *, dtype: str = "bfloat16"):
     tensors = load_checkpoint(source)
     operations = list(base.operations)
     geometry = contract["vision_config"]
+    if geometry["model_type"] == "gemma4_unified_vision":
+        operations.extend(_unified_operations(tensors))
+        return replace(
+            base,
+            decoder_config={
+                **base.decoder_config,
+                "gemma4_image_embeddings": False,
+                "scalar_image_embeddings": True,
+                "bidirectional_image_attention": True,
+            },
+            operations=tuple(sorted(operations, key=lambda operation: operation.name)),
+            metadata={**base.metadata, "stark.vision.family": contract["family"]["id"]},
+        )
     width, head_dim, intermediate = (geometry[key] for key in ("hidden_size", "head_dim", "intermediate_size"))
     clipped = geometry["use_clipped_linears"]
     expected = {
@@ -173,7 +263,7 @@ def build_gemma4_vision_plan(source: Path, *, dtype: str = "bfloat16"):
             ("mlp.up_proj", (intermediate, width)),
             ("mlp.down_proj", (width, intermediate)),
         ):
-            expected[f"{prefix}.{name}.{"linear.weight" if clipped else "weight"}"] = shape
+            expected[f"{prefix}.{name}.{'linear.weight' if clipped else 'weight'}"] = shape
             if clipped:
                 for bound in ("input_min", "input_max", "output_min", "output_max"):
                     expected[f"{prefix}.{name}.{bound}"] = ()
@@ -188,8 +278,8 @@ def build_gemma4_vision_plan(source: Path, *, dtype: str = "bfloat16"):
         if name.startswith("model.embed_vision."):
             output_name = name.removeprefix("model.")
         operations.append(TensorOperation(f"vision.{output_name}", (tensor,), "BF16", shape))
-    decoder = {**base.decoder_config, "gemma4_image_embeddings": model_dim != 5376}
-    if model_dim == 5376:
+    decoder = {**base.decoder_config, "gemma4_image_embeddings": model_dim in (1536, 2560)}
+    if model_dim not in (1536, 2560):
         decoder.update(scalar_image_embeddings=True, bidirectional_image_attention=True)
     metadata = {**base.metadata, "stark.vision.family": contract["family"]["id"]}
     return replace(

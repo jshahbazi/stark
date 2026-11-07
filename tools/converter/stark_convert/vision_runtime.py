@@ -20,13 +20,25 @@ CONFIGURED_FAMILY_PROFILE = "qwen35-dense-bf16-merged-v2"
 GEMMA4_FAMILY_PROFILE = "gemma4-e2b-bf16-v1"
 GEMMA4_E4B_FAMILY_PROFILE = "gemma4-e4b-bf16-v1"
 GEMMA4_31B_FAMILY_PROFILE = "gemma4-31b-bf16-v1"
+GEMMA4_12B_FAMILY_PROFILE = "gemma4-12b-bf16-v1"
+GEMMA4_26B_FAMILY_PROFILE = "gemma4-26b-a4b-bf16-v1"
 _GEMMA4_PROFILES = {
+    GEMMA4_12B_FAMILY_PROFILE: ("google/gemma-4-12B-it", "43c9d014b231474fa7212dbb48a762566c2b255d"),
+    GEMMA4_26B_FAMILY_PROFILE: ("google/gemma-4-26B-A4B-it", "4d7ae4984b7db7de8f8457170b3f1a419ee76d52"),
     GEMMA4_31B_FAMILY_PROFILE: ("google/gemma-4-31B-it", "842da3794eaa0b77d5f08bae87a17459d91ff475"),
     GEMMA4_FAMILY_PROFILE: ("google/gemma-4-E2B-it", "3e22461f65e89153144f8adb70e3b8c2cc9845a7"),
     GEMMA4_E4B_FAMILY_PROFILE: ("google/gemma-4-E4B-it", "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"),
 }
 VISION_MODEL_TYPES = frozenset({"Qwen35VisionLanguageModelConfig", "Gemma4VisionLanguageModelConfig"})
-_FAMILY_VERSIONS = {FAMILY_PROFILE: 1, CONFIGURED_FAMILY_PROFILE: 2, GEMMA4_FAMILY_PROFILE: 1, GEMMA4_E4B_FAMILY_PROFILE: 1, GEMMA4_31B_FAMILY_PROFILE: 1}
+_FAMILY_VERSIONS = {
+    FAMILY_PROFILE: 1,
+    CONFIGURED_FAMILY_PROFILE: 2,
+    GEMMA4_FAMILY_PROFILE: 1,
+    GEMMA4_E4B_FAMILY_PROFILE: 1,
+    GEMMA4_31B_FAMILY_PROFILE: 1,
+    GEMMA4_12B_FAMILY_PROFILE: 1,
+    GEMMA4_26B_FAMILY_PROFILE: 1,
+}
 _ARTIFACT_HASHES = {
     "artifact_sha256",
     "config_sha256",
@@ -169,9 +181,12 @@ def artifact_image_family(config: object) -> dict | None:
         return None
     family = contract.get("family")
     if config["type"] == "Gemma4VisionLanguageModelConfig":
-        if (contract.get("schema_version") == 4 and isinstance(family, dict)
-                and family.get("id") in _GEMMA4_PROFILES
-                and family == {"id": family["id"], "version": 1}):
+        if (
+            contract.get("schema_version") == 4
+            and isinstance(family, dict)
+            and family.get("id") in _GEMMA4_PROFILES
+            and family == {"id": family["id"], "version": 1}
+        ):
             return {"profile": family["id"], "version": 1}
         return None
     return family if supported_image_family(family) and family["profile"] not in _GEMMA4_PROFILES else None

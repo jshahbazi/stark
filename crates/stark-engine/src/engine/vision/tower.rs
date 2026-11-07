@@ -293,7 +293,7 @@ fn validate_parameters<B: Backend>(
     Ok(())
 }
 
-struct RawLinear<B: Backend> {
+pub(super) struct RawLinear<B: Backend> {
     kernel: <B::Kernels as Kernels>::VisionMatmulBF16Kernel,
     cast_bias: <B::Kernels as Kernels>::VisionBiasCastBF16Kernel,
     weights: B::GlobalBuffer,
@@ -304,7 +304,7 @@ struct RawLinear<B: Backend> {
 }
 
 impl<B: Backend> RawLinear<B> {
-    fn new(
+    pub(super) fn new(
         context: &B::Context,
         tree: &ParameterTree<B>,
         input_width: u32,
@@ -327,7 +327,7 @@ impl<B: Backend> RawLinear<B> {
         })
     }
 
-    fn encode(
+    pub(super) fn encode(
         &self,
         input: impl BufferRef<Backend = B>,
         rows: u32,
@@ -362,7 +362,7 @@ impl<B: Backend> RawLinear<B> {
     }
 }
 
-struct LayerNorm<B: Backend> {
+pub(super) struct LayerNorm<B: Backend> {
     kernel: <B::Kernels as Kernels>::VisionLayerNormBF16Kernel,
     weight: B::GlobalBuffer,
     bias: B::GlobalBuffer,
@@ -371,7 +371,7 @@ struct LayerNorm<B: Backend> {
 }
 
 impl<B: Backend> LayerNorm<B> {
-    fn new(
+    pub(super) fn new(
         context: &B::Context,
         tree: &ParameterTree<B>,
         width: u32,
@@ -387,7 +387,7 @@ impl<B: Backend> LayerNorm<B> {
         })
     }
 
-    fn encode(
+    pub(super) fn encode(
         &self,
         input: &B::ScratchBuffer,
         rows: u32,

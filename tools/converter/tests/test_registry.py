@@ -29,10 +29,10 @@ EXPORTER_SPEC.loader.exec_module(EXPORTER)
 def test_complete_pinned_builtin_inventory():
     catalog = load_catalog()
     assert catalog["entry_count"] == 110 == len(catalog["models"])
-    assert catalog["extension_count"] == 8 == len(catalog["extensions"])
+    assert catalog["extension_count"] == 10 == len(catalog["extensions"])
     assert catalog["reference"]["plugins"] is False
     assert catalog["reference"]["revision"] == "831accb8252a6b6606c378048caeb44178f1a050"
-    assert len({entry["repo"] for entry in models()}) == 118
+    assert len({entry["repo"] for entry in models()}) == 120
     assert sum(entry["model_kind"] == "LanguageModelSpec" for entry in catalog["models"]) == 107
     assert sum(entry["model_kind"] == "ClassifierModelSpec" for entry in models()) == 2
     assert sum(entry["model_kind"] == "TTSModelSpec" for entry in models()) == 1
@@ -41,7 +41,7 @@ def test_complete_pinned_builtin_inventory():
 
 def test_catalog_is_independent_of_reference_and_framework_imports():
     code = (
-        "import sys; from stark_convert.registry import models; assert len(models()) == 118; "
+        "import sys; from stark_convert.registry import models; assert len(models()) == 120; "
         "assert not any(name.split('.')[0] in {'lalamo','jax','torch'} for name in sys.modules)"
     )
     env = os.environ.copy()
@@ -56,7 +56,7 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 95
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 97
     assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 87
 
 
@@ -90,7 +90,9 @@ def test_olmo3_and_gemma4_text_extensions_bind_pinned_source_without_reasoning_d
     for repo, (adapter, config_class, revision) in expected.items():
         entry = get_model(repo)
         assert entry is not None
-        assert entry["catalog_origin"] == ("stark_extension" if repo.startswith("allenai/") or repo == "google/gemma-4-31B-it" else "pinned_builtin")
+        assert entry["catalog_origin"] == (
+            "stark_extension" if repo.startswith("allenai/") or repo == "google/gemma-4-31B-it" else "pinned_builtin"
+        )
         assert entry["adapter"] == entry["metadata_profile"] == adapter
         assert entry["config_class"] == config_class
         assert entry["profile_source"]["revision"] == revision

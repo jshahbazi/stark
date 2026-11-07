@@ -7,6 +7,14 @@
 #pragma METAL fp math_mode(safe)
 #pragma METAL fp contract(off)
 
+PUBLIC KERNEL(Gemma4UnifiedPositionBF16)(const device bfloat* input,const device bfloat* positions,
+    device bfloat* output,constant uint& rows,constant uint& width,constant uint& grid_width,
+    const uint i AXIS(rows*width,128)) {
+    const uint row=i/width, channel=i%width, x=row%grid_width, y=row/grid_width;
+    const float position=float(bfloat(float(positions[x*2*width+channel])+float(positions[(y*2+1)*width+channel])));
+    output[i]=bfloat(float(input[i])+position);
+}
+
 PUBLIC KERNEL(Gemma4VisionClampBF16)(const device bfloat* input, device bfloat* output,
     constant uint& length, constant float& minimum, constant float& maximum,
     const uint i AXIS(length,128)) { output[i] = bfloat(clamp(float(input[i]),minimum,maximum)); }

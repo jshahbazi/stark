@@ -22,9 +22,11 @@ from .media import ImageData
 from .vision_runtime import (
     _ARTIFACT_HASHES,
     CONFIGURED_FAMILY_PROFILE,
-    GEMMA4_FAMILY_PROFILE,
-    GEMMA4_E4B_FAMILY_PROFILE,
+    GEMMA4_12B_FAMILY_PROFILE,
+    GEMMA4_26B_FAMILY_PROFILE,
     GEMMA4_31B_FAMILY_PROFILE,
+    GEMMA4_E4B_FAMILY_PROFILE,
+    GEMMA4_FAMILY_PROFILE,
     _current_os_version,
     artifact_image_family,
     family_image_input_contract,
@@ -65,7 +67,15 @@ def preflight_family_memory(model: Path, config: dict) -> None:
         size = (model / "model.safetensors").stat().st_size
         available = psutil.virtual_memory().available
         scratch = (
-            _configured_check_memory(config) if family["profile"] == CONFIGURED_FAMILY_PROFILE else 512 * 1024 * 1024
+            _configured_check_memory(config)
+            if family["profile"]
+            in {
+                CONFIGURED_FAMILY_PROFILE,
+                GEMMA4_12B_FAMILY_PROFILE,
+                GEMMA4_26B_FAMILY_PROFILE,
+                GEMMA4_31B_FAMILY_PROFILE,
+            }
+            else 512 * 1024 * 1024
         )
         if size <= 0 or type(available) is not int or available < size + scratch:
             raise ImageCheckError("Not enough available memory to check this image model.")
@@ -108,15 +118,34 @@ def _configured_check_memory(config: dict) -> int:
                 )
             else:
                 raise ValueError
+            mlp = layer.get("mlp_config", {})
+            if mlp.get("type") == "Gemma4MoeConfig":
+                hidden = max(hidden, integer(mlp, "expert_hidden_dim", 131072))
         vision = config["artifact_contract"]["vision_config"]
-        vision_width, vision_hidden, vision_heads = (
-            integer(vision, key) for key in ("hidden_size", "intermediate_size", "num_heads")
-        )
+        if vision.get("model_type") == "gemma4_unified_vision":
+            # This family has no transformer vision layers or attention scores.
+            # Bound the raw48px patches, three normalized/projected buffers and
+            # position/RMS intermediates using conservative FP32 storage factors.
+            if (
+                vision.get("model_patch_size"),
+                vision.get("mm_embed_dim"),
+                vision.get("mm_posemb_size"),
+                vision.get("num_soft_tokens"),
+            ) != (48, 3840, 1120, 280):
+                raise ValueError
+            vision_scratch = 16 * 280 * (48 * 48 * 3 + 3 * 3840)
+        else:
+            gemma = vision.get("model_type") == "gemma4_vision"
+            vision_width, vision_hidden, vision_heads = (
+                integer(vision, key)
+                for key in ("hidden_size", "intermediate_size", "num_attention_heads" if gemma else "num_heads")
+            )
+            patches = 2520 if gemma else 256
+            vision_scratch = 16 * patches * (vision_width + vision_hidden) + 4 * vision_heads * patches * patches
         # The profile keeps the 256x256 RGB check and 16-pixel patch recipe.
         # FP32 storage factors deliberately overestimate BF16 arrays. Layer
         # scratch is reused; recurrent/KV state is retained across all layers.
         text_scratch = 16 * 2048 * (width + hidden + projections)
-        vision_scratch = 16 * 256 * (vision_width + vision_hidden) + 4 * vision_heads * 256 * 256
         return max(512 * 1024 * 1024, state + text_scratch + delta_scratch + vision_scratch)
     except (KeyError, TypeError, ValueError, OverflowError):
         raise ImageCheckError("Cannot inspect this image model's memory requirements.") from None
@@ -416,7 +445,13 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             if not _valid_reply(reply, maximum) or reply["input_tokens"] + maximum > context:
                 raise ImageCheckError("The model did not pass the image execution check.")
             image_tokens = getattr(worker, "_last_image_tokens", None)
-            gemma = identity["family_profile"] in {GEMMA4_FAMILY_PROFILE, GEMMA4_E4B_FAMILY_PROFILE, GEMMA4_31B_FAMILY_PROFILE}
+            gemma = identity["family_profile"] in {
+                GEMMA4_FAMILY_PROFILE,
+                GEMMA4_E4B_FAMILY_PROFILE,
+                GEMMA4_31B_FAMILY_PROFILE,
+                GEMMA4_12B_FAMILY_PROFILE,
+                GEMMA4_26B_FAMILY_PROFILE,
+            }
             expected_image_tokens = 256 if gemma else 64
             expected_delta = expected_image_tokens + 1 if gemma else expected_image_tokens - 1
             if (

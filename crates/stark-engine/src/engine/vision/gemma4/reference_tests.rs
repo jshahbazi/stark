@@ -269,6 +269,69 @@ fn gemma4_larger_tower_reference_metal() {
 
 #[stark_test]
 #[ignore]
+fn gemma4_unified_embedder_reference_metal() {
+    let root = PathBuf::from(std::env::var_os("STARK_GEMMA4_FIXTURE_PATH").expect("set private Gemma fixture path"));
+    let weights = PathBuf::from(std::env::var_os("STARK_GEMMA4_TOWER_PATH").expect("set extracted private tower path"));
+    let manifest: Value =
+        serde_json::from_slice(&read(&root, "manifest.json")).expect("invalid private tower manifest");
+    assert!(
+        manifest["scope"] == "vision-features-only"
+            && manifest["model_dim"] == 3840
+            && manifest["model_revision"] == PROFILES[4].revision
+            && manifest["source_sha256"] == "c52d9b27fc83b6ced166aee816b235e1db057fde10df6c1eff64bbc91fb16f39",
+        "private larger tower reference identity changed"
+    );
+    let engine =
+        Engine::<crate::backends::metal::Metal>::new().unwrap_or_else(|_| panic!("private tower context failed"));
+    let file = File::open(weights).unwrap_or_else(|_| panic!("private tower weights unavailable"));
+    let loader =
+        ParameterLoader::new(&file, &*engine.context).unwrap_or_else(|_| panic!("private tower loading failed"));
+    let tower = unified::UnifiedVisionEmbedder::<crate::backends::metal::Metal>::new(
+        &*engine.context,
+        &loader.tree().subtree("vision"),
+    )
+    .unwrap_or_else(|_| panic!("private tower construction failed"));
+    loader.tree().assert_all_tensors_validated().unwrap_or_else(|_| panic!("unconsumed private tower tensor"));
+    let mut reports = Vec::new();
+    let mut passed = true;
+    for (index, case) in manifest["cases"].as_array().expect("private tower cases missing").iter().enumerate() {
+        let patches = preprocess::prepare_unified(&read(&root, case["image"].as_str().unwrap()))
+            .unwrap_or_else(|_| panic!("private larger image preprocessing failed"));
+        let expected_grid: [u32; 3] = serde_json::from_value(case["grid"].clone()).unwrap();
+        assert_eq!(patches.grid, expected_grid, "private tower grid differs");
+        let patch_metrics = compare(&patches.patches, &floats(&read(&root, case["patches"].as_str().unwrap())));
+        let mut commands = engine
+            .context
+            .create_command_buffer(Some("private larger tower"), None)
+            .unwrap_or_else(|_| panic!("private tower command creation failed"));
+        let output = tower
+            .encode(&patches.patches, patches.grid, &mut commands)
+            .unwrap_or_else(|_| panic!("private tower execution failed"));
+        let mut readback = engine.context.create_buffer((&output).size()).unwrap();
+        commands.encode_copy(&output, &mut readback);
+        commands
+            .end_encoding()
+            .submit()
+            .wait_until_completed()
+            .unwrap_or_else(|_| panic!("private tower submission failed"));
+        let actual = (&readback).as_slice::<bf16>();
+        let metrics = compare(actual, &floats(&read(&root, case["features"].as_str().unwrap())));
+        let feature_pass = metrics["relative_rms_error"].as_f64().unwrap() <= 0.02
+            && metrics["cosine_similarity"].as_f64().unwrap() >= 0.999;
+        let patch_pass = patch_metrics["maximum_absolute_error"] == 0.0;
+        passed &= feature_pass && patch_pass;
+        reports.push(json!({"case_index":index,"features":metrics,"patches":patch_metrics,
+            "features_passed":feature_pass,"patch_exact":patch_pass}));
+    }
+    let report = json!({"passed":passed,"scope":"vision-features-only","backend":"metal",
+        "model_revision":PROFILES[4].revision,"cases":reports});
+    std::fs::write(root.join("native-unified-metrics.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    println!("{report}");
+    assert!(passed, "private larger tower reference gates failed");
+}
+
+#[stark_test]
+#[ignore]
 fn gemma4_completed_projection_cancellation_preserves_loaded_instance() {
     let root = PathBuf::from(std::env::var_os("STARK_GEMMA4_FIXTURE_PATH").expect("set private Gemma fixture path"));
     let model_path = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private Gemma model path"));
