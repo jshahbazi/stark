@@ -40,6 +40,7 @@ use crate::{
 };
 
 mod family;
+pub mod gemma3;
 pub mod gemma4;
 
 #[cfg(test)]

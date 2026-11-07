@@ -17,7 +17,7 @@ FUTURE = "example/future-model"
 def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification():
     matrix = support_matrix()
     assert matrix["schema_version"] == 1 and matrix["modes"] == list(model_support.MODES)
-    assert len(matrix["families"]) == 17
+    assert len(matrix["families"]) == 18
     assert len(json.dumps(matrix).encode()) < 65536
     assert matrix["qualification"] == {
         "status": "not_assessed",
@@ -46,7 +46,7 @@ def test_native_glm_is_listed_without_generic_architecture_admission():
 @pytest.mark.parametrize("mode", ["text", "decision"])
 def test_each_family_has_explicit_app_modes_without_checkpoint_qualification(architecture, mode):
     report = preflight_model({"model_type": architecture}, mode=mode)
-    assert report["status"] == ("unsupported" if architecture == "modernbert" else "conditional")
+    assert report["status"] == ("unsupported" if architecture in {"modernbert", "gemma3"} else "conditional")
     assert report["qualification"]["status"] == "not_assessed"
 
 
@@ -282,7 +282,7 @@ def test_resolver_rejects_changed_explicit_immutable_revision_before_metadata(tm
 def test_cli_family_listing_and_local_preflight_need_no_output(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["stark-convert", "--list-families"])
     assert cli.main() == 0
-    assert len(json.loads(capsys.readouterr().out)["families"]) == 17
+    assert len(json.loads(capsys.readouterr().out)["families"]) == 18
     root = files(tmp_path / "source")
     monkeypatch.setattr(
         "sys.argv", ["stark-convert", str(root), "--preflight", "--offline", "--support-mode", "decision"]

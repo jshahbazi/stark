@@ -53,6 +53,14 @@ from .vision_family import (
 def capability(request: ConversionRequest) -> CapabilityResult:
     """Probe catalog coverage only; this does not validate checkpoint contents."""
     if request.artifact_mode != "text":
+        if request.architecture == "gemma3" or request.repo in {"google/gemma-3-4b-it", "google/gemma-3-12b-it", "google/gemma-3-27b-it"}:
+            supported = (request.artifact_mode == "vision-language" and request.dtype == "bfloat16"
+                and request.model_kind == "language" and request.architecture in {None, "gemma3"}
+                and request.metadata_profile in {None, GENERIC_PROFILE})
+            return CapabilityResult(adapter="gemma3" if supported else None, model_kind=request.model_kind,
+                conversion="implemented" if supported else "unsupported",
+                native_loading="supported_family_unverified" if supported else "runtime_blocked",
+                reason=None if supported else "unsupported_gemma3_vision_tuple")
         if request.repo in GEMMA4_IMAGE_PROFILES:
             supported = (
                 request.artifact_mode == "vision-language"
@@ -200,6 +208,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         if request.artifact_mode == "vision-language"
         else read_json(snapshot.config_path)
     )
+    gemma3_images = request.artifact_mode == "vision-language" and config.get("model_type") == "gemma3"
     gemma_images = request.artifact_mode == "vision-language" and snapshot.repo in GEMMA4_IMAGE_PROFILES
     if gemma_images:
         from .adapters.gemma4_vision import gemma4_vision_contract
@@ -210,6 +219,10 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             for record in snapshot.manifest["files"]
             if record["role"] not in {"weights", "weight_index"}
         }
+    elif gemma3_images:
+        from .gemma3_contract import validate_gemma3_source
+
+        artifact_contract = validate_gemma3_source(snapshot, request.dtype)
     else:
         artifact_contract = (
             validate_vision_source(snapshot, request.dtype) if request.artifact_mode == "vision-language" else None
@@ -289,6 +302,10 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         from .adapters.gemma4_vision import build_gemma4_vision_plan
 
         planners["gemma4_text"] = build_gemma4_vision_plan
+    if gemma3_images:
+        from .adapters.gemma3_vision import build_gemma3_vision_plan
+
+        planners["gemma3"] = build_gemma3_vision_plan
     tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
     if artifact_contract is not None and artifact_contract["schema_version"] == 3:
         validate_family_plan(tensors)
@@ -449,7 +466,7 @@ def convert(
             ):
                 entry["metadata"]["reasoning_id"] = family_reasoning_profile(planned.artifact_contract)
         config = {**planned.model_config, "_stark_model_repo": repo}
-        if artifact_mode == "vision-language":
+        if artifact_mode == "vision-language" and planned.capability.adapter != "gemma3":
             # The exact checkpoint publishes the same template inline and as a
             # sidecar. Pin both, then give the metadata writer one unambiguous
             # source without changing its rules for other catalog profiles.
@@ -479,6 +496,9 @@ def convert(
             )
             root_config = {
                 "type": (
+                    "Gemma3VisionLanguageModelConfig"
+                    if planned.capability.adapter == "gemma3"
+                    else
                     "Gemma4VisionLanguageModelConfig"
                     if planned.capability.adapter == "gemma4_text"
                     else "Qwen35VisionLanguageModelConfig"
@@ -494,10 +514,21 @@ def convert(
                 root_config["mtp_config"] = planned.tensors.mtp_config
         family = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 3
         gemma_image = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 4
+        gemma3_image = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 5
         if planned.artifact_contract is not None:
             root_config["artifact_contract"] = planned.artifact_contract
             for filename in ("preprocessor_config.json", "chat_template.jinja"):
                 hashes = planned.artifact_contract["source"]["hashes"]
+                if gemma3_image:
+                    if filename == "preprocessor_config.json":
+                        payload = json.dumps(planned.artifact_contract["processor_config"], indent=2).encode("utf-8")
+                    else:
+                        metadata = read_json(snapshot.resolve_file("tokenizer_config.json"))
+                        payload = metadata["chat_template"].encode("utf-8")
+                        if hashlib.sha256(payload).hexdigest() != hashes[filename]:
+                            raise ConversionError("Gemma 3 source template changed during conversion")
+                    (staging / filename).write_bytes(payload)
+                    continue
                 source_filename = (
                     "processor_config.json"
                     if gemma_image and filename == "preprocessor_config.json"
@@ -522,7 +553,7 @@ def convert(
             planned.artifact_contract["component_hashes"] = {name: "0" * 64 for name in COMPONENT_FILES}
             (staging / "config.json").write_bytes(family_config_bytes(root_config))
             validate_family_output_header(planned.tensors)
-        elif gemma_image:
+        elif gemma_image or gemma3_image:
             planned.artifact_contract["component_hashes"] = {name: "0" * 64 for name in COMPONENT_FILES}
             (staging / "config.json").write_bytes(family_config_bytes(root_config))
         else:
@@ -540,7 +571,7 @@ def convert(
             storage_validation = validate_qwen38_artifact(
                 planned.tensors, staging / "model.safetensors", chunk_bytes=chunk_bytes
             )
-        if family or gemma_image:
+        if family or gemma_image or gemma3_image:
             planned.artifact_contract["component_hashes"] = {
                 name: file_hash(staging / name) for name in COMPONENT_FILES
             }
