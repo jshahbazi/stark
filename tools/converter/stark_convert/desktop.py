@@ -1629,7 +1629,11 @@ class Desktop:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
             if converted:
                 config = read_model_config(path)
-                stored_mode = "vision-language" if model_image_family(config, path) is not None else "text"
+                stored_mode = (
+                    "vision-language"
+                    if (config.get("type") in VISION_MODEL_TYPES or model_image_family(config, path) is not None)
+                    else "text"
+                )
                 if artifact_mode is not None and selected_mode != stored_mode:
                     raise DesktopError("The selected conversion mode does not match this Stark artifact.")
                 selected_mode = stored_mode
@@ -1838,13 +1842,11 @@ class Desktop:
         config = read_model_config(path)
         contract = config.get("artifact_contract", {})
         family = model_image_family(config, path)
-        if (
-            family is None
-            or not isinstance(contract, dict)
-            or (
-                family.get("profile") != "qwen38-lily-retained-bf16-vision-v1"
-                and contract.get("schema_version") not in (3, 4, 5)
-            )
+        if config.get("type") not in VISION_MODEL_TYPES and family is None:
+            return None
+        if not isinstance(contract, dict) or (
+            (family or {}).get("profile") != "qwen38-lily-retained-bf16-vision-v1"
+            and contract.get("schema_version") not in (3, 4, 5)
         ):
             return None
         if not supported_image_family(family):
@@ -1892,7 +1894,10 @@ class Desktop:
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
-        vision = model_image_family(read_model_config(Path(model["path"])), Path(model["path"])) is not None
+        config = read_model_config(Path(model["path"]))
+        vision = (
+            config.get("type") in VISION_MODEL_TYPES or model_image_family(config, Path(model["path"])) is not None
+        )
         codec, template = (None, None) if vision else load_template(Path(model["path"]))
         if mode == "decision" and vision:
             raise DesktopError("Vision-language artifacts support Chat mode only.")

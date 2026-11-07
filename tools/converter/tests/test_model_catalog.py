@@ -1,5 +1,6 @@
 """Metadata-only family browsing never downloads model weight payloads."""
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,43 @@ from stark_convert import model_catalog as catalog
 
 PIN = "a" * 40
 CATALOG_SEEDS = catalog._catalog_seeds
+
+
+def test_gemma3_image_wrapper_is_discoverable_with_bounded_large_tokenizer_metadata(tmp_path, monkeypatch):
+    from test_gemma3_vision import config_for_size
+
+    from stark_convert.gemma3_contract import PROCESSOR
+
+    hub = Hub()
+    repo = "google/gemma-3-4b-it"
+    config = {**config_for_size(2560), "torch_dtype": "bfloat16"}
+    template = "{{ messages }}"
+    # Metadata routing uses a synthetic reviewed program identity. Native
+    # execution and real template qualification remain separate model checks.
+    monkeypatch.setattr(catalog, "_GEMMA3_IMAGE_TEMPLATE", hashlib.sha256(template.encode()).hexdigest())
+    monkeypatch.setattr(catalog, "get_model", lambda _repo: {"adapter": None})
+    tokenizer_config = {"chat_template": template, "synthetic_padding": "x" * (1024 * 1024 + 128)}
+    hub.add(
+        tmp_path,
+        repo,
+        config,
+        names={
+            "config.json": 100,
+            "model.safetensors": 8_600_158_944,
+            "tokenizer_config.json": len(json.dumps(tokenizer_config)),
+            "preprocessor_config.json": 1024,
+        },
+        sidecars={"tokenizer_config.json": tokenizer_config, "preprocessor_config.json": PROCESSOR},
+    )
+    hub.discovered["gemma3"] = [repo]
+    report = catalog.family_catalog("gemma3", hub=hub)
+    assert report["status"] == "ready"
+    assert len(report["items"]) == 1
+    item = report["items"][0]
+    assert item["repo"] == repo and item["revision"] == PIN
+    assert item["artifact_modes"] == ["vision-language"]
+    assert item["default_artifact_mode"] == "vision-language"
+    assert not any(event[0] in {"head", "download"} and event[-1].endswith(".safetensors") for event in hub.events)
 
 
 @pytest.fixture(autouse=True)

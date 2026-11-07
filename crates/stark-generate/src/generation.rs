@@ -2642,12 +2642,15 @@ mod tests {
 
     #[test]
     fn image_metadata_accepts_long_text_contexts() {
-        assert!(valid_image_metadata(&PreparedImageMetadata {
-            input_tokens: 16_385,
-            image_tokens: 4,
-            grid: [1, 4, 4],
-            processed_dimensions: [64, 64],
-        }));
+        assert!(valid_image_metadata(
+            &PreparedImageMetadata {
+                input_tokens: 16_385,
+                image_tokens: 4,
+                grid: [1, 4, 4],
+                processed_dimensions: [64, 64],
+            },
+            (16, 2)
+        ));
     }
 
     #[test]

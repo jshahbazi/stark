@@ -65,8 +65,10 @@ def test_retained_image_host_inspection_binds_metadata_and_inventory(tmp_path, m
     assert prepared_image_identity(tmp_path) is None
 
 
-@pytest.mark.parametrize("field,value", [("schema_version", True), ("family_version", True),
-                                       ("artifact_sha256", "0" * 64), ("model_revision", "0" * 40)])
+@pytest.mark.parametrize(
+    "field,value",
+    [("schema_version", True), ("family_version", True), ("artifact_sha256", "0" * 64), ("model_revision", "0" * 40)],
+)
 def test_retained_image_host_inspection_rejects_descriptor_drift(tmp_path, monkeypatch, field, value):
     fixture(tmp_path, monkeypatch)
     manifest = prepare_image_artifact(tmp_path, "qwen38-lily-q4-xl")

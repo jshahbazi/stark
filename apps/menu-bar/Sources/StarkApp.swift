@@ -415,12 +415,13 @@ struct ModelFamily: Identifiable {
         case "qwen3": return "Qwen3"
         case "qwen2": return "Qwen2"
         case "qwen3_5": return "Qwen3.5"
+        case "qwen3_5_moe": return "Qwen3.5 MoE"
         case "qwen4_exp": return "Qwen3.8 Flash Next"
         case "glm5_next": return "GLM-5.3 Flash"
         case "llama": return "Llama"
         case "mistral": return "Mistral"
         case "gemma2": return "Gemma 2"
-        case "gemma3_text": return "Gemma 3"
+        case "gemma3", "gemma3_text": return "Gemma 3"
         case "gemma4_text": return "Gemma 4"
         case "olmo3": return "OLMo 3"
         case "phi3": return "Phi-3"
@@ -2974,7 +2975,7 @@ struct InstallView: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 Toggle("Enable image input when converting", isOn: $visionConversion).disabled(engine.busy)
-                Text("Image conversion supports compatible dense Qwen3.5 BF16 models and merged fine-tunes. Vision installs check support on this Mac and stop the running model.")
+                Text("Image input is available for compatible Qwen and Gemma models. Stark checks each model’s image support on this Mac during installation and stops the running model.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Text("Models stay on this Mac. Conversion may take several minutes.")
