@@ -28,6 +28,7 @@ _FAMILY_DEFINITIONS = (
     ("mistral", "Mistral dense", "HFMistralConfig", ()),
     ("gemma2", "Gemma 2 dense", "HFGemma2Config", ()),
     ("gemma3_text", "Gemma 3 text", "HFGemma3TextConfig", ()),
+    ("gemma3", "Gemma 3 images", "HFGemma3Config", ()),
     ("gemma4_text", "Gemma 4 dense PLE", "HFGemma4TextConfig", ("gemma4",)),
     ("olmo3", "OLMo 3 dense", "HFOlmo3Config", ()),
     ("phi3", "Phi-3 dense", "HFPhi3Config", ()),
@@ -49,7 +50,9 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
     classifier = architecture == "modernbert"
     modes = {}
     for mode in MODES:
-        supported = not classifier and (mode != "vision-language" or architecture in {"qwen3_5", "gemma4_text"})
+        supported = not classifier and (mode != "vision-language" or architecture in {"qwen3_5", "gemma3", "gemma4_text"})
+        if architecture == "gemma3" and mode != "vision-language":
+            supported = False
         if classifier:
             message = "Classifier conversion is implemented; the app has no text, Decision or image workflow for it."
         elif mode == "vision-language" and not supported:
@@ -89,7 +92,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
             "status": "implemented",
             "containers": [".safetensors"],
             "source_formats": formats,
-            "output_dtypes": ["bfloat16"] if architecture == "qwen4_exp" else ["bfloat16", "float32"] if architecture == "olmo3" else ["bfloat16", "float16", "float32"],
+            "output_dtypes": ["bfloat16"] if architecture in {"qwen4_exp", "gemma3"} else ["bfloat16", "float32"] if architecture == "olmo3" else ["bfloat16", "float16", "float32"],
         },
         "modes": modes,
     }
@@ -197,6 +200,7 @@ def preflight_model(
         "Qwen35VisionLanguageModelConfig",
         "Qwen38LanguageModelConfig",
         "Gemma4VisionLanguageModelConfig",
+        "Gemma3VisionLanguageModelConfig",
         "ClassifierModelConfig",
     ):
         return _report(
@@ -295,6 +299,16 @@ def preflight_model(
             "Qwen3.8 text conversion preserves MLX quantization; exact artifact runtime checks remain unverified.",
             ("Text conversion omits vision and MTP tensors; speculation is disabled.",),
         )
+    if architecture == "gemma3":
+        if mode not in {None, "vision-language"}:
+            return _report(family, mode, "unsupported", "unsupported_mode", "Convert the full Gemma 3 wrapper as an image artifact.")
+        try:
+            from .adapters.gemma3_vision import gemma3_config
+
+            gemma3_config(config)
+        except (ConversionError, UnsupportedConversion):
+            return _report(family, mode, "unsupported", "unsupported_vision_geometry", "Gemma 3 images require original 4B, 12B, or 27B BF16 geometry.")
+        return _report(family, mode, "conditional", "checkpoint_validation_required", "Gemma 3 image execution requires complete BF16 tensors, reviewed processing metadata and local checks.")
     if architecture not in {"qwen3_5", "gemma4_text"} and "text_config" in config:
         return _report(
             family,
@@ -854,6 +868,10 @@ def preflight_source(
                 ):
                     if hashlib.sha256(read({"repo": repo, "filename": filename}, maximum)).hexdigest() != expected:
                         raise UnsupportedConversion("Gemma image processing identity changed")
+            elif report["family_id"] == "gemma3":
+                from .gemma3_contract import normalize_processor
+
+                normalize_processor(json.loads(read({"repo": repo, "filename": "preprocessor_config.json"}, 65536)))
             else:
                 check_vision_processing_metadata(
                     names, lambda filename, maximum: read({"repo": repo, "filename": filename}, maximum)

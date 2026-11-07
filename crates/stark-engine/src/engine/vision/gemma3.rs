@@ -497,35 +497,8 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
         capacity: u32,
     ) -> Result<(Box<[u64]>, usize), NativeVisionError<B>> {
         self.validate_image(image)?;
-        let index = tokens
-            .iter()
-            .position(|&token| token == IMAGE)
-            .ok_or(InvalidInput("Gemma 3 prompt requires one image placeholder"))?;
-        if tokens[index + 1..].contains(&IMAGE) {
-            return Err(InvalidInput("Gemma 3 prompt requires exactly one image placeholder").into());
-        }
-        let wrapped = index > 0 && tokens[index - 1] == START && tokens.get(index + 1) == Some(&END);
-        let extra = TOKENS as usize - 1
-            + if wrapped {
-                0
-            } else {
-                2
-            };
-        if tokens.len().checked_add(extra).is_none_or(|length| length >= capacity as usize) {
-            return Err(InvalidInput("Gemma 3 image prompt exceeds requested context").into());
-        }
-        let mut expanded = Vec::with_capacity(tokens.len() + extra);
-        expanded.extend_from_slice(&tokens[..index]);
-        if !wrapped {
-            expanded.push(START);
-        }
-        let start = expanded.len();
-        expanded.extend(std::iter::repeat_n(IMAGE, TOKENS as usize));
-        if !wrapped {
-            expanded.push(END);
-        }
-        expanded.extend_from_slice(&tokens[index + 1..]);
-        let input = self.preflight(expanded.into_boxed_slice(), image, start, capacity)?;
+        let (expanded, start) = expand_prompt(&tokens, capacity)?;
+        let input = self.preflight(expanded, image, start, capacity)?;
         Ok((input.tokens, start))
     }
     fn project<F: FnMut() -> bool>(
@@ -631,6 +604,56 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
                 self.failed = true;
                 Err(error.into())
             },
+        }
+    }
+}
+
+fn expand_prompt(
+    tokens: &[u64],
+    capacity: u32,
+) -> Result<(Box<[u64]>, usize), InvalidInput> {
+    // The reviewed source template renders a single BOI marker. The HF
+    // processor replaces that marker with BOI + 256 soft-image slots + EOI.
+    let index = tokens
+        .iter()
+        .position(|&token| token == START)
+        .ok_or(InvalidInput("Gemma 3 prompt requires one start-of-image marker"))?;
+    if tokens[index + 1..].contains(&START) || tokens.contains(&IMAGE) || tokens.contains(&END) {
+        return Err(InvalidInput("Gemma 3 prompt contains surplus or already-expanded image markers"));
+    }
+    let length = tokens
+        .len()
+        .checked_add(TOKENS as usize + 1)
+        .filter(|length| *length < capacity as usize)
+        .ok_or(InvalidInput("Gemma 3 image prompt exceeds requested context"))?;
+    let mut expanded = Vec::with_capacity(length);
+    expanded.extend_from_slice(&tokens[..=index]);
+    let start = expanded.len();
+    expanded.extend(std::iter::repeat_n(IMAGE, TOKENS as usize));
+    expanded.push(END);
+    expanded.extend_from_slice(&tokens[index + 1..]);
+    Ok((expanded.into_boxed_slice(), start))
+}
+
+#[cfg(test)]
+mod tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+
+    #[stark_test]
+    fn gemma3_official_boi_placeholder_expands_once_with_exact_accounting() {
+        let original = [2, 105, START, 104, 17];
+        let (expanded, start) = expand_prompt(&original, 512).unwrap();
+        assert_eq!(expanded.len() - original.len(), 257);
+        assert_eq!(start, 3);
+        assert_eq!(&expanded[..3], &original[..3]);
+        assert!(expanded[start..start + 256].iter().all(|&token| token == IMAGE));
+        assert_eq!(expanded[start + 256], END);
+        assert_eq!(&expanded[start + 257..], &original[3..]);
+        assert!(expand_prompt(&original, expanded.len() as u32).is_err());
+        for malformed in [vec![2, 17], vec![START, START], vec![START, IMAGE], vec![START, END], expanded.to_vec()] {
+            assert!(expand_prompt(&malformed, 1024).is_err());
         }
     }
 }

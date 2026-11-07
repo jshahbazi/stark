@@ -20,6 +20,16 @@ PROCESSOR = {
     "resample": 2, "rescale_factor": 1 / 255, "size": {"height": 896, "width": 896},
 }
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
+TEMPLATE_SHA256 = "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"
+
+
+def gemma3_source_files(repo: str | None, names: tuple[str, ...]) -> tuple[dict, ...]:
+    from .profiles import generic_files
+
+    if "preprocessor_config.json" not in names:
+        raise ConversionError("Gemma 3 image processor metadata is missing")
+    return (*generic_files(repo, names),
+        {"role": "processor_config", "repo": repo, "filename": "preprocessor_config.json"})
 
 
 def normalize_processor(value: dict) -> dict:
@@ -53,6 +63,8 @@ def validate_gemma3_source(snapshot, dtype: str) -> dict:
     template = tokenizer_config.get("chat_template")
     if not isinstance(template, str) or not template:
         raise ConversionError("Gemma 3 requires its source-bound chat template")
+    if hashlib.sha256(template.encode("utf-8")).hexdigest() != TEMPLATE_SHA256:
+        raise UnsupportedConversion("Gemma 3 image template is outside the reviewed program profile")
     # A source may supply the template as a sidecar. It must agree byte-for-byte
     # with the authoritative tokenizer metadata if both are present.
     records = snapshot.manifest.get("files", [])

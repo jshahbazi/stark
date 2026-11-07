@@ -35,6 +35,7 @@ from .vision_contract import REPO as VISION_REPO
 from .vision_contract import REVISION as VISION_REVISION
 from .vision_contract import source_rules
 from .vision_family import family_source_files, read_family_config
+from .gemma3_contract import gemma3_source_files, normalize_processor
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _HASH = re.compile(r"[0-9a-f]{64}")
@@ -231,7 +232,7 @@ class SourceSnapshot:
             ):
                 raise ConversionError("Generic source profile disagrees with its checkpoint")
             rules = (
-                family_source_files(self.repo, names)
+                (gemma3_source_files(self.repo, names) if profile["architecture"] == "gemma3" else family_source_files(self.repo, names))
                 if self.artifact_mode == "vision-language"
                 else generic_files(self.repo, names)
             )
@@ -596,8 +597,8 @@ def resolve_source(
             # the text catalog has external metadata rules for this repository.
             entry = None
             metadata_profile = metadata_profile or GENERIC_PROFILE
-            if architecture not in {None, "qwen3_5"}:
-                raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
+            if architecture not in {None, "qwen3_5", "gemma3"}:
+                raise UnsupportedConversion("Vision family requires a supported image architecture")
     if metadata_profile not in {None, GENERIC_PROFILE} or metadata_profile is not None and entry is not None:
         raise UnsupportedConversion("Generic metadata requires an uncatalogued source")
     if repo is not None and entry is None and metadata_profile is None:
@@ -704,14 +705,15 @@ def resolve_source(
             root = root.parent
     profile = None
     if metadata_profile == GENERIC_PROFILE:
-        rules = family_source_files(repo, names) if artifact_mode == "vision-language" else generic_files(repo, names)
         config_path = authorize_source_path(root, loader("config.json"))
         detected = architecture_for_config(
             read_family_config(config_path) if artifact_mode == "vision-language" else read_json(config_path),
             architecture,
         )
-        if artifact_mode == "vision-language" and detected != "qwen3_5":
-            raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
+        if artifact_mode == "vision-language" and detected not in {"qwen3_5", "gemma3"}:
+            raise UnsupportedConversion("Vision family requires a supported image architecture")
+        rules = ((gemma3_source_files(repo, names) if detected == "gemma3" else family_source_files(repo, names))
+                 if artifact_mode == "vision-language" else generic_files(repo, names))
         profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
         if artifact_mode == "vision-language":
 
@@ -720,7 +722,10 @@ def resolve_source(
                     check_hub_metadata_size(hub, repo, filename, revisions[repo], maximum)
                 return read_metadata_bytes(loader(filename), root=root, maximum=maximum)
 
-            check_vision_processing_metadata(names, inspect_sidecar)
+            if detected == "gemma3":
+                normalize_processor(json.loads(inspect_sidecar("preprocessor_config.json", 65536)))
+            else:
+                check_vision_processing_metadata(names, inspect_sidecar)
     if selected is None:
         selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
     descriptors = list(rules)

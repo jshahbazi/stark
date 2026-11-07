@@ -123,11 +123,17 @@ impl<B: Backend> Gemma3VisionTower<B> {
                 WIDTH,
                 &[WIDTH, 3, 14, 14],
             )?,
-            positions: tree.leaf("embeddings.position_embedding.weight")?.read_buffer()?,
+            positions: tree
+                .leaf("embeddings.position_embedding.weight")?
+                .validate(&[PATCH_ROWS, WIDTH], DataType::BF16)?
+                .read_buffer()?,
             blocks: blocks.into_boxed_slice(),
             post_norm: norm("post_layernorm")?,
-            projector_norm: tree.leaf("mm_soft_emb_norm.scales")?.read_buffer()?,
-            projector: tree.leaf("mm_input_projection_weight")?.read_buffer()?,
+            projector_norm: tree.leaf("mm_soft_emb_norm.scales")?.validate(&[WIDTH], DataType::F32)?.read_buffer()?,
+            projector: tree
+                .leaf("mm_input_projection_weight")?
+                .validate(&[WIDTH, model_dim], DataType::BF16)?
+                .read_buffer()?,
             prepare: <B::Kernels as Kernels>::VisionPrepareBF16Kernel::new(context)
                 .map_err(VisionTowerError::Backend)?,
             attention: VisionEagerAttention::new(context, WIDTH, HEADS).map_err(VisionTowerError::Backend)?,
