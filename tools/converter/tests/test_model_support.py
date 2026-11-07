@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from test_sources import PIN, PRIMARY, Hub, files
@@ -12,6 +13,46 @@ from stark_convert.model_support import preflight_model, preflight_source, suppo
 from stark_convert.streaming import ConversionError, UnsupportedConversion
 
 FUTURE = "example/future-model"
+
+
+def test_pinned_12b_metadata_preflight_uses_its_own_processor_bytes(tmp_path, monkeypatch):
+    from stark_convert.adapters.gemma4_vision import PROFILES, TOKENS, UNIFIED_GEOMETRY
+
+    repo = "google/gemma-4-12B-it"
+    profile = dict(PROFILES[repo])
+    assert profile["source_processor_sha256"] == "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9"
+    root = files(tmp_path / "source")
+    config = {
+        "model_type": "gemma4_unified",
+        "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+        "text_config": {
+            "model_type": "gemma4_unified_text",
+            "hidden_size": 3840,
+            "num_hidden_layers": 48,
+            "hidden_size_per_layer_input": 0,
+            "attention_k_eq_v": True,
+        },
+        "vision_config": dict(UNIFIED_GEOMETRY),
+        "image_token_id": TOKENS["image"],
+        "boi_token_id": TOKENS["vision_start"],
+        "eoi_token_id": TOKENS["vision_end"],
+        "audio_token_id": TOKENS["audio"],
+        "video_token_id": TOKENS["video"],
+    }
+    (root / "config.json").write_text(json.dumps(config))
+    processor = (Path(__file__).parent / "fixtures/gemma4_unified_processor_config.json").read_bytes()
+    (root / "processor_config.json").write_bytes(processor)
+    template = b"synthetic reviewed template"
+    (root / "chat_template.jinja").write_bytes(template)
+    profile["template_sha256"] = hashlib.sha256(template).hexdigest()
+    monkeypatch.setitem(PROFILES, repo, profile)
+    report = preflight_source(root, repo=repo, revision=profile["revision"], mode="vision-language", offline=True)
+    assert report["status"] == "conditional"
+    assert report["qualification"]["status"] == "not_assessed"
+    # Geometry-equivalent bytes must not inherit the immutable source identity.
+    (root / "processor_config.json").write_bytes(processor + b"\n")
+    report = preflight_source(root, repo=repo, revision=profile["revision"], mode="vision-language", offline=True)
+    assert report["reasons"] == ["unsupported_processing_metadata"]
 
 
 def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification():

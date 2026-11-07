@@ -43,6 +43,11 @@ PROFILES.update(
     }
 )
 for _profile in PROFILES.values():
+    _profile["source_processor_sha256"] = (
+        "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9"
+        if _profile["model_dim"] == 3840
+        else "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c"
+    )
     _profile["template_sha256"] = (
         "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
         if _profile["model_dim"] not in (1536, 2560)
