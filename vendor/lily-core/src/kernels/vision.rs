@@ -18,6 +18,90 @@ pub const ATTN_D: usize = 72;
 const ATTN_BQ: usize = 32;
 const ATTN_THREADS: usize = 128;
 
+/// Source-compatible contractions for the measured retained tower geometry.
+/// Other admitted geometries retain the original dense GEMM. Each dispatch
+/// covers at most32 input rows and147456 output elements, with no new buffers.
+pub(crate) fn linear_bf16_bias(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    out: &Tensor,
+    streams: usize,
+) -> Result<()> {
+    ensure!(
+        input.shape().len() == 2 && weight.shape().len() == 2,
+        "vision linear rank"
+    );
+    let (m, k, n) = (input.shape()[0], input.shape()[1], weight.shape()[0]);
+    let elements = m
+        .checked_mul(n)
+        .ok_or_else(|| anyhow::anyhow!("vision linear element overflow"))?;
+    ensure!(m > 0 && m <= 8192 && k > 0 && n > 0, "vision linear row bounds");
+    ensure!(
+        weight.shape() == [n, k] && bias.numel() == n && out.numel() == elements,
+        "vision linear shape"
+    );
+    for tensor in [input, weight, bias, out] {
+        ensure!(tensor.dtype() == DType::BF16, "vision linear dtype");
+    }
+    let measured = matches!(
+        (k, n, streams),
+        (1536, 1152, 4)
+            | (1152, 3456, 32)
+            | (1152, 1152, 32)
+            | (1152, 4304, 32)
+            | (4304, 1152, 32)
+            | (4608, 4608, 32)
+            | (4608, 2560, 32)
+    );
+    if !measured {
+        return crate::kernels::gemm::gemm_bf16_nt_bias(
+            ctx, pass, input, weight, bias, out,
+        );
+    }
+    let pipeline = ctx.pipeline(
+        "vision_contraction_bf16_bias",
+        include_str!("metal/vision_contraction.metal"),
+        MslVersion::V4_0,
+    )?;
+    for row in (0..m).step_by(32) {
+        let rows = (m - row).min(32);
+        let input_tile = input.view(
+            row.checked_mul(k)
+                .ok_or_else(|| anyhow::anyhow!("vision linear input offset"))?,
+            &[rows, k],
+        )?;
+        let output_tile = out.view(
+            row.checked_mul(n)
+                .ok_or_else(|| anyhow::anyhow!("vision linear output offset"))?,
+            &[rows, n],
+        )?;
+        let work = rows
+            .checked_mul(n)
+            .ok_or_else(|| anyhow::anyhow!("vision linear tile overflow"))?;
+        ensure!(work <= 147456, "vision linear tile work bound");
+        pass.dispatch_with(
+            &pipeline,
+            &[
+                input_tile.binding(),
+                weight.binding(),
+                bias.binding(),
+                output_tile.binding(),
+            ],
+            &[
+                Param::U32(rows as u32),
+                Param::U32(n as u32),
+                Param::U32(k as u32),
+                Param::U32(streams as u32),
+            ],
+            Grid::Threads { grid: (work, 1, 1), threadgroup: (128, 1, 1) },
+        )?;
+    }
+    Ok(())
+}
+
 /// Checks that `(gh, gw)` is a grid of `n` patches in 2 x 2 merge blocks.
 fn check_grid(n: usize, gh: usize, gw: usize) -> Result<()> {
     ensure!(
@@ -222,5 +306,55 @@ pub(crate) fn contraction_reference_bf16_bias(
             Param::U32(streams as u32),
         ],
         Grid::Threads { grid: (m * n, 1, 1), threadgroup: (128, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn layernorm_reference_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    out: &Tensor,
+    eps: f32,
+) -> Result<()> {
+    let width = *input.shape().last().unwrap();
+    let rows = input.numel() / width;
+    ensure!(rows <= 256 && width <= 4608 && width > 0, "private norm reference bounds");
+    let pipeline = ctx.pipeline(
+        "vision_layernorm_reference_bf16",
+        include_str!("metal/vision_nonlinear_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[input.binding(), weight.binding(), bias.binding(), out.binding()],
+        &[Param::U32(rows as u32), Param::U32(width as u32), Param::F32(eps)],
+        Grid::Threads { grid: (rows, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn gelu_reference_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    values: &Tensor,
+    tanh: bool,
+) -> Result<()> {
+    ensure!(
+        values.numel() <= 256 * 4608 && values.dtype() == DType::BF16,
+        "private gelu reference bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_gelu_reference_bf16",
+        include_str!("metal/vision_nonlinear_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[values.binding()],
+        &[Param::U32(values.numel() as u32), Param::U32(u32::from(tanh))],
+        Grid::Threads { grid: (values.numel(), 1, 1), threadgroup: (128, 1, 1) },
     )
 }
