@@ -125,6 +125,20 @@ kernel void vision_qkv_rope_bf16(device bfloat*       qkv   [[buffer(0)]],
 #include <metal_tensor>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 
+// Integer RNE barriers preserve the source's BF16 arithmetic boundaries even
+// when native bfloat promotion/fast math elides an intermediate constructor.
+// Mirrors the existing Stark integer-BF16 policy; no math mode changes.
+static inline float vision_round_bf16(float value) {
+    const uint bits = as_type<uint>(value);
+    if ((bits & 0x7f800000u) == 0x7f800000u) return value;
+    const uint rounded = bits + 0x7fffu + ((bits >> 16) & 1u);
+    return as_type<float>(rounded & 0xffff0000u);
+}
+
+static inline float vision_scaled_score(float dot, float scale) {
+    return vision_round_bf16(vision_round_bf16(dot) * scale);
+}
+
 template <int D, int BQ, int BK, int SG, bool TRACE = false>
 static void vision_attn_body(device bfloat* qkv,
                              device bfloat* out,
@@ -212,7 +226,7 @@ static void vision_attn_body(device bfloat* qkv,
         float local = prev_max;
         for (uint j = j0; j < j0 + cols; ++j) {
             if (int(j) < limit) {
-                const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
+                const float score = vision_scaled_score(s_tile[row * BK + j], scale);
                 local = max(local, score);
             }
         }
@@ -224,8 +238,8 @@ static void vision_attn_body(device bfloat* qkv,
         float psum = 0.0f;
         for (uint j = j0; j < j0 + cols; ++j) {
             if (int(j) < limit) {
-                const float qk = float(bfloat(s_tile[row * BK + j]));
-                const float score = float(bfloat(qk * scale));
+                const float qk = vision_round_bf16(s_tile[row * BK + j]);
+                const float score = vision_round_bf16(qk * scale);
                 if constexpr (TRACE) {
                     if (q0 + int(row) < len) {
                         const ulong index = ((ulong)head * N + q0 + row) * N + k0 + j;
@@ -262,10 +276,10 @@ static void vision_attn_body(device bfloat* qkv,
         for (uint j = j0; j < j0 + cols; ++j) {
             float probability = 0.0f;
             if (int(j) < limit) {
-                const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
+                const float score = vision_scaled_score(s_tile[row * BK + j], scale);
                 probability = exp(score - row_max[row]) / row_sum[row];
             }
-            p_tile[row * BK + j] = bfloat(probability);
+            p_tile[row * BK + j] = bfloat(vision_round_bf16(probability));
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if constexpr (TRACE) {
