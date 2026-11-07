@@ -1,5 +1,7 @@
 mod dense;
 mod gate_act_mul;
+mod qwen_moe;
+pub(crate) mod routed;
 
 pub use dense::DenseMlp;
 use derive_more::Debug;
@@ -76,7 +78,17 @@ impl<B: Backend> dyn Mlp<B> {
 
                 Ok((Box::new(DenseMlp::new(up_projection, gate, down_projection)), up_input_hadamard_factors))
             },
-            AnyMLPConfig::MixtureOfExpertsConfig(_) => Err(MlpBlockError::UnsupportedMixtureOfExperts),
+            AnyMLPConfig::MixtureOfExpertsConfig(config) => Ok((
+                Box::new(qwen_moe::QwenMoe::new(
+                    config,
+                    model_dimension,
+                    hidden_dimension,
+                    context,
+                    parameter_tree,
+                    data_type,
+                )?),
+                None,
+            )),
         }
     }
 }

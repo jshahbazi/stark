@@ -23,6 +23,7 @@ pub(super) const VERSION: u32 = 1;
 pub(super) const DYNAMIC_PROFILE: &str = "qwen35-dense-bf16-merged-v2";
 pub(super) const DYNAMIC_VERSION: u32 = 2;
 pub(super) const AFFINE_PROFILE: &str = "qwen35-dense-affine-merged-v3";
+pub(super) const MOE_PROFILE: &str = "qwen35-moe-affine-merged-v4";
 type TensorMap = BTreeMap<String, (&'static str, Vec<u32>)>;
 
 pub(super) struct TensorContract {
@@ -35,6 +36,7 @@ pub(super) enum FamilyProfile {
     FixedV1,
     DynamicV2,
     AffineV3,
+    MoeV4,
 }
 
 impl FamilyProfile {
@@ -45,6 +47,8 @@ impl FamilyProfile {
             Some(Self::DynamicV2)
         } else if *value == json!({"profile":AFFINE_PROFILE,"version":3}) {
             Some(Self::AffineV3)
+        } else if *value == json!({"profile":MOE_PROFILE,"version":4}) {
+            Some(Self::MoeV4)
         } else {
             None
         }
@@ -55,13 +59,14 @@ impl FamilyProfile {
             Self::FixedV1 => (PROFILE, VERSION),
             Self::DynamicV2 => (DYNAMIC_PROFILE, DYNAMIC_VERSION),
             Self::AffineV3 => (AFFINE_PROFILE, 3),
+            Self::MoeV4 => (MOE_PROFILE, 4),
         }
     }
 
     pub fn max_weight_bytes(self) -> u64 {
         match self {
             Self::FixedV1 => 2_000_000_000,
-            Self::DynamicV2 | Self::AffineV3 => dynamic::MAX_WEIGHT_BYTES,
+            Self::DynamicV2 | Self::AffineV3 | Self::MoeV4 => dynamic::MAX_WEIGHT_BYTES,
         }
     }
 
@@ -70,7 +75,7 @@ impl FamilyProfile {
         digest: &str,
     ) -> bool {
         digest == super::ARTIFACT_FILES[2].1
-            || matches!(self, Self::DynamicV2 | Self::AffineV3)
+            || matches!(self, Self::DynamicV2 | Self::AffineV3 | Self::MoeV4)
                 && digest == "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
     }
 }
@@ -220,7 +225,7 @@ fn source_valid(
         + usize::from(hashes.contains_key("processor_config.json"));
     let processor_count_supported = match profile {
         FamilyProfile::FixedV1 => processors == 1,
-        FamilyProfile::DynamicV2 | FamilyProfile::AffineV3 => (1..=2).contains(&processors),
+        FamilyProfile::DynamicV2 | FamilyProfile::AffineV3 | FamilyProfile::MoeV4 => (1..=2).contains(&processors),
     };
     hashes.len() == required.len() + processors + usize::from(hashes.contains_key("generation_config.json"))
         && required.iter().all(|name| hashes.contains_key(*name))
@@ -306,6 +311,10 @@ pub(super) fn admit(
             let geometry = dynamic::geometry_affine(&config["decoder_config"], &contract["vision_config"])?;
             (geometry.tower, geometry.vocab, geometry.tensors)
         },
+        FamilyProfile::MoeV4 => {
+            let geometry = dynamic::geometry_moe(&config["decoder_config"], &contract["vision_config"])?;
+            (geometry.tower, geometry.vocab, geometry.tensors)
+        },
     };
     for name in COMPONENTS {
         let digest = contract["component_hashes"][name].as_str().ok_or_else(invalid)?;
@@ -318,7 +327,7 @@ pub(super) fn admit(
     if !hashes.get("tokenizer.json").is_some_and(|digest| profile.accepts_tokenizer(digest))
         || !hashes.get("chat_template.jinja").is_some_and(|digest| {
             TEMPLATE_HASHES.contains(&digest.as_str())
-                || matches!(profile, FamilyProfile::DynamicV2 | FamilyProfile::AffineV3)
+                || matches!(profile, FamilyProfile::DynamicV2 | FamilyProfile::AffineV3 | FamilyProfile::MoeV4)
                     && [DYNAMIC_STOCK_TEMPLATE, DYNAMIC_QWEN38_TEMPLATE].contains(&digest.as_str())
         })
     {

@@ -3,6 +3,57 @@ use stark_engine_macros::stark_test;
 use super::*;
 
 #[stark_test]
+fn moe_geometry_binds_selected_experts_shared_branch_and_flattened_banks() {
+    let mut decoder = decoder_profile();
+    fn folded(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                if let Some(offset) = map.get_mut("scale_offset") {
+                    *offset = Value::Null;
+                }
+                for value in map.values_mut() {
+                    folded(value);
+                }
+            },
+            Value::Array(values) => {
+                for value in values {
+                    folded(value);
+                }
+            },
+            _ => {},
+        }
+    }
+    folded(&mut decoder);
+    for layer in decoder["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+        layer["mlp_config"] = json!({"type":"MixtureOfExpertsConfig","expert_config":layer["mlp_config"],
+            "router_config":{},"routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":4,
+            "num_active_routed_experts":2,"router_has_biases":false,"num_shared_experts":1,
+            "expert_hidden_dim":512,"gate_config":{}});
+    }
+    let geometry = geometry_moe(&decoder, &vision_profile()).unwrap();
+    assert!(geometry.tensors.affine);
+    assert_eq!(
+        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.experts.up_projection.weights.weights"].1,
+        vec![4096, 1024]
+    );
+    assert_eq!(
+        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.experts.down_projection.weights.weights"].1,
+        vec![4096, 512]
+    );
+    assert_eq!(
+        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.shared_gate.weights.weights"].1,
+        vec![1, 1024]
+    );
+    for (field, value) in
+        [("num_shared_experts", 2), ("num_active_routed_experts", 5), ("num_routed_experts", u32::MAX)]
+    {
+        let mut invalid = decoder.clone();
+        invalid["transformer_config"]["layer_configs"][0]["mlp_config"][field] = json!(value);
+        assert!(geometry_moe(&invalid, &vision_profile()).is_err());
+    }
+}
+
+#[stark_test]
 fn affine_geometry_requires_folded_norms_and_keeps_the_exact_operation_graph() {
     let mut decoder = decoder_profile();
     assert!(geometry_affine(&decoder, &vision_profile()).is_err());

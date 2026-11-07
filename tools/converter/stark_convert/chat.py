@@ -207,10 +207,11 @@ def load_template(model, *, expected_hashes=None):
             if (
                 config.get("type") == "Qwen35VisionLanguageModelConfig"
                 and supported_image_family(family)
-                and family["profile"] in {CONFIGURED_FAMILY_PROFILE, "qwen35-dense-affine-merged-v3"}
+                and family["profile"]
+                in {CONFIGURED_FAMILY_PROFILE, "qwen35-dense-affine-merged-v3", "qwen35-moe-affine-merged-v4"}
             ):
                 template_hashes.add("a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715")
-                if family["profile"] == "qwen35-dense-affine-merged-v3":
+                if family["profile"] in {"qwen35-dense-affine-merged-v3", "qwen35-moe-affine-merged-v4"}:
                     template_hashes.add("c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041")
             copied = _chat_file(model / "chat_template.jinja", 256 * 1024)
             if (

@@ -232,7 +232,11 @@ class SourceSnapshot:
             ):
                 raise ConversionError("Generic source profile disagrees with its checkpoint")
             rules = (
-                (gemma3_source_files(self.repo, names) if profile["architecture"] == "gemma3" else family_source_files(self.repo, names))
+                (
+                    gemma3_source_files(self.repo, names)
+                    if profile["architecture"] == "gemma3"
+                    else family_source_files(self.repo, names)
+                )
                 if self.artifact_mode == "vision-language"
                 else generic_files(self.repo, names)
             )
@@ -478,10 +482,13 @@ def _replay(
             raise ValueError()
         names = tuple(record["filename"] for record in manifest["files"] if record["repo"] == primary)
         rules = (
-            (gemma3_source_files if schema == 3 and profile["architecture"] == "gemma3"
-             else family_source_files if schema == 3 else generic_files)(
-                primary, tuple(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
-            )
+            (
+                gemma3_source_files
+                if schema == 3 and profile["architecture"] == "gemma3"
+                else family_source_files
+                if schema == 3
+                else generic_files
+            )(primary, tuple(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()))
             if profile is not None
             else source_rules(entry, artifact_mode)
             if entry is not None
@@ -594,14 +601,18 @@ def resolve_source(
                 raise UnsupportedConversion("Vision conversion requires the pinned official checkpoint")
             revision = VISION_REVISION
         else:
-            gemma3 = architecture == "gemma3" or repo in {"google/gemma-3-4b-it", "google/gemma-3-12b-it", "google/gemma-3-27b-it"}
-            if entry is not None and entry.get("adapter") != "qwen3_5" and not gemma3:
+            gemma3 = architecture == "gemma3" or repo in {
+                "google/gemma-3-4b-it",
+                "google/gemma-3-12b-it",
+                "google/gemma-3-27b-it",
+            }
+            if entry is not None and entry.get("adapter") not in {"qwen3_5", "qwen3_5_moe"} and not gemma3:
                 raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
             # Vision family sources always bind their own metadata, even when
             # the text catalog has external metadata rules for this repository.
             entry = None
             metadata_profile = metadata_profile or GENERIC_PROFILE
-            if architecture not in {None, "qwen3_5", "gemma3"}:
+            if architecture not in {None, "qwen3_5", "qwen3_5_moe", "gemma3"}:
                 raise UnsupportedConversion("Vision family requires a supported image architecture")
     if metadata_profile not in {None, GENERIC_PROFILE} or metadata_profile is not None and entry is not None:
         raise UnsupportedConversion("Generic metadata requires an uncatalogued source")
@@ -714,10 +725,13 @@ def resolve_source(
             read_family_config(config_path) if artifact_mode == "vision-language" else read_json(config_path),
             architecture,
         )
-        if artifact_mode == "vision-language" and detected not in {"qwen3_5", "gemma3"}:
+        if artifact_mode == "vision-language" and detected not in {"qwen3_5", "qwen3_5_moe", "gemma3"}:
             raise UnsupportedConversion("Vision family requires a supported image architecture")
-        rules = ((gemma3_source_files(repo, names) if detected == "gemma3" else family_source_files(repo, names))
-                 if artifact_mode == "vision-language" else generic_files(repo, names))
+        rules = (
+            (gemma3_source_files(repo, names) if detected == "gemma3" else family_source_files(repo, names))
+            if artifact_mode == "vision-language"
+            else generic_files(repo, names)
+        )
         profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
         if artifact_mode == "vision-language":
 

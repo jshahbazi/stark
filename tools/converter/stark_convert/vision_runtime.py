@@ -38,6 +38,7 @@ _FAMILY_VERSIONS = {
     GEMMA3_FAMILY_PROFILE: 1,
     GEMMA4_E4B_FAMILY_PROFILE: 1,
     "qwen35-dense-affine-merged-v3": 3,
+    "qwen35-moe-affine-merged-v4": 4,
     LILY_FAMILY_PROFILE: 1,
 }
 

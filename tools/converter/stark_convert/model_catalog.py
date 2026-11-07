@@ -534,7 +534,7 @@ def _quantization(config, info, entry, family=None):
         from .compressed import parse_mlx_quantization
 
         try:
-            quantization = parse_mlx_quantization(merged, allow_mixed=family == "qwen3_5")
+            quantization = parse_mlx_quantization(merged, allow_mixed=family in {"qwen3_5", "qwen3_5_moe"})
         except Exception:
             return None
         if quantization is None:
@@ -545,7 +545,7 @@ def _quantization(config, info, entry, family=None):
         ):
             return None
         widths = {bits}
-        if family == "qwen3_5":
+        if family in {"qwen3_5", "qwen3_5_moe"}:
             widths.update(override.bits for _, override in quantization.overrides if override is not None)
         if packing is not None and not widths <= set(packing.get("mixed_bits", [bits])):
             return None
@@ -620,6 +620,7 @@ def _generation_architecture(config, family):
         and (
             name.endswith("ForCausalLM")
             or (family == "qwen3_5" and name == "Qwen3_5ForConditionalGeneration")
+            or (family == "qwen3_5_moe" and name == "Qwen3_5MoeForConditionalGeneration")
             or (family == "qwen4_exp" and name == "Qwen4ExpForConditionalGeneration")
             or (family == "gemma3" and name == "Gemma3ForConditionalGeneration")
             or (family == "gemma4_text" and name == "Gemma4ForConditionalGeneration")
@@ -866,7 +867,7 @@ def family_catalog(
                     return None
                 weight_bytes = _weight_bytes(selected, sizes)
                 modes = [base_mode]
-                if family in {"qwen3_5", "gemma3", "gemma4_text"}:
+                if family in {"qwen3_5", "qwen3_5_moe", "gemma3", "gemma4_text"}:
                     image_metadata = _catalog_image_metadata(
                         family,
                         config,

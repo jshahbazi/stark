@@ -922,6 +922,8 @@ extension EngineController {
         case "models-display-native-families":
             for (familyID, familyName, repository) in [
                 ("olmo3", "OLMo 3", "allenai/Olmo-3-7B-Instruct"),
+                ("gemma3", "Gemma 3", "google/gemma-3-4b-it"),
+                ("qwen3_5_moe", "Qwen3.5 MoE", "mlx-community/Qwen3.5-35B-A3B-4bit"),
                 ("gemma4_text", "Gemma 4", "google/gemma-4-E2B-it")
             ] {
                 var raw = modelDisplay("repo:" + repository, name: repository.split(separator: "/").last.map(String.init) ?? repository)

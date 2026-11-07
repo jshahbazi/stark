@@ -17,13 +17,7 @@ from stark_convert.streaming import ConversionError, read_safetensors_header
 family_source = _family_source
 
 
-@pytest.mark.parametrize("vl_wrapper", [False, True])
-def test_affine_image_artifact_keeps_decoder_codes_and_complete_bf16_tower(
-    family_source,
-    tmp_path,
-    monkeypatch,
-    vl_wrapper,  # noqa: F811
-):
+def affine_image_source(family_source, tmp_path, monkeypatch, vl_wrapper):
     original = json.loads((family_source / "config.json").read_text())
     _, old = read_safetensors_header(family_source / "model.safetensors")
     source = tmp_path / "affine"
@@ -55,6 +49,15 @@ def test_affine_image_artifact_keeps_decoder_codes_and_complete_bf16_tower(
     monkeypatch.setattr(vision_family, "_ATTENTION_HEAD_DIM", 32)
     monkeypatch.setattr(vision_family, "_DELTA_HEAD_DIM", 32)
     monkeypatch.setattr(vision_family, "_ROPE", config["text_config"]["rope_parameters"])
+    return source, config, tensors
+
+
+@pytest.mark.parametrize("vl_wrapper", [False, True])
+def test_affine_image_artifact_keeps_decoder_codes_and_complete_bf16_tower(
+    family_source, tmp_path, monkeypatch, vl_wrapper
+):
+    source, _config, tensors = affine_image_source(family_source, tmp_path, monkeypatch, vl_wrapper)
+    prefix = "vision_tower." if vl_wrapper else "model.visual."
     output = tmp_path / "converted"
     receipt = cli.convert(source, output, repo=FINE_TUNE, artifact_mode="vision-language")
     assert receipt["artifact_contract"]["family"] == {"profile": vision_family.AFFINE_FAMILY_PROFILE, "version": 3}
@@ -73,6 +76,51 @@ def test_affine_image_artifact_keeps_decoder_codes_and_complete_bf16_tower(
         assert tensor_bytes(vision[name]) == array.tobytes()
     assert all(info.dtype == "BF16" for info in vision.values())
     assert not any(name.startswith("mtp.") for name in infos)
+
+
+def test_moe_image_conversion_keeps_sparse_banks_and_a_separate_shared_expert(family_source, tmp_path, monkeypatch):
+    source, config, tensors = affine_image_source(family_source, tmp_path, monkeypatch, True)
+    config["model_type"] = "qwen3_5_moe"
+    config["architectures"] = ["Qwen3_5MoeForConditionalGeneration"]
+    config["vision_config"]["model_type"] = "qwen3_5_moe"
+    text = config["text_config"]
+    text.update(
+        model_type="qwen3_5_moe_text",
+        architectures=["Qwen3_5MoeForCausalLM"],
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+    )
+    text.pop("intermediate_size")
+    for layer in range(2):
+        prefix = f"language_model.model.layers.{layer}.mlp"
+        for name in ("up_proj", "gate_proj", "down_proj"):
+            for plane in ("weight", "scales", "biases"):
+                key = f"{prefix}.{name}.{plane}"
+                dtype, array = tensors.pop(key)
+                tensors[f"{prefix}.shared_expert.{name}.{plane}"] = (dtype, array)
+                tensors[f"{prefix}.switch_mlp.{name}.{plane}"] = (dtype, np.stack([array.copy() for _ in range(4)]))
+        for name, rows in (("gate", 4), ("shared_expert_gate", 1)):
+            for plane in ("weight", "scales", "biases"):
+                dtype, array = tensors[f"{prefix}.shared_expert.up_proj.{plane}"]
+                tensors[f"{prefix}.{name}.{plane}"] = (dtype, array[:rows].copy())
+    save_tensors(source / "model.safetensors", tensors)
+    (source / "config.json").write_text(json.dumps(config))
+    output = tmp_path / "converted-moe"
+    receipt = cli.convert(source, output, repo=FINE_TUNE, artifact_mode="vision-language")
+    assert receipt["artifact_contract"]["family"] == {"profile": vision_family.MOE_FAMILY_PROFILE, "version": 4}
+    config = json.loads((output / "config.json").read_text())
+    mlp = config["decoder_config"]["transformer_config"]["layer_configs"][0]["mlp_config"]
+    assert mlp["type"] == "MixtureOfExpertsConfig" and mlp["num_routed_experts"] == 4
+    assert mlp["num_active_routed_experts"] == 2 and mlp["num_shared_experts"] == 1
+    _, infos = read_safetensors_header(output / "model.safetensors")
+    prefix = "decoder.transformer.layers.0.mlp"
+    assert infos[prefix + ".experts.up_projection.weights.weights"].shape == (1024, 64)
+    assert infos[prefix + ".experts.down_projection.weights.weights"].shape == (512, 64)
+    assert infos[prefix + ".shared_expert.up_projection.weights.weights"].shape == (256, 64)
+    assert infos[prefix + ".shared_gate.weights.weights"].shape == (1, 64)
+    assert all(info.dtype == "BF16" for name, info in infos.items() if name.startswith("vision."))
 
 
 def test_vision_namespace_cannot_hide_missing_or_opposite_tower(tmp_path):
