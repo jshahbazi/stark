@@ -31,6 +31,7 @@ from .api_tools import (
     parse_tool_output,
     render_tools,
     template_messages,
+    template_tools,
     tool_parser_for,
     validate_parser_tools,
 )
@@ -60,7 +61,7 @@ from .hybrid_prepare import SOURCES as NATIVE_SOURCES
 from .hybrid_prepare import prepared_identity
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
-from .model_inventory import model_display
+from .model_inventory import model_display, model_tool_support
 from .model_removal import RemovalError, prepare_removal, removal_info, remove_model
 from .model_support import support_matrix
 from .mtp import mtp_capabilities, resolve_mtp
@@ -71,6 +72,7 @@ from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
 from .sources import huggingface_repository
+from .tool_protocols import protocol_stop_ids
 from .vision_runtime import supported_image_family
 
 MAX_COMMAND_BYTES = 1024 * 1024
@@ -1692,6 +1694,7 @@ class Desktop:
                     "installed",
                     epoch,
                     model={k: previous[k] for k in ("id", "name", "path")},
+                    tool_support=model_tool_support(previous["path"]),
                     support_request_id=support_request_id,
                 )
                 self.status("ready" if self.worker else "idle", "Model already installed", epoch)
@@ -1812,6 +1815,7 @@ class Desktop:
                     "installed",
                     epoch,
                     model={k: model[k] for k in ("id", "name", "path")},
+                    tool_support=model_tool_support(model["path"]),
                     support_request_id=support_request_id,
                     **({"request_id": support_request_id} if guided_recipe is not None else {}),
                 )
@@ -2292,7 +2296,7 @@ class Desktop:
                 template,
                 cancelled=cancelled,
                 messages=messages,
-                tools=tools,
+                tools=template_tools(tools, parser=tool_parser_for(codec)),
                 add_generation_prompt=True,
                 enable_thinking=thinking,
                 bos_token=codec.get("bos_token") or "",
@@ -2353,6 +2357,14 @@ class Desktop:
             "sampling": sampling or {"mode": "greedy"},
             "seed": seed,
         }
+        protocol_ids = protocol_stop_ids(
+            worker,
+            tool_parser_for(codec),
+            active=bool(tools or any(message.get("tool_calls") for message in messages)),
+            cancelled=cancelled,
+        )
+        if protocol_ids:
+            request["stop_token_ids"] = protocol_ids
         if capability["supported"]:
             request["mtp_drafts"] = drafts
         if prefix_cache and cache_scope is not None:
@@ -2370,7 +2382,8 @@ class Desktop:
             raise ValueError
         if capability["supported"]:
             self.validate_mtp_reply(reply, capability, drafts)
-        return reply
+        # Bind output parsing to the actual prompt, never a worker/client claim.
+        return {**reply, "_tool_initial_thinking": prompt.endswith("<think>")}
 
     def api_cache_scope(self, principal):
         """Return the random reuse scope for one API session and credential."""
@@ -2642,6 +2655,14 @@ class Desktop:
                 )
             rendered_tools = render_tools(request)
             validate_parser_tools(rendered_tools or [], parser)
+            candidate = (
+                template_messages(messages, parser=parser, tools=rendered_tools)
+                if tool_request
+                else [dict(m) for m in messages]
+            )
+            system = (self.codec or {}).get("default_system_prompt")
+            if system and not any(m["role"] == "system" for m in candidate):
+                candidate.insert(0, {"role": "system", "content": system})
             public_id = api_model_id(active)
             if request["model"] not in (None, public_id, self.active_model, active["name"]):
                 raise APIError(
@@ -2683,10 +2704,6 @@ class Desktop:
                 mtp_drafts=drafts,
             )
             cache_scope = self.api_cache_scope(getattr(cancelled, "cache_principal", None))
-            candidate = template_messages(messages) if tool_request else [dict(m) for m in messages]
-            system = (self.codec or {}).get("default_system_prompt")
-            if system and not any(m["role"] == "system" for m in candidate):
-                candidate.insert(0, {"role": "system", "content": system})
             self.status("generating", "Generating for an app…", epoch)
         # A random per-request identifier lets the app fence progress without
         # receiving client identities, credentials or request content.
@@ -2696,7 +2713,7 @@ class Desktop:
             self.emit("generation_progress", epoch, source="api", id=progress_id, model=identifier, **value)
 
         try:
-            tool_stream = ToolTextStream(on_delta) if tool_request and on_delta is not None else None
+            tool_stream = ToolTextStream(on_delta, parser=parser) if tool_request and on_delta is not None else None
             reply = self.infer(
                 candidate,
                 maximum,
@@ -2731,6 +2748,7 @@ class Desktop:
                         parallel_tool_calls=request["parallel_tool_calls"],
                         call_id_prefix=uuid.uuid4().hex,
                         tool_choice=request["tool_choice"],
+                        initial_thinking=reply.get("_tool_initial_thinking", False),
                     )
                     if tool_request
                     else (

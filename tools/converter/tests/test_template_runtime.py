@@ -74,6 +74,8 @@ def test_compile_time_constant_expansion_is_guarded(source):
         "{{ [messages[0]] * 1000000000 }}",
         "{{ [messages[0]] * 16000 | join }}",
         "{{ messages[0] | replace('x', messages[0]) }}",
+        "{{ messages[0].replace('x', messages[0]) }}",
+        "{{ messages[0].replace('', messages[0]) }}",
         "{{ messages[0] | tojson(indent=1000000000) }}",
         "{{ '%1000000000s' % messages[0] }}",
         "{{ '{:1000000000}'.format(messages[0]) }}",
@@ -153,6 +155,27 @@ def test_bounded_slicing_preserves_indexes_steps_and_empty_slices():
     arguments = {"p": "abcdef", "messages": ["a", "b", "c"]}
     expected = chat_template_environment().from_string(source).render(**arguments)
     assert IsolatedTemplate(source).render(**arguments) == expected
+
+
+@pytest.mark.parametrize("text,old,new", [("abcabc", "a", "é"), ("é😀", "", "x"), ("abc", "z", ""), ("", "", "x")])
+@pytest.mark.parametrize("count", [None, -1, 0, 1, 2, 100])
+def test_string_replace_matches_python_including_empty_unicode_patterns(text, old, new, count):
+    source = "{{ text.replace(old, new" + (", count" if count is not None else "") + ") }}"
+    expected = text.replace(old, new) if count is None else text.replace(old, new, count)
+    assert IsolatedTemplate(source).render(text=text, old=old, new=new, count=count) == expected
+
+
+def test_reviewed_calendar_format_uses_local_date_and_rejects_other_formats():
+    import datetime
+
+    before = datetime.datetime.now().date()
+    result = IsolatedTemplate('{{ strftime_now("%d %B %Y") }}').render()
+    after = datetime.datetime.now().date()
+    months = ("January February March April May June July August September October November December").split()
+    expected = {f"{day.day:02} {months[day.month - 1]} {day.year}" for day in (before, after)}
+    assert result in expected
+    with pytest.raises(TemplateRuntimeError):
+        IsolatedTemplate('{{ strftime_now("%s") }}').render()
 
 
 def test_bounded_literal_containers_preserve_empty_values_and_unpacking():

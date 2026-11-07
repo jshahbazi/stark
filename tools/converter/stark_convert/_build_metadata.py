@@ -84,7 +84,7 @@ def toolchain_provenance(project: Path | None = None) -> dict:
         if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc" or path.is_relative_to(capsule):
             continue
         # Include source, catalogs, profiles, schemas and packaged resources.
-        if path.suffix not in {".py", ".json", ".toml", ".txt", ".md"}:
+        if path.suffix not in {".py", ".json", ".toml", ".txt", ".md", ".jinja"}:
             raise ValueError("unaccounted_package_resource")
         manifest[path.relative_to(root).as_posix()] = file_hash(path)
     for name in SOURCE_INPUTS:
