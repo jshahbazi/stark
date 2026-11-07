@@ -176,7 +176,7 @@ mod reference_tests {
                 gpu_types::gemm::{GemmBPrologueKind, GemmDTransform},
                 kernel::matmul::{MatmulKernel, MatmulShape, QuantParamsLayout},
             },
-            metal::{Metal, kernel::matmul::MatmulMetalKernel},
+            metal::Metal,
         },
         tests::helpers::{buffer_to_vec, create_buffer_with_data},
     };
@@ -204,7 +204,8 @@ mod reference_tests {
             params_layout: Some(QuantParamsLayout::GroupOutput),
             d_transform: GemmDTransform::empty(),
         };
-        let matmul = MatmulMetalKernel::new(&context, DataType::BF16, DataType::BF16, DataType::BF16).unwrap();
+        type MetalMatmul = <<Metal as Backend>::Kernels as Kernels>::MatmulKernel;
+        let matmul = MetalMatmul::new(&context, DataType::BF16, DataType::BF16, DataType::BF16).unwrap();
         let requested = matmul.select_activation_format(&shape, &context);
         assert_eq!(requested, ActivationFormat::Int8, "regression fixture must exercise the MXU A8 preference");
         let gate = MlpGateActMulEncodable::<Metal>::new(
