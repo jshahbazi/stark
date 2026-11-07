@@ -23,6 +23,10 @@ REFERENCE_HASHES = {
     "modeling_gemma3.py": "0d8d5dff8e72b1207e54edce0bd2b22a34b3194edfa114996b04cef1acf4ef6a",
     "modeling_siglip.py": "0a0d2b55f4fcb977b74549540211e42a3c3f41d0d446dc474dcc244a925791aa",
 }
+PROCESSOR_HASHES = {
+    "image_processing_gemma3.py": "e8450028ceb6eb1f4d44255ebfaa27c75e3921a5acf0bd741e139f306ec08a56",
+    "image_processing_backends.py": "5f3176903638125ee01af36e8c74741a7bab19581f3c13349a775b093cb1bbb0",
+}
 PHASE = "startup"
 
 
@@ -77,6 +81,8 @@ def run(args):
     from transformers import AutoProcessor, Gemma3ForConditionalGeneration
     from transformers.models.gemma3 import modeling_gemma3
     from transformers.models.siglip import modeling_siglip
+    from transformers.models.gemma3 import image_processing_gemma3
+    from transformers import image_processing_backends
 
     if torch.__version__.split("+")[0] != "2.14.1" or transformers.__version__ != "5.15.1":
         raise ValueError("reference_versions_changed")
@@ -84,6 +90,10 @@ def run(args):
         "modeling_siglip.py": digest(Path(inspect.getfile(modeling_siglip)))}
     if reference_hashes != REFERENCE_HASHES:
         raise ValueError("reference_implementation_changed")
+    processor_hashes = {"image_processing_gemma3.py": digest(Path(inspect.getfile(image_processing_gemma3))),
+        "image_processing_backends.py": digest(Path(inspect.getfile(image_processing_backends)))}
+    if processor_hashes != PROCESSOR_HASHES:
+        raise ValueError("reference_processor_implementation_changed")
     source, output = args.source.resolve(strict=True), args.output.resolve()
     repo = Path(__file__).resolve().parents[1]
     if source.name != REVISION or output.exists() or subprocess.run(
@@ -114,6 +124,8 @@ def run(args):
         source, local_files_only=True, dtype=torch.bfloat16, attn_implementation="eager"
     ).eval()
     processor = AutoProcessor.from_pretrained(source, local_files_only=True, trust_remote_code=False)
+    if type(processor.image_processor) is not image_processing_gemma3.Gemma3ImageProcessor:
+        raise ValueError("reference_processor_backend_changed")
     definitions = []
     prompt = "Describe the image briefly."
     for name, width, height in (("red", 64, 48), ("blue", 48, 64), ("pattern", 111, 79)):
@@ -213,7 +225,8 @@ def run(args):
         "reference_profile": "transformers-canonical-eager-bf16", "torch": torch.__version__.split("+")[0],
         "transformers": transformers.__version__, "tokens_per_case": args.tokens,
         "source_hashes": {path.name: digest(path) for path in (source / "config.json", source / "model.safetensors.index.json")},
-        "reference_hashes": reference_hashes, "cases": definitions}
+        "reference_hashes": reference_hashes, "processor_hashes": processor_hashes,
+        "processor_backend": "torchvision-cpu-uint8-antialiased-bilinear", "cases": definitions}
     if previous:
         if any(digest(previous / name) != value for name, value in preserved.items()):
             raise ValueError("preserved_inputs_changed_during_resume")
