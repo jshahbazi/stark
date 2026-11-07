@@ -3,6 +3,7 @@ use crate::backends::common::Backend;
 pub mod ancestor_attention;
 pub mod attention_prepare;
 pub mod attention_single_pass;
+pub mod gemma4_vision;
 pub mod kv_cache_update;
 pub mod qkv_norm;
 pub mod sigmoid_gate;
@@ -10,6 +11,7 @@ pub mod vision_eager;
 pub mod vision_prepare;
 
 mod mask;
+mod materialized;
 
 use crate::backends::{
     common::{
@@ -31,6 +33,7 @@ impl AttentionKernel for AttentionCpuKernel {
         config: AttentionKernelConfig,
     ) -> Result<Self, CpuError> {
         crate::config::validation::validate_heads(config.num_q_heads, config.num_groups, config.head_dim)?;
+        config.validate_prefill_materialization()?;
         Ok(Self {
             config,
         })
@@ -53,6 +56,13 @@ impl AttentionKernel for AttentionCpuKernel {
             &[arguments.suffix_length, config.num_q_heads, config.head_dim],
             config.data_type,
         )?;
+        if config.materializes_scores_for_geometry(
+            arguments.suffix_length,
+            arguments.cache.prefix_len().saturating_add(arguments.suffix_length),
+        ) {
+            materialized::encode(config, arguments, &mut output, command_buffer)?;
+            return Ok(output);
+        }
 
         let single_pass = <attention_single_pass::AttentionSinglePassCpuKernel as AttentionSinglePassKernel>::new(
             command_buffer.context(),

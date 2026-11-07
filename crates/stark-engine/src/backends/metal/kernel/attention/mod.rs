@@ -4,6 +4,7 @@ mod fallback;
 mod gemm;
 mod gemm_grouped;
 mod single_pass;
+mod source_softmax;
 mod two_pass;
 
 use crate::backends::{
@@ -55,6 +56,7 @@ pub struct AttentionMetalKernel {
     fallback: Option<fallback::AttentionFallback>,
     two_pass: two_pass::AttentionTwoPass,
     single_pass: single_pass::AttentionSinglePass,
+    materialize_prefill_scores: bool,
 }
 
 impl AttentionKernel for AttentionMetalKernel {
@@ -65,6 +67,7 @@ impl AttentionKernel for AttentionMetalKernel {
         config: AttentionKernelConfig,
     ) -> Result<Self, MetalError> {
         crate::config::validation::validate_heads(config.num_q_heads, config.num_groups, config.head_dim)?;
+        config.validate_prefill_materialization()?;
         let grouped = gemm_grouped::AttentionGemmGrouped::is_supported(&config, context)
             .then(|| gemm_grouped::AttentionGemmGrouped::new(&config));
         let gemm = gemm::AttentionGemm::is_supported(&config).then(|| gemm::AttentionGemm::new(&config));
@@ -79,6 +82,7 @@ impl AttentionKernel for AttentionMetalKernel {
             fallback,
             two_pass: two_pass::AttentionTwoPass::new(&config),
             single_pass: single_pass::AttentionSinglePass::new(&config),
+            materialize_prefill_scores: config.materialize_prefill_scores,
         })
     }
 
@@ -102,6 +106,73 @@ impl AttentionKernel for AttentionMetalKernel {
 }
 
 impl AttentionMetalKernel {
+    #[cfg(test)]
+    pub(crate) fn encode_source_scale_prefill_for_test(
+        config: AttentionKernelConfig,
+        arguments: AttentionArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
+        gemm::AttentionGemm::new(&config).encode_source_scale_for_test(arguments, command_buffer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encode_mxu_prefill_for_test(
+        config: AttentionKernelConfig,
+        arguments: AttentionArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
+        gemm::AttentionGemm::new(&config).encode_forced_mxu_for_test(arguments, command_buffer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encode_unfused_prefill_for_test(
+        context: &MetalContext,
+        config: AttentionKernelConfig,
+        arguments: AttentionArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
+        fallback::AttentionFallback::new(&config, context)?.encode(arguments, command_buffer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encode_fallback_trace_for_test(
+        context: &MetalContext,
+        config: AttentionKernelConfig,
+        arguments: AttentionArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<(<Metal as Backend>::ScratchBuffer, Vec<(&'static str, <Metal as Backend>::ScratchBuffer)>), MetalError>
+    {
+        fallback::AttentionFallback::new(&config, context)?.encode_trace(arguments, command_buffer)
+    }
+
     fn encode_impl(
         &self,
         arguments: AttentionArguments<
@@ -118,6 +189,27 @@ impl AttentionMetalKernel {
         let kv_length = arguments.cache.prefix_len() + suffix_length;
         let is_trie = arguments.trie.is_some();
         let is_ring = arguments.cache.ring_params().is_some();
+        if self.materialize_prefill_scores
+            && ((9..1024).contains(&suffix_length) || (self.head_dim == 512 && kv_length < 1024))
+        {
+            if is_trie {
+                return Err(crate::backends::common::InvalidInput(
+                    "materialized prefill attention does not support tries",
+                )
+                .into());
+            }
+            return self
+                .fallback
+                .as_ref()
+                .ok_or(crate::backends::common::InvalidInput("materialized prefill attention fallback is missing"))?
+                .encode(arguments, command_buffer);
+        }
+        if !is_trie
+            && let Some(gemm) = &self.gemm
+            && gemm.uses_source_mxu_prefill(suffix_length, command_buffer.context().supports_mxu)
+        {
+            return gemm.encode(arguments, command_buffer);
+        }
         let mask = MaskKind::for_attention(self.is_causal, is_trie);
 
         if !is_ring

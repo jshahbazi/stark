@@ -79,12 +79,10 @@ impl RgbImage {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn width(&self) -> u32 {
         self.width
     }
 
-    #[cfg(test)]
     pub(crate) fn height(&self) -> u32 {
         self.height
     }
@@ -420,6 +418,25 @@ pub(crate) fn decode_image(
     data: &[u8],
     limits: &PreprocessLimits,
 ) -> Result<RgbImage, InvalidInput> {
+    decode_image_alpha(data, limits, true, |width, height| resized_dimensions(width, height, limits).map(|_| ()))
+}
+
+/// Match PIL's RGB conversion for processors that discard alpha channels.
+/// Codec and allocation bounds are shared with the white-compositing profile.
+pub(super) fn decode_image_discard_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
+    data: &[u8],
+    limits: &PreprocessLimits,
+    validate_processed: F,
+) -> Result<RgbImage, InvalidInput> {
+    decode_image_alpha(data, limits, false, validate_processed)
+}
+
+fn decode_image_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
+    data: &[u8],
+    limits: &PreprocessLimits,
+    white_background: bool,
+    validate_processed: F,
+) -> Result<RgbImage, InvalidInput> {
     if data.is_empty() || data.len() > limits.max_encoded_bytes {
         return Err(InvalidInput("encoded image exceeds preprocessing bounds"));
     }
@@ -432,7 +449,7 @@ pub(crate) fn decode_image(
     };
     check_source_dimensions(width, height, limits)?;
     // Reject a processor/admission overflow before allocating the decoded image.
-    resized_dimensions(width, height, limits)?;
+    validate_processed(width, height)?;
     if format == ImageFormat::Jpeg {
         let pixels = decode_jpeg_rgb(data, width, height)?;
         let (pixels, width, height) = orient_rgb(pixels, width, height, orientation)?;
@@ -463,7 +480,11 @@ pub(crate) fn decode_image(
         DynamicImage::ImageLumaA8(image) => {
             let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
             for (pixel, gray) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(image.into_raw().as_chunks::<2>().0.iter()) {
-                pixel.fill(composite_white(gray[0], gray[1]));
+                pixel.fill(if white_background {
+                    composite_white(gray[0], gray[1])
+                } else {
+                    gray[0]
+                });
             }
             rgb
         },
@@ -471,7 +492,11 @@ pub(crate) fn decode_image(
             let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
             for (pixel, rgba) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(image.into_raw().as_chunks::<4>().0.iter()) {
                 for channel in 0..3 {
-                    pixel[channel] = composite_white(rgba[channel], rgba[3]);
+                    pixel[channel] = if white_background {
+                        composite_white(rgba[channel], rgba[3])
+                    } else {
+                        rgba[channel]
+                    };
                 }
             }
             rgb
@@ -590,7 +615,7 @@ fn resize_weights(
     ))
 }
 
-fn resize_rgb(
+pub(super) fn resize_rgb(
     image: &RgbImage,
     width: u32,
     height: u32,

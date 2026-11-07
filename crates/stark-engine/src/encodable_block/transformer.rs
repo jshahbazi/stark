@@ -141,6 +141,17 @@ impl<B: Backend> TransformerState<B> {
         self.context_length = prefix.position;
         true
     }
+    #[cfg(test)]
+    pub(crate) fn attention_state_for_test(
+        &self,
+        layer_index: usize,
+    ) -> Option<&crate::encodable_block::mixer::attention::AttentionState<B>> {
+        match self.layer_states.get(layer_index)? {
+            TransformerLayerStateType::Owned(state) => (state.as_ref() as &dyn std::any::Any).downcast_ref(),
+            TransformerLayerStateType::Shared(source) => self.attention_state_for_test(*source as usize),
+        }
+    }
+
     /// Allow the final attention layer to skip its query path for prompt
     /// chunks whose logits are not read. Only `score_next_token` opts a state
     /// in; the pruning additionally requires a flat batch, no requested output
@@ -258,6 +269,7 @@ pub struct Transformer<B: Backend> {
     captured_output_norm: Normalization<B>,
     model_dim: u32,
     multimodal_positions_supported: bool,
+    scalar_image_positions_supported: bool,
     residual_add: <B::Kernels as Kernels>::TensorAddScaleKernel,
 }
 
@@ -332,6 +344,17 @@ impl<B: Backend> Transformer<B> {
         Ok(Self {
             multimodal_positions_supported: !ropes.is_empty()
                 && ropes.iter().all(|rope| matches!(rope, AnyRoPEConfig::Qwen35MRoPEConfig(_))),
+            scalar_image_positions_supported: !ropes.is_empty()
+                && ropes.iter().all(|rope| {
+                    matches!(rope, AnyRoPEConfig::UnscaledRoPEConfig(_) | AnyRoPEConfig::ProportionalRoPEConfig(_))
+                })
+                && transformer_config.layer_configs.iter().all(|layer| {
+                    matches!(
+                        &layer.mixer_config,
+                        crate::config::token_mixer::AnyTokenMixerConfig::AttentionConfig(attention)
+                            if attention.is_causal
+                    ) && layer.rope_config.is_some()
+                }),
             #[cfg(feature = "rope-cache")]
             rope_tables: ropes.iter().map(super::mixer::attention::rope::RoPETableCache::new).collect(),
             #[cfg(not(feature = "rope-cache"))]
@@ -373,6 +396,10 @@ impl<B: Backend> Transformer<B> {
 
     pub(crate) fn multimodal_positions_supported(&self) -> bool {
         self.multimodal_positions_supported
+    }
+
+    pub(crate) fn scalar_image_positions_supported(&self) -> bool {
+        self.scalar_image_positions_supported
     }
 
     pub fn max_context_length(&self) -> Option<u32> {

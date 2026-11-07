@@ -108,10 +108,10 @@ pub fn select(
     n: u32,
     k: u32,
     bf16_io: bool,
-    qwen35_affine_layout: bool,
+    group_major_affine_layout: bool,
 ) -> Option<GemvTile> {
     if matches!(bits, 5 | 6) {
-        if !qwen35_affine_layout || !bf16_io || group != 64 || !(1..=4).contains(&m) || !k.is_multiple_of(256) {
+        if !group_major_affine_layout || !bf16_io || group != 64 || !(1..=4).contains(&m) || !k.is_multiple_of(256) {
             return None;
         }
         let mut tile = lane_default(bits, group);
@@ -134,7 +134,7 @@ pub fn select(
     // Dense Qwen27 verification reuses each affine weight load across its
     // two to four input rows. Reuse the full verification row tile while
     // preserving scalar output geometry, K lanes and group arithmetic.
-    if qwen35_affine_layout
+    if group_major_affine_layout
         && gpu_core_count >= LARGE_MIN_GPU_CORES
         && apple_gpu_family == MTLGPUFamily::Apple10
         && group == 64
@@ -164,7 +164,7 @@ pub fn select(
     // M5 geometry for the fused Qwen3.5-2B decode projections.
     // Keep each row's K lanes and quantization-group partition unchanged;
     // increasing rows per SIMD group reuses its activation loads.
-    if qwen35_affine_layout
+    if group_major_affine_layout
         && gpu_core_count >= LARGE_MIN_GPU_CORES
         && apple_gpu_family == MTLGPUFamily::Apple10
         && bits == 4
@@ -186,4 +186,27 @@ pub fn select(
         return None;
     }
     Some(tile)
+}
+
+/// Apply measured row batching only to explicitly declared source profiles.
+/// Legacy artifacts retain their original geometry and compiled arithmetic.
+pub fn source_projection_tile(
+    gpu_core_count: u32,
+    apple_gpu_family: MTLGPUFamily,
+    group: u32,
+    n: u32,
+    k: u32,
+) -> Option<GemvTile> {
+    // Cold-weight sweeps retain each output row's reduction order while
+    // reducing idle lanes and repeated activation loads on a large M5 GPU.
+    if gpu_core_count < LARGE_MIN_GPU_CORES || apple_gpu_family != MTLGPUFamily::Apple10 || group != 64 {
+        return None;
+    }
+    let (simdgroups, rows) = match (n, k) {
+        (4096, 4096 | 11008) => (4, 2),
+        (22016, 4096) => (8, 2),
+        (12288 | 100278, 4096) | (12288, 1536) => (2, 4),
+        _ => return None,
+    };
+    Some(lane_tile(simdgroups, rows, 4, group))
 }

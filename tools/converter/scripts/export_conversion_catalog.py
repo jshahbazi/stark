@@ -21,6 +21,70 @@ from pathlib import Path
 REFERENCE_REVISION = "831accb8252a6b6606c378048caeb44178f1a050"
 QWEN38_DISTILL_REPO = "empero-ai/Qwen3.8-4B-Distill"
 QWEN38_DISTILL_REVISION = "c83cb7aa2999d2f35c43e9ae0634a30eb8985a1e"
+OLMO3_REPO = "allenai/Olmo-3-7B-Instruct"
+OLMO3_REVISION = "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc"
+GEMMA4_REPO = "google/gemma-4-E2B-it"
+GEMMA4_REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
+
+
+def profile_extension(
+    entries: list[dict],
+    *,
+    repo: str,
+    revision: str,
+    reference_repo: str,
+    config_class: str,
+    adapter: str,
+    family: str,
+    size: str,
+    vendor: str,
+    file_hashes: dict[str, str],
+) -> dict:
+    """Create an explicit Stark text-adapter profile for a pinned HF source."""
+    entry = copy.deepcopy(next(entry for entry in entries if entry["repo"] == reference_repo))
+    entry.update(
+        repo=repo,
+        catalog_origin="stark_extension",
+        profile_reference=reference_repo,
+        family=family,
+        vendor=vendor,
+        name=repo.split("/")[1],
+        size=size,
+        config_class=config_class,
+        adapter=adapter,
+        metadata_profile=adapter,
+        profile_source={"repo": repo, "revision": revision, "files_sha256": file_hashes},
+    )
+    entry["files"] = {
+        role: {"repo": repo, "filename": filename}
+        for role, filename in {
+            "model_config": "config.json",
+            "tokenizer": "tokenizer.json",
+            "tokenizer_config": "tokenizer_config.json",
+            "generation_config": "generation_config.json",
+            "chat_template": "chat_template.jinja",
+        }.items()
+    }
+    if adapter == "gemma4_text":
+        entry["files"]["processor_config"] = {"repo": repo, "filename": "processor_config.json"}
+    entry["metadata"] = {
+        "parser_id": None,
+        "reasoning_id": None,
+        "end_of_thinking_id": None,
+        "generation_config": None,
+        "generation_params_overrides": None,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": _digest([]),
+        "inline_sources": {},
+        "roles": {"system": "system", "user": "user", "assistant": "assistant"},
+    }
+    entry["status"] = {
+        "conversion": "implemented",
+        "runtime": "not_assessed",
+        "access": "not_assessed",
+        "qualification": "pending",
+    }
+    return entry
 
 
 def qwen38_distill_extension(entries: list[dict]) -> dict:
@@ -230,6 +294,31 @@ def export(reference: Path) -> dict:
                 },
             }
         )
+    # Gemma-4 E2B already exists in the pinned registry as a planned row. Bind
+    # the new text adapter to that identity without duplicating the repository
+    # or changing the source-bound builtin denominator.
+    gemma4 = profile_extension(
+        entries,
+        repo=GEMMA4_REPO,
+        revision=GEMMA4_REVISION,
+        reference_repo="google/gemma-3-4b-it",
+        config_class="HFGemma4TextConfig",
+        adapter="gemma4_text",
+        family="Gemma-4",
+        vendor="Google",
+        size="E2B",
+        file_hashes={
+            "config.json": "1b28f3d2c3100f6c594754b81107428bd7b822a7f48272ca681dae9d2ec38330",
+            "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+            "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+            "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+            "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+            "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+        },
+    )
+    gemma4["catalog_origin"] = "pinned_builtin"
+    entries[:] = [gemma4 if entry["repo"] == GEMMA4_REPO else entry for entry in entries]
+
     extensions = []
     for repository, reference_repo, family in (
         ("unsloth/Llama-3.2-1B-Instruct", "meta-llama/Llama-3.2-1B-Instruct", "Llama-3.2"),
@@ -266,6 +355,26 @@ def export(reference: Path) -> dict:
         file["repo"] = gemma2["repo"]
     extensions.append(gemma2)
     extensions.append(qwen38_distill_extension(entries))
+    extensions.append(
+        profile_extension(
+            entries,
+            repo=OLMO3_REPO,
+            revision=OLMO3_REVISION,
+            reference_repo="Qwen/Qwen3-8B",
+            config_class="HFOlmo3Config",
+            adapter="olmo3",
+            family="OLMo-3",
+            vendor="AllenAI",
+            size="7B",
+            file_hashes={
+                "config.json": "6282ae812f9e494bd212e9a3233d68dc4d5f1e2569642423d2b79a3e80373ef8",
+                "generation_config.json": "745e78c16cc40cbb08827f7b7c9d5a888f7cb908236d4ca0443ff47f43a9d5af",
+                "tokenizer_config.json": "f7a2753a4ff30657e452c8fef02b9a99a3b900ceb4c65a1e3fbea6a3bfab07a6",
+                "tokenizer.json": "7738a25c46a6043a0e2e605138851baa450269ce9d800af6ca9bf6192e45510c",
+                "chat_template.jinja": "f5186d42d99c8a0445d37fd8a6c7ccf07fe3e24a29ce622d8bd245da9507b12b",
+            },
+        )
+    )
     return {
         "schema_version": 1,
         "reference": {

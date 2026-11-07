@@ -7,7 +7,18 @@
 namespace stark {
 namespace gemm {
 
-template <typename Tile, typename AT, typename BT, typename DT, GemmBPrologueKind B_PROLOGUE, uint BITS>
+// MLX 0.32.3 quantized.h qdot returns each scaled dot plus affine bias
+// correction before qmv adds that contribution to its F32 prior. Keep the
+// addition grouped even when the surrounding legacy GEMV uses Fast math.
+inline float materialized_affine_fold(float prior, float scale, float partial, float bias, float input_sum) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(on)
+  return prior + (scale * partial + bias * input_sum);
+}
+#pragma METAL fp math_mode(fast)
+#pragma METAL fp contract(on)
+
+template <typename Tile, typename AT, typename BT, typename DT, GemmBPrologueKind B_PROLOGUE, uint BITS, bool MATERIALIZED_SOURCE>
 struct QuantMetadata {
 private:
   float scale[Tile::ROWS_PER_LANE];
@@ -78,6 +89,9 @@ public:
 
 private:
   METAL_FUNC float finish(float prior, float partial, float input_sum, uint row) const thread {
+    if constexpr (MATERIALIZED_SOURCE) {
+      return materialized_affine_fold(prior, scale[row], partial, bias[row], input_sum);
+    }
     float result = fma(scale[row], partial, prior);
     if constexpr (B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant) {
       result = fma(bias[row], input_sum, result);
