@@ -270,11 +270,18 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 || !model_state.tokens.is_empty()
                 || model_state.transformer_state.context_length() != 0
                 || model_state.last_output_token.is_some()
-                || model_state.transformer_state.rotary_position_delta().is_some()
+                || model_state.has_multimodal_context()
                 || !Arc::ptr_eq(&multimodal.image.model_identity, &model.model_identity)
                 || multimodal.image.model_dim != model.decoder.embedding().model_dim()
                 || multimodal.image.data_type != DataType::BF16
                 || multimodal.positions.len() != input.len()
+                || (multimodal.uses_spatial_positions() && !model.decoder.qwen35_multimodal_supported())
+                || (!multimodal.uses_spatial_positions() && !model.decoder.gemma4_multimodal_supported())
+                || (!multimodal.uses_spatial_positions()
+                    && (multimodal.position_delta != 0
+                        || multimodal.positions.iter().enumerate().any(|(index, position)| {
+                            u32::try_from(index).map_or(true, |index| *position != [index; 3])
+                        })))
             {
                 return Err(LanguageModelStreamError::InvalidMultimodal);
             }
@@ -302,17 +309,19 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
 
         // After this point failures fence this per-request state. A fresh state
         // is required rather than reusing partially encoded image/cache rows.
-        let multimodal_request =
-            multimodal.is_some() || model_state.transformer_state.rotary_position_delta().is_some();
+        let multimodal_request = multimodal.is_some() || model_state.has_multimodal_context();
         if multimodal_request {
             model_state.multimodal_failed = true;
         }
         if let Some(multimodal) = multimodal {
-            model_state.transformer_state.set_rotary_position_delta(Some(multimodal.position_delta));
+            model_state.multimodal_prefilled = true;
+            model_state
+                .transformer_state
+                .set_rotary_position_delta(multimodal.uses_spatial_positions().then_some(multimodal.position_delta));
         }
 
         let setup = (|| -> Result<_, LanguageModelStreamError<B>> {
-            let capture_span = if model_state.transformer_state.rotary_position_delta().is_none()
+            let capture_span = if !model_state.has_multimodal_context()
                 && let Some(capture_manager) = &model.engine.capture_manager
                 && let Some(capture_request) = capture_manager.maybe_capture_prefill_step()
             {
@@ -377,7 +386,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
 
                 let mut output_tokens = None;
                 let mut output_norm = None;
-                let split_logits_row = model.decoder.prefill_cache_skips_trailing_layers();
+                let split_logits_row = model.decoder.prefill_requires_separate_logits_row();
                 let hidden_feature_layer_indices =
                     model.speculator.as_ref().map(|speculator| speculator.hidden_feature_layer_indices());
                 #[cfg(test)]
@@ -408,13 +417,13 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                     let input_flat_trie_nodes = input_flat_trie.token_subtrie_ranges().collect::<Box<[GpuTrieNode]>>();
                     let chunk_start = model_state.tokens.len();
                     let batch_dim = match multimodal {
-                        Some(input) => BatchTopology::with_rotary_positions(
+                        Some(input) if input.uses_spatial_positions() => BatchTopology::with_rotary_positions(
                             &input_flat_trie_nodes,
                             true,
                             &input.positions[chunk_start..chunk_start + input_chunk.len()],
                         )
                         .map_err(|_| LanguageModelStreamError::InvalidMultimodal)?,
-                        None => BatchTopology::new(&input_flat_trie_nodes, true),
+                        _ => BatchTopology::new(&input_flat_trie_nodes, true),
                     };
                     let replacement = multimodal
                         .map(|input| {
@@ -808,7 +817,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             ));
         }
 
-        let capture_span = if self.model_state.transformer_state.rotary_position_delta().is_none()
+        let capture_span = if !self.model_state.has_multimodal_context()
             && let Some(capture_manager) = &self.model.engine.capture_manager
             && let Some(capture_request) = capture_manager.maybe_capture_decode_step()
         {
@@ -823,7 +832,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         };
 
         let mut pending = SubmittedScratchPool::new(Box::new([]), None::<Arc<B::AllocationPool>>).with_drop_wait(
-            self.model_state.transformer_state.rotary_position_delta().is_some(),
+            self.model_state.has_multimodal_context(),
             |pending: <B::CommandBuffer as CommandBuffer>::Pending| {
                 let _ = pending.wait_until_completed();
             },
@@ -1097,7 +1106,7 @@ impl<'a, B: Backend> Iterator for LanguageModelStream<'a, B> {
         // The ordinary stream's lookahead may already hold a sampled next
         // token. Image requests must not return it after their context budget
         // is consumed; Drop still drains the owned submission safely.
-        if self.model_state.transformer_state.rotary_position_delta().is_some()
+        if self.model_state.has_multimodal_context()
             && self
                 .model_state
                 .max_context_length
@@ -1111,7 +1120,7 @@ impl<'a, B: Backend> Iterator for LanguageModelStream<'a, B> {
         {
             **fence = true;
         }
-        if result.is_err() && self.model_state.transformer_state.rotary_position_delta().is_some() {
+        if result.is_err() && self.model_state.has_multimodal_context() {
             fence_multimodal_state(self.model_state);
         }
         result.transpose()
@@ -1128,7 +1137,7 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
                 let completion = in_flight.pending.unwrap().wait(|pending| pending.wait_until_completed().map(|_| ()));
                 if completion.is_err()
                     && (self.model_state.multimodal_failed
-                        || self.model_state.transformer_state.rotary_position_delta().is_some()
+                        || self.model_state.has_multimodal_context()
                         || self.failure_fence.is_some())
                 {
                     fence_multimodal_state(self.model_state);
@@ -1217,7 +1226,7 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
                 **fence = true;
             }
             None
-        } else if self.model_state.transformer_state.rotary_position_delta().is_some()
+        } else if self.model_state.has_multimodal_context()
             && self
                 .model_state
                 .max_context_length

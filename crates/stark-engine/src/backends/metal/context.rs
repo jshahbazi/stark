@@ -39,6 +39,7 @@ pub struct MetalContext {
     pub apple_gpu_family: MTLGPUFamily,
     pub supports_mxu: bool,
     pub device_name: String,
+    pub gpu_architecture: String,
     pub(super) residency_set: Arc<Mutex<Retained<ProtocolObject<dyn MTLResidencySet>>>>,
     pub command_queue: Retained<ProtocolObject<dyn MTL4CommandQueue>>,
     pub(super) block_allocator: Arc<BlockAllocator<MetalDenseBuffer>>,
@@ -105,6 +106,7 @@ impl Context for MetalContext {
     fn new() -> Result<Arc<Self>, MetalError> {
         let device = <dyn MTLDevice>::system_default().ok_or(MetalError::CannotOpenDevice)?;
         let device_name = device.name();
+        let gpu_architecture = device.architecture().name();
         let gpu_core_count = device.gpu_core_count();
         let apple_gpu_family = device.newest_supported_apple_gpu_family();
         let supports_mxu = device.supports_mxu();
@@ -130,6 +132,7 @@ impl Context for MetalContext {
             apple_gpu_family,
             supports_mxu,
             device_name,
+            gpu_architecture,
             residency_set: Arc::new(Mutex::new(residency_set)),
             command_queue,
             block_allocator,

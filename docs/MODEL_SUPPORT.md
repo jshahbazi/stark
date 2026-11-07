@@ -60,6 +60,18 @@ including generation prefix-reuse implementation where exact restoration is
 possible and a recorded blocker where it is unavailable. The family registry
 does not grant this runtime capability or transfer qualification between
 checkpoints and quantizations.
+[OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) use the ordinary native Metal text path.
+OLMo 3 adds whole-projection Q/K normalization and post-norm residual branches.
+Gemma 4 text coverage is bounded to dense PLE E2B/E4B layouts. A separate
+schema-4 image artifact supports only the official E2B BF16 checkpoint, with a
+Gemma-specific processor, vision tower and native execution path. Its CLI,
+terminal chat, desktop and runtime family gates are wired. The canonical HF CPU
+feature comparison passes the 2% gate on three images. Bounded generation-worker
+lifecycle checks and local cold/cached chat-client checks pass. Installed
+desktop UI execution and image performance are unmeasured. Audio, video, E4B
+images, 31B, 26B MoE and unified 12B are unsupported. Exact checkpoint
+execution and numerical evidence remain tied to their reference profiles and
+engine builds. See the [dated validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md).
 
 ## Browsing and removing models
 
@@ -173,7 +185,7 @@ The registry uses these mode identifiers:
 | --- | --- |
 | `text` | Text chat through a converted language artifact and the generation worker. |
 | `decision` | Generic answer-choice scoring through a text artifact, compatible template/tokenizer and scoring worker. |
-| `vision-language` | Image chat through the supported full vision artifact and local image checks. |
+| `vision-language` | Image chat through supported full vision artifacts and model-specific host checks. Current paths include the Qwen3.5 schemas and Gemma 4 E2B BF16 schema 4. |
 
 Decision scoring uses temperature 1 and produces a comparative distribution over
 the supplied choices. A compatible family does not establish calibration or

@@ -22,7 +22,9 @@ from .media import ImageData
 from .vision_runtime import (
     _ARTIFACT_HASHES,
     CONFIGURED_FAMILY_PROFILE,
+    GEMMA4_FAMILY_PROFILE,
     _current_os_version,
+    artifact_image_family,
     family_image_input_contract,
     image_input_contract,
     supported_image_family,
@@ -52,9 +54,9 @@ def preflight_family_memory(model: Path, config: dict) -> None:
     The native loader and operation-specific allocation guards remain authoritative.
     """
     contract = config.get("artifact_contract", {})
-    if not isinstance(contract, dict) or contract.get("schema_version") != 3:
+    if not isinstance(contract, dict) or contract.get("schema_version") not in (3, 4):
         return
-    family = contract.get("family")
+    family = artifact_image_family(config) if contract.get("schema_version") == 4 else contract.get("family")
     if not supported_image_family(family):
         raise ImageCheckError("This image model family is not supported.")
     try:
@@ -412,7 +414,14 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             if not _valid_reply(reply, maximum) or reply["input_tokens"] + maximum > context:
                 raise ImageCheckError("The model did not pass the image execution check.")
             image_tokens = getattr(worker, "_last_image_tokens", None)
-            if type(image_tokens) is not int or image_tokens != 64 or reply["input_tokens"] != base_count + 63:
+            gemma = identity["family_profile"] == GEMMA4_FAMILY_PROFILE
+            expected_image_tokens = 256 if gemma else 64
+            expected_delta = expected_image_tokens + 1 if gemma else expected_image_tokens - 1
+            if (
+                type(image_tokens) is not int
+                or image_tokens != expected_image_tokens
+                or reply["input_tokens"] != base_count + expected_delta
+            ):
                 raise ImageCheckError("The model did not pass image token accounting.")
             if list(worker.media.root.iterdir()):
                 raise ImageCheckError("The model did not clear staged image data.")

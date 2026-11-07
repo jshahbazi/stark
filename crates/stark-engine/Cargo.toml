@@ -154,3 +154,11 @@ required-features = ["grammar"]
 [[example]]
 name = "glm_exl3_validate"
 required-features = ["glm-exl3"]
+
+[[example]]
+name = "dense_parity"
+required-features = ["metal"]
+
+[[example]]
+name = "dense_profile"
+required-features = ["metal"]
