@@ -497,8 +497,17 @@ def test_known_lily_source_remains_available_without_hub_search_results(tmp_path
     identities = {(item["repo"], item["revision"]) for item in report["items"]}
     assert (repo, revision) in identities
     mixed = SOURCES["qwen38-mixed"]
-    assert identities == {(repo, revision), (mixed["weights_repo"], mixed["weights_revision"])}
-    assert next(item for item in report["items"] if item["repo"] == repo)["quantization"] == "4-bit / 8-bit"
+    serve = SOURCES["qwen38-mlx-serve-mixed"]
+    assert identities == {
+        (repo, revision),
+        (mixed["weights_repo"], mixed["weights_revision"]),
+        (serve["weights_repo"], serve["weights_revision"]),
+    }
+    item = next(item for item in report["items"] if item["repo"] == repo)
+    assert item["quantization"] == source["quantization"]
+    from stark_convert.native_catalog import source_choice
+
+    assert source_choice("qwen4_exp", item) == "qwen38-lily-q4-xl"
     assert ("info", repo, {"revision": revision, "files_metadata": True, "timeout": 5}) in hub.events
     assert [event[2] for event in hub.events if event[0] == "download"] == ["config.json"]
 
@@ -513,6 +522,22 @@ def test_known_lily_source_cannot_silently_move_to_another_revision(tmp_path, mo
     report = catalog.family_catalog("qwen4_exp", hub=hub)
     assert not any(item["repo"] == source["weights_repo"] for item in report["items"])
     assert not [event for event in hub.events if event[0] == "download"]
+
+
+def test_native_mlx_serve_choice_keeps_its_immutable_revision_when_hub_head_moves(tmp_path, monkeypatch):
+    from stark_convert.hybrid_prepare import SOURCES
+
+    source = SOURCES["qwen38-mlx-serve-mixed"]
+    hub = Hub()
+    hub.add(tmp_path, source["weights_repo"], {"model_type": "qwen4_exp"}, revision=PIN)
+    # This fixed native choice does not depend on a Hub search or the main ref.
+    monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: [source["weights_repo"]])
+    report = catalog.family_catalog("qwen4_exp", hub=hub)
+    assert report["status"] == "ready"
+    assert [(item["repo"], item["revision"]) for item in report["items"]] == [
+        (source["weights_repo"], source["weights_revision"])
+    ]
+    assert not hub.events or all(event[0] == "list" for event in hub.events)
 
 
 def test_seed_declared_size_is_preserved_without_parsing_the_repository_name(tmp_path, monkeypatch):
