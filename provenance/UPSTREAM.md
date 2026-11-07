@@ -46,6 +46,15 @@ Qwen/Hugging Face 2025 attribution, pinned source hashes, and adaptation scope
 are included in the distribution notice manifest and copied through its notice
 collector. Existing text artifacts retain the Legacy execution profile.
 
+The larger Gemma 4 vision tower's logical-width-72 and hidden-width-1,152 RMS
+reductions adapt the same pinned `SumKernel.cpp` cascade, source SHA-256
+`9b88aa14e626dd708e50816a5ca89acfc66798226dc82501cf1857caebe96f95`.
+The logical 72-channel path adds its two remaining four-channel vectors before
+reducing the four independent accumulators. The existing PyTorch BSD notice and
+source entry cover this adaptation. E2B/E4B and unified-12B RMS schedules retain
+their previous selection. Independent model-free expected values come directly
+from Transformers 5.15.1 `Gemma4RMSNorm` on pinned Torch 2.14.1.
+
 The explicit BF16 affine-Q4 source profile adapts MLX v0.32.3 at
 [`64ea011cb65f14d9ce2737e60db9a4ae91ed7441`](https://github.com/ml-explore/mlx/tree/64ea011cb65f14d9ce2737e60db9a4ae91ed7441).
 Its native QMV arithmetic preserves BF16 four-value bias sums, four-product

@@ -27,6 +27,11 @@ square-root then reciprocal sequence. `pytorch-qwen35-reference-rms` records
 their source hashes. The private numerical profile selects these operations;
 the existing text profile retains its normalization implementation.
 
+The larger Gemma 4 vision tower adapts the same sum cascade for logical72 and
+hidden1152 RMS rows, including the 72-channel whole-vector tail order.
+`pytorch-gemma4-larger-vision-rms` records this scope and pinned source hashes.
+E2B/E4B, unified12B and text normalization retain their previous schedules.
+
 The same private profile preserves Qwen3.5 DeltaNet's BF16 convolution, SiLU,
 sigmoid, gated normalization, and F32 state boundaries. Its 64-token chunk
 rule follows the pinned Hugging Face equations with F32 scratch planes and
