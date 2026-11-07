@@ -502,6 +502,18 @@ fn operator_metrics(
             assert_eq!(mismatches, 0, "private position witness exceeds exact source gate");
             assert_eq!(ordinary_mismatches, 0, "private vision position exceeds exact source gate");
         }
+        if name == "rotary" {
+            let reference = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
+            reference.write_bytes(bytemuck::cast_slice(&source)).unwrap();
+            let pass = context.begin().unwrap();
+            crate::kernels::vision::qkv_rope_reference_bf16(context, &pass, &reference, vision.num_heads, gh, gw, ROPE_THETA).unwrap();
+            pass.commit_wait().unwrap();
+            let values = reference.to_f32().unwrap();
+            let (reference_rms, reference_cosine) = numerical_metric(&values, &expected);
+            let mismatches = values.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
+            let ordinary_mismatches = actual.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
+            println!("{}", json!({"private_retained_rotary_metrics":{"patches":gh * gw,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches}}));
+        }
         if name == "attention" && record["stages"].is_object() {
             let n = input.shape()[0];
             let plane = vision.num_heads * n * n;
