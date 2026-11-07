@@ -120,9 +120,44 @@ type-check and four focused CPU sparse-expert/geometry tests passed. The exact
 source `mlx-community/Qwen3.5-35B-A3B-4bit` at revision
 `1e20fd8d42056f870933bf98ca6211024744f7ec` was downloaded once (20,418,624,545
 bytes). Header-only conversion planning admitted 1,520 operations, including
-333 BF16 vision tensors, for a 20,393,738,208-byte output payload. Full-model
-conversion and numerical qualification remain pending storage admission;
-these implementation and fixture checks do not establish end-to-end parity.
+333 BF16 vision tensors, for a 20,393,738,208-byte output payload.
+
+After explicit resource admission, the single streaming output completed in
+36.33 seconds: 20,394,001,296 bytes, SHA-256
+`2f762b2629aaefc2fea6eb37ff6caaa4747fdc23a040e36f331fa4a056c6cad7`.
+The converter reported an 8 MiB transform workspace and 585,678,848-byte peak
+RSS. Free disk remained 52.48 GiB. No duplicate source payload was created.
+
+## Full-model checks in progress
+
+The source-bound dense 27B artifact reaches readiness with the sealed worker
+`32816d8494e29d0a5ca6858f4bf60f6203c18fec256befd4d3de5eda738f9449`.
+Its first automatic **text** generation check returns `native_generation_failed`.
+This happens before image execution. The worker is reaped after each failed
+check; the artifact has no successful local image qualification receipt.
+Further full-model retries are held for a typed, content-free native diagnostic.
+
+The private logit replay now accepts dynamic admitted vocabulary and width.
+New manifests bind all five admitted artifact hashes, exact source/revision,
+family profile, greedy sampling and disabled MTP. Optional per-layer traces
+have a 512 MiB aggregate allocation cap. The original immutable 0.8B replay
+contract remains supported. Native type-check of this replay-only update is
+pending the coordinated integrated build.
+
+Original-checkpoint CPU vision references are ready for dense 27B and MoE 35B.
+Each has a normal 256 by 256 RGB fixture and a small 32 by 32 numerical stress
+fixture, with 30 stages per case. The recipe uses the pinned Transformers
+`2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397` extraction, Torch 2.14.1,
+four CPU threads, BF16 parameters and preserved FP32 rotary buffers. All 333
+original BF16 visual tensors match each converted artifact bit-for-bit,
+including the independent MLX Conv3D transpose check. Private manifest hashes:
+
+- Dense 27B: `4c49cf1bedb0188b6f7ef7f195cb03f31c5b910de99b5f6b1e91c962e598f468`.
+- MoE 35B: `6975234c15579f62d8286db6c86297dc34514d0e0699fb91c6377e3c755a3630`.
+
+Native tower replay, full decoder numerical parity, and worker image lifecycle
+qualification remain pending. Converter and fixture checks do not establish
+end-to-end image support for these particular artifacts.
 
 ## Primary references
 
