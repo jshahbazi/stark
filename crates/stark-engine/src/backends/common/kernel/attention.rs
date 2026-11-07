@@ -276,7 +276,7 @@ mod image_span_tests {
             let q = create_buffer_with_data::<B, f32>(&context, &queries);
             let k = create_buffer_with_data::<B, f32>(&context, &keys);
             let v = create_buffer_with_data::<B, f32>(&context, &values);
-            let kernel = <B::Kernels as Kernels>::AttentionKernel::new(
+            let kernel = <<B as Backend>::Kernels as Kernels>::AttentionKernel::new(
                 &context,
                 AttentionKernelConfig {
                     head_dim: 64,
@@ -301,7 +301,7 @@ mod image_span_tests {
                         keys: &k,
                         values: &v,
                         suffix_length: 4,
-                        trie: None::<&B::GlobalBuffer>,
+                        trie: None::<&<B as Backend>::GlobalBuffer>,
                         sinks: None,
                         cache: KVCacheView::full(2),
                         image_span: Some([1, 3]),
@@ -317,7 +317,7 @@ mod image_span_tests {
                             keys: &k,
                             values: &v,
                             suffix_length: 4,
-                            trie: None::<&B::GlobalBuffer>,
+                            trie: None::<&<B as Backend>::GlobalBuffer>,
                             sinks: None,
                             cache: KVCacheView::full(2),
                             image_span: Some([1, 5]),
