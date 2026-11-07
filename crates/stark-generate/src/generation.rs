@@ -248,6 +248,7 @@ fn valid_image_metadata(
     let (max_patches, max_image_tokens) = match geometry {
         (16, 2) => (4096, 1024),
         (16, 3) => (2520, 280),
+        (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
         _ => return false,
     };
     let [temporal, height, width] = metadata.grid;
@@ -2653,6 +2654,25 @@ mod tests {
             },
             (16, 2)
         ));
+    }
+
+    #[test]
+    fn gemma3_preparation_requires_its_complete_fixed_grid() {
+        let mut metadata = PreparedImageMetadata {
+            input_tokens: 273,
+            image_tokens: 256,
+            grid: [1, 64, 64],
+            processed_dimensions: [896, 896],
+        };
+        assert!(valid_image_metadata(&metadata, (14, 4)));
+        assert!(!valid_image_metadata(&metadata, (16, 2)));
+        metadata.grid = [1, 32, 64];
+        metadata.processed_dimensions = [896, 448];
+        metadata.image_tokens = 128;
+        assert!(!valid_image_metadata(&metadata, (14, 4)));
+        metadata.grid = [1, 64, 64];
+        metadata.processed_dimensions = [896, 896];
+        assert!(!valid_image_metadata(&metadata, (14, 4)));
     }
 
     #[test]
