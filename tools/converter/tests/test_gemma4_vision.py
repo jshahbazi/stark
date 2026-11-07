@@ -10,10 +10,10 @@ from stark_convert.adapters import gemma4_vision as vision
 from stark_convert.streaming import ConversionError, ConversionPlan, TensorInfo, UnsupportedConversion
 
 
-def source(tmp_path):
+def source(tmp_path, model_dim=1536):
     config = {
         "model_type": "gemma4",
-        "text_config": {"hidden_size": 1536},
+        "text_config": {"hidden_size": model_dim},
         "vision_config": dict(vision.GEOMETRY),
         "image_token_id": 258880,
         "boi_token_id": 255999,
@@ -77,11 +77,11 @@ def test_gemma_image_processor_drift_and_packed_sources_are_rejected(tmp_path):
         vision.gemma4_vision_contract(tmp_path)
 
 
-def inventory():
+def inventory(model_dim=1536):
     names = {
         "model.vision_tower.patch_embedder.input_proj.weight": (768, 768),
         "model.vision_tower.patch_embedder.position_embedding_table": (2, 10240, 768),
-        "model.embed_vision.embedding_projection.weight": (1536, 768),
+        "model.embed_vision.embedding_projection.weight": (model_dim, 768),
     }
     for i in range(16):
         prefix = f"model.vision_tower.encoder.layers.{i}"
@@ -138,3 +138,44 @@ def test_gemma_image_plan_preserves_text_and_requires_all_vision_tensors(tmp_pat
     )
     with pytest.raises(ConversionError, match="BF16"):
         vision.build_gemma4_vision_plan(tmp_path)
+
+
+def test_e4b_profile_binds_its_projector_decoder_and_immutable_source(tmp_path, monkeypatch):
+    source(tmp_path, 2560)
+    repo = "google/gemma-4-E4B-it"
+    profile = vision.PROFILES[repo]
+    contract = vision.gemma4_vision_contract(tmp_path, repo, profile["revision"])
+    assert contract["family"] == {"id": "gemma4-e4b-bf16-v1", "version": 1}
+    with pytest.raises(UnsupportedConversion, match="pinned official"):
+        vision.gemma4_vision_contract(tmp_path, vision.REPO, vision.REVISION)
+    with pytest.raises(UnsupportedConversion, match="pinned official"):
+        vision.gemma4_vision_contract(tmp_path, repo, "0" * 40)
+    tensors = inventory(2560)
+    base = ConversionPlan({"vocab_size": 262144}, (), {}, 0, len(tensors), tuple(tensors.values()))
+    monkeypatch.setattr(vision, "build_gemma4_plan", lambda *_a, **_k: base)
+    monkeypatch.setattr(vision, "load_checkpoint", lambda _p: tensors)
+    plan = vision.build_gemma4_vision_plan(tmp_path)
+    assert plan.metadata["stark.vision.family"] == "gemma4-e4b-bf16-v1"
+    projector = next(op for op in plan.operations if op.name == "vision.embed_vision.embedding_projection.weight")
+    assert projector.shape == (2560, 768)
+    tensors["model.embed_vision.embedding_projection.weight"] = inventory()["model.embed_vision.embedding_projection.weight"]
+    with pytest.raises(ConversionError, match="shape"):
+        vision.build_gemma4_vision_plan(tmp_path)
+
+
+@pytest.mark.parametrize("repo", ["google/gemma-4-E2B-it", "google/gemma-4-E4B-it"])
+def test_registered_image_profiles_keep_execution_unverified(repo):
+    from stark_convert.cli import capability
+    from stark_convert.contracts import ConversionRequest
+
+    result = capability(ConversionRequest(repo, artifact_mode="vision-language"))
+    assert result.adapter == "gemma4_text" and result.conversion == "implemented"
+    assert result.native_loading == "supported_family_unverified" and result.execution == "unverified"
+    assert capability(ConversionRequest(repo, dtype="float16", artifact_mode="vision-language")).conversion == "unsupported"
+
+
+@pytest.mark.parametrize("model_dim", [2816, 3840, 5376])
+def test_larger_architectures_do_not_inherit_efficient_family_image_conversion(tmp_path, model_dim):
+    source(tmp_path, model_dim)
+    with pytest.raises(UnsupportedConversion, match="PLE text decoder"):
+        vision.gemma4_vision_contract(tmp_path)

@@ -1,4 +1,4 @@
-//! Gemma 4 E2B native BF16 image encoder and soft-token projector.
+//! Gemma 4 E2B/E4B native BF16 image encoder and soft-token projector.
 //!
 //! Equations/layout independently implemented from Google's Apache-2.0 Gemma 4
 //! checkpoint and MIT MLX-VLM 53ebd1647cb83549b482a031ea70ba9d9ea60a04.
@@ -23,7 +23,6 @@ const WIDTH: u32 = 768;
 const HEADS: u32 = 12;
 const HEAD_DIM: u32 = 64;
 const MLP: u32 = 3072;
-const MODEL: u32 = 1536;
 const DEPTH: usize = 16;
 const POSITIONS: u32 = 10240;
 
@@ -166,7 +165,11 @@ impl<B: Backend> Gemma4VisionTower<B> {
     pub(crate) fn new(
         context: &B::Context,
         tree: &ParameterTree<B>,
+        model_dim: u32,
     ) -> Result<Self, VisionTowerError<B>> {
+        if !matches!(model_dim, 1536 | 2560) {
+            return Err(InvalidInput("unsupported Gemma vision projection width").into());
+        }
         let mut blocks = Vec::with_capacity(DEPTH);
         for i in 0..DEPTH {
             let t = tree.subtree(&format!("encoder.layers.{i}"));
@@ -198,7 +201,13 @@ impl<B: Backend> Gemma4VisionTower<B> {
             patch: Linear::new(context, &tree.subtree("patch_embedder.input_proj"), 768, WIDTH, false)?,
             positions,
             blocks: blocks.into_boxed_slice(),
-            projector: Linear::new(context, &tree.subtree("embed_vision.embedding_projection"), WIDTH, MODEL, false)?,
+            projector: Linear::new(
+                context,
+                &tree.subtree("embed_vision.embedding_projection"),
+                WIDTH,
+                model_dim,
+                false,
+            )?,
             norm: <B::Kernels as Kernels>::Gemma4VisionNormBF16Kernel::new(context)
                 .map_err(VisionTowerError::Backend)?,
             prepare: <B::Kernels as Kernels>::Gemma4VisionPrepareBF16Kernel::new(context)

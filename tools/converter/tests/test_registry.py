@@ -56,8 +56,8 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 93
-    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 86
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 94
+    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 87
 
 
 def test_specialized_dense_profiles_do_not_promote_moe_or_later_generations():
@@ -84,6 +84,7 @@ def test_olmo3_and_gemma4_text_extensions_bind_pinned_source_without_reasoning_d
     expected = {
         "allenai/Olmo-3-7B-Instruct": ("olmo3", "HFOlmo3Config", "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc"),
         "google/gemma-4-E2B-it": ("gemma4_text", "HFGemma4TextConfig", "3e22461f65e89153144f8adb70e3b8c2cc9845a7"),
+        "google/gemma-4-E4B-it": ("gemma4_text", "HFGemma4TextConfig", "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"),
     }
     for repo, (adapter, config_class, revision) in expected.items():
         entry = get_model(repo)

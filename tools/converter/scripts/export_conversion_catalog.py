@@ -25,6 +25,16 @@ OLMO3_REPO = "allenai/Olmo-3-7B-Instruct"
 OLMO3_REVISION = "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc"
 GEMMA4_REPO = "google/gemma-4-E2B-it"
 GEMMA4_REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
+GEMMA4_E4B_REPO = "google/gemma-4-E4B-it"
+GEMMA4_E4B_REVISION = "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"
+GEMMA4_E4B_HASHES = {
+    "config.json": "33b10c02df3c2e8536cf323d29d53262aaa2f4d11dbe19bc729373fbe90295d4",
+    "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+    "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+    "tokenizer.json": "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc",
+    "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+    "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+}
 
 
 def profile_extension(
@@ -318,6 +328,20 @@ def export(reference: Path) -> dict:
     )
     gemma4["catalog_origin"] = "pinned_builtin"
     entries[:] = [gemma4 if entry["repo"] == GEMMA4_REPO else entry for entry in entries]
+    gemma4_e4b = profile_extension(
+        entries,
+        repo=GEMMA4_E4B_REPO,
+        revision=GEMMA4_E4B_REVISION,
+        reference_repo="google/gemma-3-4b-it",
+        config_class="HFGemma4TextConfig",
+        adapter="gemma4_text",
+        family="Gemma-4",
+        vendor="Google",
+        size="E4B",
+        file_hashes=GEMMA4_E4B_HASHES,
+    )
+    gemma4_e4b["catalog_origin"] = "pinned_builtin"
+    entries[:] = [gemma4_e4b if entry["repo"] == GEMMA4_E4B_REPO else entry for entry in entries]
 
     extensions = []
     for repository, reference_repo, family in (

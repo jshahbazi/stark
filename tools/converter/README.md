@@ -124,7 +124,7 @@ stark-convert [SOURCE] [options]
 | `--architecture NAME` | `qwen2`, `qwen3`, `qwen3_5`, `qwen4_exp`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `gemma4_text`, `olmo3`, `phi3`, `granite`, `smollm3`, `lfm2` | Assert the checkpoint architecture; conversion fails if the checkpoint disagrees. Required with `--capabilities` for a generic probe |
 | `--model-kind KIND` | `language` (default), `classifier` | `classifier` is required for ModernBERT. `tts` is accepted by the parser but no adapter implements it |
 | `--dtype DTYPE` | `bfloat16` (default), `float16`, `float32` | Floating tensor and activation dtype. Supported MLX quantized matrices retain their packed affine 4-bit/8-bit representation independently |
-| `--artifact-mode MODE` | `text` (default), `vision-language` | Full-vision artifacts for pinned Qwen3.5 BF16 sources, the supported merged-BF16 [Qwen3.5 family](../../docs/VISION_FAMILY_CONTRACT.md), or the pinned Gemma 4 E2B BF16 image profile |
+| `--artifact-mode MODE` | `text` (default), `vision-language` | Full-vision artifacts for pinned Qwen3.5 BF16 sources, the supported merged-BF16 [Qwen3.5 family](../../docs/VISION_FAMILY_CONTRACT.md), or the pinned Gemma 4 E2B/E4B BF16 image profiles |
 | `--chunk-mib N` | 1 through 1024, default 8 | Live transformation workspace in MiB. Does not bound total process memory |
 | `--offline` | | Do not contact Hugging Face; every file must be local or covered by a source manifest |
 | `--source-manifest PATH` | | Replay a previously written manifest |
@@ -161,7 +161,7 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 | Gemma 2 | Extension `google/gemma-2-2b-it` |
 | Gemma 3 text | `google/gemma-3-1b-it`, `google/functiongemma-270m-it`, `EssentialAI/rnj-1-instruct` |
 | Gemma 3 text MLX | `mlx-community/gemma-3-1b-it-{4bit,8bit}`; multimodal 4B and 27B variants are unsupported |
-| Gemma 4 text | `google/gemma-4-E2B-it`; dense PLE E2B/E4B text layouts. E2B affine Q4 conversion emits 901 tensors in a 2.605 GB packed artifact. A separate schema-4 BF16 image artifact supports E2B only. No audio/video, E4B image, 31B, 26B MoE or unified 12B support |
+| Gemma 4 text | `google/gemma-4-{E2B,E4B}-it`; dense PLE E2B/E4B text layouts. E2B affine Q4 conversion emits 901 tensors in a 2.605 GB packed artifact. Separate schema-4 BF16 image profiles support pinned E2B/E4B sources. No audio/video, 31B, 26B MoE or unified 12B support |
 | OLMo 3 | Extension `allenai/Olmo-3-7B-Instruct`; dense text profile with MLX affine Q4/Q8 matrix imports |
 | Phi | `microsoft/Phi-4-mini-instruct` (tied Phi3 layout with LongRoPE; untied Phi3 is unsupported) |
 | Granite | `ibm-granite/granite-{3.1,3.3}-{2b,8b}-instruct` |
@@ -182,7 +182,7 @@ to the registry's exact checkpoint/build tuples.
 
 Implementation is tracked per architecture and weight format; qualification is tracked per exact checkpoint, dtype, config, output hash and engine build. In text mode, twenty-seven BF16 catalog artifacts have a stored load-only qualification: when a conversion's source manifest, weights, config and tokenizer hashes match such a record, the receipt reports `native_loading: "qualified_tuple"` together with the named build's worker, source, lockfile and toolchain hashes. That record proves the engine built at that commit loaded the artifact and reached readiness; it does not measure inference quality. Other implemented text identities, size variants, and generic conversions start as `unverified`, or `runtime_blocked` when their dtype or dimensions exceed what the engine loads. `--require-native-support` requires an exact match in the applicable catalog. Remaining unsupported rows fail with an unsupported category.
 
-The Gemma 4 image path is restricted to the official E2B BF16 profile and has separate reference and worker validation gates; Gemma 4 text or quantized conversion does not grant image support. See [OLMo 3 and Gemma 4 support](../../docs/OLMO3_GEMMA4.md) for its exact scope and source-pinned commands.
+The Gemma 4 image path is restricted to the official E2B/E4B BF16 profiles and has separate reference and worker validation gates; Gemma 4 text or quantized conversion does not grant image support. See [OLMo 3 and Gemma 4 support](../../docs/OLMO3_GEMMA4.md) for its exact scope and source-pinned commands.
 
 Vision mode uses a separate [execution catalog](stark_convert/vision_runtime_qualifications.json).
 Its records bind all five artifact files and the generation worker to the

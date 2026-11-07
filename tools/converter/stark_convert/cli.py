@@ -34,6 +34,7 @@ from .registry import (
 )
 from .sources import SourceSnapshot, huggingface_repository, resolve_source
 from .streaming import ConversionError, UnsupportedConversion, read_json, read_regular_bytes, write_plan
+from .adapters.gemma4_vision import PROFILES as GEMMA4_IMAGE_PROFILES
 from .vision_contract import REPO as VISION_REPO
 from .vision_contract import source_rules, validate_vision_source
 from .vision_family import (
@@ -52,7 +53,7 @@ from .vision_family import (
 def capability(request: ConversionRequest) -> CapabilityResult:
     """Probe catalog coverage only; this does not validate checkpoint contents."""
     if request.artifact_mode != "text":
-        if request.repo == "google/gemma-4-E2B-it":
+        if request.repo in GEMMA4_IMAGE_PROFILES:
             supported = (
                 request.artifact_mode == "vision-language"
                 and request.dtype == "bfloat16"
@@ -199,7 +200,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         if request.artifact_mode == "vision-language"
         else read_json(snapshot.config_path)
     )
-    gemma_images = request.artifact_mode == "vision-language" and snapshot.repo == "google/gemma-4-E2B-it"
+    gemma_images = request.artifact_mode == "vision-language" and snapshot.repo in GEMMA4_IMAGE_PROFILES
     if gemma_images:
         from .adapters.gemma4_vision import gemma4_vision_contract
 

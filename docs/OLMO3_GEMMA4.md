@@ -1,6 +1,6 @@
 # OLMo 3 and Gemma 4 support
 
-Stark has native dense text paths for OLMo 3 and Gemma 4, plus a separate BF16 image artifact for the official Gemma 4 E2B checkpoint. Conversion support, native execution paths, and exact checkpoint qualification are separate states. The Gemma image implementation is wired through the converter, worker, CLI, desktop family handling and schema-4 artifact admission. Canonical HF image-feature comparison, bounded generation-worker lifecycle checks, and local cold/cached chat-client checks pass. The installed desktop UI path and image performance have not been measured.
+Stark has native dense text paths for OLMo 3 and Gemma 4, plus separate BF16 image artifacts for the official Gemma 4 E2B and E4B checkpoints. Conversion support, native execution paths, and exact checkpoint qualification are separate states. The Gemma image implementation is wired through the converter, worker, CLI, desktop family handling and schema-4 artifact admission. E2B canonical HF image-feature comparison, bounded generation-worker lifecycle checks, and local cold/cached chat-client checks pass. E4B has separate source and execution validation. The installed desktop UI path and image performance have not been measured.
 
 ## Convert the pinned official checkpoints
 
@@ -16,13 +16,18 @@ uv run --project tools/converter --locked stark-convert google/gemma-4-E2B-it \
   --output models/gemma-4-e2b-it
 ```
 
-For the Gemma 4 E2B image artifact, select the full vision-language conversion explicitly:
+For the Gemma 4 E2B/E4B image artifacts, select the full vision-language conversion explicitly:
 
 ```sh
 uv run --project tools/converter --locked stark-convert google/gemma-4-E2B-it \
   --revision 3e22461f65e89153144f8adb70e3b8c2cc9845a7 \
   --artifact-mode vision-language \
   --output models/gemma-4-e2b-image
+
+uv run --project tools/converter --locked stark-convert google/gemma-4-E4B-it \
+  --revision 4ecc2ba63bcac23ba4a767fc87025b1450f84c9c \
+  --artifact-mode vision-language \
+  --output models/gemma-4-e4b-image
 ```
 
 This image conversion reads the official `processor_config.json` and writes its normalized recipe to the artifact's `preprocessor_config.json`. It consumes the checkpoint's own metadata and weights; it does not borrow image sidecars from another repository. Access to Google's official checkpoint may require accepting its Hugging Face terms.
@@ -32,12 +37,12 @@ This image conversion reads the official `processor_config.json` and writes its 
 | Family path | Current implementation boundary |
 | --- | --- |
 | OLMo 3 text | Dense `allenai/Olmo-3-7B-Instruct` layout, including full/sliding attention and configured YaRN. BF16 and MLX affine Q4/Q8 import are implemented. The pinned W4/group-64/BF16 source profile passes 14 strict numerical cases in the Q4 record below. |
-| Gemma 4 text | Dense PLE E2B/E4B layouts. The catalog pins official E2B. E2B affine Q4 conversion emits 901 tensors in a 2.605 GB native packed artifact. The pinned W4/group-64/BF16 E2B profile passes 14 strict numerical cases; Q8 and other variants require separate qualification. |
-| Gemma 4 image | Official E2B BF16 image artifact only, schema 4, family profile `gemma4-e2b-bf16-v1`. It requires BF16 source matrices and activations. The E2B/E4B text path does not imply E4B image support. |
+| Gemma 4 text | Dense PLE E2B/E4B layouts. The catalog pins official E2B and E4B. E2B affine Q4 conversion emits 901 tensors in a 2.605 GB native packed artifact. The pinned W4/group-64/BF16 E2B profile passes 14 strict numerical cases; Q8 and other variants require separate qualification. |
+| Gemma 4 image | Official E2B/E4B BF16 image artifacts, schema 4, family profiles `gemma4-e2b-bf16-v1` and `gemma4-e4b-bf16-v1`. Each requires its own pinned source, BF16 source matrices and activations, and separate execution evidence. |
 
 For text generation, `gemma4_text` supports text-only PLE decoder weights. Quantized matrix payloads use affine 4-bit or 8-bit storage where the selected source and matrix layout pass conversion. Quantization applies to matrix storage; activations and other supported tensors use BF16 on these current native paths. The E2B Q4 output size is an artifact measurement, not an inference-speed result or qualification.
 
-Gemma 4 image conversion is restricted to the official pinned E2B source and BF16 weights. Gemma 4 31B, 26B MoE, unified 12B, audio, video, and E4B image paths are unsupported. The image artifact excludes audio execution and video-frame processing even though their token identifiers are recorded for rejecting unsupported content.
+Gemma 4 image conversion is restricted to the official pinned E2B/E4B sources and BF16 weights. Gemma 4 31B, 26B MoE, unified 12B, audio and video paths are unsupported. The [larger-variant architecture assessment](archive/runs/2026-11-07-gemma4-image-family-scope.md) records the missing operations and immutable source configurations. The image artifact excludes audio execution and video-frame processing even though their token identifiers are recorded for rejecting unsupported content.
 
 ## Affine Q4 source precision
 
@@ -69,13 +74,13 @@ Gemma's source PLE path also fuses the post-attention residual addition into pre
 
 The [source fusion validation](archive/runs/2026-11-02-olmo3-gemma4-source-fusions.md) records fresh numerical, text/image worker and native-suite checks. The [qualified source fusion comparison](benchmarks/OLMO3_GEMMA4_SOURCE_FUSIONS_2026_11_02.md) measures Gemma's complete-request work rate 2.57% above the preceding C3 build and at MLX parity on the pinned 512-input/128-return workload. OLMo shows no material change from C3 and remains 2.31% above MLX on that workload.
 
-## Gemma 4 E2B image artifact and execution
+## Gemma 4 E2B/E4B image artifacts and execution
 
-The converter emits a `Gemma4VisionLanguageModelConfig` with artifact-contract schema 4 and the `gemma4-e2b-bf16-v1` family profile. Native admission validates five components before loading tensors: `config.json`, `model.safetensors`, `tokenizer.json`, `preprocessor_config.json`, and `chat_template.jinja`. Their hashes, source identity, schema, geometry, tokenizer IDs and processor recipe must match the contract.
+The converter emits a `Gemma4VisionLanguageModelConfig` with artifact-contract schema 4 and a size-specific `gemma4-e2b-bf16-v1` or `gemma4-e4b-bf16-v1` family profile. E4B uses a 2,560-wide decoder projector and its own tokenizer hash; E2B uses width 1,536. The E2B weights cap remains 12GiB and E4B admits at most 20GiB. Native admission validates five components before loading tensors: `config.json`, `model.safetensors`, `tokenizer.json`, `preprocessor_config.json`, and `chat_template.jinja`. Their hashes, source identity, schema, geometry, tokenizer IDs and processor recipe must match the contract.
 
 The runtime accepts one bounded PNG or JPEG image per request. CPU preprocessing decodes RGB, resizes by the aspect-ratio patch budget, and produces no more than 2,520 16-by-16 patches before 3-by-3 pooling to at most 280 soft tokens. The Rust/Metal path runs the learned vision encoder and projection. Image features enter the decoder after text embedding scaling; image PLE IDs are zero and image positions use the model's sequential RoPE behavior. Gemma 4 uses its own processor, token and artifact contract alongside the Qwen3.5 image path.
 
-Conversion and runtime code implement this path, and the CLI, terminal chat, desktop host and schema-4 family admission are wired. The canonical Hugging Face CPU image-feature comparison passes its 2% relative-RMS gate on three fixtures, and bounded generation-worker and local chat-client cold/cached checks pass. Installed desktop UI execution and performance benchmarking remain unmeasured; no image latency or throughput claim is made here. See the [2026-10-28 validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md) for parity, image, worker and quantized-path results and limits.
+Conversion and runtime code implement this path, and the CLI, terminal chat, desktop host and schema-4 family admission are wired. For E2B, the canonical Hugging Face CPU image-feature comparison passes its 2% relative-RMS gate on three fixtures, and bounded generation-worker and local chat-client cold/cached checks pass. E4B qualification remains separately recorded. Installed desktop UI execution and performance benchmarking remain unmeasured; no image latency or throughput claim is made here. See the [2026-10-28 validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md) for parity, image, worker and quantized-path results and limits.
 
 The canonical HF reference is `scripts/gemma4_image_hf_reference.py`, using the official checkpoint, its Transformers image processor and vision implementation on CPU with Torch 2.14.1 and Transformers 5.15.1. `scripts/gemma4_image_reference.py` is a separate comparison against pinned MLX-VLM commit `53ebd1647cb83549b482a031ea70ba9d9ea60a04`; it uses MLX 0.32.4 and Transformers 5.14.0. The MLX profile's documented preprocessing and precision differences remain distinct from the canonical HF profile.
 
@@ -88,3 +93,7 @@ Gemma 4 BF16 exports set `reference_bf16` on the per-layer embedding producer an
 These precision choices have model-bound evidence only within the references and fixtures named by their validation records. They do not establish every output configuration, quantized checkpoint, device, or end-to-end chat path.
 
 The [original validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md) preserves the BF16 qualification and earlier Q4 failures. The [Q4 precision record](archive/runs/2026-10-28-olmo3-gemma4-q4-precision.md) records the repaired profiles and their source-bound results. The [source fusion comparison](benchmarks/OLMO3_GEMMA4_SOURCE_FUSIONS_2026_11_02.md) records the current matched text measurements. The [preceding C3 comparison](benchmarks/OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) preserves its remaining Gemma gap, and the earlier [diagnostic Q4 timings](benchmarks/OLMO3_GEMMA4_NATIVE_MATCHED.md) remain historical. External measurements and licensing are in the [Mac engine evidence](benchmarks/OLMO3_GEMMA4_MAC_ENGINES.md).
+
+## Generation prefix reuse
+
+Image requests clear and bypass generation prefix reuse. E2B/E4B text artifacts currently disable prefix reuse because their owned sliding-attention layers use ring caches, and exact restoration of the overwritten ring rows is not implemented. Shared-KV consumers own no separate cache. Their source-specific physical ring traversal and canonical/source precision policies remain intact. A future ring snapshot implementation needs independent numerical and cached trajectory qualification before enabling this capability.

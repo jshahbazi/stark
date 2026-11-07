@@ -578,10 +578,12 @@ def resolve_source(
         repo = repository
     entry = get_model(repo) if repo else None
     if artifact_mode == "vision-language":
-        if repo == "google/gemma-4-E2B-it":
+        from .adapters.gemma4_vision import PROFILES as gemma_profiles
+
+        if repo in gemma_profiles:
             if metadata_profile is not None or architecture not in {None, "gemma4_text"}:
                 raise UnsupportedConversion("Gemma 4 image conversion requires its registered BF16 profile")
-            pinned = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
+            pinned = gemma_profiles[repo]["revision"]
             if revision not in {None, pinned}:
                 raise UnsupportedConversion("Gemma 4 image conversion requires the pinned official checkpoint")
             revision = pinned

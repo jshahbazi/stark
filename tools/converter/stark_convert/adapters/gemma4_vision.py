@@ -1,4 +1,4 @@
-"""Bounded native Gemma 4 E2B BF16 image-tower conversion.
+"""Bounded native Gemma 4 E2B/E4B BF16 image-tower conversion.
 
 Independently follows Google's Apache-2.0 checkpoint geometry and MIT MLX-VLM
 53ebd1647cb83549b482a031ea70ba9d9ea60a04. No model framework is imported.
@@ -15,6 +15,14 @@ from .gemma4 import build_gemma4_plan
 REPO = "google/gemma-4-E2B-it"
 REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
 FAMILY = {"id": "gemma4-e2b-bf16-v1", "version": 1}
+PROFILES = {
+    REPO: {"revision": REVISION, "model_dim": 1536, "family": FAMILY},
+    "google/gemma-4-E4B-it": {
+        "revision": "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c",
+        "model_dim": 2560,
+        "family": {"id": "gemma4-e4b-bf16-v1", "version": 1},
+    },
+}
 TOKENS = {"image": 258880, "vision_start": 255999, "vision_end": 258882, "video": 258884, "audio": 258881}
 GEOMETRY = {
     "model_type": "gemma4_vision",
@@ -62,13 +70,17 @@ def gemma4_vision_contract(source: Path, repo: str | None = None, revision: str 
         raise UnsupportedConversion("Native Gemma image conversion requires merged BF16 source weights")
     vision = config.get("vision_config")
     if not isinstance(vision, dict) or any(vision.get(key) != value for key, value in GEOMETRY.items()):
-        raise UnsupportedConversion("Native Gemma images require the E2B BF16 vision geometry")
+        raise UnsupportedConversion("Native Gemma images require the E2B/E4B BF16 vision geometry")
     if set(vision) - (set(GEOMETRY) | _VISION_ANNOTATIONS | set(_VISION_DEFAULTS)):
         raise UnsupportedConversion("Gemma vision configuration declares unimplemented options")
     if any(vision.get(key, default) != default for key, default in _VISION_DEFAULTS.items()):
         raise UnsupportedConversion("Gemma vision configuration changes an unsupported operation")
-    if config.get("model_type") != "gemma4" or config.get("text_config", {}).get("hidden_size") != 1536:
-        raise UnsupportedConversion("Native Gemma images require the E2B text decoder")
+    profile = next((value for value in PROFILES.values()
+                    if value["model_dim"] == config.get("text_config", {}).get("hidden_size")), None)
+    if config.get("model_type") != "gemma4" or profile is None:
+        raise UnsupportedConversion("Native Gemma images require an E2B/E4B PLE text decoder")
+    if repo is not None and (PROFILES.get(repo) != profile or revision != profile["revision"]):
+        raise UnsupportedConversion("Native Gemma image source differs from its pinned official profile")
     for key, token in (
         ("image_token_id", TOKENS["image"]),
         ("boi_token_id", TOKENS["vision_start"]),
@@ -101,7 +113,7 @@ def gemma4_vision_contract(source: Path, repo: str | None = None, revision: str 
         "transport": "mediaref-v1",
         "input_modalities": ["text", "image"],
         "runtime_supported": True,
-        "family": dict(FAMILY),
+        "family": dict(profile["family"]),
         "source": {"repo": repo, "revision": revision},
         "vision_config": dict(GEOMETRY),
         "token_ids": dict(TOKENS),
@@ -112,14 +124,15 @@ def gemma4_vision_contract(source: Path, repo: str | None = None, revision: str 
 def build_gemma4_vision_plan(source: Path, *, dtype: str = "bfloat16"):
     if dtype != "bfloat16":
         raise UnsupportedConversion("Native Gemma images require BF16 activations and weights")
-    gemma4_vision_contract(source)
+    contract = gemma4_vision_contract(source)
+    model_dim = read_json(source / "config.json")["text_config"]["hidden_size"]
     base = build_gemma4_plan(source, dtype=dtype)
     tensors = load_checkpoint(source)
     operations = list(base.operations)
     expected = {
         "model.vision_tower.patch_embedder.input_proj.weight": (768, 768),
         "model.vision_tower.patch_embedder.position_embedding_table": (2, 10240, 768),
-        "model.embed_vision.embedding_projection.weight": (1536, 768),
+        "model.embed_vision.embedding_projection.weight": (model_dim, 768),
     }
     for index in range(16):
         prefix = f"model.vision_tower.encoder.layers.{index}"
@@ -146,7 +159,7 @@ def build_gemma4_vision_plan(source: Path, *, dtype: str = "bfloat16"):
                 expected[f"{prefix}.{name}.{bound}"] = ()
     actual = {key for key in tensors if key.startswith(("model.vision_tower.", "model.embed_vision."))}
     if actual != set(expected):
-        raise UnsupportedConversion("Gemma vision tensor inventory is outside the admitted E2B profile")
+        raise UnsupportedConversion("Gemma vision tensor inventory is outside the admitted E2B/E4B profile")
     for name, shape in expected.items():
         tensor = tensors[name]
         if tensor.shape != shape or tensor.dtype != "BF16":
@@ -156,7 +169,7 @@ def build_gemma4_vision_plan(source: Path, *, dtype: str = "bfloat16"):
             output_name = name.removeprefix("model.")
         operations.append(TensorOperation(f"vision.{output_name}", (tensor,), "BF16", shape))
     decoder = {**base.decoder_config, "gemma4_image_embeddings": True}
-    metadata = {**base.metadata, "stark.vision.family": FAMILY["id"]}
+    metadata = {**base.metadata, "stark.vision.family": contract["family"]["id"]}
     return replace(
         base,
         decoder_config=decoder,

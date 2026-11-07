@@ -57,7 +57,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         elif mode == "decision":
             message = "Decision scoring needs a direct-answer template, single-token labels and checkpoint checks."
         elif mode == "vision-language" and architecture == "gemma4_text":
-            message = "Image input requires the pinned Gemma 4 E2B BF16 image artifact and local execution checks."
+            message = "Image input requires a pinned Gemma 4 E2B/E4B BF16 image artifact and local execution checks."
         elif mode == "vision-language":
             message = "Image input requires dense BF16 tensors, reviewed processing metadata and local image checks."
         else:
@@ -68,7 +68,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         if supported and mode == "vision-language" and architecture == "qwen3_5":
             caveats.extend(["qwen35_dense_bf16_geometry", "reviewed_processing_programs", "local_image_checks"])
         if supported and mode == "vision-language" and architecture == "gemma4_text":
-            caveats.extend(["gemma4_e2b_bf16_geometry", "pinned_processing_metadata", "local_image_checks"])
+            caveats.extend(["gemma4_e2b_e4b_bf16_geometry", "pinned_processing_metadata", "local_image_checks"])
         if supported and architecture in {"phi3", "gemma2", "gemma3_text", "gemma4_text"}:
             caveats.append("tied_embeddings_required")
         if supported and architecture == "gemma4_text" and mode != "vision-language":
@@ -448,12 +448,11 @@ def preflight_model(
             return _report(family, mode, "unsupported", "vision_tower_missing", "This checkpoint has no vision tower.")
         if raw_architecture != "gemma4" or not isinstance(config.get("text_config"), dict):
             return _report(
-                family, mode, "unsupported", "unsupported_vision_wrapper", "Gemma images require the full E2B wrapper."
+                family, mode, "unsupported", "unsupported_vision_wrapper", "Gemma images require a full E2B/E4B wrapper."
             )
         if (
             any(vision.get(key) != value for key, value in GEOMETRY.items())
-            or text.get("hidden_size") != 1536
-            or text.get("num_hidden_layers") != 35
+            or (text.get("hidden_size"), text.get("num_hidden_layers")) not in {(1536, 35), (2560, 42)}
             or any(
                 config.get(key) != TOKENS[token]
                 for key, token in (
@@ -470,7 +469,7 @@ def preflight_model(
                 mode,
                 "unsupported",
                 "unsupported_vision_geometry",
-                "Native Gemma images require the pinned E2B BF16 vision and decoder geometry.",
+                "Native Gemma images require a pinned E2B/E4B BF16 vision and decoder geometry.",
             )
     elif mode == "vision-language":
         if not isinstance(config.get("vision_config"), dict):
@@ -838,7 +837,9 @@ def preflight_source(
             )
         if report["status"] == "conditional" and mode == "vision-language":
             if report["family_id"] == "gemma4_text":
-                if repo != "google/gemma-4-E2B-it" or revisions[repo] != "3e22461f65e89153144f8adb70e3b8c2cc9845a7":
+                from .adapters.gemma4_vision import PROFILES as gemma_profiles
+
+                if repo not in gemma_profiles or revisions[repo] != gemma_profiles[repo]["revision"]:
                     raise UnsupportedConversion("Gemma images require the pinned official profile")
                 for filename, maximum, expected in (
                     (
