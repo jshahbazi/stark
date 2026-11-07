@@ -541,6 +541,9 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
         commands.end_encoding().submit().wait_until_completed().map_err(NativeVisionError::backend)?;
         for index in 0..self.tower.block_count() {
             if cancelled() {
+                // Every submitted patch/block command has completed. Tower
+                // weights are immutable and no decoder state was touched.
+                self.failed = false;
                 return Err(NativeVisionError::cancelled());
             }
             let mut commands = context
@@ -551,6 +554,7 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
             commands.end_encoding().submit().wait_until_completed().map_err(NativeVisionError::backend)?;
         }
         if cancelled() {
+            self.failed = false;
             return Err(NativeVisionError::cancelled());
         }
         let mut commands = context

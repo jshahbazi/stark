@@ -124,10 +124,13 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     neither modifies stored norm values nor introduces full-weight allocations.
     Multimodal Gemma 3 and newer Gemma generations require separate adapters.
     """
-    return build_gemma_text_plan(read_json(source / "config.json"), load_checkpoint(source), family=family, dtype=dtype)
+    if family not in _ARCHITECTURES:
+        raise UnsupportedConversion("Gemma generation has no text decoder adapter")
+    return build_gemma_text_plan(read_json(source / "config.json"), None, family=family, dtype=dtype, _source=source)
 
 
-def build_gemma_text_plan(config: dict, tensors: dict, *, family: str, dtype: str = "bfloat16") -> ConversionPlan:
+def build_gemma_text_plan(config: dict, tensors: dict | None, *, family: str, dtype: str = "bfloat16",
+                          _source: Path | None = None) -> ConversionPlan:
     """Plan an already selected decoder inventory without copying checkpoint data.
 
     Multimodal adapters validate their complete wrapper and provide only the
@@ -190,6 +193,12 @@ def build_gemma_text_plan(config: dict, tensors: dict, *, family: str, dtype: st
         if not isinstance(config["rope_parameters"], dict):
             raise ConversionError("Gemma config has malformed rope_parameters")
         unsupported.append("New Gemma RoPE parameters require a separate adapter")
+    # Keep topology/operation admission ahead of checkpoint parsing for the
+    # public text adapter. Multimodal adapters pass their selected inventory.
+    if tensors is None:
+        if _source is None:
+            raise ConversionError("Gemma decoder tensor selection is missing")
+        tensors = load_checkpoint(_source)
     validate_planning_layers(layers, tensors)
     window = _integer(config, "sliding_window")
     if family == "gemma2":
