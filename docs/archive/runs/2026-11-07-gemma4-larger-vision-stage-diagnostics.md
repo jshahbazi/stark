@@ -40,3 +40,22 @@ including ordinary patch/features. Original feature and patch hashes are
 unchanged. Source generation and Python lint pass, and Rust formatting passes.
 Native type-check and stage execution are pending at this observer checkpoint;
 the integration coordinator will batch its build to preserve the disk reserve.
+
+Independent CPU controls use the captured canonical stage inputs, without a
+native build. Sequential F32 RMS with logical width 72 reproduces every captured
+first-block Q/K/V normalized BF16 value in all three cases. The 1,152-wide input
+and projector norms have at most seven differing elements in an 8-row prefix,
+with relative RMS at most 0.000121. Sequential pooling/standardization fed the
+canonical encoder output differs by relative RMS 0.000354–0.000375. These controls
+do not explain the full feature failure and do not establish native stage parity.
+Their private aggregate receipts are
+`runtime/gemma4-31b-normalization-stage-oracles-v1.json` and
+`runtime/gemma4-31b-pool-stage-oracles-v1.json`.
+
+Separate sealed replay receipts preserve each outcome and freshly verify the
+binary and component identities. The 12B receipt
+`runtime/gemma4-12b-sealed-component-af356919-v1.json` has SHA-256
+`0a0f1bd30f98b84e0bbd47b09afb6ccd468cdf2c77586dd0b82560772fb67be4`.
+The failed 31B receipt
+`runtime/gemma4-31b-sealed-component-af356919-v1.json` has SHA-256
+`87e9371cb8ca31b35ad5af03b22069eac08a8f6877d571d03bf88cd7eb330b06`.
