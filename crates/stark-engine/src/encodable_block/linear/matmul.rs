@@ -128,9 +128,12 @@ impl<B: Backend> LinearMatmul<B> {
         } else {
             None
         };
-        let kernel =
+        let mut kernel =
             <B::Kernels as Kernels>::MatmulKernel::new(context, weights_data_type, input_data_type, output_data_type)
                 .map_err(LinearMatmulError::BackendError)?;
+        if weights_tree.numerical_profile() == NumericalProfile::Qwen35AffineBF16 {
+            kernel.set_reference_accumulation();
+        }
 
         Ok(Self {
             kernel: Mutex::new(kernel),

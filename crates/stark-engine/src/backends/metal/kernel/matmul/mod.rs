@@ -1,6 +1,8 @@
 pub mod gemm;
 mod gemv;
 mod qmv;
+#[cfg(test)]
+mod reference_tests;
 
 use metal::MTLGPUFamily;
 
@@ -37,6 +39,7 @@ pub struct MatmulMetalKernel {
     input_data_type: DataType,
     output_data_type: DataType,
     row_arithmetic_reference: Option<u32>,
+    reference_accumulation: bool,
 }
 
 enum MatmulDispatch {
@@ -166,6 +169,23 @@ impl MatmulMetalKernel {
         shape: &MatmulShape,
         context: &MetalContext,
     ) -> MatmulDispatch {
+        let dispatch = self.select_dispatch_inner(shape, context);
+        match dispatch {
+            MatmulDispatch::Gemm(mut plan) if self.reference_accumulation => {
+                // Optimized split-K stores partials in the public output
+                // dtype. BF16 partition casts change the reference graph.
+                plan.split_k = 1;
+                MatmulDispatch::Gemm(plan)
+            },
+            other => other,
+        }
+    }
+
+    fn select_dispatch_inner(
+        &self,
+        shape: &MatmulShape,
+        context: &MetalContext,
+    ) -> MatmulDispatch {
         if let Some(reference) = self.row_arithmetic_shape(shape) {
             if shape.m <= 4
                 && let Some(gemv) = GemvSpecialization::select_preserving_w8(
@@ -256,6 +276,7 @@ impl MatmulKernel for MatmulMetalKernel {
             input_data_type,
             output_data_type,
             row_arithmetic_reference: None,
+            reference_accumulation: false,
         })
     }
 
@@ -266,12 +287,16 @@ impl MatmulKernel for MatmulMetalKernel {
         self.row_arithmetic_reference = Some(output_dim);
     }
 
+    fn set_reference_accumulation(&mut self) {
+        self.reference_accumulation = true;
+    }
+
     fn select_activation_quantization(
         &self,
         shape: &MatmulShape,
         context: &MetalContext,
     ) -> Option<ActivationQuantization> {
-        if self.row_arithmetic_reference.is_some() {
+        if self.reference_accumulation || self.row_arithmetic_reference.is_some() {
             return None;
         }
         let weight_group_size = shape.b_group_size?;
@@ -306,7 +331,7 @@ impl MatmulKernel for MatmulMetalKernel {
         bf16_shape: &MatmulShape,
         context: &MetalContext,
     ) -> ActivationFormat {
-        if self.row_arithmetic_reference.is_some() {
+        if self.reference_accumulation || self.row_arithmetic_reference.is_some() {
             return ActivationFormat::Bf16;
         }
         if bf16_shape.params_layout != Some(QuantParamsLayout::GroupOutput)
