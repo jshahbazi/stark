@@ -84,6 +84,11 @@ impl<B: Backend> Attention<B> {
         if config.reference_bf16 && data_type != DataType::BF16 {
             return Err(crate::backends::common::InvalidInput("reference_bf16 requires BF16 activations").into());
         }
+        if config.materialize_rope_bf16 && (data_type != DataType::BF16 || rope_config.is_none()) {
+            return Err(
+                crate::backends::common::InvalidInput("BF16 rotary materialization requires BF16 and RoPE").into()
+            );
+        }
         if config.materialize_prefill_scores && (config.reference_bf16 || config.logit_soft_cap.is_some()) {
             return Err(
                 crate::backends::common::InvalidInput("incompatible source prefill attention configuration").into()
@@ -124,6 +129,9 @@ impl<B: Backend> Attention<B> {
         let source_yarn = source_rope && matches!(rope_config, Some(AnyRoPEConfig::YARNRoPEConfig(_)));
         let source_proportional =
             source_rope && (source_yarn || matches!(rope_config, Some(AnyRoPEConfig::ProportionalRoPEConfig(_))));
+        if source_rope && config.materialize_rope_bf16 {
+            return Err(crate::backends::common::InvalidInput("conflicting rotary precision policies").into());
+        }
         let qkv_dim = if let Some(num_kv_heads) = num_kv_heads {
             let kv_dim = crate::config::validation::checked_product(&[num_kv_heads, head_dim])?;
             q_dim
@@ -185,7 +193,7 @@ impl<B: Backend> Attention<B> {
             DataType::F32,
             !is_kv_sharing,
             rope_config.is_some(),
-            config.reference_bf16,
+            config.reference_bf16 || config.materialize_rope_bf16,
             source_rope,
             source_proportional,
             source_yarn,
@@ -208,7 +216,7 @@ impl<B: Backend> Attention<B> {
                     data_type,
                     DataType::F32,
                     rope_config.is_some(),
-                    config.reference_bf16,
+                    config.reference_bf16 || config.materialize_rope_bf16,
                     source_rope,
                     source_proportional,
                     source_yarn,

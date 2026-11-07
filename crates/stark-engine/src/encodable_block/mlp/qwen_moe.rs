@@ -59,6 +59,7 @@ impl<B: Backend> QwenMoe<B> {
         };
         let router = load("router", config.num_routed_experts, DataType::F32)?;
         let shared_gate = load("shared_gate", 1, DataType::BF16)?;
+        let reference_bf16 = tree.numerical_profile().qwen35_bf16_activations();
         let experts = RoutedExperts::new(
             context,
             model,
@@ -67,11 +68,13 @@ impl<B: Backend> QwenMoe<B> {
             config.num_active_routed_experts,
             &config.expert_config,
             &tree.subtree("experts"),
-            tree.numerical_profile().qwen35_bf16_activations(),
+            reference_bf16,
             RoutingPrecision {
                 round_logits_bf16: true,
                 round_weights_bf16: true,
                 round_products_bf16: true,
+                sort_expert_ids: reference_bf16,
+                round_accumulator_bf16: reference_bf16,
             },
         )?;
         let dense = AnyMLPConfig::DenseMLPConfig(config.expert_config.clone());

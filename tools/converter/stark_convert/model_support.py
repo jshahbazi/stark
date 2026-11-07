@@ -392,17 +392,25 @@ def preflight_model(
                 "unsupported_embedding_layout",
                 "Gemma 4 text currently requires tied embeddings.",
             )
-        if text.get("enable_moe_block") is True:
+        bounded_moe = (
+            text.get("hidden_size_per_layer_input") == 0
+            and text.get("attention_k_eq_v") is True
+            and type(text.get("num_experts")) is int
+            and 1 <= text["num_experts"] <= 1024
+            and type(text.get("top_k_experts")) is int
+            and 1 <= text["top_k_experts"] <= min(32, text["num_experts"])
+            and type(text.get("moe_intermediate_size")) is int
+            and 1 <= text["moe_intermediate_size"] <= 131072
+        )
+        if text.get("enable_moe_block") is True and not bounded_moe:
             return _report(
                 family,
                 mode,
                 "unsupported",
                 "unsupported_moe",
-                "Gemma 4 MoE operations are outside implemented dense PLE coverage.",
+                "Gemma 4 MoE requires the bounded no-PLE K=V expert layout.",
             )
-        if text.get("hidden_size_per_layer_input") == 0 and not (
-            text.get("hidden_size") == 5376 and text.get("attention_k_eq_v") is True
-        ):
+        if text.get("hidden_size_per_layer_input") == 0 and text.get("attention_k_eq_v") is not True:
             return _report(
                 family,
                 mode,
@@ -429,16 +437,20 @@ def preflight_model(
             "custom_model_code",
             "Custom model code is outside implemented conversion coverage.",
         )
-    if architecture != "qwen3_5_moe" and any(
-        value not in (None, 0)
-        for key in (
-            "num_experts",
-            "num_local_experts",
-            "num_experts_per_tok",
-            "moe_intermediate_size",
-            "n_routed_experts",
+    if (
+        architecture != "qwen3_5_moe"
+        and not (architecture == "gemma4_text" and text.get("enable_moe_block") is True and bounded_moe)
+        and any(
+            value not in (None, 0)
+            for key in (
+                "num_experts",
+                "num_local_experts",
+                "num_experts_per_tok",
+                "moe_intermediate_size",
+                "n_routed_experts",
+            )
+            for value in [text.get(key)]
         )
-        for value in [text.get(key)]
     ):
         return _report(
             family,

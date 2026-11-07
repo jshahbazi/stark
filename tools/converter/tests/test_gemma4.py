@@ -99,46 +99,119 @@ def gemma4_fixture(path, *, wrapper=True, double_wide=True, redundant=True, dim=
     return outer, tensors
 
 
-def test_dense_no_ple_global_k_equals_v_keeps_independent_normalization_inputs(tmp_path):
-    source = tmp_path / "source"
+def no_ple_fixture(source):
     config, tensors = gemma4_fixture(source, wrapper=False, double_wide=False)
-    config.update(hidden_size_per_layer_input=0, num_kv_shared_layers=0, num_key_value_heads=2,
-                  attention_k_eq_v=True, num_global_key_value_heads=1,
-                  use_bidirectional_attention="vision")
-    tensors = {name: tensor for name, tensor in tensors.items()
-               if not any(part in name for part in ("embed_tokens_per_layer", "per_layer_model_projection",
-                         "per_layer_projection_norm", "per_layer_input_gate", "per_layer_projection",
-                         "post_per_layer_input_norm"))
-               and not (".layers." in name and int(name.split(".layers.")[1].split(".")[0]) % 2
-                        and name.endswith(".self_attn.v_proj.weight"))}
-    for layer in (0,2,4):
+    config.update(
+        hidden_size_per_layer_input=0,
+        num_kv_shared_layers=0,
+        num_key_value_heads=2,
+        attention_k_eq_v=True,
+        num_global_key_value_heads=1,
+        use_bidirectional_attention="vision",
+    )
+    tensors = {
+        name: tensor
+        for name, tensor in tensors.items()
+        if not any(
+            part in name
+            for part in (
+                "embed_tokens_per_layer",
+                "per_layer_model_projection",
+                "per_layer_projection_norm",
+                "per_layer_input_gate",
+                "per_layer_projection",
+                "post_per_layer_input_norm",
+            )
+        )
+        and not (
+            ".layers." in name
+            and int(name.split(".layers.")[1].split(".")[0]) % 2
+            and name.endswith(".self_attn.v_proj.weight")
+        )
+    }
+    for layer in (0, 2, 4):
         for branch in ("k", "v"):
             name = f"model.layers.{layer}.self_attn.{branch}_proj.weight"
             dtype, values = tensors[name]
             tensors[name] = (dtype, np.concatenate([values, values], axis=0))
     (source / "config.json").write_text(json.dumps(config))
     save_tensors(source / "model.safetensors", tensors)
+    return config, tensors
+
+
+def test_dense_no_ple_global_k_equals_v_keeps_independent_normalization_inputs(tmp_path):
+    source = tmp_path / "source"
+    _, tensors = no_ple_fixture(source)
     plan = build_gemma4_plan(source)
     assert plan.decoder_config["ple_model_config"] is None
     layers = plan.decoder_config["transformer_config"]["layer_configs"]
-    assert [layer["mixer_config"]["num_groups"] for layer in layers] == [2,1,2,1,2,1]
+    assert [layer["mixer_config"]["num_groups"] for layer in layers] == [2, 1, 2, 1, 2, 1]
     assert all(layer["ple_config"] is None and layer["kv_source_layer_index"] is None for layer in layers)
     assert all(layer["materialize_post_layer_scalar"] for layer in layers)
-    global_qkv = next(op for op in plan.operations if op.name == "decoder.transformer.layers.1.mixer.qkvg_projection.weights.weights")
+    assert all(layer["mixer_config"]["materialize_rope_bf16"] for layer in layers)
+    global_qkv = next(
+        op for op in plan.operations if op.name == "decoder.transformer.layers.1.mixer.qkvg_projection.weights.weights"
+    )
     _, source_tensors = read_safetensors_header(source / "model.safetensors")
-    assert global_qkv.sources == tuple(source_tensors[name] for name in (
-        "model.layers.1.self_attn.q_proj.weight", "model.layers.1.self_attn.k_proj.weight", "model.layers.1.self_attn.k_proj.weight"
-    ))
-    local_qkv = next(op for op in plan.operations if op.name == "decoder.transformer.layers.0.mixer.qkvg_projection.weights.weights")
+    assert global_qkv.sources == tuple(
+        source_tensors[name]
+        for name in (
+            "model.layers.1.self_attn.q_proj.weight",
+            "model.layers.1.self_attn.k_proj.weight",
+            "model.layers.1.self_attn.k_proj.weight",
+        )
+    )
+    local_qkv = next(
+        op for op in plan.operations if op.name == "decoder.transformer.layers.0.mixer.qkvg_projection.weights.weights"
+    )
     assert local_qkv.sources[-1] == source_tensors["model.layers.0.self_attn.v_proj.weight"]
     output = tmp_path / "output.safetensors"
     write_plan(plan, output, chunk_bytes=96)
     _, converted = read_safetensors_header(output)
     assert tensor_bytes(converted[global_qkv.name]) == b"".join(
-        tensors[name][1].tobytes() for name in (
-            "model.layers.1.self_attn.q_proj.weight", "model.layers.1.self_attn.k_proj.weight", "model.layers.1.self_attn.k_proj.weight"
+        tensors[name][1].tobytes()
+        for name in (
+            "model.layers.1.self_attn.q_proj.weight",
+            "model.layers.1.self_attn.k_proj.weight",
+            "model.layers.1.self_attn.k_proj.weight",
         )
     )
+
+
+def test_gemma_moe_banks_reorder_gate_up_per_expert_and_preserve_controls(tmp_path):
+    source = tmp_path / "source"
+    config, tensors = no_ple_fixture(source)
+    config.update(enable_moe_block=True, num_experts=4, top_k_experts=2, moe_intermediate_size=16)
+    dim = config["hidden_size"]
+    for layer in range(6):
+        prefix = f"model.layers.{layer}"
+        for name in ("pre_feedforward_layernorm_2", "post_feedforward_layernorm_1", "post_feedforward_layernorm_2"):
+            tensors[f"{prefix}.{name}.weight"] = ("BF16", np.ones(dim, dtype=ml_dtypes.bfloat16))
+        for suffix, shape in (
+            ("router.proj.weight", (4, dim)),
+            ("router.scale", (dim,)),
+            ("router.per_expert_scale", (4,)),
+            ("experts.gate_up_proj", (4, 32, dim)),
+            ("experts.down_proj", (4, dim, 16)),
+        ):
+            values = np.arange(np.prod(shape), dtype="<f4").reshape(shape) / 1024
+            tensors[f"{prefix}.{suffix}"] = ("BF16", values.astype(ml_dtypes.bfloat16))
+    (source / "config.json").write_text(json.dumps(config))
+    save_tensors(source / "model.safetensors", tensors)
+    plan = build_gemma4_plan(source)
+    layers = plan.decoder_config["transformer_config"]["layer_configs"]
+    assert all(layer["mlp_config"]["type"] == "Gemma4MoeConfig" for layer in layers)
+    assert layers[0]["mlp_config"]["router_root_scale"] == dim**-0.5
+    output = tmp_path / "moe.safetensors"
+    write_plan(plan, output, chunk_bytes=96)
+    _, converted = read_safetensors_header(output)
+    bank = "decoder.transformer.layers.0.mlp.experts.up_projection.weights.weights"
+    source_bank = tensors["model.layers.0.experts.gate_up_proj"][1]
+    expected = np.concatenate([np.concatenate([expert[16:], expert[:16]], axis=0) for expert in source_bank])
+    assert tensor_bytes(converted[bank]) == expected.tobytes()
+    scales = converted["decoder.transformer.layers.0.mlp.expert_scales"]
+    assert scales.dtype == "F32"
+    assert tensor_bytes(scales) == tensors["model.layers.0.router.per_expert_scale"][1].astype("<f4").tobytes()
 
 
 @pytest.mark.parametrize("wrapper,redundant,double_wide", [(True, True, True), (False, False, False)])
