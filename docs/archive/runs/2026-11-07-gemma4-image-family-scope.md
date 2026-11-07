@@ -26,6 +26,12 @@ The efficient E2B/E4B path keeps its PLE and causal-image policy. Each larger fa
 
 All no-PLE paths explicitly select the materialized BF16 final residual/scalar and rotary boundaries. A controlled six-layer residual fixture passes; the original six-layer unit-Q/K stress fixture still fails and remains a precision qualification blocker. One- and two-layer unit-Q/K controls pass. No controlled/component result substitutes for a full exact-checkpoint replay. Audio/video and speculative drafts remain outside this image task.
 
+The larger official vision checkpoints retain `ClippableLinear` source wrapper
+names (`*.linear.weight`) even with clipping disabled. The converter validates
+those exact source names and maps them to plain native `*.weight` destinations.
+This was checked against all 356 tensors in the pinned extracted 31B header;
+header-only 26B/31B regression fixtures preserve that distinction.
+
 ## Upstream provenance
 
 Equations were checked against [Transformers v5.15.1 Gemma 4](https://github.com/huggingface/transformers/blob/v5.15.1/src/transformers/models/gemma4/modeling_gemma4.py), SHA-256 `4f874549f79deda4bb9ce7fb7d7b8e7349122be1711f733f7a4157e46ed10cc3`, and [unified Gemma 4](https://github.com/huggingface/transformers/blob/v5.15.1/src/transformers/models/gemma4_unified/modeling_gemma4_unified.py), SHA-256 `c52d9b27fc83b6ced166aee816b235e1db057fde10df6c1eff64bbc91fb16f39`. Both are Apache-2.0, Copyright 2026 the HuggingFace Team. Existing native image equations retain their independently implemented Google and MLX-VLM provenance in [UPSTREAM.md](../../../provenance/UPSTREAM.md).

@@ -264,7 +264,7 @@ def test_larger_vision_inventory_requires_standardization_and_plain_linear_weigh
             ("mlp.up_proj", (4304, 1152)),
             ("mlp.down_proj", (1152, 4304)),
         ):
-            shapes[projection + ".weight"] = shape
+            shapes[projection + ".linear.weight"] = shape
         for suffix, shape in shapes.items():
             tensors[prefix + "." + suffix] = TensorInfo(
                 Path("header-only"), "BF16", shape, 0, math.prod(shape) * 2, (0, 0, 0, 0)
@@ -282,6 +282,8 @@ def test_larger_vision_inventory_requires_standardization_and_plain_linear_weigh
     assert plan.decoder_config["bidirectional_image_attention"] is True
     assert plan.decoder_config["gemma4_image_embeddings"] is False
     assert len(plan.operations) == 356
+    assert any(op.name == "vision.encoder.layers.0.self_attn.q_proj.weight" for op in plan.operations)
+    assert not any(".linear.weight" in op.name for op in plan.operations)
     tensors.pop("model.vision_tower.std_scale")
     with pytest.raises(UnsupportedConversion, match="inventory"):
         vision.build_gemma4_vision_plan(tmp_path)

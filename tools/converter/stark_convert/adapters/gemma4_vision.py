@@ -268,7 +268,10 @@ def build_gemma4_vision_plan(source: Path, *, dtype: str = "bfloat16"):
             ("mlp.up_proj", (intermediate, width)),
             ("mlp.down_proj", (width, intermediate)),
         ):
-            expected[f"{prefix}.{name}.{'linear.weight' if clipped else 'weight'}"] = shape
+            # The source retains its ClippableLinear wrapper even when the
+            # checkpoint disables clipping bounds. Native unclipped linears
+            # have a plain weight leaf, mapped explicitly below.
+            expected[f"{prefix}.{name}.linear.weight"] = shape
             if clipped:
                 for bound in ("input_min", "input_max", "output_min", "output_max"):
                     expected[f"{prefix}.{name}.{bound}"] = ()
@@ -280,6 +283,8 @@ def build_gemma4_vision_plan(source: Path, *, dtype: str = "bfloat16"):
         if tensor.shape != shape or tensor.dtype != "BF16":
             raise ConversionError("Gemma vision tensor shape or BF16 storage disagrees with its profile")
         output_name = name.removeprefix("model.vision_tower.")
+        if not clipped and output_name.endswith(".linear.weight"):
+            output_name = output_name.removesuffix(".linear.weight") + ".weight"
         if name.startswith("model.embed_vision."):
             output_name = name.removeprefix("model.")
         operations.append(TensorOperation(f"vision.{output_name}", (tensor,), "BF16", shape))
