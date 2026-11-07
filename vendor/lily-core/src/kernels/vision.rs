@@ -192,9 +192,8 @@ fn check_grid(n: usize, gh: usize, gw: usize) -> Result<()> {
         "grid ({gh}, {gw}) is not made of 2 x 2 merge blocks"
     );
     ensure!(
-        gh * gw == n,
-        "grid ({gh}, {gw}) holds {} patches, tensor has {n}",
-        gh * gw
+        gh.checked_mul(gw) == Some(n),
+        "vision grid product differs from tensor rows"
     );
     Ok(())
 }
@@ -214,6 +213,7 @@ pub fn patch_pos_embed_bf16(
     ensure!(x.shape().len() == 2, "x must be [N, H], got {:?}", x.shape());
     let (n, h) = (x.shape()[0], x.shape()[1]);
     check_grid(n, gh, gw)?;
+    ensure!(n <= 8192, "vision position patch budget");
     ensure!(
         table.shape().len() == 2 && table.shape()[1] == h,
         "position table {:?} is not [side^2, {h}]",
@@ -224,7 +224,18 @@ pub fn patch_pos_embed_bf16(
     for t in [x, table] {
         ensure!(t.dtype() == DType::BF16, "patch_pos_embed expects BF16");
     }
-    let pipeline = ctx.pipeline("vision_patch_pos_bf16", SOURCE, MslVersion::V3_1)?;
+    // Distinct entrypoints keep the per-context pipeline cache policy-safe.
+    // Geometry and BF16 boundaries are unchanged; only measured math policy
+    // becomes safe/uncontracted for the retained 48x48,1152-wide table.
+    let pipeline = if h == 1152 && side == 48 {
+        ctx.pipeline(
+            "vision_patch_pos_bf16_compat",
+            include_str!("metal/vision_position.metal"),
+            MslVersion::V4_0,
+        )?
+    } else {
+        ctx.pipeline("vision_patch_pos_bf16", SOURCE, MslVersion::V3_1)?
+    };
     pass.dispatch_at(
         &pipeline,
         &[x.binding(), table.binding()],
