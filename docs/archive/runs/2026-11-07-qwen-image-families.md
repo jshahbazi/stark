@@ -283,6 +283,35 @@ its existing implementation, and the separate readout and unmarked decoder
 matrices select the new contraction. A small factory fixture covers that
 untied layout and a tied input-output table; native replay remains required.
 
+### Production packed-reference qualification
+
+Compiled source `2529098a2eabfb76fb77f9481b43e889c2a5dad1` passed all seven
+focused CPU/Metal encoder tests. The sealed engine-test executable SHA256 is
+`7c8e5edeebe1f7110bd50e2d44601521f07898225f17ca2cc841a4ec58efbeeb`.
+The unchanged audited 0.8B reference manifest remains
+`f22d7bde0e2473fad29dc62a57a72f1a1e23e0ea1ade886f6db321382d8d54bd`,
+bound to artifact
+`7e127dfb8c78f22b94edd35e52717f50e3d70398fe3668abd2290d088b5b1343`.
+
+The actual production encoder passed both complete last-prompt logit cases
+bit-for-bit: each has 248,320 logits, zero relative RMS and absolute error,
+cosine one, zero BF16 mismatches, and matching top-1. The independent scalar
+test-only full-model witness was replayed separately and was also exact.
+Both production and scalar same-input projections were exact at M=1 and
+M=83/96 for GDN input/output and MLP up/down (32 stage comparisons total).
+The fixed RMS/cosine/top-1 gate was unchanged, and every prior failed receipt
+and prior native output was preserved.
+
+Six sequential correctness tests exited successfully without the resource
+guard firing. The production full replay took 4.246 seconds with sampled
+peak process RSS of 972,128,256 bytes; these are functional observations with
+no performance claim. An unrelated Lily pilot worker was observed after the
+replay; this was not a quiet-host benchmark. The private replay receipt SHA256
+is `7fd2dc2d8124d0ae471ba88aef6bbd508f7391695b2bf235c63d388ddc34b9e3`.
+Actual 27B and MoE worker lifecycle/cancellation rechecks on the production
+encoder remain pending. The small exact dense result does not qualify those
+larger checkpoints or explicit source-wide arithmetic policies numerically.
+
 ## Primary references
 
 - [Official Qwen3.8-27B configuration](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json):
