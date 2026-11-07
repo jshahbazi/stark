@@ -36,7 +36,7 @@
       <p class="eyebrow">TECHNICAL DETAILS / APPLE SILICON</p>
       <div class="technical-hero-grid">
         <h1 id="technical-title">Inside<br>the engine.</h1>
-        <div class="technical-intro"><p>Native inference for Apple silicon, with a model catalog, local API and developer tools.</p><a class="text-link" href="docs.html">Documentation <span aria-hidden="true">↗</span></a></div>
+        <div class="technical-intro"><p>Native inference for Apple silicon, with a model catalog, local API and developer tools.</p><a class="text-link soft-link" href="docs.html">Documentation <span aria-hidden="true">↗</span></a></div>
       </div>
     </section>
     <nav class="technical-nav" aria-label="On this page">
@@ -47,9 +47,9 @@
         <div class="section-heading"><p class="eyebrow">01 / DEVELOPER INTEGRATION</p><h2 id="engine-title">Build with Stark.</h2><p>Bring local models into your app with an OpenAI-style API or native workers.</p></div>
         <div class="engine-grid">
           <div class="capabilities">
-            <article><span class="index">01</span><div><h3>Local HTTP API</h3><p>Streaming chat and function tools for compatible apps and models.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md">API reference</a></p></div></article>
-            <article><span class="index">02</span><div><h3>Native workers</h3><p>Run generation and scoring directly from your app.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/WORKER_PROTOCOLS.md">Worker documentation</a></p></div></article>
-            <article><span class="index">03</span><div><h3>Decision scoring</h3><p>Compare a set of choices with a local language model.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Scoring guide</a></p></div></article>
+            <article><span class="index">01</span><div><h3>Local HTTP API</h3><p>Streaming chat and function tools for compatible apps and models.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md" class="soft-link">API reference</a></p></div></article>
+            <article><span class="index">02</span><div><h3>Native workers</h3><p>Run generation and scoring directly from your app.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/WORKER_PROTOCOLS.md" class="soft-link">Worker documentation</a></p></div></article>
+            <article><span class="index">03</span><div><h3>Decision scoring</h3><p>Compare a set of choices with a local language model.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md" class="soft-link">Scoring guide</a></p></div></article>
           </div>
           <div class="integration-example"><div class="terminal">
             <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>LOCAL API / STREAMING CHAT</span></div>
@@ -86,7 +86,7 @@ Content-Type: application/json
         <div class="model-directory">
           <div class="tool-support-note" id="tool-workflows"><p>Tool calling depends on the model and app version. <a href="docs.html#models">Tool compatibility guide <span aria-hidden="true">↗</span></a></p></div>
 
-          <div class="model-category-heading"><h3>Featured models</h3><a href="https://github.com/jshahbazi/stark/blob/main/README.md#supported-model-families">Compatibility guide <span aria-hidden="true">↗</span></a></div>
+          <div class="model-category-heading"><h3>Featured models</h3><a href="https://github.com/jshahbazi/stark/blob/main/README.md#supported-model-families" class="soft-link">Compatibility guide <span aria-hidden="true">↗</span></a></div>
           <div class="model-tabs" role="tablist" aria-label="Model groups">
             <button type="button" role="tab" id="models-tab-text" aria-controls="text-models" aria-selected="true" tabindex="0" data-model-group="text-models">Text</button>
             <button type="button" role="tab" id="models-tab-images" aria-controls="image-models" aria-selected="false" tabindex="-1" data-model-group="image-models">Images</button>
@@ -101,20 +101,20 @@ Content-Type: application/json
 <details class="model-family"><summary><span><strong>Qwen3</strong><span>Small to large</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints">Dense models from 0.6B to 32B parameters. <a href="https://github.com/jshahbazi/stark/blob/main/docs/MODEL_SUPPORT.md">Compatibility &amp; setup</a>.</div></details>
 <details class="model-family"><summary><span><strong>Qwen3.5</strong><span>Text and images</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints">Text models and compatible BF16 vision models. <a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md">Compatibility &amp; setup</a>.</div></details>
 </div>
-            <p class="model-format-note"><a href="https://github.com/jshahbazi/stark/blob/main/README.md#supported-model-families">See all supported families and checkpoints <span aria-hidden="true">↗</span></a></p>
+            <p class="model-format-note"><a href="https://github.com/jshahbazi/stark/blob/main/README.md#supported-model-families" class="soft-link">See all supported families and checkpoints <span aria-hidden="true">↗</span></a></p>
           </div>
           <div class="model-group-panel" id="image-models" role="tabpanel" aria-labelledby="models-tab-images" tabindex="0">
-            <div class="compact-image-model"><div><p class="eyebrow">IMAGES · DENSE BF16</p><h3>Qwen3.5</h3><p>Compatible Qwen3.5 BF16 models support PNG and JPEG input.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md">Image compatibility <span aria-hidden="true">↗</span></a></div>
+            <div class="compact-image-model"><div><p class="eyebrow">IMAGES · DENSE BF16</p><h3>Qwen3.5</h3><p>Compatible Qwen3.5 BF16 models support PNG and JPEG input.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md" class="soft-link">Image compatibility <span aria-hidden="true">↗</span></a></div>
           </div>
           <div class="model-group-panel" id="decision-models" role="tabpanel" aria-labelledby="models-tab-decision" tabindex="0">
-            <div class="compact-image-model"><div><p class="eyebrow">LOCAL DECISIONS / MODEL CONFIDENCE</p><h3>JevK5</h3><p>Compare options with JevK5 and see confidence across the choices you provide. <a href="https://huggingface.co/alibiserikbay/JevK5">Model details</a>.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Decision and confidence guide <span aria-hidden="true">↗</span></a></div>
+            <div class="compact-image-model"><div><p class="eyebrow">LOCAL DECISIONS / MODEL CONFIDENCE</p><h3>JevK5</h3><p>Compare options with JevK5 and see confidence across the choices you provide. <a href="https://huggingface.co/alibiserikbay/JevK5">Model details</a>.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md" class="soft-link">Decision and confidence guide <span aria-hidden="true">↗</span></a></div>
           </div>
         </div>
       </div>
     </section>
 
     <section class="followup-section section-pad" id="followups" aria-labelledby="followup-title">
-      <div class="wrap"><div class="story-heading"><p class="eyebrow">03 / CONTEXT REUSE</p><h2 id="followup-title">Less repeated work.</h2><p>On supported models, Stark reuses the unchanged beginning of the previous request to reduce prompt processing in follow-up turns.</p></div><a class="text-link" href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md#prefix-reuse">How context reuse works <span aria-hidden="true">↗</span></a></div>
+      <div class="wrap"><div class="story-heading"><p class="eyebrow">03 / CONTEXT REUSE</p><h2 id="followup-title">Less repeated work.</h2><p>On supported models, Stark reuses the unchanged beginning of the previous request to reduce prompt processing in follow-up turns.</p></div><a class="text-link soft-link" href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md#prefix-reuse">How context reuse works <span aria-hidden="true">↗</span></a></div>
     </section>
 
     <section class="benchmark-section section-pad" id="benchmarks" aria-labelledby="benchmark-title">
@@ -143,7 +143,7 @@ Content-Type: application/json
         </div>
         <p class="table-note qwen38-conditions">Maximum observed decode rate with the same mixed 4/8-bit checkpoint and speculation disabled. Input processing is excluded.</p>
 
-        <div class="benchmark-links"><a class="text-link" href="https://github.com/jshahbazi/stark/blob/3d22b4dfb41aab4b10001bef6bbdf37a4f5cb86b/docs/benchmarks/QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md">Read the benchmark report <span aria-hidden="true">↗</span></a></div>
+        <div class="benchmark-links"><a class="text-link soft-link" href="https://github.com/jshahbazi/stark/blob/3d22b4dfb41aab4b10001bef6bbdf37a4f5cb86b/docs/benchmarks/QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md">Read the benchmark report <span aria-hidden="true">↗</span></a></div>
         </div>
         <div class="benchmark-panel qwen38-mtp-study" id="qwen38-mtp-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen38-mtp" tabindex="0">
           <p class="eyebrow">31 OCTOBER 2026 / MULTI-TOKEN PREDICTION</p>
@@ -162,7 +162,7 @@ Content-Type: application/json
           </div>
           <p class="table-note qwen38-conditions">MTP enabled versus disabled, measured separately on each checkpoint with top-k 20 sampling. Rates exclude input processing.</p>
 
-          <div class="benchmark-links"><a class="text-link" href="https://github.com/jshahbazi/stark/blob/4ebdbf15fce9fe6dca584a8bb9df7c183c55aaba/docs/benchmarks/QWEN38_MTP_COMBINATION_2026_10_31.md">Lily report <span aria-hidden="true">↗</span></a><a class="text-link" href="https://github.com/jshahbazi/stark/blob/688975102703563992c67065d9506c06c104e794/docs/benchmarks/QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md">Mixed 4/8-bit report <span aria-hidden="true">↗</span></a></div>
+          <div class="benchmark-links"><a class="text-link soft-link" href="https://github.com/jshahbazi/stark/blob/4ebdbf15fce9fe6dca584a8bb9df7c183c55aaba/docs/benchmarks/QWEN38_MTP_COMBINATION_2026_10_31.md">Lily report <span aria-hidden="true">↗</span></a><a class="text-link soft-link" href="https://github.com/jshahbazi/stark/blob/688975102703563992c67065d9506c06c104e794/docs/benchmarks/QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md">Mixed 4/8-bit report <span aria-hidden="true">↗</span></a></div>
         </div>
         <div class="benchmark-panel qwen35-study" id="qwen35-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen35" tabindex="0">
           <p class="eyebrow">22 OCTOBER 2026 / SIX WORKLOADS</p>
@@ -178,7 +178,7 @@ Content-Type: application/json
         </div>
         <p class="chart-selection" id="chart-selection" aria-live="polite">Overall · geometric mean of six workloads</p>
         <p class="table-note">End-to-end request throughput, including input processing and generation. Loading and warmup are excluded. * llama.cpp uses a different 4-bit quantizer.</p>
-        <div class="benchmark-links"><a class="text-link" href="https://github.com/jshahbazi/stark/blob/b64daf27015d346761e369885ea320b55222b846/docs/QWEN35_ENGINE_COMPARISON_2026_10_22.md">Read the benchmark report <span aria-hidden="true">↗</span></a></div>
+        <div class="benchmark-links"><a class="text-link soft-link" href="https://github.com/jshahbazi/stark/blob/b64daf27015d346761e369885ea320b55222b846/docs/QWEN35_ENGINE_COMPARISON_2026_10_22.md">Read the benchmark report <span aria-hidden="true">↗</span></a></div>
         </div>
       </div>
     </section>
@@ -190,7 +190,7 @@ Content-Type: application/json
         <h2 id="contact-title">Questions or ideas?</h2>
         <p>Email me with questions, feature ideas, or model requests.</p>
       </div>
-      <a href="mailto:john@starkengine.app">john@starkengine.app</a>
+      <a href="mailto:john@starkengine.app" class="soft-link">john@starkengine.app</a>
     </section>
     <div class="wrap footer-top"><a class="wordmark" href="index.html#">STARK<span>Run local AI on your Mac</span></a><div><a href="https://github.com/jshahbazi/stark">GitHub</a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/SECURITY.md">Security</a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/LICENSE">MIT license</a></div></div>
     <section class="wrap cat-note" aria-labelledby="cat-title">
@@ -201,7 +201,7 @@ Content-Type: application/json
         <p class="cat-description">Named after my cat, Stark. Excellent company, with strong opinions about lap availability.</p>
       </div>
     </section>
-    <div class="wrap footer-bottom"><p>An open-source Rust/Metal engine derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a>.</p><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Upstream provenance <span aria-hidden="true">↗</span></a></div>
+    <div class="wrap footer-bottom"><p>An open-source Rust/Metal engine derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a>.</p><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md" class="soft-link">Upstream provenance <span aria-hidden="true">↗</span></a></div>
   </footer>
 </body>
 </html>

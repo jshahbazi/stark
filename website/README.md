@@ -38,6 +38,8 @@ changing the pages. Run the repository policy check before committing.
   speedup.
 - Download and release-note links use GitHub's stable `releases/latest` URLs.
   Model compatibility depends on the artifact and installed app version.
+- Standalone resource actions use `soft-link`; prose links stay underlined.
+  Navigation, branding and primary download buttons keep their own styles.
 
 Benchmark JSONs in `public/` are byte-identical copies of canonical aggregate
 records under `docs/benchmarks/data/`. When changing benchmark data, update the

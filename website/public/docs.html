@@ -33,7 +33,7 @@
   <main id="main">
     <section class="technical-hero wrap" aria-labelledby="docs-title">
       <p class="eyebrow">GUIDES &amp; REFERENCE</p>
-      <div class="technical-hero-grid"><h1 id="docs-title">Documentation.</h1><div class="technical-intro"><p>Set up Stark, connect your apps and find the right model.</p><a class="text-link" href="https://github.com/jshahbazi/stark/blob/main/docs/README.md">Full reference index <span aria-hidden="true">↗</span></a></div></div>
+      <div class="technical-hero-grid"><h1 id="docs-title">Documentation.</h1><div class="technical-intro"><p>Set up Stark, connect your apps and find the right model.</p><a class="text-link soft-link" href="https://github.com/jshahbazi/stark/blob/main/docs/README.md">Full reference index <span aria-hidden="true">↗</span></a></div></div>
     </section>
     <nav class="technical-nav" aria-label="Documentation sections"><div class="wrap"><a href="#start"><span>01</span> Get started</a><a href="#apps"><span>02</span> Connect apps</a><a href="#models"><span>03</span> Models</a><a href="#developers"><span>04</span> Developers</a></div></nav>
 
@@ -46,17 +46,17 @@
         <li><strong>Download and run it.</strong> Choose <strong>Download and set up</strong>, then follow the prompt to start the model.</li>
         <li><strong>Start chatting.</strong> Choose <strong>Open chat</strong>, or connect one of the apps below. Advanced mode gives you the full catalog and import options.</li>
       </ol>
-      <div class="docs-links"><a href="https://github.com/jshahbazi/stark/blob/main/docs/INSTALLATION.md">Installation &amp; CLI tools <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/releases/latest">Release notes <span aria-hidden="true">↗</span></a></div>
+      <div class="docs-links"><a href="https://github.com/jshahbazi/stark/blob/main/docs/INSTALLATION.md" class="soft-link">Installation &amp; CLI tools <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/releases/latest" class="soft-link">Release notes <span aria-hidden="true">↗</span></a></div>
     </section>
 
     <section class="docs-section wrap" id="apps" aria-labelledby="docs-apps-title">
       <p class="eyebrow">02 / CONNECTIONS</p><h2 id="docs-apps-title">Connect your apps.</h2>
       <p class="docs-lead">With a model running in Chat mode, open <strong>Connections → Apps</strong> in Stark and choose <strong>Connect</strong>. Select Stark and your running model in the other app’s model picker.</p>
       <div class="docs-grid">
-        <article><h3>OpenWork</h3><p>Install OpenWork and open a workspace folder it can work in. If Stark asks, quit OpenWork completely and reopen it after connecting.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md#managed-openwork-connection">OpenWork setup guide <span aria-hidden="true">↗</span></a></article>
-        <article><h3>OpenCode Desktop</h3><p>Install the desktop app and connect it in Stark. Approve its engine when asked; updates or restarts can require a new approval.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md#managed-opencode-desktop-connection">OpenCode setup guide <span aria-hidden="true">↗</span></a></article>
-        <article><h3>Other compatible apps</h3><p>Copy the Base URL, API key and Model ID from <strong>Connections → Other apps</strong> into an OpenAI-compatible provider. Keep the key private. The API is local to your Mac.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md#client-compatibility">Client compatibility <span aria-hidden="true">↗</span></a></article>
-        <article><h3>Files and coding tasks</h3><p>Use a tool-capable model and look for <strong>Tool use available</strong> in Connections. The connected app handles tool execution and approvals.</p><a href="#models">Check model support <span aria-hidden="true">↓</span></a></article>
+        <article><h3>OpenWork</h3><p>Install OpenWork and open a workspace folder it can work in. If Stark asks, quit OpenWork completely and reopen it after connecting.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md#managed-openwork-connection" class="soft-link">OpenWork setup guide <span aria-hidden="true">↗</span></a></article>
+        <article><h3>OpenCode Desktop</h3><p>Install the desktop app and connect it in Stark. Approve its engine when asked; updates or restarts can require a new approval.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md#managed-opencode-desktop-connection" class="soft-link">OpenCode setup guide <span aria-hidden="true">↗</span></a></article>
+        <article><h3>Other compatible apps</h3><p>Copy the Base URL, API key and Model ID from <strong>Connections → Other apps</strong> into an OpenAI-compatible provider. Keep the key private. The API is local to your Mac.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md#client-compatibility" class="soft-link">Client compatibility <span aria-hidden="true">↗</span></a></article>
+        <article><h3>Files and coding tasks</h3><p>Use a tool-capable model and look for <strong>Tool use available</strong> in Connections. The connected app handles tool execution and approvals.</p><a href="#models" class="soft-link">Check model support <span aria-hidden="true">↓</span></a></article>
       </div>
     </section>
 
@@ -64,10 +64,10 @@
       <p class="eyebrow">03 / COMPATIBILITY</p><h2 id="docs-models-title">Models and capabilities.</h2>
       <p class="docs-lead">Start with Guided setup for a fit estimate, or browse the catalog in Advanced. Support depends on the exact checkpoint, format and app version.</p>
       <div class="docs-grid">
-        <article><h3>Supported models</h3><p>Find the supported families, prepared checkpoints and import formats.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/MODEL_SUPPORT.md">Model compatibility <span aria-hidden="true">↗</span></a></article>
-        <article><h3>Function tools</h3><p>Installed models show <strong>Tools available</strong>, <strong>Tools unavailable</strong> or <strong>Tools unchecked</strong> based on template compatibility. The v0.18.0 release predates these additions; use a newer build.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/TOOL_CALLING.md">Tool coverage and tested artifacts <span aria-hidden="true">↗</span></a></article>
-        <article><h3>Images</h3><p>Compatible Qwen3.5 BF16 vision models accept PNG and JPEG input after local checks.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md">Image compatibility <span aria-hidden="true">↗</span></a></article>
-        <article><h3>Local imports</h3><p>Import a complete supported checkpoint. Adapter-only files need to be merged with their base model first.</p><a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md">Conversion and import guide <span aria-hidden="true">↗</span></a></article>
+        <article><h3>Supported models</h3><p>Find the supported families, prepared checkpoints and import formats.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/MODEL_SUPPORT.md" class="soft-link">Model compatibility <span aria-hidden="true">↗</span></a></article>
+        <article><h3>Function tools</h3><p>Installed models show <strong>Tools available</strong>, <strong>Tools unavailable</strong> or <strong>Tools unchecked</strong> based on template compatibility. The v0.18.0 release predates these additions; use a newer build.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/TOOL_CALLING.md" class="soft-link">Tool coverage and tested artifacts <span aria-hidden="true">↗</span></a></article>
+        <article><h3>Images</h3><p>Compatible Qwen3.5 BF16 vision models accept PNG and JPEG input after local checks.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md" class="soft-link">Image compatibility <span aria-hidden="true">↗</span></a></article>
+        <article><h3>Local imports</h3><p>Import a complete supported checkpoint. Adapter-only files need to be merged with their base model first.</p><a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md" class="soft-link">Conversion and import guide <span aria-hidden="true">↗</span></a></article>
       </div>
     </section>
 
@@ -75,10 +75,10 @@
       <p class="eyebrow">04 / DEVELOPERS</p><h2 id="docs-dev-title">Build with Stark.</h2>
       <p class="docs-lead">Use the authenticated local HTTP API for chat and streaming, or drive native generation and scoring workers from your app.</p>
       <div class="docs-grid">
-        <article><h3>API reference</h3><p>Endpoints, authentication, tool calls, request limits and cancellation.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md">Local API <span aria-hidden="true">↗</span></a></article>
-        <article><h3>Worker reference</h3><p>Process lifecycle, JSON-lines messages, generation and scoring.</p><div class="docs-links"><a href="https://github.com/jshahbazi/stark/blob/main/docs/WORKER_PROTOCOLS.md">Worker protocols</a><a href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md">Generation</a><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Scoring</a></div></article>
-        <article><h3>Benchmarks and validation</h3><p>Read the measurements, exact build conditions and artifact qualification records.</p><div class="docs-links"><a href="technical.html#benchmarks">Performance overview</a><a href="https://github.com/jshahbazi/stark/blob/main/docs/benchmarks/README.md">Full benchmark index</a></div></article>
-        <article><h3>Contribute</h3><p>Build the Rust/Metal engine and follow the model onboarding workflow.</p><div class="docs-links"><a href="https://github.com/jshahbazi/stark/blob/main/CONTRIBUTING.md">Contributing</a><a href="https://github.com/jshahbazi/stark/blob/main/docs/MODEL_ONBOARDING.md">Model onboarding</a></div></article>
+        <article><h3>API reference</h3><p>Endpoints, authentication, tool calls, request limits and cancellation.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md" class="soft-link">Local API <span aria-hidden="true">↗</span></a></article>
+        <article><h3>Worker reference</h3><p>Process lifecycle, JSON-lines messages, generation and scoring.</p><div class="docs-links"><a href="https://github.com/jshahbazi/stark/blob/main/docs/WORKER_PROTOCOLS.md" class="soft-link">Worker protocols</a><a href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md" class="soft-link">Generation</a><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md" class="soft-link">Scoring</a></div></article>
+        <article><h3>Benchmarks and validation</h3><p>Read the measurements, exact build conditions and artifact qualification records.</p><div class="docs-links"><a href="technical.html#benchmarks" class="soft-link">Performance overview</a><a href="https://github.com/jshahbazi/stark/blob/main/docs/benchmarks/README.md" class="soft-link">Full benchmark index</a></div></article>
+        <article><h3>Contribute</h3><p>Build the Rust/Metal engine and follow the model onboarding workflow.</p><div class="docs-links"><a href="https://github.com/jshahbazi/stark/blob/main/CONTRIBUTING.md" class="soft-link">Contributing</a><a href="https://github.com/jshahbazi/stark/blob/main/docs/MODEL_ONBOARDING.md" class="soft-link">Model onboarding</a></div></article>
       </div>
     </section>
   </main>
@@ -88,7 +88,7 @@
         <h2 id="contact-title">Questions or ideas?</h2>
         <p>Email me with questions, feature ideas, or model requests.</p>
       </div>
-      <a href="mailto:john@starkengine.app">john@starkengine.app</a>
+      <a href="mailto:john@starkengine.app" class="soft-link">john@starkengine.app</a>
     </section>
     <div class="wrap footer-top"><a class="wordmark" href="index.html#">STARK<span>Run local AI on your Mac</span></a><div><a href="https://github.com/jshahbazi/stark">GitHub</a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/SECURITY.md">Security</a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/LICENSE">MIT license</a></div></div>
     <section class="wrap cat-note" aria-labelledby="cat-title">
@@ -99,7 +99,7 @@
         <p class="cat-description">Named after my cat, Stark. Excellent company, with strong opinions about lap availability.</p>
       </div>
     </section>
-    <div class="wrap footer-bottom"><p>An open-source Rust/Metal engine derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a>.</p><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Upstream provenance <span aria-hidden="true">↗</span></a></div>
+    <div class="wrap footer-bottom"><p>An open-source Rust/Metal engine derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a>.</p><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md" class="soft-link">Upstream provenance <span aria-hidden="true">↗</span></a></div>
   </footer>
 </body>
 </html>
