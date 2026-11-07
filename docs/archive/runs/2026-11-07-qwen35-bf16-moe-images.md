@@ -76,6 +76,13 @@ expert in a command buffer. No temporary weight matrices multiply that retained
 scratch by model or expert width. This is allocation accounting from source,
 not a measured 35B peak-memory result.
 
+A CPU-only allocation regression uses test-only pool accounting to count every
+scratch request while encoding 32 rows with top-3 experts in one command buffer.
+The 96-route synthetic graph must request less than 512 KiB in aggregate. A
+materialized gather would require over 2 MiB of weight matrices alone for that
+fixture. This bound excludes page rounding and allocator overhead; the test is
+authored for the integration native run and has not run in this worktree.
+
 Image prefix reuse remains disabled. Attention positions/KV, DeltaNet F32
 recurrence, convolution ring/history and image-dependent M-RoPE state lack a
 complete image-backend snapshot/restore contract. Rewinding token counts cannot
