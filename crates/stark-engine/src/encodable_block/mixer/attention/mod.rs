@@ -8,7 +8,11 @@ use crate::{
         Backend, CommandBuffer, CommandBufferEncoding, Kernels,
         kernel::{AttentionKernel, AttentionKernelConfig, AttentionPrepareKernel, SigmoidGateKernel},
     },
-    config::{rope::AnyRoPEConfig, token_mixer::attention::AttentionConfig, weight_matrix::AnyWeightMatrixSpec},
+    config::{
+        rope::AnyRoPEConfig,
+        token_mixer::attention::{AttentionConfig, ImageAttentionPolicy},
+        weight_matrix::AnyWeightMatrixSpec,
+    },
     data_type::DataType,
     encodable_block::{
         batch_topology::BatchTopology,
@@ -36,6 +40,7 @@ pub use state::{ATTENTION_SUFFIX_CAPACITY, AttentionState, KVCacheView};
 pub mod rope;
 
 pub struct Attention<B: Backend> {
+    image_attention_policy: ImageAttentionPolicy,
     head_dim: u32,
     num_q_heads: u32,
     num_kv_heads: Option<u32>,
@@ -260,6 +265,7 @@ impl<B: Backend> Attention<B> {
 
         Ok((
             Self {
+                image_attention_policy: config.image_attention_policy,
                 head_dim,
                 num_q_heads,
                 num_kv_heads,

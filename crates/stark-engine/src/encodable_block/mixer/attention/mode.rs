@@ -220,7 +220,7 @@ impl<B: Backend> Attention<B> {
 
                 self.encode_core(
                     AttentionArguments {
-                        image_span: batch_dim.image_span(),
+                        image_span: batch_dim.image_span().map(Into::into),
                         queries: &queries,
                         keys: &keys,
                         values: &values,
@@ -290,7 +290,7 @@ impl<B: Backend> Attention<B> {
 
         self.encode_core(
             AttentionArguments {
-                image_span: batch_dim.image_span(),
+                image_span: batch_dim.image_span().map(Into::into),
                 queries,
                 keys: state.keys.as_ref(),
                 values: state.values.as_ref(),
@@ -305,7 +305,7 @@ impl<B: Backend> Attention<B> {
 
     fn encode_core(
         &self,
-        arguments: AttentionArguments<
+        mut arguments: AttentionArguments<
             '_,
             B,
             impl BufferRef<Backend = B>,
@@ -315,6 +315,15 @@ impl<B: Backend> Attention<B> {
         >,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
+        use crate::config::token_mixer::attention::ImageAttentionPolicy;
+        arguments.image_span = arguments.image_span.and_then(|mut span| {
+            if self.image_attention_policy == ImageAttentionPolicy::Causal {
+                None
+            } else {
+                span.respects_window = self.image_attention_policy == ImageAttentionPolicy::WindowedSameImage;
+                Some(span)
+            }
+        });
         if let Some(reference) = &self.reference {
             if arguments.trie.is_some() || arguments.sinks.is_some() || arguments.cache.ring_params().is_some() {
                 return Err(

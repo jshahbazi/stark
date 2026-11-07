@@ -13,7 +13,7 @@ PUBLIC KERNEL(AttentionImageSpan)(
     const constant uint& suffix_length, const constant uint& prefix_length,
     const constant uint& ring_offset, const constant uint& has_ring,
     const constant uint& sliding_window_size, const constant uint& image_start,
-    const constant uint& image_end, const constant float& scale,
+    const constant uint& image_end, const constant uint& image_respects_window, const constant float& scale,
     const ThreadContext thread_context,
     const uint group GROUPS((suffix_length * num_heads).div_ceil(4)),
     const uint tid THREADS(128)
@@ -40,7 +40,9 @@ PUBLIC KERNEL(AttentionImageSpan)(
         && (sliding_window_size == 0 || query_position - key_position < sliding_window_size);
     const bool same_image = key >= prefix_length && row >= image_start && row < image_end
         && key - prefix_length >= image_start && key - prefix_length < image_end;
-    if (!causal && !same_image) continue;
+    const bool within_lower_window = sliding_window_size == 0 || key_position > query_position
+        || query_position - key_position < sliding_window_size;
+    if ((!causal && !same_image) || (image_respects_window != 0 && !within_lower_window)) continue;
     const uint kv_base = key * kv_stride + kv_head;
     float score = 0;
     for (uint dim = 0; dim < channels; dim++)

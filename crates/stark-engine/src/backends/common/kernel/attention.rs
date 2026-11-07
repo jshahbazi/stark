@@ -18,7 +18,8 @@ pub(crate) fn encode_image_span<B: Backend>(
     >,
     commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
 ) -> Result<B::ScratchBuffer, B::Error> {
-    let span = arguments.image_span.ok_or(InvalidInput("missing image attention block"))?;
+    let image = arguments.image_span.ok_or(InvalidInput("missing image attention block"))?;
+    let span = image.range;
     let prefix = arguments.cache.prefix_len();
     let rows = arguments.suffix_length;
     let keys = prefix.checked_add(rows).ok_or(InvalidInput("image attention context overflow"))?;
@@ -75,6 +76,7 @@ pub(crate) fn encode_image_span<B: Backend>(
         config.sliding_window_size.unwrap_or(0),
         span[0],
         span[1],
+        u32::from(image.respects_window),
         config.scale.unwrap_or(1.0 / (config.head_dim as f32).sqrt()),
         commands,
     );
@@ -238,7 +240,22 @@ pub struct AttentionArguments<
     pub cache: KVCacheView,
     /// Batch-local [start, end) containing a complete bidirectional image block.
     /// Image blocks must never straddle prefill batches; trie batches cannot use this mask.
-    pub image_span: Option<[u32; 2]>,
+    pub image_span: Option<ImageAttentionSpan>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ImageAttentionSpan {
+    pub range: [u32; 2],
+    pub respects_window: bool,
+}
+
+impl From<[u32; 2]> for ImageAttentionSpan {
+    fn from(range: [u32; 2]) -> Self {
+        Self {
+            range,
+            respects_window: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -254,63 +271,52 @@ mod image_span_tests {
     #[stark_test]
     fn image_attention_matches_independent_grouped_softmax_oracle() {
         for_each_backend!(|B| {
-            let context = <B as Backend>::Context::new().unwrap();
-            let mut queries = vec![0.0f32; 2 * 4 * 64];
-            for head in 0..2 {
-                for row in 0..4 {
-                    queries[(head * 4 + row) * 64] = if head == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    };
+            for (respects_window, window, visible) in [
+                (false, 3, [&[0, 1, 2][..], &[1, 2, 3, 4][..], &[2, 3, 4][..], &[3, 4, 5][..]]),
+                (false, 1, [&[2][..], &[3, 4][..], &[3, 4][..], &[5][..]]),
+                (true, 1, [&[2][..], &[3, 4][..], &[4][..], &[5][..]]),
+            ] {
+                let context = <B as Backend>::Context::new().unwrap();
+                let mut queries = vec![0.0f32; 2 * 4 * 64];
+                for head in 0..2 {
+                    for row in 0..4 {
+                        queries[(head * 4 + row) * 64] = if head == 0 {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                    }
                 }
-            }
-            let mut keys = vec![0.0f32; 6 * 64];
-            let mut values = vec![0.0f32; 6 * 64];
-            for key in 0..6 {
-                keys[key * 64] = key as f32 - 2.0;
-                for dim in 0..64 {
-                    values[key * 64 + dim] = key as f32 + 1.0 + dim as f32 / 64.0;
+                let mut keys = vec![0.0f32; 6 * 64];
+                let mut values = vec![0.0f32; 6 * 64];
+                for key in 0..6 {
+                    keys[key * 64] = key as f32 - 2.0;
+                    for dim in 0..64 {
+                        values[key * 64 + dim] = key as f32 + 1.0 + dim as f32 / 64.0;
+                    }
                 }
-            }
-            let q = create_buffer_with_data::<B, f32>(&context, &queries);
-            let k = create_buffer_with_data::<B, f32>(&context, &keys);
-            let v = create_buffer_with_data::<B, f32>(&context, &values);
-            let kernel = <<B as Backend>::Kernels as Kernels>::AttentionKernel::new(
-                &context,
-                AttentionKernelConfig {
-                    head_dim: 64,
-                    num_groups: 1,
-                    num_q_heads: 2,
-                    has_sinks: false,
-                    is_kv_cache_ring: false,
-                    is_causal: true,
-                    sliding_window_size: Some(3),
-                    scale: Some(1.0),
-                    data_type: DataType::F32,
-                    materialize_prefill_scores: false,
-                    source_bf16_prefill: false,
-                },
-            )
-            .unwrap();
-            let mut commands = context.create_command_buffer(None, None).unwrap();
-            let output = kernel
-                .encode(
-                    AttentionArguments {
-                        queries: &q,
-                        keys: &k,
-                        values: &v,
-                        suffix_length: 4,
-                        trie: None::<&<B as Backend>::GlobalBuffer>,
-                        sinks: None,
-                        cache: KVCacheView::full(2),
-                        image_span: Some([1, 3]),
+                let q = create_buffer_with_data::<B, f32>(&context, &queries);
+                let k = create_buffer_with_data::<B, f32>(&context, &keys);
+                let v = create_buffer_with_data::<B, f32>(&context, &values);
+                let kernel = <<B as Backend>::Kernels as Kernels>::AttentionKernel::new(
+                    &context,
+                    AttentionKernelConfig {
+                        head_dim: 64,
+                        num_groups: 1,
+                        num_q_heads: 2,
+                        has_sinks: false,
+                        is_kv_cache_ring: false,
+                        is_causal: true,
+                        sliding_window_size: Some(window),
+                        scale: Some(1.0),
+                        data_type: DataType::F32,
+                        materialize_prefill_scores: false,
+                        source_bf16_prefill: false,
                     },
-                    &mut commands,
                 )
                 .unwrap();
-            assert!(
-                kernel
+                let mut commands = context.create_command_buffer(None, None).unwrap();
+                let output = kernel
                     .encode(
                         AttentionArguments {
                             queries: &q,
@@ -320,32 +326,51 @@ mod image_span_tests {
                             trie: None::<&<B as Backend>::GlobalBuffer>,
                             sinks: None,
                             cache: KVCacheView::full(2),
-                            image_span: Some([1, 5]),
+                            image_span: Some(ImageAttentionSpan {
+                                range: [1, 3],
+                                respects_window,
+                            }),
                         },
-                        &mut commands
+                        &mut commands,
                     )
-                    .is_err()
-            );
-            let mut readback = create_buffer::<B, f32>(&context, 4 * 2 * 64);
-            commands.encode_copy(&output, &mut readback);
-            commands.end_encoding().submit().wait_until_completed().unwrap();
-            let actual = buffer_to_vec::<B, f32>(&readback);
-            let visible: [&[usize]; 4] = [&[0, 1, 2], &[1, 2, 3, 4], &[2, 3, 4], &[3, 4, 5]];
-            for (row, visible) in visible.into_iter().enumerate() {
-                for head in 0..2 {
-                    let sign = if head == 0 {
-                        1.0f64
-                    } else {
-                        -1.0f64
-                    };
-                    let denominator: f64 = visible.iter().map(|&key| (sign * (key as f64 - 2.0)).exp()).sum();
-                    for dim in 0..64 {
-                        let expected: f64 = visible
-                            .iter()
-                            .map(|&key| (sign * (key as f64 - 2.0)).exp() * (key as f64 + 1.0 + dim as f64 / 64.0))
-                            .sum::<f64>()
-                            / denominator;
-                        assert!((f64::from(actual[(row * 2 + head) * 64 + dim]) - expected).abs() < 0.00001);
+                    .unwrap();
+                assert!(
+                    kernel
+                        .encode(
+                            AttentionArguments {
+                                queries: &q,
+                                keys: &k,
+                                values: &v,
+                                suffix_length: 4,
+                                trie: None::<&<B as Backend>::GlobalBuffer>,
+                                sinks: None,
+                                cache: KVCacheView::full(2),
+                                image_span: Some([1, 5].into()),
+                            },
+                            &mut commands
+                        )
+                        .is_err()
+                );
+                let mut readback = create_buffer::<B, f32>(&context, 4 * 2 * 64);
+                commands.encode_copy(&output, &mut readback);
+                commands.end_encoding().submit().wait_until_completed().unwrap();
+                let actual = buffer_to_vec::<B, f32>(&readback);
+                for (row, visible) in visible.into_iter().enumerate() {
+                    for head in 0..2 {
+                        let sign = if head == 0 {
+                            1.0f64
+                        } else {
+                            -1.0f64
+                        };
+                        let denominator: f64 = visible.iter().map(|&key| (sign * (key as f64 - 2.0)).exp()).sum();
+                        for dim in 0..64 {
+                            let expected: f64 = visible
+                                .iter()
+                                .map(|&key| (sign * (key as f64 - 2.0)).exp() * (key as f64 + 1.0 + dim as f64 / 64.0))
+                                .sum::<f64>()
+                                / denominator;
+                            assert!((f64::from(actual[(row * 2 + head) * 64 + dim]) - expected).abs() < 0.00001);
+                        }
                     }
                 }
             }
