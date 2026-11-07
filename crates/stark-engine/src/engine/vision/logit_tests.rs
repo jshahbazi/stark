@@ -227,6 +227,127 @@ fn qwen35_vision_last_prompt_logit_reference_metal() {
     reference::<crate::backends::metal::Metal>("metal");
 }
 
+/// Same-input projection controls isolate packed matrix arithmetic without
+/// allocating a complete decoder. They are diagnostics, not a parity gate.
+#[cfg(backend = "metal")]
+#[stark_test]
+#[ignore]
+fn qwen35_affine_projection_reference_metal() {
+    use crate::{
+        backends::{
+            common::{BufferMut, CommandBufferExecutable, CommandBufferPending, Context},
+            metal::Metal,
+        },
+        encodable_block::linear::{Gather, LinearMatmul},
+        parameters::{NumericalProfile, ParameterLoader},
+    };
+    let artifact = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private exact artifact path"));
+    let root =
+        PathBuf::from(std::env::var_os("STARK_QWEN_AFFINE_REFERENCE_PATH").expect("set private affine reference path"));
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(root.join("manifest.json")).unwrap_or_else(|_| panic!("private affine manifest unavailable")),
+    )
+    .unwrap_or_else(|_| panic!("invalid private affine manifest"));
+    for (name, _) in ARTIFACT_FILES {
+        let key = match name {
+            "config.json" => "config_sha256",
+            "model.safetensors" => "artifact_sha256",
+            "tokenizer.json" => "tokenizer_sha256",
+            "preprocessor_config.json" => "processor_sha256",
+            "chat_template.jinja" => "template_sha256",
+            _ => unreachable!(),
+        };
+        let mut file =
+            std::fs::File::open(artifact.join(name)).unwrap_or_else(|_| panic!("private affine artifact unavailable"));
+        let hash = file_digest(&mut file).unwrap_or_else(|_| panic!("private affine artifact hashing failed"));
+        assert!(
+            manifest["artifact_identity"][key].as_str() == Some(hash.as_str()),
+            "private affine artifact identity differs"
+        );
+    }
+    let context = <Metal as Backend>::Context::new().unwrap_or_else(|_| panic!("private affine context setup failed"));
+    let file = std::fs::File::open(artifact.join("model.safetensors"))
+        .unwrap_or_else(|_| panic!("private affine weights unavailable"));
+    let loader = ParameterLoader::<Metal>::new(&file, &context)
+        .unwrap_or_else(|_| panic!("private affine parameter setup failed"))
+        .with_numerical_profile(NumericalProfile::Qwen35AffineBF16);
+    let mut metrics = Vec::new();
+    for (case_index, case) in manifest["cases"].as_array().expect("invalid private affine cases").iter().enumerate() {
+        let folder = root.join(case["name"].as_str().expect("invalid private affine case name"));
+        for stage in case["projection_stages"].as_array().expect("missing private affine projection controls") {
+            let input = checked_bytes(&folder, &stage["input"]);
+            let expected = checked_bytes(&folder, &stage["expected"]);
+            let integer = |value: &Value| {
+                value
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                    .expect("invalid private affine dimension")
+            };
+            let m = integer(&stage["input"]["shape"][0]);
+            let k = integer(&stage["input"]["shape"][1]);
+            let n = integer(&stage["expected"]["shape"][1]);
+            assert!(m <= 128 && k <= 17408 && n <= 34816, "private affine projection exceeds bounded diagnostic");
+            assert!(
+                input.len() == m as usize * k as usize * 2 && expected.len() == m as usize * n as usize * 2,
+                "private affine shape differs"
+            );
+            let tree = loader.tree().subtree(stage["tree"].as_str().expect("invalid private affine parameter tree"));
+            let matrix = LinearMatmul::<Metal>::load(
+                &context,
+                tree.metadata("spec").unwrap_or_else(|_| panic!("private affine matrix metadata unavailable")),
+                k,
+                n,
+                DataType::BF16,
+                DataType::BF16,
+                DataType::BF16,
+                &tree,
+                None,
+                None,
+            )
+            .unwrap_or_else(|_| panic!("private affine matrix loading failed"));
+            let mut values =
+                context.create_buffer(input.len()).unwrap_or_else(|_| panic!("private affine input allocation failed"));
+            (&mut values).copyin(&input);
+            let mut commands = context
+                .create_command_buffer(None, None)
+                .unwrap_or_else(|_| panic!("private affine commands unavailable"));
+            let output = matrix
+                .encode_with_a(
+                    crate::backends::common::kernel::matmul::MatmulA::FullPrecision {
+                        values: &values,
+                        offset: 0,
+                    },
+                    m,
+                    None::<Gather<&<Metal as Backend>::GlobalBuffer>>,
+                    &mut commands,
+                )
+                .unwrap_or_else(|_| panic!("private affine encoding failed"));
+            let mut readback =
+                context.create_buffer(expected.len()).unwrap_or_else(|_| panic!("private affine readback unavailable"));
+            commands.encode_copy(&output, &mut readback);
+            commands
+                .end_encoding()
+                .submit()
+                .wait_until_completed()
+                .unwrap_or_else(|_| panic!("private affine execution failed"));
+            let actual = (&readback).as_slice::<bf16>();
+            let (mut error, mut square, mut mismatches) = (0.0f64, 0.0f64, 0usize);
+            for (actual, expected) in actual.iter().zip(expected.chunks_exact(2)) {
+                let expected = bf16::from_bits(u16::from_le_bytes(expected.try_into().unwrap()));
+                let (a, e) = (f64::from(actual.to_f32()), f64::from(expected.to_f32()));
+                assert!(a.is_finite() && e.is_finite(), "nonfinite private affine projection");
+                error += (a - e) * (a - e);
+                square += e * e;
+                mismatches += usize::from(actual.to_bits() != expected.to_bits());
+            }
+            metrics.push(json!({"case_index":case_index,"stage":stage["name"],"elements":actual.len(),
+                "relative_rms":(error/square).sqrt(),"bf16_mismatches":mismatches}));
+        }
+    }
+    println!("{}", json!({"private_affine_projection_metrics":metrics}));
+}
+
 /// Reproduce the worker's first text check without printing request content,
 /// token IDs, generated output or backend exception strings.
 #[cfg(backend = "metal")]

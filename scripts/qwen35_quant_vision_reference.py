@@ -189,6 +189,11 @@ def main():
         action="store_true",
         help="Save private BF16 layer outputs for drift isolation",
     )
+    parser.add_argument(
+        "--capture-projections",
+        action="store_true",
+        help="Save same-input first-layer projection controls",
+    )
     args = parser.parse_args()
     import transformers
 
@@ -346,6 +351,7 @@ def main():
         "vocab_size": model.config.text_config.vocab_size,
         "context_capacity": 512,
         "captures_decoder_layers": args.capture_layers,
+        "captures_first_layer_projections": args.capture_projections,
         "cases": [],
     }
     for old_case in old["cases"]:
@@ -396,6 +402,30 @@ def main():
         mask = torch.ones_like(ids)
         types = (ids == 248056).to(torch.int32)
         handles, layer_files = [], []
+        projection_values = {}
+        if args.capture_projections:
+            first = model.model.language_model.layers[0]
+            modules = {
+                **{
+                    f"gdn_{name}": getattr(first.linear_attn, "in_proj_" + name)
+                    for name in ("qkv", "z", "b", "a")
+                },
+                "gdn_out": first.linear_attn.out_proj,
+                "mlp_up": first.mlp.up_proj,
+                "mlp_gate": first.mlp.gate_proj,
+                "mlp_down": first.mlp.down_proj,
+            }
+            for name, module in modules.items():
+
+                def capture_projection(
+                    _module, arguments, output, *, key=name, values=projection_values
+                ):
+                    values[key] = (
+                        arguments[0].detach().clone(),
+                        output.detach().clone(),
+                    )
+
+                handles.append(module.register_forward_hook(capture_projection))
         if args.capture_layers:
             for index, layer in enumerate(model.model.language_model.layers):
 
@@ -463,6 +493,46 @@ def main():
             )
         for handle in handles:
             handle.remove()
+        if args.capture_projections:
+
+            def save_projection(name, value, *, case_folder=folder):
+                assert value.dtype == torch.bfloat16 and value.shape[0] == 1
+                value = value[0].contiguous()
+                data = (
+                    value.view(torch.uint16).numpy().astype("<u2", copy=False).tobytes()
+                )
+                filename = name + ".bf16"
+                (case_folder / filename).write_bytes(data)
+                return {
+                    "file": filename,
+                    "shape": list(value.shape),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+
+            def joined(names, *, values=projection_values):
+                pairs = [values[name] for name in names]
+                assert all(torch.equal(pair[0], pairs[0][0]) for pair in pairs)
+                return pairs[0][0], torch.cat([pair[1] for pair in pairs], dim=-1)
+
+            definitions = [
+                (
+                    "gdn_in",
+                    "mixer.in_proj",
+                    joined(["gdn_qkv", "gdn_z", "gdn_b", "gdn_a"]),
+                ),
+                ("gdn_out", "mixer.out_proj", projection_values["gdn_out"]),
+                ("mlp_up", "mlp.up_projection", joined(["mlp_up", "mlp_gate"])),
+                ("mlp_down", "mlp.down_projection", projection_values["mlp_down"]),
+            ]
+            case["projection_stages"] = [
+                {
+                    "name": name,
+                    "tree": "decoder.transformer.layers.0." + tree + ".weights",
+                    "input": save_projection(name + "_input", pair[0]),
+                    "expected": save_projection(name + "_expected", pair[1]),
+                }
+                for name, tree, pair in definitions
+            ]
         if args.capture_layers:
             assert len(layer_files) == text["num_hidden_layers"]
             case["decoder_layer_outputs"] = layer_files
