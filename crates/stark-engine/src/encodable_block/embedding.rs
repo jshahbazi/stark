@@ -106,7 +106,11 @@ impl<B: Backend> Embedding<B> {
                 (
                     EmbeddingTying::Tied {
                         table,
-                        readout: readout_kernel(context, data_type)?,
+                        readout: readout_kernel(
+                            context,
+                            data_type,
+                            parameter_tree.numerical_profile() == NumericalProfile::Qwen35AffineBF16,
+                        )?,
                         reference_matmul,
                     },
                     readout_input_hadamard_factors,
@@ -283,8 +287,12 @@ impl<B: Backend> Embedding<B> {
 fn readout_kernel<B: Backend>(
     context: &B::Context,
     data_type: DataType,
+    reference_accumulation: bool,
 ) -> Result<Mutex<<B::Kernels as Kernels>::MatmulKernel>, EmbeddingError<B>> {
-    let kernel = <B::Kernels as Kernels>::MatmulKernel::new(context, data_type, data_type, data_type)
+    let mut kernel = <B::Kernels as Kernels>::MatmulKernel::new(context, data_type, data_type, data_type)
         .map_err(EmbeddingError::BackendError)?;
+    if reference_accumulation {
+        kernel.set_reference_accumulation();
+    }
     Ok(Mutex::new(kernel))
 }

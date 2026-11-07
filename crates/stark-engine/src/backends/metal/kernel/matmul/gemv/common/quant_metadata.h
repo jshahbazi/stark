@@ -14,6 +14,7 @@ private:
   float origin[Tile::ROWS_PER_LANE];
   float bias[Tile::ROWS_PER_LANE];
   bool signed_codes;
+  bool reference_bf16_weights;
 
 public:
   static METAL_FUNC uint group_count(const thread GemvParams& params, uint group_size) {
@@ -27,6 +28,7 @@ public:
       const thread GemvParams& params
   ) thread {
     signed_codes = params.signed_codes;
+    reference_bf16_weights = params.reference_bf16_weights;
     Tile::for_each_output_row([&](auto output_index) STARK_ALWAYS_INLINE {
       constexpr uint R = decltype(output_index)::value;
       const uint row = weight_rows[R];
@@ -60,6 +62,16 @@ public:
       thread float (&values)[QuantChunk<BITS>::VALUES]
   ) const thread {
     QuantChunk<BITS>::decode(words, chunk, values, origin[row], signed_codes);
+    if constexpr (B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant) {
+      if (reference_bf16_weights) {
+        // The explicit affine reference materializes each effective
+        // coefficient in BF16 before multiplying by its activation.
+        METAL_PRAGMA_UNROLL
+        for (uint i = 0; i < QuantChunk<BITS>::VALUES; i++) {
+          values[i] = float(bfloat(fma(scale[row], values[i], bias[row])));
+        }
+      }
+    }
   }
 
   METAL_FUNC void fold(
@@ -78,6 +90,9 @@ public:
 
 private:
   METAL_FUNC float finish(float prior, float partial, float input_sum, uint row) const thread {
+    if (reference_bf16_weights) {
+      return prior + partial;
+    }
     float result = fma(scale[row], partial, prior);
     if constexpr (B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant) {
       result = fma(bias[row], input_sum, result);
