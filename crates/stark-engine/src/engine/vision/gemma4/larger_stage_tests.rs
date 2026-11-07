@@ -108,7 +108,7 @@ fn gemma4_larger_tower_stage_reference_metal() {
                 .unwrap();
             for streams in [4, 32] {
                 let mut result = vec![0.0f32; rows.min(8) * 1152];
-                crate::backends::cpu::kernel::matmul::vision::vision_matmul_bf16(
+                crate::backends::cpu::kernel::vision_matmul_bf16(
                     patches.patches.as_ptr(),
                     patch_weights.as_ptr(),
                     result.as_mut_ptr(),
@@ -134,7 +134,7 @@ fn gemma4_larger_tower_stage_reference_metal() {
                 .read_slice::<bf16>()
                 .unwrap();
             let mut output = vec![bf16::ZERO; rows / 9 * 1152];
-            crate::backends::cpu::kernel::attention::gemma4_vision::gemma4_vision_pool_standardized_bf16(
+            crate::backends::cpu::kernel::gemma4_vision_pool_standardized_bf16(
                 source.as_ptr(),
                 bias.as_ptr(),
                 scale.as_ptr(),

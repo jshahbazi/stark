@@ -25,6 +25,11 @@ mod tensor_add_bias;
 mod tensor_add_scale;
 mod weaver;
 
+#[cfg(test)]
+pub(crate) use attention::gemma4_vision::gemma4_vision_pool_standardized_bf16;
+#[cfg(test)]
+pub(crate) use matmul::vision::vision_matmul_bf16;
+
 include!(concat!(env!("OUT_DIR"), "/cpu.rs"));
 
 pub struct CpuKernels;
