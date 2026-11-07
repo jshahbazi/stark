@@ -36,6 +36,11 @@ impl<B: Backend> MlpGateActMulEncodable<B> {
     ) -> Result<Self, B::Error> {
         let (hadamard_factors, activation_quantization) = input_preparation
             .map_or((None, None), |preparation| (Some(preparation.rht_signs), preparation.activation_quantization));
+        if activation.act_type() == ActivationType::SILUMaterializedSigmoid
+            && (data_type != DataType::BF16 || activation.alpha() != 1.0 || reference_bf16)
+        {
+            return Err(InvalidInput("materialized sigmoid requires BF16 unit-slope SiLU").into());
+        }
         let reference = if reference_bf16 {
             if data_type != DataType::BF16
                 || activation.act_type() != ActivationType::SILU

@@ -41,6 +41,30 @@ impl<B: Backend> Attention<B> {
         self.num_kv_heads.is_some() && self.ring_capacity.is_none()
     }
 
+    fn source_rope_arguments<'a>(
+        &self,
+        rope: Option<&'a PrecalculatedRoPE<B>>,
+    ) -> Result<(Option<&'a B::ConstantBuffer>, Option<f32>, Option<u32>, Option<&'a B::ConstantBuffer>), B::Error>
+    {
+        if !self.source_rope {
+            return Ok((None, None, None, None));
+        }
+        let rope = rope.ok_or(crate::backends::common::InvalidInput("source RoPE requires scalar tables"))?;
+        let parameters = rope
+            .source_parameters
+            .ok_or(crate::backends::common::InvalidInput("unsupported source RoPE configuration"))?;
+        let positions = rope
+            .source_positions
+            .as_ref()
+            .ok_or(crate::backends::common::InvalidInput("source RoPE requires scalar positions"))?;
+        if parameters.proportional != self.source_proportional || parameters.yarn != self.source_yarn {
+            return Err(crate::backends::common::InvalidInput("source RoPE profile mismatch").into());
+        }
+        if rope.source_yarn_parameters.is_some() != self.source_yarn {
+            return Err(crate::backends::common::InvalidInput("source YaRN parameters mismatch").into());
+        }
+        Ok((Some(positions), Some(parameters.base), Some(parameters.rotary_dim), rope.source_yarn_parameters.as_ref()))
+    }
     #[cfg(feature = "scoring-last-layer-pruning")]
     pub(crate) fn supports_scoring_cache_only(&self) -> bool {
         self.supports_cache_only()
@@ -111,24 +135,30 @@ impl<B: Backend> Attention<B> {
         #[cfg(not(feature = "attention-kv-only"))]
         let qkvg = self.projection.project(hidden, batch_dim.size(), command_buffer)?;
         #[cfg(feature = "attention-kv-only")]
-        {
-            let prefix_len = state.view().prefix_len();
-            self.prepare_kv_only.as_ref().expect("KV-only prepare requires owned full attention").encode(
-                &qkvg,
-                state.keys.as_mut(),
-                state.values.as_mut(),
-                precalculated_rope.map(|rope| &rope.cosines),
-                precalculated_rope.map(|rope| &rope.sines),
-                self.num_q_heads,
-                self.num_kv_heads.expect("KV-only prepare requires KV heads"),
-                self.head_dim,
-                precalculated_rope.map(|rope| rope.dim),
-                prefix_len,
-                self.projection_dim,
-                batch_dim.size(),
-                command_buffer,
-            );
-        }
+        let prefix_len = state.view().prefix_len();
+        #[cfg(feature = "attention-kv-only")]
+        let (source_positions, source_base, source_rotary_dim, source_yarn_parameters) =
+            self.source_rope_arguments(precalculated_rope)?;
+        #[cfg(feature = "attention-kv-only")]
+        self.prepare_kv_only.as_ref().expect("KV-only prepare requires owned full attention").encode(
+            &qkvg,
+            state.keys.as_mut(),
+            state.values.as_mut(),
+            precalculated_rope.map(|rope| &rope.cosines),
+            precalculated_rope.map(|rope| &rope.sines),
+            source_positions,
+            source_base,
+            source_rotary_dim,
+            source_yarn_parameters,
+            self.num_q_heads,
+            self.num_kv_heads.expect("KV-only prepare requires KV heads"),
+            self.head_dim,
+            precalculated_rope.map(|rope| rope.dim),
+            prefix_len,
+            self.projection_dim,
+            batch_dim.size(),
+            command_buffer,
+        );
         #[cfg(not(feature = "attention-kv-only"))]
         self.prepare_cache_only(&qkvg, state, precalculated_rope, batch_dim, command_buffer)?;
         Ok(())
@@ -190,6 +220,7 @@ impl<B: Backend> Attention<B> {
 
                 self.encode_core(
                     AttentionArguments {
+                        image_span: batch_dim.image_span(),
                         queries: &queries,
                         keys: &keys,
                         values: &values,
@@ -259,6 +290,7 @@ impl<B: Backend> Attention<B> {
 
         self.encode_core(
             AttentionArguments {
+                image_span: batch_dim.image_span(),
                 queries,
                 keys: state.keys.as_ref(),
                 values: state.values.as_ref(),
@@ -325,6 +357,8 @@ impl<B: Backend> Attention<B> {
         } else {
             command_buffer.allocate_scratch_for_shape(&[self.num_q_heads, batch_dim, self.head_dim], self.data_type)?
         };
+        let (source_positions, source_base, source_rotary_dim, source_yarn_parameters) =
+            self.source_rope_arguments(precalculated_rope)?;
         self.prepare.encode(
             input,
             &mut queries,
@@ -332,6 +366,10 @@ impl<B: Backend> Attention<B> {
             Some(values),
             precalculated_rope.map(|precalculated_rope| &precalculated_rope.cosines),
             precalculated_rope.map(|precalculated_rope| &precalculated_rope.sines),
+            source_positions,
+            source_base,
+            source_rotary_dim,
+            source_yarn_parameters,
             num_q_heads,
             Some(num_kv_heads),
             self.head_dim,
@@ -353,6 +391,8 @@ impl<B: Backend> Attention<B> {
     ) -> Result<B::ScratchBuffer, B::Error> {
         let mut queries =
             command_buffer.allocate_scratch_for_shape(&[self.num_q_heads, batch_dim, self.head_dim], self.data_type)?;
+        let (source_positions, source_base, source_rotary_dim, source_yarn_parameters) =
+            self.source_rope_arguments(precalculated_rope)?;
         self.prepare.encode(
             qkvg,
             &mut queries,
@@ -360,6 +400,10 @@ impl<B: Backend> Attention<B> {
             None::<&mut B::ScratchBuffer>,
             precalculated_rope.map(|rope| &rope.cosines),
             precalculated_rope.map(|rope| &rope.sines),
+            source_positions,
+            source_base,
+            source_rotary_dim,
+            source_yarn_parameters,
             self.num_q_heads,
             None,
             self.head_dim,

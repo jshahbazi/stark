@@ -60,6 +60,9 @@ impl<B: Backend> Normalization<B> {
         parameter_tree: &ParameterTree<B>,
         context: &B::Context,
     ) -> Result<Self, NormalizationNewError<B>> {
+        config
+            .validate_mlx_bf16_reduction(data_type, element_count, hadamard_factors.is_some())
+            .map_err(|error| NormalizationNewError::Backend(error.into()))?;
         let (copy_to_shortcut, residual_add) = match shortcut_mode {
             ShortcutMode::None => (false, false),
             ShortcutMode::Copy => (true, false),
@@ -119,6 +122,7 @@ impl<B: Backend> Normalization<B> {
             scale_output,
             biases.is_some(),
             scales.is_some(),
+            config.mlx_bf16_reduction,
         )
         .map_err(NormalizationNewError::Backend)?;
 

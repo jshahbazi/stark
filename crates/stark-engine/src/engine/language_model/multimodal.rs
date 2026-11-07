@@ -1,4 +1,4 @@
-//! Private, owned inputs for the first native Qwen3.5 image fusion path.
+//! Private, owned image inputs with explicit Qwen or Gemma position semantics.
 //!
 //! A projected image is bound to the loaded decoder that produced it. Validation
 //! here is entirely on the host and must finish before any device allocation or
@@ -41,10 +41,19 @@ pub(crate) struct ProjectedImage {
 pub(crate) struct MultimodalPrefill {
     pub(crate) tokens: Box<[u64]>,
     pub(crate) image: ProjectedImage,
-    /// Per-token temporal, height and width rotary positions.
+    /// Spatial rotary coordinates for Qwen; sequential triples for Gemma host
+    /// validation only (Gemma dispatch uses ordinary scalar text RoPE).
     pub(crate) positions: Box<[[u32; 3]]>,
     /// Applied only to rotary positions for subsequent text, never KV offsets.
     pub(crate) position_delta: i64,
+    pub(crate) mode: MultimodalMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MultimodalMode {
+    Qwen35Spatial,
+    Gemma4Sequential,
+    ScalarBidirectional,
 }
 
 impl ImageGrid {
@@ -89,6 +98,31 @@ impl MultimodalPrefill {
         vocab_size: u32,
         context_capacity: u32,
     ) -> Result<Self, InvalidInput> {
+        Self::try_new_internal(
+            tokens,
+            image,
+            special_ids,
+            expected_identity,
+            expected_model_dim,
+            expected_dtype,
+            vocab_size,
+            context_capacity,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_new_internal(
+        tokens: Box<[u64]>,
+        image: ProjectedImage,
+        special_ids: ImageTokenIds,
+        expected_identity: &Arc<()>,
+        expected_model_dim: u32,
+        expected_dtype: DataType,
+        vocab_size: u32,
+        context_capacity: u32,
+        check_video_token: bool,
+    ) -> Result<Self, InvalidInput> {
         if !Arc::ptr_eq(&image.model_identity, expected_identity) {
             return Err(InvalidInput("projected image belongs to a different loaded model"));
         }
@@ -116,7 +150,12 @@ impl MultimodalPrefill {
         if image.features.iter().any(|value| !value.is_finite()) {
             return Err(InvalidInput("projected image contains nonfinite features"));
         }
-        let ids = [special_ids.image, special_ids.vision_start, special_ids.vision_end, special_ids.video];
+        let all_ids = [special_ids.image, special_ids.vision_start, special_ids.vision_end, special_ids.video];
+        let ids = &all_ids[..if check_video_token {
+            4
+        } else {
+            3
+        }];
         if ids.iter().enumerate().any(|(index, id)| *id >= u64::from(vocab_size) || ids[..index].contains(id)) {
             return Err(InvalidInput("invalid or overlapping image special token IDs"));
         }
@@ -140,7 +179,7 @@ impl MultimodalPrefill {
             if (token == special_ids.image && !is_image)
                 || (token == special_ids.vision_start && index != wrapper_start)
                 || (token == special_ids.vision_end && index != image_end)
-                || token == special_ids.video
+                || (check_video_token && token == special_ids.video)
             {
                 return Err(InvalidInput("surplus or unsupported vision special token"));
             }
@@ -182,7 +221,120 @@ impl MultimodalPrefill {
             image,
             positions: positions.into_boxed_slice(),
             position_delta,
+            mode: MultimodalMode::Qwen35Spatial,
         })
+    }
+
+    /// Gemma image slots consume ordinary sequential text positions. Only PLE
+    /// token lookup uses token 0; decoder/cache token IDs remain the real IDs.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_gemma4(
+        tokens: Box<[u64]>,
+        image: ProjectedImage,
+        special_ids: ImageTokenIds,
+        audio_token_id: u64,
+        expected_identity: &Arc<()>,
+        expected_model_dim: u32,
+        expected_dtype: DataType,
+        vocab_size: u32,
+        context_capacity: u32,
+    ) -> Result<Self, InvalidInput> {
+        if audio_token_id >= u64::from(vocab_size)
+            || [special_ids.image, special_ids.vision_start, special_ids.vision_end, special_ids.video]
+                .contains(&audio_token_id)
+            || tokens.contains(&audio_token_id)
+        {
+            return Err(InvalidInput("unsupported or overlapping Gemma audio token"));
+        }
+        // Share ownership, dtype, finite-feature, exact wrapper/span, vocabulary
+        // and checked-grid validation with the existing image path.
+        let mut input = Self::try_new(
+            tokens,
+            image,
+            special_ids,
+            expected_identity,
+            expected_model_dim,
+            expected_dtype,
+            vocab_size,
+            context_capacity,
+        )?;
+        for (index, position) in input.positions.iter_mut().enumerate() {
+            *position = [u32::try_from(index).map_err(|_| InvalidInput("Gemma image position overflow"))?; 3];
+        }
+        input.position_delta = 0;
+        input.mode = MultimodalMode::Gemma4Sequential;
+        Ok(input)
+    }
+
+    pub(crate) fn uses_spatial_positions(&self) -> bool {
+        self.mode == MultimodalMode::Qwen35Spatial
+    }
+
+    /// Gemma 3 uses scalar RoPE and an OR-mask over the complete image block.
+    /// It has no video marker in this admitted static-image protocol.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_gemma3(
+        tokens: Box<[u64]>,
+        image: ProjectedImage,
+        image_id: u64,
+        start_id: u64,
+        end_id: u64,
+        expected_identity: &Arc<()>,
+        expected_model_dim: u32,
+        expected_dtype: DataType,
+        vocab_size: u32,
+        context_capacity: u32,
+    ) -> Result<Self, InvalidInput> {
+        let mut input = Self::try_new_internal(
+            tokens,
+            image,
+            ImageTokenIds {
+                image: image_id,
+                vision_start: start_id,
+                vision_end: end_id,
+                video: 0,
+            },
+            expected_identity,
+            expected_model_dim,
+            expected_dtype,
+            vocab_size,
+            context_capacity,
+            false,
+        )?;
+        for (index, position) in input.positions.iter_mut().enumerate() {
+            *position = [u32::try_from(index).map_err(|_| InvalidInput("scalar image position overflow"))?; 3];
+        }
+        input.position_delta = 0;
+        input.mode = MultimodalMode::ScalarBidirectional;
+        Ok(input)
+    }
+
+    pub(crate) fn bidirectional_image_range(&self) -> Option<Range<usize>> {
+        (self.mode == MultimodalMode::ScalarBidirectional).then(|| {
+            let start = self.image.token_start;
+            start..start + self.image.features.len() / self.image.model_dim as usize
+        })
+    }
+
+    pub(crate) fn chunk_image_span(
+        &self,
+        start: usize,
+        len: usize,
+    ) -> Result<Option<[u32; 2]>, InvalidInput> {
+        let Some(image) = self.bidirectional_image_range() else {
+            return Ok(None);
+        };
+        let end = start.checked_add(len).ok_or(InvalidInput("image attention chunk overflow"))?;
+        if start >= image.end || end <= image.start {
+            return Ok(None);
+        }
+        if start > image.start || end < image.end {
+            return Err(InvalidInput("bidirectional image block straddles prefill batches"));
+        }
+        Ok(Some([
+            u32::try_from(image.start - start).map_err(|_| InvalidInput("image batch offset overflow"))?,
+            u32::try_from(image.end - start).map_err(|_| InvalidInput("image batch offset overflow"))?,
+        ]))
     }
 
     /// Return the chunk-local token rows and corresponding feature rows to copy.
@@ -283,6 +435,111 @@ mod tests {
         let continuation =
             [0, 1, 2].map(|height| scalar_continuation_position(11, height, prefill.position_delta).unwrap());
         assert_eq!(continuation, [8, 9, 10]);
+    }
+
+    #[stark_test]
+    fn gemma_images_keep_sequential_positions_and_zero_continuation_delta() {
+        let identity = Arc::new(());
+        let grid = ImageGrid {
+            temporal: 1,
+            height: 6,
+            width: 9,
+            merge_size: 3,
+        };
+        let tokens = [1, 91, 90, 90, 90, 90, 90, 90, 92, 2];
+        let prefill = MultimodalPrefill::try_new_gemma4(
+            tokens.into(),
+            image(&identity, grid, 2),
+            SPECIAL_IDS,
+            94,
+            &identity,
+            4,
+            DataType::BF16,
+            100,
+            32,
+        )
+        .unwrap();
+        assert!(!prefill.uses_spatial_positions());
+        assert_eq!(prefill.position_delta, 0);
+        assert_eq!(prefill.positions.as_ref(), &(0..tokens.len() as u32).map(|index| [index; 3]).collect::<Vec<_>>());
+        assert_eq!(prefill.chunk_feature_range(0, 4).unwrap(), Some((2..4, 0..2)));
+        assert_eq!(prefill.chunk_feature_range(4, 4).unwrap(), Some((0..4, 2..6)));
+        assert_eq!(prefill.chunk_feature_range(8, 2).unwrap(), None);
+        assert_eq!(prefill.tokens.as_ref(), &tokens);
+    }
+
+    #[stark_test]
+    fn gemma_images_reject_audio_forged_spans_and_foreign_features() {
+        let identity = Arc::new(());
+        let grid = ImageGrid {
+            temporal: 1,
+            height: 6,
+            width: 9,
+            merge_size: 3,
+        };
+        let valid = [1, 91, 90, 90, 90, 90, 90, 90, 92, 2];
+        for audio in [90, 91, 92, 93, 100] {
+            assert!(
+                MultimodalPrefill::try_new_gemma4(
+                    valid.into(),
+                    image(&identity, grid, 2),
+                    SPECIAL_IDS,
+                    audio,
+                    &identity,
+                    4,
+                    DataType::BF16,
+                    100,
+                    32
+                )
+                .is_err()
+            );
+        }
+        for (index, token) in [(0, 94), (9, 94), (0, 90), (1, 2), (3, 2), (8, 2)] {
+            let mut tokens = valid;
+            tokens[index] = token;
+            assert!(
+                MultimodalPrefill::try_new_gemma4(
+                    tokens.into(),
+                    image(&identity, grid, 2),
+                    SPECIAL_IDS,
+                    94,
+                    &identity,
+                    4,
+                    DataType::BF16,
+                    100,
+                    32
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            MultimodalPrefill::try_new_gemma4(
+                valid.into(),
+                image(&Arc::new(()), grid, 2),
+                SPECIAL_IDS,
+                94,
+                &identity,
+                4,
+                DataType::BF16,
+                100,
+                32
+            )
+            .is_err()
+        );
+        assert!(
+            MultimodalPrefill::try_new_gemma4(
+                valid.into(),
+                image(&identity, grid, 2),
+                SPECIAL_IDS,
+                94,
+                &identity,
+                4,
+                DataType::BF16,
+                100,
+                9
+            )
+            .is_err()
+        );
     }
 
     #[stark_test]

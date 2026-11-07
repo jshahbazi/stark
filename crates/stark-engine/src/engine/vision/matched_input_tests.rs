@@ -326,6 +326,8 @@ fn attention<B: Backend>(backend: &str) {
                     sliding_window_size: None,
                     scale: Some(scale),
                     data_type: DataType::BF16,
+                    materialize_prefill_scores: false,
+                    source_bf16_prefill: false,
                 },
             )
             .unwrap();
@@ -336,6 +338,7 @@ fn attention<B: Backend>(backend: &str) {
                     let result = generic
                         .encode(
                             AttentionArguments {
+                                image_span: None,
                                 queries: &queries,
                                 keys: &keys,
                                 values: &values,

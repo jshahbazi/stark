@@ -40,6 +40,7 @@ use crate::{
 };
 
 mod family;
+pub mod gemma4;
 
 #[cfg(test)]
 mod logit_tests;
