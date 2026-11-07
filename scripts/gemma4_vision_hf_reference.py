@@ -125,10 +125,12 @@ def run(args):
             )
             stages = {}
             hooks = []
-            focused = args.capture_full_attention_case is not None
-            capture = args.capture_stages and (
-                not focused or index == args.capture_full_attention_case
-            )
+            focus_case = args.capture_full_attention_case
+            focus_mode = "attention"
+            if args.capture_mlp_down_case is not None:
+                focus_case, focus_mode = args.capture_mlp_down_case, "mlp"
+            focused = focus_case is not None
+            capture = args.capture_stages and (not focused or index == focus_case)
             original_rotary = modeling_gemma4.apply_multidimensional_rope
             rotary_calls = [0]
 
@@ -141,9 +143,9 @@ def run(args):
                 _valid=valid,
                 _index=index,
                 _stages=stages,
-                _focused=focused,
+                _focused=focus_mode if focused else None,
             ):
-                if _focused:
+                if _focused == "attention":
                     if tag not in {
                         "prepared_queries_0",
                         "prepared_keys_0",
@@ -152,6 +154,19 @@ def run(args):
                     }:
                         return
                     full, head0 = True, False
+                elif _focused == "mlp":
+                    allowed = {
+                        "pre_ff_norm_0",
+                        "gate_pre_gelu_0",
+                        "gate_post_gelu_0",
+                        "up_projection_0",
+                        "mlp_product_0",
+                        "mlp_down_input_0",
+                        "mlp_down_output_0",
+                    }
+                    if tag not in allowed:
+                        return
+                    full = tag in {"mlp_down_input_0", "mlp_down_output_0"}
                 value = value.detach()
                 if value.ndim >= 3:
                     value = value[0, _valid]
@@ -205,6 +220,27 @@ def run(args):
                     )
                 )
                 first = tower.encoder.layers[0]
+                if args.capture_mlp_down_case is not None:
+                    for tag, module in [
+                        ("pre_ff_norm_0", first.pre_feedforward_layernorm),
+                        ("gate_pre_gelu_0", first.mlp.gate_proj),
+                        ("gate_post_gelu_0", first.mlp.act_fn),
+                        ("up_projection_0", first.mlp.up_proj),
+                        ("mlp_down_output_0", first.mlp.down_proj),
+                    ]:
+                        hooks.append(
+                            module.register_forward_hook(
+                                lambda _m, _i, value, tag=tag: save_stage(tag, value)
+                            )
+                        )
+
+                    def capture_down(_module, inputs):
+                        save_stage("mlp_down_input_0", inputs[0], full=True)
+                        save_stage("mlp_product_0", inputs[0])
+
+                    hooks.append(
+                        first.mlp.down_proj.register_forward_pre_hook(capture_down)
+                    )
                 hooks.append(
                     first.input_layernorm.register_forward_hook(
                         lambda _m, _i, value: save_stage("input_norm_0", value)
@@ -312,6 +348,9 @@ def run(args):
     if args.capture_full_attention_case is not None:
         manifest["stage_focus"] = "first-layer-full-attention"
         manifest["stage_case_index"] = args.capture_full_attention_case
+    if args.capture_mlp_down_case is not None:
+        manifest["stage_focus"] = "first-layer-mlp-down"
+        manifest["stage_case_index"] = args.capture_mlp_down_case
     (output / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
     return {
         "passed": True,
@@ -327,10 +366,15 @@ def main():
     for name in ("source", "fixtures", "output", "reference-lock"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--capture-stages", action="store_true")
-    parser.add_argument("--capture-full-attention-case", type=int, choices=(0, 1, 2))
+    focus = parser.add_mutually_exclusive_group()
+    focus.add_argument("--capture-full-attention-case", type=int, choices=(0, 1, 2))
+    focus.add_argument("--capture-mlp-down-case", type=int, choices=(0, 1, 2))
     args = parser.parse_args()
-    if args.capture_full_attention_case is not None and not args.capture_stages:
-        parser.error("--capture-full-attention-case requires --capture-stages")
+    if (
+        args.capture_full_attention_case is not None
+        or args.capture_mlp_down_case is not None
+    ) and not args.capture_stages:
+        parser.error("focused captures require --capture-stages")
     try:
         with (
             open(os.devnull, "w") as quiet,

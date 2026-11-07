@@ -480,14 +480,21 @@ impl<B: Backend> Gemma4VisionTower<B> {
                 commands,
             );
             let normalized = block.pre_ff.encode(&hidden, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("pre_ff_norm", Some(layer as u32), &normalized, commands).map_err(VisionTowerError::Backend)?;
             let mut gate = block.gate.encode(&normalized, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("gate_pre_gelu", Some(layer as u32), &gate, commands).map_err(VisionTowerError::Backend)?;
             let up = block.up.encode(&normalized, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("up_projection", Some(layer as u32), &up, commands).map_err(VisionTowerError::Backend)?;
             self.gelu.encode(&mut gate, rows * self.mlp, 1, commands);
+            observer("gate_post_gelu", Some(layer as u32), &gate, commands).map_err(VisionTowerError::Backend)?;
             let mut product = commands
                 .allocate_scratch_for_shape(&[rows, self.mlp], DataType::BF16)
                 .map_err(VisionTowerError::Backend)?;
             self.product.encode(&gate, &up, &mut product, rows * self.mlp, commands);
+            observer("mlp_product", Some(layer as u32), &product, commands).map_err(VisionTowerError::Backend)?;
+            observer("mlp_down_input", Some(layer as u32), &product, commands).map_err(VisionTowerError::Backend)?;
             let down = block.down.encode(&product, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("mlp_down_output", Some(layer as u32), &down, commands).map_err(VisionTowerError::Backend)?;
             let residual = block.post_ff.encode(&down, rows, commands).map_err(VisionTowerError::Backend)?;
             self.add.encode(
                 None::<&B::ScratchBuffer>,

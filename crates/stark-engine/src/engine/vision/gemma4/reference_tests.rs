@@ -11,6 +11,8 @@ use super::*;
 
 #[path = "larger_stage_tests.rs"]
 mod larger_stages;
+#[path = "mlp_stage_tests.rs"]
+mod mlp_stages;
 
 fn read(
     root: &Path,
