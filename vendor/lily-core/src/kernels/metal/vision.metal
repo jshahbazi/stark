@@ -200,7 +200,6 @@ static void vision_attn_body(device bfloat* qkv,
 
     for (int k0 = 0; k0 < len; k0 += BK) {
         auto kSlice = tK.slice(0, k0);
-        auto vSlice = tV.slice(0, k0);
         auto sT = qk_op.template get_destination_cooperative_tensor<decltype(tQ), KSlice, float>();
         qk_op.run(tQ, kSlice, sT);
         sT.store(tS);
@@ -223,9 +222,10 @@ static void vision_attn_body(device bfloat* qkv,
         const float alpha = exp(prev_max - mx);
         float psum = 0.0f;
         for (uint j = j0; j < j0 + cols; ++j) {
-            const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
-            const float p = int(j) < limit ? exp(score - mx) : 0.0f;
-            psum += p;
+            if (int(j) < limit) {
+                const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
+                psum += exp(score - mx);
+            }
         }
         for (uint off = 1u; off < LANES; off <<= 1) {
             psum += simd_shuffle_xor(psum, off);
@@ -250,9 +250,11 @@ static void vision_attn_body(device bfloat* qkv,
         threadgroup_barrier(mem_flags::mem_threadgroup);
         const int limit = min(len - k0, BK);
         for (uint j = j0; j < j0 + cols; ++j) {
-            const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
-            const float probability = int(j) < limit
-                ? exp(score - row_max[row]) / row_sum[row] : 0.0f;
+            float probability = 0.0f;
+            if (int(j) < limit) {
+                const float score = float(bfloat(float(bfloat(s_tile[row * BK + j])) * scale));
+                probability = exp(score - row_max[row]) / row_sum[row];
+            }
             p_tile[row * BK + j] = bfloat(probability);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -289,9 +291,8 @@ kernel void NAME(device bfloat* qkv   [[buffer(0)]],                            
         tg, tid, tg_size);                                                               \
 }
 
-// Head dim 72 (16 heads of 1152): 32-query tiles over 64-key tiles. Measured
-// at 8 160 patches against 16 x 128, 32 x 128 and 64 x 64 tiles, this is the
-// fastest by a few percent (12 KB of threadgroup memory instead of 24 lets two
-// threadgroups share a core); 256-key tiles exceed the 32 KB limit.
+// Head dim 72 (16 heads of 1152): retain the upstream 32-query/64-key geometry
+// and roughly 12 KB threadgroup scratch. Upstream's one-pass speed comparison
+// does not qualify this two-pass implementation; it needs separate timing.
 VISION_ATTN_KERNEL(vision_attn_nax_d72, 72, 32, 64, 4)
 #endif
