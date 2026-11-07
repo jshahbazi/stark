@@ -108,7 +108,7 @@ impl<B: Backend> Embedding<B> {
                     None
                 };
                 let use_reference_affine = parameter_tree.numerical_profile() == NumericalProfile::Qwen35AffineBF16
-                    && !has_source_affine_policy::<B>(table.as_matrix().unwrap().matmul_b());
+                    && !has_source_affine_policy::<B>(&table.as_matrix().unwrap().matmul_b());
                 let reference_affine = if use_reference_affine {
                     if data_type != DataType::BF16 {
                         return Err(EmbeddingError::UnsupportedConfiguration(
@@ -279,7 +279,7 @@ impl<B: Backend> Embedding<B> {
                         .map_err(EmbeddingError::BackendError)?
                 } else if let Some(reference) = reference_affine
                     && !is_affine_dot_witness_active::<B>()
-                    && !has_source_affine_policy::<B>(table.as_matrix().expect("tied table must be matrix").matmul_b())
+                    && !has_source_affine_policy::<B>(&table.as_matrix().expect("tied table must be matrix").matmul_b())
                 {
                     reference
                         .encode(

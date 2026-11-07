@@ -20,7 +20,7 @@ const MAX_BANK_ROWS: u32 = 1 << 28;
 
 /// Explicit source arithmetic markers outrank this profile's default dot.
 /// Plain mixed-width row partitions do not carry these numerical markers.
-pub(crate) fn has_source_affine_policy<B: Backend>(weights: MatmulB<impl BufferRef<Backend = B>>) -> bool {
+pub(crate) fn has_source_affine_policy<B: Backend>(weights: &MatmulB<impl BufferRef<Backend = B>>) -> bool {
     weights
         .quantized()
         .is_some_and(|q| q.params.materializes_affine_input_sum() || !q.params.source_output_widths().is_empty())
@@ -143,7 +143,7 @@ impl<B: Backend> ReferenceAffineBF16Matmul<B> {
     ) -> Result<B::ScratchBuffer, B::Error> {
         let invalid = || InvalidInput("invalid Qwen affine reference buffers or metadata");
         let plan = ReferenceAffinePlan::new(m, n, k)?;
-        if has_source_affine_policy::<B>(weights) {
+        if has_source_affine_policy::<B>(&weights) {
             return Err(InvalidInput("explicit source affine policies require their existing backend route").into());
         }
         let (weights, scales, biases, bits, strides) = match weights {
