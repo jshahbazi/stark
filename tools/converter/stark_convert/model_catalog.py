@@ -757,7 +757,7 @@ def family_catalog(
         def inspect(repo):
             remaining()
             try:
-                if repo in native_items:
+                if repo in native_items and repo not in pins:
                     return dict(native_items[repo])
                 requested_revision = pins.get(repo)
                 try:
@@ -798,6 +798,12 @@ def family_catalog(
                 verdict = preflight_model(config, mode="text", expected_architecture=family)
                 if verdict["status"] != "conditional":
                     return None
+                if repo in native_items:
+                    # Retained image choices keep their exact native preparation
+                    # identity after the pinned metadata check. A moved revision
+                    # cannot silently replace the reviewed source or fall back
+                    # to a text-only generic conversion.
+                    return dict(native_items[repo])
                 quantization = _quantization(config, info, entry, family=family)
                 if quantization is None:
                     return None
