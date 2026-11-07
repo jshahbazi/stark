@@ -387,14 +387,6 @@ def preflight_model(
     # in every mode, or suggest an alternative already known to be impossible.
     if mode is not None and family["modes"][mode]["status"] == "unsupported":
         return _report(family, mode, "unsupported", "unsupported_mode", family["modes"][mode]["message"])
-    if quantized and mode == "vision-language":
-        return _report(
-            family,
-            mode,
-            "unsupported",
-            "unsupported_vision_weight_format",
-            "Image input requires merged BF16 weights; the declared MLX format is limited to text paths.",
-        )
     if mode == "vision-language":
         if not isinstance(config.get("vision_config"), dict):
             report = _report(

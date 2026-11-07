@@ -498,8 +498,12 @@ impl<B: Backend> Engine<B> {
         let model_dim = language_config.decoder_config.transformer_config.model_dim;
         let vocab_size = language_config.decoder_config.vocab_size;
         let weights = verified.get("model.safetensors").ok_or(InvalidInput("missing native vision weights"))?;
-        let loader = ParameterLoader::new(weights, &*self.context)?
-            .with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+        let numerical_profile = if matches!(admission.profile, family::FamilyProfile::AffineV3) {
+            NumericalProfile::Qwen35AffineBF16
+        } else {
+            NumericalProfile::Qwen35ReferenceBF16
+        };
+        let loader = ParameterLoader::new(weights, &*self.context)?.with_numerical_profile(numerical_profile);
         let tower = VisionTower::new(&*self.context, &admission.tower, &loader.tree().subtree("vision"))?;
         let language_model = self.language_model_from_config(
             model_path,

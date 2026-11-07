@@ -33,6 +33,14 @@ pub(crate) enum NumericalProfile {
     #[default]
     Legacy,
     Qwen35ReferenceBF16,
+    /// BF16 activation boundaries with canonical packed affine matrices.
+    Qwen35AffineBF16,
+}
+
+impl NumericalProfile {
+    pub(crate) fn qwen35_bf16_activations(self) -> bool {
+        matches!(self, Self::Qwen35ReferenceBF16 | Self::Qwen35AffineBF16)
+    }
 }
 
 pub struct ParameterLoader<'a, B: Backend> {

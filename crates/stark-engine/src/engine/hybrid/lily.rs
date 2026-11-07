@@ -9,7 +9,7 @@
 //! persisted. Optional MTP uses complete host-sampled F32 readouts and
 //! request-local rollback captures.
 
-use std::{collections::VecDeque, path::Path, time::Instant};
+use std::{collections::VecDeque, path::Path, sync::Arc, time::Instant};
 
 use stark_lily_core::{
     engine::{DecodeStateApi, Draw, ScratchApi, SnapshotApi, VisionMode},
@@ -19,7 +19,8 @@ use stark_lily_core::{
     },
     metal::{EncodedPass, MetalContext, PendingPass, stage_profile},
     qwen4exp::{
-        DecodeState, HostVerification, NgramStorage, Qwen4ExpModel, Scratch, config::Qwen4ExpConfig, model::Snapshot,
+        DecodeState, HostVerification, ImageEmbeds, ImageSpan, NgramStorage, Qwen4ExpModel, Scratch, VisionInput,
+        config::Qwen4ExpConfig, model::Snapshot, positions_for_prompt,
     },
 };
 
@@ -243,6 +244,8 @@ pub struct LilyModel {
     mtp_stats: MtpStats,
     capture_at: Option<usize>,
     captured: Option<PrefixSnapshot>,
+    image_owner: Arc<()>,
+    image_active: bool,
     // Context ownership outlives every model/state/scratch allocation on drop.
     context: MetalContext,
 }
@@ -253,9 +256,18 @@ impl LilyModel {
         Self::load_with_mtp(path, false)
     }
 
+    #[cfg(test)]
     pub fn load_with_mtp(
         path: &Path,
         requested: bool,
+    ) -> Result<Self> {
+        Self::load_with_options(path, requested, false)
+    }
+
+    pub fn load_with_options(
+        path: &Path,
+        requested: bool,
+        images: bool,
     ) -> Result<Self> {
         let with_mtp = requested
             && Qwen4ExpConfig::from_model_dir(path)
@@ -269,7 +281,11 @@ impl LilyModel {
             path,
             NgramStorage::Paged,
             with_mtp,
-            VisionMode::Off,
+            if images {
+                VisionMode::Auto
+            } else {
+                VisionMode::Off
+            },
             None,
             None,
             None,
@@ -278,6 +294,9 @@ impl LilyModel {
             None,
         )
         .map_err(|_| Error::Unsupported("mixed precision checkpoint admission failed"))?;
+        if images && !model.has_vision() {
+            return Err(Error::Unsupported("checkpoint does not retain an admitted vision tower"));
+        }
         Self::from_model(context, model)
     }
 
@@ -333,12 +352,182 @@ impl LilyModel {
             mtp_stats: MtpStats::default(),
             capture_at: None,
             captured: None,
+            image_owner: Arc::new(()),
+            image_active: false,
             context,
         })
     }
 
     pub fn vocab_size(&self) -> usize {
         self.vocab_size
+    }
+
+    pub fn supports_images(&self) -> bool {
+        self.model.has_vision()
+    }
+
+    fn image_tokens(&self) -> Result<super::image::Tokens> {
+        let vision = self
+            .model
+            .config
+            .vision
+            .as_ref()
+            .filter(|_| self.model.has_vision())
+            .ok_or(Error::Unsupported("native image tower unavailable"))?;
+        Ok(super::image::Tokens {
+            start: vision.vision_start_token_id,
+            end: vision.vision_end_token_id,
+            pad: vision.image_token_id,
+            video: vision.video_token_id,
+        })
+    }
+
+    pub fn validate_image_tokenizer(
+        &self,
+        tokenizer: &tokenizers::Tokenizer,
+    ) -> Result<()> {
+        let tokens = self.image_tokens()?;
+        for (text, expected) in [
+            ("<|vision_start|>", tokens.start),
+            ("<|vision_end|>", tokens.end),
+            ("<|image_pad|>", tokens.pad),
+            ("<|video_pad|>", tokens.video),
+        ] {
+            if tokenizer.token_to_id(text) != Some(expected) {
+                return Err(Error::Invalid("image tokenizer controls"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn prepare_image(
+        &self,
+        encoded: &[u8],
+    ) -> Result<super::PreparedHybridImage> {
+        self.image_tokens()?;
+        if self.is_fenced() {
+            return Err(Error::Invalid("mixed precision context requires reload"));
+        }
+        super::image::prepare(self.image_owner.clone(), encoded)
+    }
+
+    pub fn prepare_image_prompt(
+        &self,
+        tokens: &[u32],
+        image: &super::PreparedHybridImage,
+        context_capacity: usize,
+    ) -> Result<Box<[u32]>> {
+        if !Arc::ptr_eq(&self.image_owner, &image.owner)
+            || context_capacity == 0
+            || self.is_fenced()
+            || tokens.iter().any(|token| *token as usize >= self.vocab_size)
+        {
+            return Err(Error::Invalid("model-bound image prompt"));
+        }
+        self.image_tokens()?.expand(tokens, image.image_token_count() as usize, context_capacity.min(self.max_context))
+    }
+
+    pub fn prefill_image(
+        &mut self,
+        tokens: &[u32],
+        image: super::PreparedHybridImage,
+    ) -> Result<Vec<f32>> {
+        self.prefill_image_controlled(tokens, image, || false)
+    }
+
+    pub fn prefill_image_controlled<F: FnMut() -> bool>(
+        &mut self,
+        tokens: &[u32],
+        image: super::PreparedHybridImage,
+        should_cancel: F,
+    ) -> Result<Vec<f32>> {
+        let should_cancel = std::cell::RefCell::new(should_cancel);
+        let stop = || (should_cancel.borrow_mut())();
+        let result = (|| {
+            if stop() {
+                return Err(Error::Cancelled);
+            }
+            if !Arc::ptr_eq(&self.image_owner, &image.owner)
+                || self.is_fenced()
+                || tokens.is_empty()
+                || tokens.len() > self.max_context
+                || tokens.iter().any(|token| *token as usize >= self.vocab_size)
+            {
+                return Err(Error::Invalid("model-bound image prefill"));
+            }
+            let start = self.image_tokens()?.span(tokens, image.image_token_count() as usize)?;
+            let grid = image.grid();
+            let span = ImageSpan {
+                start,
+                len: image.image_token_count() as usize,
+                grid_h: grid[1] as usize,
+                grid_w: grid[2] as usize,
+            };
+            let positions =
+                positions_for_prompt(tokens, &[span]).map_err(|_| Error::Invalid("image rotary positions"))?;
+            self.reset();
+            self.set_mtp_enabled(false)?;
+            self.ensure_context_capacity(tokens.len())?;
+            let pixels: Vec<f32> = image.prepared.patches.iter().map(|value| value.to_f32()).collect();
+            // Fence the instance until every tower/prefill completion and the
+            // target readout have succeeded. Reset drains submitted work.
+            self.usable = false;
+            let rows = self
+                .model
+                .encode_image(&self.context, &mut self.scratch, &pixels, span.grid_h, span.grid_w)
+                .map_err(|_| Error::Invalid("image tower execution failed"))?;
+            // A tower pass owns one bounded image (at most 4096 patches).
+            // Submitted Metal commands cannot be interrupted safely; observe
+            // cancellation immediately after completion, before text prefill.
+            if stop() {
+                self.usable = true;
+                return Err(Error::Cancelled);
+            }
+            let images = [ImageEmbeds {
+                span,
+                rows: &rows,
+            }];
+            let input = VisionInput {
+                positions: &positions,
+                images: &images,
+            };
+            let greedy = SamplingParams::greedy();
+            let draw = Draw {
+                params: &greedy,
+                step: 0,
+            };
+            let fed = self
+                .model
+                .prefill_with_vision_until(
+                    &self.context,
+                    &mut self.state,
+                    &mut self.scratch,
+                    tokens,
+                    Some(draw),
+                    Some(&input),
+                    &stop,
+                )
+                .map_err(|_| Error::Invalid("image prefill execution failed"))?;
+            if fed != tokens.len() || stop() {
+                self.usable = true;
+                return Err(Error::Cancelled);
+            }
+            let logits = self.scratch.logits().to_f32().map_err(|_| Error::Invalid("image target readout failed"))?;
+            if self.state.pos != tokens.len()
+                || logits.len() != self.vocab_size
+                || !super::finite_guard::all_finite(&logits)
+            {
+                return Err(Error::Invalid("image target readout values"));
+            }
+            self.usable = true;
+            self.image_active = true;
+            self.last_full_readout = Some(self.state.pos);
+            Ok(logits)
+        })();
+        if result.is_err() {
+            self.reset();
+        }
+        result
     }
 
     pub fn max_context(&self) -> usize {
@@ -472,7 +661,8 @@ impl LilyModel {
         position: usize,
     ) -> Result<()> {
         let chunk = self.prefill_chunk_tokens();
-        if self.is_fenced()
+        if self.image_active
+            || self.is_fenced()
             || !self.pending.is_empty()
             || position <= self.state.pos
             || position >= self.max_context
@@ -502,7 +692,8 @@ impl LilyModel {
     ) -> Result<()> {
         let position = snapshot.position();
         let chunk = self.prefill_chunk_tokens();
-        if self.is_fenced()
+        if self.image_active
+            || self.is_fenced()
             || self.state.pos != 0
             || !self.pending.is_empty()
             || snapshot.mtp_enabled != self.mtp_enabled
@@ -532,6 +723,7 @@ impl LilyModel {
         self.last_full_readout = None;
         self.capture_at = None;
         self.captured = None;
+        self.image_active = false;
         self.mtp_stats = MtpStats::default();
         // Core waits drain submitted GPU work even on execution failure.
         // A faulted context stays unusable until the worker reloads the model.

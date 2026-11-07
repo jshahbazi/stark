@@ -9,7 +9,7 @@ use crate::{
     },
     config::normalization::{NormalizationConfig, UpcastMode},
     data_type::DataType,
-    parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
+    parameters::{ParameterLoaderError, ParameterTree},
 };
 
 // TODO: clean up
@@ -65,7 +65,7 @@ impl<B: Backend> Normalization<B> {
             ShortcutMode::Copy => (true, false),
             ShortcutMode::Add => (true, true),
         };
-        let reference = if parameter_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16 {
+        let reference = if parameter_tree.numerical_profile().qwen35_bf16_activations() {
             if data_type != DataType::BF16
                 || config.subtract_mean
                 || config.has_biases

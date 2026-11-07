@@ -72,6 +72,19 @@ SOURCES = {
         "quantization": "Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)",
         "required_files": ["LICENSE", "README.md"],
     },
+    "qwen38-mlx-serve-mixed": {
+        "architecture": "qwen4_exp",
+        "weights_repo": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+        "weights_revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+        "weights_patterns": ["*.safetensors", "model.safetensors.index.json", "ngram_table.bin", "README.md"],
+        "metadata_repo": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+        "metadata_revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+        "weight_bytes": 107_303_406_192,
+        "weight_shards": 101,
+        "ngram_bytes": 32_000_153_976,
+        "ngram_in_weight_bytes": True,
+        "quantization": "MLX-Serve mixed 4/8-bit",
+    },
 }
 _METADATA = [
     "config.json",
@@ -156,7 +169,8 @@ def finish_metadata(directory: Path, choice: str) -> dict:
         "execution": "unverified",
         "weight_bytes": sum(
             path.stat().st_size for path in directory.iterdir() if path.suffix in {".gguf", ".safetensors"}
-        ),
+        )
+        + (source.get("ngram_bytes", 0) if source.get("ngram_in_weight_bytes") else 0),
     }
     (directory / "native-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return receipt
@@ -316,6 +330,8 @@ def prepared_identity(directory: Path) -> dict | None:
         if any(not (directory / name).is_file() or (directory / name).is_symlink() for name in required_files):
             return None
         size = sum(path.stat().st_size for path in files)
+        if source.get("ngram_in_weight_bytes"):
+            size += source["ngram_bytes"]
         if receipt.get("weight_bytes") != size:
             return None
         if "storage_alignment" in receipt:
@@ -325,6 +341,10 @@ def prepared_identity(directory: Path) -> dict | None:
             return None
         if not (directory / "tokenizer.json").is_file():
             return None
+        if "ngram_bytes" in source:
+            table = directory / "ngram_table.bin"
+            if table.is_symlink() or not table.is_file() or table.stat().st_size != source["ngram_bytes"]:
+                return None
         return {
             "repo": source["weights_repo"],
             "revision": source["weights_revision"],
@@ -342,7 +362,12 @@ def prepare(
     *,
     offline: bool = False,
     progress: ProgressCallback | ProgressReporter | None = None,
+    artifact_mode: str = "text",
 ) -> dict:
+    if artifact_mode not in {"text", "vision-language"} or (
+        artifact_mode == "vision-language" and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}
+    ):
+        raise ValueError("unsupported native artifact mode")
     progress = reporter(progress)
     source = SOURCES[choice]
     output = output.absolute()
@@ -362,11 +387,12 @@ def prepare(
         raise ValueError("download staging directory is not owned by this operation")
     else:
         marker.write_text(json.dumps(identity, sort_keys=True))
-    if not offline and shutil.disk_usage(output.parent).free < source["weight_bytes"] + 4 * 1024**3:
+    disk_bytes = source["weight_bytes"] + (0 if source.get("ngram_in_weight_bytes") else source.get("ngram_bytes", 0))
+    if not offline and shutil.disk_usage(output.parent).free < disk_bytes + 4 * 1024**3:
         # Account for a resumable completed shard already in our owned staging
         # directory. Hugging Face handles its own incomplete-file recovery.
         present = sum(path.stat().st_size for path in stage.rglob("*") if path.is_file() and not path.is_symlink())
-        if shutil.disk_usage(output.parent).free + present < source["weight_bytes"] + 4 * 1024**3:
+        if shutil.disk_usage(output.parent).free + present < disk_bytes + 4 * 1024**3:
             raise ValueError("insufficient disk space for the pinned checkpoint")
     completed_gguf = sorted(stage.glob("*.gguf"))
     gguf_complete = (
@@ -423,12 +449,25 @@ def prepare(
     if "weight_shards" in source and len(weights) != source["weight_shards"]:
         raise ValueError("incomplete pinned weight shard set")
     weight_bytes = sum(path.stat().st_size for path in weights)
-    if weight_bytes != source["weight_bytes"]:
+    expected_shards_bytes = source["weight_bytes"] - (
+        source.get("ngram_bytes", 0) if source.get("ngram_in_weight_bytes") else 0
+    )
+    if weight_bytes != expected_shards_bytes:
         raise ValueError("pinned weight size mismatch")
+    if "ngram_bytes" in source:
+        table = stage / "ngram_table.bin"
+        if table.is_symlink() or not table.is_file() or table.stat().st_size != source["ngram_bytes"]:
+            raise ValueError("incomplete pinned n-gram table")
+        if source.get("ngram_in_weight_bytes"):
+            weight_bytes += source["ngram_bytes"]
     if progress is not None:
         progress.emit("download", "complete", weight_bytes, weight_bytes, force=True)
         progress.emit("conversion", "running", force=True)
     receipt = finish_metadata(stage, choice)
+    if artifact_mode == "vision-language":
+        from .hybrid_vision import prepare_image_artifact
+
+        prepare_image_artifact(stage, choice)
     # Publish only the completed, metadata-bound directory. The download remains
     # resumable on all preceding failures and is never treated as a ready model.
     _publish(stage, output)
@@ -443,13 +482,21 @@ def main(argv=None):
     parser.add_argument("model", choices=tuple(SOURCES))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--artifact-mode", choices=("text", "vision-language"), default="text")
+    parser.add_argument("--upgrade-images", action="store_true", help="Upgrade the existing --output folder in place")
     parser.add_argument("--progress-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     progress_sink = None
     try:
         if args.progress_fd is not None:
             progress_sink = FDProgressSink(args.progress_fd)
-        receipt = prepare(args.model, args.output, offline=args.offline, progress=progress_sink)
+        if args.upgrade_images:
+            from .hybrid_vision import prepare_image_artifact
+
+            receipt = prepare_image_artifact(args.output, args.model)
+        else:
+            options = {"artifact_mode": args.artifact_mode} if args.artifact_mode != "text" else {}
+            receipt = prepare(args.model, args.output, offline=args.offline, progress=progress_sink, **options)
     except (Exception, KeyboardInterrupt):
         print(
             "Native model preparation did not complete; its owned download directory can be retried.", file=sys.stderr

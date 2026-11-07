@@ -301,12 +301,16 @@ def test_source_wide_exclusions_do_not_offer_known_impossible_alternatives(confi
     assert set(report["modes"].values()) == {"unsupported"} and report["alternatives"] == []
 
 
-def test_image_only_quantized_layout_preserves_valid_text_alternatives():
+def test_affine_image_metadata_is_conditional_until_complete_tensor_admission():
     config = geometry()
     config["quantization"] = {"bits": 4, "group_size": 64}
     report = preflight_model(config, mode="vision-language")
-    assert report["reasons"] == ["unsupported_vision_weight_format"]
-    assert report["alternatives"] == ["text", "decision"]
+    assert report["status"] == "conditional"
+    assert report["reasons"] == ["structural_path_implemented"]
+    config["quantization"]["group_size"] = 32
+    report = preflight_model(config, mode="vision-language")
+    assert report["status"] == "unsupported"
+    assert report["reasons"] == ["unsupported_vision_geometry"]
 
 
 def test_missing_shared_inventory_does_not_offer_other_conditional_modes(tmp_path):

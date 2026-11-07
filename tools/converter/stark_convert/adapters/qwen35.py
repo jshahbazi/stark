@@ -496,11 +496,14 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     # another wrapper's visual alias to hide an otherwise unconsumed tensor.
     ignored = set()
     if include_vision:
-        if not (vision and prefix == "model.language_model"):
-            raise UnsupportedConversion(
-                "Qwen3.5 vision requires the official model.language_model/model.visual wrapper"
-            )
-        vision_ops, vision_expected = build_qwen35_vision_plan(vision, tensors, dim)
+        if not (vision and prefix in {"model.language_model", "language_model.model"}):
+            raise UnsupportedConversion("Qwen3.5 vision requires a complete HF or MLX vision-language wrapper")
+        vision_ops, vision_expected = build_qwen35_vision_plan(
+            vision,
+            tensors,
+            dim,
+            source_prefix="vision_tower." if prefix == "language_model.model" else "model.visual.",
+        )
         operations.extend(vision_ops)
         expected.update(vision_expected)
     else:
@@ -509,7 +512,13 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     # The reference text loader also omits the declared auxiliary MTP decoder.
     # Untrusted prefixes alone never authorize dropping source tensors.
     if config.get("mtp_num_hidden_layers", 0) > 0:
-        ignored.update(name for name in tensors if name.startswith("mtp."))
+        ignored.update(
+            name
+            for name in tensors
+            if name.startswith(
+                ("mtp.", "language_model.mtp.", "model.language_model.mtp.") if include_vision else "mtp."
+            )
+        )
     if quantization is not None and not used_mlx:
         raise ConversionError("Qwen3.5 MLX quantization configuration has no packed checkpoint matrices")
     if unsupported:

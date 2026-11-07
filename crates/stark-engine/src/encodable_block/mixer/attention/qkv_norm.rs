@@ -8,7 +8,7 @@ use crate::{
     },
     config::normalization::{NormalizationConfig, UpcastMode},
     data_type::DataType,
-    parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
+    parameters::{ParameterLoaderError, ParameterTree},
 };
 
 #[derive(Debug, Error)]
@@ -49,7 +49,7 @@ impl<B: Backend> QKVNorm<B> {
         projection_row_stride: u32,
         head_dim: u32,
     ) -> Result<Self, QKVNormError<B>> {
-        let reference_profile = parameter_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16;
+        let reference_profile = parameter_tree.numerical_profile().qwen35_bf16_activations();
         let query = query_config
             .map(|cfg| {
                 Self::build_head(

@@ -17,7 +17,7 @@ _OS_VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0
 _ARTIFACT = "7c5960e7225b3b36844fa397a85c5e20d281d732e382475062f552c0737c79d4"
 FAMILY_PROFILE = "qwen35-dense-bf16-merged-v1"
 CONFIGURED_FAMILY_PROFILE = "qwen35-dense-bf16-merged-v2"
-_FAMILY_VERSIONS = {FAMILY_PROFILE: 1, CONFIGURED_FAMILY_PROFILE: 2}
+_FAMILY_VERSIONS = {FAMILY_PROFILE: 1, CONFIGURED_FAMILY_PROFILE: 2, "qwen35-dense-affine-merged-v3": 3}
 _ARTIFACT_HASHES = {
     "artifact_sha256",
     "config_sha256",

@@ -23,6 +23,8 @@ LEGACY_FAMILY_PROFILE = "qwen35-dense-bf16-merged-v1"
 LEGACY_FAMILY_VERSION = 1
 FAMILY_PROFILE = "qwen35-dense-bf16-merged-v2"
 FAMILY_VERSION = 2
+AFFINE_FAMILY_PROFILE = "qwen35-dense-affine-merged-v3"
+AFFINE_FAMILY_VERSION = 3
 _SOURCE_TOKENIZER_SHA256 = "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
 OUTPUT_TOKENIZER_SHA256 = "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"
 ALTERNATE_OUTPUT_TOKENIZER_SHA256 = "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
@@ -315,8 +317,22 @@ def _source_label(value: Any) -> bool:
 def validate_family_geometry(config: dict) -> tuple[dict, dict]:
     """Derive a bounded dense decoder and tower from their operation metadata."""
     from .adapters.qwen35 import normalize_qwen35_config
+    from .compressed import parse_mlx_quantization
 
     text = normalize_qwen35_config(config)
+    rope = text.get("rope_parameters")
+    if isinstance(rope, dict) and "type" in rope and rope["type"] == rope.get("rope_type", rope["type"]):
+        text = {
+            **text,
+            "rope_parameters": {**{k: v for k, v in rope.items() if k != "type"}, "rope_type": rope["type"]},
+        }
+    quantization = parse_mlx_quantization(text, allow_mixed=True)
+    if text.get("quantization_config") is not None and quantization is None:
+        raise UnsupportedConversion("Vision family affine exports require explicit quantization metadata")
+    if quantization is not None and any(
+        item is not None and item.group_size != 64 for item in (quantization, *(q for _, q in quantization.overrides))
+    ):
+        raise UnsupportedConversion("Vision family affine exports require group size 64")
     if any(type(text.get(key)) is not int or not 0 < text[key] <= maximum for key, maximum in _TEXT_BOUNDS.items()):
         raise UnsupportedConversion("Vision family decoder geometry is outside the implemented profile")
     epsilon = text.get("rms_norm_eps")
@@ -344,7 +360,7 @@ def validate_family_geometry(config: dict) -> tuple[dict, dict]:
         or not _equal(text.get("rope_parameters"), _ROPE)
         or text.get("dtype", "bfloat16") != "bfloat16"
         or text.get("torch_dtype", "bfloat16") != "bfloat16"
-        or any(text.get(key) is not None for key in ("quantization", "quantization_config", "auto_map"))
+        or text.get("auto_map") is not None
     ):
         raise UnsupportedConversion("Vision family decoder operations are outside the implemented profile")
     interval = text.get("full_attention_interval")
@@ -447,7 +463,7 @@ def validate_family_source(snapshot: Any, dtype: str) -> dict:
         or config.get("architectures") != ["Qwen3_5ForConditionalGeneration"]
         or not isinstance(config.get("text_config"), dict)
         or not isinstance(config.get("vision_config"), dict)
-        or any(config.get(key) is not None for key in ("quantization", "quantization_config", "auto_map"))
+        or config.get("auto_map") is not None
         or token_config.get("auto_map") is not None
     ):
         raise UnsupportedConversion("Vision family requires a merged dense Qwen3.5 checkpoint")
@@ -566,7 +582,10 @@ def validate_family_source(snapshot: Any, dtype: str) -> dict:
     return {
         "type": "Qwen35VisionLanguageArtifact",
         "schema_version": 3,
-        "family": {"profile": FAMILY_PROFILE, "version": FAMILY_VERSION},
+        "family": {
+            "profile": AFFINE_FAMILY_PROFILE if text.get("quantization") is not None else FAMILY_PROFILE,
+            "version": AFFINE_FAMILY_VERSION if text.get("quantization") is not None else FAMILY_VERSION,
+        },
         "input_modalities": ["text", "image"],
         "dtype": dtype,
         "source": {
