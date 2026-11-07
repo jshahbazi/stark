@@ -41,7 +41,7 @@ _FAMILY_DEFINITIONS = (
     ("gemma2", "Gemma 2 dense", "HFGemma2Config", ()),
     ("gemma3_text", "Gemma 3 text", "HFGemma3TextConfig", ()),
     ("gemma3", "Gemma 3 images", "HFGemma3Config", ()),
-    ("gemma4_text", "Gemma 4 dense", "HFGemma4TextConfig", ("gemma4",)),
+    ("gemma4_text", "Gemma 4", "HFGemma4TextConfig", ("gemma4", "gemma4_unified", "gemma4_unified_text")),
     ("olmo3", "OLMo 3 dense", "HFOlmo3Config", ()),
     ("phi3", "Phi-3 dense", "HFPhi3Config", ()),
     ("granite", "Granite dense", "HFGraniteConfig", ()),
@@ -375,7 +375,7 @@ def preflight_model(
             )
         text = {**text, **{key: value for key, value in config.items() if key != "text_config"}}
     elif architecture == "gemma4_text":
-        if text is not config and text.get("model_type") not in (None, "gemma4_text"):
+        if text is not config and text.get("model_type") not in (None, "gemma4_text", "gemma4_unified_text"):
             return _report(
                 family,
                 mode,
@@ -526,12 +526,12 @@ def preflight_model(
             "Image input requires merged BF16 weights; the declared MLX format is limited to text paths.",
         )
     if mode == "vision-language" and architecture == "gemma4_text":
-        from .adapters.gemma4_vision import GEOMETRY, LARGE_GEOMETRY, TOKENS
+        from .adapters.gemma4_vision import GEOMETRY, LARGE_GEOMETRY, TOKENS, UNIFIED_GEOMETRY
 
         vision = config.get("vision_config")
         if not isinstance(vision, dict):
             return _report(family, mode, "unsupported", "vision_tower_missing", "This checkpoint has no vision tower.")
-        if raw_architecture != "gemma4" or not isinstance(config.get("text_config"), dict):
+        if raw_architecture not in {"gemma4", "gemma4_unified"} or not isinstance(config.get("text_config"), dict):
             return _report(
                 family,
                 mode,
@@ -539,10 +539,21 @@ def preflight_model(
                 "unsupported_vision_wrapper",
                 "Gemma images require an implemented full dense wrapper.",
             )
-        geometry = LARGE_GEOMETRY if text.get("hidden_size") == 5376 else GEOMETRY
+        geometry = (
+            UNIFIED_GEOMETRY
+            if raw_architecture == "gemma4_unified"
+            else LARGE_GEOMETRY
+            if text.get("hidden_size") in (2816, 5376)
+            else GEOMETRY
+        )
         if (
             any(vision.get(key) != value for key, value in geometry.items())
-            or (text.get("hidden_size"), text.get("num_hidden_layers")) not in {(1536, 35), (2560, 42), (5376, 60)}
+            or (text.get("hidden_size"), text.get("num_hidden_layers"))
+            not in (
+                {(3840, 48)}
+                if raw_architecture == "gemma4_unified"
+                else {(1536, 35), (2560, 42), (2816, 30), (5376, 60)}
+            )
             or any(
                 config.get(key) != TOKENS[token]
                 for key, token in (

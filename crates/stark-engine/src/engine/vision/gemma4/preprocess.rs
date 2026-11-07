@@ -44,28 +44,55 @@ pub(crate) fn dimensions(
 }
 
 pub(crate) fn prepare(encoded: &[u8]) -> Result<GemmaPatches, InvalidInput> {
+    prepare_mode(encoded, false)
+}
+
+pub(crate) fn prepare_unified(encoded: &[u8]) -> Result<GemmaPatches, InvalidInput> {
+    prepare_mode(encoded, true)
+}
+
+fn prepare_mode(
+    encoded: &[u8],
+    unified: bool,
+) -> Result<GemmaPatches, InvalidInput> {
     // Transformers 5.15.1's Gemma4ImageProcessor uses PIL convert("RGB"),
     // retaining color samples while discarding alpha before patch resizing.
     let image = decode_image_discard_alpha(encoded, &PreprocessLimits::default(), |width, height| {
         dimensions(width, height).map(|_| ())
     })?;
-    prepare_rgb(&image)
+    prepare_rgb_mode(&image, unified)
 }
 
 pub(crate) fn prepare_rgb(image: &RgbImage) -> Result<GemmaPatches, InvalidInput> {
+    prepare_rgb_mode(image, false)
+}
+
+fn prepare_rgb_mode(
+    image: &RgbImage,
+    unified: bool,
+) -> Result<GemmaPatches, InvalidInput> {
     let (width, height) = dimensions(image.width(), image.height())?;
     let pixels = resize_rgb(image, width, height)?;
     let gw = width / 16;
     let gh = height / 16;
     let mut patches = Vec::with_capacity((gw * gh * 768) as usize);
-    for patch_y in 0..gh {
-        for patch_x in 0..gw {
-            for y in 0..16 {
-                for x in 0..16 {
+    let patch = if unified {
+        48
+    } else {
+        16
+    };
+    for patch_y in 0..height / patch {
+        for patch_x in 0..width / patch {
+            for y in 0..patch {
+                for x in 0..patch {
                     for c in 0..3 {
-                        let index = (((patch_y * 16 + y) * width + patch_x * 16 + x) * 3 + c) as usize;
+                        let index = (((patch_y * patch + y) * width + patch_x * patch + x) * 3 + c) as usize;
                         let rescaled = f32::from(pixels[index]) * (1.0 / 255.0);
-                        patches.push(bf16::from_f32(2.0 * (rescaled - 0.5)));
+                        patches.push(bf16::from_f32(if unified {
+                            rescaled
+                        } else {
+                            2.0 * (rescaled - 0.5)
+                        }));
                     }
                 }
             }
@@ -131,5 +158,19 @@ mod tests {
         assert_eq!((native.width, native.height), (48, 13440));
         assert_eq!(native.grid, [1, 840, 3]);
         assert!(super::super::super::preprocess::decode_image(&encoded, &PreprocessLimits::default()).is_err());
+    }
+
+    #[stark_test]
+    fn unified_raw_patches_keep_teacher_grid_and_256_square_fixture_tokens() {
+        let mut encoded = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut encoded)
+            .write_image(&vec![127; 256 * 256 * 3], 256, 256, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let patches = prepare_unified(&encoded).unwrap();
+        assert_eq!(patches.grid, [1, 48, 48]);
+        assert_eq!((patches.width, patches.height), (768, 768));
+        assert_eq!(patches.patches.len(), 256 * 48 * 48 * 3);
+        let expected = bf16::from_f32(127.0 * (1.0 / 255.0));
+        assert!(patches.patches.iter().all(|v| *v == expected));
     }
 }

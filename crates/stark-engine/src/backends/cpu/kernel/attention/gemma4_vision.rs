@@ -5,6 +5,30 @@
 use half::bf16;
 use stark_engine_macros::kernel;
 
+#[kernel(Gemma4UnifiedPositionBF16)]
+pub fn gemma4_unified_position_bf16(
+    input: *const bf16,
+    positions: *const bf16,
+    output: *mut bf16,
+    rows: u32,
+    width: u32,
+    grid_width: u32,
+) {
+    for row in 0..rows as usize {
+        let x = row % grid_width as usize;
+        let y = row / grid_width as usize;
+        for channel in 0..width as usize {
+            unsafe {
+                let px = (*positions.add(x * 2 * width as usize + channel)).to_f32();
+                let py = (*positions.add((y * 2 + 1) * width as usize + channel)).to_f32();
+                let position = bf16::from_f32(px + py).to_f32();
+                *output.add(row * width as usize + channel) =
+                    bf16::from_f32((*input.add(row * width as usize + channel)).to_f32() + position);
+            }
+        }
+    }
+}
+
 #[kernel(Gemma4VisionClampBF16)]
 pub fn gemma4_vision_clamp_bf16(
     input: *const bf16,

@@ -43,7 +43,7 @@ def run(args):
     if (
         output.exists()
         or subprocess.run(
-            ["git", "check-ignore", "--quiet", "--", str(output)], cwd=root
+            ["git", "check-ignore", "--quiet", "--", str(output)], cwd=root, check=False
         ).returncode
     ):
         raise ValueError("output_must_be_new_and_ignored")
@@ -54,8 +54,8 @@ def run(args):
         "model_type": "gemma4_text",
         "architectures": ["Gemma4ForCausalLM"],
         "dtype": "bfloat16",
-        "hidden_size": 64,
-        "intermediate_size": 128,
+        "hidden_size": args.model_dim,
+        "intermediate_size": args.model_dim * 2,
         "num_hidden_layers": 6,
         "num_attention_heads": 4,
         "num_key_value_heads": 2,
@@ -91,7 +91,11 @@ def run(args):
     }
     if args.moe:
         config.update(num_experts=4, top_k_experts=2, moe_intermediate_size=64)
-    if args.layers not in (1, 2, 6) or args.query_key_norm_scale not in (0.125, 1.0):
+    if (
+        args.layers not in (1, 2, 6)
+        or args.query_key_norm_scale not in (0.125, 1.0)
+        or args.model_dim not in (64, 512)
+    ):
         raise ValueError("unsupported_control_geometry")
     config["num_hidden_layers"] = args.layers
     config["layer_types"] = (
@@ -116,14 +120,16 @@ def run(args):
             layer.self_attn.q_norm.weight.fill_(args.query_key_norm_scale)
             layer.self_attn.k_norm.weight.fill_(args.query_key_norm_scale)
             if args.moe:
-                layer.router.scale.copy_(torch.linspace(0.5, 1.5, 64).bfloat16())
+                layer.router.scale.copy_(
+                    torch.linspace(0.5, 1.5, args.model_dim).bfloat16()
+                )
                 layer.router.per_expert_scale.copy_(
                     torch.tensor([0.75, 1.25, -0.5, 1.5]).bfloat16()
                 )
                 layer.post_feedforward_layernorm_1.weight.fill_(1.25)
                 layer.post_feedforward_layernorm_2.weight.fill_(0.75)
                 layer.pre_feedforward_layernorm_2.weight.copy_(
-                    torch.linspace(0.75, 1.25, 64).bfloat16()
+                    torch.linspace(0.75, 1.25, args.model_dim).bfloat16()
                 )
     state = {
         name: value.detach().contiguous().clone()
@@ -174,6 +180,7 @@ def run(args):
         "source_sha256": SOURCE,
         "source_weights_sha256": digest(source / "model.safetensors"),
         "layer_scalars": scalars,
+        "model_dim": args.model_dim,
         "query_key_norm_scale": args.query_key_norm_scale,
         "cases": cases,
         "complete": True,
@@ -193,6 +200,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--moe", action="store_true")
     parser.add_argument("--layers", type=int, default=6)
+    parser.add_argument("--model-dim", type=int, default=64)
     parser.add_argument("--query-key-norm-scale", type=float, default=0.125)
     args = parser.parse_args()
     try:
@@ -202,7 +210,7 @@ def main():
             contextlib.redirect_stderr(quiet),
         ):
             report = run(args)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - keep private framework failures content-free
         print(json.dumps({"passed": False, "error_type": type(error).__name__}))
         return 1
     print(json.dumps(report, sort_keys=True))

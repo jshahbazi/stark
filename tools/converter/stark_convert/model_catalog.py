@@ -623,7 +623,10 @@ def _generation_architecture(config, family):
             or (family == "qwen3_5_moe" and name == "Qwen3_5MoeForConditionalGeneration")
             or (family == "qwen4_exp" and name == "Qwen4ExpForConditionalGeneration")
             or (family == "gemma3" and name == "Gemma3ForConditionalGeneration")
-            or (family == "gemma4_text" and name == "Gemma4ForConditionalGeneration")
+            or (
+                family == "gemma4_text"
+                and name in {"Gemma4ForConditionalGeneration", "Gemma4UnifiedForConditionalGeneration"}
+            )
         )
         for name in declared
     )
@@ -654,7 +657,10 @@ def _catalog_image_metadata(family, config, repo, revision, names, read):
                     (
                         "processor_config.json",
                         65536,
-                        "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+                        profile.get(
+                            "source_processor_sha256",
+                            "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+                        ),
                     ),
                     (
                         "chat_template.jinja",

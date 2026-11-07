@@ -197,7 +197,11 @@ def load_template(model, *, expected_hashes=None):
                 descriptor = config.get("artifact_contract", {}).get("family", {})
                 template_hashes = (
                     {"ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"}
-                    if descriptor == {"id": "gemma4-31b-bf16-v1", "version": 1}
+                    if descriptor
+                    in (
+                        {"id": profile, "version": 1}
+                        for profile in ("gemma4-31b-bf16-v1", "gemma4-12b-bf16-v1", "gemma4-26b-a4b-bf16-v1")
+                    )
                     else {"0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"}
                 )
             elif config.get("type") == "Gemma3VisionLanguageModelConfig":

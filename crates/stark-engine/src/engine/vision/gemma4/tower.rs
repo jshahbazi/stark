@@ -22,7 +22,7 @@ use crate::{
 
 const POSITIONS: u32 = 10240;
 
-struct Linear<B: Backend> {
+pub(super) struct Linear<B: Backend> {
     matrix: <B::Kernels as Kernels>::VisionMatmulBF16Kernel,
     cast: <B::Kernels as Kernels>::VisionCastBF16Kernel,
     clamp: <B::Kernels as Kernels>::Gemma4VisionClampBF16Kernel,
@@ -33,7 +33,7 @@ struct Linear<B: Backend> {
 }
 
 impl<B: Backend> Linear<B> {
-    fn new(
+    pub(super) fn new(
         context: &B::Context,
         tree: &ParameterTree<B>,
         input: u32,
@@ -68,7 +68,7 @@ impl<B: Backend> Linear<B> {
         })
     }
 
-    fn encode(
+    pub(super) fn encode(
         &self,
         input: &B::ScratchBuffer,
         rows: u32,
@@ -172,10 +172,10 @@ impl<B: Backend> Gemma4VisionTower<B> {
         tree: &ParameterTree<B>,
         model_dim: u32,
     ) -> Result<Self, VisionTowerError<B>> {
-        if !matches!(model_dim, 1536 | 2560 | 5376) {
+        if !matches!(model_dim, 1536 | 2560 | 2816 | 5376) {
             return Err(InvalidInput("unsupported Gemma vision projection width").into());
         }
-        let (width, heads, head_dim, mlp, depth) = if model_dim == 5376 {
+        let (width, heads, head_dim, mlp, depth) = if matches!(model_dim, 2816 | 5376) {
             (1152, 16, 72, 4304, 27)
         } else {
             (768, 12, 64, 3072, 16)
@@ -185,7 +185,7 @@ impl<B: Backend> Gemma4VisionTower<B> {
         } else {
             head_dim
         };
-        let standardization = if model_dim == 5376 {
+        let standardization = if matches!(model_dim, 2816 | 5376) {
             Some((
                 tree.leaf("std_bias")?.validate(&[width], DataType::BF16)?.read_buffer()?,
                 tree.leaf("std_scale")?.validate(&[width], DataType::BF16)?.read_buffer()?,
@@ -196,7 +196,9 @@ impl<B: Backend> Gemma4VisionTower<B> {
         let mut blocks = Vec::with_capacity(depth);
         for i in 0..depth {
             let t = tree.subtree(&format!("encoder.layers.{i}"));
-            let linear = |name, input, output| Linear::new(context, &t.subtree(name), input, output, model_dim != 5376);
+            let linear = |name, input, output| {
+                Linear::new(context, &t.subtree(name), input, output, !matches!(model_dim, 2816 | 5376))
+            };
             blocks.push(Block {
                 input_norm: Norm::new(context, &t.subtree("input_layernorm"), width)?,
                 post_attention: Norm::new(context, &t.subtree("post_attention_layernorm"), width)?,

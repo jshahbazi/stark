@@ -34,6 +34,7 @@ mod preprocess;
 #[cfg(all(test, backend = "metal"))]
 mod reference_tests;
 mod tower;
+mod unified;
 
 use preprocess::GemmaPatches;
 use tower::Gemma4VisionTower;
@@ -60,9 +61,12 @@ struct ImageProfile {
     template: &'static str,
     model_dim: u32,
     bidirectional: bool,
+    unified: bool,
+    processor: &'static str,
+    weight_limit_gib: u64,
 }
 
-const PROFILES: [ImageProfile; 3] = [
+const PROFILES: [ImageProfile; 5] = [
     ImageProfile {
         repo: REPO,
         revision: REVISION,
@@ -71,6 +75,9 @@ const PROFILES: [ImageProfile; 3] = [
         template: TEMPLATE,
         model_dim: MODEL,
         bidirectional: false,
+        unified: false,
+        processor: PROCESSOR,
+        weight_limit_gib: 12,
     },
     ImageProfile {
         repo: "google/gemma-4-E4B-it",
@@ -80,6 +87,9 @@ const PROFILES: [ImageProfile; 3] = [
         template: TEMPLATE,
         model_dim: 2560,
         bidirectional: false,
+        unified: false,
+        processor: PROCESSOR,
+        weight_limit_gib: 20,
     },
     ImageProfile {
         repo: "google/gemma-4-31B-it",
@@ -89,6 +99,33 @@ const PROFILES: [ImageProfile; 3] = [
         template: "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
         model_dim: 5376,
         bidirectional: true,
+        unified: false,
+        processor: PROCESSOR,
+        weight_limit_gib: 72,
+    },
+    ImageProfile {
+        repo: "google/gemma-4-26B-A4B-it",
+        revision: "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+        family: "gemma4-26b-a4b-bf16-v1",
+        tokenizer: TOKENIZER,
+        template: "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+        model_dim: 2816,
+        bidirectional: true,
+        unified: false,
+        processor: PROCESSOR,
+        weight_limit_gib: 60,
+    },
+    ImageProfile {
+        repo: "google/gemma-4-12B-it",
+        revision: "43c9d014b231474fa7212dbb48a762566c2b255d",
+        family: "gemma4-12b-bf16-v1",
+        tokenizer: "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb",
+        template: "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+        model_dim: 3840,
+        bidirectional: true,
+        unified: true,
+        processor: "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9",
+        weight_limit_gib: 32,
     },
 ];
 
@@ -113,11 +150,30 @@ impl PreparedGemmaImage {
 pub struct Gemma4VisionLanguageModel<B: Backend> {
     engine: Arc<Engine<B>>,
     language_model: LanguageModel<B>,
-    tower: Gemma4VisionTower<B>,
+    tower: ImageTower<B>,
     failed: bool,
     identity: VisionArtifactIdentity,
     codec_eos_token: Option<String>,
     profile: ImageProfile,
+}
+
+enum ImageTower<B: Backend> {
+    Encoder(Gemma4VisionTower<B>),
+    Unified(unified::UnifiedVisionEmbedder<B>),
+}
+
+impl<B: Backend> ImageTower<B> {
+    fn encode(
+        &self,
+        patches: &[bf16],
+        grid: [u32; 3],
+        commands: &mut <B::CommandBuffer as crate::backends::common::CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, super::tower::VisionTowerError<B>> {
+        match self {
+            Self::Encoder(tower) => tower.encode(patches, grid, commands),
+            Self::Unified(embedder) => embedder.encode(patches, grid, commands),
+        }
+    }
 }
 
 fn validate_contract(raw: &serde_json::Value) -> Result<ImageProfile, InvalidInput> {
@@ -148,7 +204,35 @@ fn validate_contract(raw: &serde_json::Value) -> Result<ImageProfile, InvalidInp
     {
         return Err(InvalidInput("unsupported Gemma image artifact contract"));
     }
+    if profile.bidirectional
+        && raw["decoder_config"]["transformer_config"]["layer_configs"].as_array().is_none_or(|layers| {
+            layers.is_empty()
+                || layers.iter().any(|layer| {
+                    let mixer = &layer["mixer_config"];
+                    let image_policy = if mixer["sliding_window_size"].is_null() {
+                        "causal"
+                    } else {
+                        "windowed_same_image"
+                    };
+                    layer["materialize_post_layer_scalar"] != true
+                        || mixer["materialize_rope_bf16"] != true
+                        || mixer["image_attention_policy"] != image_policy
+                })
+        })
+    {
+        return Err(InvalidInput("Gemma no-PLE image decoder requires its BF16 residual and rotary policy"));
+    }
     let vision = &contract["vision_config"];
+    if profile.unified {
+        if *vision
+            != serde_json::json!({"model_type":"gemma4_unified_vision", "mm_embed_dim":3840,
+            "mm_posemb_size":1120,"model_patch_size":48,"num_soft_tokens":280,"output_proj_dims":3840,
+            "patch_size":16,"pooling_kernel_size":3,"rms_norm_eps":1e-6})
+        {
+            return Err(InvalidInput("unsupported unified Gemma image geometry"));
+        }
+        return Ok(profile);
+    }
     if vision.as_object().is_none_or(|fields| fields.len() != 18) {
         return Err(InvalidInput("Gemma vision declares unsupported configuration fields"));
     }
@@ -272,19 +356,12 @@ impl<B: Backend> Engine<B> {
         let profile = validate_contract(&raw)?;
         // E2B retains its original admission cap. E4B's larger PLE decoder
         // needs its own bound; neither profile permits unbounded components.
-        let weight_limit_gib = if profile.model_dim == MODEL {
-            12
-        } else if profile.bidirectional {
-            72
-        } else {
-            20
-        };
-        if selected["model.safetensors"].metadata()?.len() > weight_limit_gib * 1024 * 1024 * 1024u64 {
+        if selected["model.safetensors"].metadata()?.len() > profile.weight_limit_gib * 1024 * 1024 * 1024u64 {
             return Err(InvalidInput("Gemma image weights exceed the selected profile bound").into());
         }
         for (name, expected) in [
             ("tokenizer.json", profile.tokenizer),
-            ("preprocessor_config.json", PROCESSOR),
+            ("preprocessor_config.json", profile.processor),
             ("chat_template.jinja", profile.template),
         ] {
             if hashes.get(name).map(String::as_str) != Some(expected) {
@@ -322,7 +399,15 @@ impl<B: Backend> Engine<B> {
         let language: LanguageModelConfig = serde_json::from_value(serde_json::json!({"type":"LanguageModelConfig",
             "decoder_config":config.decoder_config,"token_codec_config":config.token_codec_config,"generation_config":config.generation_config}))?;
         let loader = ParameterLoader::new(&selected["model.safetensors"], &*self.context)?;
-        let tower = Gemma4VisionTower::new(&*self.context, &loader.tree().subtree("vision"), profile.model_dim)?;
+        let tower = if profile.unified {
+            ImageTower::Unified(unified::UnifiedVisionEmbedder::new(&*self.context, &loader.tree().subtree("vision"))?)
+        } else {
+            ImageTower::Encoder(Gemma4VisionTower::new(
+                &*self.context,
+                &loader.tree().subtree("vision"),
+                profile.model_dim,
+            )?)
+        };
         let language_model =
             self.language_model_from_config(path, language, &loader, Some(tokenizer), SpeculatorPolicy::Disabled)?;
         loader.tree().assert_all_tensors_validated()?;
@@ -426,7 +511,11 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
         if cancelled() {
             return Err(NativeVisionError::cancelled());
         }
-        let patches = preprocess::prepare(encoded)?;
+        let patches = if self.profile.unified {
+            preprocess::prepare_unified(encoded)?
+        } else {
+            preprocess::prepare(encoded)?
+        };
         if cancelled() {
             return Err(NativeVisionError::cancelled());
         }
@@ -797,6 +886,9 @@ mod contract_tests {
         larger["decoder_config"]["gemma4_image_embeddings"] = false.into();
         larger["decoder_config"]["scalar_image_embeddings"] = true.into();
         larger["decoder_config"]["bidirectional_image_attention"] = true.into();
+        larger["decoder_config"]["transformer_config"]["layer_configs"] = serde_json::json!([{
+            "materialize_post_layer_scalar":true,"mixer_config":{"materialize_rope_bf16":true,"image_attention_policy":"causal"}
+        }]);
         for (name, value) in [
             ("hidden_size", 1152),
             ("num_hidden_layers", 27),
@@ -819,5 +911,38 @@ mod contract_tests {
         assert!(validate_contract(&changed).is_err());
         larger["artifact_contract"]["vision_config"]["standardize"] = false.into();
         assert!(validate_contract(&larger).is_err());
+    }
+
+    #[stark_test]
+    fn unified_contract_requires_encoder_free_geometry_and_explicit_no_ple_precision() {
+        let mut raw = config();
+        let profile = PROFILES[4];
+        raw["artifact_contract"]["family"]["id"] = profile.family.into();
+        raw["artifact_contract"]["source"] = serde_json::json!({"repo":profile.repo,"revision":profile.revision});
+        raw["decoder_config"]["transformer_config"]["model_dim"] = profile.model_dim.into();
+        raw["decoder_config"]["transformer_config"]["layer_configs"] = serde_json::json!([{
+            "materialize_post_layer_scalar":true,"mixer_config":{"materialize_rope_bf16":true,"image_attention_policy":"causal"}
+        }]);
+        raw["decoder_config"]["gemma4_image_embeddings"] = false.into();
+        raw["decoder_config"]["scalar_image_embeddings"] = true.into();
+        raw["decoder_config"]["bidirectional_image_attention"] = true.into();
+        raw["artifact_contract"]["vision_config"] = serde_json::json!({
+            "model_type":"gemma4_unified_vision", "mm_embed_dim":3840,"mm_posemb_size":1120,
+            "model_patch_size":48,"num_soft_tokens":280,"output_proj_dims":3840,
+            "patch_size":16,"pooling_kernel_size":3,"rms_norm_eps":1e-6
+        });
+        assert!(validate_contract(&raw).is_ok());
+        let mut changed = raw.clone();
+        changed["artifact_contract"]["vision_config"]["num_hidden_layers"] = 16.into();
+        assert!(validate_contract(&changed).is_err());
+        let mut changed = raw.clone();
+        changed["decoder_config"]["transformer_config"]["layer_configs"][0]["mixer_config"]["sliding_window_size"] =
+            1024.into();
+        assert!(validate_contract(&changed).is_err());
+        changed["decoder_config"]["transformer_config"]["layer_configs"][0]["mixer_config"]["image_attention_policy"] =
+            "windowed_same_image".into();
+        assert!(validate_contract(&changed).is_ok());
+        raw["decoder_config"]["transformer_config"]["layer_configs"][0]["materialize_post_layer_scalar"] = false.into();
+        assert!(validate_contract(&raw).is_err());
     }
 }

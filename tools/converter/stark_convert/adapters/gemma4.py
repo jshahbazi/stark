@@ -13,8 +13,8 @@ The decoder uses Stark's native PLE, shared-KV and Metal execution blocks.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import ml_dtypes
@@ -67,10 +67,10 @@ def _activation_scalar(value: float, dtype: str) -> float:
 
 def normalize_gemma4_config(config: dict) -> dict:
     """Keep wrapper token IDs (including end-of-turn EOS) over text defaults."""
-    if config.get("model_type") == "gemma4_text":
-        return dict(config)
+    if config.get("model_type") in {"gemma4_text", "gemma4_unified_text"}:
+        return {**config, "model_type": "gemma4_text"}
     text = config.get("text_config")
-    if config.get("model_type") != "gemma4" or not isinstance(text, dict):
+    if config.get("model_type") not in {"gemma4", "gemma4_unified"} or not isinstance(text, dict):
         raise ConversionError("Gemma 4 wrapper requires a text configuration")
     return {
         **text,
@@ -90,12 +90,18 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
     remain available for independently recorded controls.
     """
     outer = read_json(source / "config.json")
-    wrapper = outer.get("model_type") == "gemma4"
+    unified = outer.get("model_type") in {"gemma4_unified", "gemma4_unified_text"}
+    wrapper = outer.get("model_type") in {"gemma4", "gemma4_unified"}
     if wrapper:
         config = outer.get("text_config")
-        if not isinstance(config, dict) or config.get("model_type") != "gemma4_text":
+        if not isinstance(config, dict) or config.get("model_type") != (
+            "gemma4_unified_text" if unified else "gemma4_text"
+        ):
             raise UnsupportedConversion("Gemma 4 wrapper requires an explicit Gemma 4 text config")
-        if outer.get("architectures", ["Gemma4ForConditionalGeneration"]) != ["Gemma4ForConditionalGeneration"]:
+        expected_architecture = (
+            "Gemma4UnifiedForConditionalGeneration" if unified else "Gemma4ForConditionalGeneration"
+        )
+        if outer.get("architectures", [expected_architecture]) != [expected_architecture]:
             raise UnsupportedConversion("Gemma 4 wrapper architecture is outside text coverage")
         if outer.get("tie_word_embeddings", True) is not True:
             raise UnsupportedConversion("Gemma 4 text coverage requires tied embeddings")
@@ -104,11 +110,12 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
                 raise ConversionError("Gemma 4 modality configuration must be an object")
     else:
         config = outer
-        if config.get("model_type") != "gemma4_text":
+        if config.get("model_type") not in {"gemma4_text", "gemma4_unified_text"}:
             raise UnsupportedConversion("Gemma 4 adapter supports E2B/E4B text architectures")
-        if config.get("architectures", ["Gemma4ForCausalLM"]) not in (
-            ["Gemma4ForCausalLM"],
-            ["Gemma4TextModel"],
+        prefix_kind = "Gemma4Unified" if unified else "Gemma4"
+        if config.get("architectures", [prefix_kind + "ForCausalLM"]) not in (
+            [prefix_kind + "ForCausalLM"],
+            [prefix_kind + "TextModel"],
         ):
             raise UnsupportedConversion("Gemma 4 text architecture is outside coverage")
     if dtype not in _DTYPES:
@@ -177,6 +184,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
     if type(ple_dim) is not int or ple_dim < 0:
         raise ConversionError("Gemma 4 PLE width must be a nonnegative integer")
     k_eq_v = _boolean(config, "attention_k_eq_v", False)
+    if unified and (ple_dim or not k_eq_v or moe):
+        raise UnsupportedConversion("Unified Gemma requires the no-PLE dense K=V decoder")
     global_groups = config.get("num_global_key_value_heads")
     if k_eq_v:
         if ple_dim or type(global_groups) is not int or global_groups < 1 or heads % global_groups or shared_count:
@@ -500,6 +509,7 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
             mixer["materialize_prefill_scores"] = True
         elif target == "BF16" and ple_dim == 0:
             mixer["materialize_rope_bf16"] = True
+            mixer["image_attention_policy"] = "windowed_same_image" if kind == "sliding_attention" else "causal"
         layers.append(
             {
                 "pre_mixer_norm_config": norm_config,
@@ -545,6 +555,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
         modality_prefixes = []
         if outer.get("vision_config"):
             modality_prefixes += [modality_root + "vision_tower.", modality_root + "embed_vision."]
+            if unified:
+                modality_prefixes.append(modality_root + "vision_embedder.")
         if outer.get("audio_config"):
             modality_prefixes += [modality_root + "audio_tower.", modality_root + "embed_audio."]
         ignored = {name for name in tensors if any(name.startswith(value) for value in modality_prefixes)}

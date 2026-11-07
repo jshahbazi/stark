@@ -149,6 +149,10 @@ def test_dense_no_ple_global_k_equals_v_keeps_independent_normalization_inputs(t
     assert all(layer["ple_config"] is None and layer["kv_source_layer_index"] is None for layer in layers)
     assert all(layer["materialize_post_layer_scalar"] for layer in layers)
     assert all(layer["mixer_config"]["materialize_rope_bf16"] for layer in layers)
+    assert [layer["mixer_config"]["image_attention_policy"] for layer in layers] == [
+        "windowed_same_image",
+        "causal",
+    ] * 3
     global_qkv = next(
         op for op in plan.operations if op.name == "decoder.transformer.layers.1.mixer.qkvg_projection.weights.weights"
     )
@@ -212,6 +216,18 @@ def test_gemma_moe_banks_reorder_gate_up_per_expert_and_preserve_controls(tmp_pa
     scales = converted["decoder.transformer.layers.0.mlp.expert_scales"]
     assert scales.dtype == "F32"
     assert tensor_bytes(scales) == tensors["model.layers.0.router.per_expert_scale"][1].astype("<f4").tobytes()
+
+
+def test_unified_text_alias_uses_no_ple_residual_and_global_kv_path(tmp_path):
+    source = tmp_path / "source"
+    config, _ = no_ple_fixture(source)
+    config.update(model_type="gemma4_unified_text", architectures=["Gemma4UnifiedForCausalLM"])
+    (source / "config.json").write_text(json.dumps(config))
+    plan = build_gemma4_plan(source)
+    layers = plan.decoder_config["transformer_config"]["layer_configs"]
+    assert all(layer["materialize_post_layer_scalar"] for layer in layers)
+    assert all(layer["mixer_config"]["materialize_rope_bf16"] for layer in layers)
+    assert plan.decoder_config["ple_model_config"] is None
 
 
 @pytest.mark.parametrize("wrapper,redundant,double_wide", [(True, True, True), (False, False, False)])
