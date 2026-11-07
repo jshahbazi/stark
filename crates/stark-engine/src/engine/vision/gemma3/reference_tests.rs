@@ -272,7 +272,7 @@ fn gemma3_first_block_stage_reference_metal() {
             let count = stage["elements"].as_u64().unwrap() as usize;
             assert!(count > 0 && count <= 1_048_576, "private stage exceeds bounded prefix");
             let mut readback = engine.context.create_buffer(count * size_of::<bf16>())?;
-        commands.encode_copy(buffer.subrange(0..count * size_of::<bf16>()), &mut readback);
+            commands.encode_copy(buffer.subrange(0..count * size_of::<bf16>()), &mut readback);
             captures.push((name.to_owned(), readback));
             Ok(())
         };

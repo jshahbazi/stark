@@ -5,6 +5,19 @@ use crate::config::{
     normalization::{NormalizationConfig, UpcastMode},
 };
 
+#[stark_config]
+#[derive(Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageAttentionPolicy {
+    /// Same-image visibility overrides the complete causal/window mask.
+    #[default]
+    SameImage,
+    /// Image tokens follow the ordinary causal attention mask.
+    Causal,
+    /// Same-image visibility remains subject to the sliding lower bound.
+    WindowedSameImage,
+}
+
 #[stark_config(super::TokenMixerConfig)]
 pub struct AttentionConfig {
     pub qkvg_projection_config: LinearConfig,
@@ -20,6 +33,8 @@ pub struct AttentionConfig {
     pub num_groups: u32,
     pub head_dim: u32,
     pub is_causal: bool,
+    #[serde(default)]
+    pub image_attention_policy: ImageAttentionPolicy,
     pub scale: Option<f32>,
     pub sliding_window_size: Option<u32>,
     pub logit_soft_cap: Option<f32>,
@@ -78,6 +93,7 @@ mod source_value_tests {
             "has_gate":false,"normalize_values":true,"is_kv_sharing":false
         }))
         .unwrap();
+        assert_eq!(attention.image_attention_policy, ImageAttentionPolicy::SameImage);
         let legacy = attention.value_norm_config().unwrap();
         assert!(!legacy.mlx_bf16_reduction);
         assert_eq!(legacy.upcast_mode, UpcastMode::FullLayer);
@@ -93,5 +109,27 @@ mod source_value_tests {
         assert_eq!(source.epsilon, 3e-6);
         attention.normalize_values = false;
         assert!(attention.value_norm_config().is_none());
+    }
+
+    #[stark_test]
+    fn explicit_image_mask_policy_requires_valid_window_and_known_semantics() {
+        let mut value = serde_json::json!({
+            "type":"AttentionConfig", "qkvg_projection_config":{}, "out_projection_config":{},
+            "query_norm_config":null,"key_norm_config":null,"num_heads":2,"num_groups":1,"head_dim":64,
+            "is_causal":true,"scale":1.0,"sliding_window_size":null,"logit_soft_cap":null,"has_sinks":false,
+            "has_qkvg_biases":false,"has_out_biases":false,"has_gate":false,"normalize_values":false,
+            "is_kv_sharing":false,"image_attention_policy":"causal"
+        });
+        let global: AttentionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(global.image_attention_policy, ImageAttentionPolicy::Causal);
+        assert!(crate::config::validation::validate_attention(&global, None).is_ok());
+        value["image_attention_policy"] = serde_json::json!("windowed_same_image");
+        let local: AttentionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(crate::config::validation::validate_attention(&local, None).is_err());
+        value["sliding_window_size"] = serde_json::json!(16);
+        let local: AttentionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(crate::config::validation::validate_attention(&local, None).is_ok());
+        value["image_attention_policy"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<AttentionConfig>(value).is_err());
     }
 }

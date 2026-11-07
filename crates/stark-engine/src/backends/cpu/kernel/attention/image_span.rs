@@ -20,6 +20,7 @@ pub(crate) fn image_key_visible(
     window: u32,
     image_start: u32,
     image_end: u32,
+    image_respects_window: u32,
 ) -> bool {
     let key_position = if key < prefix && has_ring != 0 {
         (prefix + key - ring_offset) % prefix
@@ -33,7 +34,8 @@ pub(crate) fn image_key_visible(
         && query < image_end
         && key - prefix >= image_start
         && key - prefix < image_end;
-    causal || same_image
+    let within_lower_window = window == 0 || key_position > query_position || query_position - key_position < window;
+    (causal || same_image) && (image_respects_window == 0 || within_lower_window)
 }
 
 #[kernel(AttentionImageSpan)]
@@ -53,6 +55,7 @@ fn attention_image_span<T: ArrayElement + Float, const HEAD_DIM: u32>(
     sliding_window_size: u32,
     image_start: u32,
     image_end: u32,
+    image_respects_window: u32,
     scale: f32,
 ) {
     let width = HEAD_DIM as usize;
@@ -74,6 +77,7 @@ fn attention_image_span<T: ArrayElement + Float, const HEAD_DIM: u32>(
                     sliding_window_size,
                     image_start,
                     image_end,
+                    image_respects_window,
                 ) {
                     continue;
                 }
@@ -121,21 +125,21 @@ mod tests {
         ];
         for (query, row) in expected.into_iter().enumerate() {
             for (key, expected) in row.into_iter().enumerate() {
-                assert_eq!(image_key_visible(query as u32, key as u32, 2, 0, 0, 3, 1, 3), expected);
+                assert_eq!(image_key_visible(query as u32, key as u32, 2, 0, 0, 3, 1, 3, 0), expected);
             }
         }
-        assert!(image_key_visible(1, 4, 2, 0, 0, 1, 1, 3));
-        assert!(!image_key_visible(0, 4, 2, 0, 0, 0, 1, 3));
-        assert!(!image_key_visible(1, 5, 2, 0, 0, 0, 1, 3));
+        assert!(image_key_visible(1, 4, 2, 0, 0, 1, 1, 3, 0));
+        assert!(!image_key_visible(0, 4, 2, 0, 0, 0, 1, 3, 0));
+        assert!(!image_key_visible(1, 5, 2, 0, 0, 0, 1, 3, 0));
     }
 
     #[stark_test]
     fn image_attention_respects_ring_chronology() {
         // Ring slots [0,1,2] hold logical positions [2,0,1]. Only the newest
         // prefix row and current row fit this two-token sliding window.
-        assert!(image_key_visible(0, 0, 3, 1, 1, 2, 1, 3));
-        assert!(!image_key_visible(0, 1, 3, 1, 1, 2, 1, 3));
-        assert!(!image_key_visible(0, 2, 3, 1, 1, 2, 1, 3));
-        assert!(image_key_visible(1, 5, 3, 1, 1, 2, 1, 3));
+        assert!(image_key_visible(0, 0, 3, 1, 1, 2, 1, 3, 0));
+        assert!(!image_key_visible(0, 1, 3, 1, 1, 2, 1, 3, 0));
+        assert!(!image_key_visible(0, 2, 3, 1, 1, 2, 1, 3, 0));
+        assert!(image_key_visible(1, 5, 3, 1, 1, 2, 1, 3, 0));
     }
 }

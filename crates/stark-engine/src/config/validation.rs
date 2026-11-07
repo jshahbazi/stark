@@ -134,6 +134,11 @@ pub(crate) fn validate_attention(
     {
         return Err(InvalidInput("invalid sliding window capacity"));
     }
+    if config.image_attention_policy == super::token_mixer::attention::ImageAttentionPolicy::WindowedSameImage
+        && config.sliding_window_size.is_none()
+    {
+        return Err(InvalidInput("windowed image attention requires a sliding window"));
+    }
     Ok(())
 }
 
