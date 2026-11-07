@@ -57,6 +57,10 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 
 New validation runs belong in the pull request that made the change, or under `archive/runs/` when they must be preserved; reference pages describe current behaviour only.
 
+The [Gemma 3 image run](archive/runs/2026-11-07-gemma3-images.md) records exact
+4B native parity, source-bound worker/API lifecycle, preservation controls
+and the 12B/27B execution limits.
+
 The [Qwen3.5 family installation run](archive/runs/2026-10-27-qwen35-family-installation.md)
 records changed-weight conversion and automatic local image checks through the
 desktop, API and Swift controller.

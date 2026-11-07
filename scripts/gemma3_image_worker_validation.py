@@ -64,6 +64,7 @@ def run(args):
     global PHASE
     model, fixture, executable = (path.resolve(strict=True) for path in (args.model, args.fixture, args.worker))
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    args._created_output = True
     receipt = {"passed": False, "worker_sha256": digest(executable),
                "fixture_sha256": digest(fixture / "manifest.json"), "checks": {}}
     receipt["qualifier_sha256"] = digest(Path(__file__).resolve())
@@ -316,7 +317,7 @@ def main():
             current = current.__context__
         failure = {"passed": False, "phase": PHASE, "error_class": type(error).__name__,
                    "error_message_sha256": hashlib.sha256(str(error).encode()).hexdigest(), "causes": causes}
-        if args.output.is_dir():
+        if getattr(args, "_created_output", False):
             write_receipt(args.output / "failure.json", failure)
         print(json.dumps(failure), flush=True)
         return 1
