@@ -159,6 +159,31 @@ Native tower replay, full decoder numerical parity, and worker image lifecycle
 qualification remain pending. Converter and fixture checks do not establish
 end-to-end image support for these particular artifacts.
 
+## Retained Lily memory preflight
+
+Header/metadata inspection reads the existing immutable, hard-linked source;
+it changes no source files or payload permissions. The retained artifact's
+106,905,155,192 file bytes contain 32,000,153,600 bytes of paged PLE tables and
+1,842,067,616 bytes of MTP tensors skipped for images. Selected resident
+trunk plus vision tensors total 73,062,399,712 bytes. The loader reads these
+directly into shared Metal buffers, while the PLE table stays a read-only file
+mapping and copies selected rows into bounded staging buffers.
+
+The code-pinned observation recipe applies only to this exact artifact,
+configuration and index identity. It includes the adapter's initial 16,384-token
+state allocation even when the check requests 2,048 context tokens. Twelve
+attention KV/indexer stores plus 36 recurrent layers compute to 394,616,832
+bytes; the decoder's largest dequant staging tensor is 62,914,560 bytes.
+Conservative rounded buckets reserve 512 MiB for state, 256 MiB for decoder
+scratch, 2 GiB for a 2,048-row prefill, 512 MiB for CPU/GPU image preparation at
+the 4,096-patch cap, 1 GiB for the paged-table working set, and another 8 GiB for
+driver, allocator and host-memory drift. Unknown identities retain the original
+full-file-payload plus 2 GiB observation check.
+
+This is a static allocation estimate, not a measured peak or a memory
+reservation. Native payload admission and operation-specific bounds still
+apply, and actual available memory must be refreshed before a full load.
+
 ## Primary references
 
 - [Official Qwen3.8-27B configuration](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json):
