@@ -34,8 +34,6 @@ fn reference<B: Backend>(backend: &str) {
         &std::fs::read(root.join("manifest.json")).unwrap_or_else(|_| panic!("private logit manifest unavailable")),
     )
     .unwrap_or_else(|_| panic!("invalid private logit manifest"));
-    assert!(manifest["threads"].as_u64() == Some(8), "unexpected private reference thread count");
-    assert!(manifest["vocab_size"].as_u64() == Some(248320), "unexpected private logit vocabulary");
     let capacity = manifest["context_capacity"]
         .as_u64()
         .and_then(|n| u32::try_from(n).ok())
@@ -44,6 +42,41 @@ fn reference<B: Backend>(backend: &str) {
     let mut model = engine
         .load_vision_language_model(&path)
         .unwrap_or_else(|_| panic!("private logit exact artifact loading failed"));
+    let vocab = model.vocab_size() as usize;
+    assert!(manifest["vocab_size"].as_u64() == Some(vocab as u64), "unexpected private logit vocabulary");
+    if manifest["schema_version"] == 2 {
+        // Dynamic-family replays must bind the exact admitted artifact and
+        // frozen execution controls. A vector from a different quantization,
+        // template or source revision cannot qualify this loaded instance.
+        let identity = model.artifact_identity();
+        let expected = json!({"artifact_schema_version":identity.schema_version,
+            "config_sha256":identity.config_sha256,"artifact_sha256":identity.artifact_sha256,
+            "tokenizer_sha256":identity.tokenizer_sha256,"processor_sha256":identity.processor_sha256,
+            "template_sha256":identity.template_sha256});
+        assert!(manifest["artifact_identity"] == expected, "private logit artifact identity differs");
+        let (repo, revision) = model.source_identity();
+        assert!(manifest["source"] == json!({"repo":repo,"revision":revision}), "private logit source differs");
+        let (profile, version) = model.family_profile();
+        assert!(manifest["family"] == json!({"profile":profile,"version":version}), "private logit family differs");
+        assert!(
+            manifest["sampling"] == json!({"mode":"greedy"}) && manifest["mtp"] == false,
+            "private logit execution controls differ"
+        );
+    } else {
+        // Preserve the original immutable 0.8B reference replay contract.
+        assert!(manifest.get("schema_version").is_none(), "unsupported private logit manifest version");
+        assert!(manifest["threads"].as_u64() == Some(8), "unexpected private reference thread count");
+        assert!(vocab == 248320 && model.model_dim == 1024, "unexpected legacy private logit geometry");
+    }
+    let config: Value = serde_json::from_slice(
+        &std::fs::read(path.join("config.json")).unwrap_or_else(|_| panic!("private model metadata unavailable")),
+    )
+    .unwrap_or_else(|_| panic!("invalid private model metadata"));
+    let layer_count = config["decoder_config"]["transformer_config"]["layer_configs"]
+        .as_array()
+        .filter(|layers| !layers.is_empty() && layers.len() <= 256)
+        .expect("invalid private layer count")
+        .len();
     let output = root.join(format!("native-{backend}"));
     std::fs::create_dir_all(&output).unwrap_or_else(|_| panic!("private logit output setup failed"));
     #[cfg(unix)]
@@ -59,7 +92,7 @@ fn reference<B: Backend>(backend: &str) {
         let expected_tokens = u32_values(&checked_bytes(&folder, &case["files"]["tokens"]));
         let expected_positions = u32_values(&checked_bytes(&folder, &case["files"]["positions"]));
         let expected_logits = checked_bytes(&folder, &case["files"]["logits"]);
-        assert!(expected_logits.len() == 248320 * 4, "incomplete private full-vocabulary reference");
+        assert!(expected_logits.len() == vocab * 4, "incomplete private full-vocabulary reference");
         let image = model.prepare_image(&image_bytes).unwrap_or_else(|_| panic!("private image preparation failed"));
         assert!(
             u64::from(image.image_token_count()) == case["image_tokens"].as_u64().unwrap(),
@@ -95,16 +128,22 @@ fn reference<B: Backend>(backend: &str) {
         state.vision_prefill_logits_readback = Some(
             engine
                 .context
-                .create_buffer(248320 * size_of::<bf16>())
+                .create_buffer(vocab * size_of::<bf16>())
                 .unwrap_or_else(|_| panic!("private logit readback allocation failed")),
         );
         let input_len = tokens.len();
         if std::env::var_os("STARK_VISION_DECODER_LAYER_TRACE").is_some() {
-            // Exact pinned model width/layer count. These buffers never leave
-            // this ignored test and are read only after stream Drop drains.
-            let row_bytes = 1024 * size_of::<bf16>();
-            let buffers =
-                (0..24).map(|_| engine.context.create_buffer(input_len * row_bytes).unwrap()).collect::<Box<[_]>>();
+            // Admitted model width and bounded layer count. These buffers
+            // remain private and are read only after stream Drop drains.
+            let row_bytes = model.model_dim as usize * size_of::<bf16>();
+            let trace_bytes = input_len
+                .checked_mul(row_bytes)
+                .and_then(|n| n.checked_mul(layer_count))
+                .expect("private layer trace size overflow");
+            assert!(trace_bytes <= 512 * 1024 * 1024, "private layer trace exceeds bounded budget");
+            let buffers = (0..layer_count)
+                .map(|_| engine.context.create_buffer(input_len * row_bytes).unwrap())
+                .collect::<Box<[_]>>();
             state.vision_prefill_layer_readbacks = Some((row_bytes, buffers));
         }
         let mut options = model.default_stream_options();
@@ -186,4 +225,83 @@ fn qwen35_vision_last_prompt_logit_reference_cpu() {
 #[ignore]
 fn qwen35_vision_last_prompt_logit_reference_metal() {
     reference::<crate::backends::metal::Metal>("metal");
+}
+
+/// Reproduce the worker's first text check without printing request content,
+/// token IDs, generated output or backend exception strings.
+#[cfg(backend = "metal")]
+#[stark_test]
+#[ignore]
+fn qwen35_vision_worker_text_diagnostic_metal() {
+    use crate::{
+        backends::metal::{Metal, MetalError},
+        encodable_block::decoder::DecoderError,
+    };
+    fn failure(error: NativeVisionError<Metal>) -> ! {
+        let mut result = json!({"kind":format!("{:?}",error.kind())});
+        let backend = match &error.failure {
+            NativeVisionFailure::Stream(LanguageModelStreamError::Backend(error)) => {
+                result["stream_stage"] = json!("backend");
+                Some(error)
+            },
+            NativeVisionFailure::Stream(LanguageModelStreamError::Decoder(error)) => {
+                result["stream_stage"] = json!("decoder");
+                match error {
+                    DecoderError::Backend(error) => Some(error),
+                    DecoderError::InvalidInput(error) => {
+                        result["static_input_sha256"] = json!(format!("{:x}", Sha256::digest(error.0.as_bytes())));
+                        None
+                    },
+                    _ => None,
+                }
+            },
+            NativeVisionFailure::Stream(LanguageModelStreamError::InvalidMultimodal) => {
+                result["stream_stage"] = json!("multimodal_preflight");
+                None
+            },
+            NativeVisionFailure::Backend(error) => Some(error),
+            _ => None,
+        };
+        if let Some(error) = backend {
+            let stage = match error {
+                MetalError::InvalidInput(error) => {
+                    result["static_input_sha256"] = json!(format!("{:x}", Sha256::digest(error.0.as_bytes())));
+                    "invalid_input"
+                },
+                MetalError::CannotCreateBuffer | MetalError::CannotCreateHeap => "allocation",
+                MetalError::CannotCreatePipelineState {
+                    ..
+                }
+                | MetalError::CannotCreateFunction(_) => "pipeline",
+                MetalError::KernelDispatchFailed(_) => "dispatch",
+                MetalError::CommandBufferExecution(_) | MetalError::CommandBufferWait(_) => "execution",
+                _ => "setup",
+            };
+            result["backend_stage"] = json!(stage);
+        }
+        println!("{}", json!({"qwen_text_diagnostic_failure":result}));
+        panic!("private Qwen text diagnostic failed");
+    }
+    let path = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private exact artifact path"));
+    let engine = Engine::<Metal>::new().unwrap_or_else(|_| panic!("private diagnostic engine setup failed"));
+    let mut model = engine.load_vision_language_model(&path).unwrap_or_else(|error| failure(error));
+    println!("{}", json!({"qwen_text_diagnostic_stage":"loaded"}));
+    let mut state = model.create_empty_state(Some(2048), 0).unwrap_or_else(|error| failure(error));
+    println!("{}", json!({"qwen_text_diagnostic_stage":"state_created"}));
+    let tokens = model.tokenizer().encode("Hello.", false).expect("private diagnostic tokenization failed");
+    let tokens = tokens.get_ids().iter().copied().map(u64::from).collect::<Vec<_>>();
+    let mut options = model.default_stream_options();
+    options.sampling_method = crate::engine::language_model::stream::SamplingMethod::Greedy;
+    let mut stream = model.stream(&tokens, &mut state, options).unwrap_or_else(|error| failure(error));
+    println!("{}", json!({"qwen_text_diagnostic_stage":"prefilled"}));
+    for index in 0..8 {
+        match stream.next() {
+            Some(Ok(_)) => {},
+            Some(Err(error)) => failure(error.into()),
+            None => panic!("private diagnostic stream ended unexpectedly"),
+        }
+        println!("{}", json!({"qwen_text_diagnostic_stage":"decoded","completed_steps":index+1}));
+    }
+    drop(stream);
+    assert!(!model.is_fenced(), "private diagnostic model fenced");
 }
