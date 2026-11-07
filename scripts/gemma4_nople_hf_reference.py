@@ -26,7 +26,7 @@ def digest(path):
 def run(args):
     import torch
     import transformers
-    from safetensors.torch import save_file
+    from safetensors.torch import load_file, save_file
     from tokenizers import Tokenizer, models
     from torch.nn.attention import SDPBackend, sdpa_kernel
     from transformers.models.gemma4 import modeling_gemma4
@@ -113,6 +113,22 @@ def run(args):
     finally:
         torch.set_default_dtype(previous)
     scalars = [-0.5, 0.625, -0.75, 0.875, 1.125, -0.25][: args.layers]
+    source_head_norms = None
+    norm_mapping = []
+    if args.head_norm_source is not None:
+        norm_source = args.head_norm_source.resolve()
+        norm_receipt = json.loads((norm_source / "receipt.json").read_text())
+        if (
+            norm_receipt["repo"] != "google/gemma-4-31B-it"
+            or norm_receipt["revision"] != "842da3794eaa0b77d5f08bae87a17459d91ff475"
+            or norm_receipt["tensor_count"] != 12
+            or norm_receipt["metadata_bytes"] > 2 * 1024 * 1024
+            or norm_receipt["tensor_bytes"] > 64 * 1024
+            or digest(norm_source / "head-norms.safetensors")
+            != norm_receipt["weights_sha256"]
+        ):
+            raise ValueError("source_head_norm_identity_changed")
+        source_head_norms = load_file(norm_source / "head-norms.safetensors")
     with torch.no_grad():
         for index, layer in enumerate(model.model.layers):
             layer.layer_scalar.fill_(scalars[index])
@@ -120,6 +136,33 @@ def run(args):
             # transitions while preserving production head widths and masks.
             layer.self_attn.q_norm.weight.fill_(args.query_key_norm_scale)
             layer.self_attn.k_norm.weight.fill_(args.query_key_norm_scale)
+            if source_head_norms is not None:
+                # Preserve the synthetic topology and all other weights. Match
+                # the nearest source layer with the same logical head width;
+                # synthetic global layers reuse the extracted source layer 5.
+                width = layer.self_attn.q_norm.weight.numel()
+                candidates = [
+                    source_layer
+                    for source_layer in range(6)
+                    if source_head_norms[
+                        f"model.language_model.layers.{source_layer}.self_attn.q_norm.weight"
+                    ].numel()
+                    == width
+                ]
+                if not candidates:
+                    raise ValueError("source_head_norm_width_mismatch")
+                selected = min(candidates, key=lambda candidate: abs(candidate - index))
+                for kind in ("q", "k"):
+                    value = source_head_norms[
+                        f"model.language_model.layers.{selected}.self_attn.{kind}_norm.weight"
+                    ]
+                    target = getattr(layer.self_attn, f"{kind}_norm").weight
+                    if value.dtype != torch.bfloat16 or value.shape != target.shape:
+                        raise ValueError("source_head_norm_geometry_changed")
+                    target.copy_(value)
+                norm_mapping.append(
+                    {"synthetic_layer": index, "source_layer": selected}
+                )
             if args.moe:
                 layer.router.scale.copy_(
                     torch.linspace(0.5, 1.5, args.model_dim).bfloat16()
@@ -215,6 +258,15 @@ def run(args):
         "cases": cases,
         "complete": True,
     }
+    if args.head_norm_source is not None:
+        manifest["query_key_norm_scale"] = None
+        manifest["source_head_norm_control"] = {
+            "scope": "synthetic-model-with-pinned-head-norm-gains-only",
+            "source_revision": norm_receipt["revision"],
+            "source_receipt_sha256": digest(norm_source / "receipt.json"),
+            "source_weights_sha256": norm_receipt["weights_sha256"],
+            "layer_mapping": norm_mapping,
+        }
     (output / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
     return {
         "passed": True,
@@ -236,6 +288,7 @@ def main():
         "--attention-backend", choices=("default", "math"), default="default"
     )
     parser.add_argument("--capture-layers", action="store_true")
+    parser.add_argument("--head-norm-source", type=Path)
     args = parser.parse_args()
     try:
         with (
