@@ -1844,17 +1844,24 @@ code {
 .product-shot {
   min-width:0
 }
+/* Trim the screenshots’ transparent window margins without changing source PNGs. */
 .product-shot-frame {
-  display:block;
+  position:relative;
   overflow:hidden;
-  border:1px solid #d4d6cb;
-  background:#e7e8df;
-  box-shadow:0 8px 24px rgb(23 27 25 / 7%)
+  aspect-ratio:var(--crop-width) / var(--crop-height);
+  border-radius:10px
 }
+.product-shot:nth-child(1) { --source-width:1624; --crop-width:1400; --crop-height:1370 }
+.product-shot:nth-child(2) { --source-width:1504; --crop-width:1280; --crop-height:1322 }
+.product-shot:nth-child(3) { --source-width:1224; --crop-width:1000; --crop-height:1362 }
 .product-shot img {
+  position:absolute;
   display:block;
-  width:100%;
-  height:auto
+  max-width:none;
+  width:calc(100% * var(--source-width) / var(--crop-width));
+  height:auto;
+  left:calc(-100% * 112 / var(--crop-width));
+  top:calc(-100% * 76 / var(--crop-height))
 }
 .product-shot figcaption {
   padding-top:17px
