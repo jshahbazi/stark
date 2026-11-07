@@ -201,7 +201,32 @@ producer's `torch_git`. Source lineage is PyTorch `BlasKernel.cpp`,
 notices remain in `scripts/licenses/distribution`. The witness is compiled
 only in tests, with existing M <= 256 and N/K <= 4608 bounds. It records
 source bit mismatches for this schedule and the production NAX baseline.
-No contraction schedule has been promoted on the basis of source lineage.
+No contraction schedule was promoted on the basis of source lineage alone.
+
+The contraction witness at integrated source `36414711`, seal SHA256
+`d62ee1dc8d6bb21acc7740e73211a9a21235b048021055a2db740d2b20a80280`,
+was bit exact for all 14 source-input controls. NAX source mismatch counts
+for case 0 were 52 / 187 / 24 / 138 / 122 / 79 / 22 across patch, QKV,
+projection, FC1, FC2, merger FC1 and merger FC2. Case 1 counts were
+0 / 2 / 2 / 1 / 2 / 2 / 0. The 54 same-input full-depth norms per case had
+maximum relative RMS 0.000055999 / 0.000100806. These per-operator controls
+do not themselves qualify a whole tower.
+
+Production candidate `874901fa`, bounded before allocation by `5b928751`,
+selects the proven four-stream patch / 32-stream dense schedules for only the
+seven measured dimension pairs. The adapter checks BF16 types, rank, spans,
+products and the existing 8,192-patch budget before scratch allocation.
+Dispatches use at most 32 rows and 147,456 output work items, borrowing existing
+input and output views. Other admitted geometries retain NAX; text arithmetic
+is unchanged. An independent test-only contraction body remains available,
+and all 14 production outputs must match source bits exactly. First-block
+sequence observations now use this production policy and still require exact
+agreement with the ordinary graph.
+
+Test-only `bdb7158e` also compares the existing main engine's canonical
+Torch Welford/affine and GELU bodies on source operator inputs. These
+observations have no production norm or activation selector. No LayerNorm
+or GELU policy has been promoted pending the contraction-only tower result.
 
 Native candidate qualification is pending the root-owned build/replay at the
 time of this source checkpoint. Repository policy checks and `git diff

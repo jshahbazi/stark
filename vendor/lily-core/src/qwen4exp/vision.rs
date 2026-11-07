@@ -34,12 +34,16 @@
 use anyhow::{Result, ensure};
 use half::bf16;
 
-use crate::kernels::elementwise::{Gelu, add_bf16, gelu_bf16};
+#[cfg(test)]
+use crate::kernels::elementwise::gelu_bf16;
+use crate::kernels::elementwise::{Gelu, add_bf16};
 #[cfg(test)]
 use crate::kernels::gemm::gemm_bf16_nt_bias;
+#[cfg(test)]
 use crate::kernels::norm::layernorm_bf16;
 use crate::kernels::vision::{
-    attention_full_bf16, linear_bf16_bias, patch_pos_embed_bf16, qkv_rope_2d_bf16,
+    attention_full_bf16, gelu_vision_bf16, layernorm_vision_bf16, linear_bf16_bias,
+    patch_pos_embed_bf16, qkv_rope_2d_bf16,
 };
 use crate::metal::MetalContext;
 use crate::tensor::{DType, Tensor};
@@ -195,21 +199,37 @@ pub(super) fn forward_with(
         linear_bf16_bias(ctx, &pass, &px, &w.patch_proj_w, &w.patch_proj_b, &x, 4)?;
         patch_pos_embed_bf16(ctx, &pass, &x, &w.pos_embed, gh, gw)?;
         for b in &w.blocks[..depth] {
-            layernorm_bf16(ctx, &pass, &x, &b.norm1_w, &b.norm1_b, &h, LAYERNORM_EPS)?;
+            layernorm_vision_bf16(
+                ctx,
+                &pass,
+                &x,
+                &b.norm1_w,
+                &b.norm1_b,
+                &h,
+                LAYERNORM_EPS,
+            )?;
             linear_bf16_bias(ctx, &pass, &h, &b.qkv_w, &b.qkv_b, &qkv, 32)?;
             qkv_rope_2d_bf16(ctx, &pass, &qkv, heads, gh, gw, ROPE_THETA)?;
             attention_full_bf16(ctx, &pass, &qkv, &attn, heads, scale)?;
             linear_bf16_bias(ctx, &pass, &attn, &b.proj_w, &b.proj_b, &tmp, 32)?;
             add_bf16(ctx, &pass, &x, &tmp, &x)?;
-            layernorm_bf16(ctx, &pass, &x, &b.norm2_w, &b.norm2_b, &h, LAYERNORM_EPS)?;
+            layernorm_vision_bf16(
+                ctx,
+                &pass,
+                &x,
+                &b.norm2_w,
+                &b.norm2_b,
+                &h,
+                LAYERNORM_EPS,
+            )?;
             linear_bf16_bias(ctx, &pass, &h, &b.fc1_w, &b.fc1_b, &mlp, 32)?;
-            gelu_bf16(ctx, &pass, &mlp, Gelu::Tanh)?;
+            gelu_vision_bf16(ctx, &pass, &mlp, Gelu::Tanh)?;
             linear_bf16_bias(ctx, &pass, &mlp, &b.fc2_w, &b.fc2_b, &tmp, 32)?;
             add_bf16(ctx, &pass, &x, &tmp, &x)?;
         }
         // Merger: the per-patch norm lands in `h`, whose four consecutive
         // rows per merge block are one `[4 H]` row of `h4` by layout.
-        layernorm_bf16(
+        layernorm_vision_bf16(
             ctx,
             &pass,
             &x,
@@ -219,7 +239,7 @@ pub(super) fn forward_with(
             LAYERNORM_EPS,
         )?;
         linear_bf16_bias(ctx, &pass, &h4, &w.merger_fc1_w, &w.merger_fc1_b, &mlp4, 32)?;
-        gelu_bf16(ctx, &pass, &mlp4, Gelu::Erf)?;
+        gelu_vision_bf16(ctx, &pass, &mlp4, Gelu::Erf)?;
         linear_bf16_bias(
             ctx,
             &pass,

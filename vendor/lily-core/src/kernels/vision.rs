@@ -18,6 +18,89 @@ pub const ATTN_D: usize = 72;
 const ATTN_BQ: usize = 32;
 const ATTN_THREADS: usize = 128;
 
+/// The measured retained-width Torch Welford/affine operation, vision only.
+pub(crate) fn layernorm_vision_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    out: &Tensor,
+    eps: f32,
+) -> Result<()> {
+    ensure!(input.shape().len() == 2, "vision norm rank");
+    let (rows, width) = (input.shape()[0], input.shape()[1]);
+    ensure!(rows > 0 && rows <= 8192 && width > 0, "vision norm row bound");
+    ensure!(
+        weight.numel() == width
+            && bias.numel() == width
+            && out.numel() == input.numel(),
+        "vision norm shape"
+    );
+    for tensor in [input, weight, bias, out] {
+        ensure!(tensor.dtype() == DType::BF16, "vision norm dtype");
+    }
+    if width != 1152 {
+        return crate::kernels::norm::layernorm_bf16(
+            ctx, pass, input, weight, bias, out, eps,
+        );
+    }
+    ensure!(eps.is_finite() && eps >= 0.0, "vision norm epsilon");
+    let pipeline = ctx.pipeline(
+        "vision_layernorm_bf16_compat",
+        include_str!("metal/vision_nonlinear.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[input.binding(), weight.binding(), bias.binding(), out.binding()],
+        &[Param::U32(rows as u32), Param::U32(width as u32), Param::F32(eps)],
+        Grid::Threads { grid: (rows, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+/// Source-compatible pointwise activation; bounded row/element work, vision only.
+pub(crate) fn gelu_vision_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    values: &Tensor,
+    kind: crate::kernels::elementwise::Gelu,
+) -> Result<()> {
+    ensure!(
+        values.shape().len() == 2 && values.dtype() == DType::BF16,
+        "vision GELU shape/type"
+    );
+    let (rows, width) = (values.shape()[0], values.shape()[1]);
+    ensure!(rows > 0 && rows <= 8192 && width > 0, "vision GELU row bound");
+    if width > 4608 {
+        return crate::kernels::elementwise::gelu_bf16(ctx, pass, values, kind);
+    }
+    let elements = rows
+        .checked_mul(width)
+        .ok_or_else(|| anyhow::anyhow!("vision GELU element overflow"))?;
+    ensure!(elements <= 8192 * 4608, "vision GELU element bound");
+    let approximate = match kind {
+        crate::kernels::elementwise::Gelu::Tanh => 1,
+        crate::kernels::elementwise::Gelu::Erf => 0,
+    };
+    let pipeline = ctx.pipeline(
+        "vision_gelu_bf16_compat",
+        include_str!("metal/vision_nonlinear.metal"),
+        MslVersion::V4_0,
+    )?;
+    for start in (0..elements).step_by(262144) {
+        let count = (elements - start).min(262144);
+        let tile = values.view(start, &[count])?;
+        pass.dispatch_with(
+            &pipeline,
+            &[tile.binding()],
+            &[Param::U32(count as u32), Param::U32(approximate)],
+            Grid::Threads { grid: (count, 1, 1), threadgroup: (128, 1, 1) },
+        )?;
+    }
+    Ok(())
+}
+
 /// Source-compatible contractions for the measured retained tower geometry.
 /// Other admitted geometries retain the original dense GEMM. Each dispatch
 /// covers at most32 input rows and147456 output elements, with no new buffers.

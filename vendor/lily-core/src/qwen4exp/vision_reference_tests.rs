@@ -69,6 +69,58 @@ fn numerical_metric(actual: &[f32], expected: &[bf16]) -> (f64, f64) {
     ((error / reference_norm).sqrt(), dot / (actual_norm * reference_norm).sqrt())
 }
 
+fn gelu_domain_metrics(context: &MetalContext) {
+    let Some(root) = std::env::var_os("STARK_LILY_GELU_REFERENCE_PATH") else { return };
+    let root = std::path::PathBuf::from(root);
+    assert!(fs::metadata(root.join("manifest.json")).unwrap().len() <= 65536);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["kind"], "RetainedLilyGeluDomainReference");
+    assert_eq!(manifest["torch_git"], "5c4886908584029761b579af026dcfb627c84070");
+    assert_eq!(manifest["finite_inputs"], 65280);
+    assert_eq!(manifest["input"]["shape"], json!([255, 256]));
+    let input = checked_tensor(&root, &manifest["input"]);
+    let expected_bits = (0..=u16::MAX).filter(|value| value & 0x7f80 != 0x7f80);
+    assert!(
+        input.iter().map(|value| value.to_bits()).eq(expected_bits),
+        "private GELU domain input identity"
+    );
+    let mut metrics = Vec::new();
+    for (index, (name, kind)) in
+        [("erf", Gelu::Erf), ("tanh", Gelu::Tanh)].into_iter().enumerate()
+    {
+        assert_eq!(manifest[name]["shape"], json!([255, 256]));
+        let expected = checked_tensor(&root, &manifest[name]);
+        let values = Tensor::from_bytes(
+            context,
+            bytemuck::cast_slice(&input),
+            &[255, 256],
+            DType::BF16,
+        )
+        .unwrap();
+        let pass = context.begin().unwrap();
+        gelu_vision_bf16(context, &pass, &values, kind)
+            .unwrap_or_else(|_| panic!("private GELU domain execution failed"));
+        pass.commit_wait().unwrap();
+        let actual = values.to_f32().unwrap();
+        let mismatches = actual
+            .iter()
+            .zip(expected)
+            .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
+            .count();
+        let nonfinite = actual.iter().filter(|value| !value.is_finite()).count();
+        metrics.push(json!({"kind_index":index,"elements":actual.len(),"mismatch_count":mismatches,"nonfinite_count":nonfinite}));
+    }
+    println!("{}", json!({"private_retained_gelu_domain_metrics":metrics}));
+    assert!(
+        metrics
+            .iter()
+            .all(|metric| metric["mismatch_count"] == 0
+                && metric["nonfinite_count"] == 0),
+        "private GELU domain exceeds exact source gate"
+    );
+}
+
 /// Bounded first-block sequence, using the same scratch layout and production
 /// kernels. Readbacks are aggregate comparisons only. The caller separately
 /// requires the final merged bits to equal the ordinary one-pass graph.
@@ -135,7 +187,7 @@ fn first_block_metrics(
         gh,
         gw
     ));
-    stage!(h, "norm1", "output", |pass| layernorm_bf16(
+    stage!(h, "norm1", "output", |pass| layernorm_vision_bf16(
         context,
         pass,
         &x,
@@ -180,7 +232,7 @@ fn first_block_metrics(
         32
     ));
     stage!(x, "norm2", "input", |pass| add_bf16(context, pass, &x, &tmp, &x));
-    stage!(h, "norm2", "output", |pass| layernorm_bf16(
+    stage!(h, "norm2", "output", |pass| layernorm_vision_bf16(
         context,
         pass,
         &x,
@@ -198,7 +250,7 @@ fn first_block_metrics(
         &mlp,
         32
     ));
-    stage!(mlp, "gelu_tanh", "output", |pass| gelu_bf16(
+    stage!(mlp, "gelu_tanh", "output", |pass| gelu_vision_bf16(
         context,
         pass,
         &mlp,
@@ -214,7 +266,7 @@ fn first_block_metrics(
         32
     ));
     stage!(x, "merger_norm", "input", |pass| add_bf16(context, pass, &x, &tmp, &x));
-    stage!(h, "merger_norm", "output", |pass| layernorm_bf16(
+    stage!(h, "merger_norm", "output", |pass| layernorm_vision_bf16(
         context,
         pass,
         &x,
@@ -232,7 +284,7 @@ fn first_block_metrics(
         &mlp4,
         32
     ));
-    stage!(mlp4, "gelu_erf", "output", |pass| gelu_bf16(
+    stage!(mlp4, "gelu_erf", "output", |pass| gelu_vision_bf16(
         context,
         pass,
         &mlp4,
@@ -416,7 +468,25 @@ fn operator_metrics(
             let (reference_rms, reference_cosine) = numerical_metric(&values, &expected);
             let mismatches = values.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
             let ordinary_mismatches = actual.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
-            println!("{}", json!({"private_retained_nonlinear_metrics":{"patches":gh * gw,"operator_index":index,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches}}));
+            let production_mismatches;
+            if let Some((weight, bias)) = norm {
+                let production = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
+                let pass = context.begin().unwrap();
+                layernorm_vision_bf16(context, &pass, &input, weight, bias, &production, LAYERNORM_EPS).unwrap();
+                pass.commit_wait().unwrap();
+                let production = production.to_f32().unwrap();
+                production_mismatches = Some(production.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count());
+            } else {
+                let production = Tensor::zeros(context, output.shape(), DType::BF16).unwrap();
+                production.write_bytes(bytemuck::cast_slice(&source)).unwrap();
+                let pass = context.begin().unwrap();
+                gelu_vision_bf16(context, &pass, &production, if name == "gelu_tanh" { Gelu::Tanh } else { Gelu::Erf }).unwrap();
+                pass.commit_wait().unwrap();
+                let production = production.to_f32().unwrap();
+                production_mismatches = Some(production.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count());
+            }
+            println!("{}", json!({"private_retained_nonlinear_metrics":{"patches":gh * gw,"operator_index":index,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches,"production_mismatch_count":production_mismatches}}));
+            assert!(production_mismatches.is_none_or(|count| count == 0), "private vision norm exceeds exact source gate");
         }
         if name == "attention" && record["stages"].is_object() {
             let n = input.shape()[0];
@@ -499,6 +569,7 @@ fn retained_lily_tower_source_reference() {
     assert_eq!((vision.depth, vision.hidden_size, vision.num_heads), (27, 1152, 16));
     let context = MetalContext::new()
         .unwrap_or_else(|_| panic!("private tower Metal setup failed"));
+    gelu_domain_metrics(&context);
     let checkpoint = Checkpoint::open(&artifact)
         .unwrap_or_else(|_| panic!("private tower header admission failed"));
     let loader =

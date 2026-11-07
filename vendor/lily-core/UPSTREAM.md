@@ -40,6 +40,17 @@ The existing BSD/MIT notices are retained in
 repository root. It has no production selector; actual source-input controls
 record its BF16 output agreement separately from the retained NAX path.
 
+Following exact controls on all 14 actual source-input linears, the separate
+`src/kernels/metal/vision_contraction.metal` retains the same arithmetic body
+for production vision only. The internal adapter admits the seven measured
+K/N/stream combinations and otherwise preserves the original NAX dispatch.
+It checks the 8,192-row image budget, dimensions, BF16 types and output spans,
+and dispatches at most 32 rows / 147,456 output elements at a time. It uses
+existing input/output views, with no copied weights or new activation buffers.
+The independent test-only witness remains unchanged; production bit agreement
+and the unchanged full-tower numerical gate are separate checks. Text kernels
+are unchanged by this vision policy.
+
 Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision. Explicitly admitted original-format image artifacts can load the retained BF16 vision tower; ordinary text loading keeps it disabled.
 
 Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary single-token decode graph. The bridge returns complete F32 vocabulary readouts to Stark's caller-owned exact sampler, without the upstream GPU sampler's 1,024-candidate cap or probability arithmetic. Draft distributions and acceptance stay request-local; head catch-up is disabled for ordinary non-MTP requests. Verification evaluates up to four positions in one layer-major graph with the ordinary decode's affine dot expressions, reductions, normalization and rounding boundaries. Recurrent state and pre-convolution inputs are retained for exact prefix rollback. The original serial verifier remains a reference. The engine adapter restores partially consumed groups when a stream stops early, without sampling during cleanup. Checkpoint quantization and the ordinary target's activation, state, cache and weight arithmetic are preserved. Numerical and performance qualification is recorded separately.
