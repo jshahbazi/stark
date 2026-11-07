@@ -145,7 +145,7 @@ impl<B: Backend> LinearMatmul<B> {
             None
         };
         let use_reference_affine = weights_tree.numerical_profile() == NumericalProfile::Qwen35AffineBF16
-            && !has_source_affine_policy::<B>(matrix.matmul_b());
+            && !has_source_affine_policy::<B>(&matrix.matmul_b());
         let reference_affine = if use_reference_affine {
             if weights_data_type != DataType::BF16
                 || input_data_type != DataType::BF16
@@ -253,7 +253,7 @@ impl<B: Backend> LinearMatmul<B> {
         }
         if let Some(reference) = &self.reference_affine
             && !is_affine_dot_witness_active::<B>()
-            && !has_source_affine_policy::<B>(self.matmul_b())
+            && !has_source_affine_policy::<B>(&self.matmul_b())
         {
             let MatmulA::FullPrecision {
                 values,
