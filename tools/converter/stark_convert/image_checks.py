@@ -24,6 +24,7 @@ from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
     GEMMA4_FAMILY_PROFILE,
     GEMMA4_E4B_FAMILY_PROFILE,
+    GEMMA3_FAMILY_PROFILE,
     _current_os_version,
     artifact_image_family,
     family_image_input_contract,
@@ -55,7 +56,7 @@ def preflight_family_memory(model: Path, config: dict) -> None:
     The native loader and operation-specific allocation guards remain authoritative.
     """
     contract = config.get("artifact_contract", {})
-    if not isinstance(contract, dict) or contract.get("schema_version") not in (3, 4):
+    if not isinstance(contract, dict) or contract.get("schema_version") not in (3, 4, 5):
         return
     family = artifact_image_family(config) if contract.get("schema_version") == 4 else contract.get("family")
     if not supported_image_family(family):
@@ -64,7 +65,9 @@ def preflight_family_memory(model: Path, config: dict) -> None:
         size = (model / "model.safetensors").stat().st_size
         available = psutil.virtual_memory().available
         scratch = (
-            _configured_check_memory(config) if family["profile"] == CONFIGURED_FAMILY_PROFILE else 512 * 1024 * 1024
+            _configured_check_memory(config)
+            if family["profile"] in {CONFIGURED_FAMILY_PROFILE, GEMMA3_FAMILY_PROFILE}
+            else 512 * 1024 * 1024
         )
         if size <= 0 or type(available) is not int or available < size + scratch:
             raise ImageCheckError("Not enough available memory to check this image model.")
@@ -108,14 +111,17 @@ def _configured_check_memory(config: dict) -> int:
             else:
                 raise ValueError
         vision = config["artifact_contract"]["vision_config"]
+        gemma3 = config["artifact_contract"].get("family", {}).get("profile") == GEMMA3_FAMILY_PROFILE
         vision_width, vision_hidden, vision_heads = (
-            integer(vision, key) for key in ("hidden_size", "intermediate_size", "num_heads")
+            integer(vision, key) for key in ("hidden_size", "intermediate_size", "num_attention_heads" if gemma3 else "num_heads")
         )
         # The profile keeps the 256x256 RGB check and 16-pixel patch recipe.
         # FP32 storage factors deliberately overestimate BF16 arrays. Layer
         # scratch is reused; recurrent/KV state is retained across all layers.
         text_scratch = 16 * 2048 * (width + hidden + projections)
-        vision_scratch = 16 * 256 * (vision_width + vision_hidden) + 4 * vision_heads * 256 * 256
+        patches = 4096 if gemma3 else 256
+        score_heads = 1 if gemma3 else vision_heads
+        vision_scratch = 16 * patches * (vision_width + vision_hidden) + 6 * score_heads * patches * patches
         return max(512 * 1024 * 1024, state + text_scratch + delta_scratch + vision_scratch)
     except (KeyError, TypeError, ValueError, OverflowError):
         raise ImageCheckError("Cannot inspect this image model's memory requirements.") from None
@@ -415,7 +421,7 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             if not _valid_reply(reply, maximum) or reply["input_tokens"] + maximum > context:
                 raise ImageCheckError("The model did not pass the image execution check.")
             image_tokens = getattr(worker, "_last_image_tokens", None)
-            gemma = identity["family_profile"] in {GEMMA4_FAMILY_PROFILE, GEMMA4_E4B_FAMILY_PROFILE}
+            gemma = identity["family_profile"] in {GEMMA4_FAMILY_PROFILE, GEMMA4_E4B_FAMILY_PROFILE, GEMMA3_FAMILY_PROFILE}
             expected_image_tokens = 256 if gemma else 64
             expected_delta = expected_image_tokens + 1 if gemma else expected_image_tokens - 1
             if (
