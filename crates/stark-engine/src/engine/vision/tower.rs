@@ -293,7 +293,7 @@ fn validate_parameters<B: Backend>(
     Ok(())
 }
 
-struct RawLinear<B: Backend> {
+pub(super) struct RawLinear<B: Backend> {
     kernel: <B::Kernels as Kernels>::VisionMatmulBF16Kernel,
     cast_bias: <B::Kernels as Kernels>::VisionBiasCastBF16Kernel,
     weights: B::GlobalBuffer,
@@ -304,7 +304,7 @@ struct RawLinear<B: Backend> {
 }
 
 impl<B: Backend> RawLinear<B> {
-    fn new(
+    pub(super) fn new(
         context: &B::Context,
         tree: &ParameterTree<B>,
         input_width: u32,
@@ -327,7 +327,7 @@ impl<B: Backend> RawLinear<B> {
         })
     }
 
-    fn encode(
+    pub(super) fn encode(
         &self,
         input: impl BufferRef<Backend = B>,
         rows: u32,
@@ -362,7 +362,7 @@ impl<B: Backend> RawLinear<B> {
     }
 }
 
-struct LayerNorm<B: Backend> {
+pub(super) struct LayerNorm<B: Backend> {
     kernel: <B::Kernels as Kernels>::VisionLayerNormBF16Kernel,
     weight: B::GlobalBuffer,
     bias: B::GlobalBuffer,
@@ -371,7 +371,7 @@ struct LayerNorm<B: Backend> {
 }
 
 impl<B: Backend> LayerNorm<B> {
-    fn new(
+    pub(super) fn new(
         context: &B::Context,
         tree: &ParameterTree<B>,
         width: u32,
@@ -387,7 +387,7 @@ impl<B: Backend> LayerNorm<B> {
         })
     }
 
-    fn encode(
+    pub(super) fn encode(
         &self,
         input: &B::ScratchBuffer,
         rows: u32,
@@ -402,7 +402,7 @@ impl<B: Backend> LayerNorm<B> {
 /// Materialize the BF16 boundaries of the pinned eager reference. The generic
 /// fused language attention path deliberately retains more intermediate FP32
 /// precision and is not numerically interchangeable over this vision stack.
-struct VisionEagerAttention<B: Backend> {
+pub(super) struct VisionEagerAttention<B: Backend> {
     matmul: <B::Kernels as Kernels>::VisionMatmulBF16Kernel,
     cast: <B::Kernels as Kernels>::VisionCastBF16Kernel,
     softmax: <B::Kernels as Kernels>::VisionSoftmaxBF16Kernel,
@@ -414,7 +414,7 @@ struct VisionEagerAttention<B: Backend> {
 }
 
 impl<B: Backend> VisionEagerAttention<B> {
-    fn new(
+    pub(super) fn new(
         context: &B::Context,
         model_dim: u32,
         num_heads: u32,
@@ -431,7 +431,7 @@ impl<B: Backend> VisionEagerAttention<B> {
         })
     }
 
-    fn encode(
+    pub(super) fn encode(
         &self,
         queries: &B::ScratchBuffer,
         keys: &B::ScratchBuffer,
@@ -463,10 +463,15 @@ impl<B: Backend> VisionEagerAttention<B> {
         let zero = commands.allocate_constant_from_slice(&[bf16::ZERO])?;
         let head_elements = rows * self.head_dim;
         let head_bytes = head_elements as usize * size_of::<bf16>();
+        // Sequential head dispatches can reuse private scratch after each
+        // observer has encoded its readback. This bounds storage at 4096 patches.
+        let mut full_precision_scores = commands.allocate_scratch_for_shape(&[rows, rows], DataType::F32)?;
+        let mut scores = commands.allocate_scratch_for_shape(&[rows, rows], DataType::BF16)?;
+        let mut full_precision_head = commands.allocate_scratch_for_shape(&[rows, self.head_dim], DataType::F32)?;
+        let mut head_output = commands.allocate_scratch_for_shape(&[rows, self.head_dim], DataType::BF16)?;
         for head in 0..self.num_heads {
             let query_offset = head as usize * head_bytes;
             let kv_offset = head as usize * self.head_dim as usize * size_of::<bf16>();
-            let mut full_precision_scores = commands.allocate_scratch_for_shape(&[rows, rows], DataType::F32)?;
             // Q is [head,row,channel]. K/V are [row,head,channel], so B's
             // physical row stride remains the complete model width.
             // The pinned BF16 BMM uses 32 accumulation streams for QK and
@@ -484,7 +489,6 @@ impl<B: Backend> VisionEagerAttention<B> {
                 commands,
             );
             observer(head, VisionAttentionStage::FullPrecisionScores, &full_precision_scores, commands)?;
-            let mut scores = commands.allocate_scratch_for_shape(&[rows, rows], DataType::BF16)?;
             self.cast.encode(&full_precision_scores, &mut scores, rows * rows, commands);
             observer(head, VisionAttentionStage::Scores, &scores, commands)?;
             // Keep the QK BF16 rounding before scaling, even when the exact
@@ -501,7 +505,6 @@ impl<B: Backend> VisionEagerAttention<B> {
             observer(head, VisionAttentionStage::ScaledScores, &scores, commands)?;
             self.softmax.encode(&mut scores, rows, rows, commands);
             observer(head, VisionAttentionStage::Probabilities, &scores, commands)?;
-            let mut full_precision_head = commands.allocate_scratch_for_shape(&[rows, self.head_dim], DataType::F32)?;
             self.matmul.encode(
                 &scores,
                 values.subrange(kv_offset..),
@@ -515,7 +518,6 @@ impl<B: Backend> VisionEagerAttention<B> {
                 commands,
             );
             observer(head, VisionAttentionStage::FullPrecisionHead, &full_precision_head, commands)?;
-            let mut head_output = commands.allocate_scratch_for_shape(&[rows, self.head_dim], DataType::BF16)?;
             self.cast.encode(&full_precision_head, &mut head_output, head_elements, commands);
             observer(head, VisionAttentionStage::Head, &head_output, commands)?;
             self.head_copy.encode(
