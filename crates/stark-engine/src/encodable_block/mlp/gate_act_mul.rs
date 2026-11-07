@@ -88,9 +88,11 @@ impl<B: Backend> MlpGateActMulEncodable<B> {
     ) -> Result<LinearInput<B>, B::Error> {
         command_buffer.push_debug_group("gate act mul");
         if let Some(reference) = &self.reference {
-            if act_format != ActivationFormat::Bf16
-                || fused_up.size() != batch_dim as usize * self.hidden_dim as usize * 2 * size_of::<half::bf16>()
-            {
+            // The following matrix may prefer A8 on MXU devices. This policy
+            // owns an explicit BF16 activation boundary, so emit full BF16
+            // input regardless of that advisory preference. Linear dispatch
+            // then selects its ordinary BF16-input packed-weight path.
+            if fused_up.size() != batch_dim as usize * self.hidden_dim as usize * 2 * size_of::<half::bf16>() {
                 return Err(InvalidInput("invalid reference BF16 MLP gate input").into());
             }
             let mut hidden =
@@ -158,5 +160,76 @@ impl<B: Backend> MlpGateActMulEncodable<B> {
         command_buffer.pop_debug_group();
 
         Ok(input)
+    }
+}
+
+#[cfg(all(test, backend = "metal"))]
+mod reference_tests {
+    use half::bf16;
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+    use crate::{
+        backends::{
+            common::{
+                CommandBufferExecutable, CommandBufferPending, Context,
+                gpu_types::gemm::{GemmBPrologueKind, GemmDTransform},
+                kernel::matmul::{MatmulKernel, MatmulShape, QuantParamsLayout},
+            },
+            metal::{Metal, kernel::matmul::MatmulMetalKernel},
+        },
+        tests::helpers::{buffer_to_vec, create_buffer_with_data},
+    };
+
+    #[stark_test]
+    fn reference_bf16_gate_preserves_multirow_boundary_when_mxu_prefers_a8() {
+        let context = <Metal as Backend>::Context::new().unwrap();
+        if !context.supports_mxu {
+            return;
+        }
+        // Real dense27 Q4 down-projection shape at the automatic text check.
+        // No model weights are allocated; the gate uses less than 2 MiB.
+        let shape = MatmulShape {
+            m: 14,
+            n: 5120,
+            k: 17408,
+            b_transpose: true,
+            b_leading_dimension: None,
+            b_prologue: GemmBPrologueKind::ScaleBiasDequant,
+            b_bits: Some(4),
+            b_group_size: Some(64),
+            signed_codes: false,
+            a_full_precision: true,
+            gathered: false,
+            params_layout: Some(QuantParamsLayout::GroupOutput),
+            d_transform: GemmDTransform::empty(),
+        };
+        let matmul = MatmulMetalKernel::new(&context, DataType::BF16, DataType::BF16, DataType::BF16).unwrap();
+        let requested = matmul.select_activation_format(&shape, &context);
+        assert_eq!(requested, ActivationFormat::Int8, "regression fixture must exercise the MXU A8 preference");
+        let gate = MlpGateActMulEncodable::<Metal>::new(
+            &context,
+            DataType::BF16,
+            serde_json::from_value(serde_json::json!({"type":"SiLU","alpha":1.0})).unwrap(),
+            ClippingBounds::default(),
+            ClippingBounds::default(),
+            shape.k,
+            None,
+            true,
+        )
+        .unwrap();
+        let input =
+            create_buffer_with_data::<Metal, bf16>(&context, &vec![bf16::ONE; (shape.m * shape.k * 2) as usize]);
+        let mut commands = context.create_command_buffer(None, None).unwrap();
+        let output = gate.encode_for_linear(&mut commands, &input, shape.m, requested).unwrap();
+        let LinearInput::FullPrecision(output) = output else {
+            panic!("reference BF16 gate emitted quantized activations");
+        };
+        let mut readback = context.create_buffer((shape.m * shape.k) as usize * size_of::<bf16>()).unwrap();
+        commands.encode_copy(&output, &mut readback);
+        commands.end_encoding().submit().wait_until_completed().unwrap();
+        let values = buffer_to_vec::<Metal, bf16>(&readback);
+        let expected = bf16::from_f32(1.0 / (1.0 + (-1.0f32).exp()));
+        assert!(values.iter().all(|value| value.to_bits() == expected.to_bits()), "reference gate result differs");
     }
 }

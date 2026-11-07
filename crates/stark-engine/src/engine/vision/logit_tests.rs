@@ -289,7 +289,8 @@ fn qwen35_vision_worker_text_diagnostic_metal() {
     let mut state = model.create_empty_state(Some(2048), 0).unwrap_or_else(|error| failure(error));
     println!("{}", json!({"qwen_text_diagnostic_stage":"state_created"}));
     let tokens = model.tokenizer().encode("Hello.", false).expect("private diagnostic tokenization failed");
-    let tokens = tokens.get_ids().iter().copied().map(u64::from).collect::<Vec<_>>();
+    // Match the worker check prefill shape without logging token IDs.
+    let tokens = tokens.get_ids().iter().copied().cycle().take(14).map(u64::from).collect::<Vec<_>>();
     let mut options = model.default_stream_options();
     options.sampling_method = crate::engine::language_model::stream::SamplingMethod::Greedy;
     let mut stream = model.stream(&tokens, &mut state, options).unwrap_or_else(|error| failure(error));
