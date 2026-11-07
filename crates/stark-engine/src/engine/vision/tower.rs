@@ -304,6 +304,11 @@ pub(super) struct RawLinear<B: Backend> {
 }
 
 impl<B: Backend> RawLinear<B> {
+    pub(super) fn with_four_streams(mut self) -> Self {
+        self.streams = 4;
+        self
+    }
+
     pub(super) fn new(
         context: &B::Context,
         tree: &ParameterTree<B>,

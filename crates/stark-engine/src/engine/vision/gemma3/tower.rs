@@ -122,7 +122,8 @@ impl<B: Backend> Gemma3VisionTower<B> {
                 PATCH_WIDTH,
                 WIDTH,
                 &[WIDTH, 3, 14, 14],
-            )?,
+            )?
+            .with_four_streams(),
             positions: tree
                 .leaf("embeddings.position_embedding.weight")?
                 .validate(&[PATCH_ROWS, WIDTH], DataType::BF16)?

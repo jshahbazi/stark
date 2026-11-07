@@ -67,8 +67,11 @@ token sequence. Surplus image markers and non-round-trippable raw token arrays
 are rejected. Token counts depend on neighboring text; the fixed image-first
 local-check prompt expands by 258 tokens in the original tokenizer.
 
-The decoder uses ordinary scalar RoPE and permits bidirectional attention
-within the complete image block. Text remains causal. The scheduler keeps the
+The decoder uses ordinary scalar RoPE. Global layers permit causal attention
+or attention within the same image; local layers apply the sliding-window
+lower bound to that composition. The admitted 256-token image block fits
+entirely inside the 1024-token local window, preserving complete same-image
+visibility. Text remains causal. The scheduler keeps the
 complete image block in one prefill chunk, including at a 1024-token boundary.
 Each image request uses fresh decoder state and clears retained generation
 prefix state. Image patches and projected embeddings are request-owned and
@@ -106,6 +109,23 @@ The initial fixed gates require exact BF16 preprocessing, feature relative RMS
 error at most 0.02 and cosine at least 0.999, centered logit relative RMS error
 at most 0.1, reference-to-native KL at most 0.03 and identical greedy decisions.
 Checkpoint execution and worker lifecycle results belong in a dated run record.
+
+`scripts/gemma3_vision_stage_reference.py` loads only the original vision
+weights for first-block diagnostics. It verifies the preserved full-source
+receipt, captures unchanged module outputs and labels separately derived QK
+stages. `gemma3_first_block_stage_reference_metal` compares bounded row
+prefixes. These diagnostic stages locate arithmetic differences; they do not
+replace whole-model reference gates.
+
+`scripts/gemma3_image_worker_validation.py` exercises the shipped Python
+Worker, an isolated Desktop instance and the actual loopback HTTP server.
+It checks canonical greedy results, prepared-image single use, replay,
+malformed-image recovery, request cancellation, HTTP client disconnects and
+cached-check restart followed by image execution. Its private receipts bind
+the worker, host modules, template helper, source receipt and canonical
+fixture. The optional `--image-check-directory` requires an already valid
+receipt for the same implementation. A successful local image execution
+check is recorded separately from reference parity.
 
 The architecture and reference behavior are described by the
 [Google Gemma 3 model card](https://ai.google.dev/gemma/docs/core/model_card_3),
