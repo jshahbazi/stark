@@ -32,3 +32,11 @@ Native diagnostic type-check and Metal execution are pending at this source-only
 checkpoint. Full 31B/26B image features and full-checkpoint generation remain
 unqualified; earlier 12B image-component and E4B checkpoint evidence keep their
 separate scope and source identities.
+
+The existing full-attention split now preserves the remaining mismatch
+coordinates in a private runtime JSON file and replays only the affected image
+query rows, across all 16 heads and full canonical KV, on CPU and Metal. The
+diagnostic caps this replay at six distinct query rows and reuses the frozen
+full-attention fixture; no new oracle or tolerance is introduced. Only counts,
+hashes and aggregate errors are printed. This separates source-order differences
+from GPU-only rounding at ties missed by the first-eight-row prefix.
