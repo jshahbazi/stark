@@ -48,7 +48,10 @@ has SHA-256 `7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4`.
 The processor admits one bounded upright 8-bit JPEG or PNG. The shared decoder
 limits compressed input to 20 MiB, each dimension to 16384 and decoded pixels
 to 32 million. RGB conversion discards alpha. Antialiased bilinear uint8 resize
-produces 896 × 896 pixels, normalized by mean and standard deviation 0.5.
+uses the pinned CPU Torchvision processor's adaptive signed-int16 coefficient
+precision and produces 896 × 896 pixels, normalized by mean and standard
+deviation 0.5. It is covered by full patch hashes for nonuniform upsampling,
+downsampling and each unchanged-size axis.
 Pan-and-scan is disabled in this profile.
 
 The native Conv2d patch order is channel, row, column inside each 14 × 14 patch.

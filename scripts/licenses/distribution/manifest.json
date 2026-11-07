@@ -2,6 +2,21 @@
   "apache_2_0_reference_url": "https://raw.githubusercontent.com/madsmtm/objc2/ee9a7ada2131f5944b8750428e265c15632f2a19/LICENSE-APACHE.txt",
   "historical_overview_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
   "source_adaptations": {
+    "pytorch-gemma3-uint8-antialias-resize": {
+      "license": "BSD-3-Clause",
+      "license_file": "pytorch-LICENSE",
+      "license_sha256": "bd018feef8825e88181c84eb7e3aa4eafb8f08a20d9fd6ef948569610c4a3e43",
+      "repository": "https://github.com/pytorch/pytorch",
+      "source_tag": "v2.14.1",
+      "source_revision": "5c4886908584029761b579af026dcfb627c84070",
+      "source_files": [
+        {
+          "path": "aten/src/ATen/native/cpu/UpSampleKernel.cpp",
+          "sha256": "3130e86b56234a8da4c6347d973721d49845d1c7cdbdad2e27dd11f4f869d708"
+        }
+      ],
+      "adaptation": "Gemma3-only CPU uint8 bilinear antialias coefficient construction, normalized half-pixel supports and adaptive signed-int16 coefficient precision. Horizontal and vertical rounding follows the pinned Torchvision CPU processor selected by Transformers 5.15.1. No PyTorch runtime dependency or change to other model-family resizers."
+    },
     "pytorch-bf16-vision-layernorm-moments": {
       "license": "BSD-3-Clause",
       "license_file": "pytorch-LICENSE",
