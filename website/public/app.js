@@ -170,14 +170,14 @@ function renderBenchmark() {
   document.querySelector('#benchmark-caption').textContent =
     label + ': Qwen3.5-2B generation speed on Apple M5 Max.';
 }
-workloadSelect.addEventListener('change', renderBenchmark);
+workloadSelect?.addEventListener('change', renderBenchmark);
 for (const button of viewButtons) {
   button.addEventListener('click', () => {
     relativeView = button.dataset.view === 'relative';
     renderBenchmark();
   });
 }
-renderBenchmark();
+if (workloadSelect) renderBenchmark();
 
 const benchmarkTabs = [...document.querySelectorAll('[data-benchmark-panel]')];
 function selectBenchmarkModel(tab, updateHash = false) {
