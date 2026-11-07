@@ -740,6 +740,7 @@ fn attention_stages_probe() -> Result<(), &'static str> {
             &context,
             config,
             AttentionArguments {
+                image_span: None,
                 queries: &q,
                 keys: &k,
                 values: &v,
@@ -1076,6 +1077,7 @@ fn cached_vector_attention_probe() -> Result<(), &'static str> {
     let native = kernel
         .encode(
             AttentionArguments {
+                image_span: None,
                 queries: &q,
                 keys: &k,
                 values: &v,

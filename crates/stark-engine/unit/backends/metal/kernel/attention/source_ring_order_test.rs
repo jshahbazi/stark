@@ -47,6 +47,7 @@ fn run(
     let output = kernel
         .encode(
             AttentionArguments {
+                image_span: None,
                 queries: &query,
                 keys: &keys,
                 values: &values,

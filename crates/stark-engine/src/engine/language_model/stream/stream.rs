@@ -27,6 +27,35 @@ use crate::{
     trie::TrieNode,
 };
 
+/// Retain the ordinary chunk grid for text and spatial images. A scalar image
+/// with bidirectional attention must be evaluated as one complete block.
+fn prefill_batch_ranges(
+    length: usize,
+    maximum: usize,
+    image: Option<std::ops::Range<usize>>,
+) -> Result<Vec<std::ops::Range<usize>>, crate::backends::common::InvalidInput> {
+    use crate::backends::common::InvalidInput;
+    if maximum == 0 || image.as_ref().is_some_and(|r| r.start >= r.end || r.end > length || r.end - r.start > maximum) {
+        return Err(InvalidInput("invalid bidirectional image prefill geometry"));
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < length {
+        let mut end = start.saturating_add(maximum).min(length);
+        if let Some(image) = &image {
+            if end > image.start && end < image.end {
+                end = image.start;
+            }
+        }
+        if end <= start {
+            return Err(InvalidInput("image prefill made no progress"));
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    Ok(ranges)
+}
+
 enum ForwardPassChaining<B: Backend> {
     Constant {
         token: u64,
@@ -276,7 +305,10 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 || multimodal.image.data_type != DataType::BF16
                 || multimodal.positions.len() != input.len()
                 || (multimodal.uses_spatial_positions() && !model.decoder.qwen35_multimodal_supported())
-                || (!multimodal.uses_spatial_positions() && !model.decoder.gemma4_multimodal_supported())
+                || (multimodal.bidirectional_image_range().is_some() && !model.decoder.scalar_multimodal_supported())
+                || (!multimodal.uses_spatial_positions()
+                    && multimodal.bidirectional_image_range().is_none()
+                    && !model.decoder.gemma4_multimodal_supported())
                 || (!multimodal.uses_spatial_positions()
                     && (multimodal.position_delta != 0
                         || multimodal.positions.iter().enumerate().any(|(index, position)| {
@@ -367,15 +399,19 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 // NOTE: this is required for attention correctness (hardcoded suffix 1024). This is really bad design, attention should be rewritten to allow on-demand suffix length
                 // Prefix reuse depends on this fixed grid starting at position zero.
                 let max_batch_size = super::PREFILL_CHUNK_TOKENS;
-                let number_of_batches = input.len().div_ceil(max_batch_size);
+                let batch_ranges = prefill_batch_ranges(
+                    input.len(),
+                    max_batch_size,
+                    multimodal.and_then(MultimodalPrefill::bidirectional_image_range),
+                )
+                .map_err(|_| LanguageModelStreamError::InvalidMultimodal)?;
+                let number_of_batches = batch_ranges.len();
+                let last_start = batch_ranges.last().expect("nonempty input").start;
+                let largest_batch = batch_ranges.iter().map(|r| r.len()).max().expect("nonempty input");
 
                 model_state
                     .transformer_state
-                    .prepare(
-                        model_state.transformer_state.context_length()
-                            + ((number_of_batches - 1) * max_batch_size) as u32,
-                        usize::min(max_batch_size, input.len()) as u32,
-                    )
+                    .prepare(model_state.transformer_state.context_length() + last_start as u32, largest_batch as u32)
                     .map_err(LanguageModelStreamError::Backend)?;
 
                 let mut command_buffer = model
@@ -397,11 +433,11 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 #[cfg(test)]
                 let hidden_feature_layer_indices = vision_layer_indices.as_deref().or(hidden_feature_layer_indices);
 
-                for (input_chunk, sample_last) in input
-                    .chunks(max_batch_size)
+                for (input_chunk, sample_last) in batch_ranges
+                    .iter()
                     .enumerate()
-                    .flat_map(|(batch_idx, input_chunk)| {
-                        prefill_chunk_parts(input_chunk, batch_idx == number_of_batches - 1, split_logits_row)
+                    .flat_map(|(batch_idx, range)| {
+                        prefill_chunk_parts(&input[range.clone()], batch_idx == number_of_batches - 1, split_logits_row)
                     })
                     .flatten()
                 {
@@ -424,6 +460,16 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                         )
                         .map_err(|_| LanguageModelStreamError::InvalidMultimodal)?,
                         _ => BatchTopology::new(&input_flat_trie_nodes, true),
+                    };
+                    let image_span = multimodal
+                        .map(|input| input.chunk_image_span(chunk_start, input_chunk.len()))
+                        .transpose()
+                        .map_err(|_| LanguageModelStreamError::InvalidMultimodal)?
+                        .flatten();
+                    let batch_dim = if let Some(span) = image_span {
+                        batch_dim.with_image_span(span).map_err(|_| LanguageModelStreamError::InvalidMultimodal)?
+                    } else {
+                        batch_dim
                     };
                     let replacement = multimodal
                         .map(|input| {
@@ -1349,5 +1395,24 @@ mod decode_pool_tests {
         let returned_pool = submitted.wait(Pool::complete).unwrap().unwrap();
         assert_eq!(returned_pool.outstanding.get(), 0);
         assert_eq!(Rc::strong_count(&pool), 2);
+    }
+}
+
+#[cfg(test)]
+mod image_chunk_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::prefill_batch_ranges;
+
+    #[stark_test]
+    fn bidirectional_image_is_kept_whole_across_original_chunk_boundaries() {
+        assert_eq!(prefill_batch_ranges(2300, 1024, Some(1000..1256)).unwrap(), vec![0..1000, 1000..2024, 2024..2300]);
+        assert_eq!(prefill_batch_ranges(2300, 1024, Some(768..1024)).unwrap(), vec![0..1024, 1024..2048, 2048..2300]);
+        assert_eq!(prefill_batch_ranges(2300, 1024, Some(1024..1280)).unwrap(), vec![0..1024, 1024..2048, 2048..2300]);
+        assert_eq!(prefill_batch_ranges(2300, 1024, None).unwrap(), vec![0..1024, 1024..2048, 2048..2300]);
+        assert!(prefill_batch_ranges(2300, 1024, Some(0..1025)).is_err());
+        assert!(prefill_batch_ranges(2300, 1024, Some(2000..2301)).is_err());
+        assert!(prefill_batch_ranges(2300, 1024, Some(10..10)).is_err());
+        assert!(prefill_batch_ranges(2300, 0, None).is_err());
     }
 }

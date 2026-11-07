@@ -91,6 +91,7 @@ fn get_output<T: ArrayElement + Float, B: Backend>(input: &Input<T>) -> Vec<T> {
 
     let segment_prefix_length = input.sequence_length - input.suffix_length;
     let args = AttentionArguments {
+        image_span: None,
         queries: &queries_buffer,
         keys: &keys_buffer,
         values: &values_buffer,
@@ -137,6 +138,7 @@ fn get_gemm_output_variant<T: ArrayElement + Float>(
     let cache = KVCacheView::full((input.sequence_length - input.suffix_length) as u32);
     let mut command_buffer = context.create_command_buffer(None, None).expect("Failed to create command buffer");
     let arguments = AttentionArguments {
+        image_span: None,
         queries: &queries,
         keys: &keys,
         values: &values,

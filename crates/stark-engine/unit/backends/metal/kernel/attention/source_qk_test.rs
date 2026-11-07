@@ -58,6 +58,7 @@ fn source_qk_split_keeps_f32_partitions_until_the_bf16_score_store() {
             source_bf16_prefill: false,
         },
         AttentionArguments {
+            image_span: None,
             queries: &queries,
             keys: &keys,
             values: &values,

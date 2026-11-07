@@ -53,6 +53,7 @@ pub(crate) struct MultimodalPrefill {
 pub(crate) enum MultimodalMode {
     Qwen35Spatial,
     Gemma4Sequential,
+    ScalarBidirectional,
 }
 
 impl ImageGrid {
@@ -97,6 +98,31 @@ impl MultimodalPrefill {
         vocab_size: u32,
         context_capacity: u32,
     ) -> Result<Self, InvalidInput> {
+        Self::try_new_internal(
+            tokens,
+            image,
+            special_ids,
+            expected_identity,
+            expected_model_dim,
+            expected_dtype,
+            vocab_size,
+            context_capacity,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_new_internal(
+        tokens: Box<[u64]>,
+        image: ProjectedImage,
+        special_ids: ImageTokenIds,
+        expected_identity: &Arc<()>,
+        expected_model_dim: u32,
+        expected_dtype: DataType,
+        vocab_size: u32,
+        context_capacity: u32,
+        check_video_token: bool,
+    ) -> Result<Self, InvalidInput> {
         if !Arc::ptr_eq(&image.model_identity, expected_identity) {
             return Err(InvalidInput("projected image belongs to a different loaded model"));
         }
@@ -124,7 +150,12 @@ impl MultimodalPrefill {
         if image.features.iter().any(|value| !value.is_finite()) {
             return Err(InvalidInput("projected image contains nonfinite features"));
         }
-        let ids = [special_ids.image, special_ids.vision_start, special_ids.vision_end, special_ids.video];
+        let all_ids = [special_ids.image, special_ids.vision_start, special_ids.vision_end, special_ids.video];
+        let ids = &all_ids[..if check_video_token {
+            4
+        } else {
+            3
+        }];
         if ids.iter().enumerate().any(|(index, id)| *id >= u64::from(vocab_size) || ids[..index].contains(id)) {
             return Err(InvalidInput("invalid or overlapping image special token IDs"));
         }
@@ -148,7 +179,7 @@ impl MultimodalPrefill {
             if (token == special_ids.image && !is_image)
                 || (token == special_ids.vision_start && index != wrapper_start)
                 || (token == special_ids.vision_end && index != image_end)
-                || token == special_ids.video
+                || (check_video_token && token == special_ids.video)
             {
                 return Err(InvalidInput("surplus or unsupported vision special token"));
             }
@@ -237,6 +268,73 @@ impl MultimodalPrefill {
 
     pub(crate) fn uses_spatial_positions(&self) -> bool {
         self.mode == MultimodalMode::Qwen35Spatial
+    }
+
+    /// Gemma 3 uses scalar RoPE and an OR-mask over the complete image block.
+    /// It has no video marker in this admitted static-image protocol.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_gemma3(
+        tokens: Box<[u64]>,
+        image: ProjectedImage,
+        image_id: u64,
+        start_id: u64,
+        end_id: u64,
+        expected_identity: &Arc<()>,
+        expected_model_dim: u32,
+        expected_dtype: DataType,
+        vocab_size: u32,
+        context_capacity: u32,
+    ) -> Result<Self, InvalidInput> {
+        let mut input = Self::try_new_internal(
+            tokens,
+            image,
+            ImageTokenIds {
+                image: image_id,
+                vision_start: start_id,
+                vision_end: end_id,
+                video: 0,
+            },
+            expected_identity,
+            expected_model_dim,
+            expected_dtype,
+            vocab_size,
+            context_capacity,
+            false,
+        )?;
+        for (index, position) in input.positions.iter_mut().enumerate() {
+            *position = [u32::try_from(index).map_err(|_| InvalidInput("scalar image position overflow"))?; 3];
+        }
+        input.position_delta = 0;
+        input.mode = MultimodalMode::ScalarBidirectional;
+        Ok(input)
+    }
+
+    pub(crate) fn bidirectional_image_range(&self) -> Option<Range<usize>> {
+        (self.mode == MultimodalMode::ScalarBidirectional).then(|| {
+            let start = self.image.token_start;
+            start..start + self.image.features.len() / self.image.model_dim as usize
+        })
+    }
+
+    pub(crate) fn chunk_image_span(
+        &self,
+        start: usize,
+        len: usize,
+    ) -> Result<Option<[u32; 2]>, InvalidInput> {
+        let Some(image) = self.bidirectional_image_range() else {
+            return Ok(None);
+        };
+        let end = start.checked_add(len).ok_or(InvalidInput("image attention chunk overflow"))?;
+        if start >= image.end || end <= image.start {
+            return Ok(None);
+        }
+        if start > image.start || end < image.end {
+            return Err(InvalidInput("bidirectional image block straddles prefill batches"));
+        }
+        Ok(Some([
+            u32::try_from(image.start - start).map_err(|_| InvalidInput("image batch offset overflow"))?,
+            u32::try_from(image.end - start).map_err(|_| InvalidInput("image batch offset overflow"))?,
+        ]))
     }
 
     /// Return the chunk-local token rows and corresponding feature rows to copy.

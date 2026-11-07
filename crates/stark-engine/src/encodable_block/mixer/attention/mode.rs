@@ -220,6 +220,7 @@ impl<B: Backend> Attention<B> {
 
                 self.encode_core(
                     AttentionArguments {
+                        image_span: batch_dim.image_span(),
                         queries: &queries,
                         keys: &keys,
                         values: &values,
@@ -289,6 +290,7 @@ impl<B: Backend> Attention<B> {
 
         self.encode_core(
             AttentionArguments {
+                image_span: batch_dim.image_span(),
                 queries,
                 keys: state.keys.as_ref(),
                 values: state.values.as_ref(),

@@ -63,6 +63,7 @@ fn source_cached_qk_has_independent_f64_bf16_midpoint_and_tail_oracles() {
         };
         let mut commands = context.create_command_buffer(None, None).unwrap();
         let args = || AttentionArguments {
+            image_span: None,
             queries: &query,
             keys: &keys,
             values: &values,

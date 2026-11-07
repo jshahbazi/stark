@@ -457,6 +457,7 @@ fn attention_fixture_probe() -> Result<(), &'static str> {
         .create_command_buffer(Some("private identical-input attention probe"), None)
         .map_err(|_| "attention_commands_failed")?;
     let arguments = AttentionArguments {
+        image_span: None,
         queries: &queries,
         keys: &keys,
         values: &values,
