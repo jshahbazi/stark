@@ -171,6 +171,11 @@ For each new template:
    fingerprint. Preserve the original template. Review definitions, assistant
    calls, typed arguments, tool results, result ordering and the next assistant
    prefix. Reuse a parser only when that complete protocol conforms.
+   Review the template's expected tool-definition shape and result roles, ID
+   constraints, supported schema subset and required stop tokens. Keep render
+   adapters separate from public API IDs and preserve the original codec. Any
+   reviewed runtime template correction needs a pinned packaged source, license,
+   patch provenance and a separately recorded effective-template hash.
 2. Add source-bound native-rendering and parsing tests. Cover null assistant
    content, multiple calls, results arriving out of order, all supported scalar
    and structured argument types, multiline/Unicode strings, streaming,
@@ -207,6 +212,10 @@ A passing run qualifies only those three bounded checks for those sealed bytes,
 budgets and sampling settings. It does not establish broad task competence.
 Store a separate dated record with the source/build identity, device/OS, parser,
 template and artifact hashes, aggregate outcomes and remaining limitations.
+Record protocol support and native model-loading results separately. A parser
+can pass source-bound synthetic tests while its checkpoint fails loading or
+ordinary chat; that artifact has not passed the workflow. Do not weaken a failed
+check or infer a loading failure's inner cause from a generic worker error.
 Never persist prompts, generated calls, arguments, responses or token vectors.
 Do not reuse another artifact's behavioral qualification or silently promote
 import metadata into one. Consult the [current coverage matrix](TOOL_CALLING.md)

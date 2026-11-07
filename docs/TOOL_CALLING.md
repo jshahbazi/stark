@@ -15,8 +15,16 @@ it does not prove that every checkpoint using it chooses tools reliably.
 | Qwen3.8 Flash Next, Lily and matching PipeNetwork mixed export | Qwen XML, `qwen38-xml-v1` | Only matching reviewed programs; quantization and backend qualifications stay separate. |
 | Native GLM-5.3 Flash | GLM argument-key/value XML, `glm53-xml-v1` | The pinned native-preparation template is admitted. Synthetic rendering, parser and API tests pass; model-generated workflow qualification is pending. |
 | Native Flint INT4 | GLM argument-key/value XML, `glm53-xml-v1` | The pinned Flint template shares the grammar; native rendering/history tests pass. Model-generated workflow qualification is pending. |
-| Llama dense, Mistral dense, Granite dense, LFM2 | Unavailable for their unregistered native tool formats | Tool-trained checkpoints may gain support through their own reviewed renderer/history integration and parser. Existing Qwen parsers do not cover these formats. |
-| Gemma 2, Gemma 3 text, Phi-3, SmolLM3, LLaMBA and other compatible fine-tunes | Unavailable unless their actual template matches an admitted program | Assess each checkpoint's training and complete template. No family-wide tool capability is inferred. Some need a different checkpoint or training rather than an adapter. |
+| Mistral-7B-Instruct-v0.3 | JSON list after `[TOOL_CALLS]`, `mistral-json-v1` | Reviewed serializer correction and render-only nine-character ID mapping. Public API IDs are preserved. Model-generated qualification is pending. |
+| Llama 3.1 / 3.2 Instruct matching reviewed templates | JSON object, `llama-json-v1` | One call per assistant turn; mixed call/text history is rejected. Source templates were obtained from pinned public mirrors; qualification does not transfer between artifacts. |
+| Granite 3.0 / 3.1 / 3.3 Instruct | JSON list, `granite30-json-v1` / `granite33-json-v1` | Native call/result roles and content are adapted per template. Model-generated qualification is pending. |
+| LFM2 and matching LFM2.5 Instruct | Bounded Pythonic calls, `lfm2-pythonic-v1` | Syntax is parsed as data without execution. Tool-end markers inside strings remain data; documented trailing prose is preserved. LFM2-350M passed narrow call/argument and result-use checks; the exact ordinary-chat check failed. LFM2.5-350M remains a planned conversion route. |
+| SmolLM2-1.7B-Instruct | JSON list in `<tool_call>`, `smollm2-json-v1` | Adds upstream's published function-calling instructions for tool requests; an empty list means no call. Model-generated qualification is pending. |
+| SmolLM3-3B | Hermes JSON, `smollm3-hermes-v1` | Uses native function definitions and content-based history. Python-code mode is unavailable. Native template rendering passes; model-generated qualification is pending. |
+| Phi-4-mini-instruct | JSON list, `phi4-json-v1` | Uses the native system-message tools field and call/result framing. This does not enable tools for Phi-3. Model-generated qualification is pending. |
+| rnj-1-instruct | Hermes JSON, `qwen3-hermes-v1` | Reviewed rnj-1 program admitted; model-generated qualification is pending. |
+| FunctionGemma-270M matching reviewed templates | Native function-call grammar, `functiongemma-v1` | Protocol tests pass. The tested BF16 public-mirror artifact fails native model loading, so native tool execution remains blocked for that artifact. Restricted concrete schemas and representable values are required. |
+| Other Gemma 2 / Gemma 3 text, Phi-3, LLaMBA and compatible fine-tunes | Unavailable unless their actual template matches an admitted program | Assess each checkpoint's training and complete template. No family-wide tool capability is inferred. Some need a different checkpoint or training rather than an adapter. |
 | ModernBERT classifier | Unavailable | Classifier conversion does not provide generative chat/tool execution. |
 
 An unregistered template keeps tools disabled even if it emits familiar marker
@@ -37,6 +45,14 @@ These records retain their original model/build identities and limitations.
 They do not qualify all models in those families. Newly admitted Qwen2.5, GLM
 and Flint programs still require their own model-generated runs.
 
+The [additional-format validation record](archive/runs/2026-11-07-additional-tool-protocols.md)
+records native rendering, parser/API checks, the LFM2-350M partial behavioral
+result and the FunctionGemma native-loading blocker. Protocol registration
+alone leaves the Installed row's `model_behavior` as `unverified`.
+FunctionGemma remains excluded from Guided Setup's general-assistant
+recommendations; its task-specific tool-routing workflow requires separate
+qualification. Manual import and protocol compatibility remain available.
+
 ## Import and adding support
 
 Installed rows show **Tools available**, **Tools unavailable** or **Tools
@@ -53,6 +69,11 @@ when adding/importing a new model for agent use. It includes upstream provenance
 native template/history tests, adversarial parser tests and a separate
 artifact-bound smoke command. Unsupported tools do not prevent an otherwise
 valid ordinary-chat import. Unknown templates are never rewritten automatically.
+For the reviewed Mistral v0.3 program only, runtime rendering applies a packaged,
+hash-checked JSON-serialization correction. The original imported source stays
+unchanged; qualification records hash the original and effective renderer
+separately. The [fixture provenance](../tools/converter/tests/fixtures/tool_templates/README.md)
+records all additional source programs, licenses and this patch.
 
 The exact registered sources, schemas, streaming rules and tool-choice contract
 are in the [Function tools reference](LOCAL_API.md#function-tools).

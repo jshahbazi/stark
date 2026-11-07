@@ -16,11 +16,13 @@ from pathlib import Path
 from stark_convert.api_tools import (
     parse_tool_output,
     template_messages,
+    template_tools,
     tool_parser_for,
     validate_parser_tools,
 )
 from stark_convert.chat import Worker, load_template, read_model_config, render_template
 from stark_convert.template_runtime import _template_executable
+from stark_convert.tool_protocols import protocol_stop_ids
 
 
 def sha256(path):
@@ -64,9 +66,12 @@ def run_checks(worker, template, codec, *, context, maximum):
             "type": "function",
             "function": {
                 "name": "lookup",
+                "description": "Look up the supplied key and return its result.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"key": {"type": "string"}},
+                    "properties": {
+                        "key": {"type": "string", "description": "The lookup key."}
+                    },
                     "required": ["key"],
                     "additionalProperties": False,
                 },
@@ -78,8 +83,12 @@ def run_checks(worker, template, codec, *, context, maximum):
     def generate(messages, definitions, choice):
         prompt = render_template(
             template,
-            messages=template_messages(messages),
-            tools=definitions if choice != "none" else None,
+            messages=template_messages(
+                messages, parser=parser, tools=definitions if choice != "none" else None
+            ),
+            tools=template_tools(
+                definitions if choice != "none" else None, parser=parser
+            ),
             add_generation_prompt=True,
             enable_thinking=False,
             **{k: codec[k] for k in ("bos_token", "eos_token") if k in codec},
@@ -91,6 +100,13 @@ def run_checks(worker, template, codec, *, context, maximum):
             "max_new_tokens": maximum,
             "sampling": {"mode": "greedy"},
         }
+        stop_ids = protocol_stop_ids(
+            worker,
+            parser,
+            active=bool(definitions or any(m.get("tool_calls") for m in messages)),
+        )
+        if stop_ids:
+            request["stop_token_ids"] = stop_ids
         if getattr(worker, "mtp", {}).get("supported"):
             request["mtp_drafts"] = 0
         reply = worker.request(request)
@@ -228,6 +244,9 @@ def main():
             parser=parser,
             template_sha256=hashlib.sha256(
                 codec["prompt_template"].encode()
+            ).hexdigest(),
+            rendered_template_sha256=hashlib.sha256(
+                template._source.encode()
             ).hexdigest(),
             worker_sha256=sha256(args.worker),
             validator_sha256=sha256(Path(__file__)),

@@ -9,12 +9,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import keyword
 import math
 import re
 from typing import Any
 
 from .local_api import APIError
 from .template_compat import MAX_TEMPLATE_BYTES, template_program_sha256
+from .tool_protocols import (
+    FORMATS,
+    TEMPLATE_HASHES,
+    TEMPLATE_PROGRAMS,
+    adapt_history,
+    adapt_tools,
+    functiongemma_values_supported,
+    validate_functiongemma_tools,
+)
 
 MAX_TOOLS = 64
 MAX_CALLS = 16
@@ -31,6 +41,8 @@ _XML_PARSER = "qwen38-xml-v1"
 _QWEN35_XML_PARSER = "qwen35-xml-v1"
 _GLM_PARSER = "glm53-xml-v1"
 _XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER, _GLM_PARSER})
+_HERMES_PARSERS = frozenset({_PARSER, "smollm3-hermes-v1"})
+TOOL_PARSERS = frozenset({*_HERMES_PARSERS, *_XML_PARSERS, *FORMATS})
 # Official Qwen/Qwen3-0.6B tokenizer_config.json chat_template at revision
 # c1899de289a04d12100db370d81485cdf75e47ca, verified 2026-10-31. Admission
 # binds the reviewed template program, not a model name.
@@ -282,7 +294,12 @@ def render_tools(request: dict) -> list[dict] | None:
     return request["tools"] or None
 
 
-def template_messages(messages: list[dict]) -> list[dict]:
+def template_tools(tools, *, parser=None):
+    """Adapt definitions for a reviewed renderer; parsing uses original schemas."""
+    return adapt_tools(tools, parser)
+
+
+def template_messages(messages: list[dict], *, parser=None, tools=None) -> list[dict]:
     """Render call arguments as objects and align parallel results by call ID.
 
     The pinned Qwen template represents calls/results by order, with no call-ID
@@ -318,7 +335,7 @@ def template_messages(messages: list[dict]) -> list[dict]:
             ]
         result.append(copy)
         index += 1
-    return result
+    return adapt_history(result, parser, tools)
 
 
 def tool_parser_for(codec: dict | None) -> str | None:
@@ -332,6 +349,8 @@ def tool_parser_for(codec: dict | None) -> str | None:
     if len(encoded) > MAX_TEMPLATE_BYTES:
         return None
     digest = hashlib.sha256(encoded).hexdigest()
+    if digest in TEMPLATE_HASHES:
+        return TEMPLATE_HASHES[digest]
     if digest in _SUPPORTED_TEMPLATE_HASHES:
         return _PARSER
     if digest == QWEN38_XML_TEMPLATE_SHA256:
@@ -340,7 +359,8 @@ def tool_parser_for(codec: dict | None) -> str | None:
         return _QWEN35_XML_PARSER
     if digest in {GLM53_TEMPLATE_SHA256, FLINT_TEMPLATE_SHA256}:
         return _GLM_PARSER
-    return _SUPPORTED_TEMPLATE_PROGRAMS.get(template_program_sha256(source))
+    program = template_program_sha256(source)
+    return _SUPPORTED_TEMPLATE_PROGRAMS.get(program) or TEMPLATE_PROGRAMS.get(program)
 
 
 def tool_support_for(codec: dict | None) -> dict:
@@ -511,6 +531,27 @@ def validate_parser_tools(tools: list[dict], parser: str | None) -> None:
     """
     if parser in _XML_PARSERS:
         _xml_tool_schemas(tools)
+    if parser == "functiongemma-v1":
+        validate_functiongemma_tools(tools)
+    if parser == "lfm2-pythonic-v1":
+        for tool in tools:
+            function = tool["function"]
+            properties = function.get("parameters", {}).get("properties", {})
+            if not isinstance(properties, dict):
+                raise _bad("This tool format requires named function parameters.", "tool_schema_unsupported")
+            names = [function["name"], *properties]
+            if any(
+                not isinstance(name, str)
+                or len(name) > 64
+                or not name.isascii()
+                or not name.isidentifier()
+                or keyword.iskeyword(name)
+                for name in names
+            ):
+                raise _bad(
+                    "This tool format requires Python-style function and parameter identifiers.",
+                    "tool_schema_unsupported",
+                )
 
 
 def _tool_prefix_safe(prefix, *, initial_thinking=False):
@@ -796,6 +837,151 @@ def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
     return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
 
 
+def _pythonic_frame(body, closing, invalid):
+    """Find a frame boundary outside quoted literals in one bounded pass."""
+    cursor, quote = 0, None
+    while cursor < len(body):
+        if quote is not None:
+            if body[cursor] == "\\":
+                cursor += 2
+                continue
+            if body.startswith(quote, cursor):
+                cursor += len(quote)
+                quote = None
+                continue
+        elif body.startswith(closing, cursor):
+            return body[:cursor].strip(), body[cursor + len(closing) :]
+        elif body[cursor] in "\"'":
+            quote = body[cursor] * (3 if body.startswith(body[cursor] * 3, cursor) else 1)
+            cursor += len(quote)
+            continue
+        cursor += 1
+    raise invalid("format")
+
+
+def _parse_additional_output(
+    text, tools, parser, finish_reason, parallel, call_id_prefix, choice, initial_thinking, invalid
+):
+    opening, closing, kind, argument_key = FORMATS[parser]
+    start = text.find(opening)
+    bare_prefix = "{" if parser == "llama-json-v1" else "["
+    bare = parser in {"llama-json-v1", "phi4-json-v1"} and start < 0 and text.lstrip().startswith(bare_prefix)
+    if bare:
+        start = len(text) - len(text.lstrip())
+        body_start = start
+    else:
+        body_start = start + len(opening)
+    if start < 0:
+        if any(marker in text for marker in TOOL_MARKERS):
+            raise invalid("markup")
+        if choice == "required" or isinstance(choice, dict):
+            raise APIError(502, "The model did not satisfy the requested tool choice.", "tool_choice_not_satisfied")
+        return {"role": "assistant", "content": text}, "length" if finish_reason in {"length", "context"} else "stop"
+    if choice == "none" or not tools:
+        raise invalid("disabled")
+    if finish_reason not in {"eos", "stop_token", "stop"}:
+        raise invalid("limit" if finish_reason in {"length", "context"} else "unfinished")
+    if not isinstance(call_id_prefix, str) or not _CALL_ID.fullmatch(call_id_prefix) or len(call_id_prefix) > 100:
+        raise ValueError("Invalid private tool-call ID prefix")
+    prefix = text[:start]
+    if any(marker in prefix for marker in TOOL_MARKERS):
+        raise invalid("markup")
+    if parser != "lfm2-pythonic-v1" and prefix.strip():
+        raise invalid("prefix")
+    if not _tool_prefix_safe(prefix, initial_thinking=initial_thinking):
+        raise invalid("prefix")
+    body = text[body_start:].strip()
+    suffix = ""
+    if kind == "pythonic":
+        body, suffix = _pythonic_frame(text[body_start:], closing, invalid)
+        if any(marker in suffix for marker in TOOL_MARKERS):
+            raise invalid("markup")
+    elif closing and not bare:
+        if not body.endswith(closing):
+            raise invalid("format")
+        body = body[: -len(closing)].strip()
+    if kind == "pythonic":
+        from .tool_pythonic import parse_pythonic_payload
+
+        functions = parse_pythonic_payload(body, invalid=invalid)
+    elif kind == "functiongemma":
+        from .tool_functiongemma import parse_functiongemma_calls
+
+        functions = parse_functiongemma_calls(text[start:], invalid=invalid)
+    else:
+        try:
+            decoded = json.loads(body, object_pairs_hook=_pairs, parse_constant=_constant)
+        except (ValueError, RecursionError):
+            raise invalid("format") from None
+        items = [decoded] if kind == "object" else decoded
+        if not isinstance(items, list) or len(items) > MAX_CALLS:
+            raise invalid("count")
+        if not items:
+            if parser != "smollm2-json-v1":
+                raise invalid("count")
+            if choice == "required" or isinstance(choice, dict):
+                raise APIError(
+                    502, "The model did not satisfy the requested tool choice.", "tool_choice_not_satisfied"
+                )
+            return {"role": "assistant", "content": prefix.rstrip() or None}, "stop"
+        functions, identifiers = [], set()
+        for item in items:
+            allowed = {"name", argument_key} | ({"id"} if parser == "mistral-json-v1" else set())
+            if not isinstance(item, dict) or set(item) - allowed or not {"name", argument_key} <= set(item):
+                raise invalid("format")
+            if "id" in item:
+                identifier = item["id"]
+                if (
+                    not isinstance(identifier, str)
+                    or re.fullmatch(r"[A-Za-z0-9]{9}", identifier) is None
+                    or identifier in identifiers
+                ):
+                    raise invalid("format")
+                identifiers.add(identifier)
+            functions.append((item["name"], item[argument_key]))
+    names = {tool["function"]["name"] for tool in tools}
+    if isinstance(choice, dict):
+        names &= {choice["function"]["name"]}
+    calls = []
+    for name, arguments in functions:
+        if not isinstance(name, str) or not _NAME.fullmatch(name) or name not in names:
+            raise invalid("tool")
+        if not isinstance(arguments, dict):
+            raise invalid("format")
+        if parser == "functiongemma-v1" and not functiongemma_values_supported(arguments):
+            raise invalid("value")
+        try:
+            bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+        except APIError:
+            raise invalid("limits") from None
+        calls.append(
+            {
+                "id": f"call_{call_id_prefix}_{len(calls)}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False, allow_nan=False)},
+            }
+        )
+    if not parallel and len(calls) != 1:
+        raise invalid("count")
+    return {"role": "assistant", "content": (prefix.rstrip() + suffix) or None, "tool_calls": calls}, "tool_calls"
+
+
+TOOL_MARKERS = tuple(
+    dict.fromkeys(
+        [
+            "<tool_call",
+            "</tool_call",
+            *(
+                marker
+                for opening, closing, _kind, _argument in FORMATS.values()
+                for marker in (opening, closing)
+                if marker
+            ),
+        ]
+    )
+)
+
+
 class ToolTextStream:
     """Stream only text before a possible call; calls require terminal validation.
 
@@ -807,8 +993,11 @@ class ToolTextStream:
 
     _markers = ("<tool_call", "</tool_call")
 
-    def __init__(self, deliver):
+    def __init__(self, deliver, *, parser=None):
         self.deliver = deliver
+        self._markers = TOOL_MARKERS if parser in FORMATS else self._markers
+        self._bare_pending = parser in {"llama-json-v1", "phi4-json-v1"}
+        self._bare_prefix = "{" if parser == "llama-json-v1" else "["
         self.tail = ""
         self.whitespace = []
         self.blocked = False
@@ -827,6 +1016,16 @@ class ToolTextStream:
             self.tail = ""
             self.whitespace.clear()
             return
+        if self._bare_pending:
+            text = self.tail + text
+            self.tail = ""
+            if not text.strip():
+                self.tail = text
+                return
+            self._bare_pending = False
+            if text.lstrip().startswith(self._bare_prefix):
+                self.blocked = True
+                return
         value = self.tail + text
         self.tail = ""
         positions = [position for marker in self._markers if (position := value.find(marker)) >= 0]
@@ -901,6 +1100,19 @@ def parse_tool_output(
             "invalid_tool_call",
         )
 
+    if parser in FORMATS:
+        return _parse_additional_output(
+            text,
+            tools,
+            parser,
+            finish_reason,
+            parallel_tool_calls,
+            call_id_prefix,
+            tool_choice,
+            initial_thinking,
+            invalid,
+        )
+
     start = text.find("<tool_call")
     if start < 0 and "</tool_call" not in text:
         if parser == _GLM_PARSER and any(
@@ -915,7 +1127,7 @@ def parse_tool_output(
             raise APIError(502, "The model did not satisfy the requested tool choice.", "tool_choice_not_satisfied")
         return message, reason
 
-    if parser not in {_PARSER, *_XML_PARSERS} or tool_choice == "none" or not tools:
+    if parser not in TOOL_PARSERS or tool_choice == "none" or not tools:
         raise invalid("disabled")
     if finish_reason not in {"eos", "stop_token", "stop"}:
         raise invalid("limit" if reason == "length" else "unfinished")

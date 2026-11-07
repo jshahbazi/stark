@@ -161,6 +161,22 @@ Omitting both fields preserves the MTP preference.
 | `glm53-xml-v1` | `zai-org/GLM-5.3-Flash`, revision `04c4e9e95c5da8862dced7e5056455116f83a7e0`, used by native preparation | `34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891` |
 | `glm53-xml-v1` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | `7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6ae29733466` |
 
+Additional reviewed sources use the protocols below. Full pinned revisions,
+original and normalized hashes, program fingerprints and licenses are in the
+[source fixture manifest](../tools/converter/tests/fixtures/tool_templates/README.md).
+
+| Parser | Reviewed sources | Framing |
+| --- | --- | --- |
+| `mistral-json-v1` | Mistral-7B-Instruct-v0.3 | `[TOOL_CALLS]` followed by a JSON list |
+| `llama-json-v1` | Llama-3.1-8B-Instruct and Llama-3.2-1B-Instruct public-mirror templates | Bare JSON object with `name` and `parameters`; optional `<\|python_tag\|>` |
+| `granite30-json-v1` / `granite33-json-v1` | Granite 3.0, 3.1 and 3.3 Instruct | `<\|tool_call\|>` followed by a JSON list |
+| `smollm2-json-v1` | SmolLM2-1.7B-Instruct | JSON list inside `<tool_call>`; empty list means no call |
+| `smollm3-hermes-v1` | SmolLM3-3B | Hermes objects inside `<tool_call>` |
+| `lfm2-pythonic-v1` | LFM2-1.2B and LFM2.5-1.2B-Instruct / 350M template programs | `<\|tool_call_start\|>[name(key=value)]<\|tool_call_end\|>` |
+| `phi4-json-v1` | Phi-4-mini-instruct | Bare JSON list or `<\|tool_call\|>` / `<\|/tool_call\|>` |
+| `functiongemma-v1` | FunctionGemma-270M public-mirror templates | `<start_function_call>call:name{key:<escape>value<escape>}<end_function_call>` |
+| `qwen3-hermes-v1` | rnj-1-instruct | Hermes objects inside `<tool_call>` |
+
 The [coverage matrix](TOOL_CALLING.md) lists family boundaries and separately
 recorded task evidence. Newly admitted Qwen2.5, GLM and Flint programs have native
 template, parser and synthetic API coverage; model-generated workflow
@@ -178,6 +194,9 @@ The 4B template is preserved as an upstream fixture with source and license prov
 - Hermes calls contain JSON objects inside `<tool_call>`. Qwen XML calls contain `<function=NAME>` and named `<parameter=NAME>` blocks. GLM calls place the function name directly after `<tool_call>`, followed by paired `<arg_key>`/`<arg_value>` blocks; strings retain exact contents and non-string values use JSON. Only complete calls from a normally terminated generation become executable requests. Duplicate keys/parameters, nonfinite numbers, unknown names, invalid argument representations, truncated markers, quoted examples, extra trailing text and limit violations fail. Code fences, blockquotes, HTML comments and HTML code/quotation containers in the visible prefix are rejected conservatively, including completed blocks. Balanced inline-code mentions and completed thinking before an actual call remain supported. No guessed repairs occur. Malformed output does not unload an otherwise aligned worker.
 - XML schemas require directly named root properties. Parameters can declare types, constrain types through JSON `enum`/`const` literals, or use typed `anyOf`/`oneOf` alternatives or bounded local JSON Pointer references. Parameter names use the same bounded ASCII identifier syntax as function names. Root references/composition, dynamic parameter names, malformed schemas, remote/cyclic/unresolved references and resolution-budget exhaustion return `tool_schema_unsupported` before generation, with a fixed unsupported-form category.
 - Empty or annotation-only parameter schemas are forwarded unchanged as model hints, so an unused unconstrained parameter does not block ordinary chat or other tool calls. XML cannot determine the representation of a generated unconstrained value: using such a parameter fails the entire completion with `tool_argument_type_unsupported`, without returning any calls. Types are never guessed from generated text.
+- Mistral v0.3 rendering applies a hash-checked packaged correction to its upstream JSON serializer. Render-only IDs use nine alphanumeric characters and results are JSON-escaped; API IDs retain their original values. Llama permits one call per assistant turn. Mistral, Llama and Granite reject history combining visible text with a call when the native template cannot retain both, using `tool_history_unsupported` before queue admission.
+- LFM Pythonic syntax is parsed as bounded data and never executed. Attribute access, nested calls, positional arguments, unpacking and executable expressions are rejected. Function and root parameter names must be Python identifiers. Its documented trailing prose is returned as text; other formats require clean call framing. Llama holds a possible initial JSON object during streaming; Phi holds a possible initial JSON list.
+- FunctionGemma requires concrete parameter types and representable named keys. References, schema composition, dynamic properties, reserved schema-key parameter names and native delimiter strings are rejected with `tool_schema_unsupported` or `tool_history_unsupported`. Its required response marker is tokenized to one native stop-token ID for tool requests, preserving the allowance of four client stop strings. An incompatible tokenizer returns `tool_tokenizer_unsupported`. Protocol compatibility does not establish native model loading: the tested BF16 artifact currently fails that step.
 - XML strings retain their original contents; structured values use JSON. The Qwen3.5 template's top-level boolean/null scalars use its canonical `True`/`False`/`None` representation. Ambiguous string/non-string union values and strings containing reserved wire delimiters are rejected rather than coerced. These checks decode types; clients still validate the complete schema before executing anything.
 - Definitions together are limited to 256 KiB; each argument object to 64 KiB; each tool result to 256 KiB; parsed tool output to 512 KiB. JSON depth is limited to 32 and item count to 16,384. The ordinary 1 MiB body/worker-line limits and model context limits also apply. Tool use and image input cannot be combined.
 

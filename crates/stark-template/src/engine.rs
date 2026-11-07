@@ -628,6 +628,7 @@ fn methods(
                 | "lstrip"
                 | "rstrip"
                 | "split"
+                | "replace"
                 | "lower"
                 | "upper"
                 | "capitalize"
@@ -651,6 +652,19 @@ fn methods(
         return Err(unsupported());
     }
     if let Some(text) = value.as_str() {
+        if method == "replace" {
+            let (old, new, count): (&str, &str, Option<i64>) = from_args(args)?;
+            let limit = count.filter(|count| *count >= 0).map_or(usize::MAX, |count| count as usize);
+            let replacements = text.matches(old).take(limit).count();
+            let size = replacements
+                .checked_mul(new.len())
+                .and_then(|added| text.len().checked_sub(replacements * old.len())?.checked_add(added))
+                .filter(|size| *size <= MAX_OUTPUT_BYTES)
+                .ok_or_else(unsupported)?;
+            let result = text.replacen(old, new, limit);
+            debug_assert_eq!(result.len(), size);
+            return Ok(Value::from(result));
+        }
         if matches!(method, "strip" | "lstrip" | "rstrip") {
             let (characters,): (Option<&str>,) = from_args(args)?;
             let predicate = |character: char| match characters {
@@ -709,6 +723,43 @@ fn methods(
     minijinja_contrib::pycompat::unknown_method_callback(state, value, method, args)
 }
 
+/// Only calendar-date formats used by reviewed programs are admitted. Keep the
+/// clock capability narrow and independent of locale-specific month tables.
+fn strftime_now(format: &str) -> Result<String, Error> {
+    if !matches!(format, "%d %B %Y" | "%d %b %Y" | "%B %d, %Y") {
+        return Err(unsupported());
+    }
+    let seconds =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| unsupported())?.as_secs();
+    let seconds = libc::time_t::try_from(seconds).map_err(|_| unsupported())?;
+    let mut calendar = std::mem::MaybeUninit::<libc::tm>::uninit();
+    if unsafe { libc::localtime_r(&seconds, calendar.as_mut_ptr()) }.is_null() {
+        return Err(unsupported());
+    }
+    let calendar = unsafe { calendar.assume_init() };
+    let months = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let month = months.get(calendar.tm_mon as usize).ok_or_else(unsupported)?;
+    let year = calendar.tm_year + 1900;
+    Ok(match format {
+        "%d %b %Y" => format!("{:02} {} {}", calendar.tm_mday, &month[..3], year),
+        "%B %d, %Y" => format!("{} {:02}, {}", month, calendar.tm_mday, year),
+        _ => format!("{:02} {} {}", calendar.tm_mday, month, year),
+    })
+}
+
 fn environment<'source>() -> Environment<'source> {
     let mut environment = Environment::new();
     let globals: Vec<_> = environment.globals().map(|(name, _)| name.to_owned()).collect();
@@ -718,6 +769,7 @@ fn environment<'source>() -> Environment<'source> {
     environment.add_function("range", bounded_range);
     environment.add_function("dict", functions::dict);
     environment.add_function("namespace", functions::namespace);
+    environment.add_function("strftime_now", strftime_now);
     environment.add_function("raise_exception", |_value: Value| -> Result<Value, Error> { Err(unsupported()) });
     for filter in [
         "attr",

@@ -367,7 +367,9 @@ def test_qualification_seals_inputs_closes_worker_and_writes_only_private_aggreg
     monkeypatch.setattr(module, "Worker", SyntheticWorker)
     monkeypatch.setattr(module, "_template_executable", lambda: helper)
     monkeypatch.setattr(
-        module, "load_template", lambda model: ({"prompt_template": source}, SimpleNamespace(_executable=helper))
+        module,
+        "load_template",
+        lambda model: ({"prompt_template": source}, SimpleNamespace(_executable=helper, _source=source)),
     )
     monkeypatch.setattr(
         module,
