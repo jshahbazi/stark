@@ -105,6 +105,26 @@ fn qwen_affine_dot_decodes_group64_bitplanes_before_contraction() {
     crate::tests::helpers::for_each_backend!(|B| affine_dot_bitplanes::<B>());
 }
 
+#[cfg(backend = "metal")]
+#[stark_test]
+#[ignore]
+fn qwen35_affine_dot_witness_last_prompt_logit_reference_metal() {
+    use crate::backends::{
+        common::{Kernels, kernel::matmul::MatmulKernel},
+        metal::Metal,
+    };
+    let path = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private exact artifact path"));
+    let mut weights = std::fs::File::open(path.join("model.safetensors")).expect("private witness weights unavailable");
+    let hash = file_digest(&mut weights).expect("private witness artifact hashing failed");
+    assert_eq!(
+        hash, "7e127dfb8c78f22b94edd35e52717f50e3d70398fe3668abd2290d088b5b1343",
+        "contraction witness admits only the frozen small artifact"
+    );
+    <<Metal as Backend>::Kernels as Kernels>::MatmulKernel::with_reference_dot_witness(|| {
+        reference::<Metal>("metal-affine-dot-witness");
+    });
+}
+
 fn reference<B: Backend>(backend: &str) {
     let path = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private exact artifact path"));
     let root = PathBuf::from(
