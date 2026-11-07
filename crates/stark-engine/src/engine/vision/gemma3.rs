@@ -242,6 +242,11 @@ fn validate_decoder(
             || mixer["num_groups"] != groups
             || mixer["head_dim"] != head_dim
             || mixer["is_causal"] != true
+            // Legacy same-image local masks are equivalent for this fixed
+            // 256-token block within the pinned 1024-token sliding window.
+            || !(mixer["image_attention_policy"].is_null()
+                || mixer["image_attention_policy"] == "same_image"
+                || (local && mixer["image_attention_policy"] == "windowed_same_image"))
             || mixer["scale"].as_f64().is_none_or(|scale| (scale - scalar.sqrt().recip()).abs() > 1e-12)
             || mixer["sliding_window_size"]
                 != if local {

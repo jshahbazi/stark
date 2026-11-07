@@ -67,8 +67,11 @@ token sequence. Surplus image markers and non-round-trippable raw token arrays
 are rejected. Token counts depend on neighboring text; the fixed image-first
 local-check prompt expands by 258 tokens in the original tokenizer.
 
-The decoder uses ordinary scalar RoPE and permits bidirectional attention
-within the complete image block. Text remains causal. The scheduler keeps the
+The decoder uses ordinary scalar RoPE. Global layers permit causal attention
+or attention within the same image; local layers apply the sliding-window
+lower bound to that composition. The admitted 256-token image block fits
+entirely inside the 1024-token local window, preserving complete same-image
+visibility. Text remains causal. The scheduler keeps the
 complete image block in one prefill chunk, including at a 1024-token boundary.
 Each image request uses fresh decoder state and clears retained generation
 prefix state. Image patches and projected embeddings are request-owned and

@@ -129,6 +129,17 @@ def plan_vision_tensors(tensors: dict, model_dim: int, *, shapes: dict | None = 
     return tuple(operations)
 
 
+def image_decoder_config(decoder):
+    transformer = decoder["transformer_config"]
+    layers = []
+    for layer in transformer["layer_configs"]:
+        mixer = layer["mixer_config"]
+        policy = "same_image" if mixer["sliding_window_size"] is None else "windowed_same_image"
+        layers.append({**layer, "mixer_config": {**mixer, "image_attention_policy": policy}})
+    return {**decoder, "transformer_config": {**transformer, "layer_configs": layers},
+            "scalar_image_embeddings": True, "bidirectional_image_attention": True}
+
+
 def build_gemma3_vision_plan(source: Path, *, dtype: str = "bfloat16"):
     if dtype != "bfloat16":
         raise UnsupportedConversion("Gemma 3 native image execution requires merged BF16 weights")
@@ -150,7 +161,7 @@ def build_gemma3_vision_plan(source: Path, *, dtype: str = "bfloat16"):
     if any(info.dtype != "BF16" for info in tensors.values()):
         raise UnsupportedConversion("Gemma 3 images require complete BF16 source storage")
     return replace(base, operations=tuple(sorted((*base.operations, *operations), key=lambda operation: operation.name)),
-        decoder_config={**base.decoder_config, "scalar_image_embeddings": True, "bidirectional_image_attention": True},
+        decoder_config=image_decoder_config(base.decoder_config),
         metadata={**base.metadata, "stark.vision.family": FAMILY["profile"]},
         input_bytes=sum(info.nbytes for info in tensors.values()), source_tensors=len(tensors),
         input_tensors=tuple(tensors.values()))

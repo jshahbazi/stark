@@ -11,7 +11,7 @@ from test_gemma import gemma_fixture
 from test_streaming import save_tensors, tensor_bytes
 from stark_convert.adapters.gemma import build_gemma_text_plan
 from stark_convert.adapters.gemma3_vision import (
-    TEXT_GEOMETRIES, TOKENS, VISION, gemma3_config, plan_vision_tensors, vision_shapes,
+    TEXT_GEOMETRIES, TOKENS, VISION, gemma3_config, image_decoder_config, plan_vision_tensors, vision_shapes,
 )
 from stark_convert.gemma3_contract import PROCESSOR, normalize_processor
 from stark_convert.streaming import ConversionError, UnsupportedConversion, load_checkpoint, read_safetensors_header, write_plan
@@ -37,6 +37,19 @@ def test_all_actual_multimodal_sizes_admitted_by_geometry(hidden):
     shapes = vision_shapes(hidden)
     assert shapes["multi_modal_projector.mm_input_projection_weight"] == (1152, hidden)
     assert len(shapes) == 439
+
+
+def test_image_decoder_preserves_source_global_and_local_mask_composition():
+    decoder = {"transformer_config": {"layer_configs": [
+        {"mixer_config": {"sliding_window_size": 1024 if (index + 1) % 6 else None}}
+        for index in range(12)]}}
+    result = image_decoder_config(decoder)
+    policies = [layer["mixer_config"]["image_attention_policy"]
+                for layer in result["transformer_config"]["layer_configs"]]
+    assert policies == (["windowed_same_image"] * 5 + ["same_image"]) * 2
+    assert result["scalar_image_embeddings"] and result["bidirectional_image_attention"]
+    assert all("image_attention_policy" not in layer["mixer_config"]
+               for layer in decoder["transformer_config"]["layer_configs"])
 
 
 @pytest.mark.parametrize("pointer,value", [
