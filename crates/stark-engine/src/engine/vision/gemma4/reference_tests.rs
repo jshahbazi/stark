@@ -9,6 +9,9 @@ use stark_engine_macros::stark_test;
 
 use super::*;
 
+#[path = "larger_stage_tests.rs"]
+mod larger_stages;
+
 fn read(
     root: &Path,
     name: &str,

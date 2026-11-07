@@ -35,15 +35,30 @@ def run(args):
     from safetensors.torch import load_file
     from transformers.initialization import no_init_weights
     from transformers.models.gemma4 import image_processing_gemma4, modeling_gemma4
-    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig, Gemma4VisionConfig
+    from transformers.models.gemma4.configuration_gemma4 import (
+        Gemma4TextConfig,
+        Gemma4VisionConfig,
+    )
 
-    if torch.__version__.split("+")[0] != "2.14.1" or transformers.__version__ != "5.15.1":
+    if (
+        torch.__version__.split("+")[0] != "2.14.1"
+        or transformers.__version__ != "5.15.1"
+    ):
         raise ValueError("reference_versions_changed")
     if digest(modeling_gemma4.__file__) != SOURCE:
         raise ValueError("reference_source_changed")
-    source, output, fixtures = args.source.resolve(), args.output.resolve(), args.fixtures.resolve()
+    source, output, fixtures = (
+        args.source.resolve(),
+        args.output.resolve(),
+        args.fixtures.resolve(),
+    )
     root = Path(__file__).resolve().parents[1]
-    if output.exists() or subprocess.run(["git", "check-ignore", "--quiet", "--", str(output)], cwd=root).returncode:
+    if (
+        output.exists()
+        or subprocess.run(
+            ["git", "check-ignore", "--quiet", "--", str(output)], cwd=root, check=False
+        ).returncode
+    ):
         raise ValueError("output_must_be_new_and_ignored")
     receipt = json.loads((source / "receipt.json").read_text())
     if receipt["repo"] != "google/gemma-4-31B-it" or receipt["revision"] != REVISION:
@@ -60,12 +75,21 @@ def run(args):
         torch.set_default_dtype(torch.bfloat16)
         with no_init_weights():
             tower = modeling_gemma4.Gemma4VisionModel(vision_config)
-            projector = modeling_gemma4.Gemma4MultimodalEmbedder(vision_config, text_config)
+            projector = modeling_gemma4.Gemma4MultimodalEmbedder(
+                vision_config, text_config
+            )
     finally:
         torch.set_default_dtype(previous)
     state = load_file(source / "vision.safetensors", device="cpu")
-    for module, prefix in [(tower, "model.vision_tower."), (projector, "model.embed_vision.")]:
-        selected = {name.removeprefix(prefix): value for name, value in state.items() if name.startswith(prefix)}
+    for module, prefix in [
+        (tower, "model.vision_tower."),
+        (projector, "model.embed_vision."),
+    ]:
+        selected = {
+            name.removeprefix(prefix): value
+            for name, value in state.items()
+            if name.startswith(prefix)
+        }
         module.load_state_dict(selected, strict=True, assign=True)
         module.eval()
     del state
@@ -77,6 +101,7 @@ def run(args):
         raise ValueError("fixture_cases_changed")
     output.mkdir(mode=0o700)
     cases = []
+    stage_bytes = [0]
     with torch.inference_mode():
         for index, case in enumerate(original["cases"]):
             image = fixtures / case["image"]
@@ -84,45 +109,219 @@ def run(args):
                 raise ValueError("fixture_image_changed")
             image_name = f"case-{index}.png"
             shutil.copyfile(image, output / image_name)
-            batch = processor(images=Image.open(image).convert("RGB"), return_tensors="pt")
+            batch = processor(
+                images=Image.open(image).convert("RGB"), return_tensors="pt"
+            )
             positions = batch["image_position_ids"]
             valid = (positions[0] >= 0).all(dim=-1)
-            width = int(positions[0,valid,0].max()) + 1
-            height = int(positions[0,valid,1].max()) + 1
-            patches = (2 * (batch["pixel_values"][0,valid] - 0.5)).bfloat16().float().numpy().astype("<f4")
-            features = projector(tower(pixel_values=batch["pixel_values"], pixel_position_ids=positions).last_hidden_state)
+            width = int(positions[0, valid, 0].max()) + 1
+            height = int(positions[0, valid, 1].max()) + 1
+            patches = (
+                (2 * (batch["pixel_values"][0, valid] - 0.5))
+                .bfloat16()
+                .float()
+                .numpy()
+                .astype("<f4")
+            )
+            stages = {}
+            hooks = []
+            original_rotary = modeling_gemma4.apply_multidimensional_rope
+            rotary_calls = [0]
+
+            def save_stage(
+                tag,
+                value,
+                *,
+                full=False,
+                head0=False,
+                _valid=valid,
+                _index=index,
+                _stages=stages,
+            ):
+                value = value.detach()
+                if value.ndim >= 3:
+                    value = value[0, _valid]
+                if value.ndim == 3:
+                    value = (
+                        value[:, 0, :] if head0 else value.reshape(value.shape[0], -1)
+                    )
+                if not full:
+                    value = value[:8]
+                values = value.float().numpy().astype("<f4")
+                data = values.tobytes()
+                stage_bytes[0] += len(data)
+                if stage_bytes[0] > 64 * 1024 * 1024:
+                    raise ValueError("stage_capture_budget_exceeded")
+                name = f"case-{_index}-stage-{tag}.f32"
+                (output / name).write_bytes(data)
+                _stages[tag] = {
+                    "file": name,
+                    "sha256": digest(output / name),
+                    "shape": list(values.shape),
+                }
+
+            def rotated(
+                value, *parts, _rotary=original_rotary, _calls=rotary_calls, **kwargs
+            ):
+                result = _rotary(value, *parts, **kwargs)
+                call = _calls[0]
+                _calls[0] += 1
+                if call < 2:
+                    save_stage(
+                        "prepared_queries_0" if call == 0 else "prepared_keys_0",
+                        result,
+                        full=True,
+                        head0=True,
+                    )
+                return result
+
+            def capture_values(_module, _inputs, value):
+                save_stage("v_norm_0", value)
+                save_stage("prepared_values_0", value, full=True, head0=True)
+
+            if args.capture_stages:
+                hooks.append(
+                    tower.patch_embedder.input_proj.register_forward_hook(
+                        lambda _m, _i, value: save_stage("patch_projection", value)
+                    )
+                )
+                hooks.append(
+                    tower.patch_embedder.register_forward_hook(
+                        lambda _m, _i, value: save_stage("patch_positions", value)
+                    )
+                )
+                first = tower.encoder.layers[0]
+                hooks.append(
+                    first.input_layernorm.register_forward_hook(
+                        lambda _m, _i, value: save_stage("input_norm_0", value)
+                    )
+                )
+                for tag, module in [
+                    ("q_raw_0", first.self_attn.q_proj),
+                    ("k_raw_0", first.self_attn.k_proj),
+                    ("v_raw_0", first.self_attn.v_proj),
+                    ("q_norm_0", first.self_attn.q_norm),
+                    ("k_norm_0", first.self_attn.k_norm),
+                ]:
+                    hooks.append(
+                        module.register_forward_hook(
+                            lambda _m, _i, value, tag=tag: save_stage(tag, value)
+                        )
+                    )
+                hooks.append(
+                    first.self_attn.v_norm.register_forward_hook(capture_values)
+                )
+                hooks.append(
+                    first.self_attn.o_proj.register_forward_pre_hook(
+                        lambda _m, inputs: save_stage("attention_0", inputs[0])
+                    )
+                )
+                for layer, module in enumerate(tower.encoder.layers):
+                    hooks.append(
+                        module.register_forward_hook(
+                            lambda _m, _i, value, layer=layer: save_stage(
+                                f"block_{layer}", value
+                            )
+                        )
+                    )
+                hooks.append(
+                    tower.encoder.register_forward_hook(
+                        lambda _m, _i, value: save_stage(
+                            "encoder_final", value.last_hidden_state, full=True
+                        )
+                    )
+                )
+                hooks.append(
+                    tower.pooler.register_forward_hook(
+                        lambda _m, _i, value: save_stage(
+                            "pool_scaled", value[0][value[1]], full=True
+                        )
+                    )
+                )
+                hooks.append(
+                    projector.embedding_pre_projection_norm.register_forward_hook(
+                        lambda _m, _i, value: save_stage(
+                            "projector_input", value, full=True
+                        )
+                    )
+                )
+                modeling_gemma4.apply_multidimensional_rope = rotated
+            try:
+                encoded = tower(
+                    pixel_values=batch["pixel_values"], pixel_position_ids=positions
+                ).last_hidden_state
+                if args.capture_stages:
+                    save_stage("standardized", encoded, full=True)
+                features = projector(encoded)
+            finally:
+                modeling_gemma4.apply_multidimensional_rope = original_rotary
+                for hook in hooks:
+                    hook.remove()
+
             values = features.float().numpy().astype("<f4")
             count = int(batch["num_soft_tokens_per_image"][0])
-            if values.shape != (count,5376) or not np.isfinite(values).all():
+            if values.shape != (count, 5376) or not np.isfinite(values).all():
                 raise ValueError("feature_output_invalid")
-            patch_name, feature_name = f"case-{index}-patches.f32", f"case-{index}-features.f32"
+            patch_name, feature_name = (
+                f"case-{index}-patches.f32",
+                f"case-{index}-features.f32",
+            )
             (output / patch_name).write_bytes(patches.tobytes())
             (output / feature_name).write_bytes(values.tobytes())
-            cases.append({"name":case["name"], "image":image_name,"image_sha256":digest(output/image_name),
-                          "patches":patch_name,"patches_sha256":digest(output/patch_name),
-                          "features":feature_name,"features_sha256":digest(output/feature_name),
-                          "grid":[1,height,width],"image_tokens":count})
-    manifest = {"scope":"vision-features-only","model_revision":REVISION,"model_dim":5376,
-                "reference_profile":"transformers-canonical","reference_version":transformers.__version__,
-                "source_sha256":SOURCE,"source_receipt_sha256":digest(source/"receipt.json"),
-                "reference_lock_sha256":digest(args.reference_lock),"cases":cases,"complete":True}
-    (output/"manifest.json").write_text(json.dumps(manifest,sort_keys=True)+"\n")
-    return {"passed":True,"scope":"vision-features-only","cases":len(cases),"manifest_sha256":digest(output/"manifest.json")}
+            cases.append(
+                {
+                    "name": case["name"],
+                    "image": image_name,
+                    "image_sha256": digest(output / image_name),
+                    "patches": patch_name,
+                    "patches_sha256": digest(output / patch_name),
+                    "features": feature_name,
+                    "features_sha256": digest(output / feature_name),
+                    "grid": [1, height, width],
+                    "image_tokens": count,
+                }
+            )
+            if args.capture_stages:
+                cases[-1]["stages"] = stages
+    manifest = {
+        "scope": "vision-features-only",
+        "model_revision": REVISION,
+        "model_dim": 5376,
+        "reference_profile": "transformers-canonical",
+        "reference_version": transformers.__version__,
+        "source_sha256": SOURCE,
+        "source_receipt_sha256": digest(source / "receipt.json"),
+        "reference_lock_sha256": digest(args.reference_lock),
+        "cases": cases,
+        "complete": True,
+    }
+    (output / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    return {
+        "passed": True,
+        "scope": "vision-features-only",
+        "cases": len(cases),
+        "manifest_sha256": digest(output / "manifest.json"),
+    }
 
 
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("source","fixtures","output","reference-lock"):
-        parser.add_argument("--"+name,type=Path,required=True)
+    for name in ("source", "fixtures", "output", "reference-lock"):
+        parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--capture-stages", action="store_true")
     args = parser.parse_args()
     try:
-        with open(os.devnull,"w") as quiet, contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+        with (
+            open(os.devnull, "w") as quiet,
+            contextlib.redirect_stdout(quiet),
+            contextlib.redirect_stderr(quiet),
+        ):
             result = run(args)
-    except Exception as error:
-        print(json.dumps({"passed":False,"error_type":type(error).__name__}))
+    except Exception as error:  # noqa: BLE001 - keep private framework failures content-free
+        print(json.dumps({"passed": False, "error_type": type(error).__name__}))
         return 1
-    print(json.dumps(result,sort_keys=True))
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 
