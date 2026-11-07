@@ -68,3 +68,32 @@ The new ignored Metal split test compares tower-prepared values with those sourc
 planes, then runs the native Flash component on the exact canonical Q/K/V. It
 prints aggregate comparisons only. Native type-check and split execution are
 pending for this diagnostic-only checkpoint; no arithmetic policy changes.
+
+The full split passed its diagnostic execution on sealed source `36414711`,
+SHA-256 `8b997f9d72b5200818169477da7ab2995b800a8970fa0f7f2471833bafb6faa1`.
+All 2,757,888 prepared Q values, K values and V values match exactly. Native
+attention differs in 513 BF16 elements, beginning at image-patch row 3, with
+relative RMS 0.00007203. Replaying the exact canonical Q/K/V through the native
+Flash component reproduces the same 513 differences, isolating attention.
+The old split report and full feature failures remain preserved separately.
+
+The next witness distinguishes CPUBlas' F32-output and BF16-output QK routes.
+Pinned `BlasKernel.cpp`'s no-downcast F32 output uses the generic four-part sum;
+its 32-stream `compute_dot` specialization accepts BF16 output. An independent
+Python replay of the first eight canonical query rows across all heads has five
+differences with the 32-stream QK schedule (heads 14 and 15), and none when only
+QK changes to the four-part F32-output schedule. Direct pinned Torch attention
+also matches every expected prefix value. No other equation changes in this
+comparison.
+
+The candidate changes only larger-Flash QK's CPU/Metal sum to that source
+four-part schedule. The six model-free output cases and their 776 probability
+rounding witnesses are retained byte-for-byte. A new independent score witness
+uses one unmasked key in a padded 2520-key pinned Torch Flash call: its F32
+logsumexp equals QK exactly. This exposes 52 F32 differences from the old
+32-stream schedule across 256 queries without reimplementing QK as the oracle.
+The updated model-free manifest SHA-256 is
+`50e5a3de58978897ef3ff059e13f0ea9fbea3be99cf3ba60eaa848ab4372e919`.
+New native score and all-head-prefix tests, plus full attention/feature replay,
+are pending for this source-only QK checkpoint. E2B/E4B, unified 12B, text and
+all BF16-output dense projections retain their paths and all gates remain fixed.

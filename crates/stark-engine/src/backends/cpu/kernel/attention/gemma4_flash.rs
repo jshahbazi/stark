@@ -44,36 +44,19 @@ pub fn gemma4_vision_flash_qk(
                     continue;
                 }
                 let key = (key_row * heads as usize + head) * PADDED;
-                let mut sums = [[0.0f32; 4]; 8];
-                for start in [0, 32] {
-                    for register in 0..8 {
-                        for lane in 0..4 {
-                            let channel = start + register * 4 + lane;
-                            let (q, k) = unsafe {
-                                ((*queries.add(query + channel)).to_f32(), (*keys.add(key + channel)).to_f32())
-                            };
-                            sums[register][lane] = q.mul_add(k, sums[register][lane]);
-                        }
-                    }
-                }
-                for offset in [4, 2, 1] {
-                    for register in 0..offset {
-                        for lane in 0..4 {
-                            sums[register][lane] += sums[register + offset][lane];
-                        }
-                    }
-                }
-                let mut tail = [0.0f32; 4];
-                for part in 0..2 {
+                // CPUBlas gemm_no_downcast uses generic gemm_transa_ and
+                // sum()'s four partials. BF16-output Linear's 32-stream
+                // compute_dot specialization does not apply to F32 scores.
+                let mut sums = [0.0f32; 4];
+                for start in (0..WIDTH).step_by(4) {
                     for lane in 0..4 {
-                        let channel = 64 + part * 4 + lane;
+                        let channel = start + lane;
                         let (q, k) =
                             unsafe { ((*queries.add(query + channel)).to_f32(), (*keys.add(key + channel)).to_f32()) };
-                        tail[lane] = q.mul_add(k, tail[lane]);
+                        sums[lane] = q.mul_add(k, sums[lane]);
                     }
                 }
-                let dot = (sums[0][0] + sums[0][1]) + (sums[0][2] + sums[0][3]);
-                unsafe { *scores.add(index) = dot + ((tail[0] + tail[1]) + (tail[2] + tail[3])) };
+                unsafe { *scores.add(index) = ((sums[0] + sums[1]) + sums[2]) + sums[3] };
             }
         }
     }

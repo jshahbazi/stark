@@ -65,6 +65,14 @@ uses fixed reused planes with linear memory in query count. Source and license
 hashes are retained in `pytorch-gemma4-larger-vision-flash`; the existing PyTorch
 BSD notice applies. E2B/E4B, unified12B and text attention retain their dispatch.
 
+Larger-vision QK follows `BlasKernel.cpp`'s generic `gemm_transa_` F32-output
+route through `cpublas_gemm_no_downcast_impl`, with four independent partials.
+Its SHA-256 is `5f55b3a7c17c724e1b5e963f37f248fff1857867faff36d58d3b24da9cdc8363`.
+The 32-stream BF16-output `compute_dot` specialization is a different overload;
+ordinary BF16-output vision projections keep that schedule. A model-free pinned
+Torch Flash logsumexp fixture with one unmasked key exposes the QK F32 result
+directly, before probability materialization can hide accumulation differences.
+
 The explicit BF16 affine-Q4 source profile adapts MLX v0.32.3 at
 [`64ea011cb65f14d9ce2737e60db9a4ae91ed7441`](https://github.com/ml-explore/mlx/tree/64ea011cb65f14d9ce2737e60db9a4ae91ed7441).
 Its native QMV arithmetic preserves BF16 four-value bias sums, four-product

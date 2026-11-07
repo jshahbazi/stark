@@ -113,6 +113,43 @@ def run(output):
             )
     if witnesses == 0:
         raise ValueError("missing_probability_rounding_witnesses")
+    # A single unmasked key makes the pinned operator's F32 logsumexp equal
+    # its F32 QK score exactly. This independently exposes CPUBlas' no-downcast
+    # accumulation, before exponential/PV rounding can hide score differences.
+    torch.manual_seed(20261108)
+    witness_q = torch.randn(1, 1, 256, 72).bfloat16()
+    witness_k = torch.randn(1, 1, 2520, 72).bfloat16()
+    mask = torch.full((1, 2520), -float("inf"), dtype=torch.bfloat16)
+    mask[:, 0] = 0
+    _, lse = torch.ops.aten._scaled_dot_product_flash_attention_for_cpu.default(
+        witness_q, witness_k, torch.zeros_like(witness_k), attn_mask=mask, scale=1.0
+    )
+    source_scores = lse[0, 0].float().contiguous()
+    x, y = witness_q[0, 0].float(), witness_k[0, 0, 0].float()
+    sums = torch.zeros(256, 8, 4)
+    for start in (0, 32):
+        sums += (x[:, start : start + 32] * y[start : start + 32]).reshape(256, 8, 4)
+    for offset in (4, 2, 1):
+        sums[:, :offset] = sums[:, :offset] + sums[:, offset : offset * 2]
+    dot = (sums[:, 0, 0] + sums[:, 0, 1]) + (sums[:, 0, 2] + sums[:, 0, 3])
+    tail = x[:, 64:68] * y[64:68] + x[:, 68:72] * y[68:72]
+    legacy_scores = dot + ((tail[:, 0] + tail[:, 1]) + (tail[:, 2] + tail[:, 3]))
+    qk_witnesses = int((legacy_scores != source_scores).sum())
+    if qk_witnesses == 0:
+        raise ValueError("missing_qk_accumulation_witness")
+    q = torch.ones(256, 128, dtype=torch.bfloat16)
+    k = torch.ones(1, 128, dtype=torch.bfloat16)
+    q[:, :72], k[:, :72] = witness_q[0, 0], witness_k[0, 0, :1]
+    qk_records = {}
+    for name, value in (("queries", q), ("keys", k)):
+        path = output / f"qk-witness-{name}.bf16"
+        path.write_bytes(
+            value.contiguous().view(torch.uint16).numpy().astype("<u2").tobytes()
+        )
+        qk_records[name] = {"file": path.name, "sha256": digest(path)}
+    path = output / "qk-witness-expected.f32"
+    path.write_bytes(source_scores.numpy().astype("<f4").tobytes())
+    qk_records["expected"] = {"file": path.name, "sha256": digest(path)}
     manifest = {
         "scope": "model-free-larger-vision-flash",
         "torch_version": torch.__version__,
@@ -121,6 +158,15 @@ def run(output):
         "oracle": "aten._scaled_dot_product_flash_attention_for_cpu",
         "seed": 20261107,
         "cases": cases,
+        "qk_witness": {
+            "query_rows": 256,
+            "key_rows": 1,
+            "heads": 1,
+            "source_padded_key_rows": 2520,
+            "legacy32_f32_differences": qk_witnesses,
+            "oracle": "single-unmasked-key-pinned-flash-logsumexp",
+            **qk_records,
+        },
     }
     (output / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
     return {

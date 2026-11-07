@@ -278,3 +278,85 @@ fn gemma4_larger_full_attention_split_metal() {
     std::fs::write(root.join("native-full-attention-split.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     println!("{report}");
 }
+
+fn checkpoint_flash_prefix<B: Backend>() {
+    use crate::tests::helpers::{buffer_to_vec, create_buffer_with_data};
+    let root = PathBuf::from(std::env::var_os("STARK_GEMMA4_FIXTURE_PATH").unwrap());
+    let manifest: Value = serde_json::from_slice(&read(&root, "manifest.json")).unwrap();
+    assert_eq!(manifest["stage_focus"], "first-layer-full-attention");
+    assert_eq!(manifest["source_sha256"], "4f874549f79deda4bb9ce7fb7d7b8e7349122be1711f733f7a4157e46ed10cc3");
+    assert_eq!(manifest["model_revision"], PROFILES[2].revision);
+    let stages = &manifest["cases"][1]["stages"];
+    let key_rows =
+        manifest["cases"][1]["grid"][1].as_u64().unwrap() * manifest["cases"][1]["grid"][2].as_u64().unwrap();
+    assert_eq!(key_rows, 2394);
+    let context = B::Context::new().unwrap();
+    let mut inputs = Vec::new();
+    for key in ["prepared_queries_0", "prepared_keys_0", "prepared_values_0"] {
+        let record = &stages[key];
+        let bytes = read(&root, record["file"].as_str().unwrap());
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), record["sha256"].as_str().unwrap());
+        let source = floats(&bytes);
+        assert_eq!(source.len(), key_rows as usize * 1152);
+        let rows = if key == "prepared_queries_0" {
+            8
+        } else {
+            key_rows as usize
+        };
+        let mut input = vec![bf16::ZERO; rows * 16 * 128];
+        for row in 0..rows {
+            for head in 0..16 {
+                let destination = if key == "prepared_queries_0" {
+                    (head * rows + row) * 128
+                } else {
+                    (row * 16 + head) * 128
+                };
+                for channel in 0..72 {
+                    input[destination + channel] = bf16::from_f32(source[(row * 16 + head) * 72 + channel]);
+                }
+            }
+        }
+        inputs.push(create_buffer_with_data::<B, bf16>(&context, &input));
+    }
+    let record = &stages["attention_0"];
+    let bytes = read(&root, record["file"].as_str().unwrap());
+    assert_eq!(format!("{:x}", Sha256::digest(&bytes)), record["sha256"].as_str().unwrap());
+    let expected = floats(&bytes);
+    let attention = super::super::flash::FlashAttention::<B>::new(&context).unwrap();
+    let mut command = context.create_command_buffer(None, None).unwrap();
+    let mut q = command.allocate_scratch_for_shape(&[16, 8, 128], DataType::BF16).unwrap();
+    let mut k = command.allocate_scratch_for_shape(&[key_rows as u32, 16, 128], DataType::BF16).unwrap();
+    let mut v = command.allocate_scratch_for_shape(&[key_rows as u32, 16, 128], DataType::BF16).unwrap();
+    command.encode_copy(&inputs[0], &mut q);
+    command.encode_copy(&inputs[1], &mut k);
+    command.encode_copy(&inputs[2], &mut v);
+    let output = attention.encode(&q, &k, &v, 8, key_rows as u32, 16, &mut command).unwrap();
+    let mut readback = context.create_buffer(8 * 1152 * 2).unwrap();
+    command.encode_copy(&output, &mut readback);
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    let actual = buffer_to_vec::<B, bf16>(&readback);
+    let different =
+        actual.iter().zip(&expected[..8 * 1152]).filter(|(a, b)| a.to_f32().to_bits() != b.to_bits()).count();
+    let report = json!({"scope":"checkpoint-flash-query-prefix","backend":B::NAME,"query_rows":8,"heads":16,
+        "different_bf16_elements":different,"metrics":compare(&actual,&expected[..8 * 1152])});
+    std::fs::write(
+        root.join(format!("native-prefix-flash-{}.json", B::NAME)),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    println!("{report}");
+    assert_eq!(different, 0, "canonical all-head query prefix differs");
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+#[ignore]
+fn gemma4_larger_checkpoint_flash_prefix_cpu() {
+    checkpoint_flash_prefix::<crate::backends::cpu::Cpu>();
+}
+
+#[stark_test]
+#[ignore]
+fn gemma4_larger_checkpoint_flash_prefix_metal() {
+    checkpoint_flash_prefix::<crate::backends::metal::Metal>();
+}
