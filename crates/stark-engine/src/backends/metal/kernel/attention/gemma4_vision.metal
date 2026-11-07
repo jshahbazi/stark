@@ -54,3 +54,38 @@ PUBLIC KERNEL(Gemma4VisionPoolBF16)(const device bfloat* input,device bfloat* ou
     sum += float(input[((y*3+dy)*grid_width+x*3+dx)*width+channel])/9.0f;
   output[i]=bfloat(float(bfloat(sum))*metal::precise::sqrt(float(width)));
 }
+
+PUBLIC KERNEL(Gemma4VisionPreparePaddedBF16)(const device bfloat* q,const device bfloat* k,const device bfloat* v,
+    device bfloat* queries,device bfloat* keys,device bfloat* values,
+    const device bfloat* cosines,const device bfloat* sines,constant uint& rows,
+    constant uint& num_heads,constant uint& head_dim,constant uint& padded_dim,
+    const uint i AXIS(rows*num_heads*padded_dim,128)) {
+  const uint row=i/(num_heads*padded_dim), head=(i/padded_dim)%num_heads, channel=i%padded_dim;
+  const uint query_index=(head*rows+row)*padded_dim+channel;
+  if(channel>=head_dim) { queries[query_index]=bfloat(0); keys[i]=bfloat(0); values[i]=bfloat(0); return; }
+  const uint aw=head_dim/2, half_width=aw/2, local=channel%aw;
+  const uint paired=(channel/aw)*aw+(local+half_width)%aw, base=(row*num_heads+head)*head_dim;
+  const float cosine=float(cosines[row*head_dim+channel]), sine=float(sines[row*head_dim+channel]);
+  const float sign=local<half_width ? -1.0f : 1.0f;
+  const float qa=float(bfloat(float(q[base+channel])*cosine));
+  const float qb=float(bfloat(sign*float(q[base+paired])*sine));
+  const float ka=float(bfloat(float(k[base+channel])*cosine));
+  const float kb=float(bfloat(sign*float(k[base+paired])*sine));
+  queries[query_index]=bfloat(qa+qb); keys[i]=bfloat(ka+kb); values[i]=v[base+channel];
+}
+
+PUBLIC KERNEL(Gemma4VisionUnpadBF16)(const device bfloat* input,device bfloat* output,
+    constant uint& length,constant uint& head_dim,constant uint& padded_dim,const uint i AXIS(length,128)) {
+  output[i]=input[(i/head_dim)*padded_dim+i%head_dim];
+}
+
+PUBLIC KERNEL(Gemma4VisionPoolStandardizedBF16)(const device bfloat* input,const device bfloat* bias,
+    const device bfloat* scale,device bfloat* output,constant uint& grid_width,constant uint& grid_height,
+    constant uint& width,const uint i AXIS((grid_width/3)*(grid_height/3)*width,128)) {
+  const uint channel=i%width, x=(i/width)%(grid_width/3),y=i/(width*(grid_width/3));
+  float sum=0.0f;
+  for(uint dy=0;dy<3;++dy) for(uint dx=0;dx<3;++dx)
+    sum += float(input[((y*3+dy)*grid_width+x*3+dx)*width+channel])/9.0f;
+  const float pooled=float(bfloat(sum))*metal::precise::sqrt(float(width));
+  output[i]=bfloat((pooled-float(bias[channel]))*float(scale[channel]));
+}

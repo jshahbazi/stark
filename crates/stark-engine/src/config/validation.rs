@@ -257,6 +257,7 @@ mod tests {
             hidden_dim: None,
             ple_config: None,
             has_post_layer_scalar: false,
+            materialize_post_layer_scalar: false,
             kv_source_layer_index: None,
             rope_config: Some(rope(64)),
         }

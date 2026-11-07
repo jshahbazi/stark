@@ -33,6 +33,10 @@ pub struct TransformerLayerConfig {
     pub hidden_dim: Option<u32>,
     pub ple_config: Option<PLELayerConfig>,
     pub has_post_layer_scalar: bool,
+    /// Gemma no-PLE BF16: add the complete layer residual, materialize BF16,
+    /// then apply the learned layer scalar exactly once at the layer end.
+    #[serde(default)]
+    pub materialize_post_layer_scalar: bool,
     pub kv_source_layer_index: Option<u32>,
     pub rope_config: Option<AnyRoPEConfig>,
 }

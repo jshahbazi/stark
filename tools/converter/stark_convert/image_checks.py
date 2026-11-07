@@ -23,6 +23,7 @@ from .vision_runtime import (
     _ARTIFACT_HASHES,
     CONFIGURED_FAMILY_PROFILE,
     GEMMA3_FAMILY_PROFILE,
+    GEMMA4_31B_FAMILY_PROFILE,
     GEMMA4_E4B_FAMILY_PROFILE,
     GEMMA4_FAMILY_PROFILE,
     _current_os_version,
@@ -439,6 +440,7 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             gemma = identity["family_profile"] in {
                 GEMMA4_FAMILY_PROFILE,
                 GEMMA4_E4B_FAMILY_PROFILE,
+                GEMMA4_31B_FAMILY_PROFILE,
                 GEMMA3_FAMILY_PROFILE,
             }
             expected_image_tokens = 256 if gemma else 64

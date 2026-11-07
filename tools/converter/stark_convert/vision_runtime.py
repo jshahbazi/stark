@@ -19,7 +19,9 @@ FAMILY_PROFILE = "qwen35-dense-bf16-merged-v1"
 CONFIGURED_FAMILY_PROFILE = "qwen35-dense-bf16-merged-v2"
 GEMMA4_FAMILY_PROFILE = "gemma4-e2b-bf16-v1"
 GEMMA4_E4B_FAMILY_PROFILE = "gemma4-e4b-bf16-v1"
+GEMMA4_31B_FAMILY_PROFILE = "gemma4-31b-bf16-v1"
 _GEMMA4_PROFILES = {
+    GEMMA4_31B_FAMILY_PROFILE: ("google/gemma-4-31B-it", "842da3794eaa0b77d5f08bae87a17459d91ff475"),
     GEMMA4_FAMILY_PROFILE: ("google/gemma-4-E2B-it", "3e22461f65e89153144f8adb70e3b8c2cc9845a7"),
     GEMMA4_E4B_FAMILY_PROFILE: ("google/gemma-4-E4B-it", "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"),
 }
@@ -37,6 +39,7 @@ _FAMILY_VERSIONS = {
     GEMMA4_FAMILY_PROFILE: 1,
     GEMMA3_FAMILY_PROFILE: 1,
     GEMMA4_E4B_FAMILY_PROFILE: 1,
+    GEMMA4_31B_FAMILY_PROFILE: 1,
     "qwen35-dense-affine-merged-v3": 3,
     "qwen35-moe-affine-merged-v4": 4,
     LILY_FAMILY_PROFILE: 1,

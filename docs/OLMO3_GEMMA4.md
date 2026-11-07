@@ -1,6 +1,6 @@
 # OLMo 3 and Gemma 4 support
 
-Stark has native dense text paths for OLMo 3 and Gemma 4, plus separate BF16 image artifacts for the official Gemma 4 E2B and E4B checkpoints. Conversion support, native execution paths, and exact checkpoint qualification are separate states. The Gemma image implementation is wired through the converter, worker, CLI, desktop family handling and schema-4 artifact admission. E2B canonical HF image-feature comparison, bounded generation-worker lifecycle checks, and local cold/cached chat-client checks pass. E4B has separate source and execution validation. The installed desktop UI path and image performance have not been measured.
+Stark has native dense text paths for OLMo 3 and Gemma 4, plus separate BF16 image artifacts for the official Gemma 4 E2B, E4B and 31B checkpoints. Conversion support, native execution paths, and exact checkpoint qualification are separate states. The Gemma image implementation is wired through the converter, worker, CLI, desktop family handling and schema-4 artifact admission. E2B canonical HF image-feature comparison, bounded generation-worker lifecycle checks, and local cold/cached chat-client checks pass. E4B has separate source and execution validation. The installed desktop UI path and image performance have not been measured.
 
 ## Convert the pinned official checkpoints
 
@@ -37,12 +37,12 @@ This image conversion reads the official `processor_config.json` and writes its 
 | Family path | Current implementation boundary |
 | --- | --- |
 | OLMo 3 text | Dense `allenai/Olmo-3-7B-Instruct` layout, including full/sliding attention and configured YaRN. BF16 and MLX affine Q4/Q8 import are implemented. The pinned W4/group-64/BF16 source profile passes 14 strict numerical cases in the Q4 record below. |
-| Gemma 4 text | Dense PLE E2B/E4B layouts. The catalog pins official E2B and E4B. E2B affine Q4 conversion emits 901 tensors in a 2.605 GB native packed artifact. The pinned W4/group-64/BF16 E2B profile passes 14 strict numerical cases; Q8 and other variants require separate qualification. |
-| Gemma 4 image | Official E2B/E4B BF16 image artifacts, schema 4, family profiles `gemma4-e2b-bf16-v1` and `gemma4-e4b-bf16-v1`. Each requires its own pinned source, BF16 source matrices and activations, and separate execution evidence. |
+| Gemma 4 text | Dense PLE E2B/E4B and dense no-PLE/global-K=V 31B layouts. The catalog pins official E2B/E4B and adds a pinned 31B extension. E2B affine Q4 conversion emits 901 tensors in a 2.605 GB native packed artifact. The pinned W4/group-64/BF16 E2B profile passes 14 strict numerical cases; Q8 and other variants require separate qualification. |
+| Gemma 4 image | Official E2B/E4B/31B BF16 image artifacts, schema 4, family profiles `gemma4-e2b-bf16-v1`, `gemma4-e4b-bf16-v1` and `gemma4-31b-bf16-v1`. Each requires its own pinned source, BF16 source matrices and activations, and separate execution evidence. |
 
 For text generation, `gemma4_text` supports text-only PLE decoder weights. Quantized matrix payloads use affine 4-bit or 8-bit storage where the selected source and matrix layout pass conversion. Quantization applies to matrix storage; activations and other supported tensors use BF16 on these current native paths. The E2B Q4 output size is an artifact measurement, not an inference-speed result or qualification.
 
-Gemma 4 image conversion is restricted to the official pinned E2B/E4B sources and BF16 weights. Gemma 4 31B, 26B MoE, unified 12B, audio and video paths are unsupported. The [larger-variant architecture assessment](archive/runs/2026-11-07-gemma4-image-family-scope.md) records the missing operations and immutable source configurations. The image artifact excludes audio execution and video-frame processing even though their token identifiers are recorded for rejecting unsupported content.
+Gemma 4 image conversion is restricted to the official pinned E2B/E4B sources and BF16 weights. Gemma 4 26B MoE, unified 12B, audio and video paths are unsupported. Full 31B checkpoint generation remains unqualified. The [larger-variant architecture assessment](archive/runs/2026-11-07-gemma4-image-family-scope.md) records the missing operations and immutable source configurations. The image artifact excludes audio execution and video-frame processing even though their token identifiers are recorded for rejecting unsupported content.
 
 ## Affine Q4 source precision
 
@@ -97,3 +97,9 @@ The [original validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md)
 ## Generation prefix reuse
 
 Image requests clear and bypass generation prefix reuse. E2B/E4B text artifacts currently disable prefix reuse because their owned sliding-attention layers use ring caches, and exact restoration of the overwritten ring rows is not implemented. Shared-KV consumers own no separate cache. Their source-specific physical ring traversal and canonical/source precision policies remain intact. A future ring snapshot implementation needs independent numerical and cached trajectory qualification before enabling this capability.
+
+## Larger dense Gemma 4 image path
+
+The 31B converter imports its no-PLE decoder with separate local and global KV head counts. Global K=V reuses the raw K projection for both native K and V rows, then applies learned K RMS/RoPE and independent weightless V RMS. The larger image encoder has 27 layers, width 1,152, head width 72 and ordinary linears. Native execution pads each vision head to 128 elements for the online attention kernel, sets all padded Q/K/V elements to zero and removes padded outputs before projection. Pooling preserves a BF16 spatial mean followed by F32 square-root scaling and learned standardization before its final BF16 store.
+
+The 31B image block uses scalar positions with bidirectional attention inside the complete image block. Image requests still clear prefix reuse. Its artifact admission cap is 72GiB; this is a file bound and is not a claim about inference memory. Source-extracted vision-only references and small decoder fixtures do not qualify full-checkpoint language generation. See the [source assessment](archive/runs/2026-11-07-gemma4-image-family-scope.md) for immutable checkpoint identities and remaining scope.
