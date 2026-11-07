@@ -124,7 +124,7 @@ impl<B: Backend> LinearMatmul<B> {
         let reference_matmul = if weights_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16 {
             if weights_data_type != DataType::BF16
                 || input_data_type != DataType::BF16
-                || output_data_type != DataType::BF16
+                || !matches!(output_data_type, DataType::BF16 | DataType::F32)
                 || matrix.quantization().is_some()
                 || biases.is_some()
             {
@@ -175,9 +175,6 @@ impl<B: Backend> LinearMatmul<B> {
         let (output_dim, gather_indices) =
             gather.map_or((self.output_dim, None), |gather| (gather.output_dim, Some(gather.indices)));
         if let Some(reference) = &self.reference_matmul {
-            if gather_indices.is_some() {
-                return Err(InvalidInput("reference BF16 linear does not support gathered columns").into());
-            }
             let MatmulA::FullPrecision {
                 values,
                 offset,
@@ -191,7 +188,33 @@ impl<B: Backend> LinearMatmul<B> {
             else {
                 return Err(InvalidInput("reference BF16 linear requires full precision weights").into());
             };
-            return reference.encode(values, offset, b, batch_dim, output_dim, self.input_dim, command_buffer);
+            return if let Some(indices) = gather_indices {
+                reference.encode_gathered(
+                    values,
+                    offset,
+                    b,
+                    indices,
+                    batch_dim,
+                    output_dim,
+                    self.output_dim,
+                    self.input_dim,
+                    self.output_data_type,
+                    command_buffer,
+                )
+            } else if self.output_data_type == DataType::BF16 {
+                reference.encode(values, offset, b, batch_dim, output_dim, self.input_dim, command_buffer)
+            } else {
+                reference.encode_output(
+                    values,
+                    offset,
+                    b,
+                    batch_dim,
+                    output_dim,
+                    self.input_dim,
+                    self.output_data_type,
+                    command_buffer,
+                )
+            };
         }
         let mut output = command_buffer.allocate_scratch_for_shape(&[batch_dim, output_dim], self.output_data_type)?;
         self.kernel.lock().encode(

@@ -94,7 +94,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         if supported and architecture == "gemma4_text" and mode != "vision-language":
             caveats.extend(["native_dense_text_geometry", "image_and_audio_towers_excluded"])
         modes[mode] = {"status": "conditional" if supported else "unsupported", "message": message, "caveats": caveats}
-    formats = [] if architecture in {"qwen4_exp", "qwen3_5_moe"} else ["safetensors-float"]
+    formats = [] if architecture == "qwen4_exp" else ["safetensors-float"]
     if architecture in _MLX:
         formats.extend(["mlx-affine-4bit", "mlx-affine-8bit"])
     if architecture in {"qwen3_5", "qwen3_5_moe"}:
@@ -460,6 +460,19 @@ def preflight_model(
             "Mixture-of-experts operations are outside implemented dense coverage.",
         )
     quantized = any(text.get(key) is not None for key in ("quantization", "quantization_config"))
+    if (
+        architecture == "qwen3_5_moe"
+        and text.get("num_experts") is not None
+        and not quantized
+        and mode != "vision-language"
+    ):
+        return _report(
+            family,
+            mode,
+            "unsupported",
+            "unsupported_bf16_moe_text",
+            "BF16 Qwen3.5 MoE requires the image artifact reference policy.",
+        )
     if architecture == "qwen3_5_moe" and text.get("num_experts") is not None:
         try:
             from .vision_family import validate_family_geometry
@@ -471,7 +484,7 @@ def preflight_model(
                 mode,
                 "unsupported",
                 "unsupported_moe_geometry",
-                "This MoE source requires bounded affine experts and the supported Qwen geometry.",
+                "This MoE source requires bounded experts and the supported Qwen image geometry.",
             )
     if quantized:
         if architecture not in _MLX:

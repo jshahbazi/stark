@@ -24,6 +24,7 @@ pub(super) const DYNAMIC_PROFILE: &str = "qwen35-dense-bf16-merged-v2";
 pub(super) const DYNAMIC_VERSION: u32 = 2;
 pub(super) const AFFINE_PROFILE: &str = "qwen35-dense-affine-merged-v3";
 pub(super) const MOE_PROFILE: &str = "qwen35-moe-affine-merged-v4";
+pub(super) const BF16_MOE_PROFILE: &str = "qwen35-moe-bf16-merged-v5";
 type TensorMap = BTreeMap<String, (&'static str, Vec<u32>)>;
 
 pub(super) struct TensorContract {
@@ -37,6 +38,7 @@ pub(super) enum FamilyProfile {
     DynamicV2,
     AffineV3,
     MoeV4,
+    Bf16MoeV5,
 }
 
 impl FamilyProfile {
@@ -49,6 +51,8 @@ impl FamilyProfile {
             Some(Self::AffineV3)
         } else if *value == json!({"profile":MOE_PROFILE,"version":4}) {
             Some(Self::MoeV4)
+        } else if *value == json!({"profile":BF16_MOE_PROFILE,"version":5}) {
+            Some(Self::Bf16MoeV5)
         } else {
             None
         }
@@ -60,13 +64,14 @@ impl FamilyProfile {
             Self::DynamicV2 => (DYNAMIC_PROFILE, DYNAMIC_VERSION),
             Self::AffineV3 => (AFFINE_PROFILE, 3),
             Self::MoeV4 => (MOE_PROFILE, 4),
+            Self::Bf16MoeV5 => (BF16_MOE_PROFILE, 5),
         }
     }
 
     pub fn max_weight_bytes(self) -> u64 {
         match self {
             Self::FixedV1 => 2_000_000_000,
-            Self::DynamicV2 | Self::AffineV3 | Self::MoeV4 => dynamic::MAX_WEIGHT_BYTES,
+            Self::DynamicV2 | Self::AffineV3 | Self::MoeV4 | Self::Bf16MoeV5 => dynamic::MAX_WEIGHT_BYTES,
         }
     }
 
@@ -75,7 +80,7 @@ impl FamilyProfile {
         digest: &str,
     ) -> bool {
         digest == super::ARTIFACT_FILES[2].1
-            || matches!(self, Self::DynamicV2 | Self::AffineV3 | Self::MoeV4)
+            || matches!(self, Self::DynamicV2 | Self::AffineV3 | Self::MoeV4 | Self::Bf16MoeV5)
                 && digest == "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
     }
 }
@@ -225,7 +230,9 @@ fn source_valid(
         + usize::from(hashes.contains_key("processor_config.json"));
     let processor_count_supported = match profile {
         FamilyProfile::FixedV1 => processors == 1,
-        FamilyProfile::DynamicV2 | FamilyProfile::AffineV3 | FamilyProfile::MoeV4 => (1..=2).contains(&processors),
+        FamilyProfile::DynamicV2 | FamilyProfile::AffineV3 | FamilyProfile::MoeV4 | FamilyProfile::Bf16MoeV5 => {
+            (1..=2).contains(&processors)
+        },
     };
     hashes.len() == required.len() + processors + usize::from(hashes.contains_key("generation_config.json"))
         && required.iter().all(|name| hashes.contains_key(*name))
@@ -311,6 +318,10 @@ pub(super) fn admit(
             let geometry = dynamic::geometry_affine(&config["decoder_config"], &contract["vision_config"])?;
             (geometry.tower, geometry.vocab, geometry.tensors)
         },
+        FamilyProfile::Bf16MoeV5 => {
+            let geometry = dynamic::geometry_bf16_moe(&config["decoder_config"], &contract["vision_config"])?;
+            (geometry.tower, geometry.vocab, geometry.tensors)
+        },
         FamilyProfile::MoeV4 => {
             let geometry = dynamic::geometry_moe(&config["decoder_config"], &contract["vision_config"])?;
             (geometry.tower, geometry.vocab, geometry.tensors)
@@ -327,8 +338,13 @@ pub(super) fn admit(
     if !hashes.get("tokenizer.json").is_some_and(|digest| profile.accepts_tokenizer(digest))
         || !hashes.get("chat_template.jinja").is_some_and(|digest| {
             TEMPLATE_HASHES.contains(&digest.as_str())
-                || matches!(profile, FamilyProfile::DynamicV2 | FamilyProfile::AffineV3 | FamilyProfile::MoeV4)
-                    && [DYNAMIC_STOCK_TEMPLATE, DYNAMIC_QWEN38_TEMPLATE].contains(&digest.as_str())
+                || matches!(
+                    profile,
+                    FamilyProfile::DynamicV2
+                        | FamilyProfile::AffineV3
+                        | FamilyProfile::MoeV4
+                        | FamilyProfile::Bf16MoeV5
+                ) && [DYNAMIC_STOCK_TEMPLATE, DYNAMIC_QWEN38_TEMPLATE].contains(&digest.as_str())
         })
     {
         return Err(InvalidInput("unsupported native vision family text processing"));
@@ -572,6 +588,41 @@ mod tests {
         assert_eq!(decoder["transformer_config"]["layer_configs"].as_array().unwrap().len(), 24);
         assert_eq!(expected_tensors().len(), 383);
         assert_eq!(processor_profile()["merge_size"], 2);
+    }
+
+    #[stark_test]
+    fn bf16_moe_family_requires_its_version_and_full_precision_expert_header() {
+        let family = json!({"profile":BF16_MOE_PROFILE,"version":5});
+        assert!(matches!(FamilyProfile::parse(&family), Some(FamilyProfile::Bf16MoeV5)));
+        assert!(FamilyProfile::parse(&json!({"profile":BF16_MOE_PROFILE,"version":4})).is_none());
+        let mut decoder = decoder_profile();
+        for layer in decoder["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+            layer["mlp_config"] = json!({"type":"MixtureOfExpertsConfig","expert_config":layer["mlp_config"],
+                "router_config":{},"routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":4,
+                "num_active_routed_experts":2,"router_has_biases":false,"num_shared_experts":1,
+                "expert_hidden_dim":512,"gate_config":{}});
+        }
+        let geometry = dynamic::geometry_bf16_moe(&decoder, &vision_profile()).unwrap();
+        assert!(!geometry.tensors.affine);
+        let tensors = &geometry.tensors.tensors;
+        let (header, bytes) = valid_header_for(tensors);
+        assert!(validate_tensor_header(&header, bytes + 8, 8, tensors).is_ok());
+        for (pointer, value) in [
+            ("/decoder.transformer.layers.0.mlp.experts.up_projection.weights.weights/dtype", json!("U8")),
+            ("/decoder.transformer.layers.0.mlp.experts.down_projection.weights.weights/shape", json!([4096, 256])),
+            (
+                "/__metadata__/decoder.transformer.layers.0.mlp.experts.up_projection.weights.spec",
+                json!("{\"type\":\"MLXSpec\",\"layout\":\"output_input\",\"bits\":4,\"group_size\":64}"),
+            ),
+        ] {
+            let mut changed = header.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(validate_tensor_header(&changed, bytes + 8, 8, tensors).is_err());
+        }
+        let mut missing = header.clone();
+        missing.as_object_mut().unwrap().remove("decoder.transformer.layers.0.mlp.shared_gate.weights.weights");
+        assert!(validate_tensor_header(&missing, bytes + 8, 8, tensors).is_err());
+        assert!(validate_tensor_header(&header, bytes + 7, 8, tensors).is_err());
     }
 
     fn valid_header() -> (Value, u64) {

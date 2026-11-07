@@ -199,6 +199,7 @@ fn image_family_limits(
         | ("qwen35-dense-bf16-merged-v2", 2, 3)
         | ("qwen35-dense-affine-merged-v3", 3, 3)
         | ("qwen35-moe-affine-merged-v4", 4, 3)
+        | ("qwen35-moe-bf16-merged-v5", 5, 3)
         | ("qwen38-lily-retained-bf16-vision-v1", 1, 6) => ((16, 2), 4096, 1024),
         (
             "gemma4-e2b-bf16-v1"
@@ -225,6 +226,7 @@ mod image_family_tests {
             ("qwen35-dense-bf16-merged-v2", 2, 3, (16, 2), (4096, 1024, 1048576)),
             ("qwen35-dense-affine-merged-v3", 3, 3, (16, 2), (4096, 1024, 1048576)),
             ("qwen35-moe-affine-merged-v4", 4, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-moe-bf16-merged-v5", 5, 3, (16, 2), (4096, 1024, 1048576)),
             ("qwen38-lily-retained-bf16-vision-v1", 1, 6, (16, 2), (4096, 1024, 1048576)),
             ("gemma4-e2b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma4-e4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),

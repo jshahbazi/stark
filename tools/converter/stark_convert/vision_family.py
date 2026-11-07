@@ -27,6 +27,8 @@ AFFINE_FAMILY_PROFILE = "qwen35-dense-affine-merged-v3"
 AFFINE_FAMILY_VERSION = 3
 MOE_FAMILY_PROFILE = "qwen35-moe-affine-merged-v4"
 MOE_FAMILY_VERSION = 4
+BF16_MOE_FAMILY_PROFILE = "qwen35-moe-bf16-merged-v5"
+BF16_MOE_FAMILY_VERSION = 5
 _SOURCE_TOKENIZER_SHA256 = "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
 OUTPUT_TOKENIZER_SHA256 = "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"
 ALTERNATE_OUTPUT_TOKENIZER_SHA256 = "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
@@ -345,8 +347,9 @@ def validate_family_geometry(config: dict) -> tuple[dict, dict]:
             or text.get("norm_topk_prob", True) is not True
         ):
             raise UnsupportedConversion("Vision MoE routing geometry is outside the implemented profile")
-        if text["moe_intermediate_size"] % 64 or text["shared_expert_intermediate_size"] % 64:
-            raise UnsupportedConversion("Vision MoE affine expert widths require group-size alignment")
+        alignment = 64 if text.get("quantization") is not None else _TEXT_ALIGNMENT
+        if text["moe_intermediate_size"] % alignment or text["shared_expert_intermediate_size"] % alignment:
+            raise UnsupportedConversion("Vision MoE expert widths require storage alignment")
         text = {**text, "intermediate_size": text["shared_expert_intermediate_size"]}
     rope = text.get("rope_parameters")
     if isinstance(rope, dict) and "type" in rope and rope["type"] == rope.get("rope_type", rope["type"]):
@@ -355,8 +358,6 @@ def validate_family_geometry(config: dict) -> tuple[dict, dict]:
             "rope_parameters": {**{k: v for k, v in rope.items() if k != "type"}, "rope_type": rope["type"]},
         }
     quantization = parse_mlx_quantization(text, allow_mixed=True)
-    if moe and quantization is None:
-        raise UnsupportedConversion("Vision MoE currently requires canonical affine decoder storage")
     if text.get("quantization_config") is not None and quantization is None:
         raise UnsupportedConversion("Vision family affine exports require explicit quantization metadata")
     if quantization is not None and any(
@@ -616,14 +617,14 @@ def validate_family_source(snapshot: Any, dtype: str) -> dict:
     if not any(record["role"] == "weights" for record in weights.values()):
         raise ConversionError("Vision family requires complete merged weights")
     profile = (
-        MOE_FAMILY_PROFILE
+        (MOE_FAMILY_PROFILE if text.get("quantization") is not None else BF16_MOE_FAMILY_PROFILE)
         if config["model_type"] == "qwen3_5_moe"
         else AFFINE_FAMILY_PROFILE
         if text.get("quantization") is not None
         else FAMILY_PROFILE
     )
     version = (
-        MOE_FAMILY_VERSION
+        (MOE_FAMILY_VERSION if text.get("quantization") is not None else BF16_MOE_FAMILY_VERSION)
         if config["model_type"] == "qwen3_5_moe"
         else AFFINE_FAMILY_VERSION
         if text.get("quantization") is not None
