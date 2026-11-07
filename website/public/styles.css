@@ -1210,6 +1210,34 @@ code {
   padding-block:43px 29px
 }
 
+.contact-note {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  justify-content:space-between;
+  gap:20px 32px;
+  padding-bottom:32px;
+  margin-bottom:32px;
+  border-bottom:1px solid #414b39
+}
+
+.contact-note h2 {
+  font-size:26px;
+  margin-bottom:10px
+}
+
+.contact-note p {
+  color:#b6c1ad;
+  font-size:14px
+}
+
+.contact-note>a {
+  color:var(--gold);
+  font-size:16px;
+  padding-block:12px;
+  overflow-wrap:anywhere
+}
+
 .footer-top {
   display:flex;
   align-items:center;
