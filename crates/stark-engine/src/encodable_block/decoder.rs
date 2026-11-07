@@ -40,6 +40,8 @@ pub struct Decoder<B: Backend> {
     transformer: Transformer<B>,
     data_type: DataType,
     gemma4_image_embeddings: bool,
+    scalar_image_embeddings: bool,
+    bidirectional_image_attention: bool,
     separate_prefill_last_token: bool,
 }
 
@@ -91,6 +93,11 @@ impl<B: Backend> Decoder<B> {
         parameter_tree: &ParameterTree<B>,
         data_type: DataType,
     ) -> Result<Self, DecoderError<B>> {
+        if (config.gemma4_image_embeddings && config.scalar_image_embeddings)
+            || (config.bidirectional_image_attention && !config.scalar_image_embeddings)
+        {
+            return Err(InvalidInput("conflicting scalar image embedding modes").into());
+        }
         crate::config::validation::validate_ple_layout(
             config.ple_model_config.as_ref(),
             &config.transformer_config.layer_configs,
@@ -153,21 +160,24 @@ impl<B: Backend> Decoder<B> {
             transformer,
             data_type,
             gemma4_image_embeddings: config.gemma4_image_embeddings,
+            scalar_image_embeddings: config.scalar_image_embeddings,
+            bidirectional_image_attention: config.bidirectional_image_attention,
             separate_prefill_last_token: config.separate_prefill_last_token,
         })
     }
 
     pub fn speculation_supported(&self) -> bool {
-        !self.gemma4_image_embeddings && self.transformer.speculation_supported()
+        !self.gemma4_image_embeddings && !self.scalar_image_embeddings && self.transformer.speculation_supported()
     }
 
     pub(crate) fn multimodal_supported(&self) -> bool {
-        self.qwen35_multimodal_supported() || self.gemma4_multimodal_supported()
+        self.qwen35_multimodal_supported() || self.gemma4_multimodal_supported() || self.scalar_multimodal_supported()
     }
 
     pub(crate) fn qwen35_multimodal_supported(&self) -> bool {
         self.data_type == DataType::BF16
             && !self.gemma4_image_embeddings
+            && !self.scalar_image_embeddings
             && self.embedding_norm.is_none()
             && self.per_layer_embedding.is_none()
             && self.transformer.multimodal_positions_supported()
@@ -177,6 +187,14 @@ impl<B: Backend> Decoder<B> {
         self.data_type == DataType::BF16
             && self.gemma4_image_embeddings
             && self.embedding_norm.is_none()
+            && self.transformer.scalar_image_positions_supported()
+    }
+
+    pub(crate) fn scalar_multimodal_supported(&self) -> bool {
+        self.data_type == DataType::BF16
+            && self.scalar_image_embeddings
+            && self.embedding_norm.is_none()
+            && self.per_layer_embedding.is_none()
             && self.transformer.scalar_image_positions_supported()
     }
 
@@ -235,6 +253,10 @@ impl<B: Backend> Decoder<B> {
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<DecoderEncodeOutput<B>, DecoderError<B>> {
         // Validate byte spans before lookup, upload or transformer dispatch.
+        if batch_dim.image_span().is_some() && (!self.bidirectional_image_attention || replacement.is_none()) {
+            return Err(InvalidInput("image attention block lacks admitted embedding replacement").into());
+        }
+        let scalar_images = self.gemma4_image_embeddings || self.scalar_image_embeddings;
         let replacement = replacement
             .map(|replacement| {
                 let width = self.embedding.model_dim() as usize;
@@ -242,8 +264,8 @@ impl<B: Backend> Decoder<B> {
                     || replacement.features.is_empty()
                     || !replacement.features.len().is_multiple_of(width)
                     || replacement.features.iter().any(|value| !value.is_finite())
-                    || (self.gemma4_image_embeddings && batch_dim.rotary_positions().is_some())
-                    || (!self.gemma4_image_embeddings && batch_dim.rotary_positions().is_none())
+                    || (scalar_images && batch_dim.rotary_positions().is_some())
+                    || (!scalar_images && batch_dim.rotary_positions().is_none())
                     || !batch_dim.full_accept()
                     || !batch_dim.is_flat()
                 {
@@ -266,6 +288,17 @@ impl<B: Backend> Decoder<B> {
                     .ok_or(InvalidInput("embedding batch size overflow"))?;
                 if end > total {
                     return Err(InvalidInput("embedding replacement exceeds batch"));
+                }
+                if self.bidirectional_image_attention {
+                    let rows = u32::try_from(replacement.features.len() / width)
+                        .map_err(|_| InvalidInput("image attention row count overflow"))?;
+                    let span_end = replacement
+                        .token_start
+                        .checked_add(rows)
+                        .ok_or(InvalidInput("image attention span overflow"))?;
+                    if batch_dim.image_span() != Some([replacement.token_start, span_end]) {
+                        return Err(InvalidInput("image attention block differs from projected image rows"));
+                    }
                 }
                 Ok((replacement, start..end))
             })

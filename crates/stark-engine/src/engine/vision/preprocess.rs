@@ -87,6 +87,10 @@ impl RgbImage {
         self.height
     }
 
+    pub(crate) fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
     #[cfg(test)]
     pub(super) fn pixels_for_reference(&self) -> &[u8] {
         &self.pixels
