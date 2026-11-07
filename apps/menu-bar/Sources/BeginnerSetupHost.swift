@@ -12,30 +12,109 @@ final class BeginnerOpenWorkStatus: ObservableObject {
     private var connectionBasis = ""
     private var verifiedClientBasis = ""
     private var wasApproved = false
+    private var refreshID = UUID()
+    private var refreshInFlight = false
+    private var pendingRefresh: (input: ScanInput, completions: [(Bool) -> Void])?
 
-    func refresh(engine: EngineController, force: Bool = false) {
+    private struct ScanInput: Sendable {
+        var previousURL: URL?
+        var shouldResolveApplication: Bool
+        var profile: URL?
+        var candidates: [DesktopApplicationIdentity.Candidate]
+        var hasDiscoveredModel: Bool
+        var discoveryScope: String
+        var brokerPath: String
+        var apiBaseURL: String
+    }
+
+    private struct ScanResult: Sendable {
+        var applicationURL: URL?
+        var applicationVerified: Bool
+        var running: Bool
+        var liveConnection: Bool
+        var verifiedClientBasis: String
+        var connectionBasis: String
+    }
+
+    func refresh(engine: EngineController, force: Bool = false, completion: ((Bool) -> Void)? = nil) {
+        if refreshInFlight && !force { return }
         let connection = engine.desktopConnections.openWork
         if wasApproved && !connection.approved { scope = UUID().uuidString }
         wasApproved = connection.approved
-        if let applicationURL, !FileManager.default.fileExists(atPath: applicationURL.path) { applicationChecked = false }
-        if force || !applicationChecked {
-            let url = DesktopConnectionTesting.application(.openWork)
-                ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: DesktopClient.openWork.bundleID)
-            applicationURL = url.flatMap { DesktopClientPeer.verifyApplication($0, client: .openWork) ? $0 : nil }
-            applicationChecked = applicationURL != nil
+        let previousURL = applicationURL
+        let shouldResolveApplication = force || !applicationChecked || previousURL.map { !FileManager.default.fileExists(atPath: $0.path) } == true
+        let apiID = engine.activeModel?.apiID ?? ""
+        let contextTokens = engine.apiContextTokens
+        let input = ScanInput(previousURL: previousURL, shouldResolveApplication: shouldResolveApplication,
+            profile: DesktopConnectionTesting.profile,
+            candidates: DesktopApplicationIdentity.candidates(.openWork),
+            hasDiscoveredModel: connection.hasDiscoveredModel(apiID: apiID, contextTokens: contextTokens),
+            discoveryScope: connection.discoveryScope, brokerPath: engine.desktopConnections.brokerPath ?? "",
+            apiBaseURL: engine.apiBaseURL)
+
+        if refreshInFlight {
+            if var pending = pendingRefresh {
+                pending.input = input
+                if let completion { pending.completions.append(completion) }
+                pendingRefresh = pending
+            } else {
+                pendingRefresh = (input, completion.map { [$0] } ?? [])
+            }
+            return
         }
-        let application = DesktopApplicationIdentity.running(.openWork, configurationRoot: DesktopConnectionTesting.profile)
-        running = application != nil
-        if let application {
-            applicationURL = application.bundleURL; applicationChecked = true
-            verifiedClientBasis = application.process.instanceID + "|" + (application.profile?.path ?? "")
+        startScan(input, completions: completion.map { [$0] } ?? [])
+    }
+
+    private func startScan(_ input: ScanInput, completions: [(Bool) -> Void]) {
+        let requestID = UUID()
+        refreshID = requestID
+        refreshInFlight = true
+
+        Task.detached(priority: .utility) { [weak self] in
+            let url: URL?
+            if input.shouldResolveApplication {
+                let candidate = DesktopConnectionTesting.application(.openWork)
+                    ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: DesktopClient.openWork.bundleID)
+                url = candidate.flatMap { DesktopClientPeer.verifyApplication($0, client: .openWork) ? $0 : nil }
+            } else {
+                url = input.previousURL
+            }
+            let application = DesktopApplicationIdentity.running(.openWork,
+                configurationRoot: input.profile, candidates: input.candidates)
+            let running = application != nil
+            let verified = application.map { $0.process.instanceID + "|" + ($0.profile?.path ?? "") } ?? ""
+            let result = ScanResult(
+                applicationURL: application?.bundleURL ?? url,
+                applicationVerified: url != nil || application != nil,
+                running: running,
+                liveConnection: input.hasDiscoveredModel && running,
+                verifiedClientBasis: verified,
+                connectionBasis: (application?.bundleURL.path ?? url?.path ?? "") + "|" + verified + "|" +
+                    input.discoveryScope + "|" + input.brokerPath + "|" + input.apiBaseURL
+            )
+            await self?.apply(result, requestID: requestID, completions: completions)
         }
-        liveConnection = connection.hasDiscoveredModel(apiID: engine.activeModel?.apiID ?? "",
-                                                      contextTokens: engine.apiContextTokens) && application != nil
-        let basis = (applicationURL?.path ?? "") + "|" + verifiedClientBasis + "|" + connection.discoveryScope + "|" +
-            (engine.desktopConnections.brokerPath ?? "") + "|" + engine.apiBaseURL
-        if !connectionBasis.isEmpty, connectionBasis != basis { scope = UUID().uuidString }
-        connectionBasis = basis
+    }
+
+    private func apply(_ result: ScanResult, requestID: UUID, completions: [(Bool) -> Void]) {
+        guard refreshID == requestID else { return }
+        if let pending = pendingRefresh {
+            pendingRefresh = nil
+            refreshInFlight = false
+            startScan(pending.input, completions: completions + pending.completions)
+            return
+        }
+        refreshInFlight = false
+        applicationURL = result.applicationURL
+        applicationChecked = result.applicationVerified
+        running = result.running
+        liveConnection = result.liveConnection
+        verifiedClientBasis = result.verifiedClientBasis
+        if !connectionBasis.isEmpty, connectionBasis != result.connectionBasis {
+            scope = UUID().uuidString
+        }
+        connectionBasis = result.connectionBasis
+        for completion in completions { completion(result.liveConnection) }
     }
 }
 
@@ -53,18 +132,19 @@ struct BeginnerSetupHost: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Stark").font(.headline)
-                Spacer()
+            ZStack {
                 StarkInterfacePicker(preferences: interface, selected: selectInterface)
+                HStack { Text("Stark").font(.headline); Spacer() }
             }.padding(.horizontal, 20).padding(.vertical, 14)
             Divider()
             BeginnerSetupView(session: session, snapshot: snapshot, actions: actions)
         }
         .onAppear { refreshOpenWork() }
         .onReceive(refresh) { _ in refreshOpenWork() }
-        .onChange(of: openWork.approved) { _, _ in refreshOpenWork() }
-        .onChange(of: engine.apiBaseURL) { _, _ in refreshOpenWork() }
+        .onChange(of: openWork.approved) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: engine.apiBaseURL) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: engine.activeModel?.apiID) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: engine.apiContextTokens) { _, _ in refreshOpenWork(force: true) }
     }
 
     var snapshot: BeginnerSetupSnapshot {
@@ -155,18 +235,20 @@ struct BeginnerSetupHost: View {
             downloadOpenWork: { NSWorkspace.shared.open(URL(string: "https://openworklabs.com/download")!) },
             connectOpenWork: { observation.message = nil; openWork.connect() },
             checkConnection: {
-                observation.refresh(engine: engine, force: true)
-                observation.message = observation.liveConnection
-                    ? "OpenWork’s verified connector has requested this model’s settings. Confirm the workspace and model you selected there."
-                    : "Open OpenWork with a local workspace, then select Stark and the running model. Quit and reopen OpenWork if its connection settings changed."
+                observation.message = "Checking OpenWork’s connection…"
+                observation.refresh(engine: engine, force: true) { connected in
+                    observation.message = connected
+                        ? "OpenWork’s verified connector has requested this model’s settings. Confirm the workspace and model you selected there."
+                        : "Open OpenWork with a local workspace, then select Stark and the running model. Quit and reopen OpenWork if its connection settings changed."
+                }
             },
             openChat: openChat,
             showAdvanced: { selectInterface(.advanced) },
             retryLocalAPI: { observation.message = nil; engine.retryAPI() })
     }
 
-    private func refreshOpenWork() {
-        observation.refresh(engine: engine)
+    private func refreshOpenWork(force: Bool = false) {
+        observation.refresh(engine: engine, force: force)
     }
 
     private func openOpenWork() {
@@ -185,10 +267,10 @@ struct BeginnerChatView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Stark").font(.title3.weight(.semibold))
-                Spacer()
+            ZStack {
                 StarkInterfacePicker(preferences: interface, selected: selectInterface)
+                HStack { Text("Stark").font(.title3.weight(.semibold)); Spacer() }
+                    .allowsHitTesting(false)
             }
             if engine.loadedMode == .chat, !engine.loadedID.isEmpty {
                 RunningModelLabel(engine: engine).font(.callout.weight(.medium))
@@ -218,7 +300,7 @@ struct AdvancedModelsHost: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack { Spacer(); StarkInterfacePicker(preferences: interface, selected: selectInterface) }
+            HStack { Spacer(); StarkInterfacePicker(preferences: interface, selected: selectInterface); Spacer() }
                 .padding(.horizontal, 20).padding(.vertical, 12)
             Divider()
             ModelsView(engine: engine, navigation: navigation, onDone: close, onRun: run)
@@ -235,7 +317,7 @@ struct AdvancedPlaygroundHost: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack { Spacer(); StarkInterfacePicker(preferences: interface, selected: selectInterface) }
+            HStack { Spacer(); StarkInterfacePicker(preferences: interface, selected: selectInterface); Spacer() }
                 .padding(.horizontal, 20).padding(.vertical, 12)
             Divider()
             PlaygroundView(engine: engine, connection: connection, manage: manage)

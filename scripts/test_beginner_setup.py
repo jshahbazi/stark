@@ -108,6 +108,26 @@ struct BeginnerChecks {
             snapshot.installPhase = .ready
             guard session.installedID(for: candidate, in: snapshot) == "installed-b" else { return false }
             return session.installedID(for: snapshot.choices[0], in: snapshot) == "installed-a"
+        case "navigation-policy":
+            let (session, base) = ready()
+            session.selectedChoiceID = "recipe-b"
+            for target in BeginnerSetupStage.allCases {
+                guard session.canNavigate(to: target, snapshot: base) else { return false }
+            }
+            session.navigate(to: .task, snapshot: base)
+            guard session.task == .text, session.selectedChoiceID == "recipe-b" else { return false }
+            session.navigate(to: .ready, snapshot: base)
+            guard session.stage == .ready else { return false }
+            var blocked = base
+            blocked.installPhase = .downloading
+            guard !session.canNavigate(to: .task, snapshot: blocked) else { return false }
+            session.requestStart(modelID: "installed-b")
+            guard !session.canNavigate(to: .task, snapshot: base) else { return false }
+            let incomplete = BeginnerSetupSession()
+            incomplete.task = .code
+            guard !incomplete.canNavigate(to: .openWork, snapshot: BeginnerSetupSnapshot())
+                && !incomplete.canNavigate(to: .ready, snapshot: BeginnerSetupSnapshot()) else { return false }
+            return true
         case "installation-cancel-fence":
             let (session, base) = ready()
             var snapshot = base
@@ -370,6 +390,9 @@ class BeginnerSetupTests(unittest.TestCase):
         for scenario in ["installation-identity", "installation-cancel-fence"]:
             with self.subTest(scenario=scenario):
                 self.run_check(scenario)
+
+    def test_sidebar_navigation_preserves_choices_and_enforces_prerequisites(self):
+        self.run_check("navigation-policy")
 
     def test_retry_preserves_current_model_and_confirmations(self):
         for scenario in ["retry-preserves-current", "retry-before-first-guide"]:

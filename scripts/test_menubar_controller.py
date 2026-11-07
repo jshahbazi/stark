@@ -1091,6 +1091,84 @@ extension EngineController {
             engine.stopModel(id: "fixture-model")
             return command()["command"] as? String == "stop" && engine.state == "stopping" &&
                 engine.messages.isEmpty && !engine.canStopModel(id: "fixture-model")
+        case "restart-controls-stop-and-start":
+            let current = variant("fixture-model", name: "Current", display: nil)
+            let selected = variant("other-model", name: "Selected", display: nil)
+            engine.models = [current, selected]
+            engine.mode = .chat; engine.loadedMode = .decision
+            engine.loadedID = current.id; engine.selectedID = selected.id; engine.state = "ready"
+            guard engine.modelControlID == current.id, engine.canStopCurrentModel,
+                  !engine.canStartModel else { return false }
+            engine.stopModel(id: engine.modelControlID)
+            guard command()["command"] as? String == "stop", engine.state == "stopping",
+                  engine.stoppedModel?.id == current.id, engine.stoppedModel?.mode == .decision,
+                  engine.selectedID == selected.id, !engine.canStopCurrentModel else { return false }
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            guard engine.state == "idle", engine.loadedID.isEmpty, engine.loadedMode == nil,
+                  engine.startableModel?.id == current.id, engine.canStartModel else { return false }
+            engine.startModel()
+            let restart = command()
+            return restart["command"] as? String == "run" && restart["model_id"] as? String == current.id &&
+                restart["mode"] as? String == "decision" && engine.selectedID == current.id &&
+                engine.mode == .decision && engine.state == "loading"
+        case "restart-controls-explicit-target-after-failed-start":
+            let stopped = variant("fixture-model", name: "Stopped A", display: nil)
+            let selected = variant("other-model", name: "Selected B", display: nil)
+            engine.models = [stopped, selected]
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.loadedID = stopped.id; engine.selectedID = stopped.id; engine.state = "ready"
+            engine.stopModel(id: stopped.id)
+            guard command()["command"] as? String == "stop", engine.stoppedModel?.id == stopped.id else {
+                return false
+            }
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            guard engine.stoppedModel?.id == stopped.id, engine.state == "idle" else { return false }
+
+            // A rejected busy run must preserve the valid restart target.
+            engine.state = "generating"
+            guard !engine.run(), engine.stoppedModel?.id == stopped.id, noCommandSent() else { return false }
+            engine.state = "idle"
+
+            guard engine.runModel(id: selected.id) else { return false }
+            let firstAttempt = command()
+            guard firstAttempt["command"] as? String == "run",
+                  firstAttempt["model_id"] as? String == selected.id,
+                  firstAttempt["mode"] as? String == "chat", engine.selectedID == selected.id else { return false }
+            engine.apply(["event": "error", "message": "Synthetic startup failure"])
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            guard engine.state == "idle", engine.loadedID.isEmpty,
+                  engine.stoppedModel?.id != stopped.id,
+                  engine.startableModel?.id == selected.id, engine.canStartModel else { return false }
+            engine.startModel()
+            let retry = command()
+            return retry["command"] as? String == "run" && retry["model_id"] as? String == selected.id &&
+                retry["mode"] as? String == "chat" && engine.selectedID == selected.id && engine.state == "loading"
+        case "restart-controls-running-busy-and-deleted-target":
+            let current = variant("fixture-model", name: "Current", display: nil)
+            engine.models = [current, variant("other-model", name: "Other", display: nil)]
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.loadedID = current.id; engine.selectedID = "other-model"; engine.state = "generating"
+            guard engine.modelControlID == current.id, engine.canStopCurrentModel,
+                  !engine.canStartModel else { return false }
+            engine.stopModel(id: engine.modelControlID)
+            guard command()["command"] as? String == "stop", engine.state == "stopping",
+                  !engine.canStartModel, !engine.canStopCurrentModel else { return false }
+            engine.startModel()
+            guard noCommandSent(), engine.state == "stopping" else { return false }
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            engine.models.removeAll { $0.id == current.id }
+            engine.selectedID = "missing"
+            guard !engine.canStartModel, engine.startableModel == nil else { return false }
+            engine.startModel()
+            guard noCommandSent(), engine.state == "idle", engine.loadedID.isEmpty else { return false }
+            // A removed remembered model must not shadow a valid new selection
+            // or apply the deleted model's old mode to that new selection.
+            engine.selectedID = "other-model"; engine.mode = .decision
+            guard engine.canStartModel, engine.startableModel?.id == "other-model" else { return false }
+            engine.startModel()
+            let fallback = command()
+            return fallback["command"] as? String == "run" && fallback["model_id"] as? String == "other-model" &&
+                fallback["mode"] as? String == "decision" && engine.state == "loading"
         case "saved-row-control-unrelated-operation":
             engine.models = [
                 InstalledModel(id: "fixture-model", name: "Current", path: "/private/current", apiID: "current"),
@@ -1260,12 +1338,12 @@ extension EngineController {
             let first = command()
             let firstItems = (0..<30).map { catalogItem("entry-\($0)") }
             engine.apply(catalogReply(first, items: firstItems, nextOffset: 30))
-            engine.requestMoreModelCatalog()
+            engine.requestMoreModelCatalog(loadRemaining: false)
             let second = command()
             guard second["request_id"] as? String == first["request_id"] as? String,
                   (second["offset"] as? NSNumber)?.int64Value == 30, engine.catalogLoading,
                   engine.catalog?.items.count == 30 else { return false }
-            engine.requestMoreModelCatalog()
+            engine.requestMoreModelCatalog(loadRemaining: false)
             guard noCommandSent() else { return false }
             engine.apply(catalogReply(first, items: [catalogItem("stale")], nextOffset: 30))
             guard engine.catalogLoading, engine.catalog?.items.count == 30 else { return false }
@@ -1276,25 +1354,27 @@ extension EngineController {
                   engine.catalog?.nextOffset == nil, engine.catalogError == nil else { return false }
             engine.apply(catalogReply(second, items: [catalogItem("duplicate-response")]))
             return engine.catalog?.items.count == 59 && engine.modelReady && engine.loadedID == "fixture-model"
-        case "catalog-pagination-failure-retry-and-empty-page":
+        case "catalog-pagination-failure-retry-preserves-rows":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()
-            engine.apply(catalogReply(first, items: [], nextOffset: 30))
-            guard engine.catalog?.items.isEmpty == true, engine.catalog?.nextOffset == 30,
-                  engine.catalogLoading else { return false }
+            engine.apply(catalogReply(first, items: [catalogItem("initial")], nextOffset: 30))
+            guard engine.catalog?.items.map(\.id) == ["initial"], engine.catalog?.nextOffset == 30,
+                  !engine.catalogLoading, noCommandSent() else { return false }
+            engine.requestMoreModelCatalog()
             let second = command()
             engine.apply(catalogReply(second, status: "error"))
-            guard engine.catalog?.status == .ready, engine.catalog?.nextOffset == 30,
+            guard engine.catalog?.items.map(\.id) == ["initial"], engine.catalog?.status == .ready,
+                  engine.catalog?.nextOffset == 30,
                   engine.catalogError != nil, !engine.catalogLoading else { return false }
             engine.requestMoreModelCatalog()
             let retry = command()
             guard (retry["offset"] as? NSNumber)?.int64Value == 30,
                   retry["request_id"] as? String == second["request_id"] as? String else { return false }
             engine.apply(catalogReply(retry, items: [catalogItem("later")], nextOffset: 60))
-            engine.requestMoreModelCatalog()
             let third = command()
+            guard (third["offset"] as? NSNumber)?.int64Value == 60, engine.catalogLoading else { return false }
             engine.apply(catalogReply(third, status: "offline"))
-            guard engine.catalog?.items.map(\.id) == ["later"], engine.catalog?.nextOffset == 60,
+            guard engine.catalog?.items.map(\.id) == ["initial", "later"], engine.catalog?.nextOffset == 60,
                   engine.catalogError != nil else { return false }
             engine.requestModelCatalog(familyID: "qwen3_5")
             let newFamily = commands().last!
@@ -1302,13 +1382,16 @@ extension EngineController {
             guard engine.catalog == nil, engine.catalogLoading else { return false }
             engine.apply(catalogReply(newFamily))
             return engine.catalog?.familyID == "qwen3_5" && engine.catalog?.items.map(\.id) == ["entry"]
-        case "catalog-pagination-skips-empty-and-duplicate-pages":
+        case "catalog-pagination-auto-drains-positive-empty-and-duplicate-pages":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()
             engine.apply(catalogReply(first, items: [catalogItem("known")], nextOffset: 30))
             guard !engine.catalogLoading, noCommandSent() else { return false }
             engine.requestMoreModelCatalog()
             let second = command()
+            guard (second["offset"] as? NSNumber)?.int64Value == 30, engine.catalogLoading else { return false }
+            engine.requestMoreModelCatalog()
+            guard noCommandSent() else { return false }
             engine.apply(catalogReply(second, items: [], nextOffset: 60))
             let third = command()
             guard engine.catalogLoading, engine.catalog?.items.map(\.id) == ["known"],
@@ -1317,27 +1400,13 @@ extension EngineController {
             let fourth = command()
             guard engine.catalogLoading, engine.catalog?.items.map(\.id) == ["known"],
                   (fourth["offset"] as? NSNumber)?.int64Value == 90 else { return false }
-            engine.apply(catalogReply(third, items: [catalogItem("stale")], nextOffset: 90))
-            guard engine.catalogLoading, noCommandSent() else { return false }
             engine.apply(catalogReply(fourth, items: [catalogItem("found")], nextOffset: 120))
-            guard !engine.catalogLoading, noCommandSent(), engine.catalog?.items.map(\.id) == ["known", "found"]
-            else { return false }
-            engine.requestMoreModelCatalog()
-            let final = command()
-            engine.apply(catalogReply(final, items: []))
-            guard !engine.catalogLoading, engine.catalog?.nextOffset == nil, noCommandSent() else { return false }
-            engine.requestModelCatalog(familyID: "qwen3_5")
-            let busyRequest = commands().last!
-            engine.state = "installing"
-            engine.apply(catalogReply(busyRequest, items: [], nextOffset: 30))
-            guard !engine.catalogLoading, noCommandSent(), engine.catalog?.nextOffset == 30 else { return false }
-            engine.state = "ready"
-            engine.requestMoreModelCatalog()
-            let cancelled = command()
-            engine.cancelModelCatalog()
-            guard command()["command"] as? String == "catalog_cancel" else { return false }
-            engine.apply(catalogReply(cancelled, items: [], nextOffset: 60))
-            return engine.catalog == nil && !engine.catalogLoading && noCommandSent()
+            let fifth = command()
+            guard engine.catalogLoading, engine.catalog?.items.map(\.id) == ["known", "found"],
+                  (fifth["offset"] as? NSNumber)?.int64Value == 120 else { return false }
+            engine.apply(catalogReply(fifth, items: [catalogItem("last")]))
+            return !engine.catalogLoading && noCommandSent() && engine.catalog?.nextOffset == nil &&
+                engine.catalog?.items.map(\.id) == ["known", "found", "last"]
         case "catalog-schema-bounds":
             var report = catalogReport("qwen3")
             report["schema_version"] = 2
@@ -2510,6 +2579,15 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_saved_row_stop_can_cancel_active_generation(self):
         self.exercise("saved-row-control-stop-generation")
 
+    def test_restart_controls_stop_exact_model_and_restart_in_stopped_mode(self):
+        self.exercise("restart-controls-stop-and-start")
+
+    def test_explicit_failed_start_retries_selected_model_without_clearing_on_busy_run(self):
+        self.exercise("restart-controls-explicit-target-after-failed-start")
+
+    def test_restart_controls_reject_running_busy_and_deleted_targets(self):
+        self.exercise("restart-controls-running-busy-and-deleted-target")
+
     def test_saved_row_stop_cannot_cancel_unrelated_installation_or_removal(self):
         self.exercise("saved-row-control-unrelated-operation")
 
@@ -2525,11 +2603,11 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_catalog_pagination_preserves_rows_merges_duplicates_and_fences_pages(self):
         self.exercise("catalog-pagination-merge-and-fence")
 
-    def test_catalog_pagination_retries_failed_and_empty_pages(self):
-        self.exercise("catalog-pagination-failure-retry-and-empty-page")
+    def test_catalog_pagination_failure_retry_preserves_loaded_rows(self):
+        self.exercise("catalog-pagination-failure-retry-preserves-rows")
 
-    def test_catalog_pagination_continues_past_empty_and_duplicate_pages(self):
-        self.exercise("catalog-pagination-skips-empty-and-duplicate-pages")
+    def test_catalog_pagination_single_click_drains_pages_and_ignores_duplicate_clicks(self):
+        self.exercise("catalog-pagination-auto-drains-positive-empty-and-duplicate-pages")
 
     def test_catalog_schema_and_item_bounds_are_enforced(self):
         self.exercise("catalog-schema-bounds")

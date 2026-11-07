@@ -906,10 +906,28 @@ final class Scenario {
     var fetchGate: CheckedContinuation<Void, Never>?
     var prepareGate: CheckedContinuation<Void, Never>?
     var installGate: CheckedContinuation<Void, Never>?
+    var manualAutomaticClock = false
+    var automaticClockGate: CheckedContinuation<Void, Never>?
+    var automaticClockWakeCount = 0
     var assertBusy: (() -> Void)?
     var workspaces: [URL] = []
     var expectedVersion = "0.3.0"
     var installedBuild: InstalledAppBuild?
+
+    func waitForAutomaticCheck(_ interval: TimeInterval) async throws {
+        guard manualAutomaticClock else {
+            try await Task.sleep(for: .seconds(interval))
+            return
+        }
+        automaticClockWakeCount += 1
+        await withCheckedContinuation { automaticClockGate = $0 }
+    }
+
+    func resumeAutomaticCheck() {
+        let gate = automaticClockGate
+        automaticClockGate = nil
+        gate?.resume()
+    }
 
     func controller(interval: TimeInterval = 3600) -> AppUpdateController {
         let effects = AppUpdateOperations(fetch: { [self] installed in
@@ -940,7 +958,10 @@ final class Scenario {
         })
         return AppUpdateController(installed: installedBuild == nil ? "0.3.0" : nil,
                                    installedBuild: installedBuild, operations: effects, now: { self.date },
-                                   automaticCheckInterval: interval, restorePreviousFailure: false)
+                                   automaticCheckInterval: interval, restorePreviousFailure: false,
+                                   waitForAutomaticCheck: { interval in
+                                       try await self.waitForAutomaticCheck(interval)
+                                   })
     }
 
     func cleanup() {
@@ -1068,18 +1089,26 @@ struct ControllerChecks {
         let quiet = Scenario()
         quiet.fetchFailure = .download
         let third = quiet.controller(interval: 0.01)
+        quiet.manualAutomaticClock = true
         third.startAutomaticChecks()
         third.startAutomaticChecks()
         await waitFor { !third.busy }
         precondition(third.message.isEmpty && third.available == nil)
+        await waitFor { quiet.automaticClockWakeCount == 1 }
         quiet.fetchFailure = nil
         quiet.date += 3600
+        quiet.resumeAutomaticCheck()
         await waitFor { quiet.fetchCount == 2 && !third.busy }
         precondition(third.available?.version == "0.4.0" && quiet.events == ["fetch", "fetch"])
+        await waitFor { quiet.automaticClockWakeCount == 2 }
+        guard let automaticTask = third.automaticChecksFixtureTask else {
+            preconditionFailure("automatic check task was not retained")
+        }
         third.stopAutomaticChecks()
         quiet.date += 3600
-        try? await Task.sleep(for: .milliseconds(30))
-        precondition(quiet.fetchCount == 2)
+        quiet.resumeAutomaticCheck()
+        await automaticTask.value
+        precondition(quiet.fetchCount == 2 && !third.busy)
         print("Swift updater controller checks passed")
     }
 }
@@ -1138,13 +1167,20 @@ class SwiftUpdateTests(unittest.TestCase):
             root = Path(temporary)
             driver = root / "ControllerChecks.swift"
             driver.write_text(CONTROLLER_DRIVER)
+            source = root / "AppUpdate.swift"
+            source.write_text(
+                (ROOT / "apps/menu-bar/Sources/AppUpdate.swift").read_text()
+                + "\nextension AppUpdateController {\n"
+                + "    var automaticChecksFixtureTask: Task<Void, Never>? { automaticChecks }\n"
+                + "}\n"
+            )
             result = subprocess.run(
                 [
                     "xcrun",
                     "swiftc",
                     "-target",
                     "arm64-apple-macos26.4",
-                    str(ROOT / "apps/menu-bar/Sources/AppUpdate.swift"),
+                    str(source),
                     str(driver),
                     "-o",
                     str(root / "checks"),

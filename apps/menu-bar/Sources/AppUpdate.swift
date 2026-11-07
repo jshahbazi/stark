@@ -327,6 +327,7 @@ final class AppUpdateController: ObservableObject {
     private let operations: AppUpdateOperations
     private let now: () -> Date
     private let automaticCheckInterval: TimeInterval
+    private let waitForAutomaticCheck: @MainActor (TimeInterval) async throws -> Void
     private static let backgroundCheckInterval: TimeInterval = 15 * 60
 
     var actionTitle: String {
@@ -338,7 +339,10 @@ final class AppUpdateController: ObservableObject {
 
     init(installed: String? = nil, installedBuild: InstalledAppBuild? = nil,
          operations: AppUpdateOperations? = nil, now: @escaping () -> Date = Date.init,
-         automaticCheckInterval: TimeInterval = 60 * 60, restorePreviousFailure: Bool = true) {
+         automaticCheckInterval: TimeInterval = 60 * 60, restorePreviousFailure: Bool = true,
+         waitForAutomaticCheck: @escaping @MainActor (TimeInterval) async throws -> Void = { interval in
+             try await Task.sleep(for: .seconds(interval))
+         }) {
         if let installedBuild {
             self.installedBuild = installedBuild
         } else if let installed {
@@ -349,6 +353,7 @@ final class AppUpdateController: ObservableObject {
         self.operations = operations ?? .live()
         self.now = now
         self.automaticCheckInterval = automaticCheckInterval
+        self.waitForAutomaticCheck = waitForAutomaticCheck
         if restorePreviousFailure, let path = UserDefaults.standard.string(forKey: "appUpdateWorkspace") {
             let previous = URL(fileURLWithPath: path)
             if let data = try? Data(contentsOf: previous.appendingPathComponent("result.json")),
@@ -373,11 +378,14 @@ final class AppUpdateController: ObservableObject {
         guard automaticChecks == nil else { return }
         checkIfNeeded()
         let interval = automaticCheckInterval
+        let waitForNextCheck = waitForAutomaticCheck
         automaticChecks = Task { [weak self] in
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(interval)) }
+                do { try await waitForNextCheck(interval) }
                 catch { return }
-                guard let self else { return }
+                // A completed sleep can be queued on the main actor when stop
+                // cancels this task. Recheck before starting another request.
+                guard !Task.isCancelled, let self else { return }
                 self.checkIfNeeded()
             }
         }

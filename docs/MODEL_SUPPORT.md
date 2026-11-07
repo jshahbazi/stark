@@ -104,9 +104,10 @@ are never inferred from model names or quantized packed tensors.
 
 The download catalogue combines registered reference sources with a bounded live
 Hugging Face search. Parsed configuration identifies the family; repository
-names alone do not establish compatibility. At most 45 candidates are inspected
-and 30 choices are returned, preserving representative sizes and formats when
-available. Generic discovery offers supported floating Safetensors and implemented MLX 4-bit/8-bit
+names alone do not establish compatibility. Each page inspects up to 30 distinct
+candidates and returns compatible choices. **Load more models** follows the remaining
+pages automatically, preserving results already loaded. Failed pages can be retried
+at the same offset. Generic discovery offers supported floating Safetensors and implemented MLX 4-bit/8-bit
 paths. GLM instead has one fixed `UD-Q2_K_XL` GGUF entry, with its source
 revisions, four shards and 108,720,071,552 stored weight bytes owned by the native
 preparation helper. Browsing that entry uses bundled metadata and makes no Hub
@@ -120,7 +121,8 @@ models, quantized vision, unsupported MoE families, adapter-only and unsupported
 packed formats are excluded. The implemented Qwen3.8 text path includes its
 MoE graph.
 An uncatalogued compatible fine-tune can appear. This is
-a representative list, not an exhaustive inventory of Hugging Face.
+a metadata-filtered list of compatible candidates; gated, inaccessible or unsupported
+repositories may be omitted.
 
 Discovery reads bounded metadata and repository file information, without
 requesting weight payloads or executing repository code. Parameter counts and
@@ -204,6 +206,19 @@ conversion can cast floating source weights to BF16. F16/F32 output remains
 conversion-only where the native engine requires BF16. Packed formats have their
 own family/layout constraints. Classifier conversion coverage does not imply
 that the desktop Chat or Decision workflow implements classification.
+
+Conversion, template rendering and function tool parsing are separate support
+claims. A converter adapter recognizes architecture/configuration and maps the
+checkpoint's tensors into an artifact; it does not certify that the resulting
+chat template can be loaded and rendered by the app. A renderable chat template
+also does not imply tool calling: Stark enables function tools only when the
+loaded template matches a reviewed tool wire format with an implemented parser.
+The current parser registrations and their template identities are listed in
+the [Function tools reference](LOCAL_API.md#function-tools). An unsupported
+architecture stops raw-source installation before weight download with the
+message: “This model architecture has no implemented converter.” This marks a
+conversion boundary; adding a parser alone would not make that architecture
+runnable. Successful conversion alone never enables function tools.
 
 ## Installation checks before weights
 
