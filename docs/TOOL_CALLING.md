@@ -10,9 +10,11 @@ it does not prove that every checkpoint using it chooses tools reliably.
 | Supported family or path | Tool protocol in Stark | Boundary |
 | --- | --- | --- |
 | Qwen2 dense, including matching Qwen2.5 Instruct/Coder templates | Hermes JSON, `qwen3-hermes-v1` | The reviewed Qwen2.5 program is admitted; other Qwen2 templates need review. Model-bound qualification of the newly admitted program is pending. |
-| Qwen3 dense | Hermes JSON, `qwen3-hermes-v1` | The reviewed 0.6B and MLX 4B programs and syntax-equivalent programs are admitted. |
-| Qwen3.5 dense and compatible Qwen3.8 dense/distill artifacts, including JevK5 | Qwen XML, `qwen35-xml-v1` | Requires the reviewed program; this includes the matching official Qwen3.5-4B template. Tools cannot be combined with images in one request. |
-| Qwen3.8 Flash Next, Lily and matching PipeNetwork mixed export | Qwen XML, `qwen38-xml-v1` | Only matching reviewed programs; quantization and backend qualifications stay separate. |
+| Qwen3 dense | Hermes JSON, `qwen3-hermes-v1` | The reviewed programs and syntax-equivalent programs are admitted. Pinned Qwen3-32B BF16 passed native call/result checks and 14/17 HTTP checks at 32K; exact plain-text response checks failed, so its full workflow remains partially qualified. |
+| Qwen3.5 dense and compatible dense/distill artifacts, including JevK5 | Qwen XML, selected by the exact template | The matching JevK5 and official Qwen3.5-4B programs use `qwen35-xml-v1`; other reviewed programs can select `qwen38-xml-v1`. Tools cannot be combined with images in one request. |
+| Dense Qwen3.8-27B oQ4e MTP | Qwen XML, `qwen38-xml-v1` | The pinned production conversion passed the three native smoke checks and 17 HTTP API checks at 32K context with the app's default three-draft MTP. Exact artifact/build scope is recorded below. |
+| Qwen3.8 Flash Next Lily Q4-XL | Qwen XML, `qwen38-xml-v1` | The pinned native-source artifact passed the three native smoke checks and 17 HTTP API checks at 8K context with the app's default two-draft MTP. |
+| Matching Qwen3.8 Flash Next PipeNetwork mixed export | Qwen XML, `qwen38-xml-v1` | Protocol support is established; Lily's behavior and prefix-reuse results do not qualify this separate F32 execution path. |
 | Native GLM-5.3 Flash | GLM argument-key/value XML, `glm53-xml-v1` | The pinned native-preparation template is admitted. Synthetic rendering, parser and API tests pass; model-generated workflow qualification is pending. |
 | Native Flint INT4 | GLM argument-key/value XML, `glm53-xml-v1` | The pinned Flint template shares the grammar; native rendering/history tests pass. Model-generated workflow qualification is pending. |
 | Mistral-7B-Instruct-v0.3 | JSON list after `[TOOL_CALLS]`, `mistral-json-v1` | Reviewed serializer correction and render-only nine-character ID mapping. Public API IDs are preserved. Model-generated qualification is pending. |
@@ -40,6 +42,7 @@ Existing records establish narrow tool-result workflows for exact artifacts:
 - Qwen3-0.6B BF16: [native buffered/streamed smoke](archive/runs/2026-11-01-tool-template-compatibility.md).
 - MLX Qwen3-4B 4-bit: [bounded OpenWork task](archive/runs/OPENWORK_KEYCHAIN_E2E_2026_10_31.md).
 - Qwen3.8 Flash Next Lily Q4-XL: [bounded OpenWork acceptance](archive/runs/2026-11-01-openwork-lily-acceptance.md).
+- Dense Qwen3.8-27B oQ4e MTP and Qwen3.8 Flash Next Lily: [current-build native and HTTP tool workflows](archive/runs/2026-11-07-recommended-model-tool-qualification.md), including default MTP, streaming, exact-prefix reuse and cancellation recovery.
 
 These records retain their original model/build identities and limitations.
 They do not qualify all models in those families. Newly admitted Qwen2.5, GLM
