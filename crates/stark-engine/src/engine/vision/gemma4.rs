@@ -30,6 +30,9 @@ use crate::{
     parameters::ParameterLoader,
 };
 
+mod flash;
+#[cfg(test)]
+mod flash_reference_tests;
 #[cfg(all(test, backend = "cpu"))]
 mod nople_diagnostics;
 #[cfg(test)]

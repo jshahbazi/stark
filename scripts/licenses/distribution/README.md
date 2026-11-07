@@ -32,6 +32,11 @@ hidden1152 RMS rows, including the 72-channel whole-vector tail order.
 `pytorch-gemma4-larger-vision-rms` records this scope and pinned source hashes.
 E2B/E4B, unified12B and text normalization retain their previous schedules.
 
+The larger Gemma vision Flash path also adapts the pinned CPU FlashAttention
+tile boundaries, BF16 exponential stores and NEON `fexp_u20` approximation.
+`pytorch-gemma4-larger-vision-flash` records the source files and hashes; existing
+PyTorch BSD distribution notices cover this adaptation.
+
 The same private profile preserves Qwen3.5 DeltaNet's BF16 convolution, SiLU,
 sigmoid, gated normalization, and F32 state boundaries. Its 64-token chunk
 rule follows the pinned Hugging Face equations with F32 scratch planes and
