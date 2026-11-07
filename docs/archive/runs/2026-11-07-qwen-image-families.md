@@ -1,0 +1,119 @@
+# Qwen retained image execution paths
+
+The implementation adds two explicit paths. Execution qualification is pending
+at this record's first revision; model-free checks establish conversion and
+admission behavior only.
+
+## Dense affine Qwen3.5 and Qwen3.8-27B
+
+`qwen35-dense-affine-merged-v3`, version 3, retains canonical group-64 affine
+decoder matrices and a complete BF16 visual tower. Native admission reconstructs
+the same bounded dense graph as the BF16 v2 profile, requires folded RMS gains,
+and validates every packed weight/scale/bias plane against its logical matrix.
+Row partitions must cover that matrix exactly. BF16 activation, RMS, attention
+and GDN boundaries remain explicit; existing affine matmul kernels execute the
+packed projections. Image artifacts omit the separately declared MTP head.
+
+MLX visual names are admitted only with their corresponding text wrapper.
+MLX Conv3d `[H,T,P,P,C]` weights are restored bitwise to `[H,C,T,P,P]` using
+bounded tiled transposes. Other BF16 visual payloads are copied unchanged.
+Text-only exports cannot supply the missing tower.
+
+A header-only plan of the existing local
+`Jundot/Qwen3.8-27B-oQ4e-mtp` source (revision
+`7dd276b77fcb27c982ebd8d8a434539345713fea`) has 1,613 output operations,
+including all 333 BF16 visual tensors, and 17,675,742,688 payload bytes. This
+planning check was followed by a complete offline conversion. The published
+artifact is 17,676,008,168 bytes; its weights SHA256 is
+`dff4809e84a628f772183293be7f6ba69d276ee5cf34571298dda04af5e84fa1`.
+Native execution remains unverified at this revision.
+
+The exact Qwen3.8 template was reviewed separately: image serialization still
+emits one start/pad/end run, while assistant reasoning can be preserved and
+the existing boolean thinking control defaults on. Its SHA256 is
+`c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`.
+The source tokenizer differs from the existing reviewed tokenizer only in
+merge serialization. Tokenizers normalizes it to the already admitted output
+hash `87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4`.
+
+## Original-format Flash-Next
+
+The versioned `qwen38-lily-retained-bf16-vision-v1` profile uses an explicit
+schema-6 `stark-image-artifact.json`. It binds source identity, the shard index,
+all model shards and any external n-gram table, configuration, tokenizer,
+normalized fixed processor recipe and standalone template. Aggregate artifact
+identity is SHA256 over sorted filename bytes, a zero delimiter, and each
+64-byte lowercase ASCII payload digest. Native loading rehashes these files
+and checks their file identities after model loading. No manifest means no
+image capability. Existing text receipts and text loading remain valid.
+
+Two retained formats have preparation paths:
+
+- `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision
+  `0f94842e3682b49acace4daeb4cf2e65a6f94f83`.
+- `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, revision
+  `788c07a8725642bccf13a0a3b8a21954ab84b4f2`. Its 101 Safetensors shards use
+  75,303,252,216 bytes and its external n-gram table uses 32,000,153,976 bytes.
+
+An existing complete source folder can be explicitly upgraded without copying
+its model payloads:
+
+```sh
+uv run --project tools/converter --locked python -m stark_convert.hybrid_prepare \
+  qwen38-lily-q4-xl --output /path/to/prepared-model --upgrade-images
+```
+
+New native preparations accept `--artifact-mode vision-language`. The original
+PipeNetwork format retains vision payloads, but its distinct text loader has no
+image fusion bridge in this change.
+
+The public model prepares opaque, instance-bound CPU patches, expands exactly
+one complete image marker run, executes the retained native tower and prefill,
+and returns target logits for ordinary continuation. Image MTP is disabled.
+Image state cannot create or restore prefix snapshots. Cancellation is observed
+before execution, after the bounded tower pass, and between completed text
+prefill chunks. In-flight Metal commands finish before their resources are
+released. A cancelled request resets safely; a device execution failure fences
+the instance.
+
+## Checks
+
+- Native production generator `cargo +1.98.1 check --locked -p stark-generate`
+  passed in the isolated worktree target.
+- CPU engine test target compiled with the pinned nightly. Ten vision-family
+  admission tests and one image expansion/control-boundary test passed.
+- The focused dense conversion, family, geometry, MTP, runtime and metadata
+  suite passed 284 tests. The focused native preparation, retained manifest and
+  catalog suite passed 21 tests.
+- Repository policy, Rust formatting, Python lint/formatting and diff whitespace
+  checks passed.
+
+## Shared sparse expert primitives
+
+`encodable_block::mlp::routed::RoutedExperts` executes flattened expert banks
+with the existing canonical full-precision or affine matrix kernels. Device
+routing selects stable top-k IDs, expands them into bounded weight-row gathers,
+and accumulates only selected expert outputs. The helper receives separately
+normalized BF16 expert inputs and F32 router logits, allowing architectures to
+own their router normalization. Router-logit, probability and weighted-product
+BF16 boundaries are explicit policy fields. Shapes, buffer extents and expert
+bank indexing are checked before command encoding. Non-finite router values
+publish safe expert IDs and non-finite weights, allowing the existing target
+readout guard to reject the request without unsafe gathers.
+
+The Qwen MLP wrapper adds its sigmoid-gated shared expert. A two-row, four-expert
+CPU fixture passed with both BF16 and packed Q4 banks; rows select different
+expert pairs and ties have a defined lower-ID ordering. Production generator
+type-check passed with the new CPU/Metal kernel bindings. Full-model Qwen3.5
+MoE conversion admission and numerical qualification remain pending.
+
+## Primary references
+
+- [Official Qwen3.8-27B configuration](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json):
+  its dense architecture is `qwen3_5`, with the same image tokenization and M-RoPE geometry.
+- [Lily Q4-XL model card](https://huggingface.co/fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl):
+  source format and retained BF16 visual tensor inventory.
+- [MLX-VLM Qwen3.5 wrapper](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/qwen3_5.py):
+  visual namespace mapping and placeholder fusion.
+- [Transformers Qwen3.5 MoE](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py):
+  architecture-specific MoE operation requirements.
