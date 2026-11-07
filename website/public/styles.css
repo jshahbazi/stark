@@ -1844,15 +1844,12 @@ code {
 .product-shot {
   min-width:0
 }
-.product-shot>a {
+.product-shot-frame {
   display:block;
   overflow:hidden;
   border:1px solid #d4d6cb;
   background:#e7e8df;
   box-shadow:0 8px 24px rgb(23 27 25 / 7%)
-}
-.product-shot>a:hover {
-  border-color:#9b9f92
 }
 .product-shot img {
   display:block;
@@ -2104,7 +2101,7 @@ code {
     grid-template-columns:1fr
   }
   .product-gallery { gap:28px; margin-top:32px }
-  .product-shot>a { max-width:460px }
+  .product-shot-frame { max-width:460px }
   .product-shot figcaption { padding-top:12px }
   .fit-guide { margin-top:48px; padding-top:30px }
   .memory-guide { gap:9px }
