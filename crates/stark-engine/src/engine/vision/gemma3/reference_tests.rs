@@ -195,3 +195,46 @@ fn gemma3_image_full_reference_metal() {
     println!("{report}");
     assert!(passed, "private Gemma 3 full reference gates failed");
 }
+
+#[cfg(backend = "metal")]
+#[stark_test]
+#[ignore]
+fn gemma3_completed_tower_cancel_keeps_model_usable_metal() {
+    let root = PathBuf::from(std::env::var_os("STARK_GEMMA3_FIXTURE_PATH").expect("set private Gemma 3 fixture path"));
+    let model_path = PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private Gemma 3 model path"));
+    let engine =
+        Engine::<crate::backends::metal::Metal>::new().unwrap_or_else(|_| panic!("private cancellation engine failed"));
+    let mut model = engine
+        .load_gemma3_vision_language_model(&model_path)
+        .unwrap_or_else(|_| panic!("private cancellation model failed"));
+    let image =
+        model.prepare_image(&read(&root, "red.png")).unwrap_or_else(|_| panic!("private cancellation image failed"));
+    let mut checks = 0;
+    let result = model.project(&image, &mut || {
+        checks += 1;
+        checks == 2
+    });
+    assert!(
+        result.is_err_and(|error| error.kind() == super::super::NativeVisionErrorKind::Cancelled),
+        "completed-boundary cancellation did not preserve its category"
+    );
+    assert!(!model.is_fenced(), "completed-boundary cancellation fenced immutable weights");
+    let mut state = model.create_empty_state(Some(1024), 0).unwrap_or_else(|_| panic!("private recovery state failed"));
+    let text = model
+        .tokenizer()
+        .encode("<bos><start_of_turn>user\nSay hello.<end_of_turn>\n<start_of_turn>model\n", false)
+        .unwrap_or_else(|_| panic!("private recovery tokenization failed"));
+    let text: Vec<u64> = text.get_ids().iter().copied().map(u64::from).collect();
+    let mut options = model.default_stream_options();
+    options.sampling_method = crate::engine::language_model::stream::SamplingMethod::Greedy;
+    {
+        let mut stream =
+            model.stream(&text, &mut state, options).unwrap_or_else(|_| panic!("private text recovery failed"));
+        assert!(stream.next().unwrap().is_ok(), "private recovery generation failed");
+    }
+    assert!(!model.is_fenced(), "completed cancellation recovery fenced model");
+    let report = json!({"passed":true,"cancelled_after_completed_block":1,"same_instance_text_recovery":true,
+        "artifact_sha256":model.artifact_identity().artifact_sha256});
+    std::fs::write(root.join("native-cancellation-metrics.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    println!("{report}");
+}

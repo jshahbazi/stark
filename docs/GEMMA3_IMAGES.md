@@ -69,8 +69,17 @@ within the complete image block. Text remains causal. The scheduler keeps the
 complete image block in one prefill chunk, including at a 1024-token boundary.
 Each image request uses fresh decoder state and clears retained generation
 prefix state. Image patches and projected embeddings are request-owned and
-are not retained as reusable prefix evidence. Failure after native work fences
-the loaded instance, requiring worker replacement.
+are not retained as reusable prefix evidence. Backend and numerical failures
+after native work fence the loaded instance, requiring worker replacement.
+Controlled cancellation between completed tower blocks releases private scratch
+and leaves immutable model weights available for a fresh request.
+
+Text generation through this image artifact also leaves generation prefix
+reuse disabled. Five out of every six decoder layers use overwriting sliding
+KV rings. The current engine can rewind full KV caches, but it cannot restore
+an earlier ring state after those rows have been overwritten. Exact ring
+snapshots have not been implemented for this path; a new request therefore
+allocates fresh state instead of claiming a reusable prefix.
 
 ## Validation
 
