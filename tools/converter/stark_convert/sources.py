@@ -410,6 +410,12 @@ def _replay(
 ) -> SourceSnapshot:
     manifest = read_json(path)
     try:
+        from .adapters.gemma4_vision import PROFILES as gemma_profiles
+
+        pinned_gemma = (
+            manifest.get("primary_repo") in gemma_profiles
+            and manifest.get("primary_revision") == gemma_profiles[manifest["primary_repo"]]["revision"]
+        )
         schema = manifest["schema_version"]
         profile = manifest.get("conversion_profile")
         if type(schema) is not int or schema not in {1, 2, 3} or not isinstance(manifest["root"], str):
@@ -422,8 +428,8 @@ def _replay(
             or profile is None
             and (
                 metadata_profile is not None
-                or manifest.get("primary_repo") != VISION_REPO
-                or manifest.get("primary_revision") != VISION_REVISION
+                or not (pinned_gemma or (manifest.get("primary_repo") == VISION_REPO
+                        and manifest.get("primary_revision") == VISION_REVISION))
             )
         ):
             raise ValueError()
