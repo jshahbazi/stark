@@ -6,7 +6,9 @@ Track each proposed optimization, failed approach and promotion decision in the
 [model experiment ledger](../model-experiments/README.md), using its
 [attempt template](../model-experiments/TEMPLATE.md). Keep the source-bound
 measurements and current/superseded benchmark status here; ledger entries link
-to them and must not broaden their claims.
+to them and must not broaden their claims. New studies need an attempt ID and
+linked source-bound evidence. Existing reports retain their original
+qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 

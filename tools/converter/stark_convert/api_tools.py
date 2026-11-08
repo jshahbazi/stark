@@ -14,7 +14,9 @@ import math
 import re
 from typing import Any
 
+from .json_budget import check_json_structure
 from .local_api import APIError
+from .resource_budget import INPUT_BYTES
 from .template_compat import MAX_TEMPLATE_BYTES, template_program_sha256
 from .tool_protocols import (
     FORMATS,
@@ -28,10 +30,9 @@ from .tool_protocols import (
 
 MAX_TOOLS = 64
 MAX_CALLS = 16
-MAX_ARGUMENT_BYTES = 64 * 1024
-MAX_SCHEMA_BYTES = 256 * 1024
-MAX_TOOL_RESULT_BYTES = 256 * 1024
-MAX_TOOL_OUTPUT_BYTES = 512 * 1024
+MAX_ARGUMENT_BYTES = INPUT_BYTES
+MAX_SCHEMA_BYTES = INPUT_BYTES
+MAX_TOOL_OUTPUT_BYTES = INPUT_BYTES
 MAX_JSON_DEPTH = 32
 MAX_JSON_NODES = 16384
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
@@ -176,8 +177,10 @@ def strict_arguments(value: Any) -> dict:
     if not isinstance(value, str):
         raise _bad("Function arguments must be a JSON object encoded as a string.")
     try:
-        if len(value.encode("utf-8")) > MAX_ARGUMENT_BYTES:
+        encoded = value.encode("utf-8")
+        if len(encoded) > MAX_ARGUMENT_BYTES:
             raise _bad("Function arguments exceed the byte limit.")
+        check_json_structure(encoded)
         parsed = json.loads(value, object_pairs_hook=_pairs, parse_constant=_constant)
     except (UnicodeEncodeError, ValueError, RecursionError):
         raise _bad("Function arguments must contain one complete, unambiguous JSON object.") from None
@@ -645,6 +648,7 @@ def _xml_parameter_value(body, types, invalid, parser):
         value = {"True": True, "False": False, "None": None}[body]
     else:
         try:
+            check_json_structure(body.encode("utf-8"))
             value = json.loads(body, object_pairs_hook=_pairs, parse_constant=_constant)
         except (ValueError, RecursionError):
             if "string" in types:
@@ -910,6 +914,7 @@ def _parse_additional_output(
         functions = parse_functiongemma_calls(text[start:], invalid=invalid)
     else:
         try:
+            check_json_structure(body.encode("utf-8"))
             decoded = json.loads(body, object_pairs_hook=_pairs, parse_constant=_constant)
         except (ValueError, RecursionError):
             raise invalid("format") from None

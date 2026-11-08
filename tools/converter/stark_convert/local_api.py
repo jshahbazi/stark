@@ -21,9 +21,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-MAX_TEXT_BODY_BYTES = 1024 * 1024
-MAX_IMAGE_BODY_BYTES = 6 * 1024 * 1024
-MAX_PENDING_BODY_BYTES = 24 * 1024 * 1024
+from .json_budget import check_json_structure
+from .resource_budget import PENDING_BYTES, WIRE_BYTES, available_memory_bytes, json_parse_headroom_bytes
+
+MAX_TEXT_BODY_BYTES = WIRE_BYTES
+MAX_IMAGE_BODY_BYTES = WIRE_BYTES + 6 * 1024 * 1024
+MAX_PENDING_BODY_BYTES = PENDING_BYTES
 # OpenWork (16) plus OpenCode Desktop (8) managed capabilities share this admission table.
 MAX_API_CLIENTS = 24
 MAX_API_CLIENT_TTL_SECONDS = 120
@@ -145,6 +148,7 @@ class LocalAPI:
         self._closing = threading.Event()
         self._body_lock = threading.Lock()
         self._pending_body_bytes = 0
+        self._pending_parse_bytes = 0
         self._api_session = ""
         self._clients: dict[str, _ClientGrant] = {}
         # Kept separately from current admission grants: refreshing a token or
@@ -457,6 +461,7 @@ class LocalAPI:
                 client_id = None
                 monitor = None
                 reserved_body = 0
+                reserved_parse = 0
                 try:
                     client_id = self._guard(cancelled)
                     if self.path != "/v1/chat/completions":
@@ -469,7 +474,7 @@ class LocalAPI:
                     raw_length = content_lengths[0].strip()
                     if not raw_length or not raw_length.isascii() or not raw_length.isdecimal():
                         raise APIError(400, "Invalid Content-Length", "invalid_request")
-                    if len(raw_length.lstrip("0")) > 7:
+                    if len(raw_length.lstrip("0")) > len(str(MAX_IMAGE_BODY_BYTES)):
                         raise APIError(413, "Request body is too large", "body_too_large")
                     length = int(raw_length.lstrip("0") or "0")
                     if length > api._body_limit():
@@ -477,8 +482,13 @@ class LocalAPI:
                     with api._body_lock:
                         if api._pending_body_bytes + length > MAX_PENDING_BODY_BYTES:
                             raise APIError(429, "Pending request bytes exceed the server budget", "body_budget_full")
+                        parse_bytes = json_parse_headroom_bytes(length)
+                        if parse_bytes and api._pending_parse_bytes + parse_bytes > available_memory_bytes():
+                            raise APIError(429, "Available memory is too low for this request", "memory_pressure")
                         api._pending_body_bytes += length
                         reserved_body = length
+                        api._pending_parse_bytes += parse_bytes
+                        reserved_parse = parse_bytes
                     content_type = self.headers.get("Content-Type")
                     if content_type and content_type.split(";", 1)[0].strip().lower() != "application/json":
                         raise APIError(415, "Content-Type must be application/json", "unsupported_media_type")
@@ -486,6 +496,7 @@ class LocalAPI:
                         body = self.rfile.read(length)
                         if len(body) != length:
                             raise APIError(400, "Incomplete request body", "invalid_request")
+                        check_json_structure(body)
                         payload = json.loads(
                             body,
                             object_pairs_hook=self._pairs,
@@ -494,6 +505,11 @@ class LocalAPI:
                         )
                     except (ValueError, UnicodeDecodeError, RecursionError):
                         raise APIError(400, "Malformed JSON", "invalid_json") from None
+                    finally:
+                        if reserved_parse:
+                            with api._body_lock:
+                                api._pending_parse_bytes -= reserved_parse
+                            reserved_parse = 0
                     if not isinstance(payload, dict):
                         raise APIError(400, "Request body must be an object", "invalid_request")
                     if length > MAX_TEXT_BODY_BYTES and not self._contains_image(payload):
@@ -599,9 +615,10 @@ class LocalAPI:
                     else:
                         self._error(error)
                 finally:
-                    if reserved_body:
+                    if reserved_body or reserved_parse:
                         with api._body_lock:
                             api._pending_body_bytes -= reserved_body
+                            api._pending_parse_bytes -= reserved_parse
                     cancelled.set()
                     if monitor is not None:
                         monitor.join(timeout=0.2)

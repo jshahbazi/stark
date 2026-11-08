@@ -20,6 +20,7 @@ def test_normalizes_messages_and_defaults():
     assert result["messages"] == [{"role": "system", "content": "ab"}, {"role": "assistant", "content": ""}]
     assert result["sampling"] == {"mode": "greedy"}
     assert result["mtp"] is None
+    assert result["maximum"] is None
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -100,7 +101,7 @@ def test_accepts_neutral_compatibility_flags():
         user="u",
         metadata={"x": 1},
     )
-    assert result["maximum"] == 512
+    assert result["maximum"] is None
 
 
 @pytest.mark.parametrize("store", [False, None])

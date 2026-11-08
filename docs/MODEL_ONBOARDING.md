@@ -22,13 +22,15 @@ runtime authority. Follow the [model-family support contract](MODEL_SUPPORT.md),
 ## Record changes and experiments
 
 Create or extend a [model experiment record](model-experiments/README.md) for
-each compatibility, correctness, precision, state or performance attempt.
+each compatibility, correctness, memory, precision, state or performance attempt.
 Use the [template](model-experiments/TEMPLATE.md) to bind the hypothesis,
 baseline, candidate and fixed gates before running it. Record failed and
-resource-deferred attempts as well as passes, and separate the observed result
+inconclusive, abandoned and resource-deferred attempts as well as passes, and separate the observed result
 from the decision to enable or ship it. Link the attempt ID from the PR.
 The ledger points to canonical run and benchmark evidence; it does not replace
-that evidence or qualify other checkpoints.
+that evidence or qualify other checkpoints. Keep implemented support, numerical
+qualification, measured speed and deployment as separate outcomes; preserve
+older source-bound records when an attempt changes.
 
 ## Bind the implementation and artifact
 
@@ -68,6 +70,11 @@ unless that route has its own exactness proof and qualification.
 Keep the existing worker and host lifecycle unless a scoped protocol change is
 required:
 
+- For a backend without a declared context maximum, implement and test the
+  loaded-state memory estimate used by automatic execution planning. Include
+  owned/shared and ring/full KV state, recurrent buffers, activation precision,
+  scratch allocation classes and checked overflow. Report the resulting
+  allowance separately from trained model capacity.
 - Derive support from the admitted backend and actual state layout. Keep
   `prefix_cache.supported` false for a path whose restoration is incomplete.
 - Implement the backend's support, chunk size, key, planned reuse, retention,

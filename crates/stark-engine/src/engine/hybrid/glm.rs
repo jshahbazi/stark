@@ -313,6 +313,22 @@ pub struct GlmModel {
 }
 
 impl GlmModel {
+    pub(super) fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        #[cfg(feature = "metal")]
+        {
+            let c = &self.config;
+            let capacity = super::memory::growth_capacity(context_tokens, c.max_context, 64)?;
+            super::memory::gpu_buffer_fits(&[capacity, c.kv_rank], 4)?;
+            super::memory::gpu_buffer_fits(&[capacity.div_ceil(c.index_pool), c.index_dim], 4)?;
+            super::memory::gpu_buffer_fits(&[capacity, c.heads], 4)?;
+        }
+        request_memory_bytes(&self.config, context_tokens, input_tokens)
+    }
+
     pub fn new(
         weights: Weights,
         config: &Value,
@@ -1047,8 +1063,48 @@ impl BoundedPlan {
     }
 }
 
-#[cfg(feature = "metal")]
+fn request_memory_bytes(
+    config: &Config,
+    context_tokens: u32,
+    input_tokens: u32,
+) -> Option<usize> {
+    let capacity = super::memory::growth_capacity(context_tokens, config.max_context, 64)?;
+    let device = encoder_state_allowance_for_context(config, capacity).ok()?;
+    let attention_layers = config.layer_types.iter().filter(|&&kda| !kda).count();
+    // Scalar fallbacks retain independent F32 rows and Vec descriptors.
+    // Keep both host and device inventories even for graph execution.
+    let host_row = super::memory::sum(&[
+        super::memory::bytes(&[config.kv_rank], 4)?,
+        super::memory::bytes(&[3], size_of::<Vec<f32>>())?,
+    ])?;
+    let host = super::memory::bytes(&[attention_layers, capacity, host_row], 2)?.checked_add(super::memory::bytes(
+        &[attention_layers, capacity.div_ceil(config.index_pool), config.index_dim],
+        8,
+    )?)?;
+    // Large MLA score planes are allocated outside the 512 MiB graph scratch
+    // cap. Ordinary prefill owners contain at most eight rows; wider owners
+    // enforce their own combined scratch/external bound before dispatch.
+    let graphs = if std::env::var_os("STARK_GLM53_GREEDY_OVERLAP").is_some_and(|value| value == "1") {
+        2
+    } else {
+        1
+    };
+    let external = super::memory::bytes(
+        &[graphs, attention_layers, input_tokens.clamp(1, 8) as usize, config.heads, capacity],
+        4,
+    )?;
+    super::memory::sum(&[device, host, external])
+}
+
+#[cfg(any(feature = "metal", test))]
 fn encoder_state_allowance(c: &Config) -> Result<usize> {
+    encoder_state_allowance_for_context(c, c.max_context)
+}
+
+fn encoder_state_allowance_for_context(
+    c: &Config,
+    context_tokens: usize,
+) -> Result<usize> {
     let layers = c.layer_types.len() as u128;
     let kda_layers = c.layer_types.iter().filter(|&&kda| kda).count() as u128;
     let attention_layers = layers - kda_layers;
@@ -1062,7 +1118,7 @@ fn encoder_state_allowance(c: &Config) -> Result<usize> {
     let kda_weights = 3 * inner * c.conv_kernel as u128 + inner + c.kda_dim as u128 + c.kda_heads as u128;
     let kda_io = 6 * inner + c.kda_heads as u128 + 1;
     let kda = kda_layers * (kda_state + kda_weights + kda_io);
-    let context = c.max_context as u128;
+    let context = context_tokens as u128;
     let pool = c.index_pool as u128;
     let index = c.index_dim as u128;
     // Cover old/new attention allocations during growth, persistent tails/APE,
@@ -2138,7 +2194,6 @@ mod tests {
         assert!(actual.iter().zip(expected).all(|(&a, &b)| (a - b).abs() < tolerance));
     }
 
-    #[cfg(feature = "metal")]
     #[stark_test]
     fn encoder_state_allowance_includes_context_growth_and_persistent_state() {
         let mut config = Config {
@@ -2174,6 +2229,17 @@ mod tests {
         };
         let bounded = encoder_state_allowance(&config).unwrap();
         assert!(bounded > 512 * 1024 * 1024 && bounded < 2 * 1024 * 1024 * 1024);
+        let at_64 = request_memory_bytes(&config, 64, 1).unwrap();
+        assert_eq!(request_memory_bytes(&config, 63, 1), Some(at_64));
+        assert!(request_memory_bytes(&config, 65, 1).unwrap() > at_64);
+        assert!(request_memory_bytes(&config, 65, 8).unwrap() > request_memory_bytes(&config, 65, 1).unwrap());
+        assert!(request_memory_bytes(&config, 4097, 1).is_none());
+        assert_eq!(
+            crate::encodable_block::memory::automatic_context(1, 4096, at_64, |context| {
+                request_memory_bytes(&config, context, 1).map(crate::encodable_block::memory::MemoryEstimate::state)
+            }),
+            Some(64)
+        );
         config.max_context = 1_048_576;
         assert!(encoder_state_allowance(&config).unwrap() > 8 * 1024 * 1024 * 1024);
     }

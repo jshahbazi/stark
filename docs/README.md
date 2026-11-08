@@ -50,8 +50,8 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 
 | Location | What it holds |
 | --- | --- |
+| [Model experiment ledger](model-experiments/README.md) | Cross-model attempt index and recording template, including failed/inconclusive work, artifact-specific results and adoption status |
 | [benchmarks/](benchmarks/README.md) | Engine comparisons with a current-versus-superseded index, optimization records, and [conversion benchmarks](benchmarks/CONVERSION_BENCHMARKS.md) |
-| [model-experiments/](model-experiments/README.md) | Cross-model attempt records and decisions linked to their canonical run and benchmark evidence |
 | [validation/](validation/) | [Scoring parity](validation/SCORING_PARITY.md) against frozen Uzu references and [ColGrep generation acceptance](validation/GENERATION_COLGREP.md), each bound to a named build |
 | [archive/conversion/](archive/conversion/) | The converter replacement plan, milestone packets and their reviews |
 | [archive/runs/](archive/runs/) | Dated validation and review write-ups, security baselines, CI measurements, website deployment and history-rewrite records |

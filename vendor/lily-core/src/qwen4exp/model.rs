@@ -78,6 +78,9 @@ use super::ExpertCacheStats;
 use super::vision::{self, VisionScratch};
 
 use super::config::{GateAct, Qwen4ExpConfig};
+
+#[path = "request_memory.rs"]
+mod request_memory;
 use super::ngram::{NgramHasher, NgramStorage, NgramTable, StagedRows};
 use super::positions::{ImageSpan, Positions};
 use super::weights::{

@@ -8,9 +8,7 @@ use minijinja::{
 use serde::Deserialize;
 use serde_json::Value as Json;
 
-pub const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
-const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_ITEMS: usize = 16384;
 const MAX_NODES: usize = 65536;
 const MAX_DEPTH: usize = 64;
@@ -79,7 +77,7 @@ fn check_json(
         },
         _ => *size += 32,
     }
-    if *size > MAX_OUTPUT_BYTES {
+    if *size > crate::limits::input_bytes() {
         return Err(Failure::Size);
     }
     Ok(())
@@ -479,7 +477,7 @@ fn python_repr(
                     result.push_str(": ");
                     result.push_str(&python_repr(&value.get_item(&item)?, true, depth + 1, nodes)?);
                 }
-                if result.len() > MAX_OUTPUT_BYTES {
+                if result.len() > crate::limits::input_bytes() {
                     return Err(unsupported());
                 }
             }
@@ -492,7 +490,7 @@ fn python_repr(
         },
         _ => return Err(unsupported()),
     };
-    if result.len() > MAX_OUTPUT_BYTES {
+    if result.len() > crate::limits::input_bytes() {
         return Err(unsupported());
     }
     Ok(result)
@@ -505,7 +503,7 @@ fn write_json(
     ensure_ascii: bool,
     depth: usize,
 ) -> Result<(), Error> {
-    if depth > MAX_DEPTH || output.len() > MAX_OUTPUT_BYTES {
+    if depth > MAX_DEPTH || output.len() > crate::limits::input_bytes() {
         return Err(unsupported());
     }
     let newline = |output: &mut String, depth: usize| {
@@ -575,7 +573,7 @@ fn write_json(
             output.push('}');
         },
     }
-    if output.len() > MAX_OUTPUT_BYTES {
+    if output.len() > crate::limits::input_bytes() {
         return Err(unsupported());
     }
     Ok(())
@@ -659,7 +657,7 @@ fn methods(
             let size = replacements
                 .checked_mul(new.len())
                 .and_then(|added| text.len().checked_sub(replacements * old.len())?.checked_add(added))
-                .filter(|size| *size <= MAX_OUTPUT_BYTES)
+                .filter(|size| *size <= crate::limits::input_bytes())
                 .ok_or_else(unsupported)?;
             let result = text.replacen(old, new, limit);
             debug_assert_eq!(result.len(), size);
@@ -816,7 +814,7 @@ impl std::io::Write for Output {
         &mut self,
         bytes: &[u8],
     ) -> std::io::Result<usize> {
-        if bytes.len() > MAX_OUTPUT_BYTES.saturating_sub(self.bytes.len()) {
+        if bytes.len() > crate::limits::input_bytes().saturating_sub(self.bytes.len()) {
             self.too_large = true;
             return Err(std::io::ErrorKind::OutOfMemory.into());
         }
@@ -829,7 +827,7 @@ impl std::io::Write for Output {
 }
 
 pub fn evaluate(data: &[u8]) -> Result<Vec<u8>, Failure> {
-    if data.len() > MAX_REQUEST_BYTES {
+    if data.len() > crate::limits::wire_bytes() {
         return Err(Failure::Size);
     }
     check_integer_tokens(data)?;

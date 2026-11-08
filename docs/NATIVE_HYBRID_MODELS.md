@@ -574,9 +574,12 @@ paths described above when the checkpoint contains its trained head. The
 ordinary GLM GGUF path does not execute its MTP layer; the explicitly selected
 EXL3/FP8 profile and its qualification status are described in the
 [backend reference](validation/GLM_EXL3_BACKEND.md).
-The workers enforce the loaded model's configured context
-maximum and retain the 4,096-output-token cap; the upstream advertised maximum
-context is not a Stark memory qualification. A weight set fitting within 128 GiB does not establish
+The workers enforce the loaded model's configured context maximum after
+tokenization, without a separate 4,096-output-token cap. Omitted host output
+limits use remaining finite context; explicit limits are honored. The
+[automatic resource budget](WORKER_PROTOCOLS.md#resource-budget) and available
+memory still apply. The upstream advertised maximum context is not a Stark
+memory qualification. A weight set fitting within 128 GiB does not establish
 available memory for every context or concurrent application.
 
 Generation uses fresh state for every request unless the worker is started

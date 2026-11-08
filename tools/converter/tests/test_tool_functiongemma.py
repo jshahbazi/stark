@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from stark_convert import tool_functiongemma
 from stark_convert.chat import _ChatTemplate
 from stark_convert.tool_functiongemma import parse_functiongemma_calls
 
@@ -39,6 +40,12 @@ def assert_invalid(text, category=None):
         parse(text)
     if category is not None:
         assert raised.value.category == category
+
+
+@pytest.fixture
+def small_byte_budget(monkeypatch):
+    monkeypatch.setattr(tool_functiongemma, "_MAX_OUTPUT_BYTES", 512 * 1024)
+    monkeypatch.setattr(tool_functiongemma, "_MAX_ARGUMENT_BYTES", 64 * 1024)
 
 
 @pytest.mark.parametrize("fixture,expected", TEMPLATES.values())
@@ -189,7 +196,7 @@ def test_rejects_invalid_names_and_missing_terminators():
     assert_invalid("<start_function_call>call:f{value:<escape>unfinished}", "format")
 
 
-def test_rejects_nesting_node_argument_and_output_overlimits():
+def test_rejects_nesting_node_argument_and_output_overlimits(small_byte_budget):
     nested = "[" * 33 + "0" + "]" * 33
     assert_invalid(f"<start_function_call>call:f{{value:{nested}}}<end_function_call>", "limits")
     many = ",".join(f"k{i}:0" for i in range(9000))
@@ -208,7 +215,7 @@ def test_rejects_flat_scalar_node_overlimit_and_excess_call_count():
     assert_invalid(calls, "limits")
 
 
-def test_multibyte_argument_budget_uses_exact_utf8_byte_boundary():
+def test_multibyte_argument_budget_uses_exact_utf8_byte_boundary(small_byte_budget):
     opening = "{value:<escape>"
     closing = "<escape>}"
     fill_bytes = 64 * 1024 - len(opening.encode()) - len(closing.encode())
@@ -223,3 +230,10 @@ def test_multibyte_argument_budget_uses_exact_utf8_byte_boundary():
 
 def test_rejects_non_text_input():
     assert_invalid(None, "format")
+
+
+def test_shared_budget_accepts_string_larger_than_old_output_and_argument_caps():
+    value = "é" * (300 * 1024)
+    assert len(value.encode("utf-8")) > 512 * 1024
+    text = f"<start_function_call>call:f{{value:<escape>{value}<escape>}}<end_function_call>"
+    assert parse(text) == [("f", {"value": value})]

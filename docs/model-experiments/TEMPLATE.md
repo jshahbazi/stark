@@ -1,70 +1,94 @@
-# WORKSTREAM-YYYYMMDD-AREA-NNN: short model change or experiment title
+# Attempt ID: model and attempted change
 
-## Question and scope
+Use `YYYYMMDD-AREA-NN` or `WORKSTREAM-YYYYMMDD-AREA-NNN` for the attempt ID. Copy this template to a dated validation record or benchmark report. Replace every placeholder; use `not recorded`, `not run` or `not measured` when appropriate. Add the attempt to the [ledger](README.md). Adjust that link in the copied file: use `../../model-experiments/README.md` from `docs/archive/runs/`, or `../model-experiments/README.md` from `docs/benchmarks/`.
+
+## Identity and state
 
 | Field | Value |
 | --- | --- |
-| Registered / executed | Dates separately; retrospective entries must identify themselves |
-| Owner / PR | Author and implementation/review link |
-| Kind | Compatibility, correctness, precision, performance, memory, state/lifecycle or admission |
-| Problem / hypothesis | Observed defect and proposed explanation; distinguish facts from hypotheses |
-| Predecessor | Prior attempt ID and immutable evidence link, or none |
-| Exact target | Repository, immutable checkpoint revision, format and size |
-| Artifact identity | Weights/config/tokenizer/template/processor and conversion/preparation hashes |
+| Attempt ID / registered date / executed date / owner | Identify retrospective entries; registration does not establish the execution date |
+| Kind | Compatibility, correctness, memory, precision, kernel, sampling, prefix reuse or performance |
+| Attempt state | Proposed / attempted / completed / blocked / superseded |
+| Result and acceptance criterion | Planned/untested / passed / failed / invalid setup / resource-deferred / inconclusive / not measured; scope and criterion |
 | Evidence scope | Structural, operator/component, full-model numerical, lifecycle, quality or end-to-end timing |
+| Promotion decision | Promoted within named scope / default-off / diagnostic only / rejected / deferred / awaiting qualification |
+| Disposition | Experiment only / optional / adopted on branch / merged / released / installed / rejected / superseded |
+| Predecessor / related attempts / governing issue / PR | Link immutable evidence and the implementation/review PR |
 
-## Bound comparison
+## Hypothesis and change
+
+- Concrete problem, trigger and expected behavior:
+- Baseline and candidate difference:
+- Correctness metrics, fixed thresholds, controls and references set before the run:
+- Distinguish qualification artifacts and implementation sources from the source used to generate a reference:
+- Why the attempt was stopped, rejected or superseded, if applicable:
+
+## Artifact, source and environment
 
 | Field | Baseline | Candidate |
 | --- | --- | --- |
-| Source commit / tree / patch | | |
-| Executable / reference hashes | | |
-| Compiler, dependencies and flags | | |
-| Device, OS, memory and backend | | |
-| Weight / activation / accumulation / cache precision | | |
+| Model family, exact checkpoint and upstream revision | | |
+| Format/quantization and config/weight/tokenizer/processor/template hashes | | |
+| Backend, vendor revision and local patch provenance | | |
+| Stark commit, dirty patch/runtime manifest and executable hash | | |
+| Toolchains, dependency lock hashes and build flags | | |
+| Weight, activation, accumulation, recurrent-state and KV precision | | |
 | Selected kernel and materialization policies | | |
-| Context, input/output lengths and batch | | |
-| Sampler, seed, MTP/draft depth and prefix reuse | | |
+| Hardware, physical RAM, OS/driver/Metal toolchain | | |
+| Available headroom, observed peak memory and measurement method | | |
 
-Describe the one intended change and any unavoidable differences. Keep sources
-and qualification artifacts distinct from the source used to generate a
-reference. Write `not recorded` where evidence is unavailable.
+Do not repair historical identities using the current filesystem. Record missing/malformed identities and their effect on confidence.
 
-## Fixed gates and procedure
+## Workload and controls
 
-- Correctness metric, threshold, controls and reference; record these before
-  examining candidate results.
-- For speed: warm/cold/reuse state, paired order, repetitions, distributions and
-  eligible host screens. State the useful-work definition and measurement scope.
-- Memory admission, resource/time limits and stop conditions; identify owned
-  processes. Do not change another task's workers.
-- Relevant prefix-cache, MTP, cancellation, malformed-input and restart checks.
-- Privacy: only aggregate results and hashes enter committed output.
+- Task/mode and privacy-preserving corpus/fixture identifier/hash:
+- Exact input/context/output budgets; sampled versus emitted/useful-token definitions:
+- Sampling, seeds, stop rules, MTP/draft depth and other state-affecting options:
+- Cold/warm, loading/warmup exclusions, prefix-cache state and reused counts:
+- Run order, paired order, repeats, concurrency, deadlines and host-eligibility/paging screens:
+- Fixed memory/resource/time limits, stop conditions and owned processes; do not change another task's workers:
+- Exact command/config receipt identifier or hash; private artifacts stay ignored:
 
-## Results
+## Attempt history and failures
 
-| Control / arm | Eligibility | Baseline | Candidate | Gate / outcome | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| | | | | | |
+| Trial / source | What was attempted | Observation | Validity and disposition |
+| --- | --- | --- | --- |
+| | | | |
 
-Include failures, rejected arms, invalid setup and guard stops. Report precision
-counterexamples and excluded observations separately. Link immutable receipts,
-source-bound public aggregates and the canonical detailed run record. Do not
-include private evaluation content or raw logs.
+Include setup/admission/compile failures that block execution, numerical mismatches, regressions, invalid timing arms and discarded ideas. Distinguish a code-review risk from a reproduced runtime failure. Preserve invalidated results with the reason they cannot support a claim.
 
-## Decision and remaining work
+## Correctness and lifecycle
 
-| Field | Value |
-| --- | --- |
-| Outcome | Planned/untested, passed, failed, invalid setup, resource-deferred or inconclusive; name the exact gate |
-| Promotion | Promoted within named scope, default-off, diagnostic only, rejected, deferred or awaiting qualification |
-| What the result establishes | Exact supported statement |
-| What it leaves unverified | Other artifacts, full-model execution, quality, timing, host coverage or numerical domains |
-| Next test / owner | Concrete follow-up; include a blocker if it cannot run |
+- Reference, numerical tolerance and tested scope; aggregate errors/hashes:
+- Model-free versus actual artifact execution:
+- Prefix reuse support/restoration proof or concrete blocker, key/options and exactness:
+- Context/resource rejection, cancellation, timeout, reset/restart and same-worker recovery:
+- Buffer ownership, scratch lifetime, peak-state assumptions and device/index limits:
+- Tests actually run, their revision/configuration and ignored/skipped coverage:
+
+## Performance and memory
+
+| Metric and measurement boundary | Baseline | Candidate | Repeats/dispersion | Eligibility and conclusion |
+| --- | --- | --- | --- | --- |
+| Tokenization/rendering/planning | | | | |
+| First token / prefill | | | | |
+| Useful decode / end-to-end rate | | | | |
+| Observed peak memory / retained payload | | | | |
+
+Leave performance explicitly `not measured` when only functional tests were run. Separate component gains from whole-request gains; separate available-memory estimates, payload accounting, RSS and actual reservations. Record exclusions and regressions even when correctness passes.
+
+## Evidence, decision and limits
+
+- Source-bound public aggregates and private receipt hashes:
+- What worked, what did not, and which exact model/artifact/options each result covers:
+- Adoption/default decision and supporting commit/PR/build/installation evidence:
+- Untested models, formats, contexts, encoder paths, quality or lifecycle cases:
+- Next action and required evidence; link any superseding attempt without rewriting this result:
+
+Keep prompts, completions, token vectors, probabilities, credentials, exception dumps and model/private evaluation files out of this document.
 
 ## Follow-up history
 
-Append dated follow-ups and successor IDs. Preserve the original experiment and
-receipts. When a later attempt changes the conclusion or shipping decision,
-update the index with a link to that new evidence rather than rewriting the old
-measurements.
+Append dated follow-ups and successor IDs. Give each changed candidate or materially
+changed measurement recipe its own attempt or follow-up ID. Preserve original
+receipts; update the index with new evidence rather than rewriting measurements.

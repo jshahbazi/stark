@@ -7,9 +7,10 @@ import math
 import re
 from typing import Any
 
-from .api_tools import MAX_TOOL_RESULT_BYTES, normalize_calls, normalize_tool_options, validate_history
+from .api_tools import normalize_calls, normalize_tool_options, validate_history
 from .local_api import APIError
 from .media import MediaError, parse_image_url
+from .resource_budget import INPUT_BYTES
 
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _FIELDS = {
@@ -131,8 +132,6 @@ def _messages(value: Any, images: list | None = None) -> list[dict]:
             identifier = message.get("tool_call_id")
             if not isinstance(identifier, str) or not 1 <= len(identifier) <= 128:
                 raise _bad("Tool results require a bounded tool_call_id.")
-            if len(content.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
-                raise _bad("A tool result exceeds the 256 KiB byte limit.")
             normalized["tool_call_id"] = identifier
         elif "tool_call_id" in message:
             raise _bad("tool_call_id is supported only on tool-result messages.")
@@ -180,8 +179,10 @@ def parse_chat_request(
     aliases = [payload.get("max_tokens"), payload.get("max_completion_tokens")]
     if aliases[0] is not None and aliases[1] is not None:
         raise _bad("Choose one output token limit.")
-    maximum = next((x for x in aliases if x is not None), min(512, max_output))
-    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1 or maximum > max_output:
+    maximum = next((x for x in aliases if x is not None), None)
+    if maximum is not None and (
+        not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1 or maximum > max_output
+    ):
         raise _bad("Output token limit is outside the loaded model limit.")
     temperature = payload.get("temperature", 0)
     if temperature is None:
@@ -258,7 +259,7 @@ def parse_chat_request(
         else sum(len(part.get("text", "").encode("utf-8")) for part in (message["content"] or []))
         for message in messages
     ) + sum(len(message.get("reasoning_content", "").encode("utf-8")) for message in messages)
-    if text_bytes > 1024 * 1024:
+    if text_bytes > INPUT_BYTES:
         raise APIError(413, "Message text exceeds the request limit.", "text_too_large")
     for item in stop:
         _content(item)

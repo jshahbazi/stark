@@ -65,14 +65,23 @@ def executable(tmp_path):
     path = tmp_path / "fake worker"
     path.write_text(
         f"#!{sys.executable}\n"
-        "import json, sys, time\n"
+        "import json, os, sys, time\n"
+        "budget=int(os.environ.get('STARK_REQUEST_BUDGET_MIB','16'))*1024*1024\n"
+        "wire=6*budget+2*1024*1024\n"
         "print(json.dumps({'ready':True,'mode':'text-generation-v1',"
-        "'max_context_tokens':8192,'max_new_tokens':4096,'streaming':'text-delta-v1'}),flush=True)\n"
+        "'max_context_tokens':8192,'max_new_tokens':8192,'max_request_bytes':wire,"
+        "'streaming':'text-delta-v1'}),flush=True)\n"
         "for line in sys.stdin:\n"
         "    request=json.loads(line)\n"
+        "    if request['operation']=='plan_generation':\n"
+        "        context=min(request['context_tokens'],8192)\n"
+        "        print(json.dumps({'context_tokens':context,'max_new_tokens':context-request['input_tokens'],"
+        "'context_capacity_known':False,'budget_kind':'memory'}),flush=True); continue\n"
         "    if request['operation']=='tokenize': last_prompt=request['text']\n"
         "    if request['operation']=='generate' and 'wait fixture' in last_prompt: time.sleep(30)\n"
         "    if request['operation']=='generate' and 'failure fixture' in last_prompt: raise SystemExit(2)\n"
+        "    if request['operation']=='generate' and 'budget error fixture' in last_prompt:\n"
+        "        print(json.dumps({'error':'resource_budget_exceeded'}),flush=True); continue\n"
         "    if request.get('stream'):\n"
         "        p={'event':'progress','input_tokens':20,'sampled_tokens':0,"
         "'output_token_budget':request['max_new_tokens'],'elapsed_seconds':0.0,'prefill_seconds':None}\n"
@@ -313,6 +322,77 @@ def test_api_requests_publish_content_free_progress_to_the_app(desktop, model, m
     assert progress[1]["ttft_seconds"] == 0.2
     assert not progress[0]["calibrated"] and progress[3]["calibrated"]
     assert lifecycle(desktop) == ["generating", *["generation_progress"] * 3, "metrics", "ready"] * 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_finite_auto_uses_memory_admission_and_preserves_reported_capacity(desktop, model, stream):
+    running(desktop, model)
+    worker = desktop.worker
+    worker.generation_budget = True
+    original = worker.request
+    planned, generated = [], []
+
+    def request(payload, **options):
+        if payload["operation"] == "plan_generation":
+            planned.append(payload)
+            return {
+                "context_tokens": 1024,
+                "max_new_tokens": 1024 - payload["input_tokens"],
+                "context_capacity_known": True,
+                "budget_kind": "memory",
+            }
+        if payload["operation"] == "generate":
+            generated.append(payload)
+        return original(payload, **options)
+
+    with patch.object(worker, "request", side_effect=request):
+        desktop.api_complete(
+            {"messages": [{"role": "user", "content": "synthetic request"}], "stream": stream},
+            on_delta=(lambda _: None) if stream else None,
+        )
+    assert planned == [{"operation": "plan_generation", "input_tokens": 20, "context_tokens": 8192}]
+    assert generated[0]["context_tokens"] == 1024
+    assert generated[0]["max_new_tokens"] == 1004
+    assert desktop.api_models()[0]["context_length"] == 8192
+    assert desktop.api_models()[0]["context_capacity_known"] is True
+    assert desktop.worker is worker and worker.process.poll() is None
+
+
+def test_finite_auto_memory_rejection_keeps_worker_for_explicit_retry(desktop, model):
+    from stark_convert.chat import ChatRequestTooLarge
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    worker = desktop.worker
+    worker.generation_budget = True
+    original = worker.request
+
+    def request(payload, **options):
+        if payload["operation"] == "plan_generation":
+            raise ChatRequestTooLarge("Automatic execution cannot fit safely in available memory.")
+        return original(payload, **options)
+
+    with patch.object(worker, "request", side_effect=request):
+        with pytest.raises(APIError) as rejected:
+            desktop.api_complete({"messages": [{"role": "user", "content": "synthetic request"}]})
+        assert rejected.value.code == "request_too_large"
+        assert desktop.api_complete({"messages": [{"role": "user", "content": "synthetic retry"}], "max_tokens": 16})[
+            "choices"
+        ]
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert desktop.job is None
+
+
+def test_legacy_finite_auto_keeps_remaining_context_behavior(desktop, model):
+    running(desktop, model)
+    worker = desktop.worker
+    worker.generation_budget = False
+    with patch.object(worker, "request", wraps=worker.request) as request:
+        desktop.api_complete({"messages": [{"role": "user", "content": "synthetic request"}]})
+    assert all(call.args[0]["operation"] != "plan_generation" for call in request.call_args_list)
+    generated = [call.args[0] for call in request.call_args_list if call.args[0]["operation"] == "generate"]
+    assert generated[0]["context_tokens"] == 8192
+    assert generated[0]["max_new_tokens"] == 8172
 
 
 def test_serialized_api_requests_never_interleave_progress(desktop, model, monkeypatch):
@@ -1056,7 +1136,7 @@ def test_http_rejects_unknown_model_with_public_ids(desktop, model, stream):
         {"n": 2},
         {"tools": [{"type": "function", "function": {"name": "lookup"}}]},
         {"max_tokens": True},
-        {"max_tokens": 4097},
+        {"max_tokens": 8192},
         {"max_tokens": 1, "max_completion_tokens": 1},
         {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": "unsupported"}]}]},
         {"model": "unknown"},
@@ -1209,7 +1289,7 @@ def test_api_context_rejection_keeps_loaded_worker(desktop, model):
 
     identifier = running(desktop, model)
     process = desktop.worker.process
-    desktop.api_context = 21
+    desktop.api_context = 20
     with pytest.raises(APIError) as oversized:
         desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "hello"}]})
     assert oversized.value.code == "context_length_exceeded"
@@ -1219,11 +1299,16 @@ def test_api_context_rejection_keeps_loaded_worker(desktop, model):
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("overflow", ["ascii", "utf8", "template"])
-def test_http_worker_request_overflow_preserves_model_and_allows_retry(desktop, model, stream, overflow):
+def test_http_worker_request_overflow_preserves_model_and_allows_retry(desktop, model, stream, overflow, monkeypatch):
     from urllib.error import HTTPError
     from urllib.request import Request, urlopen
 
+    from stark_convert import chat
     from stark_convert.local_api import LocalAPI
+
+    # Keep the fixture bounded while exercising the worker's advertised and
+    # local minimum request ceilings.
+    monkeypatch.setattr(chat, "WIRE_BYTES", 16 * 1024)
 
     if overflow == "template":
         config_path = model / "config.json"
@@ -1236,7 +1321,7 @@ def test_http_worker_request_overflow_preserves_model_and_allows_retry(desktop, 
     worker = desktop.worker
     history = list(desktop.messages)
     payload = {"stream": stream, "messages": [{"role": "user", "content": ""}]}
-    limit = 1024 * 1024
+    limit = chat.WIRE_BYTES
     if overflow == "template":
         content = "x" * (limit // 2)
     else:
@@ -1275,11 +1360,14 @@ def test_http_worker_request_overflow_preserves_model_and_allows_retry(desktop, 
         api.close()
 
 
-def test_oversized_desktop_turn_preserves_model_and_allows_retry(desktop, model):
+def test_oversized_desktop_turn_preserves_model_and_allows_retry(desktop, model, monkeypatch):
+    from stark_convert import chat
+
+    monkeypatch.setattr(chat, "WIRE_BYTES", 2048)
     running(desktop, model)
     worker = desktop.worker
     history = list(desktop.messages)
-    desktop.dispatch({"command": "generate", "text": "x" * 1024 * 1024})
+    desktop.dispatch({"command": "generate", "text": "x" * 4096})
     finish(desktop)
     assert desktop.worker is worker and worker.process.poll() is None
     assert desktop.messages == history and desktop.job is None
@@ -1288,6 +1376,126 @@ def test_oversized_desktop_turn_preserves_model_and_allows_retry(desktop, model)
     finish(desktop)
     assert desktop.worker is worker and worker.process.poll() is None
     assert len(desktop.messages) == len(history) + 2
+
+
+def test_http_accepts_text_above_one_mib_within_shared_budget(desktop, model):
+    from urllib.request import Request, urlopen
+
+    from stark_convert.local_api import LocalAPI
+
+    running(desktop, model)
+    api = LocalAPI(desktop.api_models, desktop.api_complete, api_key="a" * 64, port=0, cancellable=True)
+    details = api.start()
+    body = json.dumps(
+        {"messages": [{"role": "user", "content": "x" * (1024 * 1024 + 4096)}]},
+        separators=(",", ":"),
+    ).encode()
+    assert len(body) > 1024 * 1024
+    try:
+        request = Request(
+            details["base_url"] + "/chat/completions",
+            data=body,
+            headers={"Authorization": "Bearer " + "a" * 64, "Content-Type": "application/json"},
+        )
+        with urlopen(request, timeout=10) as response:
+            result = json.loads(response.read())
+        assert result["choices"][0]["message"]["content"] == "synthetic answer"
+    finally:
+        api.close()
+
+
+def test_output_limit_above_4096_reaches_worker(desktop, model):
+    running(desktop, model)
+    assert desktop.output_limit > 4096
+    desktop.dispatch(advanced_options(context_tokens=8192, max_new_tokens=5000))
+    finish(desktop)
+    assert desktop.maximum == 5000
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.infer([{"role": "user", "content": "large output limit fixture"}], 5000, context=8192)
+    generated = [call.args[0] for call in request.call_args_list if call.args[0].get("operation") == "generate"]
+    assert generated, events(desktop)
+    generate = generated[-1]
+    assert generate["max_new_tokens"] == 5000
+
+
+def test_api_default_output_uses_remaining_finite_context(desktop, model):
+    running(desktop, model)
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.api_complete({"messages": [{"role": "user", "content": "automatic API output fixture"}]})
+    generate = [call.args[0] for call in request.call_args_list if call.args[0].get("operation") == "generate"][-1]
+    assert generate["max_new_tokens"] == 8172
+
+
+def test_api_default_output_plans_unknown_context_without_user_options(desktop, model):
+    from stark_convert.chat import Worker
+
+    identifier = installed(desktop, model)
+    read = Worker.read
+
+    def unknown_ready(worker, *args, **kwargs):
+        reply = read(worker, *args, **kwargs)
+        if reply.get("ready") is True:
+            reply["max_context_tokens"] = 0xFFFFFFFF
+            reply["generation_budget"] = "memory-context-v1"
+        return reply
+
+    with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=unknown_ready):
+        desktop.dispatch({"command": "run", "model_id": identifier})
+        finish(desktop)
+    worker = desktop.worker
+    with patch.object(worker, "request", wraps=worker.request) as request:
+        desktop.api_complete({"messages": [{"role": "user", "content": "unknown API output fixture"}]})
+    generated = [call.args[0] for call in request.call_args_list if call.args[0].get("operation") == "generate"][-1]
+    planned = [call.args[0] for call in request.call_args_list if call.args[0].get("operation") == "plan_generation"]
+    assert planned[0]["input_tokens"] == 20
+    assert generated["context_tokens"] == 8192
+    assert generated["max_new_tokens"] == 8172
+    assert desktop.api_models()[0]["context_length"] is None
+    assert desktop.worker is worker and worker.process.poll() is None
+
+
+def test_unknown_context_playground_auto_uses_memory_plan_without_unloading_worker(desktop, model):
+    from stark_convert.chat import Worker
+
+    identifier = installed(desktop, model)
+    read = Worker.read
+
+    def unknown_ready(worker, *args, **kwargs):
+        reply = read(worker, *args, **kwargs)
+        if reply.get("ready") is True:
+            reply["max_context_tokens"] = 0xFFFFFFFF
+            reply["generation_budget"] = "memory-context-v1"
+        return reply
+
+    with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=unknown_ready):
+        desktop.dispatch({"command": "run", "model_id": identifier})
+        finish(desktop)
+    worker = desktop.worker
+    history = list(desktop.messages)
+    desktop.dispatch({"command": "generate", "text": "unknown automatic output fixture"})
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert len(desktop.messages) == len(history) + 2
+    desktop.dispatch(advanced_options(context_tokens=2048, max_new_tokens=0))
+    history = list(desktop.messages)
+    desktop.dispatch({"command": "generate", "text": "finite automatic output fixture"})
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert len(desktop.messages) == len(history) + 2
+
+
+def test_resource_budget_error_keeps_loaded_model_and_history(desktop, model):
+    running(desktop, model)
+    worker = desktop.worker
+    history = list(desktop.messages)
+    desktop.dispatch({"command": "generate", "text": "budget error fixture"})
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert desktop.messages == history
+    assert any(event["event"] == "error" and "resource budget" in event["message"] for event in events(desktop))
+    desktop.dispatch({"command": "generate", "text": "short retry fixture"})
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
 
 
 def test_api_sampling_limits_aliases_and_message_parts(desktop, model):
@@ -1426,6 +1634,7 @@ def score_executable(tmp_path):
         "               'input_tokens':len(request['input_token_ids']),\n"
         "               'temperature':request['temperature'],'truncated':False}\n"
         "        if 'context fixture' in prompt: reply={'error':'context_overflow'}\n"
+        "        if 'resource fixture' in prompt: reply={'error':'resource_budget_exceeded'}\n"
         "    print(json.dumps(reply),flush=True)\n"
     )
     path.chmod(0o755)
@@ -1575,6 +1784,21 @@ def test_native_model_context_rejection_preserves_worker_and_allows_retry(deskto
     assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
 
 
+def test_decision_memory_rejection_preserves_worker_and_allows_retry(desktop, model, score_executable):
+    running_decision(desktop, model, score_executable)
+    worker = desktop.worker
+    desktop.dispatch(decision_command(text="resource fixture"))
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert not any(event["event"] == "decision" for event in events(desktop))
+    assert any("resource budget" in event.get("message", "") for event in events(desktop))
+    assert desktop.job is None
+    desktop.dispatch(decision_command())
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
+
+
 def test_open_reasoning_boundary_is_recoverable_and_does_not_write_to_worker(desktop, model, score_executable):
     from jinja2.sandbox import ImmutableSandboxedEnvironment
 
@@ -1679,7 +1903,7 @@ def test_advanced_options_model_default_empty_override_and_restart(desktop, mode
     assert desktop.thinking is False
     replacement = Desktop(desktop.executable, desktop.data_dir, io.StringIO())
     assert replacement.system_prompt is None
-    assert (replacement.context, replacement.maximum, replacement.thinking) == (None, 512, False)
+    assert (replacement.context, replacement.maximum, replacement.thinking) == (None, 0, False)
     assert replacement.context_override is None
 
 
@@ -1692,9 +1916,8 @@ def test_advanced_options_model_default_empty_override_and_restart(desktop, mode
         {"context_tokens": 100.5},
         {"context_tokens": "2048"},
         {"context_tokens": None},
-        {"max_new_tokens": 0},
         {"max_new_tokens": -1},
-        {"max_new_tokens": 4097},
+        {"max_new_tokens": 8192},
         {"max_new_tokens": 2048},
         {"max_new_tokens": False},
         {"max_new_tokens": float("nan")},
@@ -1710,7 +1933,7 @@ def test_advanced_options_invalid_changes_are_atomic(desktop, model, overrides):
     with pytest.raises(DesktopError, match="Invalid advanced options"):
         desktop.dispatch(advanced_options(**overrides))
     assert desktop.messages == before
-    assert (desktop.context, desktop.maximum, desktop.thinking, desktop.system_prompt) == (8192, 512, False, None)
+    assert (desktop.context, desktop.maximum, desktop.thinking, desktop.system_prompt) == (8192, 0, False, None)
     assert not any(e["event"] == "configured" for e in events(desktop))
 
 
@@ -2235,7 +2458,7 @@ def test_advanced_mtp_rejections_preserve_all_options_and_conversation(desktop, 
     assert desktop.messages == before
     assert desktop.registry.read_bytes() == registry
     assert "mtp_enabled" not in desktop.models[0]
-    assert (desktop.context, desktop.maximum, desktop.thinking, desktop.system_prompt) == (8192, 512, False, None)
+    assert (desktop.context, desktop.maximum, desktop.thinking, desktop.system_prompt) == (8192, 0, False, None)
 
 
 @pytest.mark.parametrize("invalid", [None, 0, 1, "true", [], {}])
