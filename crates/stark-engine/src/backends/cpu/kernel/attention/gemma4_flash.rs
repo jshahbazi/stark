@@ -101,9 +101,22 @@ pub fn gemma4_vision_flash_exp_bf16(
         let total = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3]);
         unsafe {
             *state.add(row * 3) = maximum;
-            *state.add(row * 3 + 1) = total + factor * previous_sum;
+            *state.add(row * 3 + 1) = factor.mul_add(previous_sum, total);
             *state.add(row * 3 + 2) = factor;
         }
+    }
+}
+
+/// Model-free diagnostic for the exact finish reciprocal; unused in production.
+#[kernel(Gemma4VisionFlashReciprocalF32)]
+pub fn gemma4_vision_flash_reciprocal_f32(
+    state: *const f32,
+    inverse: *mut f32,
+    query_rows: u32,
+    heads: u32,
+) {
+    for row in 0..(query_rows * heads) as usize {
+        unsafe { *inverse.add(row) = (*state.add(row * 3 + 1)).recip() };
     }
 }
 

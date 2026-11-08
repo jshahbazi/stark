@@ -97,3 +97,23 @@ The updated model-free manifest SHA-256 is
 New native score and all-head-prefix tests, plus full attention/feature replay,
 are pending for this source-only QK checkpoint. E2B/E4B, unified 12B, text and
 all BF16-output dense projections retain their paths and all gates remain fixed.
+
+The affected-row diagnostic on sealed source `a1649a6a` isolates six image query
+rows: CPU differs in one BF16 value, while Metal differs in six. Direct pinned
+Torch Flash matches the frozen outputs for these rows with 1, 2 and 4 CPU
+threads and both original-like and head-contiguous strides. Thus source query
+batching does not explain the mismatch. An independent CPU equation control
+has one difference with a separately rounded denominator update and none with
+`fmaf(factor, previous_sum, tile_sum)`. Prior PV rescaling stays separately
+rounded before the dot/add, matching the source loop structure.
+The private control report SHA-256 is
+`714fec6d7d3d839959d9e374380ac905a754b81e92363d39cb16d7beeb23072d`.
+
+The next candidate makes only that larger-Flash denominator contraction explicit
+on CPU and Metal. Native validation is pending. A diagnostic-only reciprocal
+kernel and no-op observer support private F32 QK/state/PV, BF16 exponential and
+F32 reciprocal traces for only affected row/head pairs. Trace storage is capped
+at 256 KiB per backend and reuses the existing canonical tensors; it introduces
+no new oracle, large fixture or production scratch plane. Only aggregate counts
+and hashes are printed. The remaining Metal-specific differences still require
+these controls before any additional arithmetic change.

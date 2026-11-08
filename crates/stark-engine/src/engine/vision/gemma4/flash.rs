@@ -38,6 +38,28 @@ impl<B: Backend> FlashAttention<B> {
         heads: u32,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
+        self.encode_with_observer(q, k, v, query_rows, key_rows, heads, commands, &mut |_, _, _, _| Ok(()))
+    }
+
+    pub(super) fn encode_with_observer<F>(
+        &self,
+        q: &B::ScratchBuffer,
+        k: &B::ScratchBuffer,
+        v: &B::ScratchBuffer,
+        query_rows: u32,
+        key_rows: u32,
+        heads: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        observer: &mut F,
+    ) -> Result<B::ScratchBuffer, B::Error>
+    where
+        F: FnMut(
+            &'static str,
+            u32,
+            &B::ScratchBuffer,
+            &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        ) -> Result<(), B::Error>,
+    {
         if query_rows == 0 || query_rows > 2520 || key_rows == 0 || key_rows > 2520 || heads == 0 || heads > 16 {
             return Err(InvalidInput("larger Gemma source attention geometry outside bounds").into());
         }
@@ -57,8 +79,12 @@ impl<B: Backend> FlashAttention<B> {
         let mut accumulator = commands.allocate_scratch_for_shape(&[heads, query_rows, 72], DataType::F32)?;
         for key_start in (0..key_rows).step_by(512) {
             self.qk.encode(q, k, &mut scores, query_rows, key_rows, heads, key_start, commands);
+            observer("qk", key_start, &scores, commands)?;
             self.exp.encode(&scores, &mut exponents, &mut state, query_rows, heads, key_start, commands);
+            observer("exp", key_start, &exponents, commands)?;
+            observer("state", key_start, &state, commands)?;
             self.pv.encode(&exponents, v, &state, &mut accumulator, query_rows, key_rows, heads, key_start, commands);
+            observer("pv", key_start, &accumulator, commands)?;
         }
         let mut output = commands.allocate_scratch_for_shape(&[query_rows, heads, 72], DataType::BF16)?;
         self.finish.encode(&accumulator, &state, &mut output, query_rows, heads, commands);

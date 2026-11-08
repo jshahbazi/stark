@@ -314,7 +314,10 @@ fn checkpoint_flash_rows<B: Backend>(
     selected_rows: &[usize],
     label: &str,
 ) -> Value {
-    use crate::tests::helpers::{buffer_to_vec, create_buffer_with_data};
+    use crate::{
+        backends::common::{Kernels, kernel::Gemma4VisionFlashReciprocalF32Kernel},
+        tests::helpers::{buffer_to_vec, create_buffer_with_data},
+    };
     let root = PathBuf::from(std::env::var_os("STARK_GEMMA4_FIXTURE_PATH").unwrap());
     let manifest: Value = serde_json::from_slice(&read(&root, "manifest.json")).unwrap();
     assert_eq!(manifest["stage_focus"], "first-layer-full-attention");
@@ -373,6 +376,29 @@ fn checkpoint_flash_rows<B: Backend>(
         .flat_map(|row| source_attention[*row * 1152..(*row + 1) * 1152].iter().copied())
         .collect::<Vec<_>>();
     let attention = super::super::flash::FlashAttention::<B>::new(&context).unwrap();
+    let pairs = if label == "affected" {
+        let coordinates: Vec<[usize; 3]> =
+            serde_json::from_slice(&std::fs::read(root.join("native-full-attention-coordinates.json")).unwrap())
+                .unwrap();
+        coordinates
+            .into_iter()
+            .map(|[row, head, _]| {
+                assert!(head < 16);
+                (selected_rows.iter().position(|value| *value == row).unwrap(), head)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    assert!(pairs.len() <= 6);
+    let reciprocal = if pairs.is_empty() {
+        None
+    } else {
+        Some(<B::Kernels as Kernels>::Gemma4VisionFlashReciprocalF32Kernel::new(&context).unwrap())
+    };
+    let mut traces = Vec::new();
     let mut command = context.create_command_buffer(None, None).unwrap();
     let mut q = command.allocate_scratch_for_shape(&[16, query_rows as u32, 128], DataType::BF16).unwrap();
     let mut k = command.allocate_scratch_for_shape(&[key_rows as u32, 16, 128], DataType::BF16).unwrap();
@@ -380,7 +406,44 @@ fn checkpoint_flash_rows<B: Backend>(
     command.encode_copy(&inputs[0], &mut q);
     command.encode_copy(&inputs[1], &mut k);
     command.encode_copy(&inputs[2], &mut v);
-    let output = attention.encode(&q, &k, &v, query_rows as u32, key_rows as u32, 16, &mut command).unwrap();
+    let mut observer = |tag: &'static str,
+                        key_start: u32,
+                        value: &B::ScratchBuffer,
+                        command: &mut <B::CommandBuffer as crate::backends::common::CommandBuffer>::Encoding|
+     -> Result<(), B::Error> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let (stride, bytes, bf16) = match tag {
+            "qk" => (512 * 4, 512 * 4, false),
+            "exp" => (512 * 2, 512 * 2, true),
+            "state" => (3 * 4, 3 * 4, false),
+            "pv" => (72 * 4, 72 * 4, false),
+            _ => return Ok(()),
+        };
+        for (index, (row, head)) in pairs.iter().enumerate() {
+            let offset = (head * query_rows + row) * stride;
+            assert!(offset + bytes <= value.size());
+            let mut output = context.create_buffer(bytes)?;
+            command.encode_copy(value.subrange(offset..offset + bytes), &mut output);
+            traces.push((tag, key_start, index, bf16, output));
+        }
+        if tag == "state" {
+            let mut inverse = command.allocate_scratch_for_shape(&[16, query_rows as u32], DataType::F32)?;
+            reciprocal.as_ref().unwrap().encode(value, &mut inverse, query_rows as u32, 16, command);
+            for (index, (row, head)) in pairs.iter().enumerate() {
+                let offset = (head * query_rows + row) * 4;
+                let mut output = context.create_buffer(4)?;
+                command.encode_copy(inverse.subrange(offset..offset + 4), &mut output);
+                traces.push(("reciprocal", key_start, index, false, output));
+            }
+        }
+        Ok(())
+    };
+    let output = attention
+        .encode_with_observer(&q, &k, &v, query_rows as u32, key_rows as u32, 16, &mut command, &mut observer)
+        .unwrap();
+    drop(observer);
     let mut readback = context.create_buffer(query_rows * 1152 * 2).unwrap();
     command.encode_copy(&output, &mut readback);
     command.end_encoding().submit().wait_until_completed().unwrap();
@@ -391,8 +454,40 @@ fn checkpoint_flash_rows<B: Backend>(
     } else {
         "checkpoint-flash-affected-query-rows"
     };
-    let report = json!({"scope":scope,"backend":B::NAME,"query_rows":query_rows,"heads":16,
+    let mut report = json!({"scope":scope,"backend":B::NAME,"query_rows":query_rows,"heads":16,
         "different_bf16_elements":different,"metrics":compare(&actual,&expected)});
+    if !pairs.is_empty() {
+        let mut records = Vec::new();
+        let mut total = 0;
+        for (tag, key_start, pair, bf16, buffer) in traces {
+            let bytes = if bf16 {
+                buffer_to_vec::<B, half::bf16>(&buffer)
+                    .into_iter()
+                    .flat_map(|value| value.to_bits().to_le_bytes())
+                    .collect::<Vec<_>>()
+            } else {
+                buffer_to_vec::<B, f32>(&buffer).into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>()
+            };
+            total += bytes.len();
+            assert!(total <= 256 * 1024, "private trace byte cap exceeded");
+            let name = format!(
+                "flash-trace-{}-{key_start}-{pair}-{tag}.{}",
+                B::NAME,
+                if bf16 {
+                    "bf16"
+                } else {
+                    "f32"
+                }
+            );
+            std::fs::write(root.join(&name), &bytes).unwrap();
+            records.push(json!({"file":name,"pair":pair,"key_start":key_start,"stage":tag,"dtype":if bf16{"bf16"}else{"f32"},"sha256":format!("{:x}",Sha256::digest(&bytes))}));
+        }
+        let metadata = json!({"scope":"private-affected-flash-f32-trace","backend":B::NAME,"pairs":pairs.iter().map(|(row,head)|json!({"image_patch_row":selected_rows[*row],"head":head})).collect::<Vec<_>>(),"bytes":total,"records":records});
+        let bytes = serde_json::to_vec_pretty(&metadata).unwrap();
+        std::fs::write(root.join(format!("flash-trace-{}.json", B::NAME)), &bytes).unwrap();
+        report["trace_manifest_sha256"] = json!(format!("{:x}", Sha256::digest(&bytes)));
+        report["trace_bytes"] = json!(total);
+    }
     std::fs::write(
         root.join(format!("native-{label}-flash-{}.json", B::NAME)),
         serde_json::to_vec_pretty(&report).unwrap(),
