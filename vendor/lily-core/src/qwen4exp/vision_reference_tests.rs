@@ -144,6 +144,21 @@ fn rotary_source_metrics(
     pass.commit_wait().unwrap();
     let values = stages.to_f32().unwrap();
     let inverse = inv.to_f32().unwrap();
+    let rust_inverse = (0..18)
+        .map(|index| 1.0_f32 / 10000_f32.powf((2 * index) as f32 / 36.0))
+        .collect::<Vec<_>>();
+    let mut host_angles = Vec::with_capacity(n * 36);
+    for row in 0..n {
+        let ih = (row / 2) % 2;
+        let iw = row % 2;
+        let bh = row / (4 * (gw / 2));
+        let bw = (row / 4) % (gw / 2);
+        for index in 0..36 {
+            let position = if index < 18 { 2 * bh + ih } else { 2 * bw + iw };
+            host_angles.push(position as f32 * inv_expected[index % 18]);
+        }
+    }
+    let (sleef_cos, sleef_sin) = super::source_math::vision_sin_cos(&host_angles);
     let plane = n * 36;
     let pairs = [
         (&inverse[..], &inv_expected[..]),
@@ -152,6 +167,10 @@ fn rotary_source_metrics(
         (&values[2 * plane..3 * plane], &sin_expected[..]),
         (&values[3 * plane..4 * plane], &cos_expected[..]),
         (&values[4 * plane..5 * plane], &sin_expected[..]),
+        (&rust_inverse[..], &inv_expected[..]),
+        (&host_angles[..], &angles[..]),
+        (&sleef_cos[..], &cos_expected[..]),
+        (&sleef_sin[..], &sin_expected[..]),
     ];
     let stage_metrics = pairs.iter().enumerate().map(|(index,(actual,reference))| {
         let mut error=0_f64; let mut norm=0_f64; let mut mismatches=0; let mut ulps=0;
@@ -183,6 +202,15 @@ fn rotary_source_metrics(
         DType::BF16,
     )
     .unwrap();
+    let sleef_applied = Tensor::from_bytes(
+        context,
+        bytemuck::cast_slice(input),
+        &[n, 3456],
+        DType::BF16,
+    )
+    .unwrap();
+    let sleef_cos_tensor = tensor(&sleef_cos, &[n, 36]);
+    let sleef_sin_tensor = tensor(&sleef_sin, &[n, 36]);
     let pass = context.begin().unwrap();
     crate::kernels::vision::rotary_apply_reference(
         context,
@@ -211,7 +239,17 @@ fn rotary_source_metrics(
         n,
     )
     .unwrap();
+    crate::kernels::vision::rotary_apply_reference(
+        context,
+        &pass,
+        &sleef_applied,
+        &sleef_cos_tensor,
+        &sleef_sin_tensor,
+        n,
+    )
+    .unwrap();
     pass.commit_wait().unwrap();
+    let sleef_applied = sleef_applied.to_f32().unwrap();
     let exact_angle_applied = exact_angle_applied.to_f32().unwrap();
     let source_applied = source_applied.to_f32().unwrap();
     let native_applied = native_applied.to_f32().unwrap();
@@ -230,9 +268,14 @@ fn rotary_source_metrics(
         .zip(expected)
         .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
         .count();
+    let sleef_mismatches = sleef_applied
+        .iter()
+        .zip(expected)
+        .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
+        .count();
     println!(
         "{}",
-        json!({"private_retained_rotary_stage_metrics":{"patches":n,"stages":stage_metrics,"source_application_mismatch_count":source_mismatches,"native_application_observer_mismatch_count":observer_mismatches,"source_angle_native_trig_mismatch_count":exact_angle_mismatches}})
+        json!({"private_retained_rotary_stage_metrics":{"patches":n,"stages":stage_metrics,"source_application_mismatch_count":source_mismatches,"native_application_observer_mismatch_count":observer_mismatches,"source_angle_native_trig_mismatch_count":exact_angle_mismatches,"sleef_application_mismatch_count":sleef_mismatches}})
     );
     assert_eq!(
         source_mismatches, 0,
