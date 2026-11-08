@@ -189,3 +189,14 @@ is retained privately, SHA-256
 This is finite numerical evidence with a known counterexample, not universal
 libm emulation. Native source-bit controls and the unchanged three full-feature
 gates remain pending for this source-only candidate.
+
+Sealed `e5dade43` subsequently passes both new 8,220-case source-bit controls,
+both retained nearest-policy controls, all four Flash/F32-QK controls and both
+blue/layer-3 prefix pairs. Full blue first-layer and pattern layer-3 attention
+are now bit-exact, including same-canonical-input replay. All three unchanged
+full-feature gates pass with relative RMS `0.00102444–0.00110689` and exact
+patches. The [final component record](2026-11-07-gemma4-larger-vision-qualified-component.md)
+preserves executable/source/weight/receipt hashes, full metrics and remaining
+qualification limits. The known broad one-ULP scalar counterexample and every
+earlier failed replay remain preserved. Full decoder/generation and released
+26B weights remain separately unqualified.
