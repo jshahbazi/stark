@@ -2,8 +2,9 @@
 
 The implementation adds dense and sparse affine native paths and an explicit
 retained Flash-Next path. The three representative artifacts below passed local
-worker image lifecycle checks. Full decoder numerical qualification remains
-in progress; the small packed reference currently fails the unchanged gate.
+worker image lifecycle checks. Both small packed dense reference cases now
+match the source logits bit for bit on the recorded production path. Full
+decoder numerical parity for the larger artifacts remains unverified.
 
 ## Dense affine Qwen3.5 and Qwen3.8-27B
 
