@@ -1,4 +1,4 @@
-// Test-only source-compatible trigonometric control copied from Stark main.
+// Source-compatible vision trigonometry copied from the measured Stark main body.
 // Copyright Naoki Shibata and contributors 2010 - 2024.
 // Distributed under the Boost Software License, Version 1.0.
 // See scripts/licenses/distribution/sleef-LICENSE.txt.

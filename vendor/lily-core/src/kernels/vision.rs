@@ -18,6 +18,44 @@ pub const ATTN_D: usize = 72;
 const ATTN_BQ: usize = 32;
 const ATTN_THREADS: usize = 128;
 
+pub(crate) fn qkv_rope_coefficients_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    gh: usize,
+    gw: usize,
+) -> Result<()> {
+    ensure!(qkv.shape().len() == 2, "vision rotary rank");
+    let n = qkv.shape()[0];
+    check_grid(n, gh, gw)?;
+    ensure!(
+        n <= 8192
+            && qkv.shape()[1] == 3456
+            && cos.shape() == [n, 36]
+            && sin.shape() == [n, 36],
+        "vision rotary coefficient bounds"
+    );
+    ensure!(
+        qkv.dtype() == DType::BF16
+            && cos.dtype() == DType::F32
+            && sin.dtype() == DType::F32,
+        "vision rotary coefficient dtype"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_qkv_rope_bf16_compat",
+        include_str!("metal/vision_rotary.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[qkv.binding(), cos.binding(), sin.binding()],
+        &[Param::U32(1152), Param::U32(72)],
+        Grid::Threads { grid: (1152, n, 1), threadgroup: (256, 1, 1) },
+    )
+}
+
 /// The measured retained-width Torch Welford/affine operation, vision only.
 pub(crate) fn layernorm_vision_bf16(
     ctx: &MetalContext,

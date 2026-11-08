@@ -159,6 +159,8 @@ fn rotary_source_metrics(
         }
     }
     let (sleef_cos, sleef_sin) = super::source_math::vision_sin_cos(&host_angles);
+    let (production_cos, production_sin) =
+        super::rotary_coefficients(n / gw, gw).unwrap();
     let plane = n * 36;
     let pairs = [
         (&inverse[..], &inv_expected[..]),
@@ -171,6 +173,8 @@ fn rotary_source_metrics(
         (&host_angles[..], &angles[..]),
         (&sleef_cos[..], &cos_expected[..]),
         (&sleef_sin[..], &sin_expected[..]),
+        (&production_cos[..], &cos_expected[..]),
+        (&production_sin[..], &sin_expected[..]),
     ];
     let stage_metrics = pairs.iter().enumerate().map(|(index,(actual,reference))| {
         let mut error=0_f64; let mut norm=0_f64; let mut mismatches=0; let mut ulps=0;
@@ -211,6 +215,15 @@ fn rotary_source_metrics(
     .unwrap();
     let sleef_cos_tensor = tensor(&sleef_cos, &[n, 36]);
     let sleef_sin_tensor = tensor(&sleef_sin, &[n, 36]);
+    let production_applied = Tensor::from_bytes(
+        context,
+        bytemuck::cast_slice(input),
+        &[n, 3456],
+        DType::BF16,
+    )
+    .unwrap();
+    let production_cos_tensor = tensor(&production_cos, &[n, 36]);
+    let production_sin_tensor = tensor(&production_sin, &[n, 36]);
     let pass = context.begin().unwrap();
     crate::kernels::vision::rotary_apply_reference(
         context,
@@ -248,7 +261,18 @@ fn rotary_source_metrics(
         n,
     )
     .unwrap();
+    crate::kernels::vision::qkv_rope_coefficients_bf16(
+        context,
+        &pass,
+        &production_applied,
+        &production_cos_tensor,
+        &production_sin_tensor,
+        n / gw,
+        gw,
+    )
+    .unwrap();
     pass.commit_wait().unwrap();
+    let production_applied = production_applied.to_f32().unwrap();
     let sleef_applied = sleef_applied.to_f32().unwrap();
     let exact_angle_applied = exact_angle_applied.to_f32().unwrap();
     let source_applied = source_applied.to_f32().unwrap();
@@ -273,9 +297,14 @@ fn rotary_source_metrics(
         .zip(expected)
         .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
         .count();
+    let production_mismatches = production_applied
+        .iter()
+        .zip(expected)
+        .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
+        .count();
     println!(
         "{}",
-        json!({"private_retained_rotary_stage_metrics":{"patches":n,"stages":stage_metrics,"source_application_mismatch_count":source_mismatches,"native_application_observer_mismatch_count":observer_mismatches,"source_angle_native_trig_mismatch_count":exact_angle_mismatches,"sleef_application_mismatch_count":sleef_mismatches}})
+        json!({"private_retained_rotary_stage_metrics":{"patches":n,"stages":stage_metrics,"source_application_mismatch_count":source_mismatches,"native_application_observer_mismatch_count":observer_mismatches,"source_angle_native_trig_mismatch_count":exact_angle_mismatches,"sleef_application_mismatch_count":sleef_mismatches,"production_mismatch_count":production_mismatches}})
     );
     assert_eq!(
         source_mismatches, 0,
@@ -284,6 +313,14 @@ fn rotary_source_metrics(
     assert_eq!(
         observer_mismatches, 0,
         "private rotary stages perturb the safe witness"
+    );
+    assert_eq!(
+        production_mismatches, 0,
+        "private vision rotary exceeds exact source gate"
+    );
+    assert!(
+        stage_metrics[10..12].iter().all(|metric| metric["mismatch_count"] == 0),
+        "private vision rotary coefficients exceed exact source gate"
     );
 }
 
@@ -376,6 +413,7 @@ fn first_block_metrics(
     let merged = s.merged.view(0, &[n / 4, vision.out_hidden_size]).unwrap();
     let cast = pixels.iter().map(|value| bf16::from_f32(*value)).collect::<Vec<_>>();
     px.write_bytes(bytemuck::cast_slice(&cast)).unwrap();
+    let rotary = prepare_rotary(s, gh, gw).unwrap();
     let block = &weights.blocks[0];
     let mut metrics = Vec::new();
     macro_rules! stage {
@@ -423,15 +461,13 @@ fn first_block_metrics(
         &qkv,
         32
     ));
-    stage!(qkv, "rotary", "output", |pass| qkv_rope_2d_bf16(
-        context,
-        pass,
-        &qkv,
-        vision.num_heads,
-        gh,
-        gw,
-        ROPE_THETA
-    ));
+    stage!(qkv, "rotary", "output", |pass| if let Some((cos, sin)) = &rotary {
+        crate::kernels::vision::qkv_rope_coefficients_bf16(
+            context, pass, &qkv, cos, sin, gh, gw,
+        )
+    } else {
+        qkv_rope_2d_bf16(context, pass, &qkv, vision.num_heads, gh, gw, ROPE_THETA)
+    });
     stage!(attn, "attention", "output", |pass| attention_full_bf16(
         context,
         pass,
