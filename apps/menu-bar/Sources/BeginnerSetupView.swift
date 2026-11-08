@@ -493,7 +493,9 @@ struct BeginnerSetupView: View {
             DisclosureGroup("Model details") {
                 VStack(alignment: .leading, spacing: 8) {
                     if !choice.qualification.isEmpty { Text(choice.qualification) }
-                    if let url = choice.benchmarkSourceURL { Link("Benchmark source", destination: url) }
+                    if let url = choice.benchmarkSourceURL {
+                        Link(destination: url) { Text("Benchmark source").underline() }.foregroundStyle(.tint)
+                    }
                 }.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.top, 8)
             }.font(.caption)
         }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
