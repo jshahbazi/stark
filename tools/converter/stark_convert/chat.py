@@ -27,6 +27,7 @@ from .template_runtime import (
     TemplateRuntimeError,
     TemplateSizeLimit,
 )
+from .tool_protocols import runtime_template_source
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
     LILY_FAMILY_PROFILE,
@@ -106,6 +107,9 @@ class ChatImageError(ChatError):
 
 
 class _ChatTemplate(IsolatedTemplate):
+    def __init__(self, source):
+        super().__init__(runtime_template_source(source))
+
     def render_with_cancellation(self, cancelled, **arguments):
         try:
             return super().render_with_cancellation(cancelled, **arguments)

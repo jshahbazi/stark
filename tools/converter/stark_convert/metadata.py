@@ -16,7 +16,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,6 +25,7 @@ from tokenizers import AddedToken, Tokenizer
 from stark_convert.profiles import GENERIC_PROFILE
 from stark_convert.registry import CONFIG_ADAPTERS, get_model, models
 from stark_convert.streaming import ConversionError, authorize_source_path, read_json, read_regular_bytes
+from stark_convert.template_compat import GENERATION_BLOCK_TAG as _GENERATION_BLOCK_TAG
 
 __all__ = ["SUPPORTED_METADATA_REPOS", "UnsupportedMetadata", "write_metadata"]
 
@@ -34,7 +34,6 @@ _OPTIONAL_THINKING_OUTPUT_PARSER_REGEX = (
     r"(?(1)(?:<think>)?(?P<chain_of_thought>.*?)(?:</think>\s*|\Z))"
     r"(?P<response>.*)\Z"
 )
-_GENERATION_BLOCK_TAG = re.compile(r"{%-?\s*(?:generation|endgeneration)\s*-?%}")
 _MODEL_TYPES = CONFIG_ADAPTERS
 _GRANITE_THINKING_OUTPUT_PARSER_REGEX = (
     r"(?s)<think>(?P<chain_of_thought>.*?)"

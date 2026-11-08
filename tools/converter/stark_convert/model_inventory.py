@@ -11,6 +11,7 @@ import struct
 from pathlib import Path
 
 from ._build_metadata import open_regular
+from .api_tools import tool_support_for
 from .hybrid_prepare import prepared_identity
 from .hybrid_vision import prepared_image_identity
 from .model_support import normalize_architecture
@@ -325,6 +326,18 @@ def _source(receipt, model):
     return repo, revision if isinstance(revision, str) and _REVISION.fullmatch(revision) else None
 
 
+def model_tool_support(root):
+    """Inspect the artifact's bounded codec, independently of saved metadata."""
+    try:
+        config = _json(_small_file(Path(root), "config.json"))
+        codec = config.get("token_codec_config") if isinstance(config, dict) else None
+        if not isinstance(codec, dict) or codec.get("type") != "ChatCodecConfig":
+            codec = None
+        return tool_support_for(codec)
+    except Exception:
+        return tool_support_for(None)
+
+
 def model_display(model):
     """Describe saved versions; missing metadata never changes runtime admission."""
     if not _text(model.get("id"), 128) or not _text(model.get("name")):
@@ -339,6 +352,7 @@ def model_display(model):
         "weight_bytes": None,
         "source_revision": None,
         "artifact_mode": mode if isinstance(mode, str) and mode in {"text", "vision-language"} else "text",
+        "tool_support": model_tool_support(model["path"]),
     }
     root = Path(os.path.abspath(model["path"]))
     hybrid = prepared_identity(root)

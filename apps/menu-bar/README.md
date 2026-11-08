@@ -161,8 +161,12 @@ their weights to BF16. Qwen3.8 Flash Next currently offers the implemented
 quantized import paths.
 Search narrows the selected tab and sorting applies to its matching rows.
 Entering another family starts at **All models**.
-Each variant row has a **link** beside its download size that opens its exact
-Hugging Face repository, including the publisher of a quantized export.
+Catalog cards use a compact heading and a row of quantization, parameter count
+and weight-file size. Unavailable metadata is omitted. Quantization labels stay
+on one line, and installation controls move below the details when space is
+limited. The publisher link on a single-variant card, or the source icon on each
+row of a multi-variant card, opens its exact Hugging Face repository, including
+the publisher of a quantized export.
 When text and image artifacts are both offered, choose which to install. Sort
 the family overview by name A–Z or Z–A; family detail sorts by name in either
 direction or model size ascending or descending. Unknown numeric values stay last

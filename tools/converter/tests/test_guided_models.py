@@ -373,6 +373,14 @@ def test_unknown_or_unsupported_catalog_plans_are_excluded(key, value):
     assert guided.recipe_from_catalog(item) is None
 
 
+@pytest.mark.parametrize("parser,eligible", [("mistral-json-v1", True), ("functiongemma-v1", False)])
+def test_new_protocols_preserve_general_assistant_recommendation_boundary(parser, eligible):
+    item = catalog_candidate()
+    item["planning"]["architecture"] = "gemma3_text" if parser == "functiongemma-v1" else "mistral"
+    item["planning"]["tool_parser"] = parser
+    assert (guided.recipe_from_catalog(item) is not None) == eligible
+
+
 def test_dynamic_recipe_snapshots_source_and_checks_config_receipt(tmp_path):
     item = catalog_candidate()
     candidate = guided.recipe_from_catalog(item)

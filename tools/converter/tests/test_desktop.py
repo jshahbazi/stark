@@ -157,6 +157,25 @@ def installed(desktop, model):
     return desktop.models[0]["id"]
 
 
+@pytest.mark.parametrize("fixture", ["glm53", "qwen25", "flint", None])
+def test_import_and_existing_install_report_actual_tool_protocol_without_loading(desktop, model, fixture):
+    if fixture is not None:
+        config = json.loads((model / "config.json").read_text())
+        config["token_codec_config"]["prompt_template"] = (
+            Path(__file__).parent / "fixtures" / f"{fixture}_chat_template.jinja"
+        ).read_text()
+        (model / "config.json").write_text(json.dumps(config))
+    installed(desktop, model)
+    assessment = next(e["tool_support"] for e in events(desktop) if e["event"] == "installed")
+    assert assessment["status"] == ("available" if fixture else "unavailable")
+    assert assessment["model_behavior"] == "unverified"
+    assert desktop.worker is None
+    installed(desktop, model)
+    assert [e["tool_support"] for e in events(desktop) if e["event"] == "installed"] == [assessment, assessment]
+    display = next(e for e in events(desktop) if e["event"] == "models")["models"][0]["display"]
+    assert display["tool_support"] == assessment
+
+
 def running(desktop, model):
     identifier = installed(desktop, model)
     desktop.dispatch({"command": "run", "model_id": identifier})
@@ -419,7 +438,7 @@ def test_playground_rejects_invalid_request_identifiers(desktop, request_id):
         desktop.dispatch({"command": "generate", "text": "timing fixture", "request_id": request_id})
 
 
-@pytest.fixture(params=["qwen3-hermes-v1", "qwen38-xml-v1", "qwen35-xml-v1"])
+@pytest.fixture(params=["qwen3-hermes-v1", "qwen38-xml-v1", "qwen35-xml-v1", "glm53-xml-v1"])
 def tool_desktop(desktop, model, monkeypatch, request):
     from jinja2.sandbox import ImmutableSandboxedEnvironment
 
@@ -430,6 +449,8 @@ def tool_desktop(desktop, model, monkeypatch, request):
         "text": (
             '<tool_call>{"name":"lookup","arguments":{"value":3}}</tool_call>'
             if parser == "qwen3-hermes-v1"
+            else "<tool_call>lookup<arg_key>value</arg_key><arg_value>3</arg_value></tool_call>"
+            if parser == "glm53-xml-v1"
             else "<tool_call>\n<function=lookup>\n<parameter=value>\n3\n</parameter>\n</function>\n</tool_call>"
         ),
         "input_tokens": 24,
@@ -735,6 +756,69 @@ def test_tool_http_stream_matches_buffered_calls_and_never_duplicates(tool_deskt
         assert body.count(b"data: [DONE]") == 1
     finally:
         api.close()
+
+
+@pytest.mark.parametrize("fixture", ["glm53", "flint", "qwen25"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("closed", [False, True])
+def test_tool_parsing_uses_rendered_generation_prefix_not_worker_claim(
+    desktop, model, monkeypatch, fixture, stream, closed
+):
+    from stark_convert.chat import _ChatTemplate
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    source = (Path(__file__).parent / "fixtures" / f"{fixture}_chat_template.jinja").read_text()
+    desktop.codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    desktop.template = _ChatTemplate(source)
+    call = (
+        '<tool_call>{"name":"lookup","arguments":{"value":3}}</tool_call>'
+        if fixture == "qwen25"
+        else "<tool_call>lookup<arg_key>value</arg_key><arg_value>3</arg_value></tool_call>"
+    )
+    # This closing tag belongs to the input only for GLM. The worker lies about
+    # initial state to verify that the host's own rendered prompt is decisive.
+    generated = ("Synthetic reasoning</think>" if closed else "") + call
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            assert payload["text"].endswith("<think>") is (fixture == "glm53")
+            return {"token_count": 24, "token_ids": [2] * 24}
+        if deliver := options.get("on_delta"):
+            for character in generated:
+                deliver(character)
+        return {
+            "text": generated,
+            "finish_reason": "eos",
+            "input_tokens": 24,
+            "output_tokens": 17,
+            "_tool_initial_thinking": fixture != "glm53",
+        }
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    payload = {
+        "messages": [{"role": "user", "content": "Synthetic request"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object", "properties": {"value": {"type": "integer"}}},
+                },
+            }
+        ],
+    }
+    deltas = []
+    if closed is (fixture == "glm53"):
+        result = desktop.api_complete(payload, on_delta=deltas.append if stream else None)
+        assert result["choices"][0]["finish_reason"] == "tool_calls"
+        assert json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]) == {"value": 3}
+    else:
+        with pytest.raises(APIError) as error:
+            desktop.api_complete(payload, on_delta=deltas.append if stream else None)
+        assert error.value.code == "invalid_tool_call"
+    assert "<tool_call>" not in "".join(deltas)
+    assert desktop.worker is not None and desktop.job is None
 
 
 def test_tool_buffered_stream_disconnect_keeps_worker_aligned(tool_desktop):
