@@ -178,6 +178,10 @@ impl Context for MetalContext {
         Some(self.peak_memory_usage.load(Ordering::Relaxed))
     }
 
+    fn max_buffer_length(&self) -> Option<usize> {
+        Some(self.device.max_buffer_length())
+    }
+
     fn enable_capture() {
         unsafe {
             std::env::set_var("METAL_CAPTURE_ENABLED", "1");

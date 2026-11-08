@@ -126,7 +126,7 @@ pub fn check_json_structure(
 /// Available memory is admission evidence, never a reservation or RSS ceiling.
 #[cfg(target_os = "macos")]
 #[allow(deprecated)] // The locked libc exports the system Mach ABI used here.
-fn available_memory_bytes() -> Option<usize> {
+pub fn available_memory_bytes() -> Option<usize> {
     unsafe extern "C" {
         fn mach_port_deallocate(
             task: libc::mach_port_t,
@@ -143,7 +143,7 @@ fn available_memory_bytes() -> Option<usize> {
     let result = unsafe { libc::host_statistics64(host, libc::HOST_VM_INFO64, stats.as_mut_ptr().cast(), &mut count) };
     // One task-local send right was returned by mach_host_self.
     unsafe { mach_port_deallocate(libc::mach_task_self(), host) };
-    if result != libc::KERN_SUCCESS || count != libc::HOST_VM_INFO64_COUNT {
+    if result != libc::KERN_SUCCESS || !valid_vm_statistics_count(count) {
         return None;
     }
     let stats = unsafe { stats.assume_init() };
@@ -151,15 +151,26 @@ fn available_memory_bytes() -> Option<usize> {
     (stats.free_count as usize).checked_add(stats.inactive_count as usize)?.checked_mul(page_size as usize)
 }
 
+#[cfg(target_os = "macos")]
+fn valid_vm_statistics_count(count: libc::mach_msg_type_number_t) -> bool {
+    // New SDK/libc definitions can include trailing counters absent from an
+    // older kernel revision. Only the free/active/inactive prefix is read,
+    // and the entire destination was zero-initialized before the syscall.
+    let prefix_bytes =
+        std::mem::offset_of!(libc::vm_statistics64, inactive_count) + std::mem::size_of::<libc::natural_t>();
+    let prefix_words = prefix_bytes.div_ceil(std::mem::size_of::<libc::integer_t>());
+    (count as usize) >= prefix_words && count <= libc::HOST_VM_INFO64_COUNT
+}
+
 #[cfg(target_os = "linux")]
-fn available_memory_bytes() -> Option<usize> {
+pub fn available_memory_bytes() -> Option<usize> {
     let data = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = data.lines().find_map(|line| line.strip_prefix("MemAvailable:"))?;
     line.split_whitespace().next()?.parse::<usize>().ok()?.checked_mul(1024)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn available_memory_bytes() -> Option<usize> {
+pub fn available_memory_bytes() -> Option<usize> {
     None
 }
 
@@ -192,6 +203,15 @@ mod tests {
         for (available, mib) in [(0, 16), (2 << 30, 16), (4 << 30, 32), (8 << 30, 64), (usize::MAX, 64)] {
             assert_eq!(Budget::automatic(available).mib, mib);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn older_kernel_memory_statistics_prefix_remains_usable() {
+        assert!(valid_vm_statistics_count(40));
+        assert!(valid_vm_statistics_count(libc::HOST_VM_INFO64_COUNT));
+        assert!(!valid_vm_statistics_count(2));
+        assert!(!valid_vm_statistics_count(libc::HOST_VM_INFO64_COUNT + 1));
     }
 
     #[test]

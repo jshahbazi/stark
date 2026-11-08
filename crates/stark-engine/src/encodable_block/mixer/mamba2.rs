@@ -223,6 +223,33 @@ impl<B: Backend> Mixer<B> for Mamba2<B> {
         None
     }
 
+    fn memory_estimate(
+        &self,
+        _context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        use crate::encodable_block::memory::{MemoryEstimate, checked_bytes};
+        let bytes = INNER_DATA_TYPE.size_in_bytes();
+        let conv = checked_bytes(&[self.conv_dim, self.kernel_size.checked_sub(1)?], bytes)?;
+        let ssm = checked_bytes(&[self.num_heads, self.head_dim, self.state_dim], bytes)?;
+        let mut estimate = MemoryEstimate::state(conv.checked_add(ssm)?);
+        for rows in [input_tokens.clamp(1, 1024), 1] {
+            let mut scratch = MemoryEstimate::default();
+            scratch.add_scratch(
+                &[rows, self.conv_dim.checked_add(self.inner_dim)?.checked_add(self.num_heads)?],
+                bytes,
+                1,
+            )?;
+            scratch.add_scratch(&[rows, self.conv_dim], bytes, 1)?;
+            scratch.add_scratch(&[rows, self.inner_dim], bytes, 3)?;
+            scratch.add_scratch(&[rows, self.num_heads], bytes, 1)?;
+            scratch.add_scratch(&[rows, self.num_groups, self.state_dim], bytes, 2)?;
+            scratch.add_scratch(&[rows.checked_add(self.kernel_size.checked_sub(1)?)?, self.conv_dim], bytes, 1)?;
+            estimate = estimate.sequential(scratch)?;
+        }
+        Some(estimate)
+    }
+
     fn create_empty_state(
         &self,
         _max_context_length: Option<u32>,

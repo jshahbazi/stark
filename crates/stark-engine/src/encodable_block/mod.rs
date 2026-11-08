@@ -6,6 +6,7 @@ pub mod dflash;
 pub mod embedding;
 pub mod embedding_table;
 pub mod linear;
+pub mod memory;
 pub mod mixer;
 pub mod mlp;
 pub mod normalization;

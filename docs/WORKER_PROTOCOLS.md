@@ -78,6 +78,37 @@ not impose a 65,536-token ceiling on native worker requests.
 Template source size, sandbox restrictions, execution fuel and deadlines remain
 separate controls; see [chat template evaluation](GENERATION.md#chat-template-evaluation).
 
+## Automatic execution for undeclared contexts
+
+Workers advertising `generation_budget: "memory-context-v1"` accept
+`plan_generation` after tokenization:
+
+```json
+{"operation":"plan_generation","input_tokens":120,"context_tokens":4294967295}
+```
+
+`input_tokens` is the actual rendered input count. `context_tokens` is an upper
+budget; the protocol ceiling permits automatic selection. The reply contains
+a finite `context_tokens`, `max_new_tokens` equal to that allowance minus the
+input, `context_capacity_known` and `budget_kind: "memory"`. Generation then uses
+those explicit finite values. The HTTP model capacity remains undeclared.
+
+The native planner performs checked, allocation-free estimates using the loaded
+attention cache dimensions and precision, ring bounds, recurrent state and
+conservative scratch-pool requirements. It admits a context against one quarter
+of currently available RAM after a 256 MiB reserve, also bounded by token-storage
+and caller limits. Planning leaves another quarter of that allowance unused for
+serialization and ordinary memory-pressure fluctuations before allocation is
+rechecked. This is conservative admission evidence; it is not a memory
+reservation or a hard process RSS ceiling. Cancellation, output byte limits and
+deadlines remain active. Insufficient memory rejects the request cleanly.
+
+Planning never replays a prompt or generated token. A successful query preserves
+the retained prefix; the worker keeps an existing planned capacity while it still
+fits current admission so context-keyed prefix reuse remains possible. If capacity
+changes, the existing context key prevents reuse across the change. Failures clear
+retained state through the ordinary worker error path.
+
 ## Readiness
 
 The first line a worker writes is its readiness reply. On success it starts with `"ready":true` and carries the capability fields documented on the per-worker page. On failure it is `{"ready":false,"error":CODE}` and the process exits with status 1. Read the readiness line before sending any request.

@@ -195,6 +195,25 @@ impl GenerationBackend for NativeBackend {
             NativeModel::Vision(model) => model.max_context_length(),
         }
     }
+    fn automatic_context_length(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+    ) -> Option<u32> {
+        match &self.model {
+            NativeModel::Text(model) => model.automatic_context_length(input_tokens, maximum, memory_budget_bytes),
+            // Vision uses its declared finite capacity and prepared image
+            // accounting; this text-only planner does not model its encoder.
+            NativeModel::Vision(_) => None,
+        }
+    }
+    fn supports_automatic_context_planning(&self) -> bool {
+        match &self.model {
+            NativeModel::Text(model) => model.supports_automatic_context_planning(),
+            NativeModel::Vision(_) => false,
+        }
+    }
     fn eos_token_ids(&self) -> &[u32] {
         &self.eos_token_ids
     }
@@ -454,6 +473,17 @@ impl NativeBackend {
                 .map_err(|_| control_error.unwrap_or("native_generation_failed"))?;
             session
         } else {
+            if model.max_context_length().is_none() {
+                let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+                let memory_budget = available.saturating_sub(256 * 1024 * 1024) / 4;
+                let input_tokens = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
+                let safe_capacity = model
+                    .automatic_context_length(input_tokens, u32::MAX, memory_budget)
+                    .ok_or("resource_budget_exceeded")?;
+                if options.context_tokens > safe_capacity {
+                    return Err("resource_budget_exceeded");
+                }
+            }
             model
                 .prefill_dense_mtp_controlled(input, options.context_tokens, &mut control)
                 .map_err(|_| control_error.unwrap_or("native_generation_failed"))?
@@ -651,6 +681,17 @@ impl NativeBackend {
             },
             (NativeModel::Text(model), retained) => {
                 drop(retained);
+                if image.is_none() && model.max_context_length().is_none() {
+                    let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+                    let memory_budget = available.saturating_sub(256 * 1024 * 1024) / 4;
+                    let input_tokens = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
+                    let safe_capacity = model
+                        .automatic_context_length(input_tokens, u32::MAX, memory_budget)
+                        .ok_or("resource_budget_exceeded")?;
+                    if options.context_tokens > safe_capacity {
+                        return Err("resource_budget_exceeded");
+                    }
+                }
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?

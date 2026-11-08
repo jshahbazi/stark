@@ -67,6 +67,7 @@ pub struct TransformerLayer<B: Backend> {
     pub mlp: Box<dyn Mlp<B>>,
     pub post_mlp_norm: Option<Normalization<B>>,
     pub ple_projection: Option<PerLayerEmbeddingProjection<B>>,
+    memory_hidden_dim: u32,
 }
 
 impl<B: Backend> TransformerLayerConv<B> {
@@ -337,7 +338,40 @@ impl<B: Backend> TransformerLayer<B> {
             mlp,
             post_mlp_norm,
             ple_projection,
+            memory_hidden_dim: layer_config.hidden_dim.unwrap_or(hidden_dim),
         })
+    }
+
+    pub(crate) fn memory_estimate(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        model_dim: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        use crate::encodable_block::memory::MemoryEstimate;
+        let mut estimate = self.mixer.memory_estimate(context_tokens, input_tokens)?;
+        if self.kv_source_layer_index.is_some() {
+            estimate = estimate.without_state();
+        }
+        for rows in [input_tokens.clamp(1, 1024), 1] {
+            let mut scratch = MemoryEstimate::default();
+            // Input/shortcut, normalization, mixer and MLP outputs can overlap.
+            // F32 bounds every supported activation storage policy here.
+            scratch.add_scratch(&[rows, model_dim], 4, 8)?;
+            scratch.add_scratch(&[rows, self.memory_hidden_dim, 2], 4, 1)?;
+            scratch.add_scratch(&[rows, self.memory_hidden_dim], 4, 4)?;
+            for convolution in [&self.mixer_conv, &self.mlp_conv].into_iter().flatten() {
+                scratch.add_scratch(&[rows, convolution.coefficient_count, 2], 4, 1)?;
+                scratch.add_scratch(&[rows, model_dim], 4, 3)?;
+            }
+            if let Some(projection) = &self.ple_projection {
+                projection.add_memory_scratch(rows, &mut scratch)?;
+            }
+            // Layer-wide buffers remain live alongside mixer workspace.
+            estimate.add_scratch(&[rows, model_dim], 4, 8)?;
+            estimate = estimate.sequential(scratch)?;
+        }
+        Some(estimate)
     }
 
     /// This narrow path excludes sequence-mixing layer convolutions and shared

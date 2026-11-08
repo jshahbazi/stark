@@ -57,6 +57,11 @@ unless that route has its own exactness proof and qualification.
 Keep the existing worker and host lifecycle unless a scoped protocol change is
 required:
 
+- For a backend without a declared context maximum, implement and test the
+  loaded-state memory estimate used by automatic execution planning. Include
+  owned/shared and ring/full KV state, recurrent buffers, activation precision,
+  scratch allocation classes and checked overflow. Report the resulting
+  allowance separately from trained model capacity.
 - Derive support from the admitted backend and actual state layout. Keep
   `prefix_cache.supported` false for a path whose restoration is incomplete.
 - Implement the backend's support, chunk size, key, planned reuse, retention,

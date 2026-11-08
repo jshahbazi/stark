@@ -47,6 +47,21 @@ pub struct QwenMtpOutput<B: Backend> {
 }
 
 impl<B: Backend> QwenMtp<B> {
+    pub(crate) fn memory_estimate(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        let mut estimate = self.transformer.memory_estimate(context_tokens, input_tokens.max(4))?;
+        for rows in [input_tokens.clamp(4, 1024), 1] {
+            // Embedding/hidden norms, fused projection output and the [e,h]
+            // concatenation use BF16, matching fuse_inputs and predictor pass.
+            estimate.add_scratch(&[rows, self.model_dim], 2, 4)?;
+            estimate.add_scratch(&[rows, self.model_dim, 2], 2, 1)?;
+        }
+        Some(estimate)
+    }
+
     pub fn new(
         config: &QwenMtpConfig,
         target_layers: usize,

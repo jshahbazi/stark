@@ -36,11 +36,13 @@ from .api_tools import (
     validate_parser_tools,
 )
 from .chat import (
+    ChatBudgetUnavailable,
     ChatCancelled,
     ChatError,
     ChatImageError,
     ChatRequestTooLarge,
     Worker,
+    automatic_generation_budget,
     load_template,
     read_model_config,
     render_template,
@@ -1966,6 +1968,7 @@ class Desktop:
             worker.streaming = ready.get("streaming") == "text-delta-v1"
             worker.stop_sequences = ready.get("stop_sequences") is True
             worker.mtp = mtp_capabilities(ready)
+            worker.generation_budget = ready.get("generation_budget") == "memory-context-v1"
             worker.max_new_tokens = ready.get("max_new_tokens", 0)
             self.codec, self.template = codec, template
             self.context_limit = ready["max_context_tokens"]
@@ -2184,7 +2187,7 @@ class Desktop:
         except (MediaError, ChatImageError) as error:
             raise DesktopError(str(error)) from None
         except APIError as error:
-            if error.code == "output_limit_required":
+            if error.code == "automatic_output_unavailable":
                 raise DesktopError(error.message) from None
             raise
         with self.lock:
@@ -2355,16 +2358,18 @@ class Desktop:
             {"operation": "tokenize", "text": prompt, "add_special_tokens": False}, cancelled=cancelled
         )
         count = tokens.get("token_count")
-        if not isinstance(count, int):
+        if type(count) is not int or count < 0:
             raise ValueError
         if maximum in (None, 0):
-            if not context_capacity_known and context == 0xFFFFFFFF:
-                raise APIError(
-                    400,
-                    "This model has no finite context maximum. Set a finite conversation budget or output limit.",
-                    "output_limit_required",
-                )
-            maximum = min(getattr(worker, "max_new_tokens", self.output_limit), context - count)
+            if count >= context:
+                raise DesktopError("Conversation is full. Start a new conversation and try again.")
+            if context_capacity_known:
+                maximum = min(getattr(worker, "max_new_tokens", self.output_limit), context - count)
+            else:
+                try:
+                    context, maximum = automatic_generation_budget(worker, count, context, cancelled=cancelled)
+                except ChatBudgetUnavailable as error:
+                    raise APIError(503, str(error), "automatic_output_unavailable") from None
             if maximum < 1:
                 raise DesktopError("Conversation is full. Start a new conversation and try again.")
         if count + maximum > context:
@@ -2685,12 +2690,6 @@ class Desktop:
                     400,
                     "This model's chat template has no supported tool parser. Run a model with tool support in Stark.",
                     "tools_unsupported",
-                )
-            if maximum is None and not self.context_capacity_known:
-                raise APIError(
-                    400,
-                    "This model has no finite context maximum. Specify max_tokens for this request.",
-                    "output_limit_required",
                 )
             rendered_tools = render_tools(request)
             validate_parser_tools(rendered_tools or [], parser)

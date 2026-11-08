@@ -115,6 +115,14 @@ pub trait Mixer<B: Backend>: Any + Send + Sync {
 
     fn max_context_length(&self) -> Option<u32>;
 
+    fn memory_estimate(
+        &self,
+        _context_tokens: u32,
+        _input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        None
+    }
+
     /// Whether every state this mixer creates can be rewound to a shorter
     /// prefix. Only full, non-ring attention caches qualify.
     fn prefix_reuse_supported(&self) -> bool {

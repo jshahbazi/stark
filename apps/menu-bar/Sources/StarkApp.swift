@@ -3128,9 +3128,6 @@ struct AdvancedOptionsView: View {
         let outputValue = output.trimmingCharacters(in: .whitespacesAndNewlines)
         let automatic = outputValue.isEmpty || outputValue.caseInsensitiveCompare("Auto") == .orderedSame
         if automatic {
-            if !engine.contextCapacityKnown && count == engine.contextLimit {
-                return "Set a finite conversation budget or choose an output limit for this model."
-            }
             return nil
         }
         guard let maximum = Int(outputValue), (1...engine.outputLimit).contains(maximum) else {
@@ -3167,7 +3164,7 @@ struct AdvancedOptionsView: View {
             Text("Auto uses all tokens left after the conversation, up to the model's generation limit.")
                 .font(.caption).foregroundStyle(.secondary)
             if !engine.contextCapacityKnown {
-                Text("This model has no finite context maximum. Set a finite conversation budget or choose an output limit before using Auto.")
+                Text("This model does not declare a context maximum. Auto sizes execution from the model's state requirements and available memory.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Toggle("Thinking mode", isOn: $thinking)
@@ -3182,7 +3179,7 @@ struct AdvancedOptionsView: View {
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
             Text(engine.contextCapacityKnown
                  ? "Context defaults to the model's maximum. Auto uses the remaining context for the reply."
-                 : "Set a finite conversation budget before using Auto with this model.")
+                 : "Auto chooses a memory-bounded execution allowance. A custom conversation budget sets an upper bound.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Restore Defaults") {

@@ -70,9 +70,13 @@ def executable(tmp_path):
         "wire=6*budget+2*1024*1024\n"
         "print(json.dumps({'ready':True,'mode':'text-generation-v1',"
         "'max_context_tokens':8192,'max_new_tokens':8192,'max_request_bytes':wire,"
-        "'streaming':'text-delta-v1'}),flush=True)\n"
+        "'streaming':'text-delta-v1','generation_budget':'memory-context-v1'}),flush=True)\n"
         "for line in sys.stdin:\n"
         "    request=json.loads(line)\n"
+        "    if request['operation']=='plan_generation':\n"
+        "        context=min(request['context_tokens'],8192)\n"
+        "        print(json.dumps({'context_tokens':context,'max_new_tokens':context-request['input_tokens'],"
+        "'context_capacity_known':False,'budget_kind':'memory'}),flush=True); continue\n"
         "    if request['operation']=='tokenize': last_prompt=request['text']\n"
         "    if request['operation']=='generate' and 'wait fixture' in last_prompt: time.sleep(30)\n"
         "    if request['operation']=='generate' and 'failure fixture' in last_prompt: raise SystemExit(2)\n"
@@ -1351,27 +1355,34 @@ def test_api_default_output_uses_remaining_finite_context(desktop, model):
     assert generate["max_new_tokens"] == 8172
 
 
-def test_api_default_output_requires_explicit_limit_for_unknown_context(desktop, model):
-    from stark_convert.local_api import APIError
+def test_api_default_output_plans_unknown_context_without_user_options(desktop, model):
+    from stark_convert.chat import Worker
 
     identifier = installed(desktop, model)
-    with patch(
-        "stark_convert.desktop.Worker.read",
-        return_value={
-            "ready": True,
-            "mode": "text-generation-v1",
-            "max_context_tokens": 0xFFFFFFFF,
-            "max_new_tokens": 6000,
-        },
-    ):
+    read = Worker.read
+
+    def unknown_ready(worker, *args, **kwargs):
+        reply = read(worker, *args, **kwargs)
+        if reply.get("ready") is True:
+            reply["max_context_tokens"] = 0xFFFFFFFF
+        return reply
+
+    with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=unknown_ready):
         desktop.dispatch({"command": "run", "model_id": identifier})
         finish(desktop)
-    with pytest.raises(APIError) as error:
+    worker = desktop.worker
+    with patch.object(worker, "request", wraps=worker.request) as request:
         desktop.api_complete({"messages": [{"role": "user", "content": "unknown API output fixture"}]})
-    assert error.value.code == "output_limit_required"
+    generated = [call.args[0] for call in request.call_args_list if call.args[0].get("operation") == "generate"][-1]
+    planned = [call.args[0] for call in request.call_args_list if call.args[0].get("operation") == "plan_generation"]
+    assert planned[0]["input_tokens"] == 20
+    assert generated["context_tokens"] == 8192
+    assert generated["max_new_tokens"] == 8172
+    assert desktop.api_models()[0]["context_length"] is None
+    assert desktop.worker is worker and worker.process.poll() is None
 
 
-def test_unknown_context_playground_auto_requires_budget_without_unloading_worker(desktop, model):
+def test_unknown_context_playground_auto_uses_memory_plan_without_unloading_worker(desktop, model):
     from stark_convert.chat import Worker
 
     identifier = installed(desktop, model)
@@ -1391,11 +1402,9 @@ def test_unknown_context_playground_auto_requires_budget_without_unloading_worke
     desktop.dispatch({"command": "generate", "text": "unknown automatic output fixture"})
     finish(desktop)
     assert desktop.worker is worker and worker.process.poll() is None
-    assert desktop.messages == history
-    assert any(
-        event["event"] == "error" and "finite conversation budget" in event["message"] for event in events(desktop)
-    )
+    assert len(desktop.messages) == len(history) + 2
     desktop.dispatch(advanced_options(context_tokens=2048, max_new_tokens=0))
+    history = list(desktop.messages)
     desktop.dispatch({"command": "generate", "text": "finite automatic output fixture"})
     finish(desktop)
     assert desktop.worker is worker and worker.process.poll() is None
