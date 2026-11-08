@@ -17,6 +17,20 @@ ROOT = Path(__file__).resolve().parent.parent
 
 VIEW_CHECK = r"""
 extension BeginnerSetupView {
+    @MainActor static func checkFilesTaskSelection() -> Bool {
+        let session = BeginnerSetupSession()
+        session.task = .files
+        var received: [(BeginnerTask, String?, String)] = []
+        var actions = BeginnerSetupActions()
+        actions.refreshChoices = { received.append(($0, $1, $2)) }
+        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+        guard BeginnerTask.allCases.contains(.files), BeginnerTask.files.rawValue == "files",
+              BeginnerTask.files.title == "Work with files",
+              BeginnerTask.files.detail == "Read or edit a folder in OpenWork" else { return false }
+        view.requestChoices()
+        return received.count == 1 && received[0].0 == .files && received[0].0.rawValue == "files"
+    }
+
     @MainActor static func checkRecommendationPreferences() -> Bool {
         let session = BeginnerSetupSession()
         session.task = .code
@@ -324,6 +338,7 @@ struct BeginnerChecks {
             preferences.select(.beginner)
             preferences.resolveInitialMode(hasInstalledModels: true)
             return preferences.mode == .beginner
+        case "files-task-selection": return BeginnerSetupView.checkFilesTaskSelection()
         case "start-reuses-current": return BeginnerSetupView.checkStartPolicy(restart: false)
         case "recommendation-preferences": return BeginnerSetupView.checkRecommendationPreferences()
         case "start-applies-restart-policy": return BeginnerSetupView.checkStartPolicy(restart: true)
@@ -439,6 +454,9 @@ class BeginnerSetupTests(unittest.TestCase):
 
     def test_model_priority_and_retry_preference_reach_recommendations(self):
         self.run_check("recommendation-preferences")
+
+    def test_files_task_is_visible_and_reaches_recommendation_action(self):
+        self.run_check("files-task-selection")
 
     def test_failed_start_can_be_retried(self):
         for scenario in ["failed-start-can-retry", "failed-switch-can-choose-again"]:

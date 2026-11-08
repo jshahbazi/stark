@@ -254,6 +254,10 @@ recommended working-set budget, plus CPU count, physical and available memory,
 and free space in the library and download cache. GPU and system memory share
 the same physical memory; the algorithm never adds their budgets together.
 
+**Explain text** covers summaries, notes and explanations. **Work with files**
+is a separate task for reading or editing a folder through OpenWork, allowing
+the guide to apply its tool-use benchmark references to that choice.
+
 The guide checks a bounded window of candidates in each supported catalog
 family using metadata only. Every candidate retains its exact source revision
 and quantization. A new catalog choice needs complete dense attention geometry,

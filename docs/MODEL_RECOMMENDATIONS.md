@@ -49,6 +49,11 @@ reuse and its artifact-specific qualification remain unchanged.
 
 ## Published task references
 
+Beginner separates **Explain text** (summaries, notes and explanations) from
+**Work with files** (reading or editing a folder through OpenWork). The files
+choice requests the `files` task cohort, which uses BFCL only as a tool-use
+reference; it does not claim file-task performance.
+
 `recommendation_benchmarks.json` contains aggregate scores, source URLs,
 immutable source revisions where available, content hashes, settings and
 explicit coverage gaps. There is no runtime leaderboard fetch or automatic
