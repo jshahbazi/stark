@@ -171,7 +171,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        matches!(self.schema_version, 2 | 3 | 4 | 5 | 6)
+        matches!(self.schema_version, 2..=6)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
