@@ -12,6 +12,7 @@ import pytest
 from maxxbench_resources import TRIAL_RESOURCES_ATTRIBUTE, ImageOwnership
 
 IMAGE = {"id": "sha256:" + "a" * 64, "reference": "sample-task-main:latest"}
+IMAGE_METADATA = {"Id": IMAGE["id"], "Os": "linux", "Architecture": "amd64"}
 
 
 def tree_hashes(root):
@@ -41,7 +42,9 @@ def make_trial(monkeypatch):
     stock = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(stock)
     calls = []
-    monkeypatch.setattr(compat.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=IMAGE["id"]))
+    monkeypatch.delenv("DOCKER_DEFAULT_PLATFORM", raising=False)
+    monkeypatch.setattr(compat.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps([IMAGE_METADATA])))
 
     def make(path, behavior=None):
         class Environment:
@@ -55,6 +58,7 @@ def make_trial(monkeypatch):
             def __init__(self):
                 self._environment = Environment()
                 self.record = []
+                self.config = SimpleNamespace(environment=SimpleNamespace(env={"FIXED": "unchanged"}, kwargs={}))
                 setattr(self, compat.TRIAL_IMAGE_ATTRIBUTE, dict(IMAGE))
 
             def _verifier_env_build_context(self, _step):
@@ -71,7 +75,7 @@ def make_trial(monkeypatch):
                     "compose": json.loads(compose.read_text()) if compose.exists() else None,
                     "getter_reference": self._environment._env_vars.main_image_name,
                     "bound_vars": self._environment.bound_compose_vars(),
-                    "env_config": env_config, "arguments": kwargs,
+                    "env_config": env_config, "arguments": kwargs, "trial_config": self.config,
                 }
                 self.record.append(item)
                 calls.append(item)
@@ -86,9 +90,9 @@ def make_trial(monkeypatch):
     return make, calls
 
 
-async def invoke(trial):
+async def invoke(trial, env_config="config"):
     return await trial._verify_with_separate_environment(
-        "config", key="trial", step_cfg=None, verifier_env={"fixed": "value"},
+        env_config, key="trial", step_cfg=None, verifier_env={"fixed": "value"},
         artifacts_dir=Path("artifacts"), artifacts=None,
     )
 
@@ -99,6 +103,8 @@ def test_stock_hook_uses_verified_reference_without_mutating_environment_or_sour
     trial = make(source)
     environment = trial._environment
     variables = environment._env_vars
+    config = trial.config
+    original_env = config.environment.env
     before = tree_hashes(source)
     assert asyncio.run(invoke(trial)) == "verified"
     assert calls[0]["compose"] == {"services": {"main": {"build": {"args": {"BASE_IMAGE": IMAGE["reference"]}}}}}
@@ -106,6 +112,14 @@ def test_stock_hook_uses_verified_reference_without_mutating_environment_or_sour
     assert calls[0]["bound_vars"] is variables
     assert calls[0]["bound_vars"].main_image_name == "original-compose-name"
     assert trial._environment is environment and environment._env_vars is variables
+    assert trial.config is config and config.environment.env is original_env
+    assert original_env == {"FIXED": "unchanged"}
+    assert calls[0]["trial_config"] is not config
+    assert calls[0]["trial_config"].environment is not config.environment
+    assert calls[0]["trial_config"].environment.env == {
+        "FIXED": "unchanged", "DOCKER_DEFAULT_PLATFORM": "linux/amd64",
+    }
+    assert "DOCKER_DEFAULT_PLATFORM" not in compat.os.environ
     assert "_verifier_env_build_context" not in trial.__dict__
     assert calls[0]["view"].__dict__ == {}
     assert not calls[0]["context"].exists()
@@ -141,7 +155,8 @@ def test_unknown_compose_shape_is_rejected_without_source_changes(tmp_path, make
 def test_tag_id_drift_is_rejected_before_verifier_execution(tmp_path, make_trial, monkeypatch):
     make, calls = make_trial
     source = context(tmp_path)
-    monkeypatch.setattr(compat.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="sha256:" + "b" * 64))
+    monkeypatch.setattr(compat.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps([{**IMAGE_METADATA, "Id": "sha256:" + "b" * 64}])))
     with pytest.raises(compat.VerifierHandoffError, match="verifier_base_image_changed"):
         asyncio.run(invoke(make(source)))
     assert not calls
@@ -171,6 +186,8 @@ def test_cancellation_restores_private_context_and_preserves_original_pointers(t
         trial = make(source, wait)
         original_environment = trial._environment
         original_variables = original_environment._env_vars
+        original_config = trial.config
+        original_config_env = trial.config.environment.env
         override = lambda _step: source
         trial._verifier_env_build_context = override
         running = asyncio.create_task(invoke(trial))
@@ -183,6 +200,8 @@ def test_cancellation_restores_private_context_and_preserves_original_pointers(t
         assert trial._verifier_env_build_context is override
         assert trial._environment is original_environment
         assert original_environment._env_vars is original_variables
+        assert trial.config is original_config and trial.config.environment.env is original_config_env
+        assert original_config_env == {"FIXED": "unchanged"}
         assert calls[0]["view"].__dict__ == {} and not temporary.exists()
         assert asyncio.all_tasks() == {asyncio.current_task()}
 
@@ -198,6 +217,7 @@ def test_non_base_verifier_uses_stock_hook_with_original_trial(tmp_path, make_tr
     trial = make(source)
     assert asyncio.run(invoke(trial)) == "verified"
     assert calls[0]["view"] is trial and calls[0]["context"] == source
+    assert calls[0]["trial_config"] is trial.config
 
 
 @pytest.mark.parametrize("base_image", [False, True])
@@ -235,3 +255,118 @@ def test_invalid_image_record_never_reaches_docker(image, monkeypatch):
     monkeypatch.setattr(compat.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("invalid image was inspected"))
     with pytest.raises(compat.VerifierHandoffError, match="verifier_base_image_unavailable"):
         compat.verify_image_reference(image)
+
+
+@pytest.mark.parametrize("architecture,variant,platform", [
+    ("amd64", None, "linux/amd64"), ("arm64", "", "linux/arm64"),
+    ("arm64", "v8", "linux/arm64/v8"), ("arm", "v7", "linux/arm/v7"),
+])
+def test_base_image_platform_is_derived_from_verified_image_only(
+    tmp_path, make_trial, monkeypatch, architecture, variant, platform,
+):
+    make, calls = make_trial
+    metadata = {**IMAGE_METADATA, "Architecture": architecture, "Variant": variant,
+                "Config": {"Env": ["PRIVATE_METADATA_SENTINEL"]}}
+    inspected = []
+
+    def run(command, **options):
+        inspected.append((command, options))
+        return SimpleNamespace(returncode=0, stdout=json.dumps([metadata]))
+
+    monkeypatch.setattr(compat.subprocess, "run", run)
+    trial = make(context(tmp_path))
+    assert asyncio.run(invoke(trial)) == "verified"
+    assert calls[0]["trial_config"].environment.env["DOCKER_DEFAULT_PLATFORM"] == platform
+    assert trial.config.environment.env == {"FIXED": "unchanged"}
+    assert inspected[0][0] == ["docker", "image", "inspect", IMAGE["reference"]]
+    assert inspected[0][1]["stderr"] == compat.subprocess.DEVNULL
+    assert inspected[0][1]["timeout"] == 5 and inspected[0][1]["check"] is False
+    assert "PRIVATE_METADATA_SENTINEL" not in repr(calls[0]["trial_config"])
+
+
+@pytest.mark.parametrize("changes", [
+    {"Architecture": None}, {"Architecture": []}, {"Os": "unknown"},
+    {"Architecture": "riscv64"}, {"Variant": "PRIVATE_VARIANT"},
+    {"Variant": []}, {"Architecture": "arm", "Variant": None},
+])
+def test_missing_or_unsupported_platform_stops_before_upstream(
+    tmp_path, make_trial, monkeypatch, changes,
+):
+    make, calls = make_trial
+    monkeypatch.setattr(compat.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps([{**IMAGE_METADATA, **changes}])))
+    source = context(tmp_path)
+    before = tree_hashes(source)
+    with pytest.raises(compat.VerifierHandoffError, match="^verifier_base_image_platform_unavailable$") as error:
+        asyncio.run(invoke(make(source)))
+    assert str(error.value) == "verifier_base_image_platform_unavailable"
+    assert not calls and tree_hashes(source) == before
+
+
+@pytest.mark.parametrize("scope", ["process", "trial", "task", "persistent_kwargs"])
+def test_conflicting_explicit_platform_is_never_overwritten(tmp_path, make_trial, monkeypatch, scope):
+    make, calls = make_trial
+    trial = make(context(tmp_path))
+    env_config = SimpleNamespace(env={})
+    if scope == "process":
+        monkeypatch.setenv("DOCKER_DEFAULT_PLATFORM", "linux/arm64")
+    elif scope == "trial":
+        trial.config.environment.env["DOCKER_DEFAULT_PLATFORM"] = "linux/arm64"
+    elif scope == "task":
+        env_config.env["DOCKER_DEFAULT_PLATFORM"] = "linux/arm64"
+    else:
+        trial.config.environment.kwargs["persistent_env"] = {"DOCKER_DEFAULT_PLATFORM": "linux/arm64"}
+    before = repr(trial.config)
+    before_env = dict(env_config.env)
+    before_process = compat.os.environ.get("DOCKER_DEFAULT_PLATFORM")
+    with pytest.raises(compat.VerifierHandoffError, match="^verifier_base_image_platform_conflict$"):
+        asyncio.run(invoke(trial, env_config))
+    assert not calls and repr(trial.config) == before and env_config.env == before_env
+    assert compat.os.environ.get("DOCKER_DEFAULT_PLATFORM") == before_process
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_pier_persistent_env_precedence_is_preserved_without_mutating_original(
+    tmp_path, make_trial, configured,
+):
+    make, calls = make_trial
+    trial = make(context(tmp_path))
+    persistent = {"FIXED_KWARG": "unchanged"}
+    if configured:
+        persistent["DOCKER_DEFAULT_PLATFORM"] = "linux/amd64"
+    trial.config.environment.kwargs["persistent_env"] = persistent
+    before = dict(persistent)
+    assert asyncio.run(invoke(trial)) == "verified"
+    copied = calls[0]["trial_config"].environment
+    assert copied.kwargs["persistent_env"] == {**before, "DOCKER_DEFAULT_PLATFORM": "linux/amd64"}
+    assert copied.kwargs["persistent_env"] is not persistent
+    assert trial.config.environment.kwargs["persistent_env"] is persistent and persistent == before
+
+
+@pytest.mark.parametrize("payload", ["PRIVATE_MALFORMED_JSON", "[]", "{}", "[null]"])
+def test_unusable_image_metadata_has_only_fixed_error(payload, monkeypatch):
+    monkeypatch.setattr(compat.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout=payload))
+    with pytest.raises(compat.VerifierHandoffError) as error:
+        compat.verify_image_reference(IMAGE)
+    assert str(error.value) == "verifier_base_image_unavailable"
+    assert error.value.__cause__ is None
+
+
+def test_explicit_none_persistent_env_cannot_drop_scoped_platform(tmp_path, make_trial):
+    make, calls = make_trial
+    trial = make(context(tmp_path))
+    trial.config.environment.kwargs["persistent_env"] = None
+    assert asyncio.run(invoke(trial)) == "verified"
+    assert calls[0]["trial_config"].environment.kwargs["persistent_env"] == {"DOCKER_DEFAULT_PLATFORM": "linux/amd64"}
+    assert trial.config.environment.kwargs["persistent_env"] is None
+
+
+def test_malformed_persistent_env_fails_closed(tmp_path, make_trial):
+    make, calls = make_trial
+    trial = make(context(tmp_path))
+    trial.config.environment.kwargs["persistent_env"] = "PRIVATE_UNSUPPORTED_CONFIG"
+    with pytest.raises(compat.VerifierHandoffError) as error:
+        asyncio.run(invoke(trial))
+    assert str(error.value) == "verifier_base_image_platform_conflict"
+    assert not calls and trial.config.environment.kwargs["persistent_env"] == "PRIVATE_UNSUPPORTED_CONFIG"

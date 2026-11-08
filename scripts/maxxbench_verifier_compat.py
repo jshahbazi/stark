@@ -8,9 +8,11 @@ Task source, tests and global Compose/environment settings are never changed.
 from __future__ import annotations
 
 import contextlib
+import copy
 import functools
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -82,20 +84,61 @@ def capture_environment_image(trial):
 
 
 def verify_image_reference(image):
-    """Require the buildable reference to still resolve to the captured image ID."""
+    """Verify the captured ID and return its allowlisted Linux build platform."""
     if not valid_image(image):
         raise VerifierHandoffError("verifier_base_image_unavailable")
     try:
         result = subprocess.run(
-            ["docker", "image", "inspect", image["reference"], "--format", "{{.Id}}"],
+            ["docker", "image", "inspect", image["reference"]],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise VerifierHandoffError("verifier_base_image_unavailable") from None
-    if result.returncode != 0:
+    if result.returncode != 0 or len(result.stdout) > 1024 * 1024:
         raise VerifierHandoffError("verifier_base_image_unavailable")
-    if result.stdout.strip() != image["id"]:
+    try:
+        entries = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        raise VerifierHandoffError("verifier_base_image_unavailable") from None
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+        raise VerifierHandoffError("verifier_base_image_unavailable")
+    metadata = entries[0]
+    if metadata.get("Id") != image["id"]:
         raise VerifierHandoffError("verifier_base_image_changed")
+    # Inspect JSON only in memory: Variant is absent from some Docker versions'
+    # template contexts. Never retain config, labels or other image metadata.
+    system = metadata.get("Os")
+    architecture = metadata.get("Architecture")
+    variant = metadata.get("Variant")
+    if (system != "linux" or not isinstance(architecture, str)
+            or (variant is not None and not isinstance(variant, str))
+            or architecture not in {"amd64", "arm64", "arm"}
+            or variant not in {None, "", "v5", "v6", "v7", "v8"}
+            or (architecture == "amd64" and variant not in {None, ""})
+            or (architecture == "arm64" and variant not in {None, "", "v8"})
+            or (architecture == "arm" and variant not in {"v5", "v6", "v7"})):
+        raise VerifierHandoffError("verifier_base_image_platform_unavailable")
+    return f"{system}/{architecture}" + (f"/{variant}" if variant else "")
+
+
+def _verifier_config(config, env_config, platform):
+    """Copy only the verifier config; refuse conflicting explicit selectors."""
+    environment = config.environment
+    persistent = environment.kwargs.get("persistent_env")
+    if persistent is not None and not isinstance(persistent, dict):
+        raise VerifierHandoffError("verifier_base_image_platform_conflict")
+    settings = (os.environ, environment.env, getattr(env_config, "env", {}) or {}, persistent or {})
+    for setting in settings:
+        if "DOCKER_DEFAULT_PLATFORM" in setting and setting["DOCKER_DEFAULT_PLATFORM"] != platform:
+            raise VerifierHandoffError("verifier_base_image_platform_conflict")
+    copied = copy.deepcopy(config)
+    copied.environment.env["DOCKER_DEFAULT_PLATFORM"] = platform
+    # Pier kwargs take precedence over config.env at its factory boundary.
+    if "persistent_env" in environment.kwargs:
+        copied.environment.kwargs["persistent_env"] = {
+            **(copied.environment.kwargs["persistent_env"] or {}), "DOCKER_DEFAULT_PLATFORM": platform,
+        }
+    return copied
 
 
 class _VariablesView:
@@ -119,10 +162,11 @@ class _EnvironmentView:
 
 
 class _TrialView:
-    def __init__(self, original, reference, context):
+    def __init__(self, original, reference, context, config):
         self._original = original
         self._environment = _EnvironmentView(original._environment, reference)
         self._verifier_env_build_context = lambda _step: context
+        self.config = config
 
     def __getattr__(self, name):
         return getattr(self._original, name)
@@ -164,9 +208,10 @@ def patch_verifier_image_compat(trial_class):
         if not dockerfile.is_file() or _BASE_IMAGE.search(dockerfile.read_text()) is None:
             return await upstream(self, env_config, **arguments)
         image = getattr(self, TRIAL_IMAGE_ATTRIBUTE, None)
-        verify_image_reference(image)
+        platform = verify_image_reference(image)
+        config = _verifier_config(self.config, env_config, platform)
         with _handoff_context(context) as private:
-            view = _TrialView(self, image["reference"], private)
+            view = _TrialView(self, image["reference"], private, config)
             try:
                 return await upstream(view, env_config, **arguments)
             finally:

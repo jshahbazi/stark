@@ -207,7 +207,8 @@ compatibility helper requires that reference to still resolve to the captured
 ID. Missing or changed identities are infrastructure failures.
 
 The pinned upstream handoff hook remains installed. It receives a disposable
-view that overrides only its image-name getter and verifier-context pointer.
+view with its image-name getter, verifier-context pointer and copied verifier
+configuration.
 Methods delegated to the real environment retain their original variables;
 the loaded model, agent path, global environment and real Compose variables
 are unchanged. A private copied context handles the historical one-key
@@ -216,6 +217,18 @@ are unchanged. A private copied context handles the historical one-key
 file hashes guard those three cases. Unexpected Compose content is rejected.
 Both layers of temporary contexts are removed on return, exception or
 cancellation, and source task files remain byte-identical.
+
+The same bounded image inspection verifies the image ID and derives an
+allowlisted Linux OS/architecture/variant. The disposable config supplies
+`DOCKER_DEFAULT_PLATFORM` only to the separate verifier environment, allowing
+an AMD64 source image to remain the verifier base on an ARM64 host. Pier also
+passes that variable into verifier exec calls. Missing or unsupported platform
+metadata, or a conflicting explicit process/trial/task/persistent platform,
+fails as infrastructure instead of selecting a different platform. Original
+configs, source-environment variables and global `os.environ` are unchanged.
+Image inspection JSON stays in memory; no image config or labels are retained.
+The [Anko platform qualification](../archive/runs/2026-11-08-maxxbench-verifier-platform.md)
+records the controlled passing oracle and the earlier unscored failures.
 
 The helper hash is part of oracle and campaign identities. Its model-free
 tests execute the exact upstream hook against synthetic contexts, including
