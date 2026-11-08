@@ -72,8 +72,15 @@ def test_e4b_capability_requires_its_own_source_profile_and_never_inherits_quali
         family_profile=vision_runtime.GEMMA4_E4B_FAMILY_PROFILE,
     )
     assert vision_runtime.image_input_contract(value) == value
-    assert vision_runtime.image_input_contract({**value, "family_profile": vision_runtime.GEMMA4_FAMILY_PROFILE}) is None
-    assert vision_runtime.image_input_contract({**gemma_contract(), "family_profile": vision_runtime.GEMMA4_E4B_FAMILY_PROFILE}) is None
+    assert (
+        vision_runtime.image_input_contract({**value, "family_profile": vision_runtime.GEMMA4_FAMILY_PROFILE}) is None
+    )
+    assert (
+        vision_runtime.image_input_contract(
+            {**gemma_contract(), "family_profile": vision_runtime.GEMMA4_E4B_FAMILY_PROFILE}
+        )
+        is None
+    )
     binary = tmp_path / "worker"
     binary.write_bytes(b"unqualified synthetic worker")
     assert not vision_runtime.qualified_image_worker(value, binary)

@@ -428,8 +428,13 @@ def _replay(
             or profile is None
             and (
                 metadata_profile is not None
-                or not (pinned_gemma or (manifest.get("primary_repo") == VISION_REPO
-                        and manifest.get("primary_revision") == VISION_REVISION))
+                or not (
+                    pinned_gemma
+                    or (
+                        manifest.get("primary_repo") == VISION_REPO
+                        and manifest.get("primary_revision") == VISION_REVISION
+                    )
+                )
             )
         ):
             raise ValueError()

@@ -16,13 +16,20 @@ from .gemma import build_gemma_text_plan
 FAMILY = {"profile": "gemma3-siglip-bf16-v1", "version": 1}
 TOKENS = {"image": 262144, "vision_start": 255999, "vision_end": 256000}
 VISION = {
-    "model_type": "siglip_vision_model", "hidden_size": 1152,
-    "image_size": 896, "intermediate_size": 4304, "num_attention_heads": 16,
-    "num_hidden_layers": 27, "patch_size": 14, "vision_use_head": False,
+    "model_type": "siglip_vision_model",
+    "hidden_size": 1152,
+    "image_size": 896,
+    "intermediate_size": 4304,
+    "num_attention_heads": 16,
+    "num_hidden_layers": 27,
+    "patch_size": 14,
+    "vision_use_head": False,
 }
 VISION_DEFAULTS = {
-    "num_channels": 3, "layer_norm_eps": 1e-6,
-    "hidden_act": "gelu_pytorch_tanh", "attention_dropout": 0.0,
+    "num_channels": 3,
+    "layer_norm_eps": 1e-6,
+    "hidden_act": "gelu_pytorch_tanh",
+    "attention_dropout": 0.0,
 }
 # hidden, intermediate, layers, heads, KV heads, head width, query scalar.
 TEXT_GEOMETRIES = {
@@ -35,39 +42,81 @@ _ANNOTATIONS = {"_name_or_path", "torch_dtype", "dtype", "transformers_version",
 
 def gemma3_config(config: dict) -> tuple[dict, dict]:
     """Admit supported original HF image geometry before tensor planning."""
-    allowed = _ANNOTATIONS | {"model_type", "architectures", "text_config", "vision_config", "mm_tokens_per_image",
-        "image_token_index", "boi_token_index", "eoi_token_index", "eos_token_id", "bos_token_id", "pad_token_id"}
-    if (config.get("model_type") != "gemma3"
+    allowed = _ANNOTATIONS | {
+        "model_type",
+        "architectures",
+        "text_config",
+        "vision_config",
+        "mm_tokens_per_image",
+        "image_token_index",
+        "boi_token_index",
+        "eoi_token_index",
+        "eos_token_id",
+        "bos_token_id",
+        "pad_token_id",
+    }
+    if (
+        config.get("model_type") != "gemma3"
         or config.get("architectures") != ["Gemma3ForConditionalGeneration"]
         or set(config) - allowed
-        or config.get("mm_tokens_per_image", 256) != 256):
+        or config.get("mm_tokens_per_image", 256) != 256
+    ):
         raise UnsupportedConversion("Gemma 3 images require the original multimodal wrapper")
-    if any(config.get(key, token) != token for key, token in (
-        ("image_token_index", TOKENS["image"]), ("boi_token_index", TOKENS["vision_start"]),
-        ("eoi_token_index", TOKENS["vision_end"]))):
+    if any(
+        config.get(key, token) != token
+        for key, token in (
+            ("image_token_index", TOKENS["image"]),
+            ("boi_token_index", TOKENS["vision_start"]),
+            ("eoi_token_index", TOKENS["vision_end"]),
+        )
+    ):
         raise UnsupportedConversion("Gemma 3 image token IDs differ from the implemented profile")
     vision, text = config.get("vision_config"), config.get("text_config")
     if not isinstance(vision, dict) or not isinstance(text, dict):
         raise ConversionError("Gemma 3 requires text and vision configurations")
-    if (any(type(vision.get(key)) is not type(value) or vision.get(key) != value for key, value in VISION.items())
-        or any(type(vision.get(key, value)) is not type(value) or vision.get(key, value) != value
-               for key, value in VISION_DEFAULTS.items())
-        or set(vision) - (set(VISION) | set(VISION_DEFAULTS) | _ANNOTATIONS)):
+    if (
+        any(type(vision.get(key)) is not type(value) or vision.get(key) != value for key, value in VISION.items())
+        or any(
+            type(vision.get(key, value)) is not type(value) or vision.get(key, value) != value
+            for key, value in VISION_DEFAULTS.items()
+        )
+        or set(vision) - (set(VISION) | set(VISION_DEFAULTS) | _ANNOTATIONS)
+    ):
         raise UnsupportedConversion("Gemma 3 vision geometry or operations are outside the implemented profile")
     model_dim = text.get("hidden_size")
     if type(model_dim) is not int or model_dim not in TEXT_GEOMETRIES:
         raise UnsupportedConversion("Gemma 3 image execution supports the 4B, 12B, and 27B decoders")
-    keys = ("intermediate_size", "num_hidden_layers", "num_attention_heads", "num_key_value_heads", "head_dim",
-            "query_pre_attn_scalar")
+    keys = (
+        "intermediate_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "head_dim",
+        "query_pre_attn_scalar",
+    )
     defaults = dict(zip(keys, (None, None, 8, 4, 256, 256), strict=True))
-    if any(type(text.get(key, defaults[key])) is not int or text.get(key, defaults[key]) != value
-           for key, value in zip(keys, TEXT_GEOMETRIES[model_dim], strict=True)):
+    if any(
+        type(text.get(key, defaults[key])) is not int or text.get(key, defaults[key]) != value
+        for key, value in zip(keys, TEXT_GEOMETRIES[model_dim], strict=True)
+    ):
         raise UnsupportedConversion("Gemma 3 decoder geometry disagrees with its image size profile")
-    standard = {"sliding_window": 1024, "sliding_window_pattern": 6, "_sliding_window_pattern": 6,
-        "max_position_embeddings": 131072, "vocab_size": 262208, "rope_theta": 1000000.0,
-        "rope_local_base_freq": 10000.0, "rope_scaling": {"factor": 8.0, "rope_type": "linear"},
-        "rms_norm_eps": 1e-6, "tie_word_embeddings": True, "attention_bias": False, "mlp_bias": False,
-        "attention_dropout": 0.0, "attn_logit_softcapping": None, "final_logit_softcapping": None}
+    standard = {
+        "sliding_window": 1024,
+        "sliding_window_pattern": 6,
+        "_sliding_window_pattern": 6,
+        "max_position_embeddings": 131072,
+        "vocab_size": 262208,
+        "rope_theta": 1000000.0,
+        "rope_local_base_freq": 10000.0,
+        "rope_scaling": {"factor": 8.0, "rope_type": "linear"},
+        "rms_norm_eps": 1e-6,
+        "tie_word_embeddings": True,
+        "attention_bias": False,
+        "mlp_bias": False,
+        "attention_dropout": 0.0,
+        "attn_logit_softcapping": None,
+        "final_logit_softcapping": None,
+    }
     if any(text.get(key, value) != value for key, value in standard.items()):
         raise UnsupportedConversion("Gemma 3 image decoder operations differ from the implemented profile")
     normalized = {**text, "architectures": ["Gemma3ForCausalLM"]}
@@ -75,8 +124,15 @@ def gemma3_config(config: dict) -> tuple[dict, dict]:
     return normalized, {**VISION, **VISION_DEFAULTS}
 
 
-def vision_shapes(model_dim: int, *, hidden: int = 1152, intermediate: int = 4304, layers: int = 27,
-                  image_size: int = 896, patch: int = 14) -> dict[str, tuple[int, ...]]:
+def vision_shapes(
+    model_dim: int,
+    *,
+    hidden: int = 1152,
+    intermediate: int = 4304,
+    layers: int = 27,
+    image_size: int = 896,
+    patch: int = 14,
+) -> dict[str, tuple[int, ...]]:
     """Complete consumed source inventory; optional dimensions serve tiny fixtures."""
     shapes = {
         "vision_tower.vision_model.embeddings.patch_embedding.weight": (hidden, 3, patch, patch),
@@ -93,9 +149,13 @@ def vision_shapes(model_dim: int, *, hidden: int = 1152, intermediate: int = 430
             shapes[f"{base}.{norm}.weight"] = (hidden,)
             shapes[f"{base}.{norm}.bias"] = (hidden,)
         for projection, shape in (
-            ("self_attn.q_proj", (hidden, hidden)), ("self_attn.k_proj", (hidden, hidden)),
-            ("self_attn.v_proj", (hidden, hidden)), ("self_attn.out_proj", (hidden, hidden)),
-            ("mlp.fc1", (intermediate, hidden)), ("mlp.fc2", (hidden, intermediate))):
+            ("self_attn.q_proj", (hidden, hidden)),
+            ("self_attn.k_proj", (hidden, hidden)),
+            ("self_attn.v_proj", (hidden, hidden)),
+            ("self_attn.out_proj", (hidden, hidden)),
+            ("mlp.fc1", (intermediate, hidden)),
+            ("mlp.fc2", (hidden, intermediate)),
+        ):
             shapes[f"{base}.{projection}.weight"] = shape
             shapes[f"{base}.{projection}.bias"] = (shape[0],)
     return shapes
@@ -136,8 +196,12 @@ def image_decoder_config(decoder):
         mixer = layer["mixer_config"]
         policy = "same_image" if mixer["sliding_window_size"] is None else "windowed_same_image"
         layers.append({**layer, "mixer_config": {**mixer, "image_attention_policy": policy}})
-    return {**decoder, "transformer_config": {**transformer, "layer_configs": layers},
-            "scalar_image_embeddings": True, "bidirectional_image_attention": True}
+    return {
+        **decoder,
+        "transformer_config": {**transformer, "layer_configs": layers},
+        "scalar_image_embeddings": True,
+        "bidirectional_image_attention": True,
+    }
 
 
 def build_gemma3_vision_plan(source: Path, *, dtype: str = "bfloat16"):
@@ -160,8 +224,12 @@ def build_gemma3_vision_plan(source: Path, *, dtype: str = "bfloat16"):
     operations = plan_vision_tensors(remainder, text["hidden_size"])
     if any(info.dtype != "BF16" for info in tensors.values()):
         raise UnsupportedConversion("Gemma 3 images require complete BF16 source storage")
-    return replace(base, operations=tuple(sorted((*base.operations, *operations), key=lambda operation: operation.name)),
+    return replace(
+        base,
+        operations=tuple(sorted((*base.operations, *operations), key=lambda operation: operation.name)),
         decoder_config=image_decoder_config(base.decoder_config),
         metadata={**base.metadata, "stark.vision.family": FAMILY["profile"]},
-        input_bytes=sum(info.nbytes for info in tensors.values()), source_tensors=len(tensors),
-        input_tensors=tuple(tensors.values()))
+        input_bytes=sum(info.nbytes for info in tensors.values()),
+        source_tensors=len(tensors),
+        input_tensors=tuple(tensors.values()),
+    )

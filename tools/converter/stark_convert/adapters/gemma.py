@@ -129,8 +129,9 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     return build_gemma_text_plan(read_json(source / "config.json"), None, family=family, dtype=dtype, _source=source)
 
 
-def build_gemma_text_plan(config: dict, tensors: dict | None, *, family: str, dtype: str = "bfloat16",
-                          _source: Path | None = None) -> ConversionPlan:
+def build_gemma_text_plan(
+    config: dict, tensors: dict | None, *, family: str, dtype: str = "bfloat16", _source: Path | None = None
+) -> ConversionPlan:
     """Plan an already selected decoder inventory without copying checkpoint data.
 
     Multimodal adapters validate their complete wrapper and provide only the
