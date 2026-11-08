@@ -552,6 +552,16 @@ impl LilyModel {
         self.max_context
     }
 
+    pub(crate) fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        let capacity =
+            planned_context_capacity(self.scratch_capacity, context_tokens as usize, self.max_context).ok()?;
+        self.model.request_memory_bytes(&self.context, capacity, input_tokens as usize)
+    }
+
     pub fn supports_mtp(&self) -> bool {
         self.mtp_capabilities().is_some()
     }

@@ -23,6 +23,17 @@ mod nucleus;
 /// Recurrent snapshots also depend on whether the draft head ran in prefill.
 const PREFIX_CACHE_KEY: &str = "model-instance+context-tokens+cache-scope+mtp-selection";
 
+fn admit_request_memory(
+    request_bytes: Option<usize>,
+    available: usize,
+) -> Result<(), &'static str> {
+    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+    if request_bytes > available.saturating_sub(256 * 1024 * 1024) / 4 {
+        return Err("resource_budget_exceeded");
+    }
+    Ok(())
+}
+
 fn native_sampling(options: &GenerationOptions) -> Option<NativeSampling> {
     let sampling = match options.sampling {
         Sampling::Greedy {} => Some(NativeSampling::Greedy {
@@ -700,6 +711,17 @@ impl GenerationBackend for HybridBackend {
     fn max_context_length(&self) -> Option<u32> {
         Some(self.model.max_context_length())
     }
+    fn automatic_context_length(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+    ) -> Option<u32> {
+        self.model.automatic_context_length(input_tokens, maximum, memory_budget_bytes)
+    }
+    fn supports_automatic_context_planning(&self) -> bool {
+        self.model.supports_automatic_context_planning()
+    }
     fn eos_token_ids(&self) -> &[u32] {
         self.model.eos_token_ids()
     }
@@ -728,6 +750,13 @@ impl GenerationBackend for HybridBackend {
         on_text: Option<&mut TextCallback<'_>>,
         on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
+        let input_tokens = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
+        let end = input_tokens.checked_add(options.max_new_tokens).ok_or("context_overflow")?;
+        if end > options.context_tokens {
+            return Err("context_overflow");
+        }
+        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+        admit_request_memory(self.model.request_memory_bytes(end, input_tokens), available)?;
         self.nucleus_sampler.clear();
         let reused = self.prefix_cache_plan(input, options);
         // A miss drops the snapshot; the next prefill overwrites the rows.
@@ -1132,6 +1161,15 @@ mod tests {
     use stark_engine::engine::hybrid::math;
 
     use super::*;
+
+    #[test]
+    fn memory_inventory_failures_are_recoverable_resource_errors() {
+        let available = 1024 * 1024 * 1024;
+        assert_eq!(admit_request_memory(None, available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_request_memory(Some(256 * 1024 * 1024), available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_request_memory(Some(128 * 1024 * 1024), available), Ok(()));
+        assert_eq!(admit_request_memory(Some(1), 256 * 1024 * 1024), Err("resource_budget_exceeded"));
+    }
 
     struct ProfileDirectory(std::path::PathBuf);
 

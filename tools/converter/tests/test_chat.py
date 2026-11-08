@@ -51,7 +51,7 @@ class FakeWorker:
             return {
                 "context_tokens": context,
                 "max_new_tokens": context - payload["input_tokens"],
-                "context_capacity_known": False,
+                "context_capacity_known": self.context_limit != 0xFFFFFFFF,
                 "budget_kind": "memory",
             }
         return {"token_count": 20} if payload["operation"] == "tokenize" else {"text": "reply fixture"}
@@ -123,6 +123,27 @@ def test_automatic_cli_output_uses_remaining_finite_context(model):
     assert generated[0]["context_tokens"] == 512
 
 
+def test_automatic_cli_output_uses_memory_admission_below_finite_capacity(model):
+    worker = FakeWorker(context_limit=32768)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None, max_new_tokens=None), worker) == 0
+    planned = [request for request in worker.requests if request["operation"] == "plan_generation"]
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert planned == [{"operation": "plan_generation", "input_tokens": 20, "context_tokens": 32768}]
+    assert generated[0]["context_tokens"] == 6164
+    assert generated[0]["max_new_tokens"] == 6144
+
+
+def test_legacy_finite_worker_uses_remaining_context_without_planner(model):
+    worker = FakeWorker(context_limit=512)
+    read = worker.read
+    worker.read = lambda: {key: value for key, value in read().items() if key != "generation_budget"}
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None, max_new_tokens=None), worker) == 0
+    assert not any(request["operation"] == "plan_generation" for request in worker.requests)
+    assert worker.requests[-1]["max_new_tokens"] == 492
+
+
 def test_automatic_cli_output_uses_custom_budget_for_unknown_context(model):
     worker = FakeWorker(context_limit=0xFFFFFFFF)
     with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
@@ -149,11 +170,11 @@ def test_automatic_cli_output_plans_unknown_context_without_user_options(model):
         {"context_tokens": 9000, "max_new_tokens": 8980},
         {"max_new_tokens": True},
         {"max_new_tokens": 1},
-        {"context_capacity_known": True},
         {"budget_kind": "model"},
     ],
 )
-def test_automatic_budget_rejects_unsafe_or_inconsistent_worker_allowances(invalid):
+@pytest.mark.parametrize("known", [False, True])
+def test_automatic_budget_rejects_unsafe_or_inconsistent_worker_allowances(invalid, known):
     from types import SimpleNamespace
 
     from stark_convert.chat import automatic_generation_budget
@@ -161,13 +182,34 @@ def test_automatic_budget_rejects_unsafe_or_inconsistent_worker_allowances(inval
     response = {
         "context_tokens": 8192,
         "max_new_tokens": 8172,
-        "context_capacity_known": False,
+        "context_capacity_known": known,
         "budget_kind": "memory",
         **invalid,
     }
     worker = SimpleNamespace(generation_budget=True, max_new_tokens=8192, request=lambda *_args, **_kwargs: response)
     with pytest.raises(ChatError, match="Invalid automatic execution budget"):
-        automatic_generation_budget(worker, 20, 8192)
+        automatic_generation_budget(worker, 20, 8192, context_capacity_known=known)
+
+
+@pytest.mark.parametrize("known", [False, True])
+@pytest.mark.parametrize("reported", [False, True, 0, 1, None])
+def test_automatic_budget_requires_exact_capacity_contract(known, reported):
+    from types import SimpleNamespace
+
+    from stark_convert.chat import automatic_generation_budget
+
+    response = {
+        "context_tokens": 8192,
+        "max_new_tokens": 8172,
+        "context_capacity_known": reported,
+        "budget_kind": "memory",
+    }
+    worker = SimpleNamespace(generation_budget=True, max_new_tokens=8192, request=lambda *_args, **_kwargs: response)
+    if reported is known:
+        assert automatic_generation_budget(worker, 20, 8192, context_capacity_known=known) == (8192, 8172)
+    else:
+        with pytest.raises(ChatError, match="Invalid automatic execution budget"):
+            automatic_generation_budget(worker, 20, 8192, context_capacity_known=known)
 
 
 def test_history_reset_and_eof(model):

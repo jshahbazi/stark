@@ -18,6 +18,7 @@ mod glm_metal;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod lily;
 pub mod math;
+mod memory;
 pub mod profile;
 pub mod qwen;
 #[cfg(feature = "metal")]
@@ -572,6 +573,53 @@ impl Model {
     }
     pub fn max_context_length(&self) -> u32 {
         self.max_context
+    }
+
+    /// Allocation admission uses the loaded execution family and cache policy.
+    /// The returned context remains bounded by the model's declared capacity.
+    pub fn automatic_context_length(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+    ) -> Option<u32> {
+        crate::encodable_block::memory::automatic_context(
+            input_tokens,
+            maximum.min(self.max_context),
+            memory_budget_bytes,
+            |context| {
+                self.request_memory_bytes(context, input_tokens)
+                    .map(crate::encodable_block::memory::MemoryEstimate::state)
+            },
+        )
+    }
+
+    pub fn supports_automatic_context_planning(&self) -> bool {
+        self.request_memory_bytes(2.min(self.max_context), 1).is_some()
+    }
+
+    /// Conservative peak inventory. Existing cached allocations are charged
+    /// again, so low headroom can reject reuse without changing model state.
+    pub fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        if input_tokens == 0 || context_tokens < input_tokens || context_tokens > self.max_context {
+            return None;
+        }
+        let state = match &self.forward {
+            Forward::Flint(model) => model.request_memory_bytes(context_tokens)?,
+            Forward::Glm(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
+            Forward::Qwen(model) => model.request_memory_bytes(context_tokens)?,
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            // The bridge's loader bills all device phases at its installed
+            // full context, including MTP and prefix-copy peak, before load.
+            Forward::GlmExl3(_) => 0,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
+        };
+        memory::sum(&[state, memory::host_workspace(context_tokens, input_tokens, self.vocab_size)?])
     }
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos

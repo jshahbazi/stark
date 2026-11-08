@@ -104,8 +104,8 @@ class ChatBudgetUnavailable(ChatError):
     """An older worker cannot yet plan automatic memory-bounded execution."""
 
 
-def automatic_generation_budget(worker, input_tokens, context_tokens, *, cancelled=None):
-    """Ask the loaded backend to size unknown-capacity execution after tokenization."""
+def automatic_generation_budget(worker, input_tokens, context_tokens, *, context_capacity_known=False, cancelled=None):
+    """Ask the loaded backend to admit execution after tokenization."""
     if not getattr(worker, "generation_budget", False):
         raise ChatBudgetUnavailable("Update Stark's worker to enable automatic output for this model.")
     reply = worker.request(
@@ -122,7 +122,7 @@ def automatic_generation_budget(worker, input_tokens, context_tokens, *, cancell
         or type(maximum) is not int
         or maximum != context - input_tokens
         or maximum > getattr(worker, "max_new_tokens", 0xFFFFFFFE)
-        or reply.get("context_capacity_known") is not False
+        or reply.get("context_capacity_known") is not context_capacity_known
         or reply.get("budget_kind") != "memory"
     ):
         raise ChatError("Invalid automatic execution budget; restart the model.")
@@ -1005,10 +1005,12 @@ def run_chat(args, worker):
                 maximum = args.max_new_tokens
                 request_context = context
                 if maximum is None:
-                    if context_capacity_known:
+                    if context_capacity_known and not worker.generation_budget:
                         maximum = min(ready["max_new_tokens"], context - count)
                     else:
-                        request_context, maximum = automatic_generation_budget(worker, count, context)
+                        request_context, maximum = automatic_generation_budget(
+                            worker, count, context, context_capacity_known=context_capacity_known
+                        )
                 if maximum < 1 or count + maximum > context:
                     print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")
                     continue

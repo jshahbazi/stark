@@ -289,6 +289,23 @@ impl<B: Backend> LanguageModel<B> {
         self.context_memory_estimate(2, 1).is_some()
     }
 
+    /// Bound physical request growth without charging unused sparse address
+    /// space from a finite model's configured context to a short request.
+    pub fn generation_allocation_context_length(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<u32> {
+        crate::encodable_block::memory::generation_allocation_context(
+            input_tokens,
+            context_tokens,
+            max_new_tokens,
+            self.max_context_length().is_some()
+                && self.engine.context.device_capabilities().contains(DeviceCapabilities::SPARSE_BUFFERS),
+        )
+    }
+
     /// Plan a finite execution allocation from loaded geometry and a caller's
     /// memory headroom. This is not a trained model context-capacity claim.
     pub fn automatic_context_length(

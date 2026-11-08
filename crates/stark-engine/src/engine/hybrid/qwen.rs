@@ -22,6 +22,7 @@ use super::{
 };
 
 #[derive(Clone)]
+#[cfg_attr(test, derive(Default))]
 struct Geometry {
     dim: usize,
     vocab: usize,
@@ -907,7 +908,79 @@ pub struct QwenModel {
     graph_enabled: bool,
 }
 
+impl Geometry {
+    fn request_memory_bytes(
+        &self,
+        layer_count: usize,
+        attention_layers: usize,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        let g = self;
+        let capacity = super::memory::growth_capacity(context_tokens, g.context, 16)?;
+        let key_width = g.kv_heads.checked_mul(g.head_dim)?;
+        // The scalar path retains independent F32 K/V/index rows and Vec
+        // descriptors while the graph owns its own F32 cache and score planes.
+        let host_row = super::memory::sum(&[
+            super::memory::bytes(&[2, key_width], 4)?,
+            super::memory::bytes(&[g.index_dim], 4)?,
+            super::memory::bytes(&[3], size_of::<Vec<f32>>())?,
+        ])?;
+        let graph_row = super::memory::sum(&[
+            super::memory::bytes(&[2, key_width], 4)?,
+            super::memory::bytes(&[g.index_dim], 4)?,
+            super::memory::bytes(&[2, g.heads], 4)?,
+            4,
+        ])?;
+        // Every graph growth allocates the replacement before dropping the
+        // previous buffers. Host descriptors may also double their capacity.
+        let cache = super::memory::bytes(&[attention_layers, capacity, host_row.checked_add(graph_row)?], 2)?;
+        let pooled =
+            super::memory::bytes(&[attention_layers, (capacity / g.ratio).max(1), g.index_dim.checked_add(1)?], 8)?;
+        let recurrent = super::memory::bytes(&[layer_count, g.value_heads, g.value_dim, g.key_dim], 16)?;
+        let conv = super::memory::bytes(
+            &[
+                layer_count,
+                g.conv_kernel,
+                g.key_heads
+                    .checked_mul(g.key_dim)?
+                    .checked_mul(2)?
+                    .checked_add(g.value_heads.checked_mul(g.value_dim)?)?,
+            ],
+            16,
+        )?;
+        let ple = super::memory::bytes(&[layer_count, g.dim, g.streams, g.ple_kernel, g.ngram_size], 16)?;
+        let width = g
+            .dim
+            .checked_mul(g.streams)?
+            .max(g.expert_dim.checked_mul(g.active_experts)?)
+            .max(g.shared_dim)
+            .max(g.heads.checked_mul(g.head_dim)?)
+            .max(g.index_heads.checked_mul(g.index_dim)?);
+        let workspace = super::memory::bytes(&[width], 256)?;
+        super::memory::sum(&[cache, pooled, recurrent, conv, ple, workspace, 512 * 1024 * 1024])
+    }
+}
+
 impl QwenModel {
+    pub(super) fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        #[cfg(feature = "metal")]
+        {
+            let g = &self.geometry;
+            let capacity = super::memory::growth_capacity(context_tokens, g.context, 16)?;
+            super::memory::gpu_buffer_fits(&[capacity, g.kv_heads, g.head_dim], 4)?;
+            super::memory::gpu_buffer_fits(&[capacity, g.index_dim], 4)?;
+            super::memory::gpu_buffer_fits(&[capacity, g.heads], 4)?;
+        }
+        self.geometry.request_memory_bytes(
+            self.layers.len(),
+            self.layers.iter().filter(|layer| matches!(layer.mixer, Mixer::Attention(_))).count(),
+            context_tokens,
+        )
+    }
+
     pub fn new(
         weights: Weights,
         config: &Value,
@@ -1221,6 +1294,51 @@ mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn qwen_request_inventory_covers_host_graph_cache_growth_and_scores() {
+        let mut g = Geometry {
+            dim: 128,
+            streams: 4,
+            heads: 8,
+            kv_heads: 2,
+            head_dim: 64,
+            key_heads: 2,
+            value_heads: 4,
+            key_dim: 64,
+            value_dim: 64,
+            conv_kernel: 4,
+            active_experts: 2,
+            expert_dim: 256,
+            shared_dim: 256,
+            index_heads: 4,
+            index_dim: 32,
+            ratio: 4,
+            context: 4096,
+            ple_kernel: 4,
+            ngram_size: 3,
+            ..Geometry::default()
+        };
+        let at_64 = g.request_memory_bytes(4, 2, 64).unwrap();
+        assert_eq!(g.request_memory_bytes(4, 2, 63), Some(at_64));
+        let at_128 = g.request_memory_bytes(4, 2, 65).unwrap();
+        // Independent row inventory from the host Vecs and graph cache:
+        // host K/V/index F32 plus three Vec descriptors; graph K/V/index,
+        // score/probability planes and visibility; pooled keys and scores.
+        let host_row = (2 * 2 * 64 + 32) * 4 + 3 * size_of::<Vec<f32>>();
+        let graph_row = (2 * 2 * 64 + 32 + 2 * 8 + 1) * 4;
+        let growth = 2 * 2 * 64 * (host_row + graph_row) + 2 * 16 * (32 + 1) * 8;
+        assert_eq!(at_128 - at_64, growth);
+        assert_eq!(
+            crate::encodable_block::memory::automatic_context(1, 4096, at_64, |context| {
+                g.request_memory_bytes(4, 2, context).map(crate::encodable_block::memory::MemoryEstimate::state)
+            }),
+            Some(64)
+        );
+        assert!(g.request_memory_bytes(4, 2, 4097).is_none());
+        g.heads = usize::MAX;
+        assert!(g.request_memory_bytes(4, 2, 64).is_none());
+    }
 
     #[stark_test]
     fn qwen_ngram_history_stops_at_eos_without_losing_current_eos_context() {

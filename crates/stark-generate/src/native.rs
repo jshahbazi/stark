@@ -42,6 +42,26 @@ const _: () = assert!(prefix_cache::PREFILL_CHUNK_TOKENS == PREFILL_CHUNK_TOKENS
 type RetainedState = PrefixEntry<LanguageModelState<Metal>>;
 type DenseRetainedState = prefix_cache::BoundaryEntry<(DenseMtpSession<Metal>, u32)>;
 
+fn admit_generation_memory(
+    model: &LanguageModel<Metal>,
+    input_tokens: usize,
+    options: &GenerationOptions,
+) -> Result<(), &'static str> {
+    let input_tokens = u32::try_from(input_tokens).map_err(|_| "context_overflow")?;
+    let allocation_context = model
+        .generation_allocation_context_length(input_tokens, options.context_tokens, options.max_new_tokens)
+        .ok_or("context_overflow")?;
+    let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+    let memory_budget = available.saturating_sub(256 * 1024 * 1024) / 4;
+    let safe_capacity = model
+        .automatic_context_length(input_tokens, allocation_context, memory_budget)
+        .ok_or("resource_budget_exceeded")?;
+    if allocation_context > safe_capacity {
+        return Err("resource_budget_exceeded");
+    }
+    Ok(())
+}
+
 fn record_accepted_prefix_round(
     counts: &mut [u64; 4],
     accepted: usize,
@@ -550,6 +570,12 @@ impl NativeBackend {
         };
         let capture = prefix_cache::reusable_prefill_rows(input.len());
         let mut session = if let Some(entry) = retained.filter(|_| reused > 0) {
+            // A reused sparse cache can grow well beyond its previous mapped
+            // rows when this request asks for more output. Undeclared contexts
+            // were already admitted for their entire unchanged capacity.
+            if model.max_context_length().is_some() {
+                admit_generation_memory(model, input.len(), options)?;
+            }
             let mut session = entry.state.0;
             model.restore_dense_mtp_prefix(&mut session, reused).map_err(|_| "native_generation_failed")?;
             model
@@ -557,17 +583,7 @@ impl NativeBackend {
                 .map_err(|_| control_error.unwrap_or("native_generation_failed"))?;
             session
         } else {
-            if model.max_context_length().is_none() {
-                let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-                let memory_budget = available.saturating_sub(256 * 1024 * 1024) / 4;
-                let input_tokens = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
-                let safe_capacity = model
-                    .automatic_context_length(input_tokens, u32::MAX, memory_budget)
-                    .ok_or("resource_budget_exceeded")?;
-                if options.context_tokens > safe_capacity {
-                    return Err("resource_budget_exceeded");
-                }
-            }
+            admit_generation_memory(model, input.len(), options)?;
             model
                 .prefill_dense_mtp_controlled(input, options.context_tokens, &mut control)
                 .map_err(|_| control_error.unwrap_or("native_generation_failed"))?
@@ -759,6 +775,12 @@ impl NativeBackend {
         self.pending_prefix = None;
         let mut state = match (&mut self.model, retained) {
             (NativeModel::Text(model), Some(entry)) if reused > 0 => {
+                // Finite sparse admission may previously have covered only a
+                // short request; an unchanged undeclared capacity was charged
+                // in full when its retained state was created.
+                if model.max_context_length().is_some() {
+                    admit_generation_memory(model, input.len(), options)?;
+                }
                 let mut state = entry.state;
                 model
                     .rewind_state(&mut state, reused, Some(options.context_tokens), options.seed)
@@ -767,16 +789,8 @@ impl NativeBackend {
             },
             (NativeModel::Text(model), retained) => {
                 drop(retained);
-                if image.is_none() && model.max_context_length().is_none() {
-                    let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-                    let memory_budget = available.saturating_sub(256 * 1024 * 1024) / 4;
-                    let input_tokens = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
-                    let safe_capacity = model
-                        .automatic_context_length(input_tokens, u32::MAX, memory_budget)
-                        .ok_or("resource_budget_exceeded")?;
-                    if options.context_tokens > safe_capacity {
-                        return Err("resource_budget_exceeded");
-                    }
+                if image.is_none() {
+                    admit_generation_memory(model, input.len(), options)?;
                 }
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)

@@ -27,6 +27,11 @@ from .resource_budget import PENDING_BYTES, WIRE_BYTES, available_memory_bytes
 MAX_TEXT_BODY_BYTES = WIRE_BYTES
 MAX_IMAGE_BODY_BYTES = WIRE_BYTES + 6 * 1024 * 1024
 MAX_PENDING_BODY_BYTES = PENDING_BYTES
+# json.loads(bytes) can hold both a decoded four-byte-wide JSON string and its
+# parsed string values at once. Reserve transient parsing headroom separately
+# from raw transport bytes, including bodies admitted by concurrent handlers.
+_JSON_PARSE_MEMORY_MULTIPLIER = 12
+_MEMORY_GUARDED_BODY_BYTES = 1024 * 1024
 # OpenWork (16) plus OpenCode Desktop (8) managed capabilities share this admission table.
 MAX_API_CLIENTS = 24
 MAX_API_CLIENT_TTL_SECONDS = 120
@@ -148,6 +153,7 @@ class LocalAPI:
         self._closing = threading.Event()
         self._body_lock = threading.Lock()
         self._pending_body_bytes = 0
+        self._pending_parse_bytes = 0
         self._api_session = ""
         self._clients: dict[str, _ClientGrant] = {}
         # Kept separately from current admission grants: refreshing a token or
@@ -460,6 +466,7 @@ class LocalAPI:
                 client_id = None
                 monitor = None
                 reserved_body = 0
+                reserved_parse = 0
                 try:
                     client_id = self._guard(cancelled)
                     if self.path != "/v1/chat/completions":
@@ -477,13 +484,18 @@ class LocalAPI:
                     length = int(raw_length.lstrip("0") or "0")
                     if length > api._body_limit():
                         raise APIError(413, "Request body is too large", "body_too_large")
-                    if length > 1024 * 1024 and 3 * length > available_memory_bytes():
-                        raise APIError(429, "Available memory is too low for this request", "memory_pressure")
                     with api._body_lock:
                         if api._pending_body_bytes + length > MAX_PENDING_BODY_BYTES:
                             raise APIError(429, "Pending request bytes exceed the server budget", "body_budget_full")
+                        parse_bytes = (
+                            _JSON_PARSE_MEMORY_MULTIPLIER * length if length > _MEMORY_GUARDED_BODY_BYTES else 0
+                        )
+                        if parse_bytes and api._pending_parse_bytes + parse_bytes > available_memory_bytes():
+                            raise APIError(429, "Available memory is too low for this request", "memory_pressure")
                         api._pending_body_bytes += length
                         reserved_body = length
+                        api._pending_parse_bytes += parse_bytes
+                        reserved_parse = parse_bytes
                     content_type = self.headers.get("Content-Type")
                     if content_type and content_type.split(";", 1)[0].strip().lower() != "application/json":
                         raise APIError(415, "Content-Type must be application/json", "unsupported_media_type")
@@ -500,6 +512,11 @@ class LocalAPI:
                         )
                     except (ValueError, UnicodeDecodeError, RecursionError):
                         raise APIError(400, "Malformed JSON", "invalid_json") from None
+                    finally:
+                        if reserved_parse:
+                            with api._body_lock:
+                                api._pending_parse_bytes -= reserved_parse
+                            reserved_parse = 0
                     if not isinstance(payload, dict):
                         raise APIError(400, "Request body must be an object", "invalid_request")
                     if length > MAX_TEXT_BODY_BYTES and not self._contains_image(payload):
@@ -605,9 +622,10 @@ class LocalAPI:
                     else:
                         self._error(error)
                 finally:
-                    if reserved_body:
+                    if reserved_body or reserved_parse:
                         with api._body_lock:
                             api._pending_body_bytes -= reserved_body
+                            api._pending_parse_bytes -= reserved_parse
                     cancelled.set()
                     if monitor is not None:
                         monitor.join(timeout=0.2)

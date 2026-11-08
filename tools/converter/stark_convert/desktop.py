@@ -2376,11 +2376,13 @@ class Desktop:
         if maximum in (None, 0):
             if count >= context:
                 raise DesktopError("Conversation is full. Start a new conversation and try again.")
-            if context_capacity_known:
+            if context_capacity_known and not getattr(worker, "generation_budget", False):
                 maximum = min(getattr(worker, "max_new_tokens", self.output_limit), context - count)
             else:
                 try:
-                    context, maximum = automatic_generation_budget(worker, count, context, cancelled=cancelled)
+                    context, maximum = automatic_generation_budget(
+                        worker, count, context, context_capacity_known=context_capacity_known, cancelled=cancelled
+                    )
                 except ChatBudgetUnavailable as error:
                     raise APIError(503, str(error), "automatic_output_unavailable") from None
             if maximum < 1:

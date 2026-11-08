@@ -3165,7 +3165,7 @@ struct AdvancedOptionsView: View {
                         .accessibilityLabel("Output limit in tokens")
                 }
             }
-            Text("Auto uses all tokens left after the conversation, up to the model's generation limit.")
+            Text("Auto uses the remaining context, within the model's limits and available memory.")
                 .font(.caption).foregroundStyle(.secondary)
             if !engine.contextCapacityKnown {
                 Text("This model does not declare a context maximum. Auto sizes execution from the model's state requirements and available memory.")
@@ -3182,7 +3182,7 @@ struct AdvancedOptionsView: View {
             if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
             Text(engine.contextCapacityKnown
-                 ? "Context defaults to the model's maximum. Auto uses the remaining context for the reply."
+                 ? "Context defaults to the model's maximum. Auto admits the reply within available memory."
                  : "Auto chooses a memory-bounded execution allowance. A custom conversation budget sets an upper bound.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {

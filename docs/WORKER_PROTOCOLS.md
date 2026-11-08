@@ -80,6 +80,9 @@ separate controls; see [chat template evaluation](GENERATION.md#chat-template-ev
 
 ## Automatic execution for undeclared contexts
 
+The memory planner also admits Auto output for finite-context text models. Their
+declared model capacity is the upper bound; it remains unchanged in discovery.
+
 Workers advertising `generation_budget: "memory-context-v1"` accept
 `plan_generation` after tokenization:
 
@@ -91,7 +94,8 @@ Workers advertising `generation_budget: "memory-context-v1"` accept
 budget; the protocol ceiling permits automatic selection. The reply contains
 a finite `context_tokens`, `max_new_tokens` equal to that allowance minus the
 input, `context_capacity_known` and `budget_kind: "memory"`. Generation then uses
-those explicit finite values. The HTTP model capacity remains undeclared.
+those explicit finite values. A model without a declared capacity continues to
+report an undeclared HTTP model capacity.
 
 The native planner performs checked, allocation-free estimates using the loaded
 attention cache dimensions and precision, ring bounds, recurrent state and
@@ -102,6 +106,22 @@ serialization and ordinary memory-pressure fluctuations before allocation is
 rechecked. This is conservative admission evidence; it is not a memory
 reservation or a hard process RSS ceiling. Cancellation, output byte limits and
 deadlines remain active. Insufficient memory rejects the request cleanly.
+
+Native text generation also checks allocation admission for explicit output
+requests. A finite context using sparse Metal buffers is charged for the actual
+input plus requested output span; unused reserved address capacity is not mapped
+cache memory. Dense buffers and undeclared contexts are charged for their full
+selected context. Finite retained states are checked before additional generation
+and may be rejected conservatively under memory pressure. Exact reuse of an
+undeclared-context state keeps its previously admitted whole-context allocation.
+
+The separate GLM, Qwen and Flint execution paths inventory their loaded cache
+geometry, growth rounding, transient replacement buffers and host workspaces.
+Retained Lily uses its selected K/V format and loaded draft head when counting
+state, snapshots and decode/prefill scratch. The EXL3 bridge already bills device
+phases at its installed full context before loading; its host planner additionally
+admits token/readout workspaces. These checks do not change inference precision
+or replay tokens. Image processing keeps its separately qualified admission path.
 
 Planning never replays a prompt or generated token. A successful query preserves
 the retained prefix; the worker keeps an existing planned capacity while it still
@@ -120,6 +140,7 @@ The first line a worker writes is its readiness reply. On success it starts with
 | `stark-generate` | `mode` | `text-generation-v1` |
 | `stark-generate` | `streaming` | `text-delta-v1` |
 | `stark-generate` | `cancellation` | `pipe-v1` |
+| `stark-generate` | `generation_budget` | `memory-context-v1` when the loaded text backend exposes an allocation profile |
 | `stark-generate` | `image_input.version` | `mediaref-v1` (when the loaded model supports the implemented vision layout) |
 | `stark-generate` | `image_input.transport` | `owner-private-file-v1` |
 | `stark-generate` | `timing_method` (in generate replies) | `first-token-wall-clock-v1` |

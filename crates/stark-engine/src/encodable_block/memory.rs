@@ -25,6 +25,26 @@ pub fn checked_bytes(
         .filter(|&size| size <= isize::MAX as usize)
 }
 
+/// Sparse finite caches reserve address space for the selected context, but
+/// only commit rows reached by this request. Dense and undeclared contexts
+/// continue to admit their entire selected allocation.
+pub fn generation_allocation_context(
+    input_tokens: u32,
+    context_tokens: u32,
+    max_new_tokens: u32,
+    sparse_finite_context: bool,
+) -> Option<u32> {
+    let requested = input_tokens.checked_add(max_new_tokens)?;
+    if input_tokens == 0 || max_new_tokens == 0 || requested > context_tokens {
+        return None;
+    }
+    Some(if sparse_finite_context {
+        requested
+    } else {
+        context_tokens
+    })
+}
+
 pub fn attention_estimate(
     context_tokens: u32,
     input_tokens: u32,
@@ -238,6 +258,21 @@ mod tests {
         assert_eq!(automatic_context(u32::MAX, u32::MAX, usize::MAX, profile), None);
         assert_eq!(automatic_context(20, 100, usize::MAX, |_| None), None);
         assert!(checked_bytes(&[u32::MAX, u32::MAX], 8).is_none());
+    }
+
+    #[stark_test]
+    fn finite_sparse_admission_counts_requested_growth_and_dense_reservation() {
+        let profile = |context: u32| Some(MemoryEstimate::state(context as usize * 8));
+        let short = generation_allocation_context(10, 1000, 10, true).unwrap();
+        assert_eq!(short, 20);
+        assert_eq!(automatic_context(10, short, 800, profile), Some(short));
+        let growing = generation_allocation_context(10, 1000, 500, true).unwrap();
+        assert_eq!(automatic_context(10, growing, 800, profile), Some(100));
+        let dense = generation_allocation_context(10, 1000, 10, false).unwrap();
+        assert_eq!(dense, 1000);
+        assert_eq!(automatic_context(10, dense, 800, profile), Some(100));
+        assert!(generation_allocation_context(u32::MAX, u32::MAX, 1, true).is_none());
+        assert!(generation_allocation_context(10, 20, 11, true).is_none());
     }
 
     #[stark_test]
