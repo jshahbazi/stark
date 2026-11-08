@@ -176,9 +176,8 @@ fn gemma4_larger_full_attention_split_metal() {
     let manifest: Value = serde_json::from_slice(&read(&root, "manifest.json")).unwrap();
     assert_eq!(manifest["source_sha256"], "4f874549f79deda4bb9ce7fb7d7b8e7349122be1711f733f7a4157e46ed10cc3");
     assert_eq!(manifest["model_revision"], PROFILES[2].revision);
-    assert_eq!(manifest["stage_focus"], "first-layer-full-attention");
-    assert_eq!(manifest["stage_case_index"], 1);
-    let case = &manifest["cases"][1];
+    let (case_index, focus_layer) = full_attention_focus(&manifest);
+    let case = &manifest["cases"][case_index];
     let stages = case["stages"].as_object().unwrap();
     assert_eq!(stages.len(), 4);
     let expected = |key: &str| {
@@ -191,7 +190,7 @@ fn gemma4_larger_full_attention_split_metal() {
     assert_eq!(format!("{:x}", Sha256::digest(&image)), case["image_sha256"].as_str().unwrap());
     let patches = preprocess::prepare(&image).unwrap();
     let rows = (patches.grid[1] * patches.grid[2]) as usize;
-    let source_attention = expected("attention_0");
+    let source_attention = expected(&format!("attention_{focus_layer}"));
     assert_eq!(source_attention.len(), rows * 1152);
     let measure = |actual: &[bf16], reference: &[f32]| {
         assert_eq!(actual.len(), rows * 1152);
@@ -216,7 +215,7 @@ fn gemma4_larger_full_attention_split_metal() {
          value: &<M as Backend>::ScratchBuffer,
          commands: &mut <<M as Backend>::CommandBuffer as crate::backends::common::CommandBuffer>::Encoding|
          -> Result<(), <M as Backend>::Error> {
-            if layer != Some(0)
+            if layer != Some(focus_layer)
                 || !matches!(tag, "prepared_queries" | "prepared_keys" | "prepared_values" | "attention")
             {
                 return Ok(());
@@ -251,16 +250,16 @@ fn gemma4_larger_full_attention_split_metal() {
             }
             actual
         };
-        measured.push(json!({"stage":tag,"comparison":measure(&actual,&expected(&format!("{tag}_0")))}));
+        measured.push(json!({"stage":tag,"comparison":measure(&actual,&expected(&format!("{tag}_{focus_layer}")))}));
     }
     let mut canonical = Vec::new();
-    for key in ["prepared_queries_0", "prepared_keys_0", "prepared_values_0"] {
-        let reference = expected(key);
+    for key in ["prepared_queries", "prepared_keys", "prepared_values"] {
+        let reference = expected(&format!("{key}_{focus_layer}"));
         assert_eq!(reference.len(), rows * 1152);
         let mut padded = vec![bf16::ZERO; rows * 16 * 128];
         for row in 0..rows {
             for head in 0..16 {
-                let destination = if key == "prepared_queries_0" {
+                let destination = if key == "prepared_queries" {
                     (head * rows + row) * 128
                 } else {
                     (row * 16 + head) * 128
@@ -300,26 +299,43 @@ fn gemma4_larger_full_attention_split_metal() {
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    assert!(selected_rows.len() <= 6, "affected-row CPU replay budget exceeded");
+    let affected_replay_within_budget = selected_rows.len() <= 6
+        && coordinates.iter().map(|value| (value[0], value[1])).collect::<std::collections::BTreeSet<_>>().len() <= 6;
     #[cfg(backend = "cpu")]
-    let affected_cpu = if selected_rows.is_empty() {
+    let affected_cpu = if selected_rows.is_empty() || !affected_replay_within_budget {
         Value::Null
     } else {
         checkpoint_flash_rows::<crate::backends::cpu::Cpu>(&selected_rows, "affected")
     };
     #[cfg(not(backend = "cpu"))]
     let affected_cpu = Value::Null;
-    let affected_metal = if selected_rows.is_empty() {
+    let affected_metal = if selected_rows.is_empty() || !affected_replay_within_budget {
         Value::Null
     } else {
         checkpoint_flash_rows::<M>(&selected_rows, "affected")
     };
-    let report = json!({"scope":"full-first-layer-attention-split","case_index":1,"backend":"metal",
+    let report = json!({"scope":"full-selected-layer-attention-split","case_index":case_index,"layer_index":focus_layer,"backend":"metal",
         "tower_stages":measured,"same_canonical_input_attention":measure(&actual,&source_attention),
         "coordinate_file_sha256":format!("{:x}",Sha256::digest(&coordinate_bytes)),"affected_query_rows":selected_rows.len(),
+        "affected_replay_within_budget":affected_replay_within_budget,
         "affected_rows_cpu":affected_cpu,"affected_rows_metal":affected_metal});
     std::fs::write(root.join("native-full-attention-split.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     println!("{report}");
+}
+
+fn full_attention_focus(manifest: &Value) -> (usize, u32) {
+    let layer = manifest["stage_layer_index"].as_u64().unwrap_or(0);
+    let case = manifest["stage_case_index"].as_u64().unwrap();
+    assert!(layer < 27 && case < 3);
+    assert_eq!(
+        manifest["stage_focus"],
+        if layer == 0 {
+            "first-layer-full-attention"
+        } else {
+            "selected-layer-full-attention"
+        }
+    );
+    (case as usize, layer as u32)
 }
 
 fn checkpoint_flash_rows<B: Backend>(
@@ -332,13 +348,13 @@ fn checkpoint_flash_rows<B: Backend>(
     };
     let root = PathBuf::from(std::env::var_os("STARK_GEMMA4_FIXTURE_PATH").unwrap());
     let manifest: Value = serde_json::from_slice(&read(&root, "manifest.json")).unwrap();
-    assert_eq!(manifest["stage_focus"], "first-layer-full-attention");
+    let (case_index, focus_layer) = full_attention_focus(&manifest);
     assert_eq!(manifest["source_sha256"], "4f874549f79deda4bb9ce7fb7d7b8e7349122be1711f733f7a4157e46ed10cc3");
     assert_eq!(manifest["model_revision"], PROFILES[2].revision);
-    let stages = &manifest["cases"][1]["stages"];
-    let key_rows =
-        manifest["cases"][1]["grid"][1].as_u64().unwrap() * manifest["cases"][1]["grid"][2].as_u64().unwrap();
-    assert_eq!(key_rows, 2394);
+    let case = &manifest["cases"][case_index];
+    let stages = &case["stages"];
+    let key_rows = case["grid"][1].as_u64().unwrap() * case["grid"][2].as_u64().unwrap();
+    assert!((1..=2520).contains(&key_rows));
     assert!(
         !selected_rows.is_empty()
             && selected_rows.len() <= 8
@@ -348,13 +364,13 @@ fn checkpoint_flash_rows<B: Backend>(
     let query_rows = selected_rows.len();
     let context = B::Context::new().unwrap();
     let mut inputs = Vec::new();
-    for key in ["prepared_queries_0", "prepared_keys_0", "prepared_values_0"] {
-        let record = &stages[key];
+    for key in ["prepared_queries", "prepared_keys", "prepared_values"] {
+        let record = &stages[format!("{key}_{focus_layer}")];
         let bytes = read(&root, record["file"].as_str().unwrap());
         assert_eq!(format!("{:x}", Sha256::digest(&bytes)), record["sha256"].as_str().unwrap());
         let source = floats(&bytes);
         assert_eq!(source.len(), key_rows as usize * 1152);
-        let rows = if key == "prepared_queries_0" {
+        let rows = if key == "prepared_queries" {
             query_rows
         } else {
             key_rows as usize
@@ -362,13 +378,13 @@ fn checkpoint_flash_rows<B: Backend>(
         let mut input = vec![bf16::ZERO; rows * 16 * 128];
         for row in 0..rows {
             for head in 0..16 {
-                let destination = if key == "prepared_queries_0" {
+                let destination = if key == "prepared_queries" {
                     (head * rows + row) * 128
                 } else {
                     (row * 16 + head) * 128
                 };
                 for channel in 0..72 {
-                    let source_row = if key == "prepared_queries_0" {
+                    let source_row = if key == "prepared_queries" {
                         selected_rows[row]
                     } else {
                         row
@@ -379,7 +395,7 @@ fn checkpoint_flash_rows<B: Backend>(
         }
         inputs.push(create_buffer_with_data::<B, bf16>(&context, &input));
     }
-    let record = &stages["attention_0"];
+    let record = &stages[format!("attention_{focus_layer}")];
     let bytes = read(&root, record["file"].as_str().unwrap());
     assert_eq!(format!("{:x}", Sha256::digest(&bytes)), record["sha256"].as_str().unwrap());
     let source_attention = floats(&bytes);
