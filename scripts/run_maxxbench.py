@@ -700,6 +700,7 @@ def main(argv=None):
                             "template_helper_sha256": digest(args.worker.parent / "stark-template"),
                             "artifact_sha256": {name: row["sha256"] for name, row in artifacts.items()},
                             "host_platform": platform.platform(), "runner_python": sys.version,
+                            "runner_executable": sys.executable,
                             "stark_source_commit": subprocess.check_output(
                                 ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()})
     campaign_id = bind_campaign(args.output / "campaign.json", stable_identity)

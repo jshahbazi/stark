@@ -136,7 +136,8 @@ The separate verifier still receives the task's normal patch artifact.
 
 Private `runtime/` receipts bind results to the upstream manifest, complete
 artifact file hashes, worker/helper hashes, Python/dependency lock, source
-commit, host platform, runner/adapter/bridge hashes and declared settings.
+commit, host platform, runner Python version and executable path,
+runner/adapter/bridge hashes and declared settings.
 Task image IDs are captured for every artifact/task attempt and checked when
 resuming that attempt. Upstream's `--force-build` also disables Docker's build
 cache; independent builds can have different image IDs. These receipts identify

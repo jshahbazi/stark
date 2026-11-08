@@ -72,6 +72,39 @@ Validation using Python 3.13.13 and the locked converter environment:
 - Ruff, staged repository policy and diff checks passed.
 
 The tests used synthetic workers and the exact qualified template helper on
-`PATH`, with the modified checkout's converter source on `PYTHONPATH`. There
-was no model inference, GPU workload or native build. A fresh thinking-enabled
-model run is still required before attributing task outcomes to that route.
+`PATH`, with the modified checkout's converter source on `PYTHONPATH`. These
+model-free checks used no model inference, GPU workload or native build.
+
+## Native follow-up runs
+
+Two fresh runs used caller `e4b7e29e80f45c29e1e6470155df905d129e626a`,
+the unchanged artifact and template helper above, and the native build recorded
+in the [initial pilot report](../../benchmarks/2026-11-08-maxxbench-native-pilot.md).
+Both requested thinking, greedy decoding with seed 0, MTP off, a 4,096-token
+output cap and matched 1,810/1,800-second client/API deadlines.
+
+| Run | Context / step budget | Calls | Terminal status | Feature / regression checks |
+| --- | --- | ---: | --- | --- |
+| Protocol admission | 131,072 / 3 | 3 | `LimitsExceeded` | 0/76; 964/964 |
+| Single-task reasoning pilot | 262,144 / 400 | 16 | `RepeatedFormatError` | 0/76; 964/964 |
+
+Both runs returned successful API responses without HTTP errors, API error
+codes, context overflows or infrastructure exceptions. Neither produced a
+submission marker; both collected an empty patch and received reward 0. The
+three-step case qualifies protocol compatibility and is excluded from quality
+comparisons. The longer case records a failed local-profile attempt after the
+binding fix; a single task supports only that observed outcome.
+
+Reported successful-response usage was 8,934 input and 379 output tokens for
+admission, then 334,345 input and 23,770 output tokens for the longer case.
+Agent execution lasted 10.164 and 386.210 seconds respectively. These
+unscreened observations do not qualify sustained throughput. Validated bridge
+shutdown receipts reported `cleanup_failed=false` for both runs.
+
+Private trial-result artifact SHA-256 values:
+
+```text
+protocol admission  16109cb3011a7ca91c4bd069e12b5b5b7751d225f88a65f902005cf0d9c628d2
+reasoning pilot     f0a7d9ae3a406e131f2c769db5755dfbc327936d2d4fb91a5bbcb2f6dff664a9
+empty patch         e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+```

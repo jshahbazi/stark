@@ -61,7 +61,7 @@ Feature and regression counts concern collected patches. An empty patch grades t
 
 Lily's patch failed 10 feature checks, so its reward remains zero despite passing all regressions. The empty Dense patch and the nonempty Lily/mixed patches represent different work states. These observations provide no basis for a model ranking. The 0.6B outcome applies to this coding-agent configuration; ordinary chat recommendations need separate evaluation.
 
-Selected aggregate accounting: Dense consumed 14,539,658 input and 9,207 output tokens; Lily 15,197,415 and 64,862; mixed 308,287 and 2,840. The 0.6B run consumed 4,251 and 143 tokens in 0.808 seconds of agent execution. The 4B run consumed 806,929 and 1,849 tokens in 72.726 seconds of agent execution, 107.366 seconds total. These are single unscreened task observations, with different termination paths; they do not qualify sustained throughput.
+Reported API usage on successful responses: Dense recorded 14,539,658 input and 9,207 output tokens; Lily 15,197,415 and 64,862; mixed 308,287 and 2,840. The 0.6B run recorded 4,251 and 143 tokens in 0.808 seconds of agent execution. The 4B run recorded 806,929 and 1,849 tokens in 72.726 seconds of agent execution, 107.366 seconds total. Failed API calls can omit usage. These are single unscreened task observations, with different termination paths; they do not qualify sustained throughput.
 
 ## Harness and operational qualification
 
