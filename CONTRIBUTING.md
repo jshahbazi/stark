@@ -93,6 +93,8 @@ printf '%s\n' '{"operation":"score","input_token_ids":[151644,872,198],"candidat
 - Put the evidence for a change (test counts, manual checks, measurements) in the pull request description. A record that must outlive the pull request goes under `docs/archive/runs/` with its date and the commit it describes; a benchmark goes under `docs/benchmarks/` and is added to the [benchmarks index](docs/benchmarks/README.md) with a note on what it supersedes.
 - Keep models, private fixtures, converted outputs and runtime artifacts out of Git; publish aggregate results and hashes only.
 
+For model correctness, performance and memory experiments, use the [model experiment register and template](docs/MODEL_EXPERIMENTS.md). Assign a stable attempt ID, record each affected model's result, and retain unsuccessful trials, invalid runs and rejected hypotheses alongside accepted changes. Bind results to the actual source, executable, artifact, reference and fixture identities before updating a current support or speed claim.
+
 ## Commits and pull requests
 
 Use Conventional Commits. Push authorized work to its branch; open a pull request only when asked. CI must pass `CI completed` and `Security completed` before merge, with the branch up to date with `main`.

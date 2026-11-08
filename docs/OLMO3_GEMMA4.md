@@ -2,6 +2,8 @@
 
 Stark has native dense text paths for OLMo 3 and Gemma 4, plus a separate BF16 image artifact for the official Gemma 4 E2B checkpoint. Conversion support, native execution paths, and exact checkpoint qualification are separate states. The Gemma image implementation is wired through the converter, worker, CLI, desktop family handling and schema-4 artifact admission. Canonical HF image-feature comparison, bounded generation-worker lifecycle checks, and local cold/cached chat-client checks pass. The installed desktop UI path and image performance have not been measured.
 
+The [findings and experiment history](archive/runs/2026-11-08-olmo3-gemma4-findings.md) records the native implementation, precision failures and repairs, per-model speedups, unpromoted trials and invalid runs. New attempts follow the [model experiment register](MODEL_EXPERIMENTS.md).
+
 ## Convert the pinned official checkpoints
 
 Run from the repository root. The revisions are immutable Hugging Face commits recorded in the catalog and image contract.

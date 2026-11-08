@@ -35,6 +35,12 @@ and kernel measurements remain historical records for their named builds.
 
 ## Optimization records
 
+The [model experiment register](../MODEL_EXPERIMENTS.md) tracks successful and
+unsuccessful attempts by model. Its first backfill is the [OLMo 3 and Gemma 4
+findings report](../archive/runs/2026-11-08-olmo3-gemma4-findings.md), covering
+precision repairs, accepted speedups, unpromoted trials and invalid measurements.
+It does not supersede the source-bound benchmark records below.
+
 | Study | Outcome |
 | --- | --- |
 | [Native GLM and Qwen decode graphs](GLM_QWEN_DECODE_GRAPH_2026_10_28.md) | Current original-format checkpoint results: Qwen 2.05x, GLM 11.1% faster warm decode on the short matched workload |

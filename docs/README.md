@@ -31,6 +31,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | Page | What it covers |
 | --- | --- |
 | [Contributing](../CONTRIBUTING.md) | Toolchains, local checks, test layout, running a model-bound smoke test, where validation records go |
+| [Model experiment register](MODEL_EXPERIMENTS.md) | Per-model changes and attempts, unsuccessful results, evidence requirements and a reusable experiment template |
 | [Technical guide](TECHNICAL_OVERVIEW.md) | Components, engine module layout, feature flags, Python package layout, the app control protocol |
 | [CI and security checks](CI.md) | Workflows, what they cover and do not cover, dependency gates, caches, local equivalents |
 | [Releasing](RELEASING.md) | Signed and prebuilt release workflows, verification on a receiving Mac, DMG handling |
@@ -50,6 +51,11 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [brand/](brand/README.md) | Logo provenance and colour tokens |
 
 New validation runs belong in the pull request that made the change, or under `archive/runs/` when they must be preserved; reference pages describe current behaviour only.
+
+The [OLMo 3 and Gemma 4 findings report](archive/runs/2026-11-08-olmo3-gemma4-findings.md)
+backfills native support, precision repairs, accepted optimizations, unsuccessful
+attempts and invalid runs from the full model-family investigation. Continue new
+work through the [model experiment register](MODEL_EXPERIMENTS.md).
 
 The [Qwen3.5 family installation run](archive/runs/2026-10-27-qwen35-family-installation.md)
 records changed-weight conversion and automatic local image checks through the
