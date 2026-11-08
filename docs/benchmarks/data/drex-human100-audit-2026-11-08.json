@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "status": "passed",
+  "checks": 809,
+  "errors": 0,
+  "contexts": {
+    "J0": {
+      "judgments": 200,
+      "matches": 172,
+      "agreement": 0.86,
+      "false_accepts": 16,
+      "false_rejects": 12,
+      "verdict_counts": {
+        "correct": 138,
+        "incorrect": 46,
+        "partial": 16
+      },
+      "per_repeat": {
+        "1": {
+          "judgments": 100,
+          "matches": 86,
+          "false_accepts": 8,
+          "false_rejects": 6
+        },
+        "2": {
+          "judgments": 100,
+          "matches": 86,
+          "false_accepts": 8,
+          "false_rejects": 6
+        }
+      },
+      "repeat_binary_flips": 0,
+      "repeat_verdict_flips": 0,
+      "repeat_max_probability_delta": 0.0,
+      "binary_brier": 0.11213485955590939,
+      "binary_log_loss": 0.4290600791147119,
+      "ece_10_bins": 0.104464950968395,
+      "agreement_case_cluster_95_interval": [
+        0.79,
+        0.92
+      ],
+      "median_seconds": 0.7532986464939313,
+      "p95_seconds": 1.1825158749998081,
+      "versus_frozen_jevk5_mlx": {
+        "baseline_matches": 180,
+        "agreement_difference": -0.04,
+        "paired_case_cluster_95_interval": [
+          -0.1,
+          0.01
+        ],
+        "first_repeat_drex_only_correct": 2,
+        "first_repeat_baseline_only_correct": 6,
+        "first_repeat_mcnemar_exact_two_sided_p": 0.2890625
+      }
+    },
+    "E1": {
+      "judgments": 200,
+      "matches": 174,
+      "agreement": 0.87,
+      "false_accepts": 14,
+      "false_rejects": 12,
+      "verdict_counts": {
+        "correct": 136,
+        "partial": 16,
+        "incorrect": 48
+      },
+      "per_repeat": {
+        "1": {
+          "judgments": 100,
+          "matches": 87,
+          "false_accepts": 7,
+          "false_rejects": 6
+        },
+        "2": {
+          "judgments": 100,
+          "matches": 87,
+          "false_accepts": 7,
+          "false_rejects": 6
+        }
+      },
+      "repeat_binary_flips": 0,
+      "repeat_verdict_flips": 0,
+      "repeat_max_probability_delta": 0.0,
+      "binary_brier": 0.10147302574716757,
+      "binary_log_loss": 0.3746627678528241,
+      "ece_10_bins": 0.09875052941148171,
+      "agreement_case_cluster_95_interval": [
+        0.8,
+        0.93
+      ],
+      "median_seconds": 5.140687396007706,
+      "p95_seconds": 6.338363749993732,
+      "versus_frozen_jevk5_mlx": {
+        "baseline_matches": 176,
+        "agreement_difference": -0.01,
+        "paired_case_cluster_95_interval": [
+          -0.07,
+          0.05
+        ],
+        "first_repeat_drex_only_correct": 4,
+        "first_repeat_baseline_only_correct": 5,
+        "first_repeat_mcnemar_exact_two_sided_p": 1.0
+      }
+    }
+  },
+  "baseline_verdicts_sha256": "874aa7a59d98afbeef71f317f43f657f5ff09741ed14b675639cc1510d23c0f7"
+}

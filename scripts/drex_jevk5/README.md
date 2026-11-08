@@ -169,6 +169,51 @@ usage after each successful response. It cannot reconstruct quality readouts
 that the failed full-pass process did not retain; its quality fields are
 explicitly limited to the newly completed subset.
 
+## Human100 local Drex replay
+
+The owner-requested Human100 arm has its own
+[registration](../../docs/benchmarks/2026-11-08-drex-human100-registration.md).
+`human100.py` reads the prior sealed SubQ Snap request snapshots, verifies the
+input/seal/verdict/wire hashes, and uses their exact verdict-only state and
+questions. The 100 human-label revision-121 references contain 67 accepted and
+33 rejected cases. J0 omits original source evidence; E1 contains the frozen
+source window. Each request is judged twice in the original order: 400 fresh
+forward passes, without output or prefix reuse.
+
+Copy `human100.config.template.json` into ignored `runtime/` and supply the
+tenant-scoped reference, saved comparator and new output directory. Preserve
+the tenant/corpus scope for derived artifacts. The output directory must not
+already exist. First validate all 200 unique requests without model inference:
+
+```sh
+uv run --project scripts/drex_jevk5 --locked python scripts/drex_jevk5/human100.py \
+  --config runtime/drex-human100-config.json --prepare-only
+uv run --project scripts/drex_jevk5 --locked python scripts/drex_jevk5/human100.py \
+  --config runtime/drex-human100-config.json
+```
+
+The preparation step instantiates the pinned upstream tokenizer/readout metadata
+without loading or forwarding the backbone. Every prompt must fit the native
+16,384-token limit; nothing is truncated. The main run records a preflight seal
+before the inference child starts. A public upstream example warms model load;
+all 400 Human100 judgments are then measured and counted.
+
+Only argmax `correct` accepts. `incorrect` and `partial` both reject.
+Checkpointed aggregate coverage/confusion counts survive a process failure.
+Individual native readouts remain in memory and private pipes; they are never
+saved. After complete coverage, `human100_audit.py` independently recomputes
+acceptance/error/calibration/repeatability metrics and case-cluster intervals
+from a private stdin transfer. It revalidates the reference and saved MLX
+baseline hashes, and the parent requires exact agreement on confusion counts.
+The output includes aggregate analysis and audit receipts only.
+
+Human100 is a reused diagnostic set. Competitor rows remain historical and
+are reused without inference. Hosted Jev, converted JevK5-4B and the later
+`SirSahOl/JevK5-chat-mlx-16bit` recipe are distinct comparators. This experiment
+uses the complete frozen MLX record whose hash is fixed in the auditor. The
+source-bound model identities and scoring conventions accompany each result;
+no production provider, acceptance threshold or model default changes.
+
 HTTP latency includes connection setup, network and hosted inference, measured
 from serialization-complete request dispatch through receipt and JSON parsing.
 It excludes response validation and local metric accounting. This differs from

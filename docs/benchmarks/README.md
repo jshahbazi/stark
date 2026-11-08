@@ -4,6 +4,15 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Drex Max v1 Q4 Human100 replay (2026-11-08).** All 400 registered
+judgments completed and independently audited. Drex scored 86% without source
+evidence and 87% with it, versus the frozen JevK5-MLX baseline's 90% and 88%.
+Repeats matched exactly, and both paired difference intervals include zero.
+The [Human100 report](2026-11-08-drex-human100-comparison.md) records false
+accept/reject counts, the missed J0 development bar, exact source provenance
+and unqualified timing observations. This is separate from JevBench and
+does not supersede its results.
+
 **Mercury Decide JevBench comparison (2026-11-08).** A fresh complete run
 scored **207/231 public cases (89.61%)**, between Drex's 212 and JevK5's 202
 on the same public corpus. All 242 supported requests succeeded without

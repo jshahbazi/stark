@@ -1,0 +1,8 @@
+{
+  "reference": "/absolute/private/tenant/corpus/experiments/subq-snap-human100-20261012-v1",
+  "baseline_mlx": "/absolute/private/tenant/corpus/experiments/new-judges-human100-20261010-v1-restart-v1/jevk5-mlx-16bit/verdicts.jsonl",
+  "drex_source": "/absolute/path/to/pinned/drex-source",
+  "drex_model": "/absolute/path/to/drex-max-v1-affine-q4",
+  "output_root": "/absolute/private/tenant/corpus/experiments/drex-human100-new-run",
+  "registration": "/absolute/path/to/stark/docs/benchmarks/2026-11-08-drex-human100-registration.md"
+}
