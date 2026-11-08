@@ -26,6 +26,13 @@ TRIAL_SOURCE_PLATFORM_ATTRIBUTE = "_stark_maxxbench_source_platform"
 TRIAL_OBSERVED_PLATFORM_ATTRIBUTE = "_stark_maxxbench_observed_source_platform"
 _SOURCE_TASK = "cliffy-config-file-parsing"
 _SOURCE_DOCKERFILE_SHA256 = "2575713dcc93a27bc1b3b052aa02129f13d2dba753f7ca7fe97a796397d9bef1"
+_SOURCE_RECIPES = {
+    _SOURCE_TASK: _SOURCE_DOCKERFILE_SHA256,
+    # MongoDB 7's Debian APT packages support x86_64. The pinned Bookworm
+    # recipe fails package lookup on the default target; an AMD64 full oracle
+    # passes with the same source, solution and verifier (25 F2P / 164 P2P).
+    "eicrud-keyset-pagination-cursor": "6bf8747fe0b1345d38333906a550ffe90e9b8d854e70d06dd1b503bdf455f68b",
+}
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _IMAGE_REFERENCE = re.compile(r"[a-z0-9][a-z0-9._:/-]{0,255}(?:@sha256:[0-9a-f]{64})?\Z")
 _BASE_IMAGE = re.compile(r"(?m)^\s*ARG\s+BASE_IMAGE\s*$")
@@ -50,10 +57,13 @@ class SourcePlatformError(ValueError):
 def source_platform_metadata(trial):
     selection = getattr(trial, TRIAL_SOURCE_PLATFORM_ATTRIBUTE, None)
     observed = getattr(trial, TRIAL_OBSERVED_PLATFORM_ATTRIBUTE, None)
-    expected = {"platform": "linux/amd64", "dockerfile_sha256": _SOURCE_DOCKERFILE_SHA256}
+    # The creator checks task path, task.toml identity and its exact recipe
+    # together. Unique recipe digests retain the existing receipt schema.
+    expected = [{"platform": "linux/amd64", "dockerfile_sha256": checksum}
+                for checksum in _SOURCE_RECIPES.values()]
     if selection is None:
         return {"selected": None, "observed": None, "dockerfile_sha256": None}
-    if selection != expected:
+    if selection not in expected:
         raise SourcePlatformError("source_platform_policy_invalid")
     if observed is not None and observed != "linux/amd64":
         raise SourcePlatformError("source_platform_changed")
@@ -186,7 +196,7 @@ def _verifier_config(config, env_config, platform):
 
 
 def patch_source_image_platform(trial_class):
-    """Select AMD64 only for the pinned Cliffy recipe's x86-only Deno binary."""
+    """Select AMD64 only for the two task- and recipe-pinned source policies."""
     if getattr(trial_class, "_stark_maxxbench_source_platform_patched", False):
         return
     original = trial_class.create.__func__
@@ -196,18 +206,18 @@ def patch_source_image_platform(trial_class):
     async def create(cls, config):
         path = config.task.path
         selection = None
-        if path is not None and path.name == _SOURCE_TASK:
+        if path is not None and path.name in _SOURCE_RECIPES:
             try:
                 recipe = path / "environment/Dockerfile"
                 checksum = hashlib.sha256(recipe.read_bytes()).hexdigest()
                 task = tomllib.loads((path / "task.toml").read_text())
             except (OSError, ValueError):
                 raise SourcePlatformError("source_platform_recipe_changed") from None
-            if checksum != _SOURCE_DOCKERFILE_SHA256:
+            if checksum != _SOURCE_RECIPES[path.name]:
                 raise SourcePlatformError("source_platform_recipe_changed")
             metadata = task.get("metadata")
             environment = task.get("environment", {})
-            if not isinstance(metadata, dict) or metadata.get("task_id") != _SOURCE_TASK:
+            if not isinstance(metadata, dict) or metadata.get("task_id") != path.name:
                 raise SourcePlatformError("source_platform_task_changed")
             if not isinstance(environment, dict):
                 raise SourcePlatformError("source_platform_policy_invalid")

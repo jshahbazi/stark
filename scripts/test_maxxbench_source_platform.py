@@ -1,4 +1,4 @@
-"""Model-free checks for the exact Cliffy source recipe's platform policy."""
+"""Model-free checks for the exact Cliffy and Eicrud source platform policies."""
 
 import asyncio
 import hashlib
@@ -9,16 +9,16 @@ import maxxbench_verifier_compat as compat
 import pytest
 
 
-@pytest.fixture
-def source_case(tmp_path, monkeypatch):
+@pytest.fixture(params=["cliffy-config-file-parsing", "eicrud-keyset-pagination-cursor"])
+def source_case(tmp_path, monkeypatch, request):
     monkeypatch.delenv("DOCKER_DEFAULT_PLATFORM", raising=False)
-    path = tmp_path / "cliffy-config-file-parsing"
+    path = tmp_path / request.param
     (path / "environment").mkdir(parents=True)
     recipe = path / "environment/Dockerfile"
     recipe.write_text("FROM synthetic-source\nRUN synthetic-x86-program\n")
     checksum = hashlib.sha256(recipe.read_bytes()).hexdigest()
-    monkeypatch.setattr(compat, "_SOURCE_DOCKERFILE_SHA256", checksum)
-    (path / "task.toml").write_text('[metadata]\ntask_id = "cliffy-config-file-parsing"\n[environment.env]\n')
+    monkeypatch.setattr(compat, "_SOURCE_RECIPES", {**compat._SOURCE_RECIPES, path.name: checksum})
+    (path / "task.toml").write_text(f'[metadata]\ntask_id = "{path.name}"\n[environment.env]\n')
     config = SimpleNamespace(task=SimpleNamespace(path=path), environment=SimpleNamespace(
         env={"FIXED": "unchanged", "PRIVATE": "not-published"}, kwargs={}, force_build=True,
     ))
@@ -39,7 +39,9 @@ def source_case(tmp_path, monkeypatch):
 
 
 def test_exact_recipe_uses_copied_config_and_fixed_aggregate_metadata(source_case):
-    _path, config, Trial, calls, checksum = source_case
+    path, config, Trial, calls, checksum = source_case
+    before = {name: hashlib.sha256((path / name).read_bytes()).hexdigest()
+              for name in ("environment/Dockerfile", "task.toml")}
     original_env, original_kwargs = config.environment.env, config.environment.kwargs
     trial = asyncio.run(Trial.create(config))
     assert calls[0] is not config and calls[0].environment is not config.environment
@@ -51,6 +53,7 @@ def test_exact_recipe_uses_copied_config_and_fixed_aggregate_metadata(source_cas
     assert metadata == {"selected": "linux/amd64", "observed": None, "dockerfile_sha256": checksum}
     assert "PRIVATE" not in json.dumps(metadata) and "not-published" not in json.dumps(metadata)
     assert "DOCKER_DEFAULT_PLATFORM" not in compat.os.environ
+    assert before == {name: hashlib.sha256((path / name).read_bytes()).hexdigest() for name in before}
 
 
 def test_other_tasks_keep_identical_config_and_require_no_source_files(source_case, monkeypatch):
@@ -93,7 +96,7 @@ def test_explicit_conflicting_source_platform_is_not_overwritten(source_case, mo
     elif scope == "trial":
         config.environment.env["DOCKER_DEFAULT_PLATFORM"] = "linux/arm64"
     elif scope == "task":
-        (path / "task.toml").write_text('[metadata]\ntask_id="cliffy-config-file-parsing"\n'
+        (path / "task.toml").write_text(f'[metadata]\ntask_id="{path.name}"\n'
                                        '[environment.env]\nDOCKER_DEFAULT_PLATFORM="linux/arm64"\n')
     else:
         config.environment.kwargs["persistent_env"] = {"DOCKER_DEFAULT_PLATFORM": "linux/arm64"}
@@ -129,10 +132,10 @@ def test_hook_is_idempotent_and_preserves_subclass_dispatch(source_case):
 def test_selected_source_captures_actual_platform_within_existing_five_second_budget(
     source_case, monkeypatch, architecture, category,
 ):
-    _path, config, Trial, _calls, _checksum = source_case
+    path, config, Trial, _calls, _checksum = source_case
     trial = asyncio.run(Trial.create(config))
-    trial._environment = SimpleNamespace(session_id="cliffy-config-file-parsing")
-    image = {"id": "sha256:" + "a" * 64, "reference": "cliffy-config-file-parsing-main:latest"}
+    trial._environment = SimpleNamespace(session_id=path.name)
+    image = {"id": "sha256:" + "a" * 64, "reference": path.name + "-main:latest"}
     clock = iter((100, 100, 101, 102))
     monkeypatch.setattr(compat.time, "monotonic", lambda: next(clock))
     commands = []
@@ -159,3 +162,23 @@ def test_selected_source_captures_actual_platform_within_existing_five_second_bu
             compat.capture_environment_image(trial)
     assert [options["timeout"] for _command, options in commands] == [5, 4, 3]
     assert all(options["stderr"] == compat.subprocess.DEVNULL for _command, options in commands)
+
+
+def test_supported_task_cannot_borrow_the_other_tasks_recipe(source_case):
+    path, config, Trial, calls, _checksum = source_case
+    other = "eicrud-keyset-pagination-cursor" if path.name == "cliffy-config-file-parsing" else "cliffy-config-file-parsing"
+    borrowed = path.parent / other
+    (borrowed / "environment").mkdir(parents=True)
+    (borrowed / "environment/Dockerfile").write_bytes((path / "environment/Dockerfile").read_bytes())
+    (borrowed / "task.toml").write_text(f'[metadata]\ntask_id="{other}"\n')
+    config.task.path = borrowed
+    with pytest.raises(compat.SourcePlatformError, match="^source_platform_recipe_changed$"):
+        asyncio.run(Trial.create(config))
+    assert not calls
+
+
+def test_source_policy_allowlist_retains_both_exact_release_recipes():
+    assert compat._SOURCE_RECIPES == {
+        "cliffy-config-file-parsing": "2575713dcc93a27bc1b3b052aa02129f13d2dba753f7ca7fe97a796397d9bef1",
+        "eicrud-keyset-pagination-cursor": "6bf8747fe0b1345d38333906a550ffe90e9b8d854e70d06dd1b503bdf455f68b",
+    }

@@ -21,6 +21,12 @@ configured million-token context. Filled maximum windows and coding-agent
 quality remain unqualified. A fresh 89-task oracle cohort and 623 model/task
 attempts are still pending.
 
+The [Eicrud source-platform qualification (2026-11-08)](../archive/runs/2026-11-08-eicrud-source-platform.md)
+records three source-setup failures and a passing 25-feature/164-regression
+AMD64 stock oracle. Its exact recipe joins Cliffy's existing scoped platform
+policy. The preceding cohort's 21 passes remain historical controls; a fresh
+89-task cohort and all 623 model/task attempts are pending on the new helper.
+
 ## Current result
 
 **Dense Qwen3.8-27B oQ4e packed-weight follow-up (2026-11-06).** The final
