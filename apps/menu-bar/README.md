@@ -316,9 +316,13 @@ Native parameter counts are source-card architecture metadata, not packed
 tensor slot counts. MoE total parameter count does not describe active compute,
 memory fit or task quality. Balanced also compares published task references:
 LiveCodeBench for coding, BFCL for file/tool tasks, and IFEval for instruction
-following in text/everyday/unsure. One published cohort can reorder only its
-scored slots within a memory-headroom tier; unknown models keep their fallback
-positions. Lighter model and More model capacity preserve their explicit
+following in text/everyday/unsure. For Coding + Balanced, models covered by one
+selected coding cohort come first after hard resource admission, ordered by
+score; models without that comparable evidence follow in fallback order. One
+eligible scored parent is enough, so an unscored model cannot retain first
+place through the memory heuristic. Missing scores remain unknown. Other
+tasks reorder scored slots within each memory-headroom tier and preserve
+unknown positions. Lighter model and More model capacity preserve their explicit
 resource priorities. Source/version/settings and upstream-reference caveats
 appear in model details. Public parent scores do not qualify Stark exports.
 The [recommendation evidence policy](../../docs/MODEL_RECOMMENDATIONS.md) describes

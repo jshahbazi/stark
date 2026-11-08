@@ -58,7 +58,7 @@ def host():
 def test_scores_reorder_known_slots_and_preserve_unknown_position():
     large, unknown, small = recipe("large", 10), recipe("unknown", 5), recipe("small", 1)
     report = guided.recommendation_report(
-        host(), {}, candidates=[small, unknown, large], task="code", benchmarks=registry(cohort())
+        host(), {}, candidates=[small, unknown, large], task="files", benchmarks=registry(cohort(benchmark="bfcl"))
     )
     assert [item["id"] for item in report["items"]] == ["small", "unknown", "large"]
     assert report["benchmark_ranking"]["applied"]
@@ -66,6 +66,44 @@ def test_scores_reorder_known_slots_and_preserve_unknown_position():
     assert "Stark artifact has not been benchmarked" in report["items"][0]["recommendation_reason"]
     assert report["items"][1]["benchmarks"] == []
     assert "unknown" in report["items"][1]["benchmark_details"][0]
+
+
+def test_coding_evidence_displaces_unknown_models_including_first_place():
+    large, unknown, small = recipe("large", 10), recipe("unknown", 50), recipe("small", 1)
+    report = guided.recommendation_report(
+        host(), {}, candidates=[small, unknown, large], task="code", benchmarks=registry(cohort())
+    )
+    assert [item["id"] for item in report["items"]] == ["small", "large", "unknown"]
+    assert report["benchmark_ranking"]["applied"]
+    assert "Prioritizes published coding benchmark evidence" in report["items"][0]["recommendation_reason"]
+    assert "It follows models with that evidence" in report["items"][2]["recommendation_reason"]
+    assert "missing scores remain unknown" in report["message"]
+
+
+def test_one_coding_reference_including_zero_is_enough_to_prioritize_evidence():
+    unknown, scored = recipe("unknown", 50), recipe("small", 1)
+    scores = registry(cohort(scores={"example/small": "0"}))
+    report = guided.recommendation_report(host(), {}, candidates=[unknown, scored], task="code", benchmarks=scores)
+    assert [item["id"] for item in report["items"]] == ["small", "unknown"]
+    assert report["items"][0]["benchmarks"][0]["score"] == "0"
+    assert report["items"][0]["benchmarks"][0]["used_for_ranking"]
+    assert "Used to prioritize coding recommendations" in report["items"][0]["benchmark_details"][0]
+
+
+def test_coding_scores_override_soft_fit_tiers_after_hard_admission():
+    large, small = recipe("large", 10), recipe("small", 1)
+    scores = registry(cohort(scores={"example/small": "90"}))
+    ranked, selected, used = scores.rank([large, small], "code", "balanced", lambda candidate: candidate.id == "large")
+    assert ranked == [small, large] and selected is not None and used == {small.id}
+
+
+def test_all_unknown_coding_models_use_explicit_resource_fallback():
+    large, small = recipe("large", 10), recipe("small", 1)
+    report = guided.recommendation_report(host(), {}, candidates=[small, large], task="code", benchmarks=registry())
+    assert [item["id"] for item in report["items"]] == ["large", "small"]
+    assert not report["benchmark_ranking"]["applied"]
+    assert "No eligible coding benchmark references" in report["message"]
+    assert "resource-based fallback; coding quality is unknown" in report["items"][0]["recommendation_reason"]
 
 
 def test_resource_admission_precedes_scores_and_lighter_preference_is_preserved():
@@ -85,7 +123,8 @@ def test_resource_admission_precedes_scores_and_lighter_preference_is_preserved(
     blocked = replace(large, estimated_weight_bytes=256 * guided.GIB)
     report = guided.recommendation_report(host(), {}, candidates=[blocked, small], task="code", benchmarks=scores)
     assert [item["id"] for item in report["items"]] == ["small"]
-    assert not report["benchmark_ranking"]["applied"]
+    assert report["benchmark_ranking"]["applied"]
+    assert report["items"][0]["benchmarks"][0]["score"] == "0"
 
 
 def test_cohorts_are_not_combined_or_cherry_picked_and_ties_preserve_fallback():
@@ -100,30 +139,75 @@ def test_cohorts_are_not_combined_or_cherry_picked_and_ties_preserve_fallback():
         assert [item["id"] for item in report["items"]] == ["large", "small"]
     separate = registry(cohort("a", scores={"example/large": "0"}), cohort("b", scores={"example/small": "100"}))
     report = guided.recommendation_report(host(), {}, candidates=[small, large], task="code", benchmarks=separate)
-    assert report["benchmark_ranking"]["cohort"] is None
+    assert report["benchmark_ranking"]["cohort"] == "a"
+    assert [item["id"] for item in report["items"]] == ["large", "small"]
+    assert not report["items"][1]["benchmarks"][0]["used_for_ranking"]
 
 
 def test_comparison_cannot_cross_resource_tiers_or_count_duplicate_parent_as_coverage():
     large, small = recipe("large", 10), recipe("small", 1)
-    scores = registry(cohort())
-    ranked, selected, used = scores.rank([large, small], "code", "balanced", lambda candidate: candidate.id == "large")
+    scores = registry(cohort(benchmark="bfcl"))
+    ranked, selected, used = scores.rank(
+        [large, small], "files", "balanced", lambda candidate: candidate.id == "large"
+    )
     assert ranked == [large, small] and selected is None and not used
     duplicate = replace(large, id="duplicate")
-    ranked, selected, used = scores.rank([large, duplicate], "code", "balanced", lambda candidate: 1)
+    ranked, selected, used = scores.rank([large, duplicate], "files", "balanced", lambda candidate: 1)
     assert selected is None and not used
 
 
 def test_cohort_selection_counts_only_models_within_comparable_memory_tiers():
     large, unknown, small = recipe("large", 10), recipe("unknown", 5), recipe("small", 1)
     scores = registry(
-        cohort("a", scores={"example/large": "10", "example/small": "90"}),
-        cohort("b", scores={"example/large": "10", "example/unknown": "90"}),
+        cohort("a", benchmark="bfcl", scores={"example/large": "10", "example/small": "90"}),
+        cohort("b", benchmark="bfcl", scores={"example/large": "10", "example/unknown": "90"}),
     )
     ranked, selected, used = scores.rank(
-        [large, unknown, small], "code", "balanced", lambda candidate: candidate.id != "small"
+        [large, unknown, small], "files", "balanced", lambda candidate: candidate.id != "small"
     )
     assert selected.id == "b"
     assert ranked == [unknown, large, small] and used == {large.id, unknown.id}
+
+
+def test_coding_cohort_coverage_counts_parents_not_quantized_aliases():
+    large, small = recipe("large", 10), recipe("small", 1)
+    duplicate = replace(large, id="duplicate")
+    other = recipe("other", 5)
+    scores = registry(
+        cohort("a", scores={"example/large": "99"}),
+        cohort("b", scores={"example/small": "80", "example/other": "40"}),
+    )
+    ranked, selected, used = scores.rank([large, duplicate, other, small], "code", "balanced", lambda candidate: 1)
+    assert selected.id == "b" and used == {small.id, other.id}
+    assert ranked == [small, other, large, duplicate]
+
+
+def test_native_coding_on_128gb_mac_prioritizes_installed_qwen_references_over_flint():
+    native = guided.native_recipes()
+    qwen = [recipe for recipe in native if recipe.native_choice in {"qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"}]
+    machine = {
+        **host(),
+        "gpu_available": True,
+        "unified_memory": True,
+        "gpu_memory_budget_bytes": 115_448_725_504,
+        "free_disk_bytes": 64 * guided.GIB,
+    }
+    installed = {recipe.id: ["exact-source-installed-" + recipe.native_choice] for recipe in qwen}
+    report = guided.recommendation_report(machine, installed, candidates=native, task="code")
+    assert [item["repo"] for item in report["items"]] == [
+        "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+        "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+        "RecursiveSI/flint-int4",
+    ]
+    for item in report["items"][:2]:
+        assert item["installed_ids"]
+        assert item["benchmarks"][0]["score"] == "91.9" and item["benchmarks"][0]["used_for_ranking"]
+    assert report["benchmark_ranking"]["cohort"] == "qwen38-card-livecodebench-v6"
+    assert report["items"][2]["benchmarks"] == []
+    machine["gpu_memory_budget_bytes"] = 80 * guided.GIB
+    blocked = guided.recommendation_report(machine, installed, candidates=native, task="code")
+    assert [item["repo"] for item in blocked["items"]] == ["RecursiveSI/flint-int4"]
+    assert not blocked["benchmark_ranking"]["applied"]
 
 
 def test_quantized_reference_bindings_require_exact_reviewed_source_revision():

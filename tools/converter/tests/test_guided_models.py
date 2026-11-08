@@ -333,7 +333,7 @@ def test_balanced_coding_scales_from_16gb_to_128gb_with_recorded_source_metadata
     for host, expected in ((small_host, "Qwen2.5-Coder-1.5B-Instruct"), (large_host, "Qwen2.5-Coder-14B-Instruct")):
         report = guided.recommendation_report(host, {}, task="code", candidates=candidates)
         assert report["items"][0]["name"] == expected
-        assert "this Mac's memory budget" in report["items"][0]["recommendation_reason"]
+        assert "resource-based fallback; coding quality is unknown" in report["items"][0]["recommendation_reason"]
         assert all(item["setup_disk_bytes_estimate"] <= host["free_disk_bytes"] for item in report["items"])
         reversed_report = guided.recommendation_report(host, {}, task="code", candidates=reversed(candidates))
         assert report == reversed_report

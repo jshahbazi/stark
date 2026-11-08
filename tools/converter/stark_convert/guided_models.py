@@ -685,7 +685,7 @@ def _ranking_key(recipe, host, installed, task, preference):
     )
 
 
-def _recommendation_reason(recipe, host, task, preference, *, benchmark_used=False):
+def _recommendation_reason(recipe, host, task, preference, *, benchmark_used=False, coding_evidence_available=False):
     reasons = [
         "The memory plan fits this Mac's RAM and GPU budget."
         if "gpu_available" in host
@@ -697,7 +697,23 @@ def _recommendation_reason(recipe, host, task, preference, *, benchmark_used=Fal
             if task == "code"
             else "The source identifies your selected task as an intended use."
         )
-    if benchmark_used:
+    if task == "code" and preference not in {"speed", "answers"}:
+        if benchmark_used:
+            reasons.append(
+                "Prioritizes published coding benchmark evidence among models that fit; "
+                "this Stark artifact has not been benchmarked."
+            )
+        elif coding_evidence_available:
+            reasons.append(
+                "No result in the selected coding benchmark cohort is recorded for this model. "
+                "It follows models with that evidence; its coding quality is unknown."
+            )
+        else:
+            reasons.append(
+                "No eligible coding benchmark references are available. "
+                "This is a resource-based fallback; coding quality is unknown."
+            )
+    elif benchmark_used:
         evaluation = {
             "code": "coding benchmark",
             "files": "tool-use benchmark",
@@ -783,7 +799,12 @@ def recommendation_report(
                 "license": license_name,
                 "qualification": recipe.qualification,
                 "recommendation_reason": _recommendation_reason(
-                    recipe, host, task, preference, benchmark_used=recipe.id in benchmark_used
+                    recipe,
+                    host,
+                    task,
+                    preference,
+                    benchmark_used=recipe.id in benchmark_used,
+                    coding_evidence_available=bool(benchmark_used),
                 ),
                 "benchmarks": evidence,
                 "benchmark_details": benchmark_details,
@@ -807,6 +828,12 @@ def recommendation_report(
     native = [recipe for recipe in candidates if recipe.native_choice is not None]
     if native:
         message += " Native hybrid models were also checked for memory and setup storage."
+    if items and task == "code" and preference not in {"speed", "answers"}:
+        message += (
+            " Coding choices prioritize published benchmark references; missing scores remain unknown."
+            if benchmark_used
+            else " No eligible coding benchmark references are available; these choices use resource fit."
+        )
     if not items:
         message = (
             "No model with a complete memory plan fits these resources. Check again or browse models in Advanced."

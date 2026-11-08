@@ -1,9 +1,10 @@
 # Beginner recommendation evidence
 
 Beginner checks resource fit before ranking a bounded set of choices. Its
-fallback uses resource/capacity heuristics and explicit task metadata. Balanced
-can reorder comparable scored options using an offline snapshot of published
-upstream benchmarks. These references do not measure Stark's quantized exports.
+fallback uses resource/capacity heuristics and explicit task metadata. Coding
+with Balanced prioritizes published benchmark evidence among admitted models.
+Other tasks use bounded comparisons of scored options. All scores come from an
+offline snapshot of published upstream benchmarks; they do not measure Stark's quantized exports.
 Native tool workflow checks establish specific protocol/lifecycle behavior;
 they do not establish general coding-agent competence.
 
@@ -78,19 +79,31 @@ or BFCL.
 1. Apply the existing RAM, GPU, disk, chat-template and route checks first.
 2. Build the deterministic fallback order from comfortable memory headroom,
    task tags and the selected capacity/memory preference.
-3. Select one task cohort with at least two distinct covered parent models in
-   the same memory-headroom tier. Prefer greater comparable-model coverage
-   across those tiers, then benchmark-publisher evidence, then cohort ID.
-   Isolated scored models do not increase coverage. Selection never uses score
-   magnitude. Repeated quantizations of one parent count once.
-4. For Balanced, sort only the scored slots within each memory-headroom tier by
-   descending score. Leave unknown models in their original slots; equal scores
-   preserve fallback order. Never merge FC/Prompt, versions, publishers or metrics.
-   The explicit Lighter model and More model capacity preferences retain their
-   resource objectives and display scores as reference information.
+3. For Coding with Balanced, select one coding cohort with at least one
+   eligible covered parent. Prefer greater distinct-parent coverage across all
+   admitted models, then benchmark-publisher evidence, then cohort ID. Put
+   covered models first, in descending score order. Uncovered models follow in
+   fallback order; a missing score cannot retain first place above recorded
+   evidence. A valid zero score is evidence, not a missing score. This policy
+   prioritizes evidence availability; it does not prove that an unscored model
+   has lower coding quality. Soft memory-headroom tiers and task tags cannot
+   override coding scores after hard admission. Equal scores use fallback order.
+4. For other tasks with Balanced, select one task cohort with at least two
+   distinct covered parents in the same memory-headroom tier. Prefer greater
+   comparable-parent coverage across those tiers, then publisher authority,
+   then cohort ID. Reorder only scored slots within each tier by descending
+   score, retaining unknown positions and equal-score fallback order.
+   Repeated quantizations count as one parent for cohort selection in every
+   task. Never merge FC/Prompt, versions, publishers or metrics. Results from
+   nonselected cohorts remain reference information. Lighter model and More
+   model capacity retain their explicit resource objectives.
 5. Select up to three choices and show source, score, settings, whether the
    result informed this comparison and the upstream-reference caveat in the
    model details. The explanation names the narrow benchmark signal.
+
+If no eligible coding reference exists, the report explicitly identifies the
+resource-based fallback and unknown coding quality. A lone covered parent can
+be prioritized over unknowns; it is not presented as a pairwise benchmark win.
 
 Repository identity admits a model-level public reference even when the
 evaluated weights revision is unknown or differs from the candidate. This is
