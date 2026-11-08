@@ -7,6 +7,13 @@ runner, isolated native API bridge, complete artifact identities and private
 aggregate receipts. A pilot covers only its selected tasks and does not establish
 an 89-task score.
 
+The [native MaxxBench pilot (2026-11-08)](2026-11-08-maxxbench-native-pilot.md)
+records seven default artifact profiles on one coding task: five graded attempts
+returned reward zero, and two legacy deadline-confounded attempts remain
+unscored. It also records three passing targeted oracle tasks, exact artifact
+identities and the remaining qualification work. It does not establish a model
+ranking or a full MaxxBench score.
+
 ## Current result
 
 **Dense Qwen3.8-27B oQ4e packed-weight follow-up (2026-11-06).** The final
