@@ -17,6 +17,61 @@ static float gemma_flash_fast_exp(float x) {
   return as_type<float>(as_type<uint>(p)+(uint(int(n))<<23));
 }
 
+// Scalar rescaling has a separate precision policy from BF16 tile fexp.
+// Compensated range reduction and degree-12 Taylor evaluation target nearest
+// F32. This is measured against independent decimal and source-libm fixtures;
+// it does not claim universally correctly rounded expf.
+static float2 gemma_flash_pair_norm(float h,float l) {
+  const float s=h+l;
+  return float2(s,l-(s-h));
+}
+static float2 gemma_flash_pair_add(float2 a,float2 b) {
+  const float s=a.x+b.x, v=s-a.x;
+  const float e=(a.x-(s-v))+(b.x-v);
+  return gemma_flash_pair_norm(s,e+(a.y+b.y));
+}
+static float2 gemma_flash_pair_mul(float2 a,float2 b) {
+  const float h=a.x*b.x;
+  const float l=fma(a.x,b.x,-h)+(a.x*b.y+a.y*b.x);
+  return gemma_flash_pair_norm(h,l);
+}
+static float gemma_flash_scalar_exp(float x) {
+  // Caller supplies an old-maximum minus new-maximum: x <= 0, including -inf.
+  if(x < -104.0f) return 0.0f;
+  if(x == 0.0f) return 1.0f;
+  const int k=int(rint(x*as_type<float>(0x3fb8aa3bu)));
+  const float2 ln2=float2(as_type<float>(0x3f317218u),as_type<float>(0xb102e308u));
+  const float2 r=gemma_flash_pair_add(float2(x,0.0f),gemma_flash_pair_mul(ln2,float2(-float(k),0.0f)));
+  // Independent mathematical coefficients 1/n!, split into high/low F32.
+  const float2 c[13]={
+    float2(1.0f,0.0f),float2(1.0f,0.0f),float2(0.5f,0.0f),
+    float2(as_type<float>(0x3e2aaaabu),as_type<float>(0xb1aaaaabu)),
+    float2(as_type<float>(0x3d2aaaabu),as_type<float>(0xb0aaaaabu)),
+    float2(as_type<float>(0x3c088889u),as_type<float>(0xafeeeeefu)),
+    float2(as_type<float>(0x3ab60b61u),as_type<float>(0xae13e93fu)),
+    float2(as_type<float>(0x39500d01u),as_type<float>(0xac3fcbfdu)),
+    float2(as_type<float>(0x37d00d01u),as_type<float>(0xaabfcbfdu)),
+    float2(as_type<float>(0x3638ef1du),as_type<float>(0x292ad8e6u)),
+    float2(as_type<float>(0x3493f27eu),as_type<float>(0xa808760au)),
+    float2(as_type<float>(0x32d7322bu),as_type<float>(0x25fea89cu)),
+    float2(as_type<float>(0x310f76c7u),as_type<float>(0x24ff8d89u))};
+  float2 p=c[12];
+  for(int i=11;i>=0;--i) p=gemma_flash_pair_add(gemma_flash_pair_mul(p,r),c[i]);
+  if(k > -126) return ldexp(p.x+p.y,k);
+  // Round in integer subnormal units before the bit cast, avoiding flush-to-zero
+  // and a second subnormal arithmetic rounding at the underflow boundary.
+  const float h=ldexp(p.x,k+149), l=ldexp(p.y,k+149), integral=floor(h);
+  const float2 tail=gemma_flash_pair_add(float2(h,l),float2(-integral,0.0f));
+  const uint base=uint(integral);
+  const bool up=tail.x>0.5f || (tail.x==0.5f && (tail.y>0.0f || (tail.y==0.0f && (base&1u))));
+  return as_type<float>(base+uint(up));
+}
+
+PUBLIC KERNEL(Gemma4VisionFlashScalarExpF32)(const device float* input,device float* output,
+    constant uint& count,const uint row AXIS(count,32)) {
+  output[row]=gemma_flash_scalar_exp(input[row]);
+}
+
 // Integer RNE survives arithmetic optimization; its result additionally crosses
 // a physical BF16 buffer into the separately dispatched PV pipeline.
 static bfloat gemma_flash_store_bf16(float x) {
@@ -51,7 +106,7 @@ PUBLIC KERNEL(Gemma4VisionFlashExpBF16)(const device float* scores,device bfloat
   const float previous_sum=key_start==0 ? 0.0f : state[row*3+1];
   float maximum=previous_max;
   for(uint column=0;column<512;++column) maximum=max(maximum,scores[base+column]);
-  const float factor=metal::precise::exp(previous_max-maximum);
+  const float factor=gemma_flash_scalar_exp(previous_max-maximum);
   float partial[8]={};
   for(uint column=0;column<512;++column) {
     const float value=gemma_flash_fast_exp(scores[base+column]-maximum);

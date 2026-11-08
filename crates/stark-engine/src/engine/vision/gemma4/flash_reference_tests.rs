@@ -5,7 +5,10 @@ use stark_engine_macros::stark_test;
 
 use super::*;
 use crate::{
-    backends::common::{Kernels, kernel::Gemma4VisionFlashQKKernel},
+    backends::common::{
+        Kernels,
+        kernel::{Gemma4VisionFlashQKKernel, Gemma4VisionFlashScalarExpF32Kernel},
+    },
     tests::helpers::{buffer_to_vec, create_buffer_with_data},
 };
 
@@ -150,4 +153,73 @@ fn gemma4_larger_flash_qk_canonical_cpu_fixture() {
 #[ignore]
 fn gemma4_larger_flash_qk_canonical_metal_fixture() {
     qk_check::<crate::backends::metal::Metal>();
+}
+
+fn scalar_exp_check<B: Backend>(source_policy: bool) {
+    let root = std::path::PathBuf::from(std::env::var_os("STARK_GEMMA4_SCALAR_EXP_FIXTURE_PATH").unwrap());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["scope"], "model-free-larger-vision-scalar-rescale-exp");
+    assert_eq!(manifest["oracle"], "decimal-exp-100-digits-and-source-libm-expf");
+    assert_eq!(manifest["torch_source_revision"], "5c4886908584029761b579af026dcfb627c84070");
+    let count = manifest["count"].as_u64().unwrap() as usize;
+    assert!((8195..=10000).contains(&count));
+    assert!(manifest["bytes"].as_u64().unwrap() <= 256 * 1024);
+    let load = |key: &str| {
+        let record = &manifest["records"][key];
+        let name = record["file"].as_str().unwrap();
+        assert!(name.len() < 128 && !name.contains('/') && !name.contains('\\'));
+        let bytes = std::fs::read(root.join(name)).unwrap();
+        assert_eq!(bytes.len(), count * 4);
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), record["sha256"].as_str().unwrap());
+        bytes.chunks_exact(4).map(|value| f32::from_le_bytes(value.try_into().unwrap())).collect::<Vec<_>>()
+    };
+    let inputs = load("input");
+    assert!(inputs.iter().all(|value| *value <= 0.0 && !value.is_nan()));
+    let source = load("source");
+    let nearest = load("nearest");
+    let expected = if source_policy {
+        &source
+    } else {
+        &nearest
+    };
+    let context = B::Context::new().unwrap();
+    let input = create_buffer_with_data::<B, f32>(&context, &inputs);
+    let kernel = <B::Kernels as Kernels>::Gemma4VisionFlashScalarExpF32Kernel::new(&context).unwrap();
+    let mut command = context.create_command_buffer(None, None).unwrap();
+    let mut output = command.allocate_scratch_for_shape(&[count as u32], DataType::F32).unwrap();
+    kernel.encode(&input, &mut output, count as u32, &mut command);
+    let mut readback = context.create_buffer(count * 4).unwrap();
+    command.encode_copy(&output, &mut readback);
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    let actual = buffer_to_vec::<B, f32>(&readback);
+    let different = actual.iter().zip(expected).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    let source_differences = actual.iter().zip(&source).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    let maximum_source_ulp = actual.iter().zip(&source).map(|(a, b)| a.to_bits().abs_diff(b.to_bits())).max().unwrap();
+    let report = serde_json::json!({"scope":"independent-scalar-rescale-exp","backend":B::NAME,
+        "policy":if source_policy{"source_libm"}else{"nearest_decimal"},"cases":count,
+        "different_f32_elements":different,"source_f32_differences":source_differences,
+        "maximum_source_ulp":maximum_source_ulp});
+    std::fs::write(
+        root.join(format!("native-scalar-exp-{}.json", B::NAME)),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    println!("{report}");
+    assert_eq!(different, 0, "scalar rescale exp differs from declared independent policy");
+    assert!(maximum_source_ulp <= 1);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+#[ignore]
+fn gemma4_larger_scalar_exp_cpu_fixture() {
+    scalar_exp_check::<crate::backends::cpu::Cpu>(true);
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+#[ignore]
+fn gemma4_larger_scalar_exp_metal_fixture() {
+    scalar_exp_check::<crate::backends::metal::Metal>(false);
 }

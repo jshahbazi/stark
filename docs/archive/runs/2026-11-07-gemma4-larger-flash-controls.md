@@ -117,3 +117,32 @@ at 256 KiB per backend and reuses the existing canonical tensors; it introduces
 no new oracle, large fixture or production scratch plane. Only aggregate counts
 and hashes are printed. The remaining Metal-specific differences still require
 these controls before any additional arithmetic change.
+
+Sealed source `96b6da7d` verifies the fused denominator update: both prefix
+controls and all four canonical Flash/F32-QK controls pass. The affected CPU
+replay is exact; full same-input Metal attention improves from six to four BF16
+differences. All captured F32 QK and physical BF16 exponential tiles agree across
+CPU and Metal. The first divergence is the scalar rescaling exponential, before
+PV: nine of twenty factors differ by one F32 ULP. CPU matches Darwin `expf` and
+100-digit decimal exponential rounded to F32 for all twenty factors. Replaying
+only CPU versus Metal factors reproduces respectively zero versus four final
+BF16 differences, with all native denominator/PV states reproduced bit for bit.
+No separate reciprocal defect is demonstrated.
+
+The next larger-only Metal candidate replaces that scalar exponential with
+compensated range reduction and a degree-12 Taylor polynomial. CPU retains libm;
+the BF16 tile exponential is unchanged. Integer rounding in subnormal units
+preserves underflow values without depending on arithmetic subnormal storage.
+The independent private fixture contains 8,215 inputs (seeded random, uniform
+grid, twenty captured factors, zero and negative infinity), totaling 98,580
+tensor bytes. Its SHA-256 is
+`fb77820532a29404499e2f17287d48464061c1b1d7bb5a693dbeae04d6972ad6`.
+It freezes both 100-digit decimal-nearest and actual source-libm outputs.
+Darwin libm differs from decimal-nearest by one ULP in 42 cases; the twenty
+observed factors agree. The Python candidate matches decimal-nearest in every
+case. Native CPU must match its retained source-libm policy; native Metal must
+match its declared nearest-decimal policy. Source differences are reported with
+a one-ULP bound. These finite controls do not establish universally correct
+rounding. Native validation and the unchanged full-attention/full-feature gates
+remain pending for this source-only scalar candidate. Historical failed gates
+are retained.
