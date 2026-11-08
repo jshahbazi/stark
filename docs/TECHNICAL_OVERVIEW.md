@@ -84,7 +84,7 @@ Two Python projects exist: `tools/converter/pyproject.toml` is the product packa
 
 ## App control protocol
 
-`Stark.app` launches `desktop.py` with the paths of the two worker binaries and its data directory, and exchanges JSON lines over the process's stdin and stdout. Each line is capped at 1 MiB. Commands from the app:
+`Stark.app` launches `desktop.py` with the paths of the two worker binaries and its data directory, and exchanges JSON lines over the process's stdin and stdout. Input command lines use the [automatic shared framing budget](WORKER_PROTOCOLS.md#resource-budget), pinned from available memory at process startup. Actual rendered input and requested output remain bounded by model context after tokenization. Commands from the app:
 
 | Command | Fields | Effect |
 | --- | --- | --- |

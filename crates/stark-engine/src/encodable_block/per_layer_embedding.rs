@@ -52,6 +52,15 @@ pub struct PerLayerEmbedding<B: Backend> {
 }
 
 impl<B: Backend> PerLayerEmbedding<B> {
+    pub(crate) fn add_memory_scratch(
+        &self,
+        rows: u32,
+        estimate: &mut crate::encodable_block::memory::MemoryEstimate,
+    ) -> Option<()> {
+        estimate.add_scratch(&[rows, self.num_layers, self.ple_dim], 4, 4)?;
+        estimate.add_scratch(&[rows, self.model_dim], 4, 2)
+    }
+
     pub fn new(
         context: &B::Context,
         config: &PLEModelConfig,
@@ -237,6 +246,15 @@ pub struct PerLayerEmbeddingProjection<B: Backend> {
 }
 
 impl<B: Backend> PerLayerEmbeddingProjection<B> {
+    pub(crate) fn add_memory_scratch(
+        &self,
+        rows: u32,
+        estimate: &mut crate::encodable_block::memory::MemoryEstimate,
+    ) -> Option<()> {
+        estimate.add_scratch(&[rows, self.ple_dim], 4, 3)?;
+        estimate.add_scratch(&[rows, self.model_dim], 4, 3)
+    }
+
     pub fn new(
         context: &B::Context,
         config: &PLELayerConfig,

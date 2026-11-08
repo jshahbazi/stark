@@ -414,6 +414,77 @@ def test_aligned_image_failure_discards_and_allows_valid_request_b(first_failure
         worker.media.close()
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_generation_memory_rejection_discards_real_pipe_transaction_and_allows_retry(tmp_path, stream):
+    from stark_convert.chat import ChatRequestTooLarge
+
+    executable = tmp_path / "synthetic image worker"
+    operations = tmp_path / "operations.jsonl"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json,sys\n"
+        f"operations={str(operations)!r}\n"
+        "prepared=None;generated=0\n"
+        "print(json.dumps({'ready':True}),flush=True)\n"
+        "for line in sys.stdin:\n"
+        " request=json.loads(line);op=request['operation']\n"
+        " with open(operations,'a') as out:out.write(json.dumps(op)+'\\n')\n"
+        " if op=='prepare_image':\n"
+        "  assert prepared is None\n"
+        "  prepared='a'*32\n"
+        "  reply={'prepared_id':prepared,'input_tokens':12,'image_tokens':4}\n"
+        " elif op=='generate_image':\n"
+        "  assert request['prepared_id']==prepared\n"
+        "  generated+=1\n"
+        "  if generated==1:\n"
+        "   if request.get('stream'): print(json.dumps({'event':'delta','text':'synthetic'}),flush=True)\n"
+        "   reply={'error':'resource_budget_exceeded'}\n"
+        "  else: reply={'text':'synthetic','input_tokens':12,'output_tokens':1,'finish_reason':'eos'}\n"
+        " elif op=='discard_image':\n"
+        "  reply={'discarded':prepared is not None};prepared=None\n"
+        " else:\n"
+        "  assert op=='tokenize' and prepared is None\n"
+        "  reply={'token_count':1,'token_ids':[1]}\n"
+        " print(json.dumps(reply),flush=True)\n"
+    )
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 5)
+    try:
+        worker.read()
+        worker.media = PrivateMediaStore()
+        worker.image_input = {"max_image_tokens": 16}
+        root = worker.media.root
+        process = worker.process
+        deltas = []
+        with pytest.raises(ChatRequestTooLarge):
+            worker.request_image(
+                "synthetic rendered prompt",
+                ImageData(PNG, "image/png"),
+                {**OPTIONS, "stream": stream},
+                on_delta=deltas.append if stream else None,
+            )
+        assert deltas == (["synthetic"] if stream else [])
+        assert worker.process is process and process.poll() is None
+        assert worker._image_deadline is None
+        assert not list(root.iterdir())
+        assert [json.loads(line) for line in operations.read_text().splitlines()] == [
+            "prepare_image",
+            "generate_image",
+            "discard_image",
+        ]
+        assert perform(worker)["finish_reason"] == "eos"
+        assert worker.request({"operation": "tokenize", "text": "synthetic retry"})["token_count"] == 1
+        assert worker.process is process and process.poll() is None
+        assert not list(root.iterdir())
+        assert [json.loads(line) for line in operations.read_text().splitlines()] == [
+            "prepare_image",
+            "generate_image",
+            "discard_image",
+        ] * 2 + ["tokenize"]
+    finally:
+        worker.close()
+
+
 @pytest.mark.parametrize(
     "scenario", ["silent_prepare", "invalid_protocol", "stream", "blocked_write", "silent_discard"]
 )

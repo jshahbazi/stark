@@ -260,6 +260,31 @@ fn as_banks(mut tensors: Tensors) -> Tensors {
 }
 
 #[stark_test]
+fn flint_request_inventory_bounds_lazy_cache_growth_and_window_retention() {
+    let c = config();
+    let fixture = Fixture::new(&tensors(), &c);
+    let mut model = fixture.load(&c).unwrap();
+    let small = model.request_memory_bytes(1).unwrap();
+    let full = model.request_memory_bytes(6).unwrap();
+    let row_bytes = 2 * model.config.kv_heads * model.config.dim * 4 + 2 * size_of::<Vec<f32>>();
+    // Three one-row caches grow into two full six-row caches and a two-row
+    // rotating cache. The admission inventory includes both growth copies.
+    assert_eq!(full - small, 2 * (14 - 3) * row_bytes);
+    for token in [0, 1, 3, 2, 4, 1] {
+        model.step(token).unwrap();
+    }
+    let live_payload: usize = model
+        .states
+        .iter()
+        .map(|state| {
+            state.keys.iter().chain(&state.values).map(|row| row.len() * 4 + size_of::<Vec<f32>>()).sum::<usize>()
+        })
+        .sum();
+    assert!(full > live_payload);
+    assert!(model.request_memory_bytes(7).is_none());
+}
+
+#[stark_test]
 fn flint_multistep_matches_independent_dense_reference_and_ingest() {
     let c = config();
     let source = tensors();

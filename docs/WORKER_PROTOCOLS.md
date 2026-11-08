@@ -24,11 +24,123 @@ The caller owns the process: start it, hold its pipes, watch for exit, and termi
 
 ## Framing
 
-Requests and replies are UTF-8 JSON objects, one per line, terminated by `\n`. A request line, including its newline, is limited to 1 MiB (1,048,576 bytes). Both workers reply with exactly one terminal line per request, in request order. The generation worker can additionally emit zero or more `{"event":"delta",...}` lines before the terminal reply of a streaming request.
+Requests and replies are UTF-8 JSON objects, one per line, terminated by `\n`. Request lines, including the newline, follow the configurable resource budget below. Both workers reply with exactly one terminal line per request, in request order. The generation worker can additionally emit zero or more `{"event":"delta",...}` lines before the terminal reply of a streaming request.
 
 Requests are parsed strictly: unknown fields, wrong types, and missing required fields are rejected. A client cannot discover optional fields by sending them; use the readiness line instead.
 
-Image-capable generation workers keep the same 1 MiB framing. They pass image data through a private file reference rather than embedding bytes in JSON. The optional `image_input` readiness object describes the `mediaref-v1` contract and the `owner-private-file-v1` transport. See [Generation](GENERATION.md#prepared-image-operations) for the request sequence, limits and qualification boundary.
+Image-capable generation workers keep the same framing budget. They pass image data through a private file reference rather than embedding bytes in JSON. The optional `image_input` readiness object describes the `mediaref-v1` contract and the `owner-private-file-v1` transport. See [Generation](GENERATION.md#prepared-image-operations) for the request sequence, limits and qualification boundary.
+
+## Resource budget
+
+Normal app use requires no budget configuration. At process startup, the host
+reads available RAM and selects `floor(available_bytes / (128 × 1 MiB))` MiB,
+clamped to 16 through 64 MiB. If memory telemetry is unavailable, it uses the
+16 MiB floor. The host pins that snapshot for its child workers and template
+helpers so a request uses one consistent policy. Native standalone workers
+apply the same automatic policy at startup.
+
+For development or controlled runtime testing, `STARK_REQUEST_BUDGET_MIB`
+overrides the budget with an integer from 1 through 64. Invalid values fail
+startup. The override is read at process startup; restart the owning app and
+workers to apply a change, and give standalone host tools and native helpers
+the same override. There is no budget setting in the app interface.
+
+For a selected logical budget `B` bytes, the policy is:
+
+| Resource | Budget | Automatic range |
+| --- | --- | --- |
+| Logical input and output content, including rendered templates | `B` | 16–64 MiB |
+| Encoded worker and template request, including framing | `6B + 2 MiB` | 98–386 MiB |
+| Text HTTP body | `6B + 2 MiB` | 98–386 MiB |
+| Image HTTP body | Text body budget plus 6 MiB | 104–392 MiB |
+| Aggregate pending HTTP bodies | Two image body budgets | 208–784 MiB |
+| Template live Rust allocation requests and sampled RSS | `128 MiB + 8B` | 256–640 MiB |
+| Template cumulative Rust allocation requests | `32 MiB + 32B` | 544–2,080 MiB |
+
+Transport headroom accommodates JSON escaping and protocol fields. Token vectors
+are also resource bounded using their four-byte-per-ID storage. Native readiness
+reports `request_budget_bytes` and `max_request_bytes`; hosts must respect the
+effective native request limit. Byte admission is independent of model context.
+The worker still applies its model's actual token limit after tokenization.
+Byte admission does not guarantee that every possible encoding of a full token
+window fits the resource budget. Automatic admission does not qualify
+full-window accuracy, execution time or memory use on a particular machine.
+
+The HTTP parser bounds JSON structure before allocating the parsed tree: at
+most 65,536 nodes and 64 nested containers, counting object keys as nodes.
+Tool schemas and argument objects retain their stricter structural limits.
+Direct native worker frames also pass a structural scan before Serde allocates
+the request: at most 65,536 string/container nodes and 64 nested containers.
+The frame's scalar count has a separate allowance of `B / 4 + 65,536` so
+long flat token-ID vectors can reach actual model context; the typed token vector
+must still fit its four-byte-per-ID content budget. The HTTP node ceiling does
+not impose a 65,536-token ceiling on native worker requests.
+Template source size, sandbox restrictions, execution fuel and deadlines remain
+separate controls; see [chat template evaluation](GENERATION.md#chat-template-evaluation).
+
+The HTTP API and private app command pipe also check current parsing headroom
+for frames above 1 MiB, using twelve times the raw size as a conservative
+Unicode/JSON allowance. HTTP reserves that allowance across concurrent readers.
+The serialized app pipe checks while receiving a frame and immediately before
+decoding; a rejected frame drains through its newline so smaller commands and
+Stop remain available. This estimate does not reserve RAM or impose a hard RSS
+ceiling.
+
+## Automatic execution for undeclared contexts
+
+The memory planner also admits Auto output for finite-context text models. Their
+declared model capacity is the upper bound; it remains unchanged in discovery.
+
+Workers advertising `generation_budget: "memory-context-v1"` accept
+`plan_generation` after tokenization:
+
+```json
+{"operation":"plan_generation","input_tokens":120,"context_tokens":4294967295}
+```
+
+`input_tokens` is the actual rendered input count. `context_tokens` is an upper
+budget; the protocol ceiling permits automatic selection. The reply contains
+a finite `context_tokens`, `max_new_tokens` equal to that allowance minus the
+input, `context_capacity_known` and `budget_kind: "memory"`. Generation then uses
+those explicit finite values. A model without a declared capacity continues to
+report an undeclared HTTP model capacity.
+
+The native planner performs checked, allocation-free estimates using the loaded
+attention cache dimensions and precision, ring bounds, recurrent state and
+conservative scratch-pool requirements. It admits a context against one quarter
+of currently available RAM after a 256 MiB reserve, also bounded by token-storage
+and caller limits. Planning leaves another quarter of that allowance unused for
+serialization and ordinary memory-pressure fluctuations before allocation is
+rechecked. This is conservative admission evidence; it is not a memory
+reservation or a hard process RSS ceiling. Cancellation, output byte limits and
+deadlines remain active. Insufficient memory rejects the request cleanly.
+
+Native text generation also checks allocation admission for explicit output
+requests. A finite context using sparse Metal buffers is charged for the actual
+input plus requested output span; unused reserved address capacity is not mapped
+cache memory. Dense buffers and undeclared contexts are charged for their full
+selected context. Finite retained states are checked before additional generation
+and may be rejected conservatively under memory pressure. Exact reuse of an
+undeclared-context state keeps its previously admitted whole-context allocation.
+
+The separate GLM, Qwen and Flint execution paths inventory their loaded cache
+geometry, growth rounding, transient replacement buffers and host workspaces.
+Retained Lily uses its selected K/V format and loaded draft head when counting
+state, snapshots and decode/prefill scratch. The EXL3 bridge already bills device
+phases at its installed full context before loading; its host planner additionally
+admits token/readout workspaces. These checks do not change inference precision
+or replay tokens. Image requests also admit their decoder cache using expanded
+prepared-token counts, and check the selected virtual cache reservation against
+device buffer and shader-index limits. The prepared context remains bound:
+image Auto can reject a window that does not fit instead of shrinking that
+context. Encoder bounds and qualification remain separate; this decoder check
+does not estimate the encoder's complete peak.
+
+Planning never replays a prompt or generated token. A successful query preserves
+the retained prefix; the worker keeps an existing planned capacity while it still
+fits current admission so context-keyed prefix reuse remains possible. If capacity
+changes, the existing context key prevents reuse across the change. Failures clear
+retained state through the ordinary worker error path.
 
 ## Readiness
 
@@ -41,6 +153,7 @@ The first line a worker writes is its readiness reply. On success it starts with
 | `stark-generate` | `mode` | `text-generation-v1` |
 | `stark-generate` | `streaming` | `text-delta-v1` |
 | `stark-generate` | `cancellation` | `pipe-v1` |
+| `stark-generate` | `generation_budget` | `memory-context-v1` when the loaded text backend exposes an allocation profile |
 | `stark-generate` | `image_input.version` | `mediaref-v1` (when the loaded model supports the implemented vision layout) |
 | `stark-generate` | `image_input.transport` | `owner-private-file-v1` |
 | `stark-generate` | `timing_method` (in generate replies) | `first-token-wall-clock-v1` |

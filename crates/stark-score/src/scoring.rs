@@ -18,10 +18,9 @@ use stark_engine::{
     backends::metal::Metal,
     engine::{Engine, language_model::LanguageModel},
 };
+use stark_resource_budget::Budget;
 
 use crate::cache::{CacheEntry, LastScoreCache};
-
-const MAX_REQUEST_BYTES: usize = 1_048_576;
 
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -188,6 +187,17 @@ struct NativeScores {
     readout_seconds: f64,
 }
 
+fn admit_scoring_memory(
+    request_bytes: Option<usize>,
+    available: usize,
+) -> Result<(), &'static str> {
+    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+    if request_bytes > available.saturating_sub(256 * 1024 * 1024) / 4 {
+        return Err("resource_budget_exceeded");
+    }
+    Ok(())
+}
+
 trait ScoringBackend {
     fn idle_maintenance_interval(&self) -> Option<Duration> {
         None
@@ -216,6 +226,7 @@ struct ScoreWorker<B> {
     digest_mode: bool,
     hits: u64,
     native_score_calls: u64,
+    budget: Budget,
 }
 
 #[derive(Serialize)]
@@ -397,6 +408,15 @@ impl ScoringBackend for NativeBackend {
         input: &[u32],
         context: u32,
     ) -> Result<NativeScores, &'static str> {
+        let input_tokens = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
+        let request_bytes = match &self.model {
+            NativeModel::Dense(model) => model.scoring_memory_bytes(input_tokens, context),
+            // Hybrid caches grow with committed prompt rows; unused selected
+            // capacity does not allocate additional cache storage here.
+            NativeModel::Hybrid(model) => model.request_memory_bytes(input_tokens, input_tokens),
+        };
+        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+        admit_scoring_memory(request_bytes, available)?;
         let NativeModel::Dense(model) = &self.model else {
             let NativeModel::Hybrid(model) = &mut self.model else {
                 unreachable!()
@@ -458,10 +478,25 @@ impl ScoringBackend for NativeBackend {
 }
 
 impl<B: ScoringBackend> ScoreWorker<B> {
+    #[cfg(test)]
     fn new(
         backend: B,
         enabled: bool,
         digest_mode: bool,
+    ) -> Self {
+        Self::new_with_budget(
+            backend,
+            enabled,
+            digest_mode,
+            Budget::from_environment().expect("valid test resource budget"),
+        )
+    }
+
+    fn new_with_budget(
+        backend: B,
+        enabled: bool,
+        digest_mode: bool,
+        budget: Budget,
     ) -> Self {
         Self {
             backend,
@@ -469,6 +504,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
             digest_mode,
             hits: 0,
             native_score_calls: 0,
+            budget,
         }
     }
 
@@ -514,8 +550,14 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                 if text.is_empty() {
                     return Err("invalid_tokenization_request");
                 }
+                if text.len() > self.budget.input_bytes {
+                    return Err("resource_budget_exceeded");
+                }
                 let started = Instant::now();
                 let ids = self.backend.tokenize(text, add_special_tokens)?;
+                if ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>() {
+                    return Err("resource_budget_exceeded");
+                }
                 Ok(PendingReply {
                     value: json!({"token_ids":ids,"token_count":ids.len(),"token_ids_sha256":token_hash(&ids),
                     "vocab_size":self.backend.vocab_size(),"tokenization_seconds":started.elapsed().as_secs_f64(),
@@ -530,6 +572,14 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                 context_tokens,
                 temperature,
             } => {
+                if self.backend.vocab_size() > self.budget.input_bytes / std::mem::size_of::<f32>() {
+                    return Err("resource_budget_exceeded");
+                }
+                if input_token_ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>()
+                    || candidate_token_ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>()
+                {
+                    return Err("resource_budget_exceeded");
+                }
                 let started = Instant::now();
                 let previous = self.cache.take_matching(&input_token_ids, context_tokens);
                 validate_score(
@@ -563,6 +613,9 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                     || scores.logits.iter().any(|value| !value.is_finite())
                 {
                     return Err("invalid_score_values");
+                }
+                if scores.logits.len() > self.budget.input_bytes / std::mem::size_of::<f32>() {
+                    return Err("resource_budget_exceeded");
                 }
                 let readout_started = Instant::now();
                 let (logits, log_probabilities, candidate_probabilities) =
@@ -618,8 +671,8 @@ impl<B: ScoringBackend> ScoreWorker<B> {
         bytes: &[u8],
         output: &mut impl Write,
     ) -> Result<(), &'static str> {
-        let result = serde_json::from_slice::<ScoreRequest>(bytes)
-            .map_err(|_| "invalid_request")
+        let result = stark_resource_budget::check_json_structure(bytes, self.budget)
+            .and_then(|()| serde_json::from_slice::<ScoreRequest>(bytes).map_err(|_| "invalid_request"))
             .and_then(|request| self.handle(request));
         match result {
             Ok(pending) => {
@@ -654,8 +707,9 @@ pub(super) fn run_lines(
     digest_mode: bool,
     output: &mut impl Write,
 ) -> Result<(), &'static str> {
+    let budget = Budget::from_environment()?;
     let started = Instant::now();
-    let mut worker = ScoreWorker::new(NativeBackend::load(path)?, enabled, digest_mode);
+    let mut worker = ScoreWorker::new_with_budget(NativeBackend::load(path)?, enabled, digest_mode, budget);
     write_reply(
         output,
         &json!({"ready":true,"engine":"stark","version":"0.1.0",
@@ -668,6 +722,7 @@ pub(super) fn run_lines(
         "cache":worker.telemetry(false),
         "load_seconds":started.elapsed().as_secs_f64(),"vocab_size":worker.backend.vocab_size(),
         "max_context_tokens":worker.backend.max_context_length(),
+        "max_request_bytes":worker.budget.wire_bytes,"request_budget_bytes":worker.budget.input_bytes,
         "peak_memory_bytes":worker.backend.peak_memory_usage()}),
     )
     .map_err(|_| "protocol_write_failed")?;
@@ -766,7 +821,7 @@ fn run_request_loop<B: ScoringBackend, I: ScoreInput>(
             }
         }
         let mut bytes = Vec::new();
-        let count = match Read::by_ref(input).take(MAX_REQUEST_BYTES as u64 + 1).read_until(b'\n', &mut bytes) {
+        let count = match Read::by_ref(input).take(worker.budget.wire_bytes as u64 + 1).read_until(b'\n', &mut bytes) {
             Ok(count) => count,
             Err(_) => {
                 worker.cache.clear();
@@ -777,7 +832,7 @@ fn run_request_loop<B: ScoringBackend, I: ScoreInput>(
             worker.cache.clear();
             return Ok(());
         }
-        if bytes.len() > MAX_REQUEST_BYTES {
+        if bytes.len() > worker.budget.wire_bytes {
             worker.cache.clear();
             write_reply(output, &json!({"error":"request_too_large","cache":worker.telemetry(false)}))
                 .map_err(|_| "protocol_write_failed")?;
@@ -831,6 +886,7 @@ mod tests {
         idle_calls: usize,
         fail_idle: bool,
         fail_score: bool,
+        fail_resource: bool,
         fail_probe: bool,
         invalid_output: bool,
         fail_tokenize: bool,
@@ -880,6 +936,9 @@ mod tests {
             if self.fail_score {
                 return Err("native_scoring_failed");
             }
+            if self.fail_resource {
+                return Err("resource_budget_exceeded");
+            }
             Ok(NativeScores {
                 logits: if self.invalid_output {
                     vec![f32::NAN; 6]
@@ -903,6 +962,7 @@ mod tests {
                 idle_calls: 0,
                 fail_idle: false,
                 fail_score: false,
+                fail_resource: false,
                 fail_probe: false,
                 invalid_output: false,
                 fail_tokenize: false,
@@ -1086,7 +1146,7 @@ mod tests {
     fn oversized_line_clears_cache_and_returns_existing_protocol_error() {
         let mut worker = worker(true, false);
         worker.backend.idle_interval = Some(Duration::from_millis(500));
-        let mut bytes = vec![b'x'; MAX_REQUEST_BYTES + 1];
+        let mut bytes = vec![b'x'; worker.budget.wire_bytes + 1];
         bytes.push(b'\n');
         let replies = run_script(&mut worker, [InputEvent::Data(bytes)]).unwrap();
         assert_eq!(replies[0]["error"], "request_too_large");
@@ -1129,6 +1189,31 @@ mod tests {
             assert_eq!(post(&mut worker, request(input, &[2, 3], context, 1.22))["cache_hit"], false);
         }
         assert_eq!(worker.backend.calls, 4);
+    }
+
+    #[test]
+    fn memory_admission_reports_recoverable_resource_errors() {
+        let available = 1024 * 1024 * 1024;
+        assert_eq!(admit_scoring_memory(None, available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(256 * 1024 * 1024), available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(128 * 1024 * 1024), available), Ok(()));
+    }
+
+    #[test]
+    fn scoring_memory_rejection_clears_logits_and_accepts_same_worker_retry() {
+        let mut worker = worker(true, false);
+        post(&mut worker, standard());
+        assert_eq!(post(&mut worker, standard())["cache_hit"], true);
+        worker.backend.fail_resource = true;
+        let full_context = request(&[2, 1], &[2, 3], 2, 1.0);
+        assert_eq!(post(&mut worker, full_context.clone())["error"], "resource_budget_exceeded");
+        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
+        worker.backend.fail_resource = false;
+        let retry = post(&mut worker, full_context.clone());
+        assert_eq!(retry["input_tokens"], 2);
+        assert_eq!(retry["cache_hit"], false);
+        assert_eq!(post(&mut worker, full_context)["cache_hit"], true);
+        assert_eq!(worker.backend.calls, 3);
     }
 
     #[test]

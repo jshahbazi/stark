@@ -55,8 +55,8 @@ jobs:
       - name: Build and test native template evaluator
         run: |
           cargo build --release --locked -p stark-template
-          cargo test --locked -p stark-template
-          cargo clippy --locked -p stark-template --all-targets -- -D warnings
+          cargo test --locked -p stark-template -p stark-resource-budget
+          cargo clippy --locked -p stark-template -p stark-resource-budget --all-targets -- -D warnings
       - name: Test model-free converter contracts
         env:
           HF_HUB_OFFLINE: '1'
@@ -99,7 +99,7 @@ jobs:
       - name: Check Rust formatting
         run: |
           RUSTUP_TOOLCHAIN=nightly-2026-10-01 ./scripts/check-rustfmt-discovery.sh
-          cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template --check
+          cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template -p stark-resource-budget --check
       - name: Test model-free generation protocol
         run: cargo test --locked -p stark-generate --no-default-features
       - name: Check locked dependency resolution

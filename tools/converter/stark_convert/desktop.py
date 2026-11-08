@@ -36,11 +36,13 @@ from .api_tools import (
     validate_parser_tools,
 )
 from .chat import (
+    ChatBudgetUnavailable,
     ChatCancelled,
     ChatError,
     ChatImageError,
     ChatRequestTooLarge,
     Worker,
+    automatic_generation_budget,
     load_template,
     read_model_config,
     render_template,
@@ -59,6 +61,7 @@ from .guided_models import (
 )
 from .hybrid_prepare import SOURCES as NATIVE_SOURCES
 from .hybrid_prepare import prepared_identity
+from .json_budget import check_json_structure
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
 from .model_inventory import model_display, model_tool_support
@@ -71,6 +74,13 @@ from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
+from .resource_budget import (
+    INPUT_BYTES,
+    REQUEST_BUDGET_MIB,
+    WIRE_BYTES,
+    available_memory_bytes,
+    json_parse_headroom_bytes,
+)
 from .sources import huggingface_repository
 from .tool_protocols import protocol_stop_ids
 from .vision_runtime import (
@@ -80,7 +90,7 @@ from .vision_runtime import (
     supported_vision_schema,
 )
 
-MAX_COMMAND_BYTES = 1024 * 1024
+MAX_COMMAND_BYTES = WIRE_BYTES
 MAX_PROGRESS_BYTES = 4096
 MAX_SUPPORT_BYTES = 65536
 MAX_CATALOG_BYTES = 256 * 1024
@@ -328,7 +338,7 @@ class Desktop:
         self.context = None
         # None tracks each loaded model's maximum; retain custom requests across clamps.
         self.context_override = None
-        self.maximum = 512
+        self.maximum = 0
         self.generation_estimates = GenerationEstimates()
         self.system_prompt = None
         self.thinking = False
@@ -344,7 +354,7 @@ class Desktop:
         self.api_queue_limit = 8
         self.api_queue_timeout = 30
         self.api_context = self.context_limit
-        self.api_maximum = 4096
+        self.api_maximum = self.output_limit
         self.api_vocab = 0
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.data_dir.chmod(0o700)
@@ -1952,7 +1962,13 @@ class Desktop:
                 self.active_model, self.active_mode = identifier, mode
                 self.vocab_size = ready["vocab_size"]
                 self.messages = []
-                self.emit("ready", epoch, model_id=identifier, mode=mode)
+                self.emit(
+                    "ready",
+                    epoch,
+                    model_id=identifier,
+                    mode=mode,
+                    resource_budget=self.resource_budget_summary(),
+                )
                 self.status("ready", "Ready", epoch)
             return
         if (
@@ -1971,12 +1987,14 @@ class Desktop:
             worker.streaming = ready.get("streaming") == "text-delta-v1"
             worker.stop_sequences = ready.get("stop_sequences") is True
             worker.mtp = mtp_capabilities(ready)
+            worker.generation_budget = ready.get("generation_budget") == "memory-context-v1"
+            worker.max_new_tokens = ready.get("max_new_tokens", 0)
             self.codec, self.template = codec, template
             self.context_limit = ready["max_context_tokens"]
             # The worker uses this integer as its wire ceiling when the model
             # declares no finite maximum. It is not a trained model capacity.
             self.context_capacity_known = ready["max_context_tokens"] != 0xFFFFFFFF
-            self.output_limit = min(4096, ready["max_new_tokens"], self.context_limit - 1)
+            self.output_limit = min(ready["max_new_tokens"], self.context_limit - 1)
             self.context = min(guided_context or self.context_override or self.context_limit, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
             self.api_context = min(guided_context or self.context_limit, self.context_limit)
@@ -2001,6 +2019,7 @@ class Desktop:
         # Prompts stay in memory; acknowledgements contain limits and capabilities.
         capability, enabled = self.mtp_settings()
         return {
+            "resource_budget": self.resource_budget_summary(),
             "context_tokens": self.context,
             "api_context_tokens": self.api_context,
             "max_new_tokens": self.maximum,
@@ -2024,6 +2043,14 @@ class Desktop:
             ),
             "tools": bool(self.active_mode == "chat" and tool_parser_for(self.codec)),
             "tool_parser": tool_parser_for(self.codec) if self.active_mode == "chat" else None,
+        }
+
+    @staticmethod
+    def resource_budget_summary():
+        return {
+            "request_budget_mib": REQUEST_BUDGET_MIB,
+            "input_bytes": INPUT_BYTES,
+            "max_request_bytes": WIRE_BYTES,
         }
 
     def mtp_settings(self):
@@ -2090,7 +2117,7 @@ class Desktop:
                 or type(context) is not int
                 or not 2 <= context <= self.context_limit
                 or type(maximum) is not int
-                or not 1 <= maximum <= min(self.output_limit, context - 1)
+                or not 0 <= maximum <= min(self.output_limit, context - 1)
                 or (system is not None and not isinstance(system, str))
                 or type(thinking) is not bool
             ):
@@ -2178,6 +2205,10 @@ class Desktop:
             )
         except (MediaError, ChatImageError) as error:
             raise DesktopError(str(error)) from None
+        except APIError as error:
+            if error.code == "automatic_output_unavailable":
+                raise DesktopError(error.message) from None
+            raise
         with self.lock:
             if epoch != self.epoch:
                 return
@@ -2346,8 +2377,22 @@ class Desktop:
             {"operation": "tokenize", "text": prompt, "add_special_tokens": False}, cancelled=cancelled
         )
         count = tokens.get("token_count")
-        if not isinstance(count, int):
+        if type(count) is not int or count < 0:
             raise ValueError
+        if maximum in (None, 0):
+            if count >= context:
+                raise DesktopError("Conversation is full. Start a new conversation and try again.")
+            if context_capacity_known and not getattr(worker, "generation_budget", False):
+                maximum = min(getattr(worker, "max_new_tokens", self.output_limit), context - count)
+            else:
+                try:
+                    context, maximum = automatic_generation_budget(
+                        worker, count, context, context_capacity_known=context_capacity_known, cancelled=cancelled
+                    )
+                except ChatBudgetUnavailable as error:
+                    raise APIError(503, str(error), "automatic_output_unavailable") from None
+            if maximum < 1:
+                raise DesktopError("Conversation is full. Start a new conversation and try again.")
         if count + maximum > context:
             raise DesktopError("Conversation is full. Start a new conversation and try again.")
         token_ids = tokens.get("token_ids")
@@ -2587,6 +2632,7 @@ class Desktop:
             capability, enabled = self.mtp_settings()
             return {
                 "status": "ok",
+                "resource_budget": self.resource_budget_summary(),
                 "model_loaded": self.active_model is not None and self.active_mode == "chat",
                 "busy": self.job is not None,
                 "queued_requests": len(self.api_queue),
@@ -2814,7 +2860,7 @@ class Desktop:
         except ChatRequestTooLarge:
             raise APIError(
                 400,
-                "Rendered request exceeds the worker size limit. Shorten the conversation.",
+                "Request exceeds Stark's resource budget. Shorten the conversation or request less output.",
                 "request_too_large",
             ) from None
         except DesktopError:
@@ -3019,7 +3065,7 @@ def serve(desktop):
     desktop.library()
     desktop.families()
     desktop.status("idle", "Choose a model to run")
-    pending = b""
+    pending = bytearray()
     discarding = False
     while True:
         if desktop.output_failed:
@@ -3030,26 +3076,46 @@ def serve(desktop):
         chunk = os.read(sys.stdin.fileno(), 65536)
         if not chunk:
             return
-        pending += chunk
-        while b"\n" in pending:
-            line, pending = pending.split(b"\n", 1)
+        while chunk:
+            newline = chunk.find(b"\n")
             if discarding:
+                if newline < 0:
+                    break
                 discarding = False
+                chunk = chunk[newline + 1 :]
                 continue
+            part = chunk if newline < 0 else chunk[:newline]
+            length = len(pending) + len(part)
+            headroom = json_parse_headroom_bytes(length)
+            error = None
+            if length > MAX_COMMAND_BYTES:
+                error = "App command is too large."
+            elif headroom and headroom > available_memory_bytes():
+                error = "Available memory is too low for this app command. Try a smaller request."
+            if error is not None:
+                pending.clear()
+                desktop.emit("error", message=error)
+                discarding = newline < 0
+                if discarding:
+                    break
+                chunk = chunk[newline + 1 :]
+                continue
+            pending.extend(part)
+            if newline < 0:
+                break
+            line = bytes(pending)
+            pending.clear()
+            chunk = chunk[newline + 1 :]
             try:
-                if len(line) > MAX_COMMAND_BYTES:
-                    raise DesktopError("App command is too large.")
+                check_json_structure(line)
+                if headroom and headroom > available_memory_bytes():
+                    raise DesktopError("Available memory is too low for this app command. Try a smaller request.")
                 if not desktop.dispatch(json.loads(line)):
                     return
             except DesktopError as error:
                 desktop.emit("error", message=str(error))
             except Exception:
                 desktop.emit("error", message="Invalid app command.")
-        if len(pending) > MAX_COMMAND_BYTES:
-            pending = b""
-            if not discarding:
-                desktop.emit("error", message="App command is too large.")
-            discarding = True
 
 
 def main(argv=None):

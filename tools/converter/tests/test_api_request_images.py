@@ -121,17 +121,49 @@ def test_decoded_image_limit_is_enforced_at_api_parser():
 
 
 def test_text_budget_counts_utf8_bytes_across_messages():
-    exact = "é" * (1024 * 1024 // 2)
+    from stark_convert import api_request
+
+    exact = "é" * (api_request.INPUT_BYTES // 2)
     result = parse([{"role": "user", "content": exact}], allow_images=True)
     assert result["image"] is None
-    assert len(result["messages"][0]["content"].encode("utf-8")) == 1024 * 1024
+    assert len(result["messages"][0]["content"].encode("utf-8")) == api_request.INPUT_BYTES
     with pytest.raises(APIError) as error:
         parse(
             [
-                {"role": "user", "content": "é" * (1024 * 1024 // 4)},
-                {"role": "assistant", "content": "é" * (1024 * 1024 // 4 + 1)},
+                {"role": "user", "content": "é" * (api_request.INPUT_BYTES // 4)},
+                {"role": "assistant", "content": "é" * (api_request.INPUT_BYTES // 4 + 1)},
             ],
             allow_images=True,
         )
     assert error.value.status == 413
+    assert error.value.code == "text_too_large"
+
+
+def test_tool_result_uses_shared_aggregate_text_budget(monkeypatch):
+    from stark_convert import api_request
+
+    monkeypatch.setattr(api_request, "INPUT_BYTES", 16)
+    with pytest.raises(APIError) as error:
+        parse_chat_request(
+            {
+                "messages": [
+                    {"role": "user", "content": "question"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "x" * 17},
+                ]
+            },
+            128,
+            1000,
+            allow_tools=True,
+        )
     assert error.value.code == "text_too_large"

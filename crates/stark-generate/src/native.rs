@@ -42,6 +42,25 @@ const _: () = assert!(prefix_cache::PREFILL_CHUNK_TOKENS == PREFILL_CHUNK_TOKENS
 type RetainedState = PrefixEntry<LanguageModelState<Metal>>;
 type DenseRetainedState = prefix_cache::BoundaryEntry<(DenseMtpSession<Metal>, u32)>;
 
+fn admit_generation_memory(
+    model: &LanguageModel<Metal>,
+    input_tokens: usize,
+    options: &GenerationOptions,
+) -> Result<(), &'static str> {
+    let input_tokens = u32::try_from(input_tokens).map_err(|_| "context_overflow")?;
+    admit_memory_bytes(model.generation_memory_bytes(input_tokens, options.context_tokens, options.max_new_tokens))
+}
+
+fn admit_memory_bytes(request_bytes: Option<usize>) -> Result<(), &'static str> {
+    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+    let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+    let memory_budget = available.saturating_sub(256 * 1024 * 1024) / 4;
+    if request_bytes > memory_budget {
+        return Err("resource_budget_exceeded");
+    }
+    Ok(())
+}
+
 fn record_accepted_prefix_round(
     counts: &mut [u64; 4],
     accepted: usize,
@@ -249,6 +268,25 @@ impl GenerationBackend for NativeBackend {
             NativeModel::Vision(model) => model.max_context_length(),
             NativeModel::Gemma4Vision(model) => model.max_context_length(),
             NativeModel::Gemma3Vision(model) => model.max_context_length(),
+        }
+    }
+    fn automatic_context_length(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+    ) -> Option<u32> {
+        match &self.model {
+            NativeModel::Text(model) => model.automatic_context_length(input_tokens, maximum, memory_budget_bytes),
+            // Vision uses its declared finite capacity and prepared image
+            // accounting; this text-only planner does not model its encoder.
+            NativeModel::Vision(_) | NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => None,
+        }
+    }
+    fn supports_automatic_context_planning(&self) -> bool {
+        match &self.model {
+            NativeModel::Text(model) => model.supports_automatic_context_planning(),
+            NativeModel::Vision(_) | NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => false,
         }
     }
     fn eos_token_ids(&self) -> &[u32] {
@@ -531,6 +569,12 @@ impl NativeBackend {
         };
         let capture = prefix_cache::reusable_prefill_rows(input.len());
         let mut session = if let Some(entry) = retained.filter(|_| reused > 0) {
+            // A reused sparse cache can grow well beyond its previous mapped
+            // rows when this request asks for more output. Undeclared contexts
+            // were already admitted for their entire unchanged capacity.
+            if model.max_context_length().is_some() {
+                admit_generation_memory(model, input.len(), options)?;
+            }
             let mut session = entry.state.0;
             model.restore_dense_mtp_prefix(&mut session, reused).map_err(|_| "native_generation_failed")?;
             model
@@ -538,6 +582,7 @@ impl NativeBackend {
                 .map_err(|_| control_error.unwrap_or("native_generation_failed"))?;
             session
         } else {
+            admit_generation_memory(model, input.len(), options)?;
             model
                 .prefill_dense_mtp_controlled(input, options.context_tokens, &mut control)
                 .map_err(|_| control_error.unwrap_or("native_generation_failed"))?
@@ -727,8 +772,18 @@ impl NativeBackend {
         };
         let retained = self.prefix_cache.take();
         self.pending_prefix = None;
+        // Prepared tokens include the expanded image placeholder. Image
+        // generation enters with an empty ordinary input slice.
+        let admission_input_tokens = u32::try_from(image.as_ref().map_or(input.len(), |image| image.tokens.len()))
+            .map_err(|_| "context_overflow")?;
         let mut state = match (&mut self.model, retained) {
             (NativeModel::Text(model), Some(entry)) if reused > 0 => {
+                // Finite sparse admission may previously have covered only a
+                // short request; an unchanged undeclared capacity was charged
+                // in full when its retained state was created.
+                if model.max_context_length().is_some() {
+                    admit_generation_memory(model, input.len(), options)?;
+                }
                 let mut state = entry.state;
                 model
                     .rewind_state(&mut state, reused, Some(options.context_tokens), options.seed)
@@ -737,24 +792,42 @@ impl NativeBackend {
             },
             (NativeModel::Text(model), retained) => {
                 drop(retained);
+                if image.is_none() {
+                    admit_generation_memory(model, input.len(), options)?;
+                }
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Vision(model), retained) => {
                 drop(retained);
+                admit_memory_bytes(model.decoder_generation_memory_bytes(
+                    admission_input_tokens,
+                    options.context_tokens,
+                    options.max_new_tokens,
+                ))?;
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma4Vision(model), retained) => {
                 drop(retained);
+                admit_memory_bytes(model.decoder_generation_memory_bytes(
+                    admission_input_tokens,
+                    options.context_tokens,
+                    options.max_new_tokens,
+                ))?;
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma3Vision(model), retained) => {
                 drop(retained);
+                admit_memory_bytes(model.decoder_generation_memory_bytes(
+                    admission_input_tokens,
+                    options.context_tokens,
+                    options.max_new_tokens,
+                ))?;
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?

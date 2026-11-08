@@ -15,7 +15,15 @@ fn invoke(
 }
 
 fn bytes(data: &[u8]) -> Output {
+    bytes_with_budget(data, 1)
+}
+
+fn bytes_with_budget(
+    data: &[u8],
+    budget_mib: usize,
+) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_stark-template"))
+        .env("STARK_REQUEST_BUDGET_MIB", budget_mib.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -306,14 +314,45 @@ fn fuel_limits_busy_templates_and_macro_recursion() {
 
 #[test]
 fn source_request_output_and_structure_limits_are_enforced() {
+    let budget = stark_resource_budget::Budget::for_mib(1).unwrap();
     rejected(&"x".repeat(256 * 1024 + 1), Value::Null);
     rejected(&"{{ value }}".repeat(20000), Value::Null);
     rejected("{{ values }}", json!({"values": vec![0; 16385]}));
-    rejected("{{ value }}", json!({"value": "x".repeat(1024 * 1024 + 1)}));
-    rejected("{% for n in range(2000) %}{{ value }}{% endfor %}", json!({"value": "x".repeat(1024)}));
-    let result = bytes(&vec![b' '; 2 * 1024 * 1024 + 1]);
+    rejected("{{ value }}", json!({"value": "x".repeat(budget.input_bytes + 1)}));
+    rejected(
+        "{% for n in range(16000) %}{{ value }}{% endfor %}",
+        json!({"value": "x".repeat(budget.input_bytes / 16000 + 1)}),
+    );
+    let result = bytes(&vec![b' '; budget.wire_bytes + 1]);
     assert_eq!(result.stdout, b"L");
     assert!(!result.status.success());
+}
+
+#[test]
+fn large_conversation_and_escaped_transport_render_successfully() {
+    let value = "synthetic control ".repeat(70000);
+    assert!(value.len() > 1024 * 1024);
+    let request = serde_json::to_vec(&json!({"source": "{{ value }}", "arguments": {"value": value}})).unwrap();
+    let result = bytes_with_budget(&request, 16);
+    assert!(result.status.success());
+    assert_eq!(&result.stdout[1..], value.as_bytes());
+    let escaped = "\u{0001}".repeat(400000);
+    let request = serde_json::to_vec(&json!({"source": "{{ value }}", "arguments": {"value": escaped}})).unwrap();
+    let result = bytes_with_budget(&request, 16);
+    assert!(result.status.success());
+    assert_eq!(&result.stdout[1..], escaped.as_bytes());
+}
+
+#[test]
+fn configured_budget_is_validated_before_reading_content() {
+    let result = Command::new(env!("CARGO_BIN_EXE_stark-template"))
+        .env("STARK_REQUEST_BUDGET_MIB", "private invalid setting")
+        .arg("--self-test")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(result.stdout, b"E");
+    assert!(result.stderr.is_empty());
 }
 
 #[test]

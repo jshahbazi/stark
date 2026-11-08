@@ -202,6 +202,60 @@ impl<B: Backend> Decoder<B> {
         self.transformer.max_context_length()
     }
 
+    pub(crate) fn context_cache_buffer_bytes(
+        &self,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        self.transformer.context_cache_buffer_bytes(context_tokens)
+    }
+
+    fn workspace_memory_estimate(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        let mut estimate = self.transformer.memory_estimate(context_tokens, input_tokens)?;
+        // The engine's u64 history can grow through a doubled Vec capacity;
+        // prefill also owns temporary u64 and retained u32 prompt copies.
+        estimate.state_bytes = estimate
+            .state_bytes
+            .checked_add((context_tokens as usize).checked_mul(16)?)?
+            .checked_add((input_tokens as usize).checked_mul(12)?)?;
+        for rows in [input_tokens.clamp(1, 1024), 1] {
+            estimate.add_scratch(&[rows, self.embedding.model_dim()], 4, 3)?;
+            if let Some(embedding) = &self.per_layer_embedding {
+                embedding.add_memory_scratch(rows, &mut estimate)?;
+            }
+        }
+        Some(estimate)
+    }
+
+    pub(crate) fn memory_estimate(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        let mut estimate = self.workspace_memory_estimate(context_tokens, input_tokens)?;
+        // Generation reads one final logit row during prefill, not a
+        // prefill_rows*vocabulary matrix. Include sampler/readback workspace.
+        estimate.add_scratch(&[self.embedding.vocab_size()], 4, 4)?;
+        Some(estimate)
+    }
+
+    pub(crate) fn scoring_memory_estimate(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        let mut estimate = self.workspace_memory_estimate(context_tokens, input_tokens)?;
+        let row = crate::encodable_block::memory::checked_bytes(&[self.embedding.vocab_size()], 4)?;
+        // Only the final chunk produces a vocabulary row. Keep its device
+        // readout, CPU conversion, candidate arrays and logits cache in one
+        // request-wide allowance, outside the per-chunk scratch multiplier.
+        estimate.add_state_buffers(row.checked_mul(16)?, row)?;
+        Some(estimate)
+    }
+
     pub fn prefill_cache_skips_trailing_layers(&self) -> bool {
         self.transformer.prefill_cache_skips_trailing_layers()
     }
