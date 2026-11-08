@@ -146,3 +146,19 @@ a one-ULP bound. These finite controls do not establish universally correct
 rounding. Native validation and the unchanged full-attention/full-feature gates
 remain pending for this source-only scalar candidate. Historical failed gates
 are retained.
+
+Sealed source `f67ab9d5` (engine tree
+`52cdc08f047e6e93b8c58bb700912229e5c410aa`, executable SHA-256
+`3fc4760fd66bc61153d58a822038a08eded217bfea14f989e5ccb6cc2c8f3328`)
+passes both 8,215-case native scalar controls, all four Flash/F32-QK controls
+and both canonical prefix controls. The full blue-image first-layer attention
+now matches all 2,757,888 BF16 values exactly; Q/K/V remain exact.
+
+The unchanged three-image full-feature gates remain **failed**. Relative RMS
+errors are `0.0091937972`, `0.0132609557`, and `0.0264942683`; cosines are
+`0.99995776`, `0.99991207`, and `0.99964903`. Patches are exact. The first two
+images pass the frozen RMS `0.02` and cosine `0.999` gates; the pattern image
+fails RMS. Existing stage captures show its first eight-row block-prefix drift
+at block 5 (zero-based), after exact prefixes for blocks 0–4. These prefixes do
+not establish full-row agreement in earlier blocks. Larger-tower qualification
+therefore remains incomplete; no tolerance or source-reference change is made.
