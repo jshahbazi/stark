@@ -349,3 +349,197 @@ fn flint_rejects_unsupported_operations_and_invalid_weights() {
     assert_eq!(model.position, 0);
     assert!(model.states.iter().all(|state| state.keys.is_empty()));
 }
+
+fn prefix_config() -> Value {
+    let mut c = config();
+    c["max_position_embeddings"] = json!(4096);
+    c
+}
+
+fn prefix_rows(
+    config: &Config,
+    position: usize,
+) -> Vec<AttentionState> {
+    let window = config.window;
+    config
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(layer, config)| {
+            let start = if config.sliding {
+                position.saturating_sub(window)
+            } else {
+                0
+            };
+            let keys = (start..position)
+                .map(|row| vec![((row + layer) % 17) as f32 * 0.01, (row % 11) as f32 * -0.02])
+                .collect();
+            let values = (start..position)
+                .map(|row| vec![(row % 7) as f32 * -0.03, ((row + layer) % 13) as f32 * 0.02])
+                .collect();
+            AttentionState {
+                keys,
+                values,
+            }
+        })
+        .collect()
+}
+
+fn same_attention_state(
+    actual: &[AttentionState],
+    expected: &[AttentionState],
+) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(expected) {
+        for (actual, expected) in [(&actual.keys, &expected.keys), (&actual.values, &expected.values)] {
+            assert_eq!(actual.len(), expected.len());
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| { a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()) }),
+                "Flint private attention state differs"
+            );
+        }
+    }
+}
+
+#[stark_test]
+fn flint_prefix_snapshot_copies_full_and_rotating_states_at_complete_token() {
+    let c = prefix_config();
+    let fixture = Fixture::new(&tensors(), &c);
+    let mut model = fixture.load(&c).unwrap();
+    let chunk = model.prefill_chunk_tokens();
+    model.capture_prefix_at(chunk).unwrap();
+    model.position = chunk - 1;
+    model.states = prefix_rows(&model.config, model.position);
+    assert!(model.take_prefix_snapshot().is_none());
+    model.ingest(3).unwrap();
+    let saved = model.take_prefix_snapshot().expect("complete Flint prefix snapshot");
+    assert_eq!(saved.position(), chunk);
+    assert!(model.take_prefix_snapshot().is_none());
+    let expected = model.states.clone();
+    model.ingest(4).unwrap();
+    model.ingest(1).unwrap();
+    model.reset();
+    model.restore_prefix(&saved).unwrap();
+    assert_eq!(model.position, chunk);
+    same_attention_state(&model.states, &expected);
+    let actual = model.step(2).unwrap();
+    let mut fresh = fixture.load(&c).unwrap();
+    fresh.position = chunk;
+    fresh.states = expected;
+    let reference = fresh.step(2).unwrap();
+    assert!(actual.iter().zip(reference).all(|(a, b)| a.to_bits() == b.to_bits()), "Flint restored readout differs");
+
+    model.reset();
+    model.restore_prefix(&saved).unwrap();
+    model.capture_prefix_at(chunk * 2).unwrap();
+    model.position = chunk * 2;
+    model.states = prefix_rows(&model.config, model.position);
+    model.capture_prefix_if_ready().unwrap();
+    let later = model.take_prefix_snapshot().unwrap();
+    assert_eq!(later.position(), chunk * 2);
+    model.reset();
+    model.restore_prefix(&saved).unwrap();
+    same_attention_state(&model.states, &saved.states);
+    model.reset();
+    model.restore_prefix(&later).unwrap();
+    same_attention_state(&model.states, &later.states);
+}
+
+#[stark_test]
+fn flint_prefix_rejects_foreign_and_malformed_snapshots_and_clears_state() {
+    let c = prefix_config();
+    let fixture = Fixture::new(&tensors(), &c);
+    let mut model = fixture.load(&c).unwrap();
+    let chunk = model.prefill_chunk_tokens();
+    model.capture_prefix_at(chunk).unwrap();
+    model.position = chunk;
+    model.states = prefix_rows(&model.config, chunk);
+    model.capture_prefix_if_ready().unwrap();
+    let saved = model.take_prefix_snapshot().unwrap();
+    let mut other = fixture.load(&c).unwrap();
+    assert!(other.restore_prefix(&saved).is_err());
+    assert_eq!(other.position, 0);
+    assert!(other.states.iter().all(|state| state.keys.is_empty() && state.values.is_empty()));
+
+    for changed in 0..10 {
+        let mut invalid = PrefixSnapshot {
+            instance: Arc::clone(&saved.instance),
+            position: saved.position,
+            states: saved.states.clone(),
+        };
+        match changed {
+            0 => invalid.position = 0,
+            1 => invalid.position += 1,
+            2 => invalid.position = 4096,
+            3 => {
+                invalid.states.pop();
+            },
+            4 => {
+                invalid.states[0].keys.pop_back();
+            },
+            5 => {
+                invalid.states[1].values.push_back(vec![0.0; 2]);
+            },
+            6 => {
+                invalid.states[0].keys[0].pop();
+            },
+            7 => invalid.states[1].values[0][0] = f32::NAN,
+            8 => invalid.states[2].values[0][0] = f32::INFINITY,
+            9 => invalid.instance = Arc::new(()),
+            _ => unreachable!(),
+        }
+        model.reset();
+        assert!(model.restore_prefix(&invalid).is_err());
+        assert_eq!(model.position, 0);
+        assert!(model.states.iter().all(|state| state.keys.is_empty() && state.values.is_empty()));
+        model.restore_prefix(&saved).unwrap();
+        assert!(model.restore_prefix(&saved).is_err(), "restore must start from reset state");
+        assert_eq!(model.position, 0);
+    }
+    for position in [0, 1, chunk - 1, chunk + 1, 4096] {
+        model.restore_prefix(&saved).unwrap();
+        assert!(model.capture_prefix_at(position).is_err());
+        assert_eq!(model.position, 0);
+        assert!(model.take_prefix_snapshot().is_none());
+    }
+    model.capture_prefix_at(chunk).unwrap();
+    model.reset();
+    model.position = chunk;
+    model.states = prefix_rows(&model.config, chunk);
+    model.capture_prefix_if_ready().unwrap();
+    assert!(model.take_prefix_snapshot().is_none(), "reset clears a pending capture");
+    model.reset();
+    model.capture_prefix_at(chunk).unwrap();
+    assert!(model.ingest(u32::MAX).is_err());
+    assert!(model.take_prefix_snapshot().is_none());
+    assert!(model.capture_at.is_none());
+}
+
+// The full 1024-token scalar replay is model-free. Metal is qualified on the
+// actual artifact separately; the state tests above cover both compiled paths.
+#[cfg(not(feature = "metal"))]
+#[stark_test]
+fn flint_prefix_cpu_full_prefill_matches_fresh_bits_after_sliding_eviction() {
+    let c = prefix_config();
+    let fixture = Fixture::new(&as_banks(tensors()), &c);
+    let mut model = fixture.load(&c).unwrap();
+    let chunk = model.prefill_chunk_tokens();
+    let input: Vec<_> = (0..chunk + 3).map(|i| (i % 5) as u32).collect();
+    model.capture_prefix_at(chunk).unwrap();
+    for &token in &input[..input.len() - 1] {
+        model.ingest(token).unwrap();
+    }
+    let expected = model.step(input[input.len() - 1]).unwrap();
+    let saved = model.take_prefix_snapshot().unwrap();
+    assert_eq!(saved.position(), chunk);
+    model.reset();
+    model.restore_prefix(&saved).unwrap();
+    for &token in &input[chunk..input.len() - 1] {
+        model.ingest(token).unwrap();
+    }
+    let actual = model.step(input[input.len() - 1]).unwrap();
+    assert!(actual.iter().zip(expected).all(|(a, b)| a.to_bits() == b.to_bits()), "Flint full-prefix readout differs");
+}

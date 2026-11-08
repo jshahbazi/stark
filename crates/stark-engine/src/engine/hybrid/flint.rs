@@ -6,7 +6,7 @@
 //! implementation uses Stark's native matrix kernels; it does not execute
 //! repository Python or invoke a foreign inference runtime.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use serde_json::Value;
 
@@ -15,6 +15,10 @@ use super::{
     math::{rms_norm, sigmoid, silu, softmax, topk},
     weights::Weights,
 };
+
+#[path = "flint_prefix.rs"]
+mod prefix;
+pub(super) use prefix::PrefixSnapshot;
 
 // Allocated lazily, with a bounded, checked maximum across every layer. The
 // published checkpoint needs about 14 GiB of f32 full-attention KV at 256k.
@@ -188,7 +192,7 @@ impl Config {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct AttentionState {
     keys: VecDeque<Vec<f32>>,
     values: VecDeque<Vec<f32>>,
@@ -200,6 +204,9 @@ pub struct FlintModel {
     states: Vec<AttentionState>,
     banks: Vec<bool>,
     position: usize,
+    prefix_instance: Arc<()>,
+    capture_at: Option<usize>,
+    captured: Option<PrefixSnapshot>,
 }
 
 impl FlintModel {
@@ -216,10 +223,15 @@ impl FlintModel {
             states,
             banks,
             position: 0,
+            prefix_instance: Arc::new(()),
+            capture_at: None,
+            captured: None,
         })
     }
 
     pub fn reset(&mut self) {
+        self.capture_at = None;
+        self.captured = None;
         self.states.iter_mut().for_each(|state| {
             state.keys.clear();
             state.values.clear();
@@ -296,6 +308,7 @@ impl FlintModel {
             Vec::new()
         };
         self.position += 1;
+        self.capture_prefix_if_ready()?;
         Ok(output)
     }
 }

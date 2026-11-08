@@ -49,13 +49,14 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Backend-owned recurrent state at a prompt prefix boundary. It remains
+/// Backend-owned state at a prompt prefix boundary. It remains
 /// private to one loaded model instance (see [`Model::restore_prefix`]).
 pub struct PrefixSnapshot {
     inner: PrefixState,
 }
 
 enum PrefixState {
+    Flint(flint::PrefixSnapshot),
     Glm(glm::PrefixSnapshot),
     #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
     GlmExl3(glm_exl3::PrefixSnapshot),
@@ -66,6 +67,7 @@ enum PrefixState {
 impl PrefixSnapshot {
     pub fn position(&self) -> usize {
         match &self.inner {
+            PrefixState::Flint(snapshot) => snapshot.position(),
             PrefixState::Glm(snapshot) => snapshot.position(),
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
             PrefixState::GlmExl3(snapshot) => snapshot.position(),
@@ -76,6 +78,7 @@ impl PrefixSnapshot {
 
     pub fn mtp_enabled(&self) -> bool {
         match &self.inner {
+            PrefixState::Flint(_) => false,
             PrefixState::Glm(_) => false,
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
             PrefixState::GlmExl3(snapshot) => snapshot.mtp_enabled(),
@@ -939,6 +942,9 @@ impl Model {
     /// The prefill chunk length when this backend can snapshot and resume a
     /// prompt prefix, which then happens only at multiples of it.
     pub fn prefix_chunk_tokens(&self) -> Option<usize> {
+        if let Forward::Flint(model) = &self.forward {
+            return Some(model.prefill_chunk_tokens());
+        }
         #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
         if let Forward::GlmExl3(model) = &self.forward {
             return model.prefix_chunk_tokens();
@@ -953,13 +959,14 @@ impl Model {
         None
     }
 
-    /// Capture the recurrent state when the next prefill reaches `position`.
+    /// Capture backend state when the next prefill reaches `position`.
     /// Call after `reset` (and any `restore_prefix`), before the prompt.
     pub fn capture_prefix_at(
         &mut self,
         position: usize,
     ) -> Result<()> {
         match &mut self.forward {
+            Forward::Flint(model) => model.capture_prefix_at(position),
             Forward::Glm(model) => model.capture_prefix_at(position),
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
             Forward::GlmExl3(model) => model.capture_prefix_at(position),
@@ -975,6 +982,11 @@ impl Model {
     /// The snapshot captured by this request's prefill. Take it before the
     /// next `reset`.
     pub fn take_prefix_snapshot(&mut self) -> Option<PrefixSnapshot> {
+        if let Forward::Flint(model) = &mut self.forward {
+            return model.take_prefix_snapshot().map(|snapshot| PrefixSnapshot {
+                inner: PrefixState::Flint(snapshot),
+            });
+        }
         #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
         if let Forward::GlmExl3(model) = &mut self.forward {
             return model.take_prefix_snapshot().map(|snapshot| PrefixSnapshot {
@@ -1004,6 +1016,7 @@ impl Model {
         snapshot: &PrefixSnapshot,
     ) -> Result<()> {
         let result = match (&mut self.forward, &snapshot.inner) {
+            (Forward::Flint(model), PrefixState::Flint(snapshot)) => model.restore_prefix(snapshot),
             (Forward::Glm(model), PrefixState::Glm(snapshot)) => model.restore_prefix(snapshot),
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
             (Forward::GlmExl3(model), PrefixState::GlmExl3(snapshot)) => model.restore_prefix(snapshot),
