@@ -120,13 +120,20 @@ class BenchmarkRegistry:
     def rank(self, ordered, task, preference, fit_tier):
         """Reorder scored slots within each resource tier, keeping unknowns fixed."""
         benchmark = TASK_BENCHMARKS.get(task, "ifeval")
+        tiers = {fit_tier(recipe) for recipe in ordered}
         matches = []
         for cohort in self.cohorts:
             if cohort.benchmark != benchmark:
                 continue
-            covered = {self.model_id(recipe) for recipe in ordered} & cohort.results.keys()
-            if len(covered) >= 2:
-                matches.append((cohort, len(covered)))
+            comparable = set()
+            for tier in tiers:
+                covered = {
+                    self.model_id(recipe) for recipe in ordered if fit_tier(recipe) == tier
+                } & cohort.results.keys()
+                if len(covered) >= 2:
+                    comparable.update(covered)
+            if comparable:
+                matches.append((cohort, len(comparable)))
         selected = min(
             matches,
             key=lambda pair: (-pair[1], pair[0].authority != "benchmark_publisher", pair[0].id),
@@ -134,7 +141,7 @@ class BenchmarkRegistry:
         )[0]
         ranked, used = list(ordered), set()
         if selected is not None and preference not in {"speed", "answers"}:
-            for tier in {fit_tier(recipe) for recipe in ordered}:
+            for tier in tiers:
                 slots = [
                     i
                     for i, recipe in enumerate(ordered)

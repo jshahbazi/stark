@@ -73,10 +73,11 @@ or BFCL.
 1. Apply the existing RAM, GPU, disk, chat-template and route checks first.
 2. Build the deterministic fallback order from comfortable memory headroom,
    task tags and the selected capacity/memory preference.
-3. Select one task cohort with at least two distinct covered parent models.
-   Prefer greater eligible-model coverage, then benchmark-publisher evidence,
-   then cohort ID. Selection never uses score magnitude. Repeated quantizations
-   of one parent count once.
+3. Select one task cohort with at least two distinct covered parent models in
+   the same memory-headroom tier. Prefer greater comparable-model coverage
+   across those tiers, then benchmark-publisher evidence, then cohort ID.
+   Isolated scored models do not increase coverage. Selection never uses score
+   magnitude. Repeated quantizations of one parent count once.
 4. For Balanced, sort only the scored slots within each memory-headroom tier by
    descending score. Leave unknown models in their original slots; equal scores
    preserve fallback order. Never merge FC/Prompt, versions, publishers or metrics.

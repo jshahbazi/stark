@@ -107,10 +107,23 @@ def test_comparison_cannot_cross_resource_tiers_or_count_duplicate_parent_as_cov
     large, small = recipe("large", 10), recipe("small", 1)
     scores = registry(cohort())
     ranked, selected, used = scores.rank([large, small], "code", "balanced", lambda candidate: candidate.id == "large")
-    assert ranked == [large, small] and selected is not None and not used
+    assert ranked == [large, small] and selected is None and not used
     duplicate = replace(large, id="duplicate")
     ranked, selected, used = scores.rank([large, duplicate], "code", "balanced", lambda candidate: 1)
     assert selected is None and not used
+
+
+def test_cohort_selection_counts_only_models_within_comparable_memory_tiers():
+    large, unknown, small = recipe("large", 10), recipe("unknown", 5), recipe("small", 1)
+    scores = registry(
+        cohort("a", scores={"example/large": "10", "example/small": "90"}),
+        cohort("b", scores={"example/large": "10", "example/unknown": "90"}),
+    )
+    ranked, selected, used = scores.rank(
+        [large, unknown, small], "code", "balanced", lambda candidate: candidate.id != "small"
+    )
+    assert selected.id == "b"
+    assert ranked == [unknown, large, small] and used == {large.id, unknown.id}
 
 
 def test_quantized_reference_bindings_require_exact_reviewed_source_revision():
