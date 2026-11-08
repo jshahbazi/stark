@@ -168,6 +168,8 @@ def native_setup_credit(data_dir, recipe):
         descriptor = os.open(directory / ".lock", os.O_RDONLY | os.O_NOFOLLOW)
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         stage = directory / "model"
+        if stage.is_symlink():
+            return 0
         completed = stage.exists()
         if completed:
             if not matches_recipe(stage, recipe):

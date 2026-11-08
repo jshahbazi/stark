@@ -109,6 +109,10 @@ def test_native_retry_credits_only_owned_allocated_payload_and_rechecks(tmp_path
         assert module.native_setup_credit(tmp_path, recipe) == 0
     physical = min(payload.stat().st_size, payload.stat().st_blocks * 512)
     assert module.native_setup_credit(tmp_path, recipe) == physical > 0
+    completed = directory / "model"
+    completed.symlink_to(directory / "missing")
+    assert module.native_setup_credit(tmp_path, recipe) == 0
+    completed.unlink()
     sparse = stage / sparse_entry["incomplete_path"]
     sparse.parent.mkdir(parents=True, exist_ok=True)
     with sparse.open("wb") as stream:
