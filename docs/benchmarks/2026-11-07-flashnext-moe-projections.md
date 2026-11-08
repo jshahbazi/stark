@@ -14,6 +14,10 @@ MTP off it measured **75.63 versus 80.33 tok/s**. Both candidates pass the
 bounded numerical controls. The completed run has no quiet admission and four
 host-ineligible arms, so no whole-model speedup is qualified. The
 fixed-gate/shared-first implementation remains experimental.
+The subsequent cadence probe recovers **95.61 tok/s on the same final
+candidate after a ten-second pause**, then measures **89.45 tok/s on the
+fourth consecutive request**. This is descriptive cadence evidence, with
+eight passing request screens; it does not qualify a candidate speedup.
 
 ## Hypothesis
 
@@ -254,6 +258,73 @@ MTP-off wall time is 3.88% higher. These measurements provide no evidence for
 promoting the candidate. The earlier roughly 95 tok/s measurements belong to
 the separate first-candidate run under its recorded machine conditions.
 
+## Cadence and slowdown diagnosis
+
+The baseline executable is byte-identical between the earlier 95.37 tok/s
+run and the completed 85.50 tok/s run. Input/configuration hashes, seed,
+sampling, output hashes and MTP work counts also match. Each two-draft
+request executes 108 rounds, proposes 214 tokens, accepts 147 and verifies
+322 rows. A change in MTP acceptance does not explain these measurements.
+
+The native timing formula is unchanged: decode rate is 255 steps divided by
+time between the first and last sampled token. The earlier protocol inserts
+at least ten seconds of quiet admission before each request; the completed
+observed protocol has only the host screen's ordinary 0.6-second interval.
+The changed cadence is material to the comparison.
+
+| Same baseline, two MTP drafts | Earlier per-request admission | Completed observed run |
+| --- | ---: | ---: |
+| Pooled decode tok/s | 95.37 | 85.50 |
+| Median time to first sampled token, seconds | 1.1907 | 0.3005 |
+| Median complete-request wall time, seconds | 3.8722 | 3.4038 |
+| Mean target-verification scope, seconds | 2.2931 | 2.5752 |
+
+Most of the extra decode time is in the target-verification scope. These are
+host elapsed scopes that include GPU waits, so they do not isolate GPU
+arithmetic, CPU scheduling or memory effects. The lower decode rate also
+coexists with a lower complete-request wall time: the first-token phase is
+much shorter. Decode tok/s alone does not capture that difference.
+
+`scripts/benchmark_qwen38_cadence.py` then holds one loaded worker, input,
+context, seed and two-draft route constant. Each cycle starts with a fixed
+ten-second pause followed by four generations. All requests retain the
+existing 0.6-second screen interval; there is no quiet admission, arm removal
+or retry. The [cadence receipts](data/flashnext-moe-cadence-2026-11-07.json)
+retain all 32 diagnostic requests across three probes, including failures of
+the descriptive host screens.
+
+| Position after fixed pause | Baseline, four cycles: pooled decode tok/s | Final candidate, two cycles: pooled decode tok/s |
+| --- | ---: | ---: |
+| First | 94.60 | 95.61 |
+| Second | 91.30 | 95.41 |
+| Third | 89.24 | 89.44 |
+| Fourth | 85.29 | 89.45 |
+
+The baseline's first two cycles pass all eight host screens and decline
+from 94.92 to 85.22 tok/s and from 95.38 to 89.29 respectively. Its later two
+cycles contain external model activity and paging, leaving 8/16 eligible
+arms overall. All eight final-candidate requests pass their screens, with
+no external model CPU activity or paging and nominal thermal state. Its two
+cycles decline from 95.85 to 91.84 and from 95.37 to 87.19. All output hashes
+and MTP work counts match. The two worker probes have different cycle counts
+and separate windows; their pooled columns do not qualify a kernel speedup.
+
+This reproduces a dependence on request cadence within both unchanged
+workers. The final candidate can still reach roughly 95 tok/s after a pause.
+The exact hardware mechanism remains unresolved: GPU clocks and power-limit
+telemetry were not collected, and nominal thermal state does not establish
+a fixed operating frequency. The apparent extra candidate loss in the
+earlier observed ABBA run is not isolated by these cadence controls.
+
+A separate control requested display sleep with `pmset displaysleepnow` and
+used `caffeinate -i` without `-d`. Actual display power state could not be
+confirmed. All eight arms fail their host screens, including external model
+activity and 6,508 swapouts. A separate native generation worker was observed
+during this followup. This control cannot attribute the slowdown to lock-screen
+rendering. The external activity observed here cannot be assigned
+retrospectively to the earlier complete ABBA run. No persistent power or
+security settings were changed.
+
 ## Disposition
 
 The combined component improved by about 2.2% in the second synthetic window.
@@ -296,3 +367,18 @@ synthetic tests are ignored native tests under `stark_lily_core`:
 whole-model timing with `--ignored --nocapture --test-threads=1`. The
 checkpoint audit and prefix test names and their aggregate receipts are in
 the public JSON. Model inputs, responses and readouts must remain private.
+
+The bounded cadence diagnostic uses the same `MODEL`, worker, corpus and
+guarded receipt. Run it separately for each worker. The default is four
+cycles; the final-candidate probe uses `--cycles 2`.
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python scripts/benchmark_qwen38_cadence.py \
+  --model "$MODEL" --worker "$CANDIDATE_WORKER" \
+  --corpus vendor/lily-core/src/qwen4exp/model.rs --weights-receipt "$WEIGHTS_RECEIPT" \
+  --cycles 2 --output runtime/flashnext-cadence-repeat.json
+```
+
+The baseline and candidate cadence probes used process-owned `caffeinate -d
+-i` assertions; the requested-display-sleep control used `-i` only. Those
+assertions do not establish actual panel state and ended with their workers.

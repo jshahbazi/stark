@@ -14,6 +14,10 @@ results do not support promotion. See the [experiment report](2026-11-07-flashne
 [initial aggregate results](data/flashnext-moe-projections-2026-11-07.json),
 [completed observed run](data/flashnext-moe-matched-observed-2026-11-07.json) and
 [source patches](../archive/experiments/2026-11-07-flashnext-moe/README.md).
+The later [cadence diagnostic](data/flashnext-moe-cadence-2026-11-07.json)
+recovers 95.61 tok/s on the same final candidate after a ten-second pause,
+versus 89.45 on the fourth consecutive request. All eight candidate arms
+pass their host screens; no quiet-qualified kernel gain is established.
 This adds separate candidate evidence and does not supersede earlier results.
 
 **Qwen3.8-Flash-Next optimization harness pilot (2026-11-07).** Eighteen cells

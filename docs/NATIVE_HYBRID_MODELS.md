@@ -474,6 +474,10 @@ limitations. The runner never promotes a setting automatically.
 The separate [MoE projection experiment](benchmarks/2026-11-07-flashnext-moe-projections.md)
 records the guarded fixed-geometry gate/up and shared-first candidate. Its
 numerical controls pass; whole-model performance qualification is blocked.
+`scripts/benchmark_qwen38_cadence.py` holds one loaded worker and request
+configuration fixed while comparing positions after a fixed pause. It emits
+hashes, counts, timings and descriptive host screens; it never claims quiet
+admission or promotes a candidate.
 
 The context benchmark supports greedy and stochastic generation; `--top-k 0`
 omits top-k filtering. It emits counts, hashes and timing aggregates. The
