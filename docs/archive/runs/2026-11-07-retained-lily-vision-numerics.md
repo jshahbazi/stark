@@ -288,6 +288,24 @@ the existing 8,192-patch budget and dtype/spans are checked. Independent
 source-input controls now require zero production position mismatches before
 the unchanged whole-tower gate is evaluated.
 
+The position-production replay at integrated source `2529098a`, seal SHA256
+`b6f367cff45a0845a275cf982b36d0dfe4aaf85f109c0672e380632f1fa3ab72`,
+passed both exact position checks and all previous component/domain/observer
+controls. The first four case-0 sequence outputs (patch, position, norm1 and
+QKV) became bit exact. The first discrepancy moved to rotary output:
+0.000016602011753 relative RMS. Attention output then measured 0.000188197,
+merged depth-one output 0.00107075, and full-depth output 0.02349485. Case 0
+still failed the frozen whole-tower gate; case 1 remained exact throughout.
+
+Test-only `9da0853a` isolates rotary contraction policy with a separate safe,
+uncontracted copy of the retained body on existing v7 pre/post-QKV controls.
+Source frequency construction is F32 throughout: for head dimension 72,
+18 inverse frequencies are `1 / (10000 ** (arange(0,36,2,F32) / 36))`;
+F32 positions multiply those frequencies, followed by F32 cosine/sine and
+`[H18,W18,H18,W18]` recomposition. Q/K are promoted from BF16 to F32; two
+separately rounded products are added before the single BF16 output cast.
+No attention policy or coordinate geometry changed for this diagnostic.
+
 Native candidate qualification is pending the root-owned build/replay at the
 time of this source checkpoint. Repository policy checks and `git diff
 --check` pass. Rust sources were formatted with nightly-2026-10-01. Native

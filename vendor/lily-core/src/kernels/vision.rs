@@ -515,3 +515,67 @@ pub(crate) fn qkv_rope_reference_bf16(
         Grid::Threads { grid: (1152, gh * gw, 1), threadgroup: (256, 1, 1) },
     )
 }
+
+#[cfg(test)]
+pub(crate) fn rotary_stages_reference(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    angles: &Tensor,
+    stages: &Tensor,
+    inv_freq: &Tensor,
+    n: usize,
+    gw: usize,
+) -> Result<()> {
+    ensure!(
+        n <= 256
+            && angles.numel() == n * 36
+            && stages.numel() == 5 * n * 36
+            && inv_freq.numel() == 18,
+        "private rotary stages bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_rotary_stages_reference",
+        include_str!("metal/vision_rotary_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[angles.binding(), stages.binding(), inv_freq.binding()],
+        &[
+            Param::U32(n as u32),
+            Param::U32(72),
+            Param::U32(gw as u32),
+            Param::F32(10000.0),
+        ],
+        Grid::Threads { grid: (36, n, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn rotary_apply_reference(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    n: usize,
+) -> Result<()> {
+    ensure!(
+        n <= 256
+            && qkv.numel() == n * 3456
+            && cos.numel() == n * 36
+            && sin.numel() == n * 36,
+        "private rotary application bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_rotary_apply_reference",
+        include_str!("metal/vision_rotary_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[qkv.binding(), cos.binding(), sin.binding()],
+        &[Param::U32(1152), Param::U32(72)],
+        Grid::Threads { grid: (1152, n, 1), threadgroup: (256, 1, 1) },
+    )
+}
