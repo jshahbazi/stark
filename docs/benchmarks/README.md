@@ -2,6 +2,11 @@
 
 Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Earlier archived comparison artifacts are under [archive/experiments](../archive/experiments/). Each report states where its source-bound aggregates are retained.
 
+[Local MaxxBench evaluations](MAXXBENCH.md) describes the pinned coding-agent
+runner, isolated native API bridge, complete artifact identities and private
+aggregate receipts. A pilot covers only its selected tasks and does not establish
+an 89-task score.
+
 ## Current result
 
 **Dense Qwen3.8-27B oQ4e packed-weight follow-up (2026-11-06).** The final
