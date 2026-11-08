@@ -23,6 +23,18 @@ fn fast_exp(x: f32) -> f32 {
     f32::from_bits(p.to_bits().wrapping_add((n as i32 as u32) << 23))
 }
 
+/// Source scalar expf observer. CPU production retains its libm implementation.
+#[kernel(Gemma4VisionFlashScalarExpF32)]
+pub fn gemma4_vision_flash_scalar_exp_f32(
+    input: *const f32,
+    output: *mut f32,
+    count: u32,
+) {
+    for row in 0..count as usize {
+        unsafe { *output.add(row) = (*input.add(row)).exp() };
+    }
+}
+
 #[kernel(Gemma4VisionFlashQK)]
 pub fn gemma4_vision_flash_qk(
     queries: *const bf16,
@@ -117,18 +129,6 @@ pub fn gemma4_vision_flash_reciprocal_f32(
 ) {
     for row in 0..(query_rows * heads) as usize {
         unsafe { *inverse.add(row) = (*state.add(row * 3 + 1)).recip() };
-    }
-}
-
-/// Source scalar expf observer. CPU production retains its libm implementation.
-#[kernel(Gemma4VisionFlashScalarExpF32)]
-pub fn gemma4_vision_flash_scalar_exp_f32(
-    input: *const f32,
-    output: *mut f32,
-    count: u32,
-) {
-    for row in 0..count as usize {
-        unsafe { *output.add(row) = (*input.add(row)).exp() };
     }
 }
 
