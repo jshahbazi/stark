@@ -156,8 +156,7 @@ struct BeginnerSetupHost: View {
                 contextTokens: item.contextTokens,
                 installedModelID: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) },
                 source: item.source, revision: item.revision,
-                qualification: ([item.qualification, "License: " + item.license,
-                    "Estimated runtime memory: " + ByteCountFormatter.string(fromByteCount: item.runtimeBytes, countStyle: .memory)] + item.caveats).joined(separator: "\n"))
+                qualification: ([item.qualification, "License: " + item.license] + item.memoryDetails + item.caveats).joined(separator: "\n"))
         }
         // Keep the exact operation choice available if another surface refreshes recommendations.
         if let item = engine.beginnerInstallChoice,

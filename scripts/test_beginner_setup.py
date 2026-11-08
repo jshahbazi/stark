@@ -328,6 +328,29 @@ struct BeginnerChecks {
         case "recommendation-preferences": return BeginnerSetupView.checkRecommendationPreferences()
         case "start-applies-restart-policy": return BeginnerSetupView.checkStartPolicy(restart: true)
         case "start-rejection-does-not-wait": return BeginnerSetupView.checkStartPolicy(restart: true, accepted: false)
+        case "memory-report":
+            var raw: [String: Any] = [
+                "id": "fixture", "name": "Fixture", "repo": "example/model",
+                "revision": String(repeating: "a", count: 40), "artifact_mode": "text", "quantization": "4-bit",
+                "download_bytes": 80, "installed_bytes_estimate": 90, "setup_disk_bytes_estimate": 100,
+                "runtime_memory_bytes_estimate": 100, "context_tokens": 512, "installed_ids": [String](),
+                "license": "test", "qualification": "Synthetic fixture", "caveats": [String]()
+            ]
+            guard let legacy = BeginnerModelReport.Item(raw), legacy.gpuRuntimeBytes == 100,
+                  legacy.memoryDetails.count == 1 else { return false }
+            raw["gpu_memory_bytes_estimate"] = 50
+            guard let paged = BeginnerModelReport.Item(raw), paged.gpuRuntimeBytes == 50,
+                  paged.memoryDetails.count == 3 else { return false }
+            raw["setup_disk_bytes_remaining_estimate"] = 20
+            guard BeginnerModelReport.Item(raw)?.setupBytes == 20 else { return false }
+            raw["setup_disk_bytes_remaining_estimate"] = 101
+            guard BeginnerModelReport.Item(raw) == nil else { return false }
+            raw.removeValue(forKey: "setup_disk_bytes_remaining_estimate")
+            for invalid in [0, -1, 101, true, 1.5, "50"] as [Any] {
+                raw["gpu_memory_bytes_estimate"] = invalid
+                if BeginnerModelReport.Item(raw) != nil { return false }
+            }
+            return true
         default: return false
         }
     }
@@ -360,6 +383,7 @@ class BeginnerSetupTests(unittest.TestCase):
                 "-target",
                 "arm64-apple-macosx26.4",
                 str(sources / "BeginnerSetupState.swift"),
+                str(sources / "BeginnerModelReport.swift"),
                 str(sources / "StarkInterfacePreferences.swift"),
                 str(view),
                 str(driver),
@@ -390,6 +414,9 @@ class BeginnerSetupTests(unittest.TestCase):
         for scenario in ["installation-identity", "installation-cancel-fence"]:
             with self.subTest(scenario=scenario):
                 self.run_check(scenario)
+
+    def test_memory_report_preserves_legacy_and_bounds_gpu_estimates(self):
+        self.run_check("memory-report")
 
     def test_sidebar_navigation_preserves_choices_and_enforces_prerequisites(self):
         self.run_check("navigation-policy")

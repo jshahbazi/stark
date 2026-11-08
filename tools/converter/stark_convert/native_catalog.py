@@ -8,10 +8,13 @@ FAMILY_ID = "glm5_next"
 CHOICE = "glm53-q2"
 QWEN_FAMILY_ID = "qwen4_exp"
 QWEN_CHOICE = "qwen38-mixed"
+FLINT_FAMILY_ID = "flint"
+FLINT_CHOICE = "flint-int4"
 
 _NATIVE_CHOICES = {
     FAMILY_ID: (CHOICE,),
     QWEN_FAMILY_ID: (QWEN_CHOICE, "qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"),
+    FLINT_FAMILY_ID: (FLINT_CHOICE,),
 }
 
 
@@ -30,18 +33,18 @@ def allowed_choice(choice: str) -> bool:
     return any(choice in choices for choices in _NATIVE_CHOICES.values())
 
 
-def family_definition() -> dict:
+def family_definition(family: str = FAMILY_ID) -> dict:
     """Describe GLM's native preparation and app modes without generic admission."""
     return {
-        "family_id": FAMILY_ID,
-        "name": "GLM-5.3 Flash",
-        "architecture_aliases": [FAMILY_ID],
+        "family_id": family,
+        "name": "Flint" if family == FLINT_FAMILY_ID else "GLM-5.3 Flash",
+        "architecture_aliases": [family],
         "config_classes": [],
         "model_kind": "language",
         "conversion": {
             "status": "implemented",
-            "containers": [".gguf"],
-            "source_formats": ["UD-Q2_K_XL"],
+            "containers": [".safetensors"] if family == FLINT_FAMILY_ID else [".gguf"],
+            "source_formats": ["MLX affine INT4"] if family == FLINT_FAMILY_ID else ["UD-Q2_K_XL"],
             "output_dtypes": [],
         },
         "modes": {
@@ -52,7 +55,7 @@ def family_definition() -> dict:
             },
             "decision": {
                 "status": "unsupported",
-                "message": "Decision scoring is not enabled for this native hybrid family.",
+                "message": "Decision scoring is not enabled for this native catalog choice.",
                 "caveats": [],
             },
             "vision-language": {
@@ -72,6 +75,8 @@ def catalog_item(choice: str = CHOICE) -> dict:
     repo, revision = source["weights_repo"], source["weights_revision"]
     if choice == CHOICE:
         name = "GLM-5.3-Flash-GGUF"
+    elif choice == FLINT_CHOICE:
+        name = "Flint INT4"
     elif choice == QWEN_CHOICE:
         name = "Qwen3.8-Flash-Next-MLX-mixed-4_8bit"
     elif choice == "qwen38-lily-q4-xl":

@@ -14,6 +14,7 @@ import secrets
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -56,6 +57,7 @@ from .guided_models import (
     host_resources,
     installation_allowed,
     matches_recipe,
+    native_recipes,
     recipe_from_catalog,
     recommendation_report,
 )
@@ -130,6 +132,110 @@ def native_download_stage(data_dir, choice):
         yield directory
     finally:
         os.close(descriptor)
+
+
+def native_setup_credit(data_dir, recipe):
+    """Already allocated payload in this exact, idle, owned native download.
+
+    Sparse logical file sizes are not disk credit. Paths stay inside the
+    backend; the report exposes only an aggregate byte count.
+    """
+    source = NATIVE_SOURCES[recipe.native_choice]
+    root = data_dir / "native-downloads"
+    identity = hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest()[:16]
+    directory = root / (recipe.native_choice + "-" + identity)
+    descriptor = None
+    try:
+        from ._build_metadata import open_regular
+        from .streaming import ConversionError
+
+        device = data_dir.stat().st_dev
+
+        def bounded_metadata(path):
+            with open_regular(path) as handle:
+                info = os.fstat(handle.fileno())
+                if info.st_dev != device or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                    raise ValueError("foreign native staging metadata")
+                data = handle.read(16385)
+                if len(data) > 16384:
+                    raise ValueError("excessive native staging metadata")
+                return data
+
+        for path in (root, directory):
+            info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_dev != device or info.st_uid != os.geteuid():
+                return 0
+        descriptor = os.open(directory / ".lock", os.O_RDONLY | os.O_NOFOLLOW)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stage = directory / "model"
+        completed = stage.exists()
+        if completed:
+            if not matches_recipe(stage, recipe):
+                return 0
+        else:
+            stage = directory / "model.native-download"
+            if stage.is_symlink() or not stage.is_dir():
+                return 0
+            marker = stage / "stark-download.json"
+            if json.loads(bounded_metadata(marker)) != {"choice": recipe.native_choice, "source": source}:
+                return 0
+        if stage.is_symlink() or not stage.is_dir():
+            return 0
+        allocated, seen = {}, 0
+        payloads, incomplete = {}, {}
+        for entry in recipe.native_profile["payload_files"]:
+            payloads[entry["path"]] = entry
+            if recipe.native_choice == "glm53-q2":
+                payloads[Path(entry["path"]).name] = entry  # The helper flattens its four GGUF shards.
+            incomplete[entry["incomplete_path"]] = entry
+        pending = [(stage, 0)]
+        while pending:
+            path, depth = pending.pop()
+            if depth > 8:
+                return 0
+            for child in path.iterdir():
+                seen += 1
+                if seen > 4096:
+                    return 0
+                info = child.lstat()
+                if info.st_dev != device or info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode):
+                    return 0
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append((child, depth + 1))
+                elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    return 0
+                else:
+                    relative = child.relative_to(stage).as_posix()
+                    entry = payloads.get(relative)
+                    if entry is not None:
+                        if info.st_size != entry["bytes"]:
+                            continue
+                        if not completed:
+                            metadata_path = stage / ".cache/huggingface/download" / (entry["path"] + ".metadata")
+                            try:
+                                values = bounded_metadata(metadata_path).decode("ascii").splitlines()
+                                valid = (
+                                    len(values) == 3
+                                    and values[:2] == [source["weights_revision"], entry["etag"]]
+                                    and math.isfinite(float(values[2]))
+                                    and float(values[2]) >= info.st_mtime - 1
+                                )
+                            except (OSError, ValueError, ConversionError):
+                                valid = False
+                            if not valid:
+                                continue
+                    else:
+                        entry = incomplete.get(relative)
+                        if entry is None or info.st_size > entry["bytes"]:
+                            continue
+                    size = min(info.st_size, info.st_blocks * 512)
+                    allocated[entry["path"]] = max(size, allocated.get(entry["path"], 0))
+        return min(sum(allocated.values()), recipe.weight_bytes)
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError, ConversionError):
+        return 0
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def cancellation_error(cancelled):
@@ -817,6 +923,9 @@ class Desktop:
             resources["supported"] = (
                 resources.get("supported") is True and hardware["gpu_available"] and hardware["unified_memory"]
             )
+            resources["native_setup_credit_bytes"] = {
+                recipe.native_choice: native_setup_credit(self.data_dir, recipe) for recipe in native_recipes()
+            }
         return resources
 
     def cancel_guided_discovery(self):
@@ -906,8 +1015,9 @@ class Desktop:
             if generation is not None and generation != self.guided_discovery_generation:
                 return
             models = [dict(model) for model in self.models]
-        candidates = {recipe.id: recipe for recipe in RECIPES}
-        sources = {(recipe.repo, recipe.revision) for recipe in RECIPES}
+        starters = (*RECIPES, *native_recipes()) if hardware is not None else RECIPES
+        candidates = {recipe.id: recipe for recipe in starters}
+        sources = {(recipe.repo, recipe.revision) for recipe in starters}
         if discovery is not None:
             for item in discovery["items"]:
                 recipe = recipe_from_catalog(item)
@@ -1035,8 +1145,8 @@ class Desktop:
                 self.install,
                 "installing",
                 "Checking starting model…",
-                "huggingface",
-                recipe.repo,
+                "native" if recipe.native_choice is not None else "huggingface",
+                recipe.native_choice or recipe.repo,
                 "text",
                 "text",
                 request_id,
@@ -1601,8 +1711,8 @@ class Desktop:
         guided_recipe = self.bound_guided_recipe(guided_recipe_id) if guided_recipe_id is not None else None
         if guided_recipe_id is not None and (
             guided_recipe is None
-            or kind != "huggingface"
-            or source != guided_recipe.repo
+            or kind != ("native" if guided_recipe.native_choice is not None else "huggingface")
+            or source != (guided_recipe.native_choice or guided_recipe.repo)
             or expected_revision != guided_recipe.revision
             or artifact_mode != "text"
             or support_mode != "text"

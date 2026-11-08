@@ -268,16 +268,29 @@ from Guided Setup: their tokenizers include chat templates, but their
 [source cards](https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B) identify pretrained completion models and advise against conversation
 without post-training. Their Instruct variants remain eligible. This exclusion
 does not establish instruction tuning or task competence for every other source.
-Candidates with unknown memory layouts, including recurrent/hybrid and native
-expert routes without a guide planner,
-remain available through Advanced. Catalog compatibility describes metadata
+The catalog planner covers dense attention and Qwen3.5-family DeltaNet layouts,
+including their recurrent state and declared MTP head. Fixed native profiles
+cover Flint INT4, GLM Flash UD-Q2_K_XL and the three supported Qwen Flash Next
+exports. They retain separate source, quantization, template and preparation
+bindings. Other layouts remain available through Advanced. Catalog compatibility describes metadata
 support; it does not inherit another model's native qualification.
 
-The memory plan includes weights, both full-context BF16 KV buffers, attention
-score scratch and a workspace allowance. It must leave 2 GiB of physical
+Dense memory plans include weights, both full-context BF16 KV buffers, attention
+score scratch and a workspace allowance. DeltaNet also includes F32 recurrent,
+convolution, prefix-snapshot and MTP verification allowances. Native profiles
+use their backend's request inventory and a loading/workspace allowance. All
+plans must leave 2 GiB of physical
 memory and use no more than 85% of Metal's recommended working-set budget.
+For Lily and MLX-Serve, the system-memory estimate includes the entire paged
+n-gram table; the GPU estimate includes its row staging rather than the entire
+table. The two estimates are shown separately in model details. GLM and the
+original mixed export use conservative full-weight GPU estimates, which can
+exclude them from the guide on a 128 GiB Mac despite their Advanced load path.
 New downloads also need 2 GiB currently available memory and enough space for
-source and converted copies plus setup reserves. Starting rechecks available
+source and converted copies plus setup reserves. Native preparation downloads
+into the library volume and publishes by rename, so it needs one weight copy
+plus metadata and the preparation helper's 4 GiB reserve. It does not require a
+second weight-sized copy in the Hugging Face cache. Starting rechecks available
 memory after releasing the previous worker. A running model's memory is never
 assumed to be reclaimable during recommendations.
 
@@ -294,6 +307,12 @@ parameter counts receive no capacity credit. Installed copies break otherwise
 equal ties. The guide offers up to three choices and explains each choice's
 resource fit and evidence. CPU count and GPU name describe the machine; core
 count alone does not establish inference speed.
+
+Native parameter counts are source-card architecture metadata, not packed
+tensor slot counts. MoE total parameter count does not describe active compute,
+memory fit or task quality. Current ranking has no task benchmark score.
+The [recommendation evidence policy](../../docs/MODEL_RECOMMENDATIONS.md) describes
+the proposed task evaluations and the evidence required before scores rank choices.
 
 Discovery runs separately from generation, with three concurrent family lookups
 and a 65-second overall process limit. Successful nonempty catalog scans are

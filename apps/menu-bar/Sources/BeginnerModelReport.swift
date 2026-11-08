@@ -18,6 +18,7 @@ struct BeginnerModelReport {
         let installedBytes: Int64
         let setupBytes: Int64
         let runtimeBytes: Int64
+        let gpuRuntimeBytes: Int64
         let contextTokens: Int
         let installedIDs: [String]
         let license: String
@@ -44,7 +45,15 @@ struct BeginnerModelReport {
                   let caveats = BeginnerMetadata.strings(raw["caveats"], count: 16, length: 2_000) else { return nil }
             self.id = id; self.name = name; self.source = source; self.revision = revision
             self.quantization = quantization; downloadBytes = download; installedBytes = installed
-            setupBytes = setup; runtimeBytes = runtime; contextTokens = Int(context)
+            if let value = raw["setup_disk_bytes_remaining_estimate"] {
+                guard let remaining = BeginnerMetadata.integer(value), remaining <= setup else { return nil }
+                setupBytes = remaining
+            } else { setupBytes = setup }
+            runtimeBytes = runtime; contextTokens = Int(context)
+            if let value = raw["gpu_memory_bytes_estimate"] {
+                guard let gpu = BeginnerMetadata.integer(value), gpu > 0, gpu <= runtime else { return nil }
+                gpuRuntimeBytes = gpu
+            } else { gpuRuntimeBytes = runtime }
             installedIDs = ids; self.license = license; self.qualification = qualification; self.caveats = caveats
             if raw["recommendation_reason"] != nil {
                 guard let reason = BeginnerMetadata.string(raw["recommendation_reason"], limit: 2_000) else { return nil }
@@ -52,6 +61,17 @@ struct BeginnerModelReport {
             } else {
                 recommendationReason = "A starting model checked for this setup. Review its answers and any actions in OpenWork."
             }
+        }
+
+        var memoryDetails: [String] {
+            if gpuRuntimeBytes == runtimeBytes {
+                return ["Estimated runtime memory: " + ByteCountFormatter.string(fromByteCount: runtimeBytes, countStyle: .memory)]
+            }
+            return [
+                "Estimated system memory: " + ByteCountFormatter.string(fromByteCount: runtimeBytes, countStyle: .memory),
+                "Estimated GPU memory: " + ByteCountFormatter.string(fromByteCount: gpuRuntimeBytes, countStyle: .memory),
+                "The system estimate includes the model's disk-backed tables."
+            ]
         }
     }
 
