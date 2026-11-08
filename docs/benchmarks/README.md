@@ -14,6 +14,13 @@ unscored. It also records three passing targeted oracle tasks, exact artifact
 identities and the remaining qualification work. It does not establish a model
 ranking or a full MaxxBench score.
 
+The [runtime/API qualification follow-up (2026-11-08)](2026-11-08-maxxbench-runtime-qualification.md)
+records bounded Flint prefix agreement and successful native API transport on
+the new build, including a 2.3 MB Qwen request and a short GLM request at its
+configured million-token context. Filled maximum windows and coding-agent
+quality remain unqualified. A fresh 89-task oracle cohort and 623 model/task
+attempts are still pending.
+
 ## Current result
 
 **Dense Qwen3.8-27B oQ4e packed-weight follow-up (2026-11-06).** The final
