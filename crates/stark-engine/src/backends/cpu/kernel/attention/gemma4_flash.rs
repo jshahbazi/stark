@@ -120,6 +120,18 @@ pub fn gemma4_vision_flash_reciprocal_f32(
     }
 }
 
+/// Source scalar expf observer. CPU production retains its libm implementation.
+#[kernel(Gemma4VisionFlashScalarExpF32)]
+pub fn gemma4_vision_flash_scalar_exp_f32(
+    input: *const f32,
+    output: *mut f32,
+    count: u32,
+) {
+    for row in 0..count as usize {
+        unsafe { *output.add(row) = (*input.add(row)).exp() };
+    }
+}
+
 #[kernel(Gemma4VisionFlashPVF32)]
 pub fn gemma4_vision_flash_pv_f32(
     exponents: *const bf16,
