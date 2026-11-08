@@ -2,8 +2,9 @@
 
 This model-free correction follows [MEM-01's actual-artifact observations](2026-11-08-qwen-guided-memory.md).
 Owner: Codex, 2026-11-08. Branch: `codex/beginner-hardware-ranking`, PR #104.
-Kind: recommendation compatibility and memory planning. Implementation and
-validation are model-free. No model is loaded or run for this correction.
+Kind: recommendation compatibility and memory planning. Completed on branch
+and installed locally; validation is model-free. No model was loaded or run
+for this correction.
 
 ## Problem and acceptance
 
@@ -56,7 +57,8 @@ Related [experiment ledger](../../model-experiments/README.md).
 The focused converter files passed **73 tests**. The native profile/scope suite
 passed **4 tests** with Rust nightly CPU/grammar and 585 unrelated tests filtered
 out. Ruff, formatting and repository policy checks passed. The complete
-converter suite is replayed before publication.
+converter suite passed **6,791 tests, 96 skipped**, in 262.49 seconds:
+`HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q`.
 
 The resource matrix uses explicit per-artifact expected outcomes rather than
 recomputing the admission predicate. It covers 16, 32, 64, 96, 128, 192 and
@@ -75,3 +77,22 @@ results: both Qwens appear with 87/88 GiB estimates and empty installed IDs.
 A matching but incomplete local copy loses the lower estimate and is excluded
 at that same headroom. Source drift cases cover revisions, weight and paged
 sizes, geometry and template metadata. No benchmark scores are added or changed.
+
+## Installed build
+
+Built from clean source `3d9be20bcb0645d75bc9cac36313707674538925` using the
+existing signed-app builder, with the updated generation worker built using
+locked Rust 1.98.1. The shared inventory's added source-binding field does not
+alter the native request gate or inference state. The pre-signing worker
+SHA-256 is `9557584d920a5873c67e142116e540ab738bf62346e1f7b957c1bf0c9f297a0c`.
+
+The packaged Python was probed with `-I -B` and synthetic resources plus an
+empty installed map. It recommended Lily and Serve at 87/88 GiB with empty
+installed IDs. Deep strict signature verification passed after that check and
+after atomic installation to `~/Applications/Stark.app`.
+
+Installed development build `20261108233242215170`; app executable SHA-256
+`cd55f8aa8aead8007e7abd516bb754c838609411510d6e0c648a078780157a2d`.
+The previously running model was closed for the update. Native UI confirmed
+the new build number and no model running; no Start action was performed.
+This is a local development install, not a merge or published release.
