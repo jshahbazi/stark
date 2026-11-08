@@ -759,6 +759,48 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
         None
     }
 
+    fn memory_estimate(
+        &self,
+        _context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        use crate::encodable_block::memory::{MemoryEstimate, checked_bytes};
+        let inner = INNER_DATA_TYPE.size_in_bytes();
+        let outer = self.outer_data_type.size_in_bytes();
+        let state_rows = self.kernel_size.checked_sub(1)?;
+        let conv = checked_bytes(&[self.conv_dim, state_rows], inner)?;
+        let ssm = checked_bytes(&[self.num_heads, self.value_head_dim, self.head_dim], inner)?;
+        let mut estimate = MemoryEstimate::state(conv.checked_add(ssm)?);
+        estimate.prefix_snapshot_bytes = conv.checked_add(ssm)?;
+        for rows in [input_tokens.clamp(1, 1024), 1] {
+            let mut scratch = MemoryEstimate::default();
+            scratch.add_scratch(&[rows, self.total_proj_dim], outer, 2)?;
+            scratch.add_scratch(&[rows.checked_add(state_rows)?, self.total_proj_dim], inner, 1)?;
+            scratch.add_scratch(&[rows, self.value_dim], outer, 2)?;
+            scratch.add_scratch(&[rows, self.key_dim], inner, 2)?;
+            scratch.add_scratch(&[rows, self.num_heads], inner, 3)?;
+            scratch.add_scratch(&[self.conv_dim, state_rows], inner, 1)?;
+            if rows > 1 && (self.chunked.is_some() || self.reference_chunk.is_some()) {
+                let chunks = rows.div_ceil(64);
+                if self.chunked.is_some() {
+                    scratch.add_scratch(&[chunks, self.num_groups, 64, 64], inner, 1)?;
+                    // QK, packed blocks and inverse blocks are each no larger
+                    // than this full per-head chunk plane; plus BF16 T.
+                    scratch.add_scratch(&[chunks, self.num_heads, 64, 64], inner, 3)?;
+                    scratch.add_scratch(&[chunks, self.num_heads, 64, 64], 2, 1)?;
+                }
+                if self.reference_chunk.is_some() {
+                    scratch.add_scratch(&[chunks, self.num_heads, 64, 128], 4, 6)?;
+                    scratch.add_scratch(&[chunks, self.num_heads, 64, 64], 4, 2)?;
+                    scratch.add_scratch(&[chunks, self.num_heads, 64], 4, 1)?;
+                    scratch.add_scratch(&[self.num_heads, 64, 128], 4, 1)?;
+                }
+            }
+            estimate = estimate.sequential(scratch)?;
+        }
+        Some(estimate)
+    }
+
     fn create_empty_state(
         &self,
         _max_context_length: Option<u32>,

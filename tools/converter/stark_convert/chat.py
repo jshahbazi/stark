@@ -100,6 +100,35 @@ class ChatRequestTooLarge(ChatError):
     """A request rejected for exceeding the worker's resource budget."""
 
 
+class ChatBudgetUnavailable(ChatError):
+    """An older worker cannot yet plan automatic memory-bounded execution."""
+
+
+def automatic_generation_budget(worker, input_tokens, context_tokens, *, cancelled=None):
+    """Ask the loaded backend to size unknown-capacity execution after tokenization."""
+    if not getattr(worker, "generation_budget", False):
+        raise ChatBudgetUnavailable("Update Stark's worker to enable automatic output for this model.")
+    reply = worker.request(
+        {"operation": "plan_generation", "input_tokens": input_tokens, "context_tokens": context_tokens},
+        **({"cancelled": cancelled} if cancelled is not None else {}),
+    )
+    if reply.get("error") == "context_planning_unavailable":
+        raise ChatBudgetUnavailable("This worker cannot plan automatic execution. Rebuild or reinstall Stark.")
+    context, maximum = reply.get("context_tokens"), reply.get("max_new_tokens")
+    if (
+        type(context) is not int
+        or not input_tokens < context < 0xFFFFFFFF
+        or context > context_tokens
+        or type(maximum) is not int
+        or maximum != context - input_tokens
+        or maximum > getattr(worker, "max_new_tokens", 0xFFFFFFFE)
+        or reply.get("context_capacity_known") is not False
+        or reply.get("budget_kind") != "memory"
+    ):
+        raise ChatError("Invalid automatic execution budget; restart the model.")
+    return context, maximum
+
+
 class ChatImageError(ChatError):
     """A recoverable, content-free image request rejection."""
 
@@ -477,6 +506,7 @@ class Worker:
                 maximum_output = reply.get("max_new_tokens")
                 if type(maximum_output) is int and maximum_output > 0:
                     self.max_new_tokens = maximum_output
+                self.generation_budget = reply.get("generation_budget") == "memory-context-v1"
                 self.mtp = mtp_capabilities(reply)
                 self.prefix_cache = prefix_cache_enabled(reply)
                 self.prefix_chunk_tokens = reply["prefix_cache"]["chunk_tokens"] if self.prefix_cache else None
@@ -908,8 +938,7 @@ def run_chat(args, worker):
         args.max_new_tokens is not None and args.max_new_tokens > ready["max_new_tokens"]
     ):
         raise ChatError("Requested token limits exceed this worker's limits.")
-    if args.max_new_tokens is None and not context_capacity_known and context == ready["max_context_tokens"]:
-        raise ChatError("This model has no finite context maximum; specify --context-tokens or --max-new-tokens.")
+    worker.generation_budget = ready.get("generation_budget") == "memory-context-v1"
     image = None
     if image_path is not None:
         if not context_capacity_known:
@@ -968,18 +997,25 @@ def run_chat(args, worker):
             else:
                 tokens = worker.request({"operation": "tokenize", "text": prompt, "add_special_tokens": False})
                 count = tokens.get("token_count")
-                if not isinstance(count, int):
+                if type(count) is not int or count < 0:
                     raise ChatError("Worker could not tokenize the conversation.")
+                if count >= context:
+                    print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")
+                    continue
                 maximum = args.max_new_tokens
+                request_context = context
                 if maximum is None:
-                    maximum = min(ready["max_new_tokens"], context - count)
+                    if context_capacity_known:
+                        maximum = min(ready["max_new_tokens"], context - count)
+                    else:
+                        request_context, maximum = automatic_generation_budget(worker, count, context)
                 if maximum < 1 or count + maximum > context:
                     print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")
                     continue
                 request = {
                     "operation": "generate",
                     "rendered_prompt": prompt,
-                    "context_tokens": context if context_capacity_known else count + maximum,
+                    "context_tokens": request_context if context_capacity_known else count + maximum,
                     "max_new_tokens": maximum,
                     "sampling": {"mode": "greedy"},
                 }
@@ -991,7 +1027,7 @@ def run_chat(args, worker):
             if not isinstance(reply.get("text"), str) or "error" in reply:
                 raise ChatError("Generation failed; chat closed.")
         except ChatError as error:
-            if isinstance(error, ChatRequestTooLarge):
+            if isinstance(error, (ChatRequestTooLarge, ChatBudgetUnavailable)):
                 print(str(error))
                 continue
             if str(error).startswith("Conversation exceeds"):

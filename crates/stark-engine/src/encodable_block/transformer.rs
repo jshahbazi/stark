@@ -417,6 +417,19 @@ impl<B: Backend> Transformer<B> {
         })
     }
 
+    pub(crate) fn memory_estimate(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        self.layers.iter().try_fold(
+            crate::encodable_block::memory::MemoryEstimate::default(),
+            |estimate, (layer, _)| {
+                estimate.sequential(layer.memory_estimate(context_tokens, input_tokens, self.model_dim)?)
+            },
+        )
+    }
+
     /// Every owned layer cache can be rewound; shared KV layers own no state.
     pub(crate) fn prefix_reuse_supported(&self) -> bool {
         !self.multimodal_positions_supported

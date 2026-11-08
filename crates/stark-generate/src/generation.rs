@@ -18,6 +18,12 @@ use crate::{
 const TEST_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EXTRA_STOPS: usize = 256;
 
+fn automatic_memory_budget(available: usize) -> usize {
+    // Use three quarters of the quarter-RAM envelope, keeping serialization
+    // and memory-pressure headroom before the native allocation recheck.
+    available.saturating_sub(256 * 1024 * 1024) / 16 * 3
+}
+
 /// Protocol policy independent of the optional native/Metal dependency.
 /// Native backends translate their loaded model's capabilities at this boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +101,10 @@ enum Request {
         token_ids: Vec<u32>,
         #[serde(default)]
         skip_special_tokens: bool,
+    },
+    PlanGeneration {
+        input_tokens: u32,
+        context_tokens: u32,
     },
     Generate {
         #[serde(default)]
@@ -483,6 +493,22 @@ pub(crate) trait GenerationBackend {
     }
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
+    /// Select a safe context capacity for text generation. Backends with a
+    /// finite model limit can use that limit; unknown unbounded models must
+    /// provide a memory-aware implementation.
+    fn automatic_context_length(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        _memory_budget_bytes: usize,
+    ) -> Option<u32> {
+        let minimum = input_tokens.checked_add(1)?;
+        let capacity = self.max_context_length()?.min(maximum);
+        (capacity >= minimum).then_some(capacity)
+    }
+    fn supports_automatic_context_planning(&self) -> bool {
+        false
+    }
     fn eos_token_ids(&self) -> &[u32];
     fn tokenize(
         &mut self,
@@ -604,6 +630,7 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     /// `Some(enabled)` when the host requested prefix reuse at startup.
     prefix_cache: Option<bool>,
     budget: Budget,
+    planned_context_tokens: Option<u32>,
 }
 
 fn valid_ids(
@@ -670,6 +697,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             prepared: None,
             prefix_cache,
             budget,
+            planned_context_tokens: None,
         })
     }
 
@@ -943,6 +971,43 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 }
                 Ok(json!({"text":text,"token_count":token_ids.len()}))
             },
+            Request::PlanGeneration {
+                input_tokens,
+                context_tokens,
+            } => {
+                if !self.backend.supports_automatic_context_planning() {
+                    return Err("context_planning_unavailable");
+                }
+                let token_limit = (self.budget.input_bytes / std::mem::size_of::<u32>()).min(u32::MAX as usize) as u32;
+                let maximum = input_tokens.saturating_add(token_limit).min(context_tokens);
+                if input_tokens == 0 || input_tokens > token_limit || context_tokens <= input_tokens {
+                    return Err("invalid_generation_request");
+                }
+                let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+                // Keep 25% inside the host's quarter-RAM admission envelope
+                // for request serialization and available-memory jitter.
+                let memory_budget = automatic_memory_budget(available);
+                let capacity = self
+                    .backend
+                    .automatic_context_length(input_tokens, maximum, memory_budget)
+                    .ok_or("resource_budget_exceeded")?;
+                let capacity = self
+                    .planned_context_tokens
+                    .filter(|previous| {
+                        *previous > input_tokens
+                            && *previous <= capacity
+                            && previous.saturating_sub(input_tokens) >= capacity.saturating_sub(input_tokens) / 2
+                    })
+                    .unwrap_or(capacity);
+                if capacity <= input_tokens || capacity > maximum {
+                    return Err("resource_budget_exceeded");
+                }
+                self.planned_context_tokens = Some(capacity);
+                Ok(json!({"context_tokens":capacity,
+                    "max_new_tokens":capacity - input_tokens,
+                    "context_capacity_known":self.backend.max_context_length().is_some(),
+                    "budget_kind":"memory"}))
+            },
             Request::Generate {
                 rendered_prompt,
                 input_token_ids,
@@ -1160,7 +1225,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             self.prepared = None;
         }
         // Image transactions never use or populate the retained text prefix.
-        if !matches!(&request, Ok(Request::Tokenize { .. } | Request::Decode { .. } | Request::Generate { .. })) {
+        if !matches!(
+            &request,
+            Ok(Request::Tokenize { .. }
+                | Request::Decode { .. }
+                | Request::Generate { .. }
+                | Request::PlanGeneration { .. })
+        ) {
             self.backend.clear_prefix_cache();
         }
         let generate = matches!(&request, Ok(Request::Generate { .. }));
@@ -1287,6 +1358,15 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             readiness["state_policy"] = json!(prefix_cache::POLICY);
             readiness["operations"] = json!(["tokenize", "decode", "generate", "reset_cache"]);
         }
+    }
+    if worker.backend.supports_automatic_context_planning() {
+        let operations = if worker.prefix_cache == Some(true) {
+            json!(["tokenize", "decode", "generate", "plan_generation", "reset_cache"])
+        } else {
+            json!(["tokenize", "decode", "generate", "plan_generation"])
+        };
+        readiness["operations"] = operations;
+        readiness["generation_budget"] = json!("memory-context-v1");
     }
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
@@ -1468,6 +1548,22 @@ mod tests {
         }
         fn max_context_length(&self) -> Option<u32> {
             self.max_context
+        }
+        fn automatic_context_length(
+            &self,
+            input_tokens: u32,
+            maximum: u32,
+            _memory_budget_bytes: usize,
+        ) -> Option<u32> {
+            if self.max_context.is_some() {
+                let minimum = input_tokens.checked_add(1)?;
+                let capacity = self.max_context?.min(maximum);
+                return (capacity >= minimum).then_some(capacity);
+            }
+            input_tokens.checked_add(4096).map(|capacity| capacity.min(maximum))
+        }
+        fn supports_automatic_context_planning(&self) -> bool {
+            self.max_context.is_none() || self.max_context == Some(0)
         }
         fn eos_token_ids(&self) -> &[u32] {
             &self.eos
@@ -3147,6 +3243,47 @@ mod tests {
                 "key":"model-instance+context-tokens+cache-scope"})
         );
         assert_eq!(enabled["operations"], json!(["tokenize", "decode", "generate", "reset_cache"]));
+    }
+
+    #[test]
+    fn automatic_budget_reserves_ram_and_leaves_planning_headroom() {
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(automatic_memory_budget(0), 0);
+        assert_eq!(automatic_memory_budget(256 * MIB), 0);
+        assert_eq!(automatic_memory_budget(1024 * MIB), 144 * MIB);
+        assert!(automatic_memory_budget(usize::MAX) < usize::MAX / 4);
+    }
+
+    #[test]
+    fn unknown_context_planning_is_bounded_recoverable_and_preserves_prefix_cache() {
+        let mut worker = prefix_worker(true);
+        worker.backend.max_context = None;
+        worker.backend.prefix_entry =
+            Some(prefix_cache::PrefixEntry::new(7, prefix_cache::parse_scope(SCOPE).unwrap(), 64, &vec![2; 1025]));
+        let reply = post(&mut worker, json!({"operation":"plan_generation","input_tokens":8,"context_tokens":128}));
+        assert_eq!(reply["context_tokens"], 128);
+        assert_eq!(reply["max_new_tokens"], 120);
+        assert_eq!(reply["context_capacity_known"], false);
+        assert_eq!(reply["budget_kind"], "memory");
+        assert!(worker.backend.prefix_entry.is_some());
+
+        let invalid = post(&mut worker, json!({"operation":"plan_generation","input_tokens":0,"context_tokens":128}));
+        assert_eq!(invalid["error"], "invalid_generation_request");
+        assert!(worker.backend.prefix_entry.is_none());
+    }
+
+    #[test]
+    fn unknown_context_planning_rejects_unrepresentable_limits_and_no_memory_fit() {
+        let mut worker = worker();
+        worker.backend.max_context = None;
+        let overflow = post(
+            &mut worker,
+            json!({"operation":"plan_generation","input_tokens":4294967295u64,"context_tokens":4294967295u64}),
+        );
+        assert_eq!(overflow["error"], "invalid_generation_request");
+        worker.backend.max_context = Some(0);
+        let reply = post(&mut worker, json!({"operation":"plan_generation","input_tokens":1,"context_tokens":16}));
+        assert_eq!(reply["error"], "resource_budget_exceeded");
     }
 
     #[test]

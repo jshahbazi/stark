@@ -1121,7 +1121,7 @@ mod tests {
     fn oversized_line_clears_cache_and_returns_existing_protocol_error() {
         let mut worker = worker(true, false);
         worker.backend.idle_interval = Some(Duration::from_millis(500));
-        let mut bytes = vec![b'x'; MAX_REQUEST_BYTES + 1];
+        let mut bytes = vec![b'x'; worker.budget.wire_bytes + 1];
         bytes.push(b'\n');
         let replies = run_script(&mut worker, [InputEvent::Data(bytes)]).unwrap();
         assert_eq!(replies[0]["error"], "request_too_large");

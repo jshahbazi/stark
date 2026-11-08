@@ -40,11 +40,20 @@ class FakeWorker:
             "ready": True,
             "mode": "text-generation-v1",
             "max_context_tokens": self.context_limit,
-            "max_new_tokens": 4096,
+            "max_new_tokens": 6144,
+            "generation_budget": "memory-context-v1",
         }
 
     def request(self, payload):
         self.requests.append(payload)
+        if payload["operation"] == "plan_generation":
+            context = min(payload["context_tokens"], payload["input_tokens"] + 6144)
+            return {
+                "context_tokens": context,
+                "max_new_tokens": context - payload["input_tokens"],
+                "context_capacity_known": False,
+                "budget_kind": "memory",
+            }
         return {"token_count": 20} if payload["operation"] == "tokenize" else {"text": "reply fixture"}
 
 
@@ -123,11 +132,42 @@ def test_automatic_cli_output_uses_custom_budget_for_unknown_context(model):
     assert generated[0]["context_tokens"] == 2048
 
 
-def test_automatic_cli_output_requires_budget_for_unknown_context(model):
+def test_automatic_cli_output_plans_unknown_context_without_user_options(model):
     worker = FakeWorker(context_limit=0xFFFFFFFF)
-    with pytest.raises(ChatError, match="specify --context-tokens or --max-new-tokens"):
-        run_chat(options(model, context_tokens=None, max_new_tokens=None), worker)
-    assert worker.requests == []
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None, max_new_tokens=None), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert generated[0]["context_tokens"] == 6164
+    assert generated[0]["max_new_tokens"] == 6144
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"context_tokens": True},
+        {"context_tokens": 0xFFFFFFFF, "max_new_tokens": 0xFFFFFFFF - 20},
+        {"context_tokens": 9000, "max_new_tokens": 8980},
+        {"max_new_tokens": True},
+        {"max_new_tokens": 1},
+        {"context_capacity_known": True},
+        {"budget_kind": "model"},
+    ],
+)
+def test_automatic_budget_rejects_unsafe_or_inconsistent_worker_allowances(invalid):
+    from types import SimpleNamespace
+
+    from stark_convert.chat import automatic_generation_budget
+
+    response = {
+        "context_tokens": 8192,
+        "max_new_tokens": 8172,
+        "context_capacity_known": False,
+        "budget_kind": "memory",
+        **invalid,
+    }
+    worker = SimpleNamespace(generation_budget=True, max_new_tokens=8192, request=lambda *_args, **_kwargs: response)
+    with pytest.raises(ChatError, match="Invalid automatic execution budget"):
+        automatic_generation_budget(worker, 20, 8192)
 
 
 def test_history_reset_and_eof(model):

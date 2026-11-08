@@ -25,14 +25,14 @@ cargo build --release --locked -p stark-generate
 
 The client renders the converted model's chat template in a Jinja sandbox, keeps the conversation in memory, and sends the complete conversation to one worker for each turn. For eligible text models the worker reuses the prompt prefix shared with the previous turn ([prefix reuse](#prefix-reuse)); `/reset` starts a new reuse scope. Replies appear when generation completes; the client does not stream. Type one message per line. `/help` lists commands, `/reset` clears the history, and `/exit`, `/quit`, Ctrl-D or Ctrl-C quit. Conversation history stays in memory.
 
-When a backend has no declared finite context maximum, the CLI treats its unsigned 32-bit ceiling as a protocol range. It allocates native text context only for the rendered input plus explicitly requested output. Automatic output requires a finite conversation budget; pass `--context-tokens` or choose an explicit `--max-new-tokens` limit. Omitting both returns an actionable `output_limit_required` error without reserving the protocol ceiling. Image chat requires a declared finite model context.
+When a backend has no declared finite context maximum, the CLI tokenizes the conversation and asks the loaded worker to plan a finite execution allowance from its actual state geometry and available memory. No context or output option is required. The unsigned 32-bit ceiling remains a protocol range. A custom context is an upper bound; an explicit output limit is honored subject to memory admission. Image chat still requires a declared finite model context.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--system TEXT` | model metadata | System message; the template decides how it is rendered |
 | `--image PATH` | none | Attach one local PNG or JPEG image; requires passing host image evidence |
-| `--context-tokens N` | loaded model's maximum context | Context budget for prompt plus reply |
-| `--max-new-tokens N` | remaining finite context after tokenization | Explicit reply budget when supplied |
+| `--context-tokens N` | model maximum, or automatic memory planning when undeclared | Upper context budget for prompt plus reply |
+| `--max-new-tokens N` | remaining context or memory-planned execution allowance | Explicit reply budget when supplied |
 | `--thinking` | off | Enable reasoning for templates that support `enable_thinking` |
 | `--mtp`, `--no-mtp` | off | Enable or disable exact MTP for this terminal session; enabling uses the loaded model's recommended draft count |
 | `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
@@ -151,6 +151,7 @@ context limit, EOS IDs and MTP support vary by loaded model:
 | --- | --- |
 | `mode` | Protocol tag for this contract |
 | `operations` | Accepted `operation` values |
+| `generation_budget` | `memory-context-v1` when the worker supports automatic memory planning for models with undeclared capacity |
 | `state_policy` | `fresh-per-request`: no state survives between requests. `consecutive-prefix-v1` when [prefix reuse](#prefix-reuse) is enabled |
 | `prefix_cache` | Present only when the worker was started with `--prefix-cache`: `supported`, `enabled`, `chunk_tokens` (the reuse grid, a multiple of 1,024: 1,024 for converted models and native GLM-5.3, 4,096 for native mixed-precision Qwen3.8), `idle_seconds` (600) and the reuse `key`. When enabled, `operations` also lists `reset_cache` |
 | `vocab_size` | Upper bound for every token ID |

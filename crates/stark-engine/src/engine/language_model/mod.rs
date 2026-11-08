@@ -258,6 +258,54 @@ impl<B: Backend> LanguageModel<B> {
         self.decoder.max_context_length()
     }
 
+    fn context_memory_estimate(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        if self.speculator.is_some() {
+            return None;
+        }
+        let head = self.dense_mtp.as_ref().filter(|_| self.has_dense_mtp());
+        let rows = input_tokens.max(if head.is_some() {
+            4
+        } else {
+            1
+        });
+        let target = self.decoder.memory_estimate(context_tokens, rows)?;
+        match head {
+            Some(head) => crate::encodable_block::memory::dense_mtp_estimate(
+                target,
+                head.memory_estimate(context_tokens, rows)?,
+                rows,
+                self.decoder.embedding().model_dim(),
+                self.decoder.embedding().vocab_size(),
+            ),
+            None => Some(target),
+        }
+    }
+
+    pub fn supports_automatic_context_planning(&self) -> bool {
+        self.context_memory_estimate(2, 1).is_some()
+    }
+
+    /// Plan a finite execution allocation from loaded geometry and a caller's
+    /// memory headroom. This is not a trained model context-capacity claim.
+    pub fn automatic_context_length(
+        &self,
+        input_tokens: u32,
+        maximum_context_tokens: u32,
+        memory_budget_bytes: usize,
+    ) -> Option<u32> {
+        let maximum =
+            self.max_context_length().map_or(maximum_context_tokens, |limit| limit.min(maximum_context_tokens));
+        let max_buffer_length = self.engine.context.max_buffer_length();
+        crate::encodable_block::memory::automatic_context(input_tokens, maximum, memory_budget_bytes, |capacity| {
+            self.context_memory_estimate(capacity, input_tokens)
+                .filter(|estimate| max_buffer_length.is_none_or(|limit| estimate.max_buffer_bytes <= limit))
+        })
+    }
+
     pub fn recommended_context_length(&self) -> Option<u32> {
         let max_context_length = self.max_context_length();
 

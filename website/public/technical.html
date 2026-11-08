@@ -61,14 +61,11 @@ Content-Type: application/json
   "messages": [
     {"role": "user", "content": "Reply with OK."}
   ],
-  "stream": true,
-  "max_tokens": 128,
-  "temperature": 0
+  "stream": true
 }</code></pre>
-            <div class="terminal-bottom"><span>OpenAI-style chat · Successful SSE ends with [DONE]</span><button type="button" class="copy-button" data-copy="command-code" data-copy-status="copy-status">Copy example</button></div>
+            <div class="terminal-bottom"><span>OpenAI-style chat</span><button type="button" class="copy-button" data-copy="command-code" data-copy-status="copy-status">Copy example</button></div>
             <p class="copy-status" id="copy-status" aria-live="polite"></p>
-          </div><p class="integration-example-note">Find connection details in Stark’s <strong>Connections</strong> window. The API is authenticated and local to your Mac. Omitting <code>model</code> targets the running model.</p></div>
-          <dl class="integration-contract"><div><dt>HTTP execution</dt><dd>One active completion + 8 FIFO waiters. 300-second request deadline. Loopback only; browser-origin requests are rejected.</dd></div><div><dt>Framing &amp; defaults</dt><dd>Automatic resource budget: 16–64 MiB logical content and 98–386 MiB encoded text requests, selected from available RAM. Temperature defaults to 0; omitted output limits use the remaining finite context until EOS or another stop condition. Models with undeclared context need an explicit output limit. Input plus output must fit context; no separate 4,096-token output cap. Memory and deadlines still apply.</dd></div><div><dt>Capability boundaries</dt><dd>Tool calls require model/template support; clients execute tools and own approvals. Images require host qualification. No embeddings, Responses API or JSON-schema output.</dd></div></dl>
+          </div><p class="integration-example-note">Find connection details in Stark’s <strong>Connections</strong> window. The API is authenticated and local to your Mac.</p></div>
         </div>
       </div>
     </section>
