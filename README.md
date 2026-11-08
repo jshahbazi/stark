@@ -13,6 +13,7 @@
   <a href="#quickstart">Get started</a> ·
   <a href="#supported-model-families">Models</a> ·
   <a href="#measured-performance">Benchmarks</a> ·
+  <a href="#privacy">Privacy</a> ·
   <a href="#developing-stark">Developers</a> ·
   <a href="docs/README.md">Documentation</a> ·
   <a href="https://starkengine.app/">Website</a>
@@ -59,6 +60,15 @@ Conversion downloads the model; use a new output directory each time. Chat loads
 Stark serves an OpenAI-style chat API for clients on the same Mac. Run a model in Chat mode, open **Connections** from Stark's menu, and use **Apps** to connect OpenWork or OpenCode Desktop without copying a key. For other native clients, choose **Connect your own app** and copy the **Base URL**, **API key** and **Model ID** into an OpenAI-compatible provider. The master key persists in macOS Keychain until you explicitly regenerate it. Streaming is supported. Qualified models and templates can return validated function calls for the client to execute under its own approval policy; Stark does not execute functions. Browser-origin requests, remote devices, embeddings and structured output are unsupported. See the [local API contract](docs/LOCAL_API.md) and [tested clients](docs/LOCAL_API.md#client-compatibility).
 
 The [native image path](docs/MULTIMODAL_IMPLEMENTATION.md) accepts one PNG/JPEG through Playground, terminal chat and the Local API. This source branch adds quantized Qwen dense/MoE, retained Lily Flash-Next, Gemma 3 and Gemma 4 image paths alongside dense Qwen3.5 BF16. Image artifacts require compatible tensors and reviewed metadata, native admission, and automatic local checks. See the [coverage and validation record](docs/archive/runs/2026-11-07-image-family-integration.md) for exact checkpoints, builds and remaining limits. Installed releases can have an earlier capability set.
+
+## Privacy
+
+Stark runs model inference on your Mac. Prompts, attached images and generated responses are processed locally and are not sent to us by Stark.
+
+- **Conversations and logs.** Playground keeps its conversation in memory rather than saving a chat history to disk. Stark's local API writes no access log and does not log prompts, replies or API keys. Connected apps may keep their own history and logs.
+- **Internet access.** Installation, model downloads, update checks and update downloads contact external services, including GitHub and Hugging Face. The app automatically checks GitHub for new releases; it downloads an update when you choose to upgrade. Those services receive the network requests and apply their own data practices. Once a model is installed, local inference does not require an internet connection. See [installation and updates](docs/INSTALLATION.md).
+- **Connected apps and tools.** The local API listens only on `127.0.0.1`, requires authentication and rejects browser-origin requests. Its persistent API key is stored in macOS Keychain. Apps you connect receive model responses and may send conversations, files or tool results to external services. Plugins running inside a connected app share that app's access. Review the app's settings and data practices before connecting it. Stark returns model-requested function calls; the connected app controls their execution. See the [local API and connection boundaries](docs/LOCAL_API.md).
+- **Website.** Stark's website adds no analytics or advertising trackers and uses system fonts. The hosting provider may perform security checks. Following download links or visiting linked services is subject to those services' data practices.
 
 ## Models and application integration
 
