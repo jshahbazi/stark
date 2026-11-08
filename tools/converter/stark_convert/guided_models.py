@@ -515,13 +515,15 @@ def matches_recipe(path, recipe):
         if recipe.native_choice is not None:
             from .api_tools import tool_parser_for
             from .hybrid_prepare import prepared_identity
+            from .vision_runtime import model_image_family
 
             profile = recipe.native_profile
             receipt = json.loads(_small_file(root, "native-source.json"))
             parsed = json.loads(config)
             template = parsed.get("token_codec_config", {}).get("prompt_template")
             return (
-                prepared_identity(root)
+                model_image_family(parsed, root) is None
+                and prepared_identity(root)
                 == {
                     "repo": recipe.repo,
                     "revision": recipe.revision,

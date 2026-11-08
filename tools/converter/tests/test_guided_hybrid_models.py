@@ -252,6 +252,9 @@ def test_guided_native_install_uses_preparation_reuses_and_rejects_receipt_drift
         assert len(host.models) == len(calls) == 1
         path = Path(host.models[0]["path"])
         assert guided.matches_recipe(path, recipe)
+        with monkeypatch.context() as scoped:
+            scoped.setattr("stark_convert.vision_runtime.model_image_family", lambda _config, _path: "qwen4_exp")
+            assert not guided.matches_recipe(path, recipe)
         host.install_guided(command)
         assert len(calls) == 1
         receipt_path = path / "native-source.json"
