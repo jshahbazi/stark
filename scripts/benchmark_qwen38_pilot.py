@@ -116,6 +116,7 @@ def run(args, *, cell_runner=mtp.run):
         "worker_hashes": {label: mtp.sha256_file(worker) for label, worker in sessions},
         "screened": args.screened,
         "observe_host": getattr(args, "observe_host", False),
+        "quiet_admission_scope": getattr(args, "quiet_scope", "request"),
         "weights_receipt_sha256": weights_before,
         "weight_guard_enabled": weights_before is not None,
         "weight_guard_policy": ("Previously hashed payloads; size, mtime and inode checked before and after the grid."
@@ -184,6 +185,7 @@ def main(argv=None):
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--screened", action="store_true")
+    parser.add_argument("--quiet-scope", choices=("request", "session"), default="request")
     parser.add_argument("--observe-host", action="store_true", help="Complete the grid with host observations and unqualified timings.")
     args = parser.parse_args(argv)
     try:

@@ -346,7 +346,7 @@ def run(
         raise ValueError("corpus_empty")
 
     report = {
-        "schema_version": 4,
+        "schema_version": 5,
         "scope": "qwen38_same_worker_paired_mtp_sampling",
         "sampling": sampling_options(args),
         "seed": args.seed,
@@ -366,6 +366,9 @@ def run(
 
     screened = getattr(args, "screened", False)
     observe_host = getattr(args, "observe_host", False)
+    quiet_scope = getattr(args, "quiet_scope", "request")
+    if quiet_scope not in {"request", "session"}:
+        raise ValueError("invalid_quiet_scope")
     if screened and observe_host:
         raise ValueError("conflicting_host_modes")
     monitored = screened or observe_host
@@ -373,6 +376,7 @@ def run(
     report["execution_profile"] = execution_profile(screened=monitored)
     report["screened"] = screened
     report["observe_host"] = observe_host
+    report["quiet_admission_scope"] = quiet_scope
     monitor = None
     if monitored:
         from benchmark_clean_qwen import Monitor, paging
@@ -387,6 +391,7 @@ def run(
             "screen_attempt": "benchmark_glm_mlx_serve.screen_attempt",
             "pair_policy": "Both arms must be eligible; no selective arm removal or retries.",
             "quiet_admission_enabled": screened,
+            "quiet_admission_scope": quiet_scope,
         }
     report.update(checkpoint_metadata(args))
     env = dict(os.environ)
@@ -462,7 +467,9 @@ def run(
                 "mtp_drafts": requested,
                 "request_id": request_id,
             }
-            admission = admission_fn(monitor) if screened and not warmup else None
+            admission = admission_fn(monitor) if screened and not warmup and (
+                quiet_scope == "request" or request_id == 3
+            ) else None
             phase = f"mtp_request_{request_id}"
             if monitor is not None:
                 monitor.set_phase(phase)
@@ -616,6 +623,8 @@ def main(argv=None) -> int:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--screened", action="store_true", help="Screen every measured arm; retain ineligible pairs without ranking them.")
+    parser.add_argument("--quiet-scope", choices=("request", "session"), default="request",
+                        help="Require quiet before every arm, or before the first measured arm of each loaded worker; all arms retain host screens.")
     parser.add_argument("--observe-host", action="store_true", help="Record host screens without quiet admission; timing remains unqualified.")
     args = parser.parse_args(argv)
     try:

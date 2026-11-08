@@ -142,6 +142,35 @@ def test_observation_mode_records_screens_without_admission(tmp_path):
     assert report["screening_policy"]["quiet_admission_enabled"] is False
 
 
+@pytest.mark.parametrize("scope,expected", [("request", 8), ("session", 1)])
+def test_quiet_scope_keeps_every_request_screen(tmp_path, scope, expected):
+    args = make_args(tmp_path)
+    args.screened = True
+    args.quiet_scope = scope
+    admissions, screens = [], []
+
+    class Monitor:
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def set_phase(self, _phase): pass
+
+    def admit(_monitor):
+        admissions.append(True)
+        return {"streak_seconds": 10}
+
+    def screen(*_):
+        screens.append(True)
+        return {"eligible": True}
+
+    report = mtp.run(args, worker_factory=FakeWorker, monitor_factory=Monitor,
+                     paging_reader=lambda: {}, admission_fn=admit, screen_fn=screen)
+    assert len(admissions) == expected
+    assert len(screens) == 10  # Both warmups and every measured arm.
+    assert report["timing_eligible"]
+    assert report["quiet_admission_scope"] == scope
+    assert sum(item["quiet_admission"] is not None for item in report["requests"]) == expected
+
+
 def test_entire_grid_validated_before_running(tmp_path, monkeypatch):
     args = args_for(tmp_path, monkeypatch)
     args.input_lengths = [5, 16384]

@@ -1,0 +1,480 @@
+diff --git a/vendor/lily-core/src/kernels/metal/moe.metal b/vendor/lily-core/src/kernels/metal/moe.metal
+index ec709bec..e32f82a8 100644
+--- a/vendor/lily-core/src/kernels/metal/moe.metal
++++ b/vendor/lily-core/src/kernels/metal/moe.metal
+@@ -208,21 +208,25 @@ MOE_ROUTER_TOPK_KERNELS(16)
+ MOE_ROUTER_TOPK_KERNELS(32)
+ 
+ // Fuses selected-expert gate/up projections and writes SwiGLU output.
+-kernel void moe_gather_gemv_q4_gate_up(
+-    device const uint* gate_codes [[buffer(0)]],
+-    device const bfloat* gate_scales [[buffer(1)]],
+-    device const bfloat* gate_biases [[buffer(2)]],
+-    device const uint* up_codes [[buffer(3)]],
+-    device const bfloat* up_scales [[buffer(4)]],
+-    device const bfloat* up_biases [[buffer(5)]],
+-    device const bfloat* x [[buffer(6)]],
+-    device const uint* indices [[buffer(7)]],
+-    device bfloat* y [[buffer(8)]],
+-    constant uint& K [[buffer(9)]],
+-    constant uint& GS [[buffer(10)]],
+-    constant uint& N [[buffer(11)]],
+-    uint2 tg [[threadgroup_position_in_grid]],
+-    uint lane [[thread_index_in_threadgroup]]) {
++template <uint FIXED_K, uint FIXED_GS, uint FIXED_N>
++static inline void moe_gate_up_body(
++    device const uint* gate_codes,
++    device const bfloat* gate_scales,
++    device const bfloat* gate_biases,
++    device const uint* up_codes,
++    device const bfloat* up_scales,
++    device const bfloat* up_biases,
++    device const bfloat* x,
++    device const uint* indices,
++    device bfloat* y,
++    uint runtime_k,
++    uint runtime_gs,
++    uint runtime_n,
++    uint2 tg,
++    uint lane) {
++    const uint K = FIXED_K ? FIXED_K : runtime_k;
++    const uint GS = FIXED_GS ? FIXED_GS : runtime_gs;
++    const uint N = FIXED_N ? FIXED_N : runtime_n;
+     const uint row = tg.x;
+     const uint slot = tg.y;
+     const ulong grow = (ulong)indices[slot] * N + row;
+@@ -276,6 +280,47 @@ kernel void moe_gather_gemv_q4_gate_up(
+     }
+ }
+ 
++kernel void moe_gather_gemv_q4_gate_up(
++    device const uint* gate_codes [[buffer(0)]],
++    device const bfloat* gate_scales [[buffer(1)]],
++    device const bfloat* gate_biases [[buffer(2)]],
++    device const uint* up_codes [[buffer(3)]],
++    device const bfloat* up_scales [[buffer(4)]],
++    device const bfloat* up_biases [[buffer(5)]],
++    device const bfloat* x [[buffer(6)]],
++    device const uint* indices [[buffer(7)]],
++    device bfloat* y [[buffer(8)]],
++    constant uint& K [[buffer(9)]],
++    constant uint& GS [[buffer(10)]],
++    constant uint& N [[buffer(11)]],
++    uint2 tg [[threadgroup_position_in_grid]],
++    uint lane [[thread_index_in_threadgroup]]) {
++    moe_gate_up_body<0, 0, 0>(
++        gate_codes, gate_scales, gate_biases, up_codes, up_scales, up_biases,
++        x, indices, y, K, GS, N, tg, lane);
++}
++
++// Fixed geometry removes runtime integer division; floating operations are shared.
++kernel void stark_moe_gate_up_h2560_i640_g64(
++    device const uint* gate_codes [[buffer(0)]],
++    device const bfloat* gate_scales [[buffer(1)]],
++    device const bfloat* gate_biases [[buffer(2)]],
++    device const uint* up_codes [[buffer(3)]],
++    device const bfloat* up_scales [[buffer(4)]],
++    device const bfloat* up_biases [[buffer(5)]],
++    device const bfloat* x [[buffer(6)]],
++    device const uint* indices [[buffer(7)]],
++    device bfloat* y [[buffer(8)]],
++    constant uint& K [[buffer(9)]],
++    constant uint& GS [[buffer(10)]],
++    constant uint& N [[buffer(11)]],
++    uint2 tg [[threadgroup_position_in_grid]],
++    uint lane [[thread_index_in_threadgroup]]) {
++    moe_gate_up_body<2560, 64, 640>(
++        gate_codes, gate_scales, gate_biases, up_codes, up_scales, up_biases,
++        x, indices, y, K, GS, N, tg, lane);
++}
++
+ // The routed experts' down projections gathered and combined with the
+ // scores (and the gated shared expert): LANES lanes per output row (16, two
+ // rows per simdgroup) and SG simdgroups per threadgroup taking alternate
+diff --git a/vendor/lily-core/src/kernels/metal/quant.metal b/vendor/lily-core/src/kernels/metal/quant.metal
+index e16fd12d..65805b7b 100644
+--- a/vendor/lily-core/src/kernels/metal/quant.metal
++++ b/vendor/lily-core/src/kernels/metal/quant.metal
+@@ -207,6 +207,23 @@ kernel void gemv_q8_bf16(device const uint*   codes  [[buffer(0)]],
+     GEMV_Q8_BODY(y[row] = bfloat(sum))
+ }
+ 
++// Modified by Stark: Flash-Next shared-down geometry, with the ordinary
++// Q8 arithmetic/reduction body and BF16 output boundary unchanged.
++kernel void stark_shared_down_q8_h2560_i640_g64(
++                         device const uint* codes [[buffer(0)]],
++                         device const bfloat* scales [[buffer(1)]],
++                         device const bfloat* biases [[buffer(2)]],
++                         device const bfloat* x [[buffer(3)]],
++                         device bfloat* y [[buffer(4)]],
++                         constant uint& runtime_k [[buffer(5)]],
++                         constant uint& runtime_gs [[buffer(6)]],
++                         uint row [[threadgroup_position_in_grid]],
++                         uint lane [[thread_index_in_threadgroup]]) {
++    const uint K = 640;
++    const uint GS = 64;
++    GEMV_Q8_BODY(y[row] = bfloat(sum))
++}
++
+ kernel void gemv_q8_bf16_f32out(device const uint*   codes  [[buffer(0)]],
+                                 device const bfloat* scales [[buffer(1)]],
+                                 device const bfloat* biases [[buffer(2)]],
+diff --git a/vendor/lily-core/src/kernels/moe.rs b/vendor/lily-core/src/kernels/moe.rs
+index b2e5f529..676a5f7a 100644
+--- a/vendor/lily-core/src/kernels/moe.rs
++++ b/vendor/lily-core/src/kernels/moe.rs
+@@ -9,6 +9,10 @@ use crate::tensor::{DType, Tensor};
+ use crate::weights::QuantWeights;
+ 
+ const SOURCE: &str = include_str!("metal/moe.metal");
++
++#[cfg(test)]
++#[path = "moe_specialization_tests.rs"]
++mod specialization_tests;
+ const DECODE_ROWS_SOURCE: &str = concat!(
+     include_str!("metal/moe.metal"),
+     "\n",
+@@ -378,7 +382,15 @@ pub fn moe_gather_gemv_gate_up(
+     moe_gather_gemv_gate_up_named(
+         ctx,
+         pass,
+-        "moe_gather_gemv_q4_gate_up",
++        if gate.in_features() == 2560
++            && n_per_expert == 640
++            && gate.group_size == 64
++            && up.group_size == 64
++        {
++            "stark_moe_gate_up_h2560_i640_g64"
++        } else {
++            "moe_gather_gemv_q4_gate_up"
++        },
+         gate,
+         up,
+         n_per_expert,
+@@ -409,6 +421,12 @@ pub fn moe_gather_gemv_gate_up_named(
+         "expert gate/up shapes or group sizes differ"
+     );
+     let (rows, k_in) = (gate.out_features(), gate.in_features());
++    if name == "stark_moe_gate_up_h2560_i640_g64" {
++        ensure!(
++            k_in == 2560 && n_per_expert == 640 && gate.group_size == 64,
++            "specialized gate/up geometry"
++        );
++    }
+     ensure!(rows.is_multiple_of(n_per_expert), "bad stacked expert rows");
+     ensure!(
+         k_in.is_multiple_of(gate.group_size) && gate.group_size.is_multiple_of(32),
+diff --git a/vendor/lily-core/src/kernels/moe_specialization_tests.rs b/vendor/lily-core/src/kernels/moe_specialization_tests.rs
+new file mode 100644
+index 00000000..23cf4d28
+--- /dev/null
++++ b/vendor/lily-core/src/kernels/moe_specialization_tests.rs
+@@ -0,0 +1,232 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Original Stark controls for the fixed Flash-Next gate/up and shared-down paths.
++//! Synthetic inputs stay in memory; only counts, hashes and timings are emitted.
++
++use super::*;
++use crate::kernels::quant;
++use crate::sha256::{Sha256, hex};
++
++fn word(state: &mut u32) -> u32 {
++    *state ^= *state << 13;
++    *state ^= *state >> 17;
++    *state ^= *state << 5;
++    *state
++}
++
++fn weight(
++    ctx: &MetalContext,
++    seed: &mut u32,
++    bits: usize,
++    n: usize,
++    k: usize,
++) -> Result<QuantWeights> {
++    let rows = n + 2;
++    let codes: Vec<_> = (0..rows * k / (32 / bits)).map(|_| word(seed)).collect();
++    let scales: Vec<_> =
++        (0..rows * k / 64).map(|_| (word(seed) % 127 + 1) as f32 / 65536.0).collect();
++    let biases: Vec<_> = (0..rows * k / 64)
++        .map(|_| (word(seed) % 257) as f32 / 4096.0 - 0.03125)
++        .collect();
++    QuantWeights {
++        codes: Tensor::from_bytes(
++            ctx,
++            bytemuck::cast_slice(&codes),
++            &[rows, k / (32 / bits)],
++            DType::U32,
++        )?,
++        scales: Tensor::from_f32_as_bf16(ctx, &scales, &[rows, k / 64])?,
++        biases: Tensor::from_f32_as_bf16(ctx, &biases, &[rows, k / 64])?,
++        bits,
++        group_size: 64,
++    }
++    .view_rows(2, n)
++}
++
++fn input(ctx: &MetalContext, seed: &mut u32, n: usize, style: usize) -> Result<Tensor> {
++    let values: Vec<_> = (0..n)
++        .map(|i| match style {
++            1 => {
++                if i % 2 == 0 {
++                    0.0
++                } else {
++                    -0.0
++                }
++            }
++            2 => {
++                half::bf16::from_bits([0x0001, 0x8001, 0x007f, 0x807f][i % 4]).to_f32()
++            }
++            3 => [64.0, -64.0, 1.0, -1.0][i % 4],
++            _ => (word(seed) % 8193) as f32 / 2048.0 - 2.0,
++        })
++        .collect();
++    let padded = Tensor::zeros(ctx, &[n + 16], DType::BF16)?;
++    let value = padded.view(8, &[n])?;
++    value.write_bytes(Tensor::from_f32_as_bf16(ctx, &values, &[n])?.raw_bytes())?;
++    Ok(value)
++}
++
++fn output(ctx: &MetalContext, n: usize) -> Result<(Tensor, Tensor)> {
++    let storage = Tensor::zeros(ctx, &[n + 16], DType::BF16)?;
++    storage.write_bytes(&vec![0xa5; storage.byte_len()])?;
++    let value = storage.view(8, &[n])?;
++    Ok((storage, value))
++}
++
++fn canaries(storage: &Tensor) -> Result<()> {
++    let bytes = storage.raw_bytes();
++    ensure!(
++        bytes[..16].iter().chain(&bytes[bytes.len() - 16..]).all(|b| *b == 0xa5),
++        "specialized projection wrote outside its output view"
++    );
++    Ok(())
++}
++
++#[test]
++#[ignore = "requires a physical Apple Silicon Metal device"]
++fn flashnext_gate_up_shared_down_match_reference_bytes() -> Result<()> {
++    let ctx = MetalContext::new()?;
++    let mut seed = 0x77a1_3bc2;
++    let gate = weight(&ctx, &mut seed, 4, 16 * 640, 2560)?;
++    let up = weight(&ctx, &mut seed, 4, 16 * 640, 2560)?;
++    let shared = weight(&ctx, &mut seed, 8, 2560, 640)?;
++    let mut reference_hash = Sha256::new();
++    let mut candidate_hash = Sha256::new();
++    let mut compared = 0;
++    for style in 0..4 {
++        for slots in [1, 10, 16] {
++            // Permuted/duplicate routes and offset views exercise real gather addressing.
++            let ids: Vec<_> =
++                (0..slots).map(|i| ((i * 3 + style) % 16) as u32).collect();
++            let id_storage = Tensor::zeros(&ctx, &[slots + 8], DType::U32)?;
++            let indices = id_storage.view(4, &[slots])?;
++            indices.write_bytes(bytemuck::cast_slice(&ids))?;
++            let x = input(&ctx, &mut seed, 2560, style)?;
++            let act = input(&ctx, &mut seed, 640, style)?;
++            let (rs, reference) = output(&ctx, slots * 640)?;
++            let (cs, candidate) = output(&ctx, slots * 640)?;
++            let (rds, reference_down) = output(&ctx, 2560)?;
++            let (cds, candidate_down) = output(&ctx, 2560)?;
++            let pass = ctx.begin_concurrent()?;
++            moe_gather_gemv_gate_up_named(
++                &ctx,
++                &pass,
++                "moe_gather_gemv_q4_gate_up",
++                &gate,
++                &up,
++                640,
++                &x,
++                &indices,
++                &reference,
++            )?;
++            quant::gemv_quant(&ctx, &pass, &shared, &act, &reference_down)?;
++            pass.level_barrier(&[&reference, &reference_down])?;
++            moe_gather_gemv_gate_up(
++                &ctx, &pass, &gate, &up, 640, &x, &indices, &candidate,
++            )?;
++            quant::gemv_shared_down(&ctx, &pass, &shared, &act, &candidate_down)?;
++            pass.end()?.commit()?.wait()?;
++            for storage in [&rs, &cs, &rds, &cds] {
++                canaries(storage)?;
++            }
++            for (reference, candidate) in
++                [(&reference, &candidate), (&reference_down, &candidate_down)]
++            {
++                ensure!(
++                    reference.raw_bytes() == candidate.raw_bytes(),
++                    "fixed projection numerical mismatch"
++                );
++                reference_hash.update(reference.raw_bytes());
++                candidate_hash.update(candidate.raw_bytes());
++                compared += reference.numel();
++            }
++        }
++    }
++    println!(
++        "{}",
++        serde_json::json!({"cases":12,"compared_bf16_values":compared,
++        "reference_sha256":hex(&reference_hash.finish()),"candidate_sha256":hex(&candidate_hash.finish())})
++    );
++    Ok(())
++}
++
++#[test]
++#[ignore = "physical Apple Silicon; alternating streaming component timing"]
++fn flashnext_gate_up_shared_down_streaming_timing() -> Result<()> {
++    let ctx = MetalContext::new()?;
++    let mut seed = 0x2ab3_6d82;
++    // Rotate sixteen independent banks instead of repeatedly measuring one
++    // tiny-weight fixture. These are synthetic, not model weights.
++    let banks = (0..16)
++        .map(|_| {
++            Ok((
++                weight(&ctx, &mut seed, 4, 16 * 640, 2560)?,
++                weight(&ctx, &mut seed, 4, 16 * 640, 2560)?,
++                weight(&ctx, &mut seed, 8, 2560, 640)?,
++            ))
++        })
++        .collect::<Result<Vec<_>>>()?;
++    let x = input(&ctx, &mut seed, 2560, 0)?;
++    let act = input(&ctx, &mut seed, 640, 0)?;
++    let ids: Vec<u32> = (0..10).map(|i| (i * 3 % 16) as u32).collect();
++    let indices =
++        Tensor::from_bytes(&ctx, bytemuck::cast_slice(&ids), &[10], DType::U32)?;
++    let gate_out = Tensor::zeros(&ctx, &[10 * 640], DType::BF16)?;
++    let down_out = Tensor::zeros(&ctx, &[2560], DType::BF16)?;
++    let measure = |specialized: bool, shared: bool| -> Result<f64> {
++        let pass = ctx.begin_concurrent()?;
++        for (gate, up, down) in &banks {
++            moe_gather_gemv_gate_up_named(
++                &ctx,
++                &pass,
++                if specialized {
++                    "stark_moe_gate_up_h2560_i640_g64"
++                } else {
++                    "moe_gather_gemv_q4_gate_up"
++                },
++                gate,
++                up,
++                640,
++                &x,
++                &indices,
++                &gate_out,
++            )?;
++            if shared {
++                if specialized {
++                    quant::gemv_shared_down(&ctx, &pass, down, &act, &down_out)?;
++                } else {
++                    quant::gemv_quant(&ctx, &pass, down, &act, &down_out)?;
++                }
++            }
++            pass.level_barrier(&[&gate_out, &down_out])?;
++        }
++        let completed = pass.commit()?.wait_retain()?;
++        let timing = completed.timing()?;
++        let seconds = timing.gpu_end_secs - timing.gpu_start_secs;
++        ensure!(seconds.is_finite() && seconds > 0.0, "component timing unavailable");
++        Ok(seconds / banks.len() as f64)
++    };
++    let mut results = Vec::new();
++    for shared in [false, true] {
++        for _ in 0..4 {
++            measure(false, shared)?;
++            measure(true, shared)?;
++        }
++        let mut pairs = Vec::new();
++        for block in 0..16 {
++            let candidate_first = [false, true, true, false][block % 4];
++            let first = measure(candidate_first, shared)?;
++            let second = measure(!candidate_first, shared)?;
++            let (reference, candidate) =
++                if candidate_first { (second, first) } else { (first, second) };
++            pairs.push(serde_json::json!({"reference_seconds_per_layer":reference,
++                "candidate_seconds_per_layer":candidate,"speedup":reference/candidate}));
++        }
++        results.push(serde_json::json!({"includes_shared_down":shared,"pairs":pairs}));
++    }
++    println!(
++        "{}",
++        serde_json::json!({"scope":"synthetic_streaming_component_only",
++        "banks":banks.len(),"results":results})
++    );
++    Ok(())
++}
+diff --git a/vendor/lily-core/src/kernels/quant.rs b/vendor/lily-core/src/kernels/quant.rs
+index eb1f117a..d048e641 100644
+--- a/vendor/lily-core/src/kernels/quant.rs
++++ b/vendor/lily-core/src/kernels/quant.rs
+@@ -156,6 +156,42 @@ pub(crate) fn check_quant(w: &QuantWeights) -> Result<(usize, usize)> {
+     Ok((n, k))
+ }
+ 
++/// Flash-Next's shared-down projection, specialized only for its Q8 geometry.
++/// Every other layout retains the ordinary projection policy.
++pub(crate) fn gemv_shared_down(
++    ctx: &MetalContext,
++    pass: &ComputePass<'_>,
++    w: &QuantWeights,
++    x: &Tensor,
++    y: &Tensor,
++) -> Result<()> {
++    if w.bits != 8
++        || w.group_size != 64
++        || w.in_features() != 640
++        || w.out_features() != 2560
++        || x.dtype() != DType::BF16
++        || y.dtype() != DType::BF16
++    {
++        return gemv_quant(ctx, pass, w, x, y);
++    }
++    let (n, k) = check_quant(w)?;
++    ensure!(x.numel() == k && y.numel() == n, "shared-down projection shape");
++    let pipeline =
++        ctx.pipeline("stark_shared_down_q8_h2560_i640_g64", SOURCE, MslVersion::V3_1)?;
++    pass.dispatch_at(
++        &pipeline,
++        &[
++            w.codes.binding(),
++            w.scales.binding(),
++            w.biases.binding(),
++            x.binding(),
++            y.binding(),
++        ],
++        &[&u32_bytes(k), &u32_bytes(w.group_size)],
++        Grid::Threadgroups { groups: (n, 1, 1), threadgroup: (32, 1, 1) },
++    )
++}
++
+ pub fn gemv_quant(
+     ctx: &MetalContext,
+     pass: &ComputePass<'_>,
+diff --git a/vendor/lily-core/src/moe_ffn.rs b/vendor/lily-core/src/moe_ffn.rs
+index 88f17787..6d0869cd 100644
+--- a/vendor/lily-core/src/moe_ffn.rs
++++ b/vendor/lily-core/src/moe_ffn.rs
+@@ -1172,7 +1172,23 @@ pub(crate) fn decode_moe(
+         )?;
+     }
+     if !crate::ablate::on(crate::ablate::Group::Shared) {
+-        quant::gemv_quant(ctx, pass, &shared.down_proj, io.mlp_act, &ms.shared_out)?;
++        if dims.official_mlx_rounding {
++            quant::gemv_quant(
++                ctx,
++                pass,
++                &shared.down_proj,
++                io.mlp_act,
++                &ms.shared_out,
++            )?;
++        } else {
++            quant::gemv_shared_down(
++                ctx,
++                pass,
++                &shared.down_proj,
++                io.mlp_act,
++                &ms.shared_out,
++            )?;
++        }
+     }
+     pass.level_barrier(&[&ms.act, &ms.shared_out])?;
+ 

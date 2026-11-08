@@ -39,6 +39,19 @@ The upstream Metal shaders originate at the pinned revision. Stark modifies five
 - `src/kernels/metal/quant.metal` adds GDN Q4 two-row input projection with a convolution epilogue. It calls the existing packed dot helper, preserves the BF16 projection boundary and copies the original convolution expression, tap order and window update. Other layouts retain separate projection and convolution.
 - `src/kernels/metal/moe.metal` adds a decode down/combine entry point whose row owner also performs the following hyperconnection injection. It copies the original dot and slot-ordered combine, retains the BF16 branch output, and applies the original F32 injection expression to that rounded branch. Decode orders both the branch output and residual streams before their next consumers. The original down/combine and injection kernels remain available for reference controls.
 
+The experimental Flash-Next gate/up entry point in `moe.metal` shares the
+generic arithmetic body with compile-time K2560/N640/group64 dimensions.
+`src/kernels/moe.rs` admits only that exact Q4 geometry; other dimensions use
+the generic entry point. For the Lily numerical policy, `src/moe_ffn.rs` queues
+the ordinary shared-down projection before expert gate/up in the existing
+concurrent level, retaining its output barrier. The official policy retains
+its original order. This original Stark scheduling/addressing change preserves
+the upstream license, stored weights, arithmetic expressions and precision
+boundaries. Source patches and bounded numerical/component results are in the
+[MoE projection experiment](../../docs/benchmarks/2026-11-07-flashnext-moe-projections.md).
+A complete host-eligible whole-model timing comparison remains outstanding;
+the component result does not qualify a release speedup.
+
 The other nine upstream shader files retain their pinned source bytes. `stark_decode_rows.metal` and `stark_moe_decode_rows.metal` add verifier entry points compiled after the unchanged generic projection and expert shader bodies. Batch row is the fast grid axis, exposing parallel work and weight-cache reuse while retaining each row's original arithmetic. The original HC and generic projection/convolution entry points remain available for reference controls. These patches do not change checkpoint quantization or the selected precision policy. Numerical and performance qualification is recorded separately in the [kernel study](../../docs/benchmarks/QWEN38_KERNELS_2026_10_29.md) and [injection fusion study](../../docs/benchmarks/QWEN38_FUSION_2026_10_29.md).
 
 `stark_packed_rows.metal` extends the pinned Q4 packed-dot expression to independent short token rows while sharing raw weight loads. `stark_gdn_projection_rows.metal` adds the guarded verifier projection/convolution/scatter entry points. They preserve the 16-lane reduction, BF16 projection boundary and runtime convolution tap order, retain the original window, write its alternate, and capture projected inputs for rollback. Ordinary decode and unsupported layouts keep their existing routes. These original Stark extensions retain Apache-2.0 licensing; `quant.metal` is unchanged by this addition. The host verifier also batches up to four sparse queries through the existing QSA split kernels, using independent query scratch and per-query visibility; dense queries retain ordinary decode. Source-bound qualification is in the [MTP optimization study](../../docs/benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md).

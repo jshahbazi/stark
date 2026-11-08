@@ -461,12 +461,19 @@ records the profile and longer on/off measurements at fixed quantization.
 `scripts/benchmark_qwen38_pilot.py` extends that paired harness with bounded
 input-length/draft-depth grids and optional candidate-worker ABBA sessions.
 Use `--screened` for quiet admission and request-time host qualification.
+The default `--quiet-scope request` requires admission before every measured
+arm. `--quiet-scope session` requires admission before the first measured arm
+of each loaded worker; every arm still receives the same host screen, and all
+arms must pass for qualified timing. Record these protocols separately.
 `--observe-host` records interference without quiet admission and always leaves
 timings unqualified. Candidate comparisons require matching same-route output
 hashes; this gate is intended for scheduling changes that preserve the existing
 numerical policy. See the [Flash-Next pilot](benchmarks/2026-11-07-flashnext-optimization-pilot.md)
 for the measured source identities, artifact guards, reproduction commands and
 limitations. The runner never promotes a setting automatically.
+The separate [MoE projection experiment](benchmarks/2026-11-07-flashnext-moe-projections.md)
+records the guarded fixed-geometry gate/up and shared-first candidate. Its
+numerical controls pass; whole-model performance qualification is blocked.
 
 The context benchmark supports greedy and stochastic generation; `--top-k 0`
 omits top-k filtering. It emits counts, hashes and timing aggregates. The

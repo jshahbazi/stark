@@ -1144,8 +1144,13 @@ pub(crate) fn decode_moe(
     if crate::ablate::on(crate::ablate::Group::Gather) {
         return Ok(false);
     }
-    // Expert gate/up and the independent shared down projection overlap.
+    // Queue Lily's independent shared-down projection first in this level.
+    // Both inputs are ready; the existing barrier still orders both outputs.
+    // Keep the separately qualified official policy's original dispatch order.
     pass.profile_stage(crate::metal::stage_profile::Phase::MoeExpertGateUpSharedDown)?;
+    if !dims.official_mlx_rounding && !crate::ablate::on(crate::ablate::Group::Shared) {
+        quant::gemv_quant(ctx, pass, &shared.down_proj, io.mlp_act, &ms.shared_out)?;
+    }
     if dims.official_mlx_rounding {
         moe::official_moe_gate_up(
             ctx,
@@ -1171,7 +1176,7 @@ pub(crate) fn decode_moe(
             &ms.act,
         )?;
     }
-    if !crate::ablate::on(crate::ablate::Group::Shared) {
+    if dims.official_mlx_rounding && !crate::ablate::on(crate::ablate::Group::Shared) {
         quant::gemv_quant(ctx, pass, &shared.down_proj, io.mlp_act, &ms.shared_out)?;
     }
     pass.level_barrier(&[&ms.act, &ms.shared_out])?;

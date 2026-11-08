@@ -4,6 +4,16 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Qwen3.8-Flash-Next MoE projection experiment (2026-11-07).** Fixed-geometry
+expert gate/up and shared-first dispatch pass bounded numerical, scoring and
+prefix-restoration controls. The final synthetic combined projection improves
+by about 2.2%; no whole-model speedup is qualified. Matched timing attempts
+were ineligible or incomplete, and the next quiet window requires unlocking
+the benchmark console. See the [experiment report](2026-11-07-flashnext-moe-projections.md),
+[aggregate results](data/flashnext-moe-projections-2026-11-07.json) and
+[source patches](../archive/experiments/2026-11-07-flashnext-moe/README.md).
+This adds separate candidate evidence and does not supersede earlier results.
+
 **Qwen3.8-Flash-Next optimization harness pilot (2026-11-07).** Eighteen cells
 and 144 measured requests passed bounded repeatability/candidate-hash checks.
 Draft depths one through three and a 16-to-64-row concurrent-encoder cutoff
