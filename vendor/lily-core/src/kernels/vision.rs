@@ -617,3 +617,121 @@ pub(crate) fn rotary_apply_reference(
         Grid::Threads { grid: (1152, n, 1), threadgroup: (256, 1, 1) },
     )
 }
+
+#[cfg(test)]
+pub(crate) fn attention_order_qk(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    qk: &Tensor,
+    scaled: &Tensor,
+    n: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(
+        n > 0
+            && n <= 256
+            && n.is_multiple_of(4)
+            && qkv.numel() == n * 3456
+            && qk.numel() == 16 * n * n
+            && scaled.numel() == 16 * n * n,
+        "private attention QK bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_attention_order_qk",
+        include_str!("metal/vision_attention_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[qkv.binding(), qk.binding(), scaled.binding()],
+        &[Param::U32(n as u32), Param::F32(scale)],
+        Grid::Threads { grid: (16 * n * n, 1, 1), threadgroup: (128, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn attention_order_softmax(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    scaled: &Tensor,
+    probabilities: &Tensor,
+    n: usize,
+) -> Result<()> {
+    ensure!(
+        n > 0
+            && n <= 256
+            && n.is_multiple_of(4)
+            && scaled.numel() == 16 * n * n
+            && probabilities.numel() == 16 * n * n,
+        "private attention softmax bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_attention_order_softmax",
+        include_str!("metal/vision_attention_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[scaled.binding(), probabilities.binding()],
+        &[Param::U32(n as u32)],
+        Grid::Threads { grid: (16 * n, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn attention_order_scale(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qk: &Tensor,
+    scaled: &Tensor,
+    n: usize,
+    scale: f32,
+) -> Result<()> {
+    ensure!(
+        n > 0 && n <= 256 && qk.numel() == 16 * n * n && scaled.numel() == 16 * n * n,
+        "private attention scale bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_attention_order_scale",
+        include_str!("metal/vision_attention_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[qk.binding(), scaled.binding()],
+        &[Param::U32((16 * n * n) as u32), Param::F32(scale)],
+        Grid::Threads { grid: (16 * n * n, 1, 1), threadgroup: (128, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn attention_order_pv(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    probabilities: &Tensor,
+    output: &Tensor,
+    n: usize,
+) -> Result<()> {
+    ensure!(
+        n > 0
+            && n <= 256
+            && n.is_multiple_of(4)
+            && qkv.numel() == n * 3456
+            && probabilities.numel() == 16 * n * n
+            && output.numel() == n * 1152,
+        "private attention PV bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_attention_order_pv",
+        include_str!("metal/vision_attention_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[qkv.binding(), probabilities.binding(), output.binding()],
+        &[Param::U32(n as u32)],
+        Grid::Threads { grid: (n * 1152, 1, 1), threadgroup: (128, 1, 1) },
+    )
+}

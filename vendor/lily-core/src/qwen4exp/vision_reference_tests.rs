@@ -81,6 +81,108 @@ fn checked_f32(root: &Path, record: &Value, shape: &[usize]) -> Vec<f32> {
     values
 }
 
+fn attention_order_metrics(
+    context: &MetalContext,
+    input: &Tensor,
+    folder: &Path,
+    record: &Value,
+    expected: &[bf16],
+    ordinary: &[f32],
+    n: usize,
+) {
+    use crate::kernels::vision::{
+        attention_order_pv, attention_order_qk, attention_order_scale,
+        attention_order_softmax,
+    };
+    let qk_expected = checked_tensor(folder, &record["stages"]["qk"]);
+    let scaled_expected = checked_tensor(folder, &record["stages"]["scaled"]);
+    let probabilities_expected =
+        checked_tensor(folder, &record["stages"]["probabilities"]);
+    let shape = [16, n, n];
+    let z =
+        |dimensions: &[usize]| Tensor::zeros(context, dimensions, DType::BF16).unwrap();
+    let source = |values: &[bf16]| {
+        Tensor::from_bytes(context, bytemuck::cast_slice(values), &shape, DType::BF16)
+            .unwrap()
+    };
+    let qk = z(&shape);
+    let scaled = z(&shape);
+    let probabilities = z(&shape);
+    let output = z(&[n, 1152]);
+    let scale = (72_f32).powf(-0.5);
+    let pass = context.begin().unwrap();
+    attention_order_qk(context, &pass, input, &qk, &scaled, n, scale).unwrap();
+    attention_order_softmax(context, &pass, &scaled, &probabilities, n).unwrap();
+    attention_order_pv(context, &pass, input, &probabilities, &output, n).unwrap();
+    pass.commit_wait().unwrap();
+    let qk_values = qk.to_f32().unwrap();
+    let scaled_values = scaled.to_f32().unwrap();
+    let probabilities_values = probabilities.to_f32().unwrap();
+    let output_values = output.to_f32().unwrap();
+    let source_qk = source(&qk_expected);
+    let source_scaled = source(&scaled_expected);
+    let source_probabilities = source(&probabilities_expected);
+    let scaled_only = z(&shape);
+    let probabilities_only = z(&shape);
+    let pv_only = z(&[n, 1152]);
+    let pass = context.begin().unwrap();
+    attention_order_scale(context, &pass, &source_qk, &scaled_only, n, scale).unwrap();
+    attention_order_softmax(context, &pass, &source_scaled, &probabilities_only, n)
+        .unwrap();
+    attention_order_pv(context, &pass, input, &source_probabilities, &pv_only, n)
+        .unwrap();
+    pass.commit_wait().unwrap();
+    let metric = |index: usize, actual: &[f32], reference: &[bf16]| {
+        let (rms, cosine) = numerical_metric(actual, reference);
+        let mismatches = actual
+            .iter()
+            .zip(reference)
+            .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
+            .count();
+        json!({"stage_index":index,"elements":actual.len(),"mismatch_count":mismatches,"relative_rms":rms,"cosine":cosine})
+    };
+    let metrics = vec![
+        metric(0, &qk_values, &qk_expected),
+        metric(1, &scaled_values, &scaled_expected),
+        metric(2, &scaled_only.to_f32().unwrap(), &scaled_expected),
+        metric(3, &probabilities_only.to_f32().unwrap(), &probabilities_expected),
+        metric(4, &pv_only.to_f32().unwrap(), expected),
+        metric(5, &probabilities_values, &probabilities_expected),
+        metric(6, &output_values, expected),
+    ];
+    // Same reference graph with per-stage commits/readbacks must preserve all
+    // intermediate and final bits; ordinary production's observer stays intact.
+    let pass = context.begin().unwrap();
+    attention_order_qk(context, &pass, input, &qk, &scaled, n, scale).unwrap();
+    pass.commit_wait().unwrap();
+    let mismatch = |a: &[f32], b: &[f32]| {
+        a.iter().zip(b).filter(|(a, b)| a.to_bits() != b.to_bits()).count()
+    };
+    let mut observer = mismatch(&qk.to_f32().unwrap(), &qk_values)
+        + mismatch(&scaled.to_f32().unwrap(), &scaled_values);
+    let pass = context.begin().unwrap();
+    attention_order_softmax(context, &pass, &scaled, &probabilities, n).unwrap();
+    pass.commit_wait().unwrap();
+    observer += mismatch(&probabilities.to_f32().unwrap(), &probabilities_values);
+    let pass = context.begin().unwrap();
+    attention_order_pv(context, &pass, input, &probabilities, &output, n).unwrap();
+    pass.commit_wait().unwrap();
+    observer += mismatch(&output.to_f32().unwrap(), &output_values);
+    let ordinary_mismatches = ordinary
+        .iter()
+        .zip(expected)
+        .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
+        .count();
+    println!(
+        "{}",
+        json!({"private_retained_attention_order_metrics":{"patches":n,"stages":metrics,"observer_mismatch_count":observer,"ordinary_mismatch_count":ordinary_mismatches}})
+    );
+    assert_eq!(
+        observer, 0,
+        "private attention reference stage readbacks perturb ordinary execution"
+    );
+}
+
 fn rotary_source_metrics(
     context: &MetalContext,
     input: &[bf16],
@@ -770,6 +872,7 @@ fn operator_metrics(
             rotary_source_metrics(context, &source, &expected, &values, case, gh * gw, gw);
         }
         if name == "attention" && record["stages"].is_object() {
+            attention_order_metrics(context, &input, folder, record, &expected, &actual, gh * gw);
             let n = input.shape()[0];
             let plane = vision.num_heads * n * n;
             let stages = Tensor::zeros(context, &[3, vision.num_heads, n, n], DType::F32).unwrap();
