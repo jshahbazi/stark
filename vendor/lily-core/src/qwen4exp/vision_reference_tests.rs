@@ -69,6 +69,159 @@ fn numerical_metric(actual: &[f32], expected: &[bf16]) -> (f64, f64) {
     ((error / reference_norm).sqrt(), dot / (actual_norm * reference_norm).sqrt())
 }
 
+fn checked_f32(root: &Path, record: &Value, shape: &[usize]) -> Vec<f32> {
+    assert_eq!(record["shape"], json!(shape));
+    let bytes = checked_file(root, record, 256 * 72 * 4);
+    assert_eq!(bytes.len(), shape.iter().product::<usize>() * 4);
+    let values = bytes
+        .chunks_exact(4)
+        .map(|part| f32::from_le_bytes(part.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert!(values.iter().all(|value| value.is_finite()));
+    values
+}
+
+fn rotary_source_metrics(
+    context: &MetalContext,
+    input: &[bf16],
+    expected: &[bf16],
+    safe: &[f32],
+    case: &Value,
+    n: usize,
+    gw: usize,
+) {
+    let Some(root) = std::env::var_os("STARK_LILY_ROTARY_REFERENCE_PATH") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    assert!(fs::metadata(root.join("manifest.json")).unwrap().len() <= 65536);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["kind"], "RetainedLilyRotarySourceReference");
+    assert_eq!(manifest["torch_git"], "5c4886908584029761b579af026dcfb627c84070");
+    assert_eq!(
+        manifest["source_sha256"],
+        "e57b3617e71e81ecb7e5ae3b420c45b5aee80d76a07aa8c88b797c2642f1f5df"
+    );
+    let record = manifest["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["name"] == case["name"])
+        .unwrap();
+    assert_eq!(record["grid"], case["grid"]);
+    let folder = root.join(case["name"].as_str().unwrap());
+    let inv_expected = checked_f32(&root, &manifest["inv_freq"], &[18]);
+    let angles = checked_f32(&folder, &record["angles"], &[n, 36]);
+    let compact = |values: Vec<f32>| {
+        values
+            .chunks_exact(72)
+            .flat_map(|row| row[..36].iter().copied())
+            .collect::<Vec<_>>()
+    };
+    let cos_expected = compact(checked_f32(&folder, &record["cos"], &[n, 72]));
+    let sin_expected = compact(checked_f32(&folder, &record["sin"], &[n, 72]));
+    let tensor = |values: &[f32], shape: &[usize]| {
+        Tensor::from_bytes(context, bytemuck::cast_slice(values), shape, DType::F32)
+            .unwrap()
+    };
+    let source_angles = tensor(&angles, &[n, 36]);
+    let source_cos = tensor(&cos_expected, &[n, 36]);
+    let source_sin = tensor(&sin_expected, &[n, 36]);
+    let stages = Tensor::zeros(context, &[5, n, 36], DType::F32).unwrap();
+    let inv = Tensor::zeros(context, &[18], DType::F32).unwrap();
+    let pass = context.begin().unwrap();
+    crate::kernels::vision::rotary_stages_reference(
+        context,
+        &pass,
+        &source_angles,
+        &stages,
+        &inv,
+        n,
+        gw,
+    )
+    .unwrap();
+    pass.commit_wait().unwrap();
+    let values = stages.to_f32().unwrap();
+    let inverse = inv.to_f32().unwrap();
+    let plane = n * 36;
+    let pairs = [
+        (&inverse[..], &inv_expected[..]),
+        (&values[..plane], &angles[..]),
+        (&values[plane..2 * plane], &cos_expected[..]),
+        (&values[2 * plane..3 * plane], &sin_expected[..]),
+        (&values[3 * plane..4 * plane], &cos_expected[..]),
+        (&values[4 * plane..5 * plane], &sin_expected[..]),
+    ];
+    let stage_metrics = pairs.iter().enumerate().map(|(index,(actual,reference))| {
+        let mut error=0_f64; let mut norm=0_f64; let mut mismatches=0; let mut ulps=0;
+        for (a,b) in actual.iter().zip(reference.iter()) {
+            assert!(a.is_finite() && b.is_finite());
+            error += (f64::from(*a)-f64::from(*b)).powi(2); norm += f64::from(*b).powi(2);
+            mismatches += usize::from(a.to_bits()!=b.to_bits()); ulps=ulps.max(a.to_bits().abs_diff(b.to_bits()));
+        }
+        json!({"stage_index":index,"elements":actual.len(),"mismatch_count":mismatches,"max_ulp":ulps,"relative_rms":(error/norm.max(f64::MIN_POSITIVE)).sqrt()})
+    }).collect::<Vec<_>>();
+    let source_applied = Tensor::from_bytes(
+        context,
+        bytemuck::cast_slice(input),
+        &[n, 3456],
+        DType::BF16,
+    )
+    .unwrap();
+    let native_applied = Tensor::from_bytes(
+        context,
+        bytemuck::cast_slice(input),
+        &[n, 3456],
+        DType::BF16,
+    )
+    .unwrap();
+    let pass = context.begin().unwrap();
+    crate::kernels::vision::rotary_apply_reference(
+        context,
+        &pass,
+        &source_applied,
+        &source_cos,
+        &source_sin,
+        n,
+    )
+    .unwrap();
+    crate::kernels::vision::rotary_apply_reference(
+        context,
+        &pass,
+        &native_applied,
+        &stages.view(plane, &[n, 36]).unwrap(),
+        &stages.view(2 * plane, &[n, 36]).unwrap(),
+        n,
+    )
+    .unwrap();
+    pass.commit_wait().unwrap();
+    let source_applied = source_applied.to_f32().unwrap();
+    let native_applied = native_applied.to_f32().unwrap();
+    let source_mismatches = source_applied
+        .iter()
+        .zip(expected)
+        .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
+        .count();
+    let observer_mismatches = native_applied
+        .iter()
+        .zip(safe)
+        .filter(|(a, b)| a.to_bits() != b.to_bits())
+        .count();
+    println!(
+        "{}",
+        json!({"private_retained_rotary_stage_metrics":{"patches":n,"stages":stage_metrics,"source_application_mismatch_count":source_mismatches,"native_application_observer_mismatch_count":observer_mismatches}})
+    );
+    assert_eq!(
+        source_mismatches, 0,
+        "private rotary source-angle application exceeds exact gate"
+    );
+    assert_eq!(
+        observer_mismatches, 0,
+        "private rotary stages perturb the safe witness"
+    );
+}
+
 fn gelu_domain_metrics(context: &MetalContext) {
     let Some(root) = std::env::var_os("STARK_LILY_GELU_REFERENCE_PATH") else { return };
     let root = std::path::PathBuf::from(root);
@@ -513,6 +666,7 @@ fn operator_metrics(
             let mismatches = values.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
             let ordinary_mismatches = actual.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits() != b.to_bits()).count();
             println!("{}", json!({"private_retained_rotary_metrics":{"patches":gh * gw,"elements":values.len(),"relative_rms":reference_rms,"cosine":reference_cosine,"mismatch_count":mismatches,"ordinary_mismatch_count":ordinary_mismatches}}));
+            rotary_source_metrics(context, &source, &expected, &values, case, gh * gw, gw);
         }
         if name == "attention" && record["stages"].is_object() {
             let n = input.shape()[0];

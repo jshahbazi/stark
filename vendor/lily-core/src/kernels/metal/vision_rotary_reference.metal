@@ -114,3 +114,51 @@ kernel void vision_qkv_rope_reference_bf16(device bfloat*       qkv   [[buffer(0
     qkv[base + col1] = bfloat(x1 * c + x0 * s);
 }
 
+kernel void vision_rotary_stages_reference(
+    device const float* source_angles [[buffer(0)]],
+    device float* stages [[buffer(1)]],
+    device float* inverse_frequencies [[buffer(2)]],
+    constant uint& N [[buffer(3)]],
+    constant uint& D [[buffer(4)]],
+    constant uint& gw [[buffer(5)]],
+    constant float& theta [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]]) {
+    const uint i = gid.x, row = gid.y;
+    const uint half_d = D / 2, quarter = half_d / 2;
+    if (i >= half_d || row >= N) return;
+    const uint2 rc = vision_grid_coords(row, gw);
+    const uint fi = i % quarter;
+    const float inverse = 1.0f / precise::pow(theta, float(2 * fi) / float(half_d));
+    const float position = float(i < quarter ? rc.x : rc.y);
+    const float angle = position * inverse;
+    const ulong plane = ulong(N) * half_d;
+    const ulong index = ulong(row) * half_d + i;
+    if (row == 0 && i < quarter) inverse_frequencies[i] = inverse;
+    stages[index] = angle;
+    stages[plane + index] = precise::cos(angle);
+    stages[2 * plane + index] = precise::sin(angle);
+    stages[3 * plane + index] = precise::cos(source_angles[index]);
+    stages[4 * plane + index] = precise::sin(source_angles[index]);
+}
+
+kernel void vision_rotary_apply_reference(
+    device bfloat* qkv [[buffer(0)]],
+    device const float* cosines [[buffer(1)]],
+    device const float* sines [[buffer(2)]],
+    constant uint& H [[buffer(3)]],
+    constant uint& D [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]) {
+    const uint j = gid.x, row = gid.y;
+    const uint half_h = H / 2, half_d = D / 2;
+    if (j >= H) return;
+    const uint which = j / half_h, within = j % half_h;
+    const uint head = within / half_d, i = within % half_d;
+    const ulong base = ulong(row) * 3 * H;
+    const uint col0 = which * H + head * D + i, col1 = col0 + half_d;
+    const float x0 = float(qkv[base + col0]), x1 = float(qkv[base + col1]);
+    const float c = cosines[ulong(row) * half_d + i];
+    const float s = sines[ulong(row) * half_d + i];
+    qkv[base + col0] = bfloat(x0 * c - x1 * s);
+    qkv[base + col1] = bfloat(x1 * c + x0 * s);
+}
+

@@ -73,6 +73,16 @@ def save(folder, name, value):
     }
 
 
+def save_f32(folder, name, value):
+    value = value.detach().cpu().contiguous()
+    assert value.dtype == torch.float32 and value.numel() <= 256 * 72
+    data = value.numpy().astype("<f4", copy=False).tobytes()
+    filename = name + ".f32"
+    (folder / filename).write_bytes(data)
+    return {"file": filename, "shape": list(value.shape),
+            "sha256": hashlib.sha256(data).hexdigest()}
+
+
 def operator_capture(tower, namespace, folder, record):
     """Observe unchanged source operators on their own inputs, without recoding them."""
     handles = []
@@ -264,6 +274,38 @@ def main(args):
     helper.selected_ast(
         args.helpers / "vision_utils.py", {"get_vision_attention_seqlens"}, ns
     )
+    if args.rotary_stages:
+        PHASE = "rotary_stages"
+        assert torch.version.git_version == "5c4886908584029761b579af026dcfb627c84070"
+        rotary = ns["Qwen4ExpVisionRotaryEmbedding"](config)
+        assert rotary.inv_freq.dtype == torch.float32
+        args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
+        record = {"kind": "RetainedLilyRotarySourceReference",
+                  "source_revision": SOURCE_REVISION, "source_sha256": SOURCE_SHA,
+                  "torch_git": torch.version.git_version,
+                  "artifact_sha256": ARTIFACT,
+                  "generator_sha256": digest(Path(__file__)),
+                  "inv_freq": save_f32(args.output, "inv_freq", rotary.inv_freq),
+                  "cases": []}
+        for name in ("square_256", "stress_32"):
+            case = json.loads((args.pixels / name / "metadata.json").read_bytes())
+            grid = torch.tensor([case["grid"]], dtype=torch.long)
+            positions = ns["get_vision_position_ids"](grid, 2, kwargs={})
+            angles = positions[..., None].float() * rotary.inv_freq.float()
+            cos, sin = rotary(torch.zeros(1, dtype=torch.bfloat16), positions)
+            folder = args.output / name
+            folder.mkdir(mode=0o700)
+            record["cases"].append({"name": name, "grid": case["grid"],
+                "angles": save_f32(folder, "angles", angles.reshape(-1, 36)),
+                "cos": save_f32(folder, "cos", cos),
+                "sin": save_f32(folder, "sin", sin)})
+        (args.output / "manifest.json").write_text(json.dumps(record, indent=2) + "\n")
+        total = sum(path.stat().st_size for path in args.output.rglob("*") if path.is_file())
+        assert total < 1024**2
+        print(json.dumps({"rotary_reference_complete": True,
+                          "reference_bytes": total,
+                          "manifest_sha256": digest(args.output / "manifest.json")}))
+        return
     PHASE = "construct_tower"
     with torch.device("meta"):
         tower = ns["Qwen4ExpVisionModel"](config)
@@ -429,6 +471,8 @@ if __name__ == "__main__":
                         help="save bounded full-depth source norm and residual states")
     parser.add_argument("--gelu-domain", action="store_true",
                         help="produce a model-free all-finite-BF16 GELU reference only")
+    parser.add_argument("--rotary-stages", action="store_true",
+                        help="produce bounded source F32 frequency/angle/cos/sin stages only")
     try:
         main(parser.parse_args())
     except BaseException as error:  # noqa: BLE001 - content-free private diagnostic
