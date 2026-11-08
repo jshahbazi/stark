@@ -80,12 +80,14 @@ Pinned schema-4 BF16 image profiles cover E2B, E4B, 12B unified, 26B-A4B and
 31B. Audio and video execution remain unsupported. E2B has a canonical HF CPU
 image-feature comparison within the 2% gate on three fixtures plus bounded
 worker and chat-client lifecycle checks; E4B has separate source and execution
-validation. The 12B embedder and 26B MoE paths have component checks, while the
-31B feature gate currently fails. Full 12B/26B/31B checkpoint generation is
+validation. The 12B embedder and 26B MoE paths have component checks. The pinned
+31B tower/projector passes all three unchanged canonical feature gates, with
+relative RMS at most 0.00110689. Full 12B/26B/31B checkpoint generation is
 unqualified. Installed desktop UI execution and image performance are
 unmeasured. Exact checkpoint evidence remains tied to its reference profile and
 engine build. See the
-[original E2B validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md).
+[original E2B validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md)
+and [31B vision component record](archive/runs/2026-11-07-gemma4-larger-vision-qualified-component.md).
 
 ## Browsing and removing models
 
