@@ -261,13 +261,13 @@ impl GenerationBackend for NativeBackend {
             NativeModel::Text(model) => model.automatic_context_length(input_tokens, maximum, memory_budget_bytes),
             // Vision uses its declared finite capacity and prepared image
             // accounting; this text-only planner does not model its encoder.
-            NativeModel::Vision(_) => None,
+            NativeModel::Vision(_) | NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => None,
         }
     }
     fn supports_automatic_context_planning(&self) -> bool {
         match &self.model {
             NativeModel::Text(model) => model.supports_automatic_context_planning(),
-            NativeModel::Vision(_) => false,
+            NativeModel::Vision(_) | NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => false,
         }
     }
     fn eos_token_ids(&self) -> &[u32] {
