@@ -344,6 +344,52 @@ exited successfully, and both workers were reaped before the next stage.
 Retained Lily was held for its separate final numerical correction and is
 not included in this release lifecycle replay.
 
+### Final retained Lily release replay
+
+After its [source-bound tower qualification](2026-11-07-retained-lily-vision-numerics.md),
+retained Lily passed a fresh actual-worker lifecycle replay on Rust 1.98.1
+source `3898d16d890b033301b1306a3e850035a4769c8a`, worker SHA256
+`ad208012a80edaa54027af971ef02f51546c59cfab6b693897f93a226d9b1ad2`.
+The vendored Lily tree is `25dfbb16004058500ea9b2cf8cb889408e17ddab`.
+All 68 sealed Python file hashes and the worker/helper hashes were verified;
+the worker hash was checked again afterward. The seal manifest SHA256 is
+`e1068cd48e7d4a4f417bbb4c4a6d7b336ba95e4061026fd8e2b0a071299eb2c7`.
+
+The admitted identity remained schema 6,
+`qwen38-lily-retained-bf16-vision-v1`, family version 1, artifact SHA256
+`18c7bcc1e97d1fefdd361472c2daa59d81d89fcd6f3a61983d995a032b44bfb4`.
+Readiness and automatic local checks passed. Both solid-color cases produced
+distinct correct outputs. Real streaming cancellation after a delta, private
+staging cleanup, image-to-text recovery and fresh-image recovery all passed;
+the worker remained healthy before normal shutdown. MTP was disabled, and
+image requests did not reuse retained text prefixes.
+
+The first attempt was explicitly stopped during payload verification when
+an unrelated worker appeared after admission. That attempt is recorded as
+deferred due to a resource-admission race, with model correctness unevaluated.
+Only its own worker and harness processes were stopped. Its private receipt
+SHA256 remains
+`2e4a1a89ff5245ae36cc1c7468d594fdddeb52c118ff9a1a9668cb85131432c9`.
+
+The separately authorized retry admitted 114,147,377,152 bytes available
+against the exact 86,215,737,056-byte static bound, with no competing native
+worker. During the small-RSS preload phase, the runner also checked that
+static bound and unrelated-worker absence every 250 ms. The 8-GiB available
+memory guard, 86,215,737,056-byte worker RSS cap and 900-second timeout remained
+active afterward. No guard fired. The higher of the inner/outer sampled peak
+RSS observations was 61,299,671,040 bytes; the outer runner observed at least
+30,880,858,112 bytes available. Startup plus local checks took 191.303 seconds,
+and the complete lifecycle wrapper took 194.333 seconds. These are functional
+observations with no performance claim.
+
+The successful private receipt SHA256 is
+`17d457e574c07a2ce80eea19cd04d9d582778ec7011a8805aefbcd84ee4be87c`.
+It is separate from the deferred attempt and every prior pass/failure. The
+runner and worker exited successfully, no native worker remained, and no new
+download, conversion or further replay was required. Full-BF16 MoE-v5
+checkpoint qualification remains resource-unverified; these dense/quantized
+and retained-model results do not extend that admission claim.
+
 ## Primary references
 
 - [Official Qwen3.8-27B configuration](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json):
