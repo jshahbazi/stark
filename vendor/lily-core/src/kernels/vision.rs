@@ -485,3 +485,33 @@ pub(crate) fn patch_pos_reference_bf16(
         Grid::Threads { grid: (1152, gh * gw, 1), threadgroup: (256, 1, 1) },
     )
 }
+
+#[cfg(test)]
+pub(crate) fn qkv_rope_reference_bf16(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    heads: usize,
+    gh: usize,
+    gw: usize,
+    theta: f32,
+) -> Result<()> {
+    ensure!(
+        qkv.shape() == [gh * gw, 3456]
+            && gh * gw <= 256
+            && heads == 16
+            && theta == 10000.0,
+        "private rotary reference bounds"
+    );
+    let pipeline = ctx.pipeline(
+        "vision_qkv_rope_reference_bf16",
+        include_str!("metal/vision_rotary_reference.metal"),
+        MslVersion::V4_0,
+    )?;
+    pass.dispatch_with(
+        &pipeline,
+        &[qkv.binding()],
+        &[Param::U32(1152), Param::U32(72), Param::U32(gw as u32), Param::F32(theta)],
+        Grid::Threads { grid: (1152, gh * gw, 1), threadgroup: (256, 1, 1) },
+    )
+}

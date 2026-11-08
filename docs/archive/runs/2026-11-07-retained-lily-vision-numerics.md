@@ -225,8 +225,8 @@ agreement with the ordinary graph.
 
 Test-only `bdb7158e` also compares the existing main engine's canonical
 Torch Welford/affine and GELU bodies on source operator inputs. These
-observations have no production norm or activation selector. No LayerNorm
-or GELU policy has been promoted pending the contraction-only tower result.
+observations had no production norm or activation selector at that checkpoint.
+LayerNorm and GELU selection awaited the contraction-only tower result.
 
 The contraction-only production replay at integrated source `42efacbf`, seal
 SHA256 `4c80351d09903d83702606b075adb591f5f1b99aabef41e11e7bfddd4bcfb016`,
@@ -254,6 +254,39 @@ Only the ignored unit reads `STARK_LILY_GELU_REFERENCE_PATH`; release code has
 no diagnostic selector. The domain control requires zero source-bit
 mismatches and zero nonfinite outputs for both forms. This source fixture
 does not itself qualify native execution.
+
+The combined norm/GELU replay at integrated source `42f328a2`, seal SHA256
+`ffb569c501c1d5b444db708c599801e7ec9b3b551ddfae268cf78539258f73e3`,
+passed all 14 production contraction and 10 production nonlinear source-bit
+checks. Both GELU domain controls had zero mismatches and zero nonfinite
+outputs across 65,280 values each. All trace/sequence observers matched
+ordinary execution exactly. Case 1 became bit exact at all three depths.
+Case 0 at 0/1/27 blocks remained 0.000602537 / 0.002470966 / 0.024297598
+relative RMS, so its full-depth gate still failed.
+
+Its first source-sequence discrepancy was position addition: patch output
+was exact, while position output relative RMS was 0.000056127348. A CPU
+source-input comparison ruled out complete elision of the intermediate BF16
+position blend: that policy produced 25,196 mismatches and 0.000950757 RMS.
+Sequential uncontracted F32 summation followed by the two BF16 boundaries
+matched both source cases exactly. A pairwise sum produced two mismatches
+in case 0, confirming that mathematically equivalent reduction order alone
+is not the source contract.
+
+Test-only safe/uncontracted position witness `08181b80` at integrated source
+`5067716c`, seal SHA256
+`eb5ef51859941a0a77982ad281636b508cd71ce8f29169108d7549375023161b`,
+was bit exact for both cases. The default path differed at 128 of 294,912
+case-0 elements, while case 1 was already exact. Its full-tower failure was
+retained because the witness was not selected by the production graph.
+
+Position candidate `fe905fc6` selects only that measured safe/uncontracted
+body for the 48-by-48, 1,152-wide table, with a unique pipeline-cache key.
+It preserves coordinates, tap ordering, BF16 blend/add boundaries and
+geometry. Other table geometries retain the previous policy. Grid products,
+the existing 8,192-patch budget and dtype/spans are checked. Independent
+source-input controls now require zero production position mismatches before
+the unchanged whole-tower gate is evaluated.
 
 Native candidate qualification is pending the root-owned build/replay at the
 time of this source checkpoint. Repository policy checks and `git diff
