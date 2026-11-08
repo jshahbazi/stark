@@ -454,7 +454,14 @@ def _planning_metadata(family, config, info, names, sizes, *, chat_template=None
         head_dim = _positive_int(hidden // heads)
 
     blockers = []
-    if family not in _PLANNING_DENSE_FAMILIES:
+    recurrent = None
+    if family == "qwen3_5":
+        from .guided_memory import qwen35_geometry
+
+        recurrent = qwen35_geometry(text)
+        if recurrent is not None:
+            layers = recurrent["attention_layers"]
+    if family not in _PLANNING_DENSE_FAMILIES and recurrent is None:
         blockers.append("runtime_layout_not_covered")
     if context is None:
         blockers.append("context_limit_unknown")
@@ -511,6 +518,7 @@ def _planning_metadata(family, config, info, names, sizes, *, chat_template=None
         "supports_tools": supports_tools,
         "tool_parser": tool_parser,
         "blockers": blockers,
+        **({"recurrent_memory": recurrent} if recurrent is not None else {}),
     }
 
 
@@ -683,6 +691,7 @@ def family_catalog(
 ):
     """Return candidate downloads; actual installation must repeat pinned preflight."""
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
+    from .native_catalog import FLINT_CHOICE, FLINT_FAMILY_ID
     from .native_catalog import catalog_item as native_catalog_item
     from .native_catalog import catalog_items as native_catalog_items
 
@@ -696,30 +705,31 @@ def family_catalog(
     if type(planning) is not bool or type(deadline_seconds) not in (int, float) or not 0 < deadline_seconds <= 600:
         return report(family_id or "", "error", "The model catalogue request is invalid.")
 
-    if family_id == NATIVE_FAMILY_ID:
+    if family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID}:
         if type(limit) is not int or not 1 <= limit <= MAX_ITEMS or offset != 0:
-            return report(NATIVE_FAMILY_ID, "error", "The model catalogue request is invalid.")
+            return report(family_id, "error", "The model catalogue request is invalid.")
         if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
-            return report(NATIVE_FAMILY_ID, "offline", "Connect to the internet to browse models.")
+            return report(family_id, "offline", "Connect to the internet to browse models.")
+        native_item = native_catalog_item(FLINT_CHOICE) if family_id == FLINT_FAMILY_ID else native_catalog_item()
         return report(
-            NATIVE_FAMILY_ID,
+            family_id,
             "ready",
             "Choose a model to download.",
             [
                 {
-                    **native_catalog_item(),
+                    **native_item,
                     **(
                         {
                             "planning": {
                                 "status": "unavailable",
-                                "architecture": NATIVE_FAMILY_ID,
+                                "architecture": family_id,
                                 "context_limit": None,
                                 "attention_layers": None,
                                 "query_heads": None,
                                 "kv_heads": None,
                                 "head_dim": None,
                                 "hidden_size": None,
-                                "download_bytes": native_catalog_item()["weight_bytes"],
+                                "download_bytes": native_item["weight_bytes"],
                                 "task_tags": [],
                                 "license": None,
                                 "chat_template_available": False,

@@ -26,9 +26,11 @@ const PREFIX_CACHE_KEY: &str = "model-instance+context-tokens+cache-scope+mtp-se
 fn admit_request_memory(
     request_bytes: Option<usize>,
     available: usize,
+    divisor: usize,
+    reserve: usize,
 ) -> Result<(), &'static str> {
     let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
-    if request_bytes > available.saturating_sub(256 * 1024 * 1024) / 4 {
+    if divisor == 0 || request_bytes > available.saturating_sub(reserve) / divisor {
         return Err("resource_budget_exceeded");
     }
     Ok(())
@@ -69,6 +71,7 @@ pub(crate) struct HybridBackend {
     /// The last successful request's snapshot, until its reply is written.
     pending_prefix: Option<BoundaryEntry<PrefixSnapshot>>,
     image_runtime_identity: Option<stark_engine::engine::MetalDeviceIdentity>,
+    guided_admission: Option<stark_engine::engine::hybrid::guided_admission::AdmissionPlan>,
 }
 
 pub(crate) struct HybridPreparedRequest {
@@ -329,6 +332,11 @@ impl HybridBackend {
             Model::load_with_native_decode(path, true)
         }
         .map_err(|_| "hybrid_model_load_failed")?;
+        let guided_admission = if images {
+            None
+        } else {
+            stark_engine::engine::hybrid::guided_admission::qualified_plan(path)
+        };
         let image_runtime_identity = if images {
             if !model.supports_images() {
                 return Err("images_not_supported");
@@ -359,6 +367,7 @@ impl HybridBackend {
             prefix_cache: None,
             pending_prefix: None,
             image_runtime_identity,
+            guided_admission,
         })
     }
 
@@ -673,7 +682,7 @@ impl GenerationBackend for HybridBackend {
         // Prepared image tokens contribute to the same growing text caches.
         // The separately bounded encoder is not an automatic-context planner.
         let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-        admit_request_memory(self.model.request_memory_bytes(end, input_tokens), available)?;
+        admit_request_memory(self.model.request_memory_bytes(end, input_tokens), available, 4, 256 * 1024 * 1024)?;
         self.clear_prefix_cache();
         self.last_mtp = None;
         self.nucleus_sampler.clear();
@@ -765,7 +774,11 @@ impl GenerationBackend for HybridBackend {
             return Err("context_overflow");
         }
         let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-        admit_request_memory(self.model.request_memory_bytes(end, input_tokens), available)?;
+        let plan = self.guided_admission.filter(|plan| plan.applies_to(options.context_tokens, options.mtp_drafts));
+        let (divisor, reserve) = plan.map_or((4, 256 * 1024 * 1024), |plan| {
+            (plan.request_headroom_divisor, plan.host_reserve_bytes.saturating_add(plan.paged_working_set_bytes))
+        });
+        admit_request_memory(self.model.request_memory_bytes(end, input_tokens), available, divisor, reserve)?;
         self.nucleus_sampler.clear();
         let reused = self.prefix_cache_plan(input, options);
         // A miss drops the snapshot; the next prefill overwrites the rows.
@@ -1174,10 +1187,31 @@ mod tests {
     #[test]
     fn memory_inventory_failures_are_recoverable_resource_errors() {
         let available = 1024 * 1024 * 1024;
-        assert_eq!(admit_request_memory(None, available), Err("resource_budget_exceeded"));
-        assert_eq!(admit_request_memory(Some(256 * 1024 * 1024), available), Err("resource_budget_exceeded"));
-        assert_eq!(admit_request_memory(Some(128 * 1024 * 1024), available), Ok(()));
-        assert_eq!(admit_request_memory(Some(1), 256 * 1024 * 1024), Err("resource_budget_exceeded"));
+        assert_eq!(admit_request_memory(None, available, 4, 256 * 1024 * 1024), Err("resource_budget_exceeded"));
+        assert_eq!(
+            admit_request_memory(Some(256 * 1024 * 1024), available, 4, 256 * 1024 * 1024),
+            Err("resource_budget_exceeded")
+        );
+        assert_eq!(admit_request_memory(Some(128 * 1024 * 1024), available, 4, 256 * 1024 * 1024), Ok(()));
+        assert_eq!(
+            admit_request_memory(Some(1), 256 * 1024 * 1024, 4, 256 * 1024 * 1024),
+            Err("resource_budget_exceeded")
+        );
+    }
+
+    #[test]
+    fn candidate_memory_threshold_is_narrower_only_when_qualified() {
+        let available = 10 * 1024 * 1024 * 1024;
+        let reserve = 9 * 1024 * 1024 * 1024;
+        assert_eq!(admit_request_memory(Some(1024 * 1024 * 1024), available, 1, reserve), Ok(()));
+        assert_eq!(
+            admit_request_memory(Some(1024 * 1024 * 1024 + 1), available, 1, reserve),
+            Err("resource_budget_exceeded")
+        );
+        assert_eq!(
+            admit_request_memory(Some(256 * 1024 * 1024 + 1), available, 4, reserve),
+            Err("resource_budget_exceeded")
+        );
     }
 
     struct ProfileDirectory(std::path::PathBuf);

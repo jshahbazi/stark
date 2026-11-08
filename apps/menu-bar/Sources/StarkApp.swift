@@ -1384,11 +1384,7 @@ final class EngineController: ObservableObject {
             }
         }
         output = outgoing.fileHandleForReading
-        output?.readabilityHandler = { [weak self] handle in
-            let bytes = handle.readData(ofLength: 65_536)
-            guard !bytes.isEmpty else { handle.readabilityHandler = nil; return }
-            self?.reader.async { [weak self] in self?.receive(bytes) }
-        }
+        observeBackendOutput(outgoing.fileHandleForReading)
         do {
             try child.run()
             process = child
@@ -1400,6 +1396,16 @@ final class EngineController: ObservableObject {
             state = "error"
             message = "Cannot start the bundled runtime. Reinstall Stark."
             attachmentStaging = nil
+        }
+    }
+
+    private func observeBackendOutput(_ handle: FileHandle) {
+        handle.readabilityHandler = { [weak self] handle in
+            // The backend keeps stdout open between JSONL events. A fixed-size
+            // read can wait for the rest of that size and starve short replies.
+            let bytes = handle.availableData
+            guard !bytes.isEmpty else { handle.readabilityHandler = nil; return }
+            self?.reader.async { [weak self] in self?.receive(bytes) }
         }
     }
 
@@ -2082,7 +2088,7 @@ final class EngineController: ObservableObject {
     }
 
     func requestBeginnerModels(task: String, excludingModelID: String? = nil, preference: String = "balanced") {
-        guard ["everyday", "text", "code", "unsure"].contains(task) else { return }
+        guard ["everyday", "text", "files", "code", "unsure"].contains(task) else { return }
         guard ["balanced", "speed", "answers"].contains(preference) else { return }
         let requestID = UUID().uuidString.lowercased()
         beginnerRequestID = requestID; beginnerChoicesLoading = true; beginnerChoicesError = nil

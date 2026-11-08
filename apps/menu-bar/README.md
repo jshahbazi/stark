@@ -254,6 +254,10 @@ recommended working-set budget, plus CPU count, physical and available memory,
 and free space in the library and download cache. GPU and system memory share
 the same physical memory; the algorithm never adds their budgets together.
 
+**Explain text** covers summaries, notes and explanations. **Work with files**
+is a separate task for reading or editing a folder through OpenWork, allowing
+the guide to apply its tool-use benchmark references to that choice.
+
 The guide checks a bounded window of candidates in each supported catalog
 family using metadata only. Every candidate retains its exact source revision
 and quantization. A new catalog choice needs complete dense attention geometry,
@@ -263,28 +267,77 @@ handles recognized architecture/configuration and weight layouts; chat requires
 a template Stark can load and render; tool calling additionally requires a
 reviewed template wire format with a matching parser. Tool capability comes from
 the loaded artifact's template/parser check. Converting a model does not add a
-parser or enable tools. Candidates with unknown memory layouts,
-including recurrent/hybrid and native expert routes without a guide planner,
-remain available through Advanced. Catalog compatibility describes metadata
+parser or enable tools. The official Qwen2.5-Coder base checkpoints are excluded
+from Guided Setup: their tokenizers include chat templates, but their
+[source cards](https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B) identify pretrained completion models and advise against conversation
+without post-training. Their Instruct variants remain eligible. This exclusion
+does not establish instruction tuning or task competence for every other source.
+The catalog planner covers dense attention and Qwen3.5-family DeltaNet layouts,
+including their recurrent state and declared MTP head. Fixed native profiles
+cover Flint INT4, GLM Flash UD-Q2_K_XL and the three supported Qwen Flash Next
+exports. They retain separate source, quantization, template and preparation
+bindings. Other layouts remain available through Advanced. Catalog compatibility describes metadata
 support; it does not inherit another model's native qualification.
 
-The memory plan includes weights, both full-context BF16 KV buffers, attention
-score scratch and a workspace allowance. It must leave 2 GiB of physical
+Dense memory plans include weights, both full-context BF16 KV buffers, attention
+score scratch and a workspace allowance. DeltaNet also includes F32 recurrent,
+convolution, prefix-snapshot and MTP verification allowances. Native profiles
+use their backend's request inventory and a loading/workspace allowance. All
+plans must leave 2 GiB of physical
 memory and use no more than 85% of Metal's recommended working-set budget.
-New downloads also need 2 GiB currently available memory and enough space for
-source and converted copies plus setup reserves. Starting rechecks available
+For the pinned Lily and MLX-Serve text preparations, the system plan
+uses nonpaged payload, the full request inventory, 1 GiB active paging and an
+8 GiB host reserve: 87 GiB for Lily and 88 GiB for Serve at 32K context. Other artifacts retain full-payload
+accounting. The recipe-bound estimate applies before download on a fresh Mac;
+installed copies additionally require exact artifact validation. A changed
+local copy falls back to conservative accounting in both recommendations and
+startup. The GPU estimate includes row staging rather than the entire
+n-gram table. Full accounting and its bounds are documented in
+[recommendation evidence](../../docs/MODEL_RECOMMENDATIONS.md). GLM and the
+original mixed export use conservative full-weight GPU estimates, which can
+exclude them from the guide on a 128 GiB Mac despite their Advanced load path.
+Recommendations and startup share the current available-memory check; new
+downloads additionally need enough space for
+source and converted copies plus setup reserves. Native preparation downloads
+into the library volume and publishes by rename, so it needs one weight copy
+plus metadata and the preparation helper's 4 GiB reserve. It does not require a
+second weight-sized copy in the Hugging Face cache. Starting rechecks available
 memory after releasing the previous worker. A running model's memory is never
 assumed to be reclaimable during recommendations.
 
 Ranking first prefers comfortable memory headroom, then explicit source task
-tags when available. **Balanced** uses parameter capacity divided by squared
-estimated runtime memory; **Lighter model** prefers lower weight traffic; and
+tags when available. **Balanced** scales its memory penalty to this Mac: its
+target is half the smaller of physical memory minus 2 GiB and 85% of Metal's
+budget. It ranks parameter capacity divided by
+`1 + (estimated runtime memory / target)^2`, so unused memory on a larger Mac
+reduces the penalty on larger candidates. **Lighter model** prefers lower weight
+traffic; and
 **More model capacity** prefers higher parameter counts. These are documented
-heuristics, with no measured tokens-per-second or answer-quality score. Unknown
+fallback heuristics, with no measured tokens-per-second or Stark artifact quality score. Unknown
 parameter counts receive no capacity credit. Installed copies break otherwise
 equal ties. The guide offers up to three choices and explains each choice's
 resource fit and evidence. CPU count and GPU name describe the machine; core
 count alone does not establish inference speed.
+
+Native parameter counts are source-card architecture metadata, not packed
+tensor slot counts. MoE total parameter count does not describe active compute,
+memory fit or task quality. Balanced also compares published task references:
+LiveCodeBench for coding, BFCL for file/tool tasks, and IFEval for instruction
+following in text/everyday/unsure. For Coding + Balanced, models covered by one
+selected coding cohort come first after hard resource admission, ordered by
+score; models without that comparable evidence follow in fallback order. One
+eligible scored parent is enough, so an unscored model cannot retain first
+place through the memory heuristic. Missing scores remain unknown. Other
+tasks reorder scored slots within each memory-headroom tier and preserve
+unknown positions. Lighter model and More model capacity preserve their explicit
+resource priorities. Beginner details show estimated memory, a short benchmark
+score with a published-model caveat, and a link to the evaluated model's Hugging Face page. Technical provenance,
+revisions, harness settings and validation notes remain in backend reports and
+evidence records. Existing models show no new setup-space requirement.
+Public parent scores do not qualify Stark exports.
+The [recommendation evidence policy](../../docs/MODEL_RECOMMENDATIONS.md) describes
+the imported coverage, exact comparison policy and future artifact evaluation
+requirements. MaxxBench remains deferred until model-specific runs exist.
 
 Discovery runs separately from generation, with three concurrent family lookups
 and a 65-second overall process limit. Successful nonempty catalog scans are

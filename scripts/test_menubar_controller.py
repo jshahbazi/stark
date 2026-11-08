@@ -213,6 +213,29 @@ extension EngineController {
         }
         let apiFirst = String(repeating: "a", count: 32), apiSecond = String(repeating: "b", count: 32)
         switch scenario {
+        case "backend-short-replies":
+            let backend = Pipe()
+            engine.observeBackendOutput(backend.fileHandleForReading)
+            defer {
+                backend.fileHandleForReading.readabilityHandler = nil
+                try? backend.fileHandleForWriting.close()
+                try? backend.fileHandleForReading.close()
+            }
+            engine.state = "starting"
+            for message in ["Fixture backend ready", "Fixture next reply"] {
+                let event = ["event": "status", "state": "idle", "message": message]
+                var bytes = try! JSONSerialization.data(withJSONObject: event)
+                bytes.append(10)
+                backend.fileHandleForWriting.write(bytes)
+                // The writer deliberately remains open, as in the real app.
+                guard pump({ engine.state == "idle" && engine.message == message }) else { return false }
+            }
+            return true
+        case "beginner-files-task-transport":
+            engine.requestBeginnerModels(task: "files")
+            let request = command()
+            return engine.beginnerChoicesLoading && request["command"] as? String == "guided_models"
+                && request["task"] as? String == "files"
         case "beginner-recommendation-fences":
             engine.requestBeginnerModels(task: "unsure")
             let request = command()
@@ -901,7 +924,7 @@ extension EngineController {
             raw["families"] = Array(families.reversed())
             guard let registry = ModelFamilyRegistry(raw),
                   let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
-            return rows.map(\.name) == ["Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
+            return rows.map(\.name) == ["Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
                 "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
@@ -2328,6 +2351,9 @@ exit(EngineController.exercise(scenario, backendError: backendError) ? 0 : 1)
     "Apple silicon macOS required",
 )
 class ControllerLifecycleTests(unittest.TestCase):
+    def test_small_backend_replies_do_not_wait_for_pipe_close(self):
+        self.exercise("backend-short-replies")
+
     def test_connected_application_activity_does_not_show_playground_timing(self):
         self.exercise("generation-progress-external-activity")
 
@@ -2389,6 +2415,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_beginner_recommendations_reject_stale_or_invalid_reports(self):
         self.exercise("beginner-recommendation-fences")
+
+    def test_beginner_files_task_reaches_guided_model_backend(self):
+        self.exercise("beginner-files-task-transport")
 
     def test_beginner_cancellation_preserves_the_current_worker_and_history(self):
         self.exercise("beginner-cancel-preserves-current")

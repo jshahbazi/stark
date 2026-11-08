@@ -7,6 +7,7 @@ pub mod activity;
 pub mod finite_guard;
 pub mod flint;
 pub mod glm;
+pub mod guided_admission;
 mod image;
 pub use image::PreparedHybridImage;
 #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]

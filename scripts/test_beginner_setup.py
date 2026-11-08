@@ -17,6 +17,32 @@ ROOT = Path(__file__).resolve().parent.parent
 
 VIEW_CHECK = r"""
 extension BeginnerSetupView {
+    @MainActor static func checkInstalledSpacePresentation() -> Bool {
+        let session = BeginnerSetupSession()
+        let existing = BeginnerModelChoice(id: "existing", name: "Existing", summary: "Fixture",
+                                          setupBytes: 111_000_000_000, installedModelID: "installed-a")
+        let fresh = BeginnerModelChoice(id: "fresh", name: "Fresh", summary: "Fixture", setupBytes: 10_000_000_000)
+        var snapshot = BeginnerSetupSnapshot()
+        snapshot.choices = [existing, fresh]
+        let view = BeginnerSetupView(session: session, snapshot: snapshot, actions: BeginnerSetupActions())
+        return view.setupSpaceDescription(existing) == nil
+            && view.setupSpaceDescription(fresh)?.hasPrefix("Free space needed:") == true
+    }
+
+    @MainActor static func checkFilesTaskSelection() -> Bool {
+        let session = BeginnerSetupSession()
+        session.task = .files
+        var received: [(BeginnerTask, String?, String)] = []
+        var actions = BeginnerSetupActions()
+        actions.refreshChoices = { received.append(($0, $1, $2)) }
+        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+        guard BeginnerTask.allCases.contains(.files), BeginnerTask.files.rawValue == "files",
+              BeginnerTask.files.title == "Work with files",
+              BeginnerTask.files.detail == "Read or edit a folder in OpenWork" else { return false }
+        view.requestChoices()
+        return received.count == 1 && received[0].0 == .files && received[0].0.rawValue == "files"
+    }
+
     @MainActor static func checkRecommendationPreferences() -> Bool {
         let session = BeginnerSetupSession()
         session.task = .code
@@ -324,10 +350,93 @@ struct BeginnerChecks {
             preferences.select(.beginner)
             preferences.resolveInitialMode(hasInstalledModels: true)
             return preferences.mode == .beginner
+        case "files-task-selection": return BeginnerSetupView.checkFilesTaskSelection()
         case "start-reuses-current": return BeginnerSetupView.checkStartPolicy(restart: false)
         case "recommendation-preferences": return BeginnerSetupView.checkRecommendationPreferences()
         case "start-applies-restart-policy": return BeginnerSetupView.checkStartPolicy(restart: true)
         case "start-rejection-does-not-wait": return BeginnerSetupView.checkStartPolicy(restart: true, accepted: false)
+        case "memory-report":
+            var raw: [String: Any] = [
+                "id": "fixture", "name": "Fixture", "repo": "example/model",
+                "revision": String(repeating: "a", count: 40), "artifact_mode": "text", "quantization": "4-bit",
+                "download_bytes": 80, "installed_bytes_estimate": 90, "setup_disk_bytes_estimate": 100,
+                "runtime_memory_bytes_estimate": 100, "context_tokens": 512, "installed_ids": [String](),
+                "license": "test", "qualification": "Synthetic fixture", "caveats": [String]()
+            ]
+            guard let legacy = BeginnerModelReport.Item(raw), legacy.gpuRuntimeBytes == 100,
+                  legacy.memoryDetails.count == 1, legacy.benchmarkDetails.isEmpty else { return false }
+            raw["benchmark_details"] = ["Published upstream reference: 42/100"]
+            guard BeginnerModelReport.Item(raw)?.benchmarkDetails.count == 1 else { return false }
+            for invalid in [true, [1], Array(repeating: "reference", count: 17),
+                            [String(repeating: "x", count: 2_001)]] as [Any] {
+                raw["benchmark_details"] = invalid
+                if BeginnerModelReport.Item(raw) != nil { return false }
+            }
+            raw.removeValue(forKey: "benchmark_details")
+            raw["gpu_memory_bytes_estimate"] = 50
+            guard let paged = BeginnerModelReport.Item(raw), paged.gpuRuntimeBytes == 50,
+                  paged.memoryDetails.count == 3 else { return false }
+            raw["setup_disk_bytes_remaining_estimate"] = 20
+            guard BeginnerModelReport.Item(raw)?.setupBytes == 20 else { return false }
+            raw["setup_disk_bytes_remaining_estimate"] = 101
+            guard BeginnerModelReport.Item(raw) == nil else { return false }
+            raw.removeValue(forKey: "setup_disk_bytes_remaining_estimate")
+            for invalid in [0, -1, 101, true, 1.5, "50"] as [Any] {
+                raw["gpu_memory_bytes_estimate"] = invalid
+                if BeginnerModelReport.Item(raw) != nil { return false }
+            }
+            return true
+        case "beginner-presentation":
+            let benchmark: [String: Any] = [
+                "benchmark": "livecodebench", "score": "91.9", "used_for_ranking": true,
+                "model_id": "Qwen/Qwen3.8-Flash-Next",
+                "evidence_kind": "upstream_reference", "settings": "TECHNICAL_HARNESS_SETTINGS",
+                "source": ["url": "https://example.com/published-score"]
+            ]
+            let raw: [String: Any] = [
+                "id": "fixture", "name": "Fixture", "repo": "example/model",
+                "revision": String(repeating: "a", count: 40), "artifact_mode": "text", "quantization": "4-bit",
+                "download_bytes": 80, "installed_bytes_estimate": 90, "setup_disk_bytes_estimate": 100,
+                "runtime_memory_bytes_estimate": 111 * 1_073_741_824,
+                "gpu_memory_bytes_estimate": 82 * 1_073_741_824,
+                "context_tokens": 32768, "installed_ids": ["installed-a"], "license": "other",
+                "qualification": "TECHNICAL_NATIVE_QUALIFICATION", "caveats": ["TECHNICAL_VALIDATION_CAVEAT"],
+                "benchmark_details": ["TECHNICAL_BENCHMARK_DETAILS"],
+                "recommendation_reason": "TECHNICAL_CAPACITY_FORMULA", "benchmarks": [benchmark]
+            ]
+            guard let item = BeginnerModelReport.Item(raw), let reference = item.benchmarkReference,
+                  reference.name == "LiveCodeBench", reference.usedForRanking,
+                  reference.sourceURL?.absoluteString == "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+                  item.beginnerDetails.split(separator: "\n").count == 3,
+                  item.beginnerDetails.contains("111"), item.beginnerDetails.contains("LiveCodeBench:"),
+                  item.beginnerDetails.contains("Published model score"),
+                  !item.beginnerDetails.contains("TECHNICAL_"), !item.beginnerDetails.contains("https://"),
+                  !item.beginnerDetails.contains("License:"), !item.beginnerDetails.contains("Revision:"),
+                  item.beginnerSummary(availableMemoryBytes: nil).contains("Recommended for coding"),
+                  !item.beginnerSummary(availableMemoryBytes: nil).contains("TECHNICAL_"),
+                  item.beginnerSummary(availableMemoryBytes: 1).contains("Free up memory") else { return false }
+            var unscored = raw; unscored.removeValue(forKey: "benchmarks")
+            guard let fallback = BeginnerModelReport.Item(unscored), fallback.benchmarkReference == nil,
+                  fallback.beginnerDetails.split(separator: "\n").count == 1,
+                  fallback.beginnerSummary(availableMemoryBytes: nil).contains("No benchmark result is recorded") else { return false }
+            var unranked = benchmark; unranked["used_for_ranking"] = false
+            var unrankedRaw = raw; unrankedRaw["benchmarks"] = [unranked]
+            guard let unrankedItem = BeginnerModelReport.Item(unrankedRaw),
+                  !unrankedItem.beginnerSummary(availableMemoryBytes: nil).contains("Recommended for coding"),
+                  unrankedItem.beginnerDetails.contains("Reference only") else { return false }
+            for score in ["NaN", "Infinity", "-1", "101", "garbage"] {
+                var invalid = benchmark; invalid["score"] = score
+                if BeginnerModelReport.BenchmarkReference(invalid) != nil { return false }
+            }
+            var arbitrarySource = benchmark; arbitrarySource["source"] = ["url": "file:///private/fixture"]
+            guard BeginnerModelReport.BenchmarkReference(arbitrarySource)?.sourceURL?.absoluteString
+                    == "https://huggingface.co/Qwen/Qwen3.8-Flash-Next" else { return false }
+            for model in ["Qwen", "../model", "Qwen/../file", "Qwen/model?redirect=x", "https://example.com/model", "Qwen/model\n"] {
+                var invalid = benchmark; invalid["model_id"] = model
+                guard let reference = BeginnerModelReport.BenchmarkReference(invalid), reference.sourceURL == nil else { return false }
+            }
+            return true
+        case "installed-space-presentation": return BeginnerSetupView.checkInstalledSpacePresentation()
         default: return false
         }
     }
@@ -360,6 +469,7 @@ class BeginnerSetupTests(unittest.TestCase):
                 "-target",
                 "arm64-apple-macosx26.4",
                 str(sources / "BeginnerSetupState.swift"),
+                str(sources / "BeginnerModelReport.swift"),
                 str(sources / "StarkInterfacePreferences.swift"),
                 str(view),
                 str(driver),
@@ -391,6 +501,9 @@ class BeginnerSetupTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.run_check(scenario)
 
+    def test_memory_report_preserves_legacy_and_bounds_gpu_estimates(self):
+        self.run_check("memory-report")
+
     def test_sidebar_navigation_preserves_choices_and_enforces_prerequisites(self):
         self.run_check("navigation-policy")
 
@@ -404,6 +517,15 @@ class BeginnerSetupTests(unittest.TestCase):
 
     def test_model_priority_and_retry_preference_reach_recommendations(self):
         self.run_check("recommendation-preferences")
+
+    def test_files_task_is_visible_and_reaches_recommendation_action(self):
+        self.run_check("files-task-selection")
+
+    def test_beginner_display_keeps_short_benchmark_evidence_and_omits_technical_metadata(self):
+        self.run_check("beginner-presentation")
+
+    def test_installed_models_do_not_display_new_setup_space_requirements(self):
+        self.run_check("installed-space-presentation")
 
     def test_failed_start_can_be_retried(self):
         for scenario in ["failed-start-can-retry", "failed-switch-can-choose-again"]:

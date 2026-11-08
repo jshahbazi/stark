@@ -58,7 +58,7 @@ def test_pinned_12b_metadata_preflight_uses_its_own_processor_bytes(tmp_path, mo
 def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification():
     matrix = support_matrix()
     assert matrix["schema_version"] == 1 and matrix["modes"] == list(model_support.MODES)
-    assert len(matrix["families"]) == len(model_support.CONFIG_ADAPTERS) + 1
+    assert len(matrix["families"]) == len(model_support.CONFIG_ADAPTERS) + 2
     assert len(json.dumps(matrix).encode()) < 65536
     assert matrix["qualification"] == {
         "status": "not_assessed",
@@ -359,7 +359,7 @@ def test_resolver_rejects_changed_explicit_immutable_revision_before_metadata(tm
 def test_cli_family_listing_and_local_preflight_need_no_output(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["stark-convert", "--list-families"])
     assert cli.main() == 0
-    assert len(json.loads(capsys.readouterr().out)["families"]) == len(model_support.CONFIG_ADAPTERS) + 1
+    assert len(json.loads(capsys.readouterr().out)["families"]) == len(model_support.CONFIG_ADAPTERS) + 2
     root = files(tmp_path / "source")
     monkeypatch.setattr(
         "sys.argv", ["stark-convert", str(root), "--preflight", "--offline", "--support-mode", "decision"]
