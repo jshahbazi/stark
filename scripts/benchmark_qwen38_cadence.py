@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import time
 from pathlib import Path
@@ -15,11 +16,16 @@ from benchmark_hybrid import hardware_identity
 from benchmark_hybrid_context import execution_profile
 from benchmark_qwen38_pilot import clean_environment, weight_guard
 from stark_convert.chat import ChatError, Worker
+from qwen38_clock_metrics import ClockSampler, summarize as summarize_clocks
+from qwen38_process_metrics import snapshot as process_snapshot, delta as process_delta
+from hybrid_host_metrics import HostMetricsSampler
 
 
 def run(args):
     if args.output.exists():
         raise ValueError("output_exists")
+    if args.native_profile_output is not None and args.native_profile_output.exists():
+        raise ValueError("profile_output_exists")
     if not 2 <= args.cycles <= 8 or not 2 <= args.consecutive <= 8 or not 1 <= args.rest_seconds <= 30:
         raise ValueError("invalid_cadence")
     args.input_tokens, args.tokens, args.blocks = 512, 256, 4
@@ -29,7 +35,7 @@ def run(args):
     weights_before = weight_guard(args.model, args.weights_receipt)
     worker_hash = mtp.sha256_file(args.worker)
     report = {
-        "schema": "stark-flashnext-cadence-v1",
+        "schema": "stark-flashnext-cadence-v4",
         "harness_sha256": mtp.sha256_file(Path(__file__)),
         "paired_harness_sha256": mtp.sha256_file(Path(mtp.__file__)),
         "worker_sha256": worker_hash,
@@ -48,12 +54,28 @@ def run(args):
         "rest_seconds_before_each_cycle": args.rest_seconds,
         "policy": "Fixed rest before each group; subsequent requests retain the ordinary 0.6s host-screen interval. No quiet admission or selective removal. Same loaded worker, input, seed and MTP route throughout.",
         "requests": [],
+        "clock_sampler_requested": args.clock_sampler is not None,
+        "clock_helper_sha256": mtp.sha256_file(Path(__file__).with_name("qwen38_clock_metrics.py")),
+        "process_metrics_requested": args.process_metrics,
+        "process_helper_sha256": mtp.sha256_file(Path(__file__).with_name("qwen38_process_metrics.py")),
+        "native_aggregate_profiling": args.native_profile_output is not None,
+        "idle_keepalive_ms": getattr(args, "idle_keepalive_ms", 0),
+        "alternate_idle_keepalive": getattr(args, "alternate_idle_keepalive", False),
+        "idle_intervals": [],
     }
     report.update(mtp.checkpoint_metadata(args))
     with clean_environment():
         report["execution_profile"] = execution_profile(screened=True)
-        worker = Worker(args.worker.resolve(), args.model.resolve(), 3600)
+        try:
+            if args.native_profile_output is not None:
+                args.native_profile_output.parent.mkdir(parents=True, exist_ok=True)
+                os.environ["STARK_NATIVE_PROFILE_OUTPUT"] = str(args.native_profile_output.resolve())
+            worker = Worker(args.worker.resolve(), args.model.resolve(), 3600)
+        finally:
+            os.environ.pop("STARK_NATIVE_PROFILE_OUTPUT", None)
         monitor = None
+        clocks = None
+        attribution = None
         try:
             ready = worker.read()
             if ready.get("ready") is not True or ready.get("mode") != "text-generation-v1":
@@ -67,6 +89,11 @@ def run(args):
             report["input_sha256"] = mtp.ids_sha256(ids)
             monitor = Monitor()
             monitor.__enter__()
+            if args.clock_sampler is not None:
+                clocks = ClockSampler(args.clock_sampler, args.clock_interval_ms).start()
+            if args.process_metrics:
+                attribution = HostMetricsSampler(worker.process.pid)
+                attribution.__enter__()
             counter = 0
 
             def request(route):
@@ -75,6 +102,9 @@ def run(args):
                 phase = f"cadence_request_{counter}"
                 monitor.set_phase(phase)
                 before = paging()
+                process_before = process_snapshot(worker.process.pid) if args.process_metrics else None
+                marker = attribution.begin_request() if attribution is not None else None
+                started_unix = time.time()
                 started = time.monotonic()
                 result = worker.request({
                     "operation": "generate", "input_token_ids": ids,
@@ -84,20 +114,58 @@ def run(args):
                     "request_id": counter,
                 })
                 elapsed = time.monotonic() - started
+                finished_unix = time.time()
+                process_after = process_snapshot(worker.process.pid) if args.process_metrics else None
+                if attribution is not None:
+                    attribution.end_request(marker)
                 item = mtp._validate_result(result, ready, args, route, args.drafts, ready["vocab_size"])
                 item["wall_seconds"] = elapsed
+                item["started_unix_seconds"] = started_unix
+                item["finished_unix_seconds"] = finished_unix
                 item["host_screen"] = screen_attempt(monitor, phase, before, paging())
+                if args.process_metrics:
+                    item["process_metrics"] = process_delta(process_before, process_after)
+                    item["host_attribution"] = attribution.request_result(marker)
+                if clocks is not None:
+                    samples = clocks.snapshot()
+                    item["clock_full_request"] = summarize_clocks(samples, started_unix, finished_unix)
+                    item["clock_approximate_decode"] = summarize_clocks(samples, started_unix + item["prefill_seconds"], finished_unix)
                 return item
 
             report["warmups"] = [request("off"), request("on")]
             for cycle in range(args.cycles):
                 monitor.set_phase("fixed_rest")
-                time.sleep(args.rest_seconds)
+                keepalive = bool(getattr(args, "idle_keepalive_ms", 0))
+                if getattr(args, "alternate_idle_keepalive", False):
+                    keepalive = keepalive and [False, True, True, False][cycle % 4]
+                idle_start = time.time()
+                idle_process_before = process_snapshot(worker.process.pid) if args.process_metrics else None
+                deadline = time.monotonic() + args.rest_seconds
+                wake_times = []
+                if keepalive:
+                    while time.monotonic() < deadline:
+                        wake = worker.request({"operation": "diagnostic_gpu_wake"})
+                        if wake.get("gpu_wake") is not True or not isinstance(wake.get("wake_seconds"), (int, float)):
+                            raise ValueError("diagnostic_gpu_wake_failed")
+                        wake_times.append(wake["wake_seconds"])
+                        time.sleep(min(args.idle_keepalive_ms / 1000, max(0, deadline - time.monotonic())))
+                else:
+                    time.sleep(args.rest_seconds)
+                idle_end = time.time()
+                idle_process_after = process_snapshot(worker.process.pid) if args.process_metrics else None
+                idle = {"cycle": cycle, "keepalive": keepalive, "elapsed_seconds": idle_end-idle_start,
+                        "wake_calls": len(wake_times), "wake_seconds_total": sum(wake_times),
+                        "wake_seconds_max": max(wake_times, default=None)}
+                if args.process_metrics:
+                    idle["process_metrics"] = process_delta(idle_process_before, idle_process_after)
+                if clocks is not None:
+                    idle["clocks"] = summarize_clocks(clocks.snapshot(), idle_start, idle_end)
+                report["idle_intervals"].append(idle)
                 for position in range(args.consecutive):
                     item = request("on")
-                    item.update(cycle=cycle, position_after_rest=position)
+                    item.update(cycle=cycle, position_after_rest=position, idle_keepalive=keepalive)
                     report["requests"].append(item)
-                    print(json.dumps({"cycle": cycle, "position": position, "decode_tok_s": 255 / item["decode_seconds"]}), flush=True)
+                    print(json.dumps({"cycle": cycle, "position": position, "decode_tok_s": 255 / item["decode_seconds"], "decode_clocks": item.get("clock_approximate_decode")}), flush=True)
             report["by_position"] = []
             for position in range(args.consecutive):
                 items = [r for r in report["requests"] if r["position_after_rest"] == position]
@@ -115,12 +183,22 @@ def run(args):
             report["passed"] = len(hashes) == 1 and all(report[k] for k in ("artifact_unchanged", "worker_unchanged", "execution_profile_unchanged"))
             report["timing_eligible"] = False
             report["all_host_screens_eligible"] = all(r["host_screen"]["eligible"] for r in report["requests"])
+            if clocks is not None:
+                clocks.close()
+                report["clock_capture"] = clocks.report()
+                report["clock_capture_valid"] = report["clock_capture"]["failures"] == 0 and all(r["clock_approximate_decode"]["fully_contained_intervals"] > 0 for r in report["requests"])
+            if attribution is not None:
+                report["host_attribution_sampler"] = attribution.summary()
             mtp._atomic_report(args.output, report)
             return report
         finally:
             worker.close()
             if monitor is not None:
                 monitor.__exit__(None, None, None)
+            if clocks is not None:
+                clocks.close()
+            if attribution is not None:
+                attribution.__exit__(None, None, None)
 
 
 def main():
@@ -130,6 +208,13 @@ def main():
     parser.add_argument("--cycles", type=int, default=4)
     parser.add_argument("--consecutive", type=int, default=4)
     parser.add_argument("--rest-seconds", type=float, default=10)
+    parser.add_argument("--clock-sampler", type=Path)
+    parser.add_argument("--clock-interval-ms", type=int, choices=(250, 500, 1000), default=500)
+    parser.add_argument("--process-metrics", action="store_true")
+    parser.add_argument("--native-profile-output", type=Path)
+    parser.add_argument("--idle-keepalive-ms", type=int, choices=(0, 250, 500, 1000), default=0,
+                        help="Private diagnostic worker only: signal its GPU queue during the pause.")
+    parser.add_argument("--alternate-idle-keepalive", action="store_true")
     args = parser.parse_args()
     try:
         report = run(args)
@@ -137,7 +222,7 @@ def main():
         print(json.dumps({"passed": False, "stage": "cadence_probe_failed"}))
         return 1
     print(json.dumps({"passed": report["passed"], "by_position": report["by_position"]}))
-    return 0 if report["passed"] else 1
+    return 0 if report["passed"] and report.get("clock_capture_valid", True) else 1
 
 
 if __name__ == "__main__":

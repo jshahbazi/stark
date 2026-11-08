@@ -17,7 +17,7 @@ use stark_lily_core::{
         attention::{KvFormat, MAX_SEQ},
         sample::SamplingParams,
     },
-    metal::{EncodedPass, MetalContext, PendingPass, stage_profile},
+    metal::{EncodedPass, MetalContext, PendingPass, gpu_busy_ns, stage_profile},
     qwen4exp::{
         DecodeState, HostVerification, NgramStorage, Qwen4ExpModel, Scratch, config::Qwen4ExpConfig, model::Snapshot,
     },
@@ -145,6 +145,24 @@ fn record_gpu_profile_for(mtp_verify: bool) {
                 seconds,
                 0,
             );
+        }
+    }
+}
+
+/// Capture Lily's process-local union of completed GPU command spans only for
+/// an opted-in profile. The caller records the delta after its phase completes.
+fn gpu_busy_snapshot() -> Option<u64> {
+    profile::enabled().then(gpu_busy_ns)
+}
+
+fn record_gpu_busy_delta(
+    name: &'static str,
+    before: Option<u64>,
+) {
+    if let Some(before) = before {
+        let after = gpu_busy_ns();
+        if after >= before {
+            profile::record(name, (after - before) as f64 * 1e-9, 0);
         }
     }
 }
@@ -832,6 +850,7 @@ impl LilyModel {
         end: usize,
         draw: Option<Draw<'_>>,
     ) -> Result<()> {
+        let gpu_busy_before = gpu_busy_snapshot();
         let chunk = self.prefill_chunk_tokens();
         let split = self.capture_at.and_then(|position| position.checked_sub(self.state.pos)).filter(|&split| {
             (split < end || (split == end && draw.is_none()))
@@ -841,23 +860,29 @@ impl LilyModel {
         });
         let failed = |_| Error::Invalid("mixed precision prefill failed");
         let Some(split) = split else {
-            return self
+            let result = self
                 .model
                 .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..end], draw)
                 .map_err(failed);
+            record_gpu_busy_delta("qwen.mixed.prefill.gpu_busy", gpu_busy_before);
+            return result;
         };
-        if split > 0 {
-            self.model
-                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..split], None)
-                .map_err(failed)?;
-        }
-        self.capture_prefix()?;
-        if split < end {
-            self.model
-                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[split..end], draw)
-                .map_err(failed)?;
-        }
-        Ok(())
+        let result = (|| -> Result<()> {
+            if split > 0 {
+                self.model
+                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..split], None)
+                    .map_err(failed)?;
+            }
+            self.capture_prefix()?;
+            if split < end {
+                self.model
+                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[split..end], draw)
+                    .map_err(failed)?;
+            }
+            Ok(())
+        })();
+        record_gpu_busy_delta("qwen.mixed.prefill.gpu_busy", gpu_busy_before);
+        result
     }
 
     /// Copies the recurrent state at the current position. The GPU is idle
@@ -952,43 +977,45 @@ impl MtpDecode<'_> {
         let count = self.drafts.min(self.remaining.saturating_sub(1));
         *self.usable = false;
         let started = Instant::now();
-        let proposals = if count > 0 {
+        let gpu_busy_before = gpu_busy_snapshot();
+        let proposals_result = if count > 0 {
             let sampler = &mut *self.sampler;
             self.model
                 .draft_host(self.context, self.state, self.scratch, self.pending, count, &mut |logits| {
                     sampler.draft(logits).map_err(|_| std::io::Error::other("MTP draft selection failed").into())
                 })
-                .map_err(|_| Error::Invalid("MTP draft failed"))?
+                .map_err(|_| Error::Invalid("MTP draft failed"))
         } else {
-            Vec::new()
+            Ok(Vec::new())
         };
+        record_gpu_busy_delta("qwen.mtp.draft.gpu_busy", gpu_busy_before);
+        let proposals = proposals_result?;
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.draft_seconds += elapsed;
         profile::record("qwen.mtp.draft", elapsed, 0);
         let started = Instant::now();
-        let verified = self
-            .model
-            .verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals)
-            .map_err(|error| {
-                if profile::enabled() {
-                    // Classify only fixed diagnostic guards. Never emit the
-                    // framework error, request data, or an exception dump.
-                    let category = match error.to_string().as_str() {
-                        "stage profile capacity exceeded" => "qwen.mtp.verify.profile_failure.capacity",
-                        "stage profile changed command buffer count" => {
-                            "qwen.mtp.verify.profile_failure.command_buffers"
-                        },
-                        "stage timestamp duration" => "qwen.mtp.verify.profile_failure.duration",
-                        "stage timestamp order" => "qwen.mtp.verify.profile_failure.order",
-                        "stage timestamp shape" => "qwen.mtp.verify.profile_failure.shape",
-                        "stage profile missing terminal timestamp" => "qwen.mtp.verify.profile_failure.terminal",
-                        "stage trace missing" => "qwen.mtp.verify.profile_failure.missing",
-                        _ => "qwen.mtp.verify.profile_failure.other",
-                    };
-                    profile::record(category, 0.0, 0);
-                }
-                Error::Invalid("MTP verify failed")
-            })?;
+        let gpu_busy_before = gpu_busy_snapshot();
+        let verified_result =
+            self.model.verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals);
+        record_gpu_busy_delta("qwen.mtp.verify.gpu_busy", gpu_busy_before);
+        let verified = verified_result.map_err(|error| {
+            if profile::enabled() {
+                // Classify only fixed diagnostic guards. Never emit the
+                // framework error, request data, or an exception dump.
+                let category = match error.to_string().as_str() {
+                    "stage profile capacity exceeded" => "qwen.mtp.verify.profile_failure.capacity",
+                    "stage profile changed command buffer count" => "qwen.mtp.verify.profile_failure.command_buffers",
+                    "stage timestamp duration" => "qwen.mtp.verify.profile_failure.duration",
+                    "stage timestamp order" => "qwen.mtp.verify.profile_failure.order",
+                    "stage timestamp shape" => "qwen.mtp.verify.profile_failure.shape",
+                    "stage profile missing terminal timestamp" => "qwen.mtp.verify.profile_failure.terminal",
+                    "stage trace missing" => "qwen.mtp.verify.profile_failure.missing",
+                    _ => "qwen.mtp.verify.profile_failure.other",
+                };
+                profile::record(category, 0.0, 0);
+            }
+            Error::Invalid("MTP verify failed")
+        })?;
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.verify_seconds += elapsed;
         profile::record("qwen.mtp.verify", elapsed, 0);
@@ -1010,9 +1037,10 @@ impl MtpDecode<'_> {
             }
         }
         let started = Instant::now();
-        self.model
-            .finish_host_verify(self.context, self.state, self.scratch, &verified, accepted)
-            .map_err(|_| Error::Invalid("MTP rollback failed"))?;
+        let gpu_busy_before = gpu_busy_snapshot();
+        let finish_result = self.model.finish_host_verify(self.context, self.state, self.scratch, &verified, accepted);
+        record_gpu_busy_delta("qwen.mtp.finish.gpu_busy", gpu_busy_before);
+        finish_result.map_err(|_| Error::Invalid("MTP rollback failed"))?;
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.rollback_seconds += elapsed;
         profile::record("qwen.mtp.finish", elapsed, 0);

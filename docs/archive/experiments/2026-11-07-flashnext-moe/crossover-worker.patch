@@ -1,0 +1,466 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/lily.rs b/crates/stark-engine/src/engine/hybrid/lily.rs
+index 56a46d28..68b8acb8 100644
+--- a/crates/stark-engine/src/engine/hybrid/lily.rs
++++ b/crates/stark-engine/src/engine/hybrid/lily.rs
+@@ -17,7 +17,7 @@ use stark_lily_core::{
+         attention::{KvFormat, MAX_SEQ},
+         sample::SamplingParams,
+     },
+-    metal::{EncodedPass, MetalContext, PendingPass, stage_profile},
++    metal::{EncodedPass, MetalContext, PendingPass, gpu_busy_ns, stage_profile},
+     qwen4exp::{
+         DecodeState, HostVerification, NgramStorage, Qwen4ExpModel, Scratch, config::Qwen4ExpConfig, model::Snapshot,
+     },
+@@ -149,6 +149,24 @@ fn record_gpu_profile_for(mtp_verify: bool) {
+     }
+ }
+ 
++/// Capture Lily's process-local union of completed GPU command spans only for
++/// an opted-in profile. The caller records the delta after its phase completes.
++fn gpu_busy_snapshot() -> Option<u64> {
++    profile::enabled().then(gpu_busy_ns)
++}
++
++fn record_gpu_busy_delta(
++    name: &'static str,
++    before: Option<u64>,
++) {
++    if let Some(before) = before {
++        let after = gpu_busy_ns();
++        if after >= before {
++            profile::record(name, (after - before) as f64 * 1e-9, 0);
++        }
++    }
++}
++
+ fn admitted_position(
+     committed: usize,
+     pending: usize,
+@@ -430,6 +448,21 @@ impl LilyModel {
+     }
+ 
+     /// Explicit diagnostic mode for future passes; no payload is captured.
++    pub fn diagnostic_gpu_wake(&self) -> Result<()> {
++        self.context.wake().map_err(|_| Error::Invalid("diagnostic GPU wake failed"))
++    }
++
++    /// Change private crossover dispatch only between fully drained requests.
++    pub fn set_diagnostic_moe_variant(
++        &mut self,
++        variant: u8,
++    ) -> Result<()> {
++        if self.is_fenced() || self.position() != 0 {
++            return Err(Error::Invalid("diagnostic MoE selection requires a reset request"));
++        }
++        self.model.set_diagnostic_moe_variant(variant).map_err(|_| Error::Invalid("diagnostic MoE variant"))
++    }
++
+     pub fn set_stage_profiling(
+         &mut self,
+         enabled: bool,
+@@ -832,6 +865,7 @@ impl LilyModel {
+         end: usize,
+         draw: Option<Draw<'_>>,
+     ) -> Result<()> {
++        let gpu_busy_before = gpu_busy_snapshot();
+         let chunk = self.prefill_chunk_tokens();
+         let split = self.capture_at.and_then(|position| position.checked_sub(self.state.pos)).filter(|&split| {
+             (split < end || (split == end && draw.is_none()))
+@@ -841,23 +875,29 @@ impl LilyModel {
+         });
+         let failed = |_| Error::Invalid("mixed precision prefill failed");
+         let Some(split) = split else {
+-            return self
++            let result = self
+                 .model
+                 .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..end], draw)
+                 .map_err(failed);
++            record_gpu_busy_delta("qwen.mixed.prefill.gpu_busy", gpu_busy_before);
++            return result;
+         };
+-        if split > 0 {
+-            self.model
+-                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..split], None)
+-                .map_err(failed)?;
+-        }
+-        self.capture_prefix()?;
+-        if split < end {
+-            self.model
+-                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[split..end], draw)
+-                .map_err(failed)?;
+-        }
+-        Ok(())
++        let result = (|| -> Result<()> {
++            if split > 0 {
++                self.model
++                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..split], None)
++                    .map_err(failed)?;
++            }
++            self.capture_prefix()?;
++            if split < end {
++                self.model
++                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[split..end], draw)
++                    .map_err(failed)?;
++            }
++            Ok(())
++        })();
++        record_gpu_busy_delta("qwen.mixed.prefill.gpu_busy", gpu_busy_before);
++        result
+     }
+ 
+     /// Copies the recurrent state at the current position. The GPU is idle
+@@ -952,43 +992,45 @@ impl MtpDecode<'_> {
+         let count = self.drafts.min(self.remaining.saturating_sub(1));
+         *self.usable = false;
+         let started = Instant::now();
+-        let proposals = if count > 0 {
++        let gpu_busy_before = gpu_busy_snapshot();
++        let proposals_result = if count > 0 {
+             let sampler = &mut *self.sampler;
+             self.model
+                 .draft_host(self.context, self.state, self.scratch, self.pending, count, &mut |logits| {
+                     sampler.draft(logits).map_err(|_| std::io::Error::other("MTP draft selection failed").into())
+                 })
+-                .map_err(|_| Error::Invalid("MTP draft failed"))?
++                .map_err(|_| Error::Invalid("MTP draft failed"))
+         } else {
+-            Vec::new()
++            Ok(Vec::new())
+         };
++        record_gpu_busy_delta("qwen.mtp.draft.gpu_busy", gpu_busy_before);
++        let proposals = proposals_result?;
+         let elapsed = started.elapsed().as_secs_f64();
+         self.stats.draft_seconds += elapsed;
+         profile::record("qwen.mtp.draft", elapsed, 0);
+         let started = Instant::now();
+-        let verified = self
+-            .model
+-            .verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals)
+-            .map_err(|error| {
+-                if profile::enabled() {
+-                    // Classify only fixed diagnostic guards. Never emit the
+-                    // framework error, request data, or an exception dump.
+-                    let category = match error.to_string().as_str() {
+-                        "stage profile capacity exceeded" => "qwen.mtp.verify.profile_failure.capacity",
+-                        "stage profile changed command buffer count" => {
+-                            "qwen.mtp.verify.profile_failure.command_buffers"
+-                        },
+-                        "stage timestamp duration" => "qwen.mtp.verify.profile_failure.duration",
+-                        "stage timestamp order" => "qwen.mtp.verify.profile_failure.order",
+-                        "stage timestamp shape" => "qwen.mtp.verify.profile_failure.shape",
+-                        "stage profile missing terminal timestamp" => "qwen.mtp.verify.profile_failure.terminal",
+-                        "stage trace missing" => "qwen.mtp.verify.profile_failure.missing",
+-                        _ => "qwen.mtp.verify.profile_failure.other",
+-                    };
+-                    profile::record(category, 0.0, 0);
+-                }
+-                Error::Invalid("MTP verify failed")
+-            })?;
++        let gpu_busy_before = gpu_busy_snapshot();
++        let verified_result =
++            self.model.verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals);
++        record_gpu_busy_delta("qwen.mtp.verify.gpu_busy", gpu_busy_before);
++        let verified = verified_result.map_err(|error| {
++            if profile::enabled() {
++                // Classify only fixed diagnostic guards. Never emit the
++                // framework error, request data, or an exception dump.
++                let category = match error.to_string().as_str() {
++                    "stage profile capacity exceeded" => "qwen.mtp.verify.profile_failure.capacity",
++                    "stage profile changed command buffer count" => "qwen.mtp.verify.profile_failure.command_buffers",
++                    "stage timestamp duration" => "qwen.mtp.verify.profile_failure.duration",
++                    "stage timestamp order" => "qwen.mtp.verify.profile_failure.order",
++                    "stage timestamp shape" => "qwen.mtp.verify.profile_failure.shape",
++                    "stage profile missing terminal timestamp" => "qwen.mtp.verify.profile_failure.terminal",
++                    "stage trace missing" => "qwen.mtp.verify.profile_failure.missing",
++                    _ => "qwen.mtp.verify.profile_failure.other",
++                };
++                profile::record(category, 0.0, 0);
++            }
++            Error::Invalid("MTP verify failed")
++        })?;
+         let elapsed = started.elapsed().as_secs_f64();
+         self.stats.verify_seconds += elapsed;
+         profile::record("qwen.mtp.verify", elapsed, 0);
+@@ -1010,9 +1052,10 @@ impl MtpDecode<'_> {
+             }
+         }
+         let started = Instant::now();
+-        self.model
+-            .finish_host_verify(self.context, self.state, self.scratch, &verified, accepted)
+-            .map_err(|_| Error::Invalid("MTP rollback failed"))?;
++        let gpu_busy_before = gpu_busy_snapshot();
++        let finish_result = self.model.finish_host_verify(self.context, self.state, self.scratch, &verified, accepted);
++        record_gpu_busy_delta("qwen.mtp.finish.gpu_busy", gpu_busy_before);
++        finish_result.map_err(|_| Error::Invalid("MTP rollback failed"))?;
+         let elapsed = started.elapsed().as_secs_f64();
+         self.stats.rollback_seconds += elapsed;
+         profile::record("qwen.mtp.finish", elapsed, 0);
+diff --git a/crates/stark-engine/src/engine/hybrid/mod.rs b/crates/stark-engine/src/engine/hybrid/mod.rs
+index 01baf4df..9a320c94 100644
+--- a/crates/stark-engine/src/engine/hybrid/mod.rs
++++ b/crates/stark-engine/src/engine/hybrid/mod.rs
+@@ -609,6 +609,27 @@ impl Model {
+         false
+     }
+ 
++    pub fn diagnostic_gpu_wake(&self) -> Result<()> {
++        #[cfg(all(feature = "metal", target_os = "macos"))]
++        if let Forward::Lily(model) = &self.forward {
++            return model.diagnostic_gpu_wake();
++        }
++        Err(Error::Unsupported("diagnostic GPU wake unavailable"))
++    }
++
++    /// Select a private Qwen Lily MoE variant between completed requests.
++    pub fn set_diagnostic_moe_variant(
++        &mut self,
++        variant: u8,
++    ) -> Result<()> {
++        #[cfg(all(feature = "metal", target_os = "macos"))]
++        if let Forward::Lily(model) = &mut self.forward {
++            return model.set_diagnostic_moe_variant(variant);
++        }
++        let _ = variant;
++        Err(Error::Unsupported("diagnostic MoE variant unavailable"))
++    }
++
+     /// Opt-in aggregate GPU stage timestamps for the BF16 backend. Profiling
+     /// perturbs execution and is never enabled for production rate comparisons.
+     pub fn set_bf16_stage_profiling(
+diff --git a/crates/stark-generate/src/generation.rs b/crates/stark-generate/src/generation.rs
+index bc963426..66c88314 100644
+--- a/crates/stark-generate/src/generation.rs
++++ b/crates/stark-generate/src/generation.rs
+@@ -85,6 +85,10 @@ impl Sampling {
+ #[derive(Deserialize)]
+ #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+ enum Request {
++    DiagnosticGpuWake {},
++    DiagnosticMoeVariant {
++        variant: u8,
++    },
+     Tokenize {
+         text: String,
+         #[serde(default)]
+@@ -455,6 +459,15 @@ pub(crate) trait GenerationBackend {
+     fn runtime_identity(&self) -> Option<Value> {
+         None
+     }
++    fn diagnostic_gpu_wake(&mut self) -> Result<(), &'static str> {
++        Err("diagnostic_gpu_wake_unavailable")
++    }
++    fn diagnostic_moe_variant(
++        &mut self,
++        _variant: u8,
++    ) -> Result<(), &'static str> {
++        Err("diagnostic_moe_variant_unavailable")
++    }
+     fn cancelled(
+         &mut self,
+         _request_id: u64,
+@@ -799,6 +812,20 @@ impl<B: GenerationBackend> GenerationWorker<B> {
+         output: &mut impl Write,
+     ) -> Result<Value, &'static str> {
+         match request {
++            Request::DiagnosticGpuWake {} => {
++                let started = std::time::Instant::now();
++                self.backend.diagnostic_gpu_wake()?;
++                Ok(json!({"gpu_wake":true,"wake_seconds":started.elapsed().as_secs_f64()}))
++            },
++            Request::DiagnosticMoeVariant {
++                variant,
++            } => {
++                if variant > 2 {
++                    return Err("invalid_diagnostic_moe_variant");
++                }
++                self.backend.diagnostic_moe_variant(variant)?;
++                Ok(json!({"variant":variant}))
++            },
+             Request::Tokenize {
+                 text,
+                 add_special_tokens,
+diff --git a/crates/stark-generate/src/hybrid.rs b/crates/stark-generate/src/hybrid.rs
+index 8e774080..5868982f 100644
+--- a/crates/stark-generate/src/hybrid.rs
++++ b/crates/stark-generate/src/hybrid.rs
+@@ -516,6 +516,18 @@ impl HybridBackend {
+ 
+ impl GenerationBackend for HybridBackend {
+     type PreparedImage = ();
++    fn diagnostic_gpu_wake(&mut self) -> Result<(), &'static str> {
++        self.model.diagnostic_gpu_wake().map_err(|_| "diagnostic_gpu_wake_failed")
++    }
++    fn diagnostic_moe_variant(
++        &mut self,
++        variant: u8,
++    ) -> Result<(), &'static str> {
++        self.model.set_diagnostic_moe_variant(variant).map_err(|_| "diagnostic_moe_variant_failed")?;
++        self.prefix_cache = None;
++        self.pending_prefix = None;
++        Ok(())
++    }
+     fn vocab_size(&self) -> usize {
+         self.model.vocab_size()
+     }
+diff --git a/vendor/lily-core/src/kernels/metal/moe.metal b/vendor/lily-core/src/kernels/metal/moe.metal
+index e32f82a8..ab828d39 100644
+--- a/vendor/lily-core/src/kernels/metal/moe.metal
++++ b/vendor/lily-core/src/kernels/metal/moe.metal
+@@ -295,9 +295,57 @@ kernel void moe_gather_gemv_q4_gate_up(
+     constant uint& N [[buffer(11)]],
+     uint2 tg [[threadgroup_position_in_grid]],
+     uint lane [[thread_index_in_threadgroup]]) {
+-    moe_gate_up_body<0, 0, 0>(
+-        gate_codes, gate_scales, gate_biases, up_codes, up_scales, up_biases,
+-        x, indices, y, K, GS, N, tg, lane);
++    const uint row = tg.x;
++    const uint slot = tg.y;
++    const ulong grow = (ulong)indices[slot] * N + row;
++    const uint words = K / 8;
++    const uint blocks = words / 4;
++    const uint bpg = GS / 32;
++    const uint groups = K / GS;
++    device const uint4* gate_wrow =
++        (device const uint4*)(gate_codes + grow * words);
++    device const uint4* up_wrow =
++        (device const uint4*)(up_codes + grow * words);
++    device const bfloat4* xv = (device const bfloat4*)x;
++    float gate_sum = 0.0f;
++    float up_sum = 0.0f;
++    for (uint i = lane; i < blocks; i += 32) {
++        uint g = i / bpg;
++        uint4 gate_w4 = gate_wrow[i];
++        uint4 up_w4 = up_wrow[i];
++        float gate_dot = 0.0f;
++        float up_dot = 0.0f;
++        float x_sum = 0.0f;
++        for (uint j = 0; j < 4; ++j) {
++            float4 xlo = float4(xv[2 * (4 * i + j)]);
++            float4 xhi = float4(xv[2 * (4 * i + j) + 1]);
++            uint gw = gate_w4[j];
++            uint uw = up_w4[j];
++            float4 gqlo = float4(float((gw >> 0) & 0xF), float((gw >> 4) & 0xF),
++                                 float((gw >> 8) & 0xF), float((gw >> 12) & 0xF));
++            float4 gqhi = float4(float((gw >> 16) & 0xF), float((gw >> 20) & 0xF),
++                                 float((gw >> 24) & 0xF), float((gw >> 28) & 0xF));
++            float4 uqlo = float4(float((uw >> 0) & 0xF), float((uw >> 4) & 0xF),
++                                 float((uw >> 8) & 0xF), float((uw >> 12) & 0xF));
++            float4 uqhi = float4(float((uw >> 16) & 0xF), float((uw >> 20) & 0xF),
++                                 float((uw >> 24) & 0xF), float((uw >> 28) & 0xF));
++            gate_dot += dot(gqlo, xlo) + dot(gqhi, xhi);
++            up_dot += dot(uqlo, xlo) + dot(uqhi, xhi);
++            x_sum += dot(xlo, float4(1.0f)) + dot(xhi, float4(1.0f));
++        }
++        gate_sum += float(gate_scales[grow * groups + g]) * gate_dot
++                  + float(gate_biases[grow * groups + g]) * x_sum;
++        up_sum += float(up_scales[grow * groups + g]) * up_dot
++                + float(up_biases[grow * groups + g]) * x_sum;
++    }
++    gate_sum = simd_sum(gate_sum);
++    up_sum = simd_sum(up_sum);
++    if (lane == 0) {
++        gate_sum = float(bfloat(gate_sum));
++        up_sum = float(bfloat(up_sum));
++        y[(ulong)slot * N + row] =
++            bfloat((gate_sum / (1.0f + exp(-gate_sum))) * up_sum);
++    }
+ }
+ 
+ // Fixed geometry removes runtime integer division; floating operations are shared.
+diff --git a/vendor/lily-core/src/kernels/moe.rs b/vendor/lily-core/src/kernels/moe.rs
+index 676a5f7a..48fa5665 100644
+--- a/vendor/lily-core/src/kernels/moe.rs
++++ b/vendor/lily-core/src/kernels/moe.rs
+@@ -2,6 +2,7 @@
+ //! GPU-resident sparse-MoE routing, expert projection, and combine kernels.
+ 
+ use anyhow::{Result, bail, ensure};
++use std::sync::atomic::{AtomicU8, Ordering};
+ 
+ use crate::kernels::u32_bytes;
+ use crate::metal::{ComputePass, Grid, MetalContext, MslVersion};
+@@ -10,6 +11,22 @@ use crate::weights::QuantWeights;
+ 
+ const SOURCE: &str = include_str!("metal/moe.metal");
+ 
++// Private crossover diagnostic. 0 is generic-first/shared-after, 1 fixed-gate/shared-after,
++// and 2 fixed-gate/shared-first (the qualified default).
++static DIAGNOSTIC_MOE_VARIANT: AtomicU8 = AtomicU8::new(2);
++
++pub fn set_diagnostic_moe_variant(variant: u8) -> bool {
++    if variant > 2 {
++        return false;
++    }
++    DIAGNOSTIC_MOE_VARIANT.store(variant, Ordering::Relaxed);
++    true
++}
++
++pub fn diagnostic_moe_variant() -> u8 {
++    DIAGNOSTIC_MOE_VARIANT.load(Ordering::Relaxed)
++}
++
+ #[cfg(test)]
+ #[path = "moe_specialization_tests.rs"]
+ mod specialization_tests;
+@@ -382,7 +399,8 @@ pub fn moe_gather_gemv_gate_up(
+     moe_gather_gemv_gate_up_named(
+         ctx,
+         pass,
+-        if gate.in_features() == 2560
++        if diagnostic_moe_variant() != 0
++            && gate.in_features() == 2560
+             && n_per_expert == 640
+             && gate.group_size == 64
+             && up.group_size == 64
+diff --git a/vendor/lily-core/src/moe_ffn.rs b/vendor/lily-core/src/moe_ffn.rs
+index b82fcbf6..a14191ca 100644
+--- a/vendor/lily-core/src/moe_ffn.rs
++++ b/vendor/lily-core/src/moe_ffn.rs
+@@ -1144,11 +1144,14 @@ pub(crate) fn decode_moe(
+     if crate::ablate::on(crate::ablate::Group::Gather) {
+         return Ok(false);
+     }
+-    // Queue Lily's independent shared-down projection first in this level.
+-    // Both inputs are ready; the existing barrier still orders both outputs.
+-    // Keep the separately qualified official policy's original dispatch order.
++    // Variant 2 queues the independent shared-down projection first. Variants
++    // 0 and 1 retain the original expert-gate-then-shared-down submission order.
++    // The separately qualified official policy always retains its old order.
+     pass.profile_stage(crate::metal::stage_profile::Phase::MoeExpertGateUpSharedDown)?;
+-    if !dims.official_mlx_rounding && !crate::ablate::on(crate::ablate::Group::Shared) {
++    let shared_first = !dims.official_mlx_rounding
++        && crate::kernels::moe::diagnostic_moe_variant() == 2
++        && !crate::ablate::on(crate::ablate::Group::Shared);
++    if shared_first {
+         quant::gemv_quant(ctx, pass, &shared.down_proj, io.mlp_act, &ms.shared_out)?;
+     }
+     if dims.official_mlx_rounding {
+@@ -1176,7 +1179,7 @@ pub(crate) fn decode_moe(
+             &ms.act,
+         )?;
+     }
+-    if dims.official_mlx_rounding && !crate::ablate::on(crate::ablate::Group::Shared) {
++    if !shared_first && !crate::ablate::on(crate::ablate::Group::Shared) {
+         quant::gemv_quant(ctx, pass, &shared.down_proj, io.mlp_act, &ms.shared_out)?;
+     }
+     pass.level_barrier(&[&ms.act, &ms.shared_out])?;
+diff --git a/vendor/lily-core/src/qwen4exp/model.rs b/vendor/lily-core/src/qwen4exp/model.rs
+index 4b5e2e48..fc93617a 100644
+--- a/vendor/lily-core/src/qwen4exp/model.rs
++++ b/vendor/lily-core/src/qwen4exp/model.rs
+@@ -2239,6 +2239,15 @@ impl Qwen4ExpModel {
+         self.ngram_ahead = on;
+     }
+ 
++    /// Select the private crossover MoE dispatch variant between requests.
++    pub fn set_diagnostic_moe_variant(&mut self, variant: u8) -> Result<()> {
++        ensure!(
++            crate::kernels::moe::set_diagnostic_moe_variant(variant),
++            "diagnostic MoE variant"
++        );
++        Ok(())
++    }
++
+     /// Select head work only while the request is reset.
+     pub fn set_mtp_enabled(&mut self, enabled: bool) -> Result<()> {
+         ensure!(!enabled || self.weights.mtp.is_some(), "no MTP head loaded");

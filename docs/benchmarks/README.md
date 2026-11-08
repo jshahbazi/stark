@@ -4,6 +4,17 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Flash-Next sustained throughput diagnosis (2026-11-07).** The unchanged
+baseline reproduces a fall from 95.46 to 82.20 decode tok/s; about 98% of added
+verification elapsed time is inside GPU command spans, with contemporaneous
+clock reductions. An idle queue control separately avoids about 0.7 seconds
+before the first sample. A single-model crossover establishes no reliable
+projection gain; the original projection dispatch is restored. All 128
+diagnostic arms are retained, 125 pass host screens, and timing remains
+unqualified. See the [diagnosis](2026-11-07-flashnext-sustained-diagnosis.md),
+[aggregates](data/flashnext-sustained-diagnosis-2026-11-07.json) and
+[source archive](../archive/experiments/2026-11-07-flashnext-moe/README.md).
+
 **Qwen3.8-Flash-Next MoE projection experiment (2026-11-07).** Fixed-geometry
 expert gate/up and shared-first dispatch pass bounded numerical, scoring and
 prefix-restoration controls. The final synthetic combined projection improves

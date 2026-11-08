@@ -472,12 +472,23 @@ numerical policy. See the [Flash-Next pilot](benchmarks/2026-11-07-flashnext-opt
 for the measured source identities, artifact guards, reproduction commands and
 limitations. The runner never promotes a setting automatically.
 The separate [MoE projection experiment](benchmarks/2026-11-07-flashnext-moe-projections.md)
-records the guarded fixed-geometry gate/up and shared-first candidate. Its
-numerical controls pass; whole-model performance qualification is blocked.
+records the guarded fixed-geometry gate/up and shared-first candidate. The
+candidate is now withdrawn and its source controls remain archived. The
+[sustained diagnosis](benchmarks/2026-11-07-flashnext-sustained-diagnosis.md)
+records GPU-span growth during repeated requests, the separate idle wake cost,
+and a single-loaded-model crossover without an accepted projection benefit.
 `scripts/benchmark_qwen38_cadence.py` holds one loaded worker and request
 configuration fixed while comparing positions after a fixed pause. It emits
 hashes, counts, timings and descriptive host screens; it never claims quiet
 admission or promotes a candidate.
+Optional `--clock-sampler` uses a separately supplied source-bracketed sampler;
+`--process-metrics` records worker CPU/memory aggregates and host attribution.
+`--native-profile-output` enables native aggregate profiling without GPU stage
+timestamp writes. Profile-gated GPU-busy deltas cover Qwen prefill and MTP
+draft/verify/finish using existing completed command spans, including any device
+stalls or preemption. Disabled profiling adds no counter reads. Idle keepalive
+and the separate `benchmark_qwen38_moe_crossover.py` require archived private
+worker patches; the production worker exposes neither diagnostic operation.
 
 The context benchmark supports greedy and stochastic generation; `--top-k 0`
 omits top-k filtering. It emits counts, hashes and timing aggregates. The
