@@ -138,6 +138,29 @@ The upstream Metal shaders originate at the pinned revision. Stark modifies six 
 - `src/kernels/metal/quant.metal` adds GDN Q4 two-row input projection with a convolution epilogue. It calls the existing packed dot helper, preserves the BF16 projection boundary and copies the original convolution expression, tap order and window update. Other layouts retain separate projection and convolution.
 - `src/kernels/metal/moe.metal` adds a decode down/combine entry point whose row owner also performs the following hyperconnection injection. It copies the original dot and slot-ordered combine, retains the BF16 branch output, and applies the original F32 injection expression to that rounded branch. Decode orders both the branch output and residual streams before their next consumers. The original down/combine and injection kernels remain available for reference controls.
 
+The experimental Flash-Next fixed-geometry gate/up and shared-first scheduling
+changes are withdrawn. `moe.metal`, `src/kernels/moe.rs` and `src/moe_ffn.rs`
+retain their original dispatch source from engine baseline
+`72b5aaef96c939809bc906d10d45a0eef70386c0`. Candidate patches, original licenses
+and bounded controls remain in the
+[MoE projection experiment](../../docs/benchmarks/2026-11-07-flashnext-moe-projections.md).
+The [sustained diagnosis](../../docs/benchmarks/2026-11-07-flashnext-sustained-diagnosis.md)
+records the follow-up single-model crossover and absence of an accepted
+whole-model benefit. No candidate numerical or performance result is relabeled
+as validation of the restored source.
+
+The Stark generation and scoring adapters invoke the existing
+`MetalContext::wake` empty queue signal every 500 ms while waiting for a new
+request under the Lily or official mixed-affine numerical policy. This adds no
+vendored shader or precision change. Owner-thread maintenance preserves model
+state and the prefix-cache idle deadline, and exits
+on a queue fault. The
+[idle wake fix](../../docs/benchmarks/2026-11-07-flashnext-idle-wake-fix.md)
+records the original production patch, matched latency, idle resource and state
+controls. The [cross-backend follow-up](../../docs/benchmarks/2026-11-08-cross-backend-idle-wake.md)
+extends adapter eligibility and scoring input scheduling without changing
+vendored model or kernel code.
+
 The other eight upstream shader files retain their pinned source bytes. `stark_decode_rows.metal` and `stark_moe_decode_rows.metal` add verifier entry points compiled after the unchanged generic projection and expert shader bodies. Batch row is the fast grid axis, exposing parallel work and weight-cache reuse while retaining each row's original arithmetic. The original HC and generic projection/convolution entry points remain available for reference controls. These patches do not change checkpoint quantization or the selected precision policy. Numerical and performance qualification is recorded separately in the [kernel study](../../docs/benchmarks/QWEN38_KERNELS_2026_10_29.md) and [injection fusion study](../../docs/benchmarks/QWEN38_FUSION_2026_10_29.md).
 
 `stark_packed_rows.metal` extends the pinned Q4 packed-dot expression to independent short token rows while sharing raw weight loads. `stark_gdn_projection_rows.metal` adds the guarded verifier projection/convolution/scatter entry points. They preserve the 16-lane reduction, BF16 projection boundary and runtime convolution tap order, retain the original window, write its alternate, and capture projected inputs for rollback. Ordinary decode and unsupported layouts keep their existing routes. These original Stark extensions retain Apache-2.0 licensing; `quant.metal` is unchanged by this addition. The host verifier also batches up to four sparse queries through the existing QSA split kernels, using independent query scratch and per-query visibility; dense queries retain ordinary decode. Source-bound qualification is in the [MTP optimization study](../../docs/benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md).

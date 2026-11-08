@@ -61,6 +61,11 @@ pub struct MetalDeviceIdentity {
 
 #[cfg(feature = "metal")]
 impl Engine<Metal> {
+    /// Submit and boundedly wait for an empty queue signal during worker idle.
+    pub fn maintain_idle_queue(&self) -> Result<(), &'static str> {
+        self.context.maintain_idle_queue()
+    }
+
     /// Stable, non-unique device properties for binding runtime evidence to a
     /// tested Metal device class. This deliberately excludes host identifiers.
     pub fn metal_device_identity(&self) -> MetalDeviceIdentity {

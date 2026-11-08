@@ -26,6 +26,15 @@ EXACT_VERIFIERS = frozenset(
         "batched-affine-decode-exact-v1",
     }
 )
+SAFE_FAILURE_CODES = frozenset({
+    "quiet_admission_timeout", "host_monitor_failed", "host_observations_missing",
+    "generation_failed", "generation_count_mismatch",
+    "worker_not_ready", "mtp_not_supported", "mtp_sampling_unavailable",
+    "mtp_verifier_unavailable", "mtp_drafts_unavailable", "decode_timing_unavailable",
+    "mtp_acknowledgement_unavailable", "mtp_verifier_acknowledgement_mismatch",
+    "mtp_route_acknowledgement_mismatch", "invalid_mtp_statistics", "invalid_mtp_timings",
+    "corpus_tokenization_failed", "disabled_mtp_has_activity", "enabled_mtp_has_no_draft_activity",
+})
 OFFICIAL_REPOSITORY = "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
 OFFICIAL_REVISION = "788c07a8725642bccf13a0a3b8a21954ab84b4f2"
 OFFICIAL_MANIFEST_SHA256 = (
@@ -313,15 +322,18 @@ def _atomic_report(path: Path, report: dict) -> None:
 
 @contextlib.contextmanager
 def _profile_env_removed():
-    previous = os.environ.pop("STARK_QWEN38_PROFILE_OUTPUT", None)
+    names = ("STARK_QWEN38_PROFILE_OUTPUT", "STARK_NATIVE_PROFILE_OUTPUT")
+    previous = {name: os.environ.pop(name) for name in names if name in os.environ}
     try:
         yield
     finally:
-        if previous is not None:
-            os.environ["STARK_QWEN38_PROFILE_OUTPUT"] = previous
+        os.environ.update(previous)
 
 
-def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
+def run(
+    args: argparse.Namespace, worker_factory=Worker, *, rng=None,
+    monitor_factory=None, paging_reader=None, admission_fn=None, screen_fn=None,
+) -> dict:
     validate_args(args)
     if args.output.exists():
         raise ValueError("output_exists")
@@ -334,7 +346,7 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
         raise ValueError("corpus_empty")
 
     report = {
-        "schema_version": 3,
+        "schema_version": 5,
         "scope": "qwen38_same_worker_paired_mtp_sampling",
         "sampling": sampling_options(args),
         "seed": args.seed,
@@ -350,10 +362,42 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
         "warmups_per_route": 1,
         "requests": [],
     }
+    from benchmark_hybrid_context import execution_profile
+
+    screened = getattr(args, "screened", False)
+    observe_host = getattr(args, "observe_host", False)
+    quiet_scope = getattr(args, "quiet_scope", "request")
+    if quiet_scope not in {"request", "session"}:
+        raise ValueError("invalid_quiet_scope")
+    if screened and observe_host:
+        raise ValueError("conflicting_host_modes")
+    monitored = screened or observe_host
+    report["harness_sha256"] = sha256_file(Path(__file__))
+    report["execution_profile"] = execution_profile(screened=monitored)
+    report["screened"] = screened
+    report["observe_host"] = observe_host
+    report["quiet_admission_scope"] = quiet_scope
+    monitor = None
+    if monitored:
+        from benchmark_clean_qwen import Monitor, paging
+        from benchmark_glm_mlx_serve import quiet_admission, screen_attempt
+
+        monitor_factory = monitor_factory or Monitor
+        paging_reader = paging_reader or paging
+        admission_fn = admission_fn or quiet_admission
+        screen_fn = screen_fn or screen_attempt
+        report["screening_policy"] = {
+            "quiet_admission": "benchmark_glm_mlx_serve.quiet_admission",
+            "screen_attempt": "benchmark_glm_mlx_serve.screen_attempt",
+            "pair_policy": "Both arms must be eligible; no selective arm removal or retries.",
+            "quiet_admission_enabled": screened,
+            "quiet_admission_scope": quiet_scope,
+        }
     report.update(checkpoint_metadata(args))
     env = dict(os.environ)
     env.pop("STARK_QWEN38_PROFILE_OUTPUT", None)
-    report["environment_policy"] = {"profile_output_removed": True}
+    env.pop("STARK_NATIVE_PROFILE_OUTPUT", None)
+    report["environment_policy"] = {"profile_output_removed": True, "native_profile_output_removed": True}
     if worker_factory is Worker:
         # Worker inherits the parent environment internally. Remove profiling
         # only while it starts its subprocess, then restore the caller state.
@@ -404,9 +448,12 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
         report["input_tokens"] = len(ids)
         report["corpus_token_count"] = len(tokenized_ids)
         report["input_sha256"] = ids_sha256(ids)
+        if monitored:
+            monitor = monitor_factory()
+            monitor.__enter__()
         request_id = 0
 
-        def request(route: str) -> dict:
+        def request(route: str, *, warmup=False) -> dict:
             nonlocal request_id
             request_id += 1
             requested = 0 if route == "off" else args.drafts
@@ -420,16 +467,26 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
                 "mtp_drafts": requested,
                 "request_id": request_id,
             }
+            admission = admission_fn(monitor) if screened and not warmup and (
+                quiet_scope == "request" or request_id == 3
+            ) else None
+            phase = f"mtp_request_{request_id}"
+            if monitor is not None:
+                monitor.set_phase(phase)
+                before = paging_reader()
             started = time.monotonic()
             result = worker.request(payload)
             elapsed = time.monotonic() - started
             item = _validate_result(result, ready, args, route, args.drafts, vocab_size)
             item["wall_seconds"] = elapsed
             item["request_id"] = request_id
+            if monitor is not None:
+                item["host_screen"] = screen_fn(monitor, phase, before, paging_reader())
+                item["quiet_admission"] = admission
             return item
 
         for route in ("off", "on"):
-            warmup = request(route)
+            warmup = request(route, warmup=True)
             report.setdefault("warmups", []).append(
                 {
                     key: warmup[key]
@@ -518,10 +575,31 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
             value["deterministic_within_route"]
             for value in report["route_summary"].values()
         )
+        report["timing_eligible"] = screened and all(
+            item["host_screen"]["eligible"] for item in report["requests"]
+        )
+        report["paired_wall_speedups"] = [
+            pair["routes"]["off"]["wall_seconds"] / pair["routes"]["on"]["wall_seconds"]
+            for pair in report["pairs"]
+        ]
+        report["execution_profile_after"] = execution_profile(screened=monitored)
+        report["execution_profile_unchanged"] = report["execution_profile_after"] == report["execution_profile"]
+        report["passed"] = report["passed"] and report["execution_profile_unchanged"]
         _atomic_report(args.output, report)
         return report
+    except (OSError, ValueError, KeyError, TypeError, TimeoutError, ChatError) as error:
+        if monitored and not args.output.exists():
+            from benchmark_hybrid_context import screen_monitor_diagnostics
+
+            report["passed"] = report["timing_eligible"] = False
+            report["failure_code"] = str(error) if str(error) in SAFE_FAILURE_CODES else "paired_benchmark_failed"
+            report["screen_diagnostics"] = screen_monitor_diagnostics(monitor)
+            _atomic_report(args.output, report)
+        raise
     finally:
         worker.close()
+        if monitor is not None:
+            monitor.__exit__(None, None, None)
 
 
 def main(argv=None) -> int:
@@ -544,10 +622,14 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--screened", action="store_true", help="Screen every measured arm; retain ineligible pairs without ranking them.")
+    parser.add_argument("--quiet-scope", choices=("request", "session"), default="request",
+                        help="Require quiet before every arm, or before the first measured arm of each loaded worker; all arms retain host screens.")
+    parser.add_argument("--observe-host", action="store_true", help="Record host screens without quiet admission; timing remains unqualified.")
     args = parser.parse_args(argv)
     try:
         report = run(args)
-    except (OSError, ValueError, KeyError, TypeError, ChatError):
+    except (OSError, ValueError, KeyError, TypeError, TimeoutError, ChatError):
         print(json.dumps({"passed": False, "stage": "mtp_benchmark_failed"}))
         return 1
     print(json.dumps(report, sort_keys=True))

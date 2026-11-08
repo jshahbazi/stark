@@ -583,6 +583,12 @@ impl HybridBackend {
 
 impl GenerationBackend for HybridBackend {
     type PreparedImage = HybridPreparedRequest;
+    fn idle_maintenance_interval(&self) -> Option<std::time::Duration> {
+        self.model.idle_maintenance_interval()
+    }
+    fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
+        self.model.maintain_idle_queue().map_err(|_| "native_idle_maintenance_failed")
+    }
 
     fn supports_images(&self) -> bool {
         self.image_runtime_identity.is_some() && self.model.supports_images()

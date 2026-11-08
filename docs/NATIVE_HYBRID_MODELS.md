@@ -296,6 +296,20 @@ Hybrid generation and scoring hold a macOS user-initiated, latency-critical
 process activity through request execution and GPU cleanup, then release it
 between requests. This expresses the request's activity lifetime; it does not
 reserve GPU resources or establish a fixed clock or throughput.
+Between complete requests, the native Qwen mixed-precision generation and
+scoring workers wait for input with a 500 ms poll timeout and send an empty
+Metal queue signal on timeout. Both Lily and official mixed-affine numerical
+policies use this maintenance.
+This avoids the measured idle queue wake penalty while keeping model state and
+the ten-minute prefix expiry unchanged. It creates no background thread or
+inference activity assertion; it ends at worker shutdown. Queue/input failures
+clear retained state and exit for reload. The scoring loop preserves its
+consecutive-logit cache and cumulative counters across successful idle ticks;
+EOF discards the entry. Converted text generation also maintains its Metal4
+queue through a private shared event. Vision wrappers, dense scoring and other
+native hybrid backends keep their existing idle behavior. Latency and idle
+resource evidence are in the original [Lily generation study](benchmarks/2026-11-07-flashnext-idle-wake-fix.md)
+and the [cross-backend follow-up](benchmarks/2026-11-08-cross-backend-idle-wake.md).
 For Qwen3.8, the generation worker can also load the checkpoint's existing MTP
 head and enable one to three draft tokens per request through `mtp_drafts`.
 It remains off by default. The generic `mtp: true` request option chooses the
@@ -488,6 +502,38 @@ use a separate diagnostic worker session to collect MTP profiles. A build
 with profiling disabled remains valid uninstrumented throughput evidence for
 its named executable. The [MTP optimization study](benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md)
 records the profile and longer on/off measurements at fixed quantization.
+
+`scripts/benchmark_qwen38_pilot.py` extends that paired harness with bounded
+input-length/draft-depth grids and optional candidate-worker ABBA sessions.
+Use `--screened` for quiet admission and request-time host qualification.
+The default `--quiet-scope request` requires admission before every measured
+arm. `--quiet-scope session` requires admission before the first measured arm
+of each loaded worker; every arm still receives the same host screen, and all
+arms must pass for qualified timing. Record these protocols separately.
+`--observe-host` records interference without quiet admission and always leaves
+timings unqualified. Candidate comparisons require matching same-route output
+hashes; this gate is intended for scheduling changes that preserve the existing
+numerical policy. See the [Flash-Next pilot](benchmarks/2026-11-07-flashnext-optimization-pilot.md)
+for the measured source identities, artifact guards, reproduction commands and
+limitations. The runner never promotes a setting automatically.
+The separate [MoE projection experiment](benchmarks/2026-11-07-flashnext-moe-projections.md)
+records the guarded fixed-geometry gate/up and shared-first candidate. The
+candidate is now withdrawn and its source controls remain archived. The
+[sustained diagnosis](benchmarks/2026-11-07-flashnext-sustained-diagnosis.md)
+records GPU-span growth during repeated requests, the separate idle wake cost,
+and a single-loaded-model crossover without an accepted projection benefit.
+`scripts/benchmark_qwen38_cadence.py` holds one loaded worker and request
+configuration fixed while comparing positions after a fixed pause. It emits
+hashes, counts, timings and descriptive host screens; it never claims quiet
+admission or promotes a candidate.
+Optional `--clock-sampler` uses a separately supplied source-bracketed sampler;
+`--process-metrics` records worker CPU/memory aggregates and host attribution.
+`--native-profile-output` enables native aggregate profiling without GPU stage
+timestamp writes. Profile-gated GPU-busy deltas cover Qwen prefill and MTP
+draft/verify/finish using existing completed command spans, including any device
+stalls or preemption. Disabled profiling adds no counter reads. Idle keepalive
+and the separate `benchmark_qwen38_moe_crossover.py` require archived private
+worker patches; the production worker exposes neither diagnostic operation.
 
 The context benchmark supports greedy and stochastic generation; `--top-k 0`
 omits top-k filtering. It emits counts, hashes and timing aggregates. The

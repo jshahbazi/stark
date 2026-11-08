@@ -4,7 +4,7 @@ use std::{
     io::Read,
     os::unix::fs::OpenOptionsExt,
     path::Path,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
@@ -55,6 +55,7 @@ fn record_accepted_prefix_round(
 
 pub(crate) struct NativeBackend {
     model: NativeModel,
+    idle_engine: Option<std::sync::Arc<Engine<Metal>>>,
     vocab_size: usize,
     eos_token_ids: Vec<u32>,
     cancellation: Option<CancelSignal>,
@@ -194,6 +195,7 @@ impl NativeBackend {
             |id| tokenizer_ids.contains(&id),
         )?;
         Ok(Self {
+            idle_engine: matches!(&model, NativeModel::Text(_)).then(|| engine.clone()),
             model,
             vocab_size,
             eos_token_ids,
@@ -210,6 +212,17 @@ impl NativeBackend {
 
 impl GenerationBackend for NativeBackend {
     type PreparedImage = NativePreparedImage;
+
+    fn idle_maintenance_interval(&self) -> Option<Duration> {
+        self.idle_engine.as_ref().map(|_| Duration::from_millis(500))
+    }
+
+    fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
+        if let Some(engine) = &self.idle_engine {
+            engine.maintain_idle_queue().map_err(|_| "native_idle_maintenance_failed")?;
+        }
+        Ok(())
+    }
 
     fn mtp_capabilities(&self) -> Option<crate::generation::MtpCapabilities> {
         match &self.model {

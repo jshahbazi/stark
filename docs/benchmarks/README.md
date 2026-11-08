@@ -4,6 +4,66 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Cross-backend idle wake follow-up (2026-11-08).** Extends queue maintenance
+to official mixed-affine Flash-Next generation, native Flash-Next scoring and
+converted text generation on Metal4. The
+[matched study](2026-11-08-cross-backend-idle-wake.md) binds separate artifacts,
+baseline/candidate/candidate/baseline controls, score-cache and full-vocabulary
+hash checks, prefix restoration, lifecycle and idle-resource results. This
+extends the original Lily-generation study below; its source-bound results
+remain unchanged.
+Official first-sample latency falls from 1.12–1.13 to 0.31–0.32 seconds;
+the fully screened dense repeat falls from 0.71–0.75 to about 0.62 seconds.
+Fresh scoring is observed at about 0.30 seconds, with a documented host-coverage
+gap in one primary candidate call.
+
+**Flash-Next idle wake fix (2026-11-07).** The native Lily-policy generation
+worker now signals its otherwise empty GPU queue every 500 ms while waiting
+for a new request. It retains prefix state and its original expiry deadline.
+Matched post-idle first-sample latency falls from 1.07–1.09 seconds to
+0.30–0.31 seconds, with 16/16 host screens passing and matching seeded outputs.
+Observed idle worker CPU is 0.033% of one core.
+See the [matched latency and idle-resource validation](2026-11-07-flashnext-idle-wake-fix.md)
+and [source archive](../archive/experiments/2026-11-07-flashnext-idle-wake/README.md).
+
+**Flash-Next sustained throughput diagnosis (2026-11-07).** The unchanged
+baseline reproduces a fall from 95.46 to 82.20 decode tok/s; about 98% of added
+verification elapsed time is inside GPU command spans, with contemporaneous
+clock reductions. An idle queue control separately avoids about 0.7 seconds
+before the first sample. A single-model crossover establishes no reliable
+projection gain; the original projection dispatch is restored. All 128
+diagnostic arms are retained, 125 pass host screens, and timing remains
+unqualified. See the [diagnosis](2026-11-07-flashnext-sustained-diagnosis.md),
+[aggregates](data/flashnext-sustained-diagnosis-2026-11-07.json) and
+[source archive](../archive/experiments/2026-11-07-flashnext-moe/README.md).
+
+**Qwen3.8-Flash-Next MoE projection experiment (2026-11-07).** Fixed-geometry
+expert gate/up and shared-first dispatch pass bounded numerical, scoring and
+prefix-restoration controls. The final synthetic combined projection improves
+by about 2.2%. A completed observed ABBA run measured **81.23 decode tok/s with
+two MTP drafts versus 85.50 baseline**, and **75.63 versus 80.33 tok/s with MTP
+off**. It has no quiet admission and four host-ineligible arms; the available
+results do not support promotion. See the [experiment report](2026-11-07-flashnext-moe-projections.md),
+[initial aggregate results](data/flashnext-moe-projections-2026-11-07.json),
+[completed observed run](data/flashnext-moe-matched-observed-2026-11-07.json) and
+[source patches](../archive/experiments/2026-11-07-flashnext-moe/README.md).
+The later [cadence diagnostic](data/flashnext-moe-cadence-2026-11-07.json)
+recovers 95.61 tok/s on the same final candidate after a ten-second pause,
+versus 89.45 on the fourth consecutive request. All eight candidate arms
+pass their host screens; no quiet-qualified kernel gain is established.
+This adds separate candidate evidence and does not supersede earlier results.
+
+**Qwen3.8-Flash-Next optimization harness pilot (2026-11-07).** Eighteen cells
+and 144 measured requests passed bounded repeatability/candidate-hash checks.
+Draft depths one through three and a 16-to-64-row concurrent-encoder cutoff
+were tested on the pinned Lily artifact, with an independent corpus/seed case
+and separate stage diagnostics. Host interference prevented timing qualification;
+the encoder candidate is not promoted and no production default changed.
+See the [pilot report](2026-11-07-flashnext-optimization-pilot.md) and
+[aggregate results](data/flashnext-optimization-pilot-2026-11-07.json).
+This is separate evidence and does not supersede the qualified historical
+Flash-Next MTP records below.
+
 **Dense Qwen3.8-27B oQ4e packed-weight follow-up (2026-11-06).** The final
 host-screened run measured **51.48 useful decode tok/s median**, with all six
 768-token responses passing on their first attempt. The **70.8 tok/s target
