@@ -1,4 +1,4 @@
-"""Own only image/cache IDs introduced by one serialized benchmark attempt.
+"""Clean verified benchmark images and new disposable cache from one attempt.
 
 No command in this module deletes volumes, containers, baseline images or
 baseline cache records. All command diagnostics are discarded. Receipts retain
@@ -20,10 +20,51 @@ from pathlib import Path
 MIN_FREE_BYTES = 12 * 1024**3
 _IMAGE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CACHE = re.compile(r"[a-z0-9]{20,64}\Z")
+TRIAL_RESOURCES_ATTRIBUTE = "_stark_maxxbench_resource_ownership"
 
 
 class ResourceError(ValueError):
     """Fixed content-free benchmark resource failure."""
+
+
+def _reference_tag(value):
+    if "@" in value or ":" in value.rsplit("/", 1)[-1]:
+        return value
+    return value + ":latest"
+
+
+class ImageOwnership:
+    """Projects and exact image references registered by the owning Trial."""
+
+    def __init__(self):
+        self.projects = set()
+        self.captured = {}
+
+    def register_project(self, session_id):
+        if not isinstance(session_id, str) or not session_id or len(session_id) > 255:
+            raise ResourceError("resource_ownership_unavailable")
+        # Pinned Pier's Compose project-name normalization.
+        project = session_id.lower()
+        if re.match(r"^[a-z0-9]", project) is None:
+            project = "0" + project
+        self.projects.add(re.sub(r"[^a-z0-9_-]", "-", project))
+
+    def register_image(self, image):
+        if (not isinstance(image, dict) or not isinstance(image.get("id"), str)
+                or _IMAGE.fullmatch(image["id"]) is None or not isinstance(image.get("reference"), str)
+                or not image["reference"] or len(image["reference"]) > 512
+                or any(character.isspace() for character in image["reference"])):
+            raise ResourceError("resource_ownership_unavailable")
+        self.captured.setdefault(image["id"], set()).add(_reference_tag(image["reference"]))
+
+    def owns(self, metadata):
+        references = self.captured.get(metadata.get("id"), set())
+        tags = metadata.get("tags") or []
+        project = metadata.get("project")
+        if project in self.projects and metadata.get("service") == "main":
+            expected = references | {project + "-main:latest"}
+            return set(tags) <= expected
+        return bool(references and tags and set(tags) <= references)
 
 
 def require_disk_space(path):
@@ -125,6 +166,22 @@ class DockerResources:
         return bool(self.command(["ps", "--all", "--no-trunc", "--filter", "ancestor=" + identifier,
                                   "--format", "{{.ID}}"]).strip())
 
+    def image_metadata(self, identifier):
+        image_format = ('{"id":{{json .Id}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},'
+                        '"service":{{json (index .Config.Labels "com.docker.compose.service")}},'
+                        '"tags":{{json .RepoTags}}}')
+        try:
+            metadata = json.loads(self.command(["image", "inspect", identifier, "--format", image_format]))
+        except (ValueError, TypeError):
+            raise ResourceError("resource_snapshot_failed") from None
+        if (not isinstance(metadata, dict) or metadata.get("id") != identifier
+                or any(metadata.get(name) is not None and not isinstance(metadata[name], str)
+                       for name in ("project", "service"))
+                or not isinstance(metadata.get("tags") or [], list)
+                or not all(isinstance(value, str) for value in metadata.get("tags") or [])):
+            raise ResourceError("resource_snapshot_failed")
+        return metadata
+
     def remove_image(self, identifier):
         if _IMAGE.fullmatch(identifier) is None:
             raise ResourceError("resource_cleanup_failed")
@@ -147,6 +204,15 @@ def eligible(record):
             and record.get("Reclaimable") is True and record.get("Type") not in {"internal", "frontend"})
 
 
+def require_cleanup_complete(path):
+    try:
+        receipt = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        raise ResourceError("resource_cleanup_failed") from None
+    if receipt.get("state") != "finished" or receipt.get("failure") is not None:
+        raise ResourceError("resource_cleanup_failed")
+
+
 def _cache_order(records, identifiers):
     depths = {}
 
@@ -161,16 +227,21 @@ def _cache_order(records, identifiers):
     return sorted(identifiers, key=lambda value: (-depth(value, set()), value))
 
 
-def cleanup_introduced(client, builder, before_images, before_cache, before_volumes, *, report=None):
+def cleanup_introduced(client, builder, before_images, before_cache, before_volumes, ownership, *, report=None):
     if client.builder() != builder or not before_volumes <= client.volumes():
         raise ResourceError("resource_identity_changed")
     report = {} if report is None else report
-    report.update(new_image_ids=sorted(client.images() - before_images), removed_image_ids=[],
-                  retained_image_ids=[], new_cache_ids=[], removed_cache_ids=[], retained_cache_ids=[],
+    report.update(observed_new_image_ids=sorted(client.images() - before_images), removed_image_ids=[],
+                  verified_image_ids=[], retained_unowned_image_ids=[], retained_image_ids=[],
+                  new_cache_ids=[], removed_cache_ids=[], retained_cache_ids=[],
                   image_removal_attempted_ids=[], cache_prune_attempted_ids=[])
     failed = False
-    for identifier in report["new_image_ids"]:
+    for identifier in report["observed_new_image_ids"]:
         try:
+            if not ownership.owns(client.image_metadata(identifier)):
+                report["retained_unowned_image_ids"].append(identifier)
+                continue
+            report["verified_image_ids"].append(identifier)
             if client.image_in_use(identifier):
                 report["retained_image_ids"].append(identifier)
                 failed = True
@@ -222,18 +293,22 @@ def task_resources(path, *, client=None):
                "builder": builder, "protected_image_ids": sorted(before_images),
                "protected_cache_ids": sorted(before_cache), "protected_volume_count": len(before_volumes),
                "protected_volumes_sha256": hashlib.sha256(json.dumps(sorted(before_volumes)).encode()).hexdigest(),
+               "cache_cleanup_policy": "new_private_immutable_unused_ids_since_attempt_start",
                "host_free_before_bytes": shutil.disk_usage(path.parent).free}
     _write(path, receipt)
     body_failed = False
+    ownership = ImageOwnership()
     try:
-        yield
+        yield ownership
     except BaseException:
         body_failed = True
         raise
     finally:
         failure = None
+        receipt["registered_compose_projects"] = sorted(ownership.projects)
+        receipt["captured_image_references"] = {key: sorted(value) for key, value in ownership.captured.items()}
         try:
-            cleanup_introduced(client, builder, before_images, before_cache, before_volumes, report=receipt)
+            cleanup_introduced(client, builder, before_images, before_cache, before_volumes, ownership, report=receipt)
             if receipt["cleanup_failed"]:
                 failure = "resource_cleanup_failed"
         except ResourceError as error:

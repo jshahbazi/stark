@@ -31,7 +31,11 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
-from maxxbench_resources import task_resources
+from maxxbench_resources import (
+    TRIAL_RESOURCES_ATTRIBUTE,
+    require_cleanup_complete,
+    task_resources,
+)
 from maxxbench_verifier_compat import (
     TRIAL_IMAGE_ATTRIBUTE,
     capture_environment_image,
@@ -122,6 +126,7 @@ def aggregate_agent_metrics(result):
     if metadata.get("agent_status") in {
         "submitted", "Submitted", "LimitsExceeded", "FormatError", "run_error", "unknown",
         "step_limit", "wall_time_limit", "format_error", "context_overflow", "model_error", "RepeatedFormatError",
+        "AgentTimeoutError", "request_timeout",
         "adapter_error",
     }:
         safe["agent_status"] = metadata["agent_status"]
@@ -130,11 +135,11 @@ def aggregate_agent_metrics(result):
         safe["http_errors"] = {key: value for key, value in errors.items() if key in {
             "transport", "configuration", "request_rejected", "authentication", "endpoint",
             "rate_limited", "server", "http_other", "response_too_large", "invalid_response",
-            "environment", "environment_timeout", "cancelled", "agent",
+            "environment", "environment_timeout", "cancelled", "agent", "client_timeout",
         } and type(value) is int}
     codes = metadata.get("api_error_codes")
     adapter = sys.modules.get("maxxbench_agent")
-    allowed_codes = set(getattr(adapter, "SAFE_API_ERROR_CODES", ())) | {"unknown"}
+    allowed_codes = set(getattr(adapter, "SAFE_API_ERROR_CODES", ())) | {"unknown", "request_timeout"}
     if isinstance(codes, dict):
         safe["api_error_codes"] = {key: value for key, value in codes.items()
                                    if key in allowed_codes and type(value) is int and value >= 0}
@@ -391,13 +396,12 @@ def model_bridge(profile, worker):
                 cleanup_failed = True
         try:
             if process.poll() is None:
-                # A load can fail or hang before readiness names its native PID.
-                # Capture exact matching direct children before their parent exits.
-                if not worker_identities:
-                    try:
-                        discover_workers()
-                    except (OSError, ValueError, subprocess.TimeoutExpired):
-                        cleanup_failed = True
+                # Capture exact matching current children before their parent
+                # exits, including a worker replaced after initial readiness.
+                try:
+                    discover_workers()
+                except (OSError, ValueError, subprocess.TimeoutExpired):
+                    cleanup_failed = True
                 process.terminate()
                 try:
                     process.wait(timeout=60)
@@ -438,7 +442,22 @@ def inspect_environment_image(trial):
     return image["id"] if image is not None else None
 
 
-async def trial_run(Trial, upstream, task, directory, profile=None):
+@contextlib.contextmanager
+def model_bridge_receipt(profile, worker, destination):
+    """Retain the validated stopped aggregate even when a trial body fails."""
+    frames = None
+    try:
+        with model_bridge(profile, worker) as details:
+            frames = details[2]
+            yield details
+    finally:
+        # model_bridge appends only validated aggregate protocol frames. A
+        # missing terminal frame must never be replaced with readiness data.
+        if frames and frames[-1].get("event") == "stopped":
+            write_json(destination, frames[-1])
+
+
+async def trial_run(Trial, upstream, task, directory, profile=None, *, ownership=None):
     from pier.models.trial.config import (
         AgentConfig,
         EnvironmentConfig,
@@ -461,6 +480,7 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
     unset = object()
     original_setup_override = unset
     original_image = unset
+    original_ownership = unset
     image_id = None
     image_checked = False
     state = "creating"
@@ -468,7 +488,7 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
     error_names = {
         "transport", "configuration", "request_rejected", "authentication", "endpoint",
         "rate_limited", "server", "http_other", "response_too_large", "invalid_response",
-        "environment", "environment_timeout", "cancelled", "agent",
+        "environment", "environment_timeout", "cancelled", "agent", "client_timeout",
     }
 
     def counters():
@@ -483,7 +503,7 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
             if name in error_names and type(value) is int and value >= 0
         } if isinstance(errors, dict) else {}
         codes = values.get("api_error_codes", {})
-        allowed_codes = set(getattr(adapter, "SAFE_API_ERROR_CODES", ())) | {"unknown"}
+        allowed_codes = set(getattr(adapter, "SAFE_API_ERROR_CODES", ())) | {"unknown", "request_timeout"}
         safe["api_error_codes"] = {
             key: value for key, value in codes.items()
             if key in allowed_codes and type(value) is int and value >= 0
@@ -528,6 +548,10 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
         try:
             progress(True)
             trial = await Trial.create(config)
+            original_ownership = getattr(trial, TRIAL_RESOURCES_ATTRIBUTE, unset)
+            if ownership is not None:
+                ownership.register_project(trial._environment.session_id)
+                setattr(trial, TRIAL_RESOURCES_ATTRIBUTE, ownership)
             original_image = getattr(trial, TRIAL_IMAGE_ATTRIBUTE, unset)
             original_setup = getattr(trial, "_setup_environment", None)
             original_setup_override = trial.__dict__.get("_setup_environment", unset)
@@ -538,6 +562,8 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
                     # Capture before agent execution; Pier can remove the image
                     # while finalizing even a short attempt.
                     image_id = inspect_environment_image(trial)
+                    if ownership is not None and image_id is not None:
+                        ownership.register_image(getattr(trial, TRIAL_IMAGE_ATTRIBUTE))
                     image_checked = True
                     progress(True)
                     return value
@@ -554,6 +580,8 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
                     result = await running
                     if not image_checked:
                         image_id = inspect_environment_image(trial)
+                        if ownership is not None and image_id is not None:
+                            ownership.register_image(getattr(trial, TRIAL_IMAGE_ATTRIBUTE))
                         image_checked = True
                     state = "finished"
                     break
@@ -576,13 +604,27 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
                     trial.__dict__.pop(TRIAL_IMAGE_ATTRIBUTE, None)
                 else:
                     setattr(trial, TRIAL_IMAGE_ATTRIBUTE, original_image)
+                if original_ownership is unset:
+                    trial.__dict__.pop(TRIAL_RESOURCES_ATTRIBUTE, None)
+                else:
+                    setattr(trial, TRIAL_RESOURCES_ATTRIBUTE, original_ownership)
             progress(False)
     rewards = result.verifier_result.rewards if result.verifier_result else None
+    exception_type = result.exception_info.exception_type if result.exception_info else None
+    timed_out = exception_type == "AgentTimeoutError"
+    infrastructure = exception_type if exception_type and not timed_out else None
+    agent_metrics = aggregate_agent_metrics(result.agent_result)
+    if timed_out:
+        agent_metrics = agent_metrics or {}
+        agent_metrics.setdefault("metadata", {})["agent_status"] = "AgentTimeoutError"
+    request_timed_out = bool(agent_metrics and agent_metrics.get("metadata", {}).get("agent_status") == "request_timeout")
     return {
         "task": task, "rewards": rewards,
-        "passed": bool(rewards and rewards.get("reward") == 1 and result.exception_info is None),
-        "infrastructure_exception": result.exception_info.exception_type if result.exception_info else None,
-        "agent_metrics": aggregate_agent_metrics(result.agent_result),
+        "passed": bool(rewards and rewards.get("reward") == 1 and infrastructure is None),
+        "infrastructure_exception": infrastructure,
+        "trial_exception": "AgentTimeoutError" if timed_out else None,
+        "agent_completed": False if timed_out or request_timed_out else None,
+        "agent_metrics": agent_metrics,
         "environment_image_id": image_id,
         "started_at": result.started_at.isoformat() if result.started_at else None,
         "finished_at": result.finished_at.isoformat() if result.finished_at else None,
@@ -624,10 +666,11 @@ def main(argv=None):
     if args.oracle:
         with gpu_reservation(args.gpu_lock):
             for task in tasks:
-                with task_resources(args.output / "resource-cleanup" / (task + ".json")):
+                with task_resources(args.output / "resource-cleanup" / (task + ".json")) as ownership:
                     emit({"event": "oracle_start", "task": task})
-                    result = asyncio.run(trial_run(Trial, args.upstream, task, args.output / "oracle-trials"))
-                write_json(args.output / f"oracle-{task}.json", {**identity, **result})
+                    result = asyncio.run(trial_run(Trial, args.upstream, task, args.output / "oracle-trials",
+                                                  ownership=ownership))
+                    write_json(args.output / f"oracle-{task}.json", {**identity, **result})
                 emit({"event": "oracle_done", "task": task, "passed": result["passed"],
                       "infrastructure_exception": result["infrastructure_exception"]})
                 if not result["passed"]:
@@ -666,7 +709,7 @@ def main(argv=None):
         for profile in profiles:
             assert_artifact_unchanged(artifacts[profile["id"]])
             emit({"event": "model_start", "profile": profile["id"]})
-            with model_bridge(profile, args.worker) as (ready, key, bridge_output):
+            with model_bridge_receipt(profile, args.worker, args.output / profile["id"] / "bridge-totals.json") as (ready, key, _frames):
                 maxxbench_agent.configure_connection(ready["base_url"], key, ready["model"])
                 write_json(args.output / profile["id"] / "identity.json", {**identity, **ready, "profile": profile})
                 for task in tasks:
@@ -678,24 +721,25 @@ def main(argv=None):
                             raise ValueError("campaign_identity_mismatch")
                         if existing.get("infrastructure_exception"):
                             raise ValueError("trial_infrastructure_failed")
+                        require_cleanup_complete(args.output / profile["id"] / "resource-cleanup" / (task + ".json"))
                         bind_environment_image(task_images, profile["id"] + "/" + task,
                                                existing.get("environment_image_id"))
                         continue
-                    with task_resources(args.output / profile["id"] / "resource-cleanup" / (task + ".json")):
+                    with task_resources(args.output / profile["id"] / "resource-cleanup" / (task + ".json")) as ownership:
                         emit({"event": "trial_start", "profile": profile["id"], "task": task})
                         result = asyncio.run(trial_run(Trial, args.upstream, task,
-                                                      args.output / profile["id"] / "trials", profile))
-                    assert_artifact_unchanged(artifacts[profile["id"]])
-                    image_id = result.get("environment_image_id")
-                    if not result["infrastructure_exception"]:
-                        bind_environment_image(task_images, profile["id"] + "/" + task, image_id)
-                        write_json(image_receipt, task_images)
-                    write_json(destination, {**result, "campaign_sha256": campaign_id})
+                                                      args.output / profile["id"] / "trials", profile,
+                                                      ownership=ownership))
+                        assert_artifact_unchanged(artifacts[profile["id"]])
+                        image_id = result.get("environment_image_id")
+                        if not result["infrastructure_exception"]:
+                            bind_environment_image(task_images, profile["id"] + "/" + task, image_id)
+                            write_json(image_receipt, task_images)
+                        write_json(destination, {**result, "campaign_sha256": campaign_id})
                     emit({"event": "trial_done", "profile": profile["id"], "task": task,
                           "passed": result["passed"], "infrastructure_exception": result["infrastructure_exception"]})
                     if result["infrastructure_exception"]:
                         raise ValueError("trial_infrastructure_failed")
-            write_json(args.output / profile["id"] / "bridge-totals.json", bridge_output[-1])
     emit({"event": "campaign_completed", "profiles": len(profiles), "tasks_per_profile": len(tasks)})
     return 0
 
@@ -720,7 +764,7 @@ if __name__ == "__main__":
             "model_bridge_protocol_failed", "model_bridge_ownership_unverified", "model_bridge_cleanup_failed",
             "model_bridge_shutdown_failed",
             "environment_identity_unavailable", "environment_identity_changed",
-            "resource_snapshot_failed", "resource_cleanup_failed", "resource_identity_changed",
+            "resource_snapshot_failed", "resource_cleanup_failed", "resource_identity_changed", "resource_ownership_unavailable",
             "campaign_identity_mismatch",
             "artifact_changed", "artifact_empty",
         } else "runner_failed"

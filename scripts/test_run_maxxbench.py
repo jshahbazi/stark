@@ -13,6 +13,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import run_maxxbench as runner
+from maxxbench_resources import TRIAL_RESOURCES_ATTRIBUTE, ImageOwnership, ResourceError
 from maxxbench_verifier_compat import CONTAINER_IMAGE_FORMAT, TRIAL_IMAGE_ATTRIBUTE
 
 
@@ -334,6 +335,39 @@ def test_model_bridge_surfaces_native_cleanup_failure(tmp_path, monkeypatch):
         pass
 
 
+def test_model_bridge_discovers_replacement_worker_before_parent_exits(tmp_path, monkeypatch):
+    process = BridgeProcess()
+    bridge_patches(monkeypatch, tmp_path, process)
+    replaced = False
+    replacement_alive = True
+    signalled = []
+
+    def snapshot(command, **_kwargs):
+        if command[:2] == ["/bin/ps", "-A"]:
+            return SimpleNamespace(returncode=0,
+                                   stdout=f"5678 {process.pid} Sun Nov 8 02:00:00 2026 {tmp_path / 'stark-generate'}\n")
+        identifier = command[2]
+        if identifier == "1234" and not replaced:
+            return SimpleNamespace(returncode=0,
+                                   stdout=f"{process.pid} Sun Nov 8 01:00:00 2026 {tmp_path / 'stark-generate'}\n")
+        if identifier == "5678" and replacement_alive:
+            parent = 1 if process.terminated else process.pid
+            return SimpleNamespace(returncode=0,
+                                   stdout=f"{parent} Sun Nov 8 02:00:00 2026 {tmp_path / 'stark-generate'}\n")
+        return SimpleNamespace(returncode=1, stdout="")
+
+    def kill(identifier, _signum):
+        nonlocal replacement_alive
+        signalled.append(identifier)
+        replacement_alive = False
+
+    monkeypatch.setattr(runner.subprocess, "run", snapshot)
+    monkeypatch.setattr(runner.os, "kill", kill)
+    with runner.model_bridge(profile(tmp_path), tmp_path / "stark-generate"):
+        replaced = True
+    assert signalled == [5678] and process.terminated
+
+
 def test_trial_run_aggregates_do_not_serialize_rollout_or_arbitrary_metadata(tmp_path, monkeypatch):
     config_module(monkeypatch)
     result = SimpleNamespace(
@@ -368,6 +402,137 @@ def test_trial_run_aggregates_do_not_serialize_rollout_or_arbitrary_metadata(tmp
 def test_repeated_format_error_status_is_preserved_as_model_budget_outcome():
     result = SimpleNamespace(model_dump=lambda: {"metadata": {"agent_status": "RepeatedFormatError"}})
     assert runner.aggregate_agent_metrics(result)["metadata"]["agent_status"] == "RepeatedFormatError"
+
+
+def test_client_timeout_error_counts_are_preserved_without_arbitrary_metadata():
+    result = SimpleNamespace(model_dump=lambda: {"metadata": {"http_errors": {"client_timeout": 2, "private": 99}}})
+    assert runner.aggregate_agent_metrics(result)["metadata"]["http_errors"] == {"client_timeout": 2}
+
+
+def test_request_timeout_budget_status_and_api_code_survive_aggregate_filter():
+    result = SimpleNamespace(model_dump=lambda: {"metadata": {
+        "agent_status": "request_timeout", "api_error_codes": {"request_timeout": 1, "private": 99},
+    }})
+    metrics = runner.aggregate_agent_metrics(result)["metadata"]
+    assert metrics["agent_status"] == "request_timeout"
+    assert metrics["api_error_codes"] == {"request_timeout": 1}
+
+
+def test_bridge_stopped_aggregate_is_written_after_trial_failure(tmp_path, monkeypatch):
+    frames = [{"event": "ready"}]
+    terminal = {"event": "stopped", "failure": None, "cleanup_failed": False, "elapsed_seconds": 1,
+                "requests": 1, "completed": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                "request_elapsed_seconds": 1, "http_failures": {"503": 1}}
+
+    @contextlib.contextmanager
+    def bridge(*_args):
+        try:
+            yield {}, "not-persisted", frames
+        finally:
+            frames.append(terminal)
+
+    monkeypatch.setattr(runner, "model_bridge", bridge)
+    path = tmp_path / "bridge-totals.json"
+    with pytest.raises(RuntimeError, match="trial failed"), runner.model_bridge_receipt({}, tmp_path, path):
+        raise RuntimeError("trial failed")
+    assert json.loads(path.read_text()) == terminal
+
+
+@pytest.mark.parametrize("reward,exception,passed,infrastructure", [
+    (0, "AgentTimeoutError", False, None), (1, "AgentTimeoutError", True, None),
+    (1, "UnknownNativeFault", False, "UnknownNativeFault"),
+])
+def test_graded_agent_timeout_is_budget_outcome_while_unknown_errors_remain_infrastructure(
+    tmp_path, monkeypatch, reward, exception, passed, infrastructure,
+):
+    config_module(monkeypatch)
+
+    class Trial:
+        @classmethod
+        async def create(cls, _config):
+            return cls()
+
+        async def run(self):
+            return SimpleNamespace(verifier_result=SimpleNamespace(rewards={"reward": reward}),
+                                   exception_info=SimpleNamespace(exception_type=exception), agent_result=None,
+                                   started_at=datetime.now(UTC), finished_at=datetime.now(UTC))
+
+    result = asyncio.run(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
+    assert result["rewards"] == {"reward": reward} and result["passed"] is passed
+    assert result["infrastructure_exception"] == infrastructure
+    if exception == "AgentTimeoutError":
+        assert result["trial_exception"] == "AgentTimeoutError" and result["agent_completed"] is False
+        assert result["agent_metrics"]["metadata"]["agent_status"] == "AgentTimeoutError"
+
+
+@pytest.mark.parametrize("oracle", [True, False])
+def test_completed_result_survives_cleanup_failure_and_next_task_is_not_started(tmp_path, monkeypatch, oracle):
+    entered = []
+    monkeypatch.setattr(runner, "preflight", lambda _path: ["sample-task", "next-task"])
+    monkeypatch.setattr(runner, "patch_pier", lambda _path: object())
+    monkeypatch.setattr(runner, "digest", lambda _path: "a" * 64)
+    monkeypatch.setattr(runner, "gpu_reservation", lambda _path: contextlib.nullcontext())
+
+    @contextlib.contextmanager
+    def failed_cleanup(path):
+        entered.append(path)
+        yield ImageOwnership()
+        raise ResourceError("resource_cleanup_failed")
+
+    async def completed(*_args, **_kwargs):
+        return {"task": "sample-task", "passed": True, "rewards": {"reward": 1}, "infrastructure_exception": None,
+                "environment_image_id": "sha256:" + "b" * 64}
+
+    monkeypatch.setattr(runner, "task_resources", failed_cleanup)
+    monkeypatch.setattr(runner, "trial_run", completed)
+    output = tmp_path / "output"
+    arguments = ["--upstream", str(tmp_path / "upstream"), "--output", str(output)]
+    if oracle:
+        arguments.append("--oracle")
+        receipt_path = output / "oracle-sample-task.json"
+    else:
+        adapter = ModuleType("maxxbench_agent")
+        adapter.configure_connection = lambda *_args: None
+        monkeypatch.setitem(sys.modules, adapter.__name__, adapter)
+        monkeypatch.setattr(runner, "fingerprint_artifact", lambda *_args: {"sha256": "a" * 64})
+        monkeypatch.setattr(runner, "assert_artifact_unchanged", lambda *_args: None)
+        monkeypatch.setattr(runner, "bind_campaign", lambda *_args: "a" * 64)
+        monkeypatch.setattr(runner.platform, "platform", lambda: "unit-host")
+        monkeypatch.setattr(runner.subprocess, "check_output", lambda *_args, **_kwargs: "a" * 40)
+        monkeypatch.setattr(runner, "model_bridge_receipt", lambda *_args: contextlib.nullcontext((
+            {"base_url": "http://127.0.0.1:12345/v1", "model": "sample"}, "not-persisted", [],
+        )))
+        matrix = tmp_path / "matrix.json"
+        matrix.write_text(json.dumps({"profiles": [{"id": "sample", "path": str(tmp_path / "model")}]}))
+        arguments.extend(["--matrix", str(matrix)])
+        receipt_path = output / "sample/sample-task.json"
+    with pytest.raises(ResourceError, match="resource_cleanup_failed"):
+        runner.main(arguments)
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["passed"] is True and receipt["rewards"] == {"reward": 1}
+    assert receipt["infrastructure_exception"] is None and len(entered) == 1
+
+
+@pytest.mark.parametrize("reward", [0, 1])
+def test_request_deadline_budget_preserves_grading_without_completion_claim(tmp_path, monkeypatch, reward):
+    config_module(monkeypatch)
+
+    class Trial:
+        @classmethod
+        async def create(cls, _config):
+            return cls()
+
+        async def run(self):
+            return SimpleNamespace(
+                verifier_result=SimpleNamespace(rewards={"reward": reward}), exception_info=None,
+                agent_result=SimpleNamespace(model_dump=lambda: {"metadata": {"agent_status": "request_timeout"}}),
+                started_at=datetime.now(UTC), finished_at=datetime.now(UTC),
+            )
+
+    result = asyncio.run(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
+    assert result["infrastructure_exception"] is None and result["passed"] is (reward == 1)
+    assert result["agent_completed"] is False and result["rewards"] == {"reward": reward}
+    assert result["agent_metrics"]["metadata"]["agent_status"] == "request_timeout"
 
 
 def test_oracle_main_enforces_disk_guard_before_starting_trial(tmp_path, monkeypatch):
@@ -535,6 +700,8 @@ def test_trial_cancellation_restores_preexisting_image_metadata_and_setup_pointe
     original = {"id": "prior", "reference": "prior"}
     captured = {"id": "sha256:" + "a" * 64, "reference": "sample-task-main:latest"}
     instance = None
+    ownership = ImageOwnership()
+    original_ownership = object()
     monkeypatch.setattr(runner, "capture_environment_image", lambda _trial: captured)
 
     async def scenario():
@@ -543,6 +710,8 @@ def test_trial_cancellation_restores_preexisting_image_metadata_and_setup_pointe
         class Trial:
             def __init__(self):
                 setattr(self, TRIAL_IMAGE_ATTRIBUTE, original)
+                setattr(self, TRIAL_RESOURCES_ATTRIBUTE, original_ownership)
+                self._environment = SimpleNamespace(session_id="sample-task")
 
             @classmethod
             async def create(cls, _config):
@@ -558,17 +727,21 @@ def test_trial_cancellation_restores_preexisting_image_metadata_and_setup_pointe
                 started.set()
                 await asyncio.Event().wait()
 
-        running = asyncio.create_task(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
+        running = asyncio.create_task(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials",
+                                                      ownership=ownership))
         await started.wait()
         assert getattr(instance, TRIAL_IMAGE_ATTRIBUTE) is captured
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
             await running
         assert getattr(instance, TRIAL_IMAGE_ATTRIBUTE) is original
+        assert getattr(instance, TRIAL_RESOURCES_ATTRIBUTE) is original_ownership
         assert "_setup_environment" not in instance.__dict__
         assert asyncio.all_tasks() == {asyncio.current_task()}
 
     asyncio.run(scenario())
+    assert ownership.projects == {"sample-task"}
+    assert ownership.captured == {captured["id"]: {captured["reference"]}}
 
 
 @pytest.mark.parametrize("output", ["private-marker Docker diagnostic", "sha256:" + "g" * 64, ""])

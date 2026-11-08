@@ -154,6 +154,9 @@ def patch_verifier_image_compat(trial_class):
 
     @functools.wraps(upstream)
     async def verify(self, env_config, *, key, step_cfg, verifier_env, artifacts_dir, artifacts=None):
+        ownership = getattr(self, "_stark_maxxbench_resource_ownership", None)
+        if ownership is not None:
+            ownership.register_project(self._separate_verifier_session_id(key))
         context = self._verifier_env_build_context(step_cfg)
         dockerfile = context / "Dockerfile"
         arguments = {"key": key, "step_cfg": step_cfg, "verifier_env": verifier_env,

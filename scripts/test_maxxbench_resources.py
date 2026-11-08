@@ -27,6 +27,7 @@ class FakeDocker:
         self.pruned_cache = []
         self.in_use_images = set()
         self.race_cache = set()
+        self.image_metadata_overrides = {}
 
     def builder(self):
         return self.selected
@@ -56,6 +57,11 @@ class FakeDocker:
     def image_in_use(self, identifier):
         return identifier in self.in_use_images
 
+    def image_metadata(self, identifier):
+        return self.image_metadata_overrides.get(identifier, {
+            "id": identifier, "project": "sample-task", "service": "main", "tags": ["sample-task-main:latest"],
+        })
+
     def remove_image(self, identifier):
         self.removed_images.append(identifier)
         self.image_ids.remove(identifier)
@@ -74,7 +80,8 @@ def test_only_new_unshared_immutable_unused_cache_and_new_images_are_removed(tmp
     client = FakeDocker()
     volume_ids = set(client.volume_ids)
     path = tmp_path / "cleanup.json"
-    with resources.task_resources(path, client=client):
+    with resources.task_resources(path, client=client) as ownership:
+        ownership.register_project("sample-task")
         client.image_ids.add(NEW_IMAGE)
         client.cache_records.update({NEW_CACHE: record(), "c" * 25: record(shared=True),
                                      "d" * 25: record(mutable=True), "e" * 25: record(reclaimable=False)})
@@ -112,7 +119,11 @@ def test_cache_children_are_pruned_before_owned_parents(tmp_path):
 def test_in_use_image_is_retained_and_cleanup_failure_surfaces(tmp_path):
     client = FakeDocker()
     path = tmp_path / "cleanup.json"
-    with pytest.raises(resources.ResourceError, match="resource_cleanup_failed"), resources.task_resources(path, client=client):
+    with (
+        pytest.raises(resources.ResourceError, match="resource_cleanup_failed"),
+        resources.task_resources(path, client=client) as ownership,
+    ):
+        ownership.register_project("sample-task")
         client.image_ids.add(NEW_IMAGE)
         client.in_use_images.add(NEW_IMAGE)
     assert not client.removed_images
@@ -135,7 +146,11 @@ def test_worker_identity_change_aborts_before_any_deletion(tmp_path):
 def test_resource_cleanup_runs_after_body_failure_without_logging_exception(tmp_path):
     client = FakeDocker()
     path = tmp_path / "cleanup.json"
-    with pytest.raises(RuntimeError, match="private-marker"), resources.task_resources(path, client=client):
+    with (
+        pytest.raises(RuntimeError, match="private-marker"),
+        resources.task_resources(path, client=client) as ownership,
+    ):
+        ownership.register_project("sample-task")
         client.image_ids.add(NEW_IMAGE)
         client.cache_records[NEW_CACHE] = record()
         raise RuntimeError("private-marker")
@@ -201,8 +216,9 @@ def test_partial_cleanup_preserves_deletion_provenance_when_later_snapshot_fails
     path = tmp_path / "cleanup.json"
     with (
         pytest.raises(resources.ResourceError, match="resource_snapshot_failed"),
-        resources.task_resources(path, client=client),
+        resources.task_resources(path, client=client) as ownership,
     ):
+        ownership.register_project("sample-task")
         client.image_ids.add(NEW_IMAGE)
 
         def failed_snapshot(*args, **kwargs):
@@ -215,3 +231,61 @@ def test_partial_cleanup_preserves_deletion_provenance_when_later_snapshot_fails
     assert receipt["image_removal_attempted_ids"] == [NEW_IMAGE]
     assert receipt["removed_image_ids"] == [NEW_IMAGE]
     assert receipt["failure"] == "resource_snapshot_failed"
+
+
+def test_concurrent_foreign_image_is_observed_and_retained(tmp_path):
+    client = FakeDocker()
+    foreign = "sha256:" + "f" * 64
+    path = tmp_path / "cleanup.json"
+    with resources.task_resources(path, client=client) as ownership:
+        ownership.register_project("sample-task")
+        client.image_ids.update({NEW_IMAGE, foreign})
+        client.image_metadata_overrides[foreign] = {
+            "id": foreign, "project": "unrelated-project", "service": "main", "tags": ["manual-asset:latest"],
+        }
+    assert client.removed_images == [NEW_IMAGE]
+    assert foreign in client.image_ids
+    assert json.loads(path.read_text())["retained_unowned_image_ids"] == [foreign]
+
+
+def test_captured_image_id_and_exact_tag_can_prove_ownership_without_project_label(tmp_path):
+    client = FakeDocker()
+    with resources.task_resources(tmp_path / "cleanup.json", client=client) as ownership:
+        ownership.register_image({"id": NEW_IMAGE, "reference": "source/custom:one"})
+        client.image_ids.add(NEW_IMAGE)
+        client.image_metadata_overrides[NEW_IMAGE] = {
+            "id": NEW_IMAGE, "project": None, "service": None, "tags": ["source/custom:one"],
+        }
+    assert client.removed_images == [NEW_IMAGE]
+
+
+def test_captured_id_does_not_authorize_an_additional_unregistered_tag(tmp_path):
+    client = FakeDocker()
+    with resources.task_resources(tmp_path / "cleanup.json", client=client) as ownership:
+        ownership.register_image({"id": NEW_IMAGE, "reference": "source/custom:one"})
+        client.image_ids.add(NEW_IMAGE)
+        client.image_metadata_overrides[NEW_IMAGE] = {
+            "id": NEW_IMAGE, "project": None, "service": None,
+            "tags": ["source/custom:one", "somebody-else:keep"],
+        }
+    assert not client.removed_images
+
+
+def test_own_project_label_does_not_authorize_a_foreign_manual_tag(tmp_path):
+    client = FakeDocker()
+    with resources.task_resources(tmp_path / "cleanup.json", client=client) as ownership:
+        ownership.register_project("sample-task")
+        client.image_ids.add(NEW_IMAGE)
+        client.image_metadata_overrides[NEW_IMAGE] = {
+            "id": NEW_IMAGE, "project": "sample-task", "service": "main", "tags": ["manual-asset:keep"],
+        }
+    assert not client.removed_images
+
+
+def test_cleanup_failure_status_blocks_resuming_to_next_task(tmp_path):
+    path = tmp_path / "cleanup.json"
+    path.write_text(json.dumps({"state": "cleanup_failed", "failure": "resource_cleanup_failed"}))
+    with pytest.raises(resources.ResourceError, match="resource_cleanup_failed"):
+        resources.require_cleanup_complete(path)
+    path.write_text(json.dumps({"state": "finished", "failure": None}))
+    resources.require_cleanup_complete(path)

@@ -77,12 +77,22 @@ is an explicitly different benchmark configuration implemented by the isolated
 bridge; it is not a new public HTTP request field. Output requests above the
 production API's limit fail admission instead of being silently clamped.
 
-The local client allows 600 seconds per completion and 30 seconds per command.
+The host client allows 1810 seconds per completion, covering the bridge's
+1800-second request deadline, and 30 seconds per command.
 Command timeouts return fixed feedback to the agent so it can recover. The
 upstream task normally allows three hours for the agent and 30 minutes for its
 verifier. Context overflow is a recorded budget outcome. Unexpected adapter
 faults abort the attempt as infrastructure failures and cannot become model
 scores.
+An exact stock `AgentTimeoutError` remains a budget outcome when Pier still
+collects and grades the patch. Receipts retain the verifier reward and mark
+`trial_exception` and agent status as `AgentTimeoutError`, with
+`agent_completed: false`. Reward 1 still means the submitted patch passed the
+task; it does not assert that the agent finished within its time budget.
+The exact HTTP 504 `request_timeout` API outcome is also a graded agent budget
+exit with `agent_completed: false`. A generic generation failure remains an
+infrastructure error. Aggregate client-deadline counts use `client_timeout`;
+they never include transport exception messages.
 Stark's fixed `invalid_tool_call` and `tool_choice_not_satisfied` codes feed the
 stock agent's format-error retry loop. Other HTTP failures remain infrastructure
 faults. Receipts retain allowlisted error-code counts without error messages.
@@ -151,13 +161,18 @@ Both oracle and model attempts require at least 12 GiB of host free space
 before starting. Inside the existing serial benchmark reservation, the runner
 records protected image IDs, cache IDs, the builder worker identity and a hash
 of the existing volume set. After Pier finishes the attempt's environment
-cleanup, the runner removes only image IDs introduced during that attempt,
-using non-force exact-ID removal with `--no-prune` to preserve untagged parent
-images. An image still referenced by a container is
+cleanup, the runner considers only image IDs introduced during that attempt.
+Deletion additionally requires a source/verifier Compose project registered
+from this Trial with a matching main-service image and expected tags, or an
+exact ID/reference captured from its actual main container. Foreign projects,
+unknown images and additional manual tags are retained. Removal uses non-force
+exact IDs and `--no-prune` to preserve untagged parent images. An image still referenced by a container is
 retained and reported as incomplete cleanup.
 
 The runner then rechecks cache records. Only newly introduced, unshared,
-immutable, reclaimable records are eligible. Each deletion has an exact-ID
+immutable, reclaimable records are eligible. This is a temporal boundary for
+rebuildable unused cache under the serial benchmark reservation; it does not
+prove which build created each record. Each deletion has an exact-ID
 filter and server-side private/immutable selectors; BuildKit protects active
 records. Baseline records remain protected even if their sharing state changes.
 The helper never invokes volume removal, container removal, image sweeping or
@@ -170,8 +185,10 @@ Private `resource-cleanup/<task>.json` receipts contain ownership boundaries,
 attempted and confirmed deletion IDs, fixed failure categories and before/after
 host capacity. Docker diagnostics and build-cache descriptions are discarded.
 Builder changes or missing protected volumes stop cleanup before deletion.
-Failed cleanup aborts an otherwise successful attempt instead of implying
-that capacity was recovered. A receipt can retain protected, shared, mutable
+A completed trial's aggregate result is written before housekeeping. Failed
+cleanup preserves that result and stops progression; it does not turn a valid
+verifier reward into a model failure. Resume checks the separate cleanup
+receipt before advancing. A receipt can retain protected, shared, mutable
 or active cache records; cleanup does not promise a fixed amount of free space.
 
 The resource helper hash participates in oracle and campaign identity. The

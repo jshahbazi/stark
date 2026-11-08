@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import maxxbench_verifier_compat as compat
 import pytest
+from maxxbench_resources import TRIAL_RESOURCES_ATTRIBUTE, ImageOwnership
 
 IMAGE = {"id": "sha256:" + "a" * 64, "reference": "sample-task-main:latest"}
 
@@ -58,6 +59,9 @@ def make_trial(monkeypatch):
 
             def _verifier_env_build_context(self, _step):
                 return path
+
+            def _separate_verifier_session_id(self, key):
+                return "sample-task--verifier--" + key
 
             async def _verify_with_separate_environment(self, env_config, **kwargs):
                 generated = self._verifier_env_build_context(kwargs["step_cfg"])
@@ -194,6 +198,19 @@ def test_non_base_verifier_uses_stock_hook_with_original_trial(tmp_path, make_tr
     trial = make(source)
     assert asyncio.run(invoke(trial)) == "verified"
     assert calls[0]["view"] is trial and calls[0]["context"] == source
+
+
+@pytest.mark.parametrize("base_image", [False, True])
+def test_actual_verifier_project_is_registered_for_resource_ownership(tmp_path, make_trial, base_image):
+    make, _calls = make_trial
+    source = context(tmp_path)
+    if not base_image:
+        (source / "Dockerfile").write_text("FROM python:3.12\n")
+    trial = make(source)
+    ownership = ImageOwnership()
+    setattr(trial, TRIAL_RESOURCES_ATTRIBUTE, ownership)
+    assert asyncio.run(invoke(trial)) == "verified"
+    assert ownership.projects == {"sample-task--verifier--trial"}
 
 
 def test_capture_reads_only_id_and_buildable_reference(monkeypatch):
