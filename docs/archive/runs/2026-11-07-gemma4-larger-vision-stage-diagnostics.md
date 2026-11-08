@@ -105,3 +105,31 @@ Q/K/V now match exactly. The first measured difference moves to attention.
 Full feature gates still fail: relative RMS 0.07462, 0.10354 and 0.04970. The
 normalization correction is retained and these failures remain separate from
 the [next Flash source-policy controls](2026-11-07-gemma4-larger-flash-controls.md).
+
+After the witnessed Flash fixes, the unchanged full-feature replay on `f67ab9d5`
+passes two cases, while pattern RMS remains `0.0264942683` against the frozen
+`0.02` gate. A separate current-main `VisionGeluBF16` test on sealed `bd4ea321`
+(SHA-256 `be5533ba9c9bc497f51cf6359ddfd1a78e8f5d91ed76dc7110059e43fc705c9d`)
+matches pinned Torch tanh-GELU for all 65,280 finite BF16 inputs on both CPU and
+Metal. Its retained oracle manifest SHA-256 is
+`78f542f4bb6f10a760927ef5501ba5d9884d0f1c78bc430ecd5646f77c037644`.
+This measures the main Gemma caller directly; it transfers no Lily runtime
+qualification and motivates no GELU arithmetic change.
+
+The next source capture stores all pattern rows for blocks 0–5, totaling
+63,700,992 bytes below the 64 MiB aggregate stage cap. Manifest SHA-256:
+`edb9d9f7edc576eb11e70a20c552380e59e11ea6723f6d577e504d0af4c6852f`.
+All three original image, patch and full-feature hashes remain unchanged.
+Sealed `3898d16d` (SHA-256
+`e450bf52de8afa144b3303dc643057c5851762651b5398e9291c10f0de885f09`)
+matches complete blocks 0–2 exactly. Block 3 first differs in 63 of 2,654,208 BF16
+values (relative RMS `0.00000276024`); blocks 4 and 5 differ in 36,438 and 421,740
+values. Earlier eight-row prefixes had concealed this first whole-block drift.
+Layer 3's complete input is therefore established before further diagnosis.
+
+A four-plane layer-3 Q/K/V/attention source capture totals 42,467,328 bytes and
+retains all original image/patch/full-feature hashes. Its manifest SHA-256 is
+`c53a500fda80fccf774b0f571fb7261fad4d233dd508f0be7f98ca316832b6af`.
+The additive selected-layer observer defaults to layer 0 for existing fixtures.
+Native layer-3 substage comparison remains pending; no new arithmetic change or
+gate relaxation follows from the block-level evidence alone.

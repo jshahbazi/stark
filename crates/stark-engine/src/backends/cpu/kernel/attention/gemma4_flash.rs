@@ -35,6 +35,18 @@ pub fn gemma4_vision_flash_scalar_exp_f32(
     }
 }
 
+/// Independent source-compatibility observer; CPU continues to call libm.
+#[kernel(Gemma4VisionFlashSourceExpF32)]
+pub fn gemma4_vision_flash_source_exp_f32(
+    input: *const f32,
+    output: *mut f32,
+    count: u32,
+) {
+    for row in 0..count as usize {
+        unsafe { *output.add(row) = (*input.add(row)).exp() };
+    }
+}
+
 #[kernel(Gemma4VisionFlashQK)]
 pub fn gemma4_vision_flash_qk(
     queries: *const bf16,

@@ -40,3 +40,13 @@ diagnostic caps this replay at six distinct query rows and reuses the frozen
 full-attention fixture; no new oracle or tolerance is introduced. Only counts,
 hashes and aggregate errors are printed. This separates source-order differences
 from GPU-only rounding at ties missed by the first-eight-row prefix.
+
+Sealed `2529098a` subsequently executes the full down-projection split. All
+captured first-eight-row pre-FF norm, gate, GELU, up and product values match
+exactly. The full native down input differs in 2,819 BF16 values, while applying
+the existing native down projection directly to the complete canonical source
+input matches all 2,757,888 output values exactly. This clears the 4304-wide
+projection's 16-channel tail as the first-block cause for that blue-image case;
+it does not establish agreement for later-layer inputs. No projection arithmetic
+change is made. Later whole-block and selected-layer diagnosis is recorded in
+[the stage evidence](2026-11-07-gemma4-larger-vision-stage-diagnostics.md).

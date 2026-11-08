@@ -430,6 +430,25 @@
         }
       ],
       "adaptation": "Retained Lily vision-only streaming source-order attention in vendor/lily-core/src/kernels/metal/vision_attention.metal, with independent test-only vision_attention_reference.metal. PyTorch5c488690 source QK aligned64/32-stream plus8-term-tail contraction, modulo-four/cross-fold FP32 softmax reduction and reciprocal, and four-stream PV are retained from the main-engine source-compatible vision bodies. The exponential is the pinned SLEEF expf_u10 schedule, with explicit FMA boundaries. Three QK sweeps retain fixed register state and allocate no NxN tensor; final BF16 boundaries are explicit. Actual artifact source-input controls and full-tower qualification are recorded separately. Copyright and Boost text are retained in vendor NOTICE, ATTRIBUTION.sleef and LICENSE.sleef."
+    },
+    "arm-larger-vision-scalar-exp-reference": {
+      "license": "MIT OR Apache-2.0 WITH LLVM-exception",
+      "selected_license": "MIT",
+      "license_file": "arm-optimized-routines-LICENSE",
+      "license_sha256": "650afbf29f214451e02241adc42534e82c9d6ae2b38e2444b92b5a1ffcaf9346",
+      "repository": "https://github.com/ARM-software/optimized-routines",
+      "source_revision": "20859d3fd9e797dde592c489c8ef7d383f778620",
+      "source_files": [
+        {
+          "path": "math/expf.c",
+          "sha256": "31cb4e66fa51bd28d95025e3a702e9b3c02cb91e8cbe31da73cf8eaf8d71aae7"
+        },
+        {
+          "path": "math/exp2f_data.c",
+          "sha256": "d58b44276cb8330ffb896c5adff2fc5d85d4b8a8bb809fbd51267a04347602f1"
+        }
+      ],
+      "adaptation": "Licensed numerical-method reference for table-based exponential range reduction. Larger Gemma vision scalar rescaling uses an independently derived128-power quadratic with mathematical Chebyshev coefficients and generated power constants, implemented with compensated F32 pairs. No proprietary host instructions, tuned coefficients or table bytes are copied; no Darwin-source identity or universal bit-exactness is claimed. Existing nearest policy remains a separate control."
     }
   },
   "packages": {

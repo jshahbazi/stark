@@ -84,6 +84,22 @@ This nearest-F32 numerical policy is distinct from the source libm in rare
 one-ULP cases; frozen source attention/features remain the qualification gates.
 CPU libm and the source-derived BF16 tile fexp implementation are unchanged.
 
+The subsequent larger-only scalar source-compatibility policy uses a generic
+128-entry power table and quadratic residual, independently derived with
+`a=ln(2)/128`, `c0=a²/2`, and `c1=a+a³/32` (the leading Chebyshev cubic
+correction). Constants are generated from 100-digit Decimal mathematics; no host
+instructions, tuned coefficients or table bytes are redistributed. ARM optimized
+routines at `20859d3fd9e797dde592c489c8ef7d383f778620`, `math/expf.c`
+(`31cb4e66fa51bd28d95025e3a702e9b3c02cb91e8cbe31da73cf8eaf8d71aae7`)
+and `math/exp2f_data.c`
+(`d58b44276cb8330ffb896c5adff2fc5d85d4b8a8bb809fbd51267a04347602f1`),
+are a licensed table/range-reduction reference, distinct from this independently
+derived 128/quadratic formula. The selected MIT notice is retained in
+`arm-optimized-routines-LICENSE` (the complete upstream dual-license notice).
+The original nearest-F32 helper/test remains a separate control. Source-bit
+agreement is qualified only for the recorded finite controls and model gates;
+a one-ULP broad-control counterexample remains preserved.
+
 The explicit BF16 affine-Q4 source profile adapts MLX v0.32.3 at
 [`64ea011cb65f14d9ce2737e60db9a4ae91ed7441`](https://github.com/ml-explore/mlx/tree/64ea011cb65f14d9ce2737e60db9a4ae91ed7441).
 Its native QMV arithmetic preserves BF16 four-value bias sums, four-product
