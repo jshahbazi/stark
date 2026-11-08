@@ -73,6 +73,22 @@ tensor dtype/spans are checked before dispatch. Coordinates and interpolation
 geometry are unchanged. An independent test-only safe body remains separate;
 both source-input position controls require exact production bit agreement.
 
+The retained H1152/head72 rotary path derives live F32 inverse frequencies
+with Rust powf, builds block-major angles, and uses the measured SLEEF
+ADVSIMD sinf/cosf u10 schedule from
+`5a1d179df9cf652951b59010a2d2075372d67f68` in `src/qwen4exp/vision_math.rs`.
+The independent test-only copy is `vision_math_reference.rs`. Original
+Naoki Shibata/contributors copyright is preserved in both source headers,
+`ATTRIBUTION.sleef` and `NOTICE`; the Boost text is retained in
+`LICENSE.sleef`. The distribution source manifest records the pinned source
+hashes and adaptation. No reference vectors or checkpoint weights are embedded.
+Two scratch-owned F32 coefficient buffers cover at most 8,192 by36 elements
+each, are refreshed before each image pass, and remain alive until GPU
+completion. Angles are finite and below4,096. Separate F32 products/addition
+are applied by the vision-only `vision_rotary.metal` before its BF16 store.
+Other retained geometries keep the existing rotary path. Exact source F32
+coefficient and BF16 application checks remain separate from the tower gate.
+
 Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision. Explicitly admitted original-format image artifacts can load the retained BF16 vision tower; ordinary text loading keeps it disabled.
 
 Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary single-token decode graph. The bridge returns complete F32 vocabulary readouts to Stark's caller-owned exact sampler, without the upstream GPU sampler's 1,024-candidate cap or probability arithmetic. Draft distributions and acceptance stay request-local; head catch-up is disabled for ordinary non-MTP requests. Verification evaluates up to four positions in one layer-major graph with the ordinary decode's affine dot expressions, reductions, normalization and rounding boundaries. Recurrent state and pre-convolution inputs are retained for exact prefix rollback. The original serial verifier remains a reference. The engine adapter restores partially consumed groups when a stream stops early, without sampling during cleanup. Checkpoint quantization and the ordinary target's activation, state, cache and weight arithmetic are preserved. Numerical and performance qualification is recorded separately.

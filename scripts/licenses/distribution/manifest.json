@@ -320,6 +320,54 @@
         }
       ],
       "adaptation": "Pinned expf_u10 and positive log1pf_u10 branch for reference-only FP32 SiLU, softplus and decay. The log1p input is exp(x) with source softplus x<=20; the direct linear branch handles x>20. All arithmetic associations and explicit FMAs follow the pinned double-float helpers; legacy text activation/decay kernels remain unchanged."
+    },
+    "sleef-retained-lily-vision-rotary": {
+      "license": "BSL-1.0",
+      "license_file": "sleef-LICENSE.txt",
+      "license_sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+      "repository": "https://github.com/shibatch/sleef",
+      "source_revision": "5a1d179df9cf652951b59010a2d2075372d67f68",
+      "source_files": [
+        {
+          "path": "src/libm/sleefsimdsp.c",
+          "sha256": "726d962aaa9cfb0b1696122f4d26765495491c0cbc26c084c899704de46b2f5c"
+        },
+        {
+          "path": "src/libm/rempitab.c",
+          "sha256": "105201cc9c80126a3f18ea96e52540c0d13fda7c91a664599ba4078639f961ad"
+        },
+        {
+          "path": "src/libm/rename.h",
+          "sha256": "358200ef8dee58eaf68a63eea3b905251d138b6ddfcaf2dd93dde16b8ffc7dc4"
+        },
+        {
+          "path": "src/arch/helperadvsimd.h",
+          "sha256": "8db49cb2881771dde2ac6b7fcf5031b3fecf302b92220ff4cf0ed04f169bb610"
+        },
+        {
+          "path": "src/common/df.h",
+          "sha256": "cd3c7de0e47f3751a15dd62878effabdec9e47a892a03fefd75981c26fdaf097"
+        },
+        {
+          "path": "src/common/misc.h",
+          "sha256": "516ddeb5cc9501039b104967f1830b92e94cc6053c401fbb6773873dfb1b6178"
+        },
+        {
+          "path": "src/common/quaddef.h",
+          "sha256": "7dd06a0161c384d6823f4554312765cd5af61eb913fd997c5f835c10bf5cf309"
+        }
+      ],
+      "additional_notices": [
+        {
+          "license": "Copyright attribution",
+          "license_file": "sleef-ATTRIBUTION.txt",
+          "license_sha256": "3acf0d6a7e3518460982b79e8d4e0ba2429b9929fab3dd15dd19776e66d5ea71",
+          "notice_source_file": "third_party/sleef/src/libm/sleefsimdsp.c and src/arch/helperadvsimd.h",
+          "notice_source_revision": "5a1d179df9cf652951b59010a2d2075372d67f68",
+          "repository": "https://github.com/shibatch/sleef"
+        }
+      ],
+      "adaptation": "Retained Lily vision-only F32 sinf/cosf u10 scalar-lane and double-float schedule, copied from Stark main into vendor/lily-core/src/qwen4exp/vision_math.rs with an independent test-only vision_math_reference.rs. Live Rust F32 powf frequencies and block-major angles feed the measured four-lane source schedule; no reference fixture vectors or checkpoint weights are embedded. Source correspondence, actual Lily F32-stage bit controls, BF16 rotary application and full-tower qualification remain separate. Existing copyright attribution is preserved in both source headers, vendor NOTICE and ATTRIBUTION.sleef; the Boost license is also retained as vendor/lily-core/LICENSE.sleef."
     }
   },
   "packages": {

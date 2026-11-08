@@ -56,8 +56,11 @@ use super::vision_weights::VisionWeights;
 mod reference_tests;
 
 #[cfg(test)]
-#[path = "vision_math.rs"]
+#[path = "vision_math_reference.rs"]
 mod source_math;
+
+#[path = "vision_math.rs"]
+mod rotary_math;
 
 /// The rotary base of `Qwen4ExpVisionRotaryEmbedding`, a constructor default
 /// the checkpoint's config does not carry (VISION.md "Rotary").
@@ -87,6 +90,8 @@ pub struct VisionScratch {
     mlp: Tensor,
     /// `[n / 4, out_hidden]` bf16.
     merged: Tensor,
+    /// Grid-derived F32 cos/sin, kept alive through the full GPU pass.
+    rotary: Option<(Tensor, Tensor)>,
 }
 
 impl VisionScratch {
@@ -106,8 +111,69 @@ impl VisionScratch {
             tmp: z(&[capacity, h])?,
             mlp: z(&[capacity, i])?,
             merged: z(&[capacity / 4, v.out_hidden_size])?,
+            rotary: if v.hidden_size == 1152 && v.num_heads == 16 && v.head_dim() == 72
+            {
+                Some((
+                    Tensor::zeros(ctx, &[capacity, 36], DType::F32)?,
+                    Tensor::zeros(ctx, &[capacity, 36], DType::F32)?,
+                ))
+            } else {
+                None
+            },
         })
     }
+}
+
+fn rotary_coefficients(gh: usize, gw: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+    let n = gh
+        .checked_mul(gw)
+        .ok_or_else(|| anyhow::anyhow!("vision rotary grid overflow"))?;
+    ensure!(
+        gh >= 2 && gw >= 2 && gh.is_multiple_of(2) && gw.is_multiple_of(2) && n <= 8192,
+        "vision rotary grid bounds"
+    );
+    let inverse = (0..18)
+        .map(|index| 1.0_f32 / 10000_f32.powf((2 * index) as f32 / 36.0))
+        .collect::<Vec<_>>();
+    let mut angles = Vec::with_capacity(n * 36);
+    for row in 0..n {
+        let ih = (row / 2) % 2;
+        let iw = row % 2;
+        let bh = row / (4 * (gw / 2));
+        let bw = (row / 4) % (gw / 2);
+        for index in 0..36 {
+            let position = if index < 18 { 2 * bh + ih } else { 2 * bw + iw };
+            angles.push(position as f32 * inverse[index % 18]);
+        }
+    }
+    ensure!(
+        angles.iter().all(|angle| angle.is_finite() && angle.abs() < 4096.0),
+        "vision rotary angle bounds"
+    );
+    let (cos, sin) = rotary_math::vision_sin_cos(&angles);
+    ensure!(
+        cos.iter().chain(&sin).all(|value| value.is_finite()),
+        "vision rotary coefficient finite gate"
+    );
+    Ok((cos, sin))
+}
+
+fn prepare_rotary(
+    s: &VisionScratch,
+    gh: usize,
+    gw: usize,
+) -> Result<Option<(Tensor, Tensor)>> {
+    let Some((cos, sin)) = &s.rotary else { return Ok(None) };
+    let n = gh
+        .checked_mul(gw)
+        .ok_or_else(|| anyhow::anyhow!("vision rotary extent overflow"))?;
+    ensure!(n <= s.capacity, "vision rotary capacity");
+    let (cosines, sines) = rotary_coefficients(gh, gw)?;
+    let cos = cos.view(0, &[n, 36])?;
+    let sin = sin.view(0, &[n, 36])?;
+    cos.write_bytes(bytemuck::cast_slice(&cosines))?;
+    sin.write_bytes(bytemuck::cast_slice(&sines))?;
+    Ok(Some((cos, sin)))
 }
 
 /// One image's tower outputs, as views into the tower's scratch: valid until
@@ -197,6 +263,7 @@ pub(super) fn forward_with(
         // The cast is the reference's `hidden_states.to(target_dtype)`.
         let cast: Vec<bf16> = pixels.iter().map(|&p| bf16::from_f32(p)).collect();
         px.write_bytes(bytemuck::cast_slice(&cast))?;
+        let rotary = prepare_rotary(s, gh, gw)?;
 
         let pass = ctx.begin()?;
         pass.set_label("vision");
@@ -213,7 +280,13 @@ pub(super) fn forward_with(
                 LAYERNORM_EPS,
             )?;
             linear_bf16_bias(ctx, &pass, &h, &b.qkv_w, &b.qkv_b, &qkv, 32)?;
-            qkv_rope_2d_bf16(ctx, &pass, &qkv, heads, gh, gw, ROPE_THETA)?;
+            if let Some((cos, sin)) = &rotary {
+                crate::kernels::vision::qkv_rope_coefficients_bf16(
+                    ctx, &pass, &qkv, cos, sin, gh, gw,
+                )?;
+            } else {
+                qkv_rope_2d_bf16(ctx, &pass, &qkv, heads, gh, gw, ROPE_THETA)?;
+            }
             attention_full_bf16(ctx, &pass, &qkv, &attn, heads, scale)?;
             linear_bf16_bias(ctx, &pass, &attn, &b.proj_w, &b.proj_b, &tmp, 32)?;
             add_bf16(ctx, &pass, &x, &tmp, &x)?;
