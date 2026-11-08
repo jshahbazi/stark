@@ -1,8 +1,141 @@
 {
   "entry_count": 110,
   "exporter": "tools/converter/scripts/export_conversion_catalog.py",
-  "extension_count": 6,
+  "extension_count": 10,
   "extensions": [
+    {
+      "adapter": "qwen3_5",
+      "catalog_origin": "stark_extension",
+      "compressed_format": {
+        "bits": 4,
+        "mixed_bits": [
+          4,
+          5,
+          6,
+          8
+        ],
+        "scheme": "mlx_affine"
+      },
+      "config_class": "HFQwen35Config",
+      "container": ".safetensors",
+      "family": "Qwen3.8",
+      "files": {
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": "qwen_think_end",
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": "optional_thinking",
+        "reasoning_id": "boolean_default_on",
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "qwen3_5",
+      "model_kind": "LanguageModelSpec",
+      "name": "Qwen3.8-27B oQ4e MTP",
+      "origin": "HuggingFaceOrigin",
+      "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp",
+      "size": "27B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "Alibaba"
+    },
+    {
+      "adapter": "olmo3",
+      "catalog_origin": "stark_extension",
+      "compressed_format": null,
+      "config_class": "HFOlmo3Config",
+      "container": ".safetensors",
+      "family": "OLMo-3",
+      "files": {
+        "chat_template": {
+          "filename": "chat_template.jinja",
+          "repo": "allenai/Olmo-3-7B-Instruct"
+        },
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "allenai/Olmo-3-7B-Instruct"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "allenai/Olmo-3-7B-Instruct"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "allenai/Olmo-3-7B-Instruct"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "allenai/Olmo-3-7B-Instruct"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": null,
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": null,
+        "reasoning_id": null,
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "olmo3",
+      "model_kind": "LanguageModelSpec",
+      "name": "Olmo-3-7B-Instruct",
+      "origin": "HuggingFaceOrigin",
+      "profile_reference": "Qwen/Qwen3-8B",
+      "profile_source": {
+        "files_sha256": {
+          "chat_template.jinja": "f5186d42d99c8a0445d37fd8a6c7ccf07fe3e24a29ce622d8bd245da9507b12b",
+          "config.json": "6282ae812f9e494bd212e9a3233d68dc4d5f1e2569642423d2b79a3e80373ef8",
+          "generation_config.json": "745e78c16cc40cbb08827f7b7c9d5a888f7cb908236d4ca0443ff47f43a9d5af",
+          "tokenizer.json": "7738a25c46a6043a0e2e605138851baa450269ce9d800af6ca9bf6192e45510c",
+          "tokenizer_config.json": "f7a2753a4ff30657e452c8fef02b9a99a3b900ceb4c65a1e3fbea6a3bfab07a6"
+        },
+        "repo": "allenai/Olmo-3-7B-Instruct",
+        "revision": "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc"
+      },
+      "repo": "allenai/Olmo-3-7B-Instruct",
+      "size": "7B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "AllenAI"
+    },
     {
       "adapter": "qwen3_5",
       "catalog_origin": "stark_extension",
@@ -115,6 +248,231 @@
       "profile_reference": "HFGemma2Config / standard LanguageModelSpec",
       "repo": "google/gemma-2-2b-it",
       "size": "2B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "Google"
+    },
+    {
+      "adapter": "gemma4_text",
+      "catalog_origin": "stark_extension",
+      "compressed_format": null,
+      "config_class": "HFGemma4TextConfig",
+      "container": ".safetensors",
+      "family": "Gemma-4",
+      "files": {
+        "chat_template": {
+          "filename": "chat_template.jinja",
+          "repo": "google/gemma-4-12B-it"
+        },
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "google/gemma-4-12B-it"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "google/gemma-4-12B-it"
+        },
+        "processor_config": {
+          "filename": "processor_config.json",
+          "repo": "google/gemma-4-12B-it"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "google/gemma-4-12B-it"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "google/gemma-4-12B-it"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": null,
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": null,
+        "reasoning_id": null,
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "gemma4_text",
+      "model_kind": "LanguageModelSpec",
+      "name": "gemma-4-12B-it",
+      "origin": "HuggingFaceOrigin",
+      "profile_reference": "google/gemma-3-4b-it",
+      "profile_source": {
+        "files_sha256": {
+          "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+          "config.json": "478c46e8d2c52d5c2d85bf67e3b3e8c90e7c9d91086cee27e3c267907e936bd9",
+          "generation_config.json": "a8349d9bd64cc5841297fcb5002f0fdc4749c473c8f1b10ea337f9ce4ee7014e",
+          "processor_config.json": "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9",
+          "tokenizer.json": "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb",
+          "tokenizer_config.json": "a62f4e85a47c0c136edaaa3a4f591fd6783717299a9def47e5ad03a49f6a5eb9"
+        },
+        "repo": "google/gemma-4-12B-it",
+        "revision": "43c9d014b231474fa7212dbb48a762566c2b255d"
+      },
+      "repo": "google/gemma-4-12B-it",
+      "size": "12B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "Google"
+    },
+    {
+      "adapter": "gemma4_text",
+      "catalog_origin": "stark_extension",
+      "compressed_format": null,
+      "config_class": "HFGemma4TextConfig",
+      "container": ".safetensors",
+      "family": "Gemma-4",
+      "files": {
+        "chat_template": {
+          "filename": "chat_template.jinja",
+          "repo": "google/gemma-4-26B-A4B-it"
+        },
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "google/gemma-4-26B-A4B-it"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "google/gemma-4-26B-A4B-it"
+        },
+        "processor_config": {
+          "filename": "processor_config.json",
+          "repo": "google/gemma-4-26B-A4B-it"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "google/gemma-4-26B-A4B-it"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "google/gemma-4-26B-A4B-it"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": null,
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": null,
+        "reasoning_id": null,
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "gemma4_text",
+      "model_kind": "LanguageModelSpec",
+      "name": "gemma-4-26B-A4B-it",
+      "origin": "HuggingFaceOrigin",
+      "profile_reference": "google/gemma-3-4b-it",
+      "profile_source": {
+        "files_sha256": {
+          "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+          "config.json": "ed0c1eb3633de771906e9ba004a44cc5635bcc06ee2062077c3d2e88a50707d3",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+          "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633"
+        },
+        "repo": "google/gemma-4-26B-A4B-it",
+        "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52"
+      },
+      "repo": "google/gemma-4-26B-A4B-it",
+      "size": "26B-A4B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "Google"
+    },
+    {
+      "adapter": "gemma4_text",
+      "catalog_origin": "stark_extension",
+      "compressed_format": null,
+      "config_class": "HFGemma4TextConfig",
+      "container": ".safetensors",
+      "family": "Gemma-4",
+      "files": {
+        "chat_template": {
+          "filename": "chat_template.jinja",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "processor_config": {
+          "filename": "processor_config.json",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "google/gemma-4-31B-it"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "google/gemma-4-31B-it"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": null,
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": null,
+        "reasoning_id": null,
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "gemma4_text",
+      "model_kind": "LanguageModelSpec",
+      "name": "gemma-4-31B-it",
+      "origin": "HuggingFaceOrigin",
+      "profile_reference": "google/gemma-3-4b-it",
+      "profile_source": {
+        "files_sha256": {
+          "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+          "config.json": "e967dd38bc5cfd38bd09a995a7bf4a754075df2b46aba68f7fbb5a791e6d8dd1",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+          "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633"
+        },
+        "repo": "google/gemma-4-31B-it",
+        "revision": "842da3794eaa0b77d5f08bae87a17459d91ff475"
+      },
+      "repo": "google/gemma-4-31B-it",
+      "size": "31B",
       "status": {
         "access": "not_assessed",
         "conversion": "implemented",
@@ -287,69 +645,6 @@
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
-    },
-    {
-      "adapter": "qwen3_5",
-      "catalog_origin": "stark_extension",
-      "compressed_format": {
-        "scheme": "mlx_affine",
-        "bits": 4,
-        "mixed_bits": [
-          4,
-          5,
-          6,
-          8
-        ]
-      },
-      "config_class": "HFQwen35Config",
-      "container": ".safetensors",
-      "family": "Qwen3.8",
-      "files": {
-        "generation_config": {
-          "filename": "generation_config.json",
-          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
-        },
-        "model_config": {
-          "filename": "config.json",
-          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
-        },
-        "tokenizer": {
-          "filename": "tokenizer.json",
-          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
-        },
-        "tokenizer_config": {
-          "filename": "tokenizer_config.json",
-          "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp"
-        }
-      },
-      "metadata": {
-        "end_of_thinking_id": "qwen_think_end",
-        "generation_config": null,
-        "generation_params_overrides": null,
-        "grammar_start_tokens_count": 0,
-        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-        "inline_sources": {},
-        "parser_id": "optional_thinking",
-        "reasoning_id": "boolean_default_on",
-        "roles": {
-          "assistant": "assistant",
-          "system": "system",
-          "user": "user"
-        }
-      },
-      "metadata_profile": "qwen3_5",
-      "model_kind": "LanguageModelSpec",
-      "name": "Qwen3.8-27B oQ4e MTP",
-      "origin": "HuggingFaceOrigin",
-      "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp",
-      "size": "27B",
-      "status": {
-        "access": "not_assessed",
-        "conversion": "implemented",
-        "qualification": "pending",
-        "runtime": "not_assessed"
-      },
-      "vendor": "Alibaba"
     }
   ],
   "models": [
@@ -3651,10 +3946,10 @@
       "vendor": "Google"
     },
     {
-      "adapter": null,
+      "adapter": "gemma4_text",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
-      "config_class": "HFGemma4Config",
+      "config_class": "HFGemma4TextConfig",
       "container": ".safetensors",
       "family": "Gemma-4",
       "files": {
@@ -3670,6 +3965,10 @@
           "filename": "config.json",
           "repo": "google/gemma-4-E2B-it"
         },
+        "processor_config": {
+          "filename": "processor_config.json",
+          "repo": "google/gemma-4-E2B-it"
+        },
         "tokenizer": {
           "filename": "tokenizer.json",
           "repo": "google/gemma-4-E2B-it"
@@ -3680,29 +3979,42 @@
         }
       },
       "metadata": {
-        "end_of_thinking_id": "sha256:fb958de693e7994607d23c9cf676c888245756140d3610bba8e5da92a15c4f66",
+        "end_of_thinking_id": null,
         "generation_config": null,
         "generation_params_overrides": null,
         "grammar_start_tokens_count": 0,
         "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "inline_sources": {},
-        "parser_id": "sha256:9c2d241e53f72d2582b640080b809194bb043edaa8a4151d94f2116fa8cfa0ba",
-        "reasoning_id": "boolean_default_off",
+        "parser_id": null,
+        "reasoning_id": null,
         "roles": {
           "assistant": "assistant",
           "system": "system",
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "gemma4_text",
       "model_kind": "LanguageModelSpec",
-      "name": "gemma-4-e2b-it",
+      "name": "gemma-4-E2B-it",
       "origin": "HuggingFaceOrigin",
+      "profile_reference": "google/gemma-3-4b-it",
+      "profile_source": {
+        "files_sha256": {
+          "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+          "config.json": "1b28f3d2c3100f6c594754b81107428bd7b822a7f48272ca681dae9d2ec38330",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+          "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633"
+        },
+        "repo": "google/gemma-4-E2B-it",
+        "revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
+      },
       "repo": "google/gemma-4-E2B-it",
-      "size": "5B",
+      "size": "E2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -3767,10 +4079,10 @@
       "vendor": "Google"
     },
     {
-      "adapter": null,
+      "adapter": "gemma4_text",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
-      "config_class": "HFGemma4Config",
+      "config_class": "HFGemma4TextConfig",
       "container": ".safetensors",
       "family": "Gemma-4",
       "files": {
@@ -3786,6 +4098,10 @@
           "filename": "config.json",
           "repo": "google/gemma-4-E4B-it"
         },
+        "processor_config": {
+          "filename": "processor_config.json",
+          "repo": "google/gemma-4-E4B-it"
+        },
         "tokenizer": {
           "filename": "tokenizer.json",
           "repo": "google/gemma-4-E4B-it"
@@ -3796,29 +4112,42 @@
         }
       },
       "metadata": {
-        "end_of_thinking_id": "sha256:fb958de693e7994607d23c9cf676c888245756140d3610bba8e5da92a15c4f66",
+        "end_of_thinking_id": null,
         "generation_config": null,
         "generation_params_overrides": null,
         "grammar_start_tokens_count": 0,
         "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "inline_sources": {},
-        "parser_id": "sha256:9c2d241e53f72d2582b640080b809194bb043edaa8a4151d94f2116fa8cfa0ba",
-        "reasoning_id": "boolean_default_off",
+        "parser_id": null,
+        "reasoning_id": null,
         "roles": {
           "assistant": "assistant",
           "system": "system",
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "gemma4_text",
       "model_kind": "LanguageModelSpec",
-      "name": "gemma-4-e4b-it",
+      "name": "gemma-4-E4B-it",
       "origin": "HuggingFaceOrigin",
+      "profile_reference": "google/gemma-3-4b-it",
+      "profile_source": {
+        "files_sha256": {
+          "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+          "config.json": "33b10c02df3c2e8536cf323d29d53262aaa2f4d11dbe19bc729373fbe90295d4",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+          "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+          "tokenizer.json": "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc",
+          "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633"
+        },
+        "repo": "google/gemma-4-E4B-it",
+        "revision": "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"
+      },
       "repo": "google/gemma-4-E4B-it",
-      "size": "8B",
+      "size": "E4B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },

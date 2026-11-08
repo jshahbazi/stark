@@ -280,7 +280,7 @@ def test_malformed_tensor_layouts_fail_closed(tmp_path, case):
 @pytest.mark.parametrize(
     "field,value,error",
     [
-        ("model_type", "qwen3_5_moe", UnsupportedConversion),
+        ("model_type", "qwen3_5_moe", ConversionError),
         ("model_type", "qwen3_5_text_moe", UnsupportedConversion),
         ("layer_types", ["linear_attention"], ConversionError),
         ("layer_types", ["linear_attention", "unknown"], ConversionError),

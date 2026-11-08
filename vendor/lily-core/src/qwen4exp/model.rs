@@ -2030,6 +2030,17 @@ impl Qwen4ExpModel {
         self.prefill_chunks(ctx, state, s, tokens, draw, vision, None).map(drop)
     }
 
+    /// Stark's bounded image worker: retain the ordinary final target readout
+    /// while allowing cancellation between completed prefill command buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill_with_vision_until(
+        &self, ctx: &MetalContext, state: &mut DecodeState, s: &mut Scratch,
+        tokens: &[u32], draw: Option<Draw<'_>>, vision: Option<&VisionInput<'_>>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<usize> {
+        self.prefill_chunks(ctx, state, s, tokens, draw, vision, Some(stop))
+    }
+
     /// [`Self::prefill_with_vision`] without a draw that stops before the
     /// first chunk at which `stop` returns true (checked before every chunk,
     /// the first included). Returns the tokens fed, a whole number of chunks

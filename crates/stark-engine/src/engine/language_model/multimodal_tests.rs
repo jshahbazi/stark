@@ -38,6 +38,38 @@ const SPECIAL_IDS: ImageTokenIds = ImageTokenIds {
     video: 4,
 };
 
+#[stark_test]
+fn separate_prefill_last_token_aligns_stream_and_scoring_cpu() {
+    use crate::backends::cpu::Cpu;
+    for split in [false, true] {
+        let fixture = TinyModel::new(128);
+        let path = fixture.directory.join("config.json");
+        if split {
+            let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            config["decoder_config"]["separate_prefill_last_token"] = json!(true);
+            fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        }
+        let engine = Engine::<Cpu>::new().unwrap();
+        let model = engine.load_language_model(&fixture.directory).unwrap();
+        assert_eq!(model.decoder.prefill_requires_separate_logits_row(), split);
+        let prompt = [5u32, 6, 7, 8];
+        let scores = model.score_next_token(&prompt, 64).unwrap();
+        let expected = greedy(&scores.logits);
+        let mut state = model.create_empty_state(Some(64), 0).unwrap();
+        let options = LanguageModelStreamOptions {
+            sampling_method: SamplingMethod::Greedy,
+            ..model.default_stream_options()
+        };
+        let tokens: Vec<u64> = prompt.into_iter().map(u64::from).collect();
+        let mut stream = model.stream(&tokens, &mut state, options).unwrap();
+        let actual = stream.next().unwrap().unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stream.metrics().num_tokens_prefilled, 4);
+        // Both decoder parts belong to one logical prefill batch.
+        assert_eq!(stream.metrics().num_prefill_forward_passes, 1);
+    }
+}
+
 struct TinyModel {
     directory: PathBuf,
     model_dim: u32,
@@ -53,6 +85,41 @@ impl Drop for TinyModel {
 impl TinyModel {
     fn new(model_dim: u32) -> Self {
         Self::with_rope_mix(model_dim, false)
+    }
+
+    fn gemma4_images(model_dim: u32) -> Self {
+        let fixture = Self::new(model_dim);
+        let path = fixture.directory.join("config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["decoder_config"]["gemma4_image_embeddings"] = json!(true);
+        for layer in config["decoder_config"]["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+            layer["rope_config"] = json!({
+                "type":"UnscaledRoPEConfig", "base":100.0, "head_dim":4, "max_sequence_length":CAPACITY
+            });
+        }
+        fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        fixture
+    }
+
+    fn scalar_bidirectional_images(
+        model_dim: u32,
+        reference: bool,
+    ) -> Self {
+        let fixture = Self::gemma4_images(model_dim);
+        let path = fixture.directory.join("config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["decoder_config"]["gemma4_image_embeddings"] = json!(false);
+        config["decoder_config"]["scalar_image_embeddings"] = json!(true);
+        config["decoder_config"]["bidirectional_image_attention"] = json!(true);
+        for layer in config["decoder_config"]["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+            layer["rope_config"] = json!({
+                "type":"LinearScalingRoPEConfig", "base":100.0, "head_dim":4,
+                "max_sequence_length":CAPACITY, "scaling_factor":8.0,
+            });
+            layer["mixer_config"]["reference_bf16"] = json!(reference);
+        }
+        fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        fixture
     }
 
     fn with_rope_mix(
@@ -562,6 +629,120 @@ fn stream_crosses_image_boundary<B: Backend>(model_dim: u32) {
     assert_eq!(state.transformer_state.rotary_position_delta(), Some(-2));
 }
 
+fn gemma4_scalar_image_fusion_and_stream<B: Backend>() {
+    let fixture = TinyModel::gemma4_images(128);
+    let engine = Engine::<B>::new().unwrap();
+    let model = engine.load_language_model(&fixture.directory).unwrap();
+    let old = fixture.prefill(&model, 0);
+    let input = MultimodalPrefill::try_new_gemma4(
+        old.tokens,
+        old.image,
+        SPECIAL_IDS,
+        15,
+        &model.model_identity,
+        128,
+        DataType::BF16,
+        VOCAB,
+        64,
+    )
+    .unwrap();
+    let controls = control_tokens(&input);
+    let empty = || model.decoder.create_empty_state(Some(64), &model.engine.context).unwrap();
+    let mut fused = empty();
+    let actual = encode(&model, &mut fused, &input.tokens, None, image_replacement(&input, 0..8));
+    let mut control = empty();
+    let expected = encode(&model, &mut control, &controls, None, None);
+    assert_identical(&actual, &expected);
+    assert_eq!(fused.context_length(), 8);
+    assert_eq!(fused.rotary_position_delta(), None);
+    let next = greedy(&expected);
+    let expected_continuation = encode(&model, &mut control, &[next], None, None);
+
+    let mut state = model.create_empty_state(Some(64), 0).unwrap();
+    {
+        let mut stream = model.stream_multimodal(&input, &mut state, greedy_options(&model)).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap(), next);
+        assert_eq!(stream.next().unwrap().unwrap(), greedy(&expected_continuation));
+    }
+    assert!(state.multimodal_prefilled);
+    assert!(state.has_multimodal_context());
+    assert_eq!(state.transformer_state.rotary_position_delta(), None);
+
+    // Gemma has no rotary delta to act as a request marker. Its explicit image
+    // marker must still enforce the one-token output headroom and stop limit.
+    let mut bounded = model.create_empty_state(Some(9), 0).unwrap();
+    let generated = model
+        .stream_multimodal(&input, &mut bounded, greedy_options(&model))
+        .unwrap()
+        .take(4)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(generated.len(), 1);
+    assert_eq!(bounded.tokens().len(), 9);
+    assert_eq!(bounded.last_output_token, None);
+    assert!(bounded.has_multimodal_context());
+    assert_eq!(bounded.transformer_state.rotary_position_delta(), None);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn gemma4_image_fusion_uses_scalar_rope_and_explicit_context_marker_cpu() {
+    gemma4_scalar_image_fusion_and_stream::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn gemma4_image_fusion_uses_scalar_rope_and_explicit_context_marker_metal() {
+    gemma4_scalar_image_fusion_and_stream::<crate::backends::metal::Metal>();
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn gemma4_image_mode_rejects_spatial_decoder_and_forged_position_delta() {
+    use crate::backends::cpu::Cpu;
+    let fixture = TinyModel::new(128);
+    let engine = Engine::<Cpu>::new().unwrap();
+    let qwen = engine.load_language_model(&fixture.directory).unwrap();
+    let old = fixture.prefill(&qwen, 0);
+    let input = MultimodalPrefill::try_new_gemma4(
+        old.tokens,
+        old.image,
+        SPECIAL_IDS,
+        15,
+        &qwen.model_identity,
+        128,
+        DataType::BF16,
+        VOCAB,
+        64,
+    )
+    .unwrap();
+    let mut state = qwen.create_empty_state(Some(64), 0).unwrap();
+    assert!(qwen.stream_multimodal(&input, &mut state, greedy_options(&qwen)).is_err());
+    assert!(!state.multimodal_prefilled);
+    assert_eq!(state.tokens().len(), 0);
+
+    let fixture = TinyModel::gemma4_images(128);
+    let gemma = engine.load_language_model(&fixture.directory).unwrap();
+    let old = fixture.prefill(&gemma, 0);
+    let mut input = MultimodalPrefill::try_new_gemma4(
+        old.tokens,
+        old.image,
+        SPECIAL_IDS,
+        15,
+        &gemma.model_identity,
+        128,
+        DataType::BF16,
+        VOCAB,
+        64,
+    )
+    .unwrap();
+    input.position_delta = 1;
+    let mut state = gemma.create_empty_state(Some(64), 0).unwrap();
+    assert!(gemma.stream_multimodal(&input, &mut state, greedy_options(&gemma)).is_err());
+    assert!(!state.multimodal_prefilled);
+    assert_eq!(state.tokens().len(), 0);
+}
+
 #[cfg(backend = "cpu")]
 #[stark_test]
 fn native_image_stream_crosses_1024_token_feature_boundary_cpu() {
@@ -724,4 +905,49 @@ fn native_image_fusion_matches_lookup_and_chunked_decoder_metal() {
     // Metal attention instantiates head widths 64 and larger. Rotate the same
     // four-channel prefix while exercising its actual GPU feature copy path.
     fusion_and_cache_parity::<crate::backends::metal::Metal>(128);
+}
+
+fn scalar_bidirectional_linear_rope_stream<B: Backend>() {
+    for reference in [false, true] {
+        let fixture = TinyModel::scalar_bidirectional_images(128, reference);
+        let engine = Engine::<B>::new().unwrap();
+        let model = engine.load_language_model(&fixture.directory).unwrap();
+        assert!(model.decoder.scalar_multimodal_supported());
+        let old = fixture.prefill(&model, 0);
+        let input = MultimodalPrefill::try_new_gemma3(
+            old.tokens,
+            old.image,
+            SPECIAL_IDS.image,
+            SPECIAL_IDS.vision_start,
+            SPECIAL_IDS.vision_end,
+            &model.model_identity,
+            128,
+            DataType::BF16,
+            VOCAB,
+            64,
+        )
+        .unwrap();
+        let mut state = model.create_empty_state(Some(64), 0).unwrap();
+        let result = model.stream_multimodal(&input, &mut state, greedy_options(&model));
+        if reference {
+            assert!(result.is_err(), "causal-only eager score path must reject image masks");
+        } else {
+            let generated = result.unwrap().take(2).collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(generated.len(), 2);
+            assert!(state.has_multimodal_context());
+            assert_eq!(state.transformer_state.rotary_position_delta(), None);
+        }
+    }
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn scalar_bidirectional_linear_rope_image_stream_cpu() {
+    scalar_bidirectional_linear_rope_stream::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn scalar_bidirectional_linear_rope_image_stream_metal() {
+    scalar_bidirectional_linear_rope_stream::<crate::backends::metal::Metal>();
 }

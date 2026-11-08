@@ -126,7 +126,19 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     """
     if family not in _ARCHITECTURES:
         raise UnsupportedConversion("Gemma generation has no text decoder adapter")
-    config = read_json(source / "config.json")
+    return build_gemma_text_plan(read_json(source / "config.json"), None, family=family, dtype=dtype, _source=source)
+
+
+def build_gemma_text_plan(
+    config: dict, tensors: dict | None, *, family: str, dtype: str = "bfloat16", _source: Path | None = None
+) -> ConversionPlan:
+    """Plan an already selected decoder inventory without copying checkpoint data.
+
+    Multimodal adapters validate their complete wrapper and provide only the
+    decoder namespace here. TensorInfo retains the original source descriptors.
+    """
+    if family not in _ARCHITECTURES:
+        raise UnsupportedConversion("Gemma generation has no text decoder adapter")
     if config.get("model_type") != family:
         raise UnsupportedConversion("Checkpoint model_type does not match the Gemma text adapter")
     if dtype not in _DTYPES:
@@ -182,7 +194,12 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         if not isinstance(config["rope_parameters"], dict):
             raise ConversionError("Gemma config has malformed rope_parameters")
         unsupported.append("New Gemma RoPE parameters require a separate adapter")
-    tensors = load_checkpoint(source)
+    # Keep topology/operation admission ahead of checkpoint parsing for the
+    # public text adapter. Multimodal adapters pass their selected inventory.
+    if tensors is None:
+        if _source is None:
+            raise ConversionError("Gemma decoder tensor selection is missing")
+        tensors = load_checkpoint(_source)
     validate_planning_layers(layers, tensors)
     window = _integer(config, "sliding_window")
     if family == "gemma2":

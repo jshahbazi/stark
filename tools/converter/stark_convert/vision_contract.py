@@ -43,6 +43,10 @@ def source_rules(entry: dict, artifact_mode: str = "text") -> tuple[dict, ...]:
         return required_files(entry)
     if artifact_mode != "vision-language":
         raise ConversionError("Unsupported artifact mode")
+    from .adapters.gemma4_vision import PROFILES as gemma_profiles
+
+    if entry.get("repo") in gemma_profiles and entry.get("adapter") == "gemma4_text":
+        return required_files(entry)
     if entry.get("repo") != REPO:
         raise ConversionError("Vision source is outside the pinned repository")
     return (

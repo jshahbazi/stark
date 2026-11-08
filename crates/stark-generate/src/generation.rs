@@ -171,7 +171,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        matches!(self.schema_version, 2 | 3)
+        matches!(self.schema_version, 2..=6)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
@@ -186,6 +186,64 @@ impl ImageArtifactIdentity<'_> {
     }
 }
 
+/// Bind each implementation profile to its artifact schema and actual geometry.
+/// Capability recognition never implies that an artifact has been qualified.
+fn image_family_limits(
+    profile: &str,
+    version: u32,
+    schema: u32,
+    geometry: (u32, u32),
+) -> Option<(u32, u32, u32)> {
+    let (expected_geometry, patches, tokens) = match (profile, version, schema) {
+        ("qwen35-dense-bf16-merged-v1", 1, 2 | 3)
+        | ("qwen35-dense-bf16-merged-v2", 2, 3)
+        | ("qwen35-dense-affine-merged-v3", 3, 3)
+        | ("qwen35-moe-affine-merged-v4", 4, 3)
+        | ("qwen35-moe-bf16-merged-v5", 5, 3)
+        | ("qwen38-lily-retained-bf16-vision-v1", 1, 6) => ((16, 2), 4096, 1024),
+        (
+            "gemma4-e2b-bf16-v1"
+            | "gemma4-e4b-bf16-v1"
+            | "gemma4-31b-bf16-v1"
+            | "gemma4-12b-bf16-v1"
+            | "gemma4-26b-a4b-bf16-v1",
+            1,
+            4,
+        ) => ((16, 3), 2520, 280),
+        ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
+        _ => return None,
+    };
+    (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
+}
+
+#[cfg(test)]
+mod image_family_tests {
+    use super::image_family_limits;
+
+    #[test]
+    fn family_handshakes_require_matching_schema_version_and_geometry() {
+        for (profile, version, schema, geometry, expected) in [
+            ("qwen35-dense-bf16-merged-v2", 2, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-dense-affine-merged-v3", 3, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-moe-affine-merged-v4", 4, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-moe-bf16-merged-v5", 5, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, (16, 2), (4096, 1024, 1048576)),
+            ("gemma4-e2b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-e4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-31b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-12b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-26b-a4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma3-siglip-bf16-v1", 1, 5, (14, 4), (4096, 256, 802816)),
+        ] {
+            assert_eq!(image_family_limits(profile, version, schema, geometry), Some(expected));
+            assert_eq!(image_family_limits(profile, version + 1, schema, geometry), None);
+            assert_eq!(image_family_limits(profile, version, 1, geometry), None);
+            assert_eq!(image_family_limits(profile, version, schema, (1, 1)), None);
+        }
+        assert_eq!(image_family_limits("unimplemented", 1, 5, (14, 4)), None);
+    }
+}
+
 struct PreparedRequest<P> {
     id: String,
     image: P,
@@ -195,20 +253,32 @@ struct PreparedRequest<P> {
     _lease: ImageLease,
 }
 
-fn valid_image_metadata(metadata: &PreparedImageMetadata) -> bool {
+fn valid_image_metadata(
+    metadata: &PreparedImageMetadata,
+    geometry: (u32, u32),
+) -> bool {
+    let (patch_size, merge_size) = geometry;
+    let (max_patches, max_image_tokens) = match geometry {
+        (16, 2) => (4096, 1024),
+        (16, 3) => (2520, 280),
+        (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
+        _ => return false,
+    };
     let [temporal, height, width] = metadata.grid;
     temporal == 1
         && height > 0
         && width > 0
-        && height.is_multiple_of(2)
-        && width.is_multiple_of(2)
-        && height.checked_mul(width).is_some_and(|patches| patches <= 4096 && patches / 4 == metadata.image_tokens)
-        && metadata.processed_dimensions[0].checked_div(16) == Some(width)
-        && metadata.processed_dimensions[1].checked_div(16) == Some(height)
-        && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(16))
+        && height.is_multiple_of(merge_size)
+        && width.is_multiple_of(merge_size)
+        && height.checked_mul(width).is_some_and(|patches| {
+            patches <= max_patches && patches / (merge_size * merge_size) == metadata.image_tokens
+        })
+        && metadata.processed_dimensions[0].checked_div(patch_size) == Some(width)
+        && metadata.processed_dimensions[1].checked_div(patch_size) == Some(height)
+        && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(patch_size))
         && metadata.input_tokens >= metadata.image_tokens as usize + 2
         && metadata.image_tokens > 0
-        && metadata.image_tokens <= 1024
+        && metadata.image_tokens <= max_image_tokens
 }
 
 #[derive(Clone)]
@@ -442,6 +512,9 @@ pub(crate) trait GenerationBackend {
         options: &GenerationOptions,
     ) -> Result<u32, &'static str> {
         Ok(options.mtp_drafts)
+    }
+    fn image_geometry(&self) -> (u32, u32) {
+        (16, 2)
     }
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
         None
@@ -909,7 +982,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if self.backend.cancelled(request_id)? {
                     return Err("generation_cancelled");
                 }
-                if !valid_image_metadata(&metadata) {
+                if !valid_image_metadata(&metadata, self.backend.image_geometry()) {
                     return Err("invalid_image_preparation_output");
                 }
                 if metadata
@@ -1089,21 +1162,22 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             .filter(ImageArtifactIdentity::valid)
             .ok_or("invalid_model_config")?;
         let runtime_identity = worker.backend.runtime_identity().ok_or("invalid_model_config")?;
-        let (family_profile, family_version) = worker
-            .backend
-            .image_family_profile()
-            .filter(|(profile, version)| {
-                matches!((*profile, *version), ("qwen35-dense-bf16-merged-v1", 1) | ("qwen35-dense-bf16-merged-v2", 2))
-            })
-            .ok_or("invalid_model_config")?;
+        let (family_profile, family_version) = worker.backend.image_family_profile().ok_or("invalid_model_config")?;
         let (model_source, model_revision) = worker.backend.image_source_identity().ok_or("invalid_model_config")?;
+        let (max_patches, max_image_tokens, max_processed_pixels) = image_family_limits(
+            family_profile,
+            family_version,
+            identity.schema_version,
+            worker.backend.image_geometry(),
+        )
+        .ok_or("invalid_model_config")?;
         readiness["image_input"] = json!({
             "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],
             "formats":["image/jpeg","image/png"],"max_images":1,
             "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":32_000_000,
             "max_source_dimension":16_384,
-            "max_processed_pixels":1_048_576,"max_patches":4096,"max_image_tokens":1024,
+            "max_processed_pixels":max_processed_pixels,"max_patches":max_patches,"max_image_tokens":max_image_tokens,
             "artifact_schema_version":identity.schema_version,"model_source":model_source,
             "model_revision":model_revision,"family_profile":family_profile,"family_version":family_version,
             "artifact_sha256":identity.artifact_sha256,"config_sha256":identity.config_sha256,
@@ -1416,8 +1490,18 @@ mod tests {
             self.images.then_some((self.family_profile, self.family_version))
         }
 
+        fn image_geometry(&self) -> (u32, u32) {
+            if self.family_profile == "gemma4-e2b-bf16-v1" {
+                (16, 3)
+            } else {
+                (16, 2)
+            }
+        }
+
         fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
-            self.images.then_some(if self.image_schema == 3 {
+            self.images.then_some(if self.image_schema == 4 {
+                ("google/gemma-4-E2B-it", Some("3e22461f65e89153144f8adb70e3b8c2cc9845a7"))
+            } else if self.image_schema == 3 {
                 ("local:synthetic-merged-model", None)
             } else {
                 ("Qwen/Qwen3.5-0.8B", Some("2fc06364715b967f1860aea9cf38778875588b17"))
@@ -1461,9 +1545,21 @@ mod tests {
                 },
                 PreparedImageMetadata {
                     input_tokens: 7,
-                    image_tokens: 4,
-                    grid: [1, 4, 4],
-                    processed_dimensions: [64, 64],
+                    image_tokens: if self.image_schema == 4 {
+                        1
+                    } else {
+                        4
+                    },
+                    grid: if self.image_schema == 4 {
+                        [1, 3, 3]
+                    } else {
+                        [1, 4, 4]
+                    },
+                    processed_dimensions: if self.image_schema == 4 {
+                        [48, 48]
+                    } else {
+                        [64, 64]
+                    },
                 },
             ))
         }
@@ -2065,6 +2161,40 @@ mod tests {
     }
 
     #[test]
+    fn gemma_image_readiness_and_preparation_use_three_by_three_pooling() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        worker.backend.image_schema = 4;
+        worker.backend.family_profile = "gemma4-e2b-bf16-v1";
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let ready: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(ready["image_input"]["artifact_schema_version"], 4);
+        assert_eq!(ready["image_input"]["max_image_tokens"], 280);
+        assert_eq!(ready["image_input"]["max_patches"], 2520);
+        assert_eq!(ready["image_input"]["max_processed_pixels"], 645120);
+        assert_eq!(ready["image_input"]["qualification"], "unverified");
+        let prepared = post(&mut worker, image_prepare(&root));
+        assert_eq!(prepared["image_tokens"], 1);
+        assert_eq!(prepared["grid"], json!([1, 3, 3]));
+        assert!(prepared.get("prepared_id").is_some());
+        let metadata = PreparedImageMetadata {
+            input_tokens: 7,
+            image_tokens: 1,
+            grid: [1, 3, 3],
+            processed_dimensions: [48, 48],
+        };
+        assert!(valid_image_metadata(&metadata, (16, 3)));
+        assert!(!valid_image_metadata(&metadata, (16, 2)));
+        assert!(!valid_image_metadata(&metadata, (16, 0)));
+        worker.backend.image_schema = 3;
+        assert_eq!(
+            run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut Vec::new()),
+            Err("invalid_model_config")
+        );
+    }
+
+    #[test]
     fn image_readiness_is_separate_and_oversized_frames_and_eof_clear_preparation() {
         let root = crate::media::tests::PrivateRoot::new();
         let mut worker = image_worker(&root);
@@ -2528,12 +2658,34 @@ mod tests {
 
     #[test]
     fn image_metadata_accepts_long_text_contexts() {
-        assert!(valid_image_metadata(&PreparedImageMetadata {
-            input_tokens: 16_385,
-            image_tokens: 4,
-            grid: [1, 4, 4],
-            processed_dimensions: [64, 64],
-        }));
+        assert!(valid_image_metadata(
+            &PreparedImageMetadata {
+                input_tokens: 16_385,
+                image_tokens: 4,
+                grid: [1, 4, 4],
+                processed_dimensions: [64, 64],
+            },
+            (16, 2)
+        ));
+    }
+
+    #[test]
+    fn gemma3_preparation_requires_its_complete_fixed_grid() {
+        let mut metadata = PreparedImageMetadata {
+            input_tokens: 273,
+            image_tokens: 256,
+            grid: [1, 64, 64],
+            processed_dimensions: [896, 896],
+        };
+        assert!(valid_image_metadata(&metadata, (14, 4)));
+        assert!(!valid_image_metadata(&metadata, (16, 2)));
+        metadata.grid = [1, 32, 64];
+        metadata.processed_dimensions = [896, 448];
+        metadata.image_tokens = 128;
+        assert!(!valid_image_metadata(&metadata, (14, 4)));
+        metadata.grid = [1, 64, 64];
+        metadata.processed_dimensions = [896, 896];
+        assert!(!valid_image_metadata(&metadata, (14, 4)));
     }
 
     #[test]

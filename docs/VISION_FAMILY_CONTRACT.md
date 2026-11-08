@@ -16,6 +16,44 @@ base model's capabilities after training. The official checkpoint's existing
 [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json)
 remain separate.
 
+The separate `qwen35-moe-bf16-merged-v5` version `5` profile admits complete
+BF16 Qwen3.5 MoE image wrappers under schema `3`. The source uses the official
+HF fused expert layout: `experts.gate_up_proj` has shape
+`[experts, 2 * expert_hidden, model]`, and `experts.down_proj` has shape
+`[experts, model, expert_hidden]`. Conversion binds every source file and swaps
+gate/up row ranges within each expert into native up/gate order. Normalized
+top-k routing, one sigmoid-gated shared expert, BF16 matrices and the supported
+vision geometry are required. Expert counts are bounded to 1,024, selected
+experts to 32, and expert/shared widths to 131,072 with 32-element alignment.
+The affine version-3 and version-4 profiles retain their separate storage and
+folded-normalization contracts.
+
+Version 5 independently reconstructs the MoE operation graph and requires a
+complete full-precision tensor header before native allocation. The admitted
+loader selects `Qwen35ReferenceBF16`: zero-centered RMS gain in F32 before the
+BF16 activation boundary, reference BF16 projection boundaries, selected expert
+IDs sorted into source order, and BF16 products and partial sums. Router logits
+occupy F32 storage after their BF16 output rounding. Indexed expert dots read
+bank rows directly with the existing reference reduction schedule; they never
+materialize gathered weight matrices. Their extra scratch is one F32
+accumulator plus one BF16 output per selected projection value. BF16 MoE text
+conversion remains unsupported outside this image artifact policy.
+
+Version-5 structural and bounded component fixtures do not establish full-model
+reference parity or a working 35B installation. The official full BF16 artifact
+was not downloaded or converted in this implementation. See the
+[source-bound record](archive/runs/2026-11-07-qwen35-bf16-moe-images.md).
+
+Image artifacts, including version 5, keep prefix reuse disabled and use fresh
+decoder state for each request. State requiring restoration includes attention
+KV rows and positions, DeltaNet F32 recurrence, convolution ring/history state,
+and image-dependent M-RoPE positions. The image backend has no retained boundary
+snapshot/restoration contract for that complete state. Overwritten ring/history
+rows cannot be recovered by rewinding a token count. Exact boundary snapshots,
+image-position identity and artifact-bound equivalence checks are required
+before enabling reuse. The existing worker capability remains false for image
+models, including their text requests.
+
 ## Config-derived family profile
 
 Admission requires the complete supported decoder and vision tower, including
@@ -89,7 +127,7 @@ forms:
 - Self-contained source configuration, tokenizer metadata and template. No
   custom `auto_map` code, unresolved adapter weights or quantization metadata.
 
-MoE, LoRA-only repositories, quantized vision weights, tokenizer programs outside
+Unsupported MoE layouts, LoRA-only repositories, quantized vision weights, tokenizer programs outside
 the reviewed forms, unrecognized templates/processors and other architectures
 require additional implementation. Matching a repository name, model size or
 architecture label alone cannot admit a model.

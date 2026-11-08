@@ -8,7 +8,11 @@ use crate::{
         Backend, CommandBuffer, CommandBufferEncoding, Kernels,
         kernel::{AttentionKernel, AttentionKernelConfig, AttentionPrepareKernel, SigmoidGateKernel},
     },
-    config::{rope::AnyRoPEConfig, token_mixer::attention::AttentionConfig},
+    config::{
+        rope::AnyRoPEConfig,
+        token_mixer::attention::{AttentionConfig, ImageAttentionPolicy},
+        weight_matrix::AnyWeightMatrixSpec,
+    },
     data_type::DataType,
     encodable_block::{
         batch_topology::BatchTopology,
@@ -36,6 +40,7 @@ pub use state::{ATTENTION_SUFFIX_CAPACITY, AttentionState, KVCacheView};
 pub mod rope;
 
 pub struct Attention<B: Backend> {
+    image_attention_policy: ImageAttentionPolicy,
     head_dim: u32,
     num_q_heads: u32,
     num_kv_heads: Option<u32>,
@@ -44,6 +49,9 @@ pub struct Attention<B: Backend> {
     data_type: DataType,
     projection_dim: u32,
     projection: LinearProjection<B>,
+    source_rope: bool,
+    source_proportional: bool,
+    source_yarn: bool,
     prepare: <B::Kernels as Kernels>::AttentionPrepareKernel,
     #[cfg(feature = "attention-kv-only")]
     prepare_kv_only: Option<<B::Kernels as Kernels>::AttentionPrepareKVOnlyKernel>,
@@ -81,6 +89,16 @@ impl<B: Backend> Attention<B> {
         if config.reference_bf16 && data_type != DataType::BF16 {
             return Err(crate::backends::common::InvalidInput("reference_bf16 requires BF16 activations").into());
         }
+        if config.materialize_rope_bf16 && (data_type != DataType::BF16 || rope_config.is_none()) {
+            return Err(
+                crate::backends::common::InvalidInput("BF16 rotary materialization requires BF16 and RoPE").into()
+            );
+        }
+        if config.materialize_prefill_scores && (config.reference_bf16 || config.logit_soft_cap.is_some()) {
+            return Err(
+                crate::backends::common::InvalidInput("incompatible source prefill attention configuration").into()
+            );
+        }
         let reference = config
             .reference_bf16
             .then(|| reference::ReferenceBF16Attention::<B>::new(context, config))
@@ -100,6 +118,25 @@ impl<B: Backend> Attention<B> {
         let q_dim = crate::config::validation::checked_product(&[num_q_heads, head_dim])?;
 
         let projection_tree = parameter_tree.subtree("qkvg_projection");
+        let source_profile = data_type == DataType::BF16
+            && !config.reference_bf16
+            && matches!(projection_tree.subtree("weights").metadata::<AnyWeightMatrixSpec>("spec")?,
+                AnyWeightMatrixSpec::MLXSpec(spec) if spec.materialize_affine_input_sum);
+        let source_rope = source_profile
+            && matches!(
+                rope_config,
+                Some(
+                    AnyRoPEConfig::UnscaledRoPEConfig(_)
+                        | AnyRoPEConfig::ProportionalRoPEConfig(_)
+                        | AnyRoPEConfig::YARNRoPEConfig(_)
+                )
+            );
+        let source_yarn = source_rope && matches!(rope_config, Some(AnyRoPEConfig::YARNRoPEConfig(_)));
+        let source_proportional =
+            source_rope && (source_yarn || matches!(rope_config, Some(AnyRoPEConfig::ProportionalRoPEConfig(_))));
+        if source_rope && config.materialize_rope_bf16 {
+            return Err(crate::backends::common::InvalidInput("conflicting rotary precision policies").into());
+        }
         let qkv_dim = if let Some(num_kv_heads) = num_kv_heads {
             let kv_dim = crate::config::validation::checked_product(&[num_kv_heads, head_dim])?;
             q_dim
@@ -116,9 +153,17 @@ impl<B: Backend> Attention<B> {
         } else {
             qkv_dim
         };
+        let mut projection_widths = vec![q_dim];
+        if let Some(num_kv_heads) = num_kv_heads {
+            let kv_dim = crate::config::validation::checked_product(&[num_kv_heads, head_dim])?;
+            projection_widths.extend([kv_dim, kv_dim]);
+        }
+        if config.has_gate {
+            projection_widths.push(q_dim);
+        }
         let (projection, in_projection_input_hadamard_factors) = <dyn Linear<B>>::new_with_input_rht(
             hidden_dim,
-            [projection_dim],
+            &projection_widths,
             config.has_qkvg_biases,
             context,
             data_type,
@@ -142,6 +187,7 @@ impl<B: Backend> Attention<B> {
                     num_kv_heads.unwrap_or(0), // TODO: should take option
                     projection_dim,
                     config.head_dim,
+                    config.qk_norm_full_width,
                 )
             })
             .transpose()?;
@@ -152,7 +198,10 @@ impl<B: Backend> Attention<B> {
             DataType::F32,
             !is_kv_sharing,
             rope_config.is_some(),
-            config.reference_bf16,
+            config.reference_bf16 || config.materialize_rope_bf16,
+            source_rope,
+            source_proportional,
+            source_yarn,
         )
         .map_err(AttentionNewError::Backend)?;
         let sinks = config
@@ -172,7 +221,10 @@ impl<B: Backend> Attention<B> {
                     data_type,
                     DataType::F32,
                     rope_config.is_some(),
-                    config.reference_bf16,
+                    config.reference_bf16 || config.materialize_rope_bf16,
+                    source_rope,
+                    source_proportional,
+                    source_yarn,
                 )
             })
             .transpose()
@@ -190,6 +242,8 @@ impl<B: Backend> Attention<B> {
                 sliding_window_size,
                 scale: config.scale,
                 data_type,
+                materialize_prefill_scores: config.materialize_prefill_scores,
+                source_bf16_prefill: source_profile && matches!(head_dim, 64 | 128),
             },
         )
         .map_err(AttentionNewError::Backend)?;
@@ -211,6 +265,7 @@ impl<B: Backend> Attention<B> {
 
         Ok((
             Self {
+                image_attention_policy: config.image_attention_policy,
                 head_dim,
                 num_q_heads,
                 num_kv_heads,
@@ -218,6 +273,9 @@ impl<B: Backend> Attention<B> {
                 max_rope_length,
                 data_type,
                 projection_dim,
+                source_rope,
+                source_proportional,
+                source_yarn,
                 projection: LinearProjection {
                     lin: projection,
                     norm: qkv_norm,

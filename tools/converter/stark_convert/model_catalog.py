@@ -27,6 +27,7 @@ MAX_ITEMS = 30
 MAX_CANDIDATES = MAX_ITEMS
 MAX_INVENTORY = 16384
 MAX_CONFIG_BYTES = 1024 * 1024
+MAX_TOKENIZER_CONFIG_BYTES = 2 * 1024 * 1024
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _SIZE = re.compile(r"[0-9]+(?:\.[0-9]+)?[KMBT]\Z", re.IGNORECASE)
 _LINE_SIZE = re.compile(r"(?i)(?<![a-z0-9])[0-9]+(?:\.[0-9]+)?[mbt](?![a-z0-9])")
@@ -60,6 +61,7 @@ _CONTEXT_FIELDS = ("max_position_embeddings", "n_positions", "max_seq_len")
 _CODE_TASK_TAGS = {"code", "coding", "programming", "coder"}
 _GENERATION_BLOCK_TAG = re.compile(r"{%-?\s*(?:generation|endgeneration)\s*-?%}")
 _MAX_CHAT_TEMPLATE_BYTES = 256 * 1024
+_GEMMA3_IMAGE_TEMPLATE = "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"
 
 
 class _Unavailable(Exception):
@@ -392,7 +394,7 @@ def _source_chat_template(entry, repo, names, read):
     if not isinstance(tokenizer_file, str) or tokenizer_file not in names:
         return None, "tokenizer_config_missing"
     try:
-        tokenizer_config = _json(read(tokenizer_file, MAX_CONFIG_BYTES))
+        tokenizer_config = _json(read(tokenizer_file, MAX_TOKENIZER_CONFIG_BYTES))
     except (_Unavailable, _MalformedMetadata, _Inaccessible):
         return None, "tokenizer_config_unavailable"
     if not isinstance(tokenizer_config, dict):
@@ -533,7 +535,7 @@ def _quantization(config, info, entry, family=None):
         from .compressed import parse_mlx_quantization
 
         try:
-            quantization = parse_mlx_quantization(merged, allow_mixed=family == "qwen3_5")
+            quantization = parse_mlx_quantization(merged, allow_mixed=family in {"qwen3_5", "qwen3_5_moe"})
         except Exception:
             return None
         if quantization is None:
@@ -544,7 +546,7 @@ def _quantization(config, info, entry, family=None):
         ):
             return None
         widths = {bits}
-        if family == "qwen3_5":
+        if family in {"qwen3_5", "qwen3_5_moe"}:
             widths.update(override.bits for _, override in quantization.overrides if override is not None)
         if packing is not None and not widths <= set(packing.get("mixed_bits", [bits])):
             return None
@@ -586,6 +588,8 @@ def _catalog_seeds(family):
         for entry in models()
         if entry.get("adapter") == family and entry.get("container") == ".safetensors"
     ]
+    if family == "gemma3":
+        registered.extend(("google/gemma-3-4b-it", "google/gemma-3-12b-it", "google/gemma-3-27b-it"))
     return list(
         dict.fromkeys([*registered, *_catalog_pins(family), *(item["repo"] for item in catalog_items(family))])
     )
@@ -617,10 +621,61 @@ def _generation_architecture(config, family):
         and (
             name.endswith("ForCausalLM")
             or (family == "qwen3_5" and name == "Qwen3_5ForConditionalGeneration")
+            or (family == "qwen3_5_moe" and name == "Qwen3_5MoeForConditionalGeneration")
             or (family == "qwen4_exp" and name == "Qwen4ExpForConditionalGeneration")
+            or (family == "gemma3" and name == "Gemma3ForConditionalGeneration")
+            or (
+                family == "gemma4_text"
+                and name in {"Gemma4ForConditionalGeneration", "Gemma4UnifiedForConditionalGeneration"}
+            )
         )
         for name in declared
     )
+
+
+def _catalog_image_metadata(family, config, repo, revision, names, read):
+    """Check reviewed image processing before advertising a download mode."""
+    if preflight_model(config, mode="vision-language", expected_architecture=family)["status"] != "conditional":
+        return False
+    try:
+        if family == "gemma3":
+            from .gemma3_contract import normalize_processor
+
+            normalize_processor(_json(read("preprocessor_config.json", 65536)))
+            template, _reason = _source_chat_template(None, repo, names, read)
+            return (
+                isinstance(template, str) and hashlib.sha256(template.encode()).hexdigest() == _GEMMA3_IMAGE_TEMPLATE
+            )
+        if family == "gemma4_text":
+            from .adapters.gemma4_vision import PROFILES
+
+            profile = PROFILES.get(repo)
+            if profile is None or profile["revision"] != revision:
+                return False
+            return all(
+                hashlib.sha256(read(name, maximum)).hexdigest() == expected
+                for name, maximum, expected in (
+                    (
+                        "processor_config.json",
+                        65536,
+                        profile.get(
+                            "source_processor_sha256",
+                            "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+                        ),
+                    ),
+                    (
+                        "chat_template.jinja",
+                        262144,
+                        profile.get(
+                            "template_sha256", "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"
+                        ),
+                    ),
+                )
+            )
+        check_vision_processing_metadata(names, read)
+        return True
+    except Exception:
+        return False
 
 
 def family_catalog(
@@ -682,7 +737,9 @@ def family_catalog(
 
     family = normalize_architecture(family_id)
     definition = next((item for item in support_matrix()["families"] if item["family_id"] == family), None)
-    if definition is None or definition["modes"]["text"]["status"] != "conditional":
+    if definition is None or not any(
+        definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language")
+    ):
         return report(family or "", "error", "This model family is not available in Stark.")
     if type(limit) is not int or not 1 <= limit <= MAX_ITEMS:
         return report(family, "error", "The model catalogue request is invalid.")
@@ -758,7 +815,7 @@ def family_catalog(
         def inspect(repo):
             remaining()
             try:
-                if repo in native_items:
+                if repo in native_items and repo not in pins:
                     return dict(native_items[repo])
                 requested_revision = pins.get(repo)
                 try:
@@ -775,7 +832,10 @@ def family_catalog(
                 if requested_revision is not None and revision != requested_revision:
                     raise _Unavailable()
                 names, sizes = _weight_inventory(info)
-                entry = get_model(repo)
+                # The original registry's Gemma3 wrappers predate the native
+                # image adapter. Bind their complete, same-revision metadata
+                # through the generic vision path rather than a text recipe.
+                entry = None if family == "gemma3" else get_model(repo)
                 if entry is not None and entry.get("adapter") != family:
                     return None
                 rule = (
@@ -796,9 +856,22 @@ def family_catalog(
                 config = _json(read(config_repo, rule["filename"], config_revision, MAX_CONFIG_BYTES))
                 if not isinstance(config, dict) or not _generation_architecture(config, family):
                     return None
-                verdict = preflight_model(config, mode="text", expected_architecture=family)
+                text_config = config.get("text_config", config)
+                bf16_qwen_moe = family == "qwen3_5_moe" and not any(
+                    scope.get(key) is not None
+                    for scope in (config, text_config)
+                    for key in ("quantization", "quantization_config")
+                )
+                base_mode = "vision-language" if family == "gemma3" or bf16_qwen_moe else "text"
+                verdict = preflight_model(config, mode=base_mode, expected_architecture=family)
                 if verdict["status"] != "conditional":
                     return None
+                if repo in native_items:
+                    # Retained image choices keep their exact native preparation
+                    # identity after the pinned metadata check. A moved revision
+                    # cannot silently replace the reviewed source or fall back
+                    # to a text-only generic conversion.
+                    return dict(native_items[repo])
                 quantization = _quantization(config, info, entry, family=family)
                 if quantization is None:
                     return None
@@ -806,17 +879,20 @@ def family_catalog(
                 if selected is None:
                     return None
                 weight_bytes = _weight_bytes(selected, sizes)
-                modes = ["text"]
-                if family == "qwen3_5" and quantization == "BF16":
-                    vision = preflight_model(config, mode="vision-language", expected_architecture=family)
-                    if vision["status"] == "conditional":
-                        try:
-                            check_vision_processing_metadata(
-                                names, lambda filename, maximum: read(repo, filename, revision, maximum)
-                            )
-                            modes.append("vision-language")
-                        except Exception:
-                            pass
+                modes = [base_mode]
+                if family in {"qwen3_5", "qwen3_5_moe", "gemma3", "gemma4_text"}:
+                    image_metadata = _catalog_image_metadata(
+                        family,
+                        config,
+                        repo,
+                        revision,
+                        names,
+                        lambda filename, maximum: read(repo, filename, revision, maximum),
+                    )
+                    if base_mode == "vision-language" and (quantization != "BF16" or not image_metadata):
+                        return None
+                    if base_mode != "vision-language" and image_metadata:
+                        modes.append("vision-language")
                 extra_weights = any(name.endswith(".safetensors") and name not in selected for name in names)
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
                 chat_template, chat_template_blocker = (None, None)
@@ -836,7 +912,9 @@ def family_catalog(
                     "weight_bytes": weight_bytes,
                     "quantization": quantization,
                     "artifact_modes": modes,
-                    "default_artifact_mode": modes[-1],
+                    "default_artifact_mode": modes[-1]
+                    if family == "qwen3_5" and quantization == "BF16"
+                    else base_mode,
                     "downloadable": True,
                     "model_group": _model_group(family, repo, repo.split("/")[-1], quantization, entry),
                 }
