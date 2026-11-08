@@ -2396,7 +2396,7 @@ class Desktop:
         if capability["supported"]:
             self.validate_mtp_reply(reply, capability, drafts)
         # Bind output parsing to the actual prompt, never a worker/client claim.
-        return {**reply, "_tool_initial_thinking": prompt.endswith("<think>")}
+        return {**reply, "_tool_initial_thinking": prompt.rstrip().endswith("<think>")}
 
     def api_cache_scope(self, principal):
         """Return the random reuse scope for one API session and credential."""

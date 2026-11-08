@@ -821,6 +821,60 @@ def test_tool_parsing_uses_rendered_generation_prefix_not_worker_claim(
     assert desktop.worker is not None and desktop.job is None
 
 
+@pytest.mark.parametrize("suffix", ["\n", "\r\n\t "])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("opened", [False, True])
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize("known_tool", [False, True])
+def test_tool_thinking_boundary_ignores_suffix_whitespace_without_changing_prompt(
+    desktop, model, monkeypatch, suffix, stream, opened, closed, known_tool
+):
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    rendered = ("synthetic assistant<think>" if opened else "synthetic assistant") + suffix
+    monkeypatch.setattr("stark_convert.desktop.render_template", lambda *_args, **_kwargs: rendered)
+    monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda _codec: "qwen38-xml-v1")
+    function = "lookup" if known_tool else "unavailable"
+    wire = f"<tool_call><function={function}><parameter=value>3</parameter></function></tool_call>"
+    generated = ("Synthetic reasoning</think>\n" if closed else "") + wire
+    tokenization_calls = 0
+
+    def request(payload, **options):
+        nonlocal tokenization_calls
+        if payload["operation"] == "tokenize":
+            # Detection may normalize its local view; inference must retain the
+            # exact trusted-renderer bytes, including all trailing whitespace.
+            assert payload["text"] == rendered
+            tokenization_calls += 1
+            return {"token_count": 24, "token_ids": [2] * 24}
+        if deliver := options.get("on_delta"):
+            for character in generated:
+                deliver(character)
+        return {"text": generated, "finish_reason": "eos", "input_tokens": 24, "output_tokens": 17,
+                "_tool_initial_thinking": not opened}
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    payload = {"messages": [{"role": "user", "content": "Synthetic boundary request"}], "tools": [{
+        "type": "function", "function": {"name": "lookup", "parameters": {
+            "type": "object", "properties": {"value": {"type": "integer"}},
+        }},
+    }]}
+    deltas = []
+    if opened == closed and known_tool:
+        reply = desktop.api_complete(payload, on_delta=deltas.append if stream else None)
+        assert reply["choices"][0]["finish_reason"] == "tool_calls"
+        function = reply["choices"][0]["message"]["tool_calls"][0]["function"]
+        assert function["name"] == "lookup" and json.loads(function["arguments"]) == {"value": 3}
+    else:
+        with pytest.raises(APIError) as error:
+            desktop.api_complete(payload, on_delta=deltas.append if stream else None)
+        assert error.value.code == "invalid_tool_call"
+    assert tokenization_calls == 1
+    assert "<tool_call>" not in "".join(deltas)
+    assert desktop.worker is not None and desktop.job is None
+
+
 def test_tool_buffered_stream_disconnect_keeps_worker_aligned(tool_desktop):
     from stark_convert.local_api import APIError
 
