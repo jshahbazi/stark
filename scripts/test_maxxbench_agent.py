@@ -102,7 +102,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(method, "POST")
         self.assertEqual(target, "/v1/chat/completions")
         self.assertEqual(headers["Authorization"], "Bearer ephemeral-key")
-        self.assertEqual(connection.timeout, 600.0)
+        self.assertEqual(connection_factory.call_args.kwargs["timeout"], 1810.0)
         self.assertEqual(body["temperature"], 0.0)
         self.assertEqual(body["max_tokens"], 4096)
         self.assertEqual(body["seed"], 0)
@@ -110,6 +110,128 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(
             response["extra"]["actions"],
             [{"command": "printf ok", "tool_call_id": "call-1"}],
+        )
+
+    def test_socket_timeout_is_a_safe_client_timeout_category(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+
+        class TimeoutConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                raise TimeoutError("private socket diagnostic")
+
+            def close(self):
+                pass
+
+        model_config = _agent_templates()["model"]
+        model = LocalOpenAIModel(
+            "stark-test",
+            observation_template=model_config["observation_template"],
+            format_error_template=model_config["format_error_template"],
+        )
+        before = METRICS.snapshot()
+        with (
+            patch("maxxbench_agent._CancellableHTTPConnection", TimeoutConnection),
+            self.assertRaisesRegex(RuntimeError, "client_timeout") as raised,
+        ):
+            model.query([{"role": "user", "content": "private test input"}])
+        after = METRICS.snapshot()
+        self.assertEqual(str(raised.exception), "model request failed: client_timeout")
+        self.assertTrue(raised.exception.__suppress_context__)
+        self.assertEqual(
+            after["http_error_categories"].get("client_timeout", 0)
+            - before["http_error_categories"].get("client_timeout", 0),
+            1,
+        )
+        self.assertEqual(
+            after["http_error_categories"].get("transport", 0)
+            - before["http_error_categories"].get("transport", 0),
+            0,
+        )
+
+    def test_generic_socket_error_remains_transport(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+
+        class TransportConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                raise OSError("private socket diagnostic")
+
+            def close(self):
+                pass
+
+        model_config = _agent_templates()["model"]
+        model = LocalOpenAIModel(
+            "stark-test",
+            observation_template=model_config["observation_template"],
+            format_error_template=model_config["format_error_template"],
+        )
+        before = METRICS.snapshot()
+        with (
+            patch("maxxbench_agent._CancellableHTTPConnection", TransportConnection),
+            self.assertRaisesRegex(RuntimeError, "transport") as raised,
+        ):
+            model.query([{"role": "user", "content": "private test input"}])
+        after = METRICS.snapshot()
+        self.assertEqual(str(raised.exception), "model request failed: transport")
+        self.assertTrue(raised.exception.__suppress_context__)
+        self.assertEqual(
+            after["http_error_categories"].get("transport", 0)
+            - before["http_error_categories"].get("transport", 0),
+            1,
+        )
+        self.assertEqual(
+            after["http_error_categories"].get("client_timeout", 0)
+            - before["http_error_categories"].get("client_timeout", 0),
+            0,
+        )
+
+    def test_timeout_after_abort_is_classified_as_cancelled(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        stop_event = threading.Event()
+
+        class CancelledTimeoutConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                stop_event.set()
+                raise TimeoutError("private cancellation diagnostic")
+
+            def close(self):
+                pass
+
+        model_config = _agent_templates()["model"]
+        model = LocalOpenAIModel(
+            "stark-test",
+            observation_template=model_config["observation_template"],
+            format_error_template=model_config["format_error_template"],
+            stop_event=stop_event,
+        )
+        before = METRICS.snapshot()
+        with (
+            patch(
+                "maxxbench_agent._CancellableHTTPConnection", CancelledTimeoutConnection
+            ),
+            self.assertRaisesRegex(RuntimeError, "agent stopped") as raised,
+        ):
+            model.query([{"role": "user", "content": "private test input"}])
+        after = METRICS.snapshot()
+        self.assertEqual(str(raised.exception), "agent stopped")
+        self.assertTrue(raised.exception.__suppress_context__)
+        self.assertEqual(
+            after["http_error_categories"].get("cancelled", 0)
+            - before["http_error_categories"].get("cancelled", 0),
+            1,
+        )
+        self.assertEqual(
+            after["http_error_categories"].get("client_timeout", 0)
+            - before["http_error_categories"].get("client_timeout", 0),
+            0,
         )
 
     def test_connection_rejects_non_loopback_and_ambiguous_urls(self):

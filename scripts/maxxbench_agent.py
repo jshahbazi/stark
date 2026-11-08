@@ -49,6 +49,7 @@ MODEL_TEMPERATURE = 0.0
 MODEL_MAX_TOKENS = 4096
 MODEL_SEED = 0
 DEFAULT_STEP_LIMIT = 250
+MODEL_REQUEST_TIMEOUT = 1810.0
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ERROR_JSON_BYTES = 64 * 1024
 MODEL_FORMAT_ERROR_CODES = frozenset({"invalid_tool_call", "tool_choice_not_satisfied"})
@@ -246,7 +247,7 @@ class LocalOpenAIModel:
         self,
         model_name: str,
         *,
-        timeout: float = 600.0,
+        timeout: float = MODEL_REQUEST_TIMEOUT,
         max_tokens: int = MODEL_MAX_TOKENS,
         temperature: float = MODEL_TEMPERATURE,
         observation_template: str,
@@ -367,6 +368,12 @@ class LocalOpenAIModel:
             )
             # Raw model output is held only in the current conversation memory.
             return {**message, "extra": {"actions": actions}}
+        except TimeoutError:
+            if self.stop_event.is_set():
+                METRICS.record_error("cancelled")
+                raise RuntimeError("agent stopped") from None
+            METRICS.record_error("client_timeout")
+            raise RuntimeError("model request failed: client_timeout") from None
         except OSError:
             if self.stop_event.is_set():
                 METRICS.record_error("cancelled")
