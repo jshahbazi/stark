@@ -457,7 +457,8 @@ def test_trial_captures_image_before_short_run_cleanup_and_includes_it_in_progre
 
     class Trial:
         def __init__(self):
-            self._environment = SimpleNamespace(_env_vars=SimpleNamespace(main_image_name="hb__sample-task"))
+            self._environment = SimpleNamespace(session_id="sample-task",
+                                                _env_vars=SimpleNamespace(main_image_name="incorrect-assumed-tag"))
 
         @classmethod
         async def create(cls, _config):
@@ -476,22 +477,56 @@ def test_trial_captures_image_before_short_run_cleanup_and_includes_it_in_progre
     def inspect(command, **kwargs):
         assert setup_finished and not image_removed
         commands.append((command, kwargs))
-        return SimpleNamespace(returncode=0, stdout=image_id + "\n")
+        return SimpleNamespace(returncode=0, stdout=("b" * 64 if command[1] == "ps" else image_id) + "\n")
 
     monkeypatch.setattr(runner.subprocess, "run", inspect)
     receipt = asyncio.run(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
     assert receipt["environment_image_id"] == image_id
-    assert commands[0][0] == ["docker", "image", "inspect", "hb__sample-task", "--format", "{{.Id}}"]
-    assert commands[0][1]["timeout"] == 5 and commands[0][1]["stderr"] == runner.subprocess.DEVNULL
+    assert commands[0][0] == [
+        "docker", "ps", "--all", "--no-trunc", "--filter", "label=com.docker.compose.project=sample-task",
+        "--filter", "label=com.docker.compose.service=main", "--format", "{{.ID}}",
+    ]
+    assert commands[1][0] == ["docker", "container", "inspect", "b" * 64, "--format", "{{.Image}}"]
+    assert all(0 < options["timeout"] <= 5 and options["stderr"] == runner.subprocess.DEVNULL
+               for _command, options in commands)
+    assert "incorrect-assumed-tag" not in json.dumps(commands)
     progress = json.loads((tmp_path / "trials/sample-task/progress.json").read_text())
     assert progress["environment_image_id"] == image_id and progress["environment_image_capture"] == "captured"
 
 
 @pytest.mark.parametrize("output", ["private-marker Docker diagnostic", "sha256:" + "g" * 64, ""])
 def test_image_inspection_does_not_return_arbitrary_docker_output(tmp_path, monkeypatch, output):
-    trial = SimpleNamespace(_environment=SimpleNamespace(_env_vars=SimpleNamespace(main_image_name="hb__sample-task")))
+    trial = SimpleNamespace(_environment=SimpleNamespace(session_id="sample-task"))
     monkeypatch.setattr(runner.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=output))
     assert runner.inspect_environment_image(trial) is None
+
+
+def test_image_inspection_refuses_multiple_matching_containers(monkeypatch):
+    trial = SimpleNamespace(_environment=SimpleNamespace(session_id="sample-task"))
+    commands = []
+
+    def inspect(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="a" * 64 + "\n" + "b" * 64 + "\n")
+
+    monkeypatch.setattr(runner.subprocess, "run", inspect)
+    assert runner.inspect_environment_image(trial) is None
+    assert len(commands) == 1
+
+
+def test_image_inspection_shares_one_five_second_budget_across_metadata_calls(monkeypatch):
+    trial = SimpleNamespace(_environment=SimpleNamespace(session_id="sample-task"))
+    times = iter([10.0, 10.5, 14.5])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(times))
+    timeouts = []
+
+    def inspect(command, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return SimpleNamespace(returncode=0, stdout="a" * 64 if command[1] == "ps" else "sha256:" + "b" * 64)
+
+    monkeypatch.setattr(runner.subprocess, "run", inspect)
+    assert runner.inspect_environment_image(trial) == "sha256:" + "b" * 64
+    assert timeouts == [4.5, 0.5]
 
 
 def test_patch_pier_suppresses_exception_strings_and_traceback(tmp_path, monkeypatch):

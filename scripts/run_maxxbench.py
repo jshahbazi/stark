@@ -418,19 +418,43 @@ def model_bridge(profile, worker):
 
 
 def inspect_environment_image(trial):
-    """Read one local image identity; Docker diagnostics never enter artifacts."""
+    """Read the main container's actual image ID within one five-second budget.
+
+    Pier's build Compose file omits ``image:``, so ``main_image_name`` need not
+    match the generated tag. Exact project/service labels identify its container.
+    """
     import re
 
     environment = getattr(trial, "_environment", None)
-    name = getattr(getattr(environment, "_env_vars", None), "main_image_name", None)
-    if not isinstance(name, str) or re.fullmatch(r"[a-z0-9][a-z0-9_.:/-]{0,255}", name) is None:
+    project = getattr(environment, "session_id", None)
+    # MaxxBench's task IDs already satisfy Pier's Compose-project sanitizer.
+    # Refuse an unexpected value rather than selecting a guessed project.
+    if not isinstance(project, str) or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,255}", project) is None:
         return None
+    deadline = time.monotonic() + 5
+
+    def inspect(command):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        return subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                              timeout=remaining, check=False)
+
     try:
-        result = subprocess.run(
-            ["docker", "image", "inspect", name, "--format", "{{.Id}}"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, check=False,
-        )
+        container = inspect([
+            "docker", "ps", "--all", "--no-trunc",
+            "--filter", "label=com.docker.compose.project=" + project,
+            "--filter", "label=com.docker.compose.service=main", "--format", "{{.ID}}",
+        ])
+        if container is None or container.returncode != 0:
+            return None
+        container_id = container.stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{64}", container_id) is None:
+            return None
+        result = inspect(["docker", "container", "inspect", container_id, "--format", "{{.Image}}"])
     except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result is None:
         return None
     image_id = result.stdout.strip()
     return image_id if result.returncode == 0 and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) else None
