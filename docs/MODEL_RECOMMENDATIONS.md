@@ -97,9 +97,12 @@ or BFCL.
    task. Never merge FC/Prompt, versions, publishers or metrics. Results from
    nonselected cohorts remain reference information. Lighter model and More
    model capacity retain their explicit resource objectives.
-5. Select up to three choices and show source, score, settings, whether the
-   result informed this comparison and the upstream-reference caveat in the
-   model details. The explanation names the narrow benchmark signal.
+5. Select up to three choices. Beginner shows a short recommendation reason,
+   estimated memory, a compact benchmark score, a brief published-model caveat
+   and a benchmark-source link. It retains actionable memory-pressure notices.
+   Full revisions, settings, qualification text and caveats remain in the
+   structured backend report and evidence records. They are not concatenated
+   into Beginner's details. Existing copies do not show a new setup-space need.
 
 If no eligible coding reference exists, the report explicitly identifies the
 resource-based fallback and unknown coding quality. A lone covered parent can

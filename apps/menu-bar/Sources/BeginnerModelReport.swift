@@ -8,6 +8,42 @@ enum BeginnerContextPolicy {
 
 /// A recommendation is a short-lived backend binding, separate from the catalog.
 struct BeginnerModelReport {
+    struct BenchmarkReference: Equatable {
+        let name: String
+        let score: String
+        let usedForRanking: Bool
+        let sourceURL: URL?
+
+        init?(_ raw: [String: Any]) {
+            let names = ["livecodebench": "LiveCodeBench", "bfcl": "BFCL", "ifeval": "IFEval"]
+            guard let key = raw["benchmark"] as? String, let name = names[key],
+                  raw["evidence_kind"] as? String == "upstream_reference",
+                  let text = BeginnerMetadata.string(raw["score"], limit: 32),
+                  let value = Double(text), value.isFinite, (0...100).contains(value),
+                  let used = raw["used_for_ranking"] as? NSNumber,
+                  CFGetTypeID(used) == CFBooleanGetTypeID() else { return nil }
+            self.name = name
+            let formatter = NumberFormatter()
+            formatter.minimumFractionDigits = 0; formatter.maximumFractionDigits = 1
+            formatter.usesGroupingSeparator = false
+            score = formatter.string(from: NSNumber(value: value)) ?? text
+            usedForRanking = used.boolValue
+            let source = raw["source"] as? [String: Any]
+            if let text = BeginnerMetadata.string(source?["url"], limit: 1_000),
+               let url = URL(string: text), url.scheme == "https", url.host != nil {
+                sourceURL = url
+            } else { sourceURL = nil }
+        }
+
+        var recommendation: String {
+            switch name {
+            case "LiveCodeBench": return "Recommended for coding using published benchmark results."
+            case "BFCL": return "Recommended using published tool-use results."
+            default: return "Recommended using published instruction-following results."
+            }
+        }
+    }
+
     struct Item: Identifiable, Equatable {
         let id: String
         let name: String
@@ -26,6 +62,7 @@ struct BeginnerModelReport {
         let caveats: [String]
         let recommendationReason: String
         let benchmarkDetails: [String]
+        let benchmarkReference: BenchmarkReference?
 
         init?(_ raw: [String: Any]) {
             guard let id = BeginnerMetadata.string(raw["id"], limit: 128),
@@ -60,12 +97,37 @@ struct BeginnerModelReport {
                 guard let details = BeginnerMetadata.strings(value, count: 16, length: 2_000) else { return nil }
                 benchmarkDetails = details
             } else { benchmarkDetails = [] }
+            let references = (raw["benchmarks"] as? [[String: Any]]).flatMap { values in
+                values.count <= 32 ? values.compactMap(BenchmarkReference.init) : nil
+            } ?? []
+            benchmarkReference = references.first(where: \.usedForRanking) ?? references.first
             if raw["recommendation_reason"] != nil {
                 guard let reason = BeginnerMetadata.string(raw["recommendation_reason"], limit: 2_000) else { return nil }
                 recommendationReason = reason
             } else {
                 recommendationReason = "A starting model checked for this setup. Review its answers and any actions in OpenWork."
             }
+        }
+
+        func beginnerSummary(availableMemoryBytes: Int64?) -> String {
+            var summary = "Selected to fit your Mac."
+            if let reference = benchmarkReference, reference.usedForRanking { summary = reference.recommendation }
+            if benchmarkReference == nil { summary += " No benchmark result is recorded." }
+            if let availableMemoryBytes, availableMemoryBytes < runtimeBytes {
+                summary += " Free up memory before starting."
+            }
+            return summary
+        }
+
+        var beginnerDetails: String {
+            var lines = ["Estimated memory: " + ByteCountFormatter.string(fromByteCount: runtimeBytes, countStyle: .memory)]
+            if let benchmarkReference {
+                lines.append(benchmarkReference.name + ": " + benchmarkReference.score + "/100")
+                lines.append(benchmarkReference.usedForRanking
+                    ? "Published model score; local results may vary."
+                    : "Reference only; it did not determine this choice.")
+            }
+            return lines.joined(separator: "\n")
         }
 
         var memoryDetails: [String] {
@@ -109,8 +171,6 @@ struct BeginnerModelReport {
         var details: [String] = []
         if let gpuName { details.append(gpuName) }
         if let bytes = physicalMemoryBytes { details.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory) + " memory") }
-        if let bytes = gpuMemoryBudgetBytes, bytes > 0 { details.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory) + " GPU budget") }
-        if let bytes = freeDiskBytes { details.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) + " free for setup") }
         return details.joined(separator: " · ")
     }
 }

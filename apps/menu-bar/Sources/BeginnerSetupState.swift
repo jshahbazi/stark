@@ -101,6 +101,7 @@ struct BeginnerModelChoice: Identifiable, Equatable {
     var source = ""
     var revision = ""
     var qualification = ""
+    var benchmarkSourceURL: URL? = nil
     var availabilityMessage: String? = nil
 
     func installed(as modelID: String) -> BeginnerModelChoice {

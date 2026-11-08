@@ -151,26 +151,27 @@ struct BeginnerSetupHost: View {
         var result = BeginnerSetupSnapshot()
         result.choices = (engine.beginnerReport?.items ?? []).map { item in
             BeginnerModelChoice(id: item.id, name: item.name,
-                summary: item.recommendationReason,
+                summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens,
                 installedModelID: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) },
                 source: item.source, revision: item.revision,
-                qualification: ([item.qualification, "License: " + item.license] + item.memoryDetails + item.benchmarkDetails + item.caveats).joined(separator: "\n"))
+                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL)
         }
         // Keep the exact operation choice available if another surface refreshes recommendations.
         if let item = engine.beginnerInstallChoice,
            !result.choices.contains(where: { $0.id == item.id }),
            engine.beginnerInstallState != "idle", (session.installingChoiceID == item.id || session.selectedChoiceID == item.id) {
-            result.choices.append(BeginnerModelChoice(id: item.id, name: item.name, summary: "Your selected starting model.",
+            result.choices.append(BeginnerModelChoice(id: item.id, name: item.name,
+                summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens, source: item.source, revision: item.revision,
-                qualification: item.qualification))
+                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL))
         }
         result.choicesLoading = engine.beginnerChoicesLoading
         result.choicesError = engine.beginnerChoicesError
         result.deviceSummary = engine.beginnerReport?.deviceSummary ?? ""
-        result.recommendationMessage = engine.beginnerReport?.message ?? ""
+        result.recommendationMessage = engine.beginnerReport.map { $0.items.isEmpty ? $0.message : "" } ?? ""
         result.installChoiceID = engine.beginnerInstallChoice?.id
         result.installedResultID = engine.beginnerInstalledResultID
         result.installPhase = installationPhase

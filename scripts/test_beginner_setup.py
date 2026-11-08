@@ -17,6 +17,18 @@ ROOT = Path(__file__).resolve().parent.parent
 
 VIEW_CHECK = r"""
 extension BeginnerSetupView {
+    @MainActor static func checkInstalledSpacePresentation() -> Bool {
+        let session = BeginnerSetupSession()
+        let existing = BeginnerModelChoice(id: "existing", name: "Existing", summary: "Fixture",
+                                          setupBytes: 111_000_000_000, installedModelID: "installed-a")
+        let fresh = BeginnerModelChoice(id: "fresh", name: "Fresh", summary: "Fixture", setupBytes: 10_000_000_000)
+        var snapshot = BeginnerSetupSnapshot()
+        snapshot.choices = [existing, fresh]
+        let view = BeginnerSetupView(session: session, snapshot: snapshot, actions: BeginnerSetupActions())
+        return view.setupSpaceDescription(existing) == nil
+            && view.setupSpaceDescription(fresh)?.hasPrefix("Free space needed:") == true
+    }
+
     @MainActor static func checkFilesTaskSelection() -> Bool {
         let session = BeginnerSetupSession()
         session.task = .files
@@ -374,6 +386,50 @@ struct BeginnerChecks {
                 if BeginnerModelReport.Item(raw) != nil { return false }
             }
             return true
+        case "beginner-presentation":
+            let benchmark: [String: Any] = [
+                "benchmark": "livecodebench", "score": "91.9", "used_for_ranking": true,
+                "evidence_kind": "upstream_reference", "settings": "TECHNICAL_HARNESS_SETTINGS",
+                "source": ["url": "https://example.com/published-score"]
+            ]
+            let raw: [String: Any] = [
+                "id": "fixture", "name": "Fixture", "repo": "example/model",
+                "revision": String(repeating: "a", count: 40), "artifact_mode": "text", "quantization": "4-bit",
+                "download_bytes": 80, "installed_bytes_estimate": 90, "setup_disk_bytes_estimate": 100,
+                "runtime_memory_bytes_estimate": 111 * 1_073_741_824,
+                "gpu_memory_bytes_estimate": 82 * 1_073_741_824,
+                "context_tokens": 32768, "installed_ids": ["installed-a"], "license": "other",
+                "qualification": "TECHNICAL_NATIVE_QUALIFICATION", "caveats": ["TECHNICAL_VALIDATION_CAVEAT"],
+                "benchmark_details": ["TECHNICAL_BENCHMARK_DETAILS"],
+                "recommendation_reason": "TECHNICAL_CAPACITY_FORMULA", "benchmarks": [benchmark]
+            ]
+            guard let item = BeginnerModelReport.Item(raw), let reference = item.benchmarkReference,
+                  reference.name == "LiveCodeBench", reference.usedForRanking,
+                  reference.sourceURL?.absoluteString == "https://example.com/published-score",
+                  item.beginnerDetails.split(separator: "\n").count == 3,
+                  item.beginnerDetails.contains("111"), item.beginnerDetails.contains("LiveCodeBench:"),
+                  item.beginnerDetails.contains("Published model score"),
+                  !item.beginnerDetails.contains("TECHNICAL_"), !item.beginnerDetails.contains("https://"),
+                  !item.beginnerDetails.contains("License:"), !item.beginnerDetails.contains("Revision:"),
+                  item.beginnerSummary(availableMemoryBytes: nil).contains("Recommended for coding"),
+                  !item.beginnerSummary(availableMemoryBytes: nil).contains("TECHNICAL_"),
+                  item.beginnerSummary(availableMemoryBytes: 1).contains("Free up memory") else { return false }
+            var unscored = raw; unscored.removeValue(forKey: "benchmarks")
+            guard let fallback = BeginnerModelReport.Item(unscored), fallback.benchmarkReference == nil,
+                  fallback.beginnerDetails.split(separator: "\n").count == 1,
+                  fallback.beginnerSummary(availableMemoryBytes: nil).contains("No benchmark result is recorded") else { return false }
+            var unranked = benchmark; unranked["used_for_ranking"] = false
+            var unrankedRaw = raw; unrankedRaw["benchmarks"] = [unranked]
+            guard let unrankedItem = BeginnerModelReport.Item(unrankedRaw),
+                  !unrankedItem.beginnerSummary(availableMemoryBytes: nil).contains("Recommended for coding"),
+                  unrankedItem.beginnerDetails.contains("Reference only") else { return false }
+            for score in ["NaN", "Infinity", "-1", "101", "garbage"] {
+                var invalid = benchmark; invalid["score"] = score
+                if BeginnerModelReport.BenchmarkReference(invalid) != nil { return false }
+            }
+            var insecure = benchmark; insecure["source"] = ["url": "file:///private/fixture"]
+            return BeginnerModelReport.BenchmarkReference(insecure)?.sourceURL == nil
+        case "installed-space-presentation": return BeginnerSetupView.checkInstalledSpacePresentation()
         default: return false
         }
     }
@@ -457,6 +513,12 @@ class BeginnerSetupTests(unittest.TestCase):
 
     def test_files_task_is_visible_and_reaches_recommendation_action(self):
         self.run_check("files-task-selection")
+
+    def test_beginner_display_keeps_short_benchmark_evidence_and_omits_technical_metadata(self):
+        self.run_check("beginner-presentation")
+
+    def test_installed_models_do_not_display_new_setup_space_requirements(self):
+        self.run_check("installed-space-presentation")
 
     def test_failed_start_can_be_retried(self):
         for scenario in ["failed-start-can-retry", "failed-switch-can-choose-again"]:

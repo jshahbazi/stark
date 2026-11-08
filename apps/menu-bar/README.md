@@ -323,8 +323,11 @@ eligible scored parent is enough, so an unscored model cannot retain first
 place through the memory heuristic. Missing scores remain unknown. Other
 tasks reorder scored slots within each memory-headroom tier and preserve
 unknown positions. Lighter model and More model capacity preserve their explicit
-resource priorities. Source/version/settings and upstream-reference caveats
-appear in model details. Public parent scores do not qualify Stark exports.
+resource priorities. Beginner details show estimated memory, a short benchmark
+score with a published-model caveat, and a source link. Technical provenance,
+revisions, harness settings and validation notes remain in backend reports and
+evidence records. Existing models show no new setup-space requirement.
+Public parent scores do not qualify Stark exports.
 The [recommendation evidence policy](../../docs/MODEL_RECOMMENDATIONS.md) describes
 the imported coverage, exact comparison policy and future artifact evaluation
 requirements. MaxxBench remains deferred until model-specific runs exist.
