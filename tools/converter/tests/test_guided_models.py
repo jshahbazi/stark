@@ -217,8 +217,7 @@ def test_resources_select_starting_choices_and_installed_reuse():
     pressure = resources(available_memory_bytes=0, free_disk_bytes=0, download_free_disk_bytes=0)
     assert guided.recommendation_report(pressure, {})["items"] == []
     reused = guided.recommendation_report(pressure, {guided.RECIPES[0].id: ["same-copy"]})
-    assert reused["items"][0]["installed_ids"] == ["same-copy"]
-    assert "planning estimates" in reused["items"][0]["caveats"][0]
+    assert reused["items"] == []
 
 
 def catalog_candidate(number=1, *, weights=2 * guided.GIB, parameters=2_000_000_000, tags=()):
@@ -325,6 +324,7 @@ def test_balanced_coding_scales_from_16gb_to_128gb_with_recorded_source_metadata
     large_host = gpu_resources()
     large_host.update(
         physical_memory_bytes=128 * guided.GIB,
+        available_memory_bytes=128 * guided.GIB,
         gpu_memory_budget_bytes=107_520_000_000,
         free_disk_bytes=63_720_000_000,
         download_free_disk_bytes=63_720_000_000,
@@ -366,13 +366,12 @@ def test_installed_copy_does_not_override_hardware_or_capacity_ranking():
     assert [item["id"] for item in report["items"]] == [small.id]
 
 
-def test_current_worker_memory_pressure_does_not_remove_static_fit():
+def test_current_worker_memory_pressure_removes_choices_that_cannot_start():
     candidate = guided.recipe_from_catalog(catalog_candidate())
     host = gpu_resources()
     host["available_memory_bytes"] = 2 * guided.GIB
     report = guided.recommendation_report(host, {}, candidates=[candidate])
-    assert report["items"][0]["id"] == candidate.id
-    assert "when starting" in report["items"][0]["recommendation_reason"]
+    assert report["items"] == []
 
 
 @pytest.mark.parametrize(
@@ -709,6 +708,85 @@ def test_wrong_installed_model_cannot_use_a_guided_offer_or_stop_current_worker(
     )
     assert events(host)[-2]["event"] == "error" and events(host)[-2]["request_id"] == "start"
     assert host.worker is worker and not worker.closed and host.epoch == 0
+
+
+def test_guided_worker_closes_old_worker_before_fresh_memory_check_and_starts_at_threshold(host, monkeypatch):
+    recipe = guided.RECIPES[0]
+    model = add_model(host, recipe)
+    old_worker = host.worker = ExistingWorker()
+    start_calls = []
+    host.run = lambda *args, **kwargs: start_calls.append((args, kwargs))
+    observed = []
+
+    def fresh_resources(_hardware):
+        observed.append(old_worker.closed and host.worker is None)
+        return resources(available_memory_bytes=recipe.runtime_memory)
+
+    host.guided_resources = fresh_resources
+    host.run_guided_worker(host.epoch, model["id"], recipe, None, "start")
+    assert observed == [True]
+    assert len(start_calls) == 1
+    assert start_calls[0][0][:3] == (host.epoch, model["id"], "chat")
+    assert start_calls[0][1]["guided_context"] == recipe.context_tokens
+
+
+def test_guided_worker_rejects_one_byte_below_current_memory_threshold(host, monkeypatch):
+    recipe = guided.RECIPES[0]
+    model = add_model(host, recipe)
+    old_worker = host.worker = ExistingWorker()
+    start_calls = []
+    host.run = lambda *args, **kwargs: start_calls.append((args, kwargs))
+    host.guided_resources = lambda _hardware: resources(available_memory_bytes=recipe.runtime_memory - 1)
+    with pytest.raises(module.DesktopError, match="Not enough memory"):
+        host.run_guided_worker(host.epoch, model["id"], recipe, None, "start")
+    assert old_worker.closed and host.worker is None
+    assert start_calls == []
+
+
+def test_stale_guided_worker_epoch_does_not_close_current_worker(host, monkeypatch):
+    current = host.worker = ExistingWorker()
+    host.epoch = 4
+    host.guided_resources = lambda _hardware: pytest.fail("stale epoch must return before resource reads")
+    host.run_guided_worker(3, "missing", None, None, "stale")
+    assert host.worker is current and not current.closed
+
+
+def test_guided_worker_revalidates_cached_resident_profile_after_artifact_change(host, monkeypatch, tmp_path):
+    from stark_convert.guided_memory_profiles import ResidentProfile
+
+    recipe = next(item for item in guided.native_recipes() if item.native_choice == "qwen38-mlx-serve-mixed")
+    cached_profile = ResidentProfile(
+        recipe.native_choice,
+        "qwen38-paged-text-v1",
+        recipe.repo,
+        recipe.revision,
+        recipe.weight_bytes,
+        recipe.native_profile["paged_weight_bytes"],
+        32768,
+        2,
+        1,
+        guided.GIB,
+        8 * guided.GIB,
+    )
+    cached_offer = replace(recipe, resident_profile=cached_profile)
+    path = tmp_path / "mutated-native-artifact"
+    path.mkdir()
+    model = {"id": "native-installed", "path": str(path)}
+    host.models.append(model)
+    monkeypatch.setattr(module, "matches_recipe", lambda *_args: True)
+    host.guided_resources = lambda _hardware: {
+        "supported": True,
+        "physical_memory_bytes": 128 * guided.GIB,
+        "available_memory_bytes": 100 * guided.GIB,
+        "gpu_available": True,
+        "unified_memory": True,
+        "gpu_memory_budget_bytes": 107_520_000_000,
+    }
+    start_calls = []
+    host.run = lambda *args, **kwargs: start_calls.append((args, kwargs))
+    with pytest.raises(module.DesktopError, match="Not enough memory"):
+        host.run_guided_worker(host.epoch, model["id"], cached_offer, None, "start")
+    assert start_calls == []
 
 
 @pytest.mark.parametrize("running", [False, True])

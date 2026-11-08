@@ -29,6 +29,7 @@ import psutil
 from ._build_metadata import _signature, open_regular
 from .api_tools import TOOL_PARSERS
 from .guided_memory import config_identity, native_request_bytes
+from .guided_memory_profiles import ResidentProfile, qualified_profile
 from .model_inventory import MAX_HEADER_BYTES, _weights
 from .recommendation_benchmarks import load_registry
 from .registry import get_model
@@ -76,6 +77,7 @@ class Recipe:
     native_profile: dict | None = None
     recurrent_state_bytes: int = 0
     recurrent_workspace_bytes: int = 0
+    resident_profile: ResidentProfile | None = None
 
     @property
     def weight_bytes(self):
@@ -110,6 +112,12 @@ class Recipe:
     def runtime_memory(self):
         if self.native_profile is not None:
             state = native_request_bytes(self.native_choice, self.native_profile["geometry"], self.context_tokens)
+            if self.resident_profile is not None:
+                policy = self.resident_profile
+                resident = self.installed_bytes - policy.paged_weight_bytes
+                total = resident + state * policy.request_headroom_divisor
+                total += policy.paged_working_set_bytes + policy.host_reserve_bytes
+                return ((total + GIB - 1) // GIB) * GIB
             return ((self.installed_bytes + state + 3 * GIB + GIB - 1) // GIB) * GIB
         # Guided installs use the converter's BF16 default (cli.py), matching
         # the dense generation route's activation/KV state policy.
@@ -130,10 +138,29 @@ class Recipe:
 
     @property
     def gpu_runtime_memory(self):
-        # Paged n-gram tables remain fully charged to the system-memory plan.
+        # GPU planning is independent of qualified resident-system accounting.
         # Only the admitted Lily/MLX-Serve paths stage selected rows on the GPU.
         paged = self.native_profile["paged_weight_bytes"] if self.native_profile is not None else 0
-        return ((self.runtime_memory - paged + GIB - 1) // GIB) * GIB
+        if self.native_profile is not None:
+            state = native_request_bytes(self.native_choice, self.native_profile["geometry"], self.context_tokens)
+            return ((self.installed_bytes + state + 3 * GIB - paged + GIB - 1) // GIB) * GIB
+        return self.runtime_memory
+
+
+def with_resident_profile(recipe, model):
+    # Always revalidate; an offer does not authorize a changed artifact at start.
+    base = replace(recipe, resident_profile=None)
+    profile = qualified_profile(model, recipe.native_choice) if recipe.native_choice is not None else None
+    if (
+        profile is None
+        or recipe.context_tokens > profile.maximum_context_tokens
+        or profile.paged_weight_bytes != recipe.native_profile["paged_weight_bytes"]
+        or (recipe.repo, recipe.revision, recipe.weight_bytes)
+        != (profile.repo, profile.revision, profile.weight_bytes)
+    ):
+        return replace(base, minimum_memory=base.runtime_memory + 2 * GIB) if recipe.native_choice else base
+    planned = replace(base, resident_profile=profile)
+    return replace(planned, minimum_memory=planned.runtime_memory + 2 * GIB)
 
 
 # Metadata checked without downloading weights on 2026-11-04 against the named
@@ -649,6 +676,16 @@ def _planning_budget(host):
     return min(physical, budget * 85 // 100) if type(budget) is int and budget > 0 else physical
 
 
+def execution_allowed(recipe, host):
+    """Shared current-memory gate for recommendations and fresh worker starts."""
+    available = host.get("available_memory_bytes")
+    return (
+        installation_allowed(recipe, host, installed=True)
+        and type(available) is int
+        and available >= recipe.runtime_memory
+    )
+
+
 def _fit_tier(recipe, host):
     """A comfortable fit leaves 10% beyond the admission planning reserves."""
     if recipe.native_choice is None:
@@ -762,6 +799,7 @@ def recommendation_report(
         for recipe in candidates
         if recipe.id not in excluded_recipe_ids
         and installation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
+        and execution_allowed(recipe, host)
     ]
     eligible.sort(key=lambda recipe: _ranking_key(recipe, host, installed, task, preference))
     benchmarks = load_registry() if benchmarks is None else benchmarks

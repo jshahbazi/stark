@@ -7,6 +7,8 @@ import pytest
 
 from stark_convert import guided_models as guided
 from stark_convert import recommendation_benchmarks as module
+from stark_convert.guided_memory_profiles import ResidentProfile
+from stark_convert.guided_memory_profiles import profiles as resident_profiles
 
 
 def cohort(identity="test", *, benchmark="livecodebench", scores=None):
@@ -193,10 +195,37 @@ def test_native_coding_on_128gb_mac_prioritizes_installed_qwen_references_over_f
         "free_disk_bytes": 64 * guided.GIB,
     }
     installed = {recipe.id: ["exact-source-installed-" + recipe.native_choice] for recipe in qwen}
-    report = guided.recommendation_report(machine, installed, candidates=native, task="code")
+    # At 100 GiB currently available, the conservative 111 GiB plans are
+    # correctly ineligible. Bind the reviewed artifact-specific resident rows
+    # for the installed copies so this ranks the 88 GiB plans used at startup.
+    unqualified = guided.recommendation_report(machine, installed, candidates=native, task="code")
+    assert not any(item["id"] in installed for item in unqualified["items"])
+    policy = resident_profiles()
+    qualified = []
+    for recipe in native:
+        row = policy["profiles"].get(recipe.native_choice)
+        if row is None:
+            qualified.append(recipe)
+            continue
+        profile = ResidentProfile(
+            recipe.native_choice,
+            policy["policy"],
+            row["repo"],
+            row["revision"],
+            row["weight_bytes"],
+            row["paged_weight_bytes"],
+            policy["maximum_context_tokens"],
+            policy["maximum_mtp_drafts"],
+            policy["request_headroom_divisor"],
+            policy["paged_working_set_bytes"],
+            policy["host_reserve_bytes"],
+        )
+        planned = replace(recipe, resident_profile=profile)
+        qualified.append(replace(planned, minimum_memory=planned.runtime_memory + 2 * guided.GIB))
+    report = guided.recommendation_report(machine, installed, candidates=qualified, task="code")
     assert [item["repo"] for item in report["items"]] == [
-        "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
         "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+        "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
         "RecursiveSI/flint-int4",
     ]
     for item in report["items"][:2]:
@@ -205,7 +234,7 @@ def test_native_coding_on_128gb_mac_prioritizes_installed_qwen_references_over_f
     assert report["benchmark_ranking"]["cohort"] == "qwen38-card-livecodebench-v6"
     assert report["items"][2]["benchmarks"] == []
     machine["gpu_memory_budget_bytes"] = 80 * guided.GIB
-    blocked = guided.recommendation_report(machine, installed, candidates=native, task="code")
+    blocked = guided.recommendation_report(machine, installed, candidates=qualified, task="code")
     assert [item["repo"] for item in blocked["items"]] == ["RecursiveSI/flint-int4"]
     assert not blocked["benchmark_ranking"]["applied"]
 

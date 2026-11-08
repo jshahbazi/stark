@@ -54,12 +54,14 @@ from .generation_eta import GenerationEstimates
 from .guided_models import (
     MAX_EXCLUSIONS,
     TASKS,
+    execution_allowed,
     host_resources,
     installation_allowed,
     matches_recipe,
     native_recipes,
     recipe_from_catalog,
     recommendation_report,
+    with_resident_profile,
 )
 from .hybrid_prepare import SOURCES as NATIVE_SOURCES
 from .hybrid_prepare import prepared_identity
@@ -1033,7 +1035,7 @@ class Desktop:
             for model in models
             if model.get("artifact_mode", "text") == "text" and model_valid(Path(model["path"]))
         ]
-        for recipe in candidates.values():
+        for recipe in tuple(candidates.values()):
             ids = [
                 model["id"]
                 for model, display in valid_models
@@ -1049,6 +1051,17 @@ class Desktop:
             ]
             if excluded["excluded_model_ids"].intersection(ids):
                 excluded_recipes.add(recipe.id)
+            qualified = []
+            for identifier in ids:
+                model = next(model for model, _display in valid_models if model["id"] == identifier)
+                planned = with_resident_profile(recipe, model["path"])
+                if planned.resident_profile is not None:
+                    qualified.append((identifier, planned))
+            if qualified:
+                recipe = qualified[0][1]
+                candidates[recipe.id] = recipe
+                preferred = [identifier for identifier, _planned in qualified]
+                ids = preferred + [identifier for identifier in ids if identifier not in preferred]
             installed[recipe.id] = ids
         report = recommendation_report(
             self.guided_resources(hardware),
@@ -1194,14 +1207,12 @@ class Desktop:
             if epoch != self.epoch:
                 return
             self.close_worker()
+            model = next((entry for entry in self.models if entry["id"] == identifier), None)
+        if model is None or recipe is None or not matches_recipe(model["path"], recipe):
+            raise DesktopError("The installed model changed. Check the starting models again.")
+        recipe = with_resident_profile(recipe, model["path"])
         resources = self.guided_resources(hardware)
-        available = resources.get("available_memory_bytes")
-        if (
-            recipe is None
-            or not installation_allowed(recipe, resources, installed=True)
-            or type(available) is not int
-            or available < recipe.runtime_memory
-        ):
+        if not execution_allowed(recipe, resources):
             raise DesktopError("Not enough memory is available to start this model. Close other apps and try again.")
         self.run(epoch, identifier, "chat", guided_context=recipe.context_tokens, guided_request_id=request_id)
 

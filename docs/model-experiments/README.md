@@ -55,6 +55,14 @@ All rows below link to the [complete findings and per-model matrix](../archive/r
 | CTX-18 | Buffered callback performance | No matched timing study. | Open measurement; no speedup claimed. |
 | CTX-19 | Early Qwen3.5 tokenizer provenance | Recorded SHA-256 has 63 hexadecimal characters. | Unresolved; recover original receipt, do not substitute later hash. |
 
+## 2026-11-08 Qwen Beginner memory admission
+
+[Source-bound record](../archive/runs/2026-11-08-qwen-guided-memory.md).
+
+| ID | Scope and attempt | Recorded outcome | Disposition |
+| --- | --- | --- | --- |
+| 20261108-MEM-01 | Exact Lily Q4-XL and MLX-Serve mixed text artifacts on M5 Max 128 GiB; reconcile Beginner and native memory admission | Final trials passed 9/9 requests per artifact through near-32K, MTP on/off and reuse/fresh-scope hash agreement. Physical footprint stayed below 74 GiB, without additional swap. Earlier admission, compile, test and telemetry failures are retained. | Adopted on branch; signed installation pending. |
+
 ## Public record boundary
 
 Publish aggregate results and hashes only. Keep prompts, completions, token vectors, probabilities, credentials, exception dumps, model files and private evaluation/runtime artifacts out of the ledger. An evidence link can point to an ignored private receipt by a stable identifier/hash without publishing its contents. Preserve upstream licenses and distinguish unmodified source revisions from local patches.

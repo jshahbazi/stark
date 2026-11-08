@@ -23,19 +23,35 @@ it cannot inherit the old one.
 | Flint INT4 | Full and sliding F32 KV rows, host descriptors/growth and native workspace. Requests remain fresh because the existing Flint backend has no prefix restoration. |
 | GLM Flash UD-Q2_K_XL | MLA/index caches, F32 KDA/control state, host fallbacks, external score planes and two graph scratch owners. Full weights remain charged to physical and GPU estimates. A per-encoder bank cap is not a whole-model residency bound. |
 | Qwen Flash Next original mixed export | Native F32 graph/scalar cache, GDN/convolution/PLE and host workspace; full-weight GPU estimate. This source does not inherit Lily's paged GPU deduction or numerical evidence. |
-| Qwen Flash Next Lily Q4-XL and MLX-Serve mixed | Q8 KV plus scales, sparse index buffers, F32 GDN, convolution/PLE history, MTP state, live/replaced prefix snapshots and prefill/decode scratch. The entire paged n-gram payload is charged to system memory; only its staging enters the GPU plan. |
+| Qwen Flash Next Lily Q4-XL and MLX-Serve mixed | Q8 KV plus scales, sparse index buffers, F32 GDN, convolution/PLE history, MTP state, live/replaced prefix snapshots and prefill/decode scratch. Exact qualified text artifacts use resident payload plus bounded paging; unqualified artifacts retain the full-payload system estimate. |
 
-All native plans include a 3 GiB loading/workspace allowance and round system
+Unqualified native plans include a 3 GiB loading/workspace allowance and round system
 and GPU estimates up to GiB. These are conservative estimates, not observed
 peak RSS or a guarantee that the loader will admit a machine under memory
 pressure. The guide retains the 2 GiB physical reserve and 85% Metal budget
-check, and rereads available memory after releasing its previous worker.
+check. Recommendations and startup use the same `execution_allowed` predicate:
+current available memory must cover the effective system plan. Startup rereads
+memory and revalidates the actual artifact after releasing its previous worker.
+An installed copy waives download space, never current execution headroom.
 
 For the 128 GiB / 107.52 GB Metal-budget envelope, the current 32K-context
-estimates are 29 GiB for Flint, and 111 GiB system / 82 GiB GPU for the paged
-Qwen sources. GLM and the original mixed export estimate 111 GiB GPU and fail
+estimates are 29 GiB for Flint, 87 GiB system for qualified Lily and 88 GiB for
+qualified MLX-Serve text (82 GiB GPU each; 111 GiB system fallback). GLM and the original mixed export estimate 111 GiB GPU and fail
 this guide budget. This does not remove their Advanced paths or imply they
 cannot execute using mapped ranges on that Mac.
+
+`guided_memory_profiles.json` is shared with the native request gate. It binds
+prepared config, source receipt and index hashes and the complete payload
+filename/size inventory, including Serve's external n-gram file. Payload bytes
+are not freshly rehashed. At <=32K context and MTP depth <=2 the request gate
+charges the complete native inventory once; that inventory already covers
+overlapping old/new state and scratch. Both planning and request admission
+retain 8 GiB host reserve plus 1 GiB paged working set. The system plan also
+charges the complete nonpaged payload. Larger contexts, deeper MTP, images and
+unknown/changed artifacts retain the existing conservative request gate.
+See the source-bound [memory observations](archive/runs/2026-11-08-qwen-guided-memory.md)
+for actual measurements and limitations. This does not change precision,
+sampling, prefix cache keys or restoration rules.
 
 Native preparation stores the original payload once, publishes by rename and
 uses a 4 GiB setup reserve. An exact installed copy does not need download

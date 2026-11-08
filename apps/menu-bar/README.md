@@ -285,12 +285,16 @@ convolution, prefix-snapshot and MTP verification allowances. Native profiles
 use their backend's request inventory and a loading/workspace allowance. All
 plans must leave 2 GiB of physical
 memory and use no more than 85% of Metal's recommended working-set budget.
-For Lily and MLX-Serve, the system-memory estimate includes the entire paged
-n-gram table; the GPU estimate includes its row staging rather than the entire
-table. The two estimates are shown separately in model details. GLM and the
+For the two exact qualified Lily and MLX-Serve text artifacts, the system plan
+uses nonpaged payload, the full request inventory, 1 GiB active paging and an
+8 GiB host reserve: 87 GiB for Lily and 88 GiB for Serve at 32K context. Other artifacts retain full-payload
+accounting. The GPU estimate includes row staging rather than the entire
+n-gram table. Full accounting and its bounds are documented in
+[recommendation evidence](../../docs/MODEL_RECOMMENDATIONS.md). GLM and the
 original mixed export use conservative full-weight GPU estimates, which can
 exclude them from the guide on a 128 GiB Mac despite their Advanced load path.
-New downloads also need 2 GiB currently available memory and enough space for
+Recommendations and startup share the current available-memory check; new
+downloads additionally need enough space for
 source and converted copies plus setup reserves. Native preparation downloads
 into the library volume and publishes by rename, so it needs one weight copy
 plus metadata and the preparation helper's 4 GiB reserve. It does not require a
