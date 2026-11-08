@@ -324,7 +324,7 @@ place through the memory heuristic. Missing scores remain unknown. Other
 tasks reorder scored slots within each memory-headroom tier and preserve
 unknown positions. Lighter model and More model capacity preserve their explicit
 resource priorities. Beginner details show estimated memory, a short benchmark
-score with a published-model caveat, and a source link. Technical provenance,
+score with a published-model caveat, and a link to the evaluated model's Hugging Face page. Technical provenance,
 revisions, harness settings and validation notes remain in backend reports and
 evidence records. Existing models show no new setup-space requirement.
 Public parent scores do not qualify Stark exports.

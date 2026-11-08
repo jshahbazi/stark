@@ -389,6 +389,7 @@ struct BeginnerChecks {
         case "beginner-presentation":
             let benchmark: [String: Any] = [
                 "benchmark": "livecodebench", "score": "91.9", "used_for_ranking": true,
+                "model_id": "Qwen/Qwen3.8-Flash-Next",
                 "evidence_kind": "upstream_reference", "settings": "TECHNICAL_HARNESS_SETTINGS",
                 "source": ["url": "https://example.com/published-score"]
             ]
@@ -405,7 +406,7 @@ struct BeginnerChecks {
             ]
             guard let item = BeginnerModelReport.Item(raw), let reference = item.benchmarkReference,
                   reference.name == "LiveCodeBench", reference.usedForRanking,
-                  reference.sourceURL?.absoluteString == "https://example.com/published-score",
+                  reference.sourceURL?.absoluteString == "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
                   item.beginnerDetails.split(separator: "\n").count == 3,
                   item.beginnerDetails.contains("111"), item.beginnerDetails.contains("LiveCodeBench:"),
                   item.beginnerDetails.contains("Published model score"),
@@ -427,8 +428,14 @@ struct BeginnerChecks {
                 var invalid = benchmark; invalid["score"] = score
                 if BeginnerModelReport.BenchmarkReference(invalid) != nil { return false }
             }
-            var insecure = benchmark; insecure["source"] = ["url": "file:///private/fixture"]
-            return BeginnerModelReport.BenchmarkReference(insecure)?.sourceURL == nil
+            var arbitrarySource = benchmark; arbitrarySource["source"] = ["url": "file:///private/fixture"]
+            guard BeginnerModelReport.BenchmarkReference(arbitrarySource)?.sourceURL?.absoluteString
+                    == "https://huggingface.co/Qwen/Qwen3.8-Flash-Next" else { return false }
+            for model in ["Qwen", "../model", "Qwen/../file", "Qwen/model?redirect=x", "https://example.com/model", "Qwen/model\n"] {
+                var invalid = benchmark; invalid["model_id"] = model
+                guard let reference = BeginnerModelReport.BenchmarkReference(invalid), reference.sourceURL == nil else { return false }
+            }
+            return true
         case "installed-space-presentation": return BeginnerSetupView.checkInstalledSpacePresentation()
         default: return false
         }

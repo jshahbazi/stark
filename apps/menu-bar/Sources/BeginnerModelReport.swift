@@ -28,10 +28,10 @@ struct BeginnerModelReport {
             formatter.usesGroupingSeparator = false
             score = formatter.string(from: NSNumber(value: value)) ?? text
             usedForRanking = used.boolValue
-            let source = raw["source"] as? [String: Any]
-            if let text = BeginnerMetadata.string(source?["url"], limit: 1_000),
-               let url = URL(string: text), url.scheme == "https", url.host != nil {
-                sourceURL = url
+            if let model = BeginnerMetadata.string(raw["model_id"], limit: 256),
+               model.range(of: "\\A[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*\\z",
+                           options: .regularExpression) != nil {
+                sourceURL = URL(string: "https://huggingface.co/" + model)
             } else { sourceURL = nil }
         }
 
