@@ -3,7 +3,7 @@
 ## Identity and acceptance
 
 Memory attempt, 2026-11-08, Codex. Bounded qualification passed on
-`codex/beginner-hardware-ranking`; installation pending. Related attempts:
+`codex/beginner-hardware-ranking`; signed development build installed and started. Related attempts:
 [context admission](2026-11-08-context-resource-budget.md) and
 [experiment ledger](../../model-experiments/README.md).
 
@@ -59,6 +59,7 @@ system and Serve 88 GiB; both plan 82 GiB GPU. The original full-payload fallbac
 | Serve v4 | 88 GiB plan; baseline available was 85.82 GiB, below that plan. Completed 1K and 8K, then 16K was rejected with about 16 GiB available. Peak sampled physical footprint 72.88 GiB; no guard trigger or swap growth. | Diagnostic run under competing Docker pressure; not a successful qualification. Subsequent harness requires startup headroom for five seconds before loading. |
 | Model-free checks | One engine test incorrectly expected a same-size payload edit to revoke a size-bound memory layout; one ranking fixture omitted the now-required resident binding. | Corrected tests to match the documented contract. Payload byte identity is explicitly outside this layout check; altered metadata and payload sizes must fail. |
 | Serve v5 | All nine requests passed, including near-32K MTP on/off, immediate reuse and fresh-scope hash agreement. The harness's telemetry callback had the wrong argument signature, so GPU samples were silently dropped by the production client. System/process samples are valid; complete measurement acceptance failed. | Preserved as functional/process-memory evidence; repeat with corrected callback. Added a model-free check through the production telemetry reader. |
+| Initial app staging | A post-signing verification probe omitted Python's `-B` flag and created bytecode caches inside the signed bundle. Installation's staged-signature check rejected it and kept the previous app. | Rebuilt into a clean output; repeated the probe with `-I -B`, then verified and installed the intact signature. Production already launches with `-I -B`; no runtime source change was needed. |
 
 Measurements sample macOS `proc_pid_rusage` RSS/physical footprint at 10 Hz,
 system available memory and swap at 10 Hz, and private worker Metal telemetry
@@ -127,5 +128,30 @@ new engine profile/scope tests passed using the nightly CPU/grammar harness.
 The first converter run passed 6,763 tests, skipped 96 and found the stale
 ranking fixture recorded above. The corrected ranking/profile files passed
 32 tests; guided/start/profile tests passed 95; production telemetry callback
-integration passed one. Final complete converter replay and signed installation
-results will be appended below.
+integration passed one. The final complete converter replay passed **6,764**
+tests with **96 skipped** in 261.91 seconds. Swift Beginner tests passed 14;
+controller harness passed 136 checks. Repository policy, changed-file Ruff,
+format checks and native nightly formatting passed. The generation, optimized
+scoring and template workers were built separately with locked Rust 1.98.1.
+
+Installed `~/Applications/Stark.app` from clean source
+`360075adbadb635099835ae469153e2040415828`, development build
+`20261108231220983305`. Developer ID Team `S5BT2PRN5B`; deep strict signature
+verification passed before staging, after the cache-disabled probe, after
+installation and during actual startup. The app executable SHA-256 is
+`1e69673d50d20736110395602c3bbb5df697d31acf9562f95552abe83b691e3c`.
+The manifest retains measured pre-signing worker SHA-256 `01d9bb09…caf900af`
+and signed worker SHA-256
+`b0e25e6b8f1a125cab5b52ec0686ff3f339e0d49761fa6bb44f6c49b1da2cbba`.
+The measurement matrix used the pre-signing worker; the signed installed worker
+was exercised by the actual app startup below.
+
+Native UI verification selected **Help with code + Balanced**. Its first choice
+was installed Lily Q4-XL, followed by MLX-Serve mixed and Qwen3.8-27B-oQ4e-mtp.
+Details showed 87 GB, LiveCodeBench 91.9/100, the brief public-score caveat and a
+blue underlined link to `https://huggingface.co/Qwen/Qwen3.8-Flash-Next`. There
+was no memory warning. Clicking **Start Qwen3.8-Flash-Next-lily-q4-xl** completed
+startup; the guide reported **Model running** and advanced to OpenWork setup.
+No new OpenWork connection or folder permission was granted. The model was
+left running for the user's trial. This records a local development install,
+not a merged PR or published release.
