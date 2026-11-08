@@ -675,6 +675,83 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertIsNone(context.metadata["adapter_error_type"])
 
+    def test_request_deadline_is_a_task_outcome_but_generation_failure_is_infra(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+
+        class ResponseConnection:
+            status = 0
+            payload = None
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse(self.payload, status=self.status)
+
+            def close(self):
+                pass
+
+        class NoCommandEnvironment:
+            async def exec(self, *args, **kwargs):
+                raise AssertionError("HTTP error should stop before tool execution")
+
+        async def exercise(status, code):
+            ResponseConnection.status = status
+            ResponseConnection.payload = {
+                "error": {
+                    "message": "A private server diagnostic.",
+                    "type": "server_error",
+                    "code": code,
+                }
+            }
+            agent = StarkMiniSweAgent(logs_dir=Path("/tmp"), model_name="stark-test")
+            context = AgentContext()
+            with patch(
+                "maxxbench_agent._CancellableHTTPConnection", ResponseConnection
+            ):
+                if status == 504:
+                    try:
+                        await agent.run(
+                            "synthetic task metadata", NoCommandEnvironment(), context
+                        )
+                    except RuntimeError:
+                        pass
+                else:
+                    with self.assertRaisesRegex(
+                        RuntimeError, "^maxxbench_adapter_failed$"
+                    ):
+                        await agent.run(
+                            "synthetic task metadata", NoCommandEnvironment(), context
+                        )
+            return context
+
+        request_deadline = asyncio.run(exercise(504, "request_timeout"))
+        self.assertEqual(
+            request_deadline.metadata["agent_status"],
+            "request_timeout",
+            request_deadline.metadata,
+        )
+        self.assertEqual(request_deadline.metadata["http_errors"], {"server": 1})
+        self.assertEqual(
+            request_deadline.metadata["api_error_codes"], {"request_timeout": 1}
+        )
+        self.assertIsNone(request_deadline.metadata["adapter_error_type"])
+
+        generation_failure = asyncio.run(exercise(503, "generation_failed"))
+        self.assertEqual(generation_failure.metadata["agent_status"], "adapter_error")
+        self.assertEqual(
+            generation_failure.metadata["http_errors"], {"server": 1, "agent": 1}
+        )
+        self.assertEqual(
+            generation_failure.metadata["api_error_codes"], {"generation_failed": 1}
+        )
+        self.assertEqual(
+            generation_failure.metadata["adapter_error_type"], "RuntimeError"
+        )
+
     def test_model_tool_format_error_reenters_stock_format_loop(self):
         configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
         responses = [

@@ -68,6 +68,7 @@ SAFE_API_ERROR_CODES = frozenset(
         "invalid_image",
         "context_length_exceeded",
         "context_capacity_unknown",
+        "request_timeout",
         "request_too_large",
         "tools_unsupported",
         "invalid_tool_call",
@@ -93,7 +94,6 @@ SAFE_API_ERROR_CODES = frozenset(
         "streaming_unavailable",
         "stop_sequences_unavailable",
         "generation_failed",
-        "request_timeout",
         "internal_error",
         "benchmark_completion_failed",
         "http_error",
@@ -240,6 +240,10 @@ class ContextOverflowError(RuntimeError):
     """Expected request-budget failure; report as task outcome, not harness fault."""
 
 
+class RequestDeadlineError(RuntimeError):
+    """Local API request deadline; report as a bounded task outcome."""
+
+
 class LocalOpenAIModel:
     """Small OpenAI chat-completions client with redacted error handling."""
 
@@ -335,6 +339,8 @@ class LocalOpenAIModel:
                 METRICS.record_error(category, context_overflow=overflow)
                 if overflow:
                     raise ContextOverflowError("context_overflow") from None
+                if api_error_code == "request_timeout" and response.status == 504:
+                    raise RequestDeadlineError("request_timeout") from None
                 if api_error_code in MODEL_FORMAT_ERROR_CODES:
                     parse_toolcall_actions(
                         [],
@@ -517,6 +523,14 @@ class MemoryOnlyAgent(DefaultAgent):
 
     def handle_uncaught_exception(self, error):
         # DefaultAgent's implementation stores exception text and traceback.
+        if isinstance(error, RequestDeadlineError):
+            return self.add_messages(
+                self.model.format_message(
+                    role="exit",
+                    content="request_timeout",
+                    extra={"exit_status": "request_timeout", "submission": ""},
+                )
+            )
         return self.add_messages(
             self.model.format_message(
                 role="exit",
@@ -614,6 +628,10 @@ class StarkMiniSweAgent(BaseAgent):
             raise
         except ContextOverflowError:
             status = "context_overflow"
+            submission = ""
+            failure_type = None
+        except RequestDeadlineError:
+            status = "request_timeout"
             submission = ""
             failure_type = None
         except Exception as error:  # noqa: BLE001 - retain only the safe exception type
