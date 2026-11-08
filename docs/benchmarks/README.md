@@ -4,6 +4,15 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Flash-Next idle wake fix (2026-11-07).** The native Lily-policy generation
+worker now signals its otherwise empty GPU queue every 500 ms while waiting
+for a new request. It retains prefix state and its original expiry deadline.
+Matched post-idle first-sample latency falls from 1.07–1.09 seconds to
+0.30–0.31 seconds, with 16/16 host screens passing and matching seeded outputs.
+Observed idle worker CPU is 0.033% of one core.
+See the [matched latency and idle-resource validation](2026-11-07-flashnext-idle-wake-fix.md)
+and [source archive](../archive/experiments/2026-11-07-flashnext-idle-wake/README.md).
+
 **Flash-Next sustained throughput diagnosis (2026-11-07).** The unchanged
 baseline reproduces a fall from 95.46 to 82.20 decode tok/s; about 98% of added
 verification elapsed time is inside GPU command spans, with contemporaneous

@@ -830,6 +830,30 @@ impl Model {
         }
     }
 
+    /// Owner-thread maintenance while the generation worker waits for input.
+    /// Other backends retain their existing idle behavior.
+    pub fn idle_maintenance_interval(&self) -> Option<std::time::Duration> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward
+            && model.needs_idle_queue_maintenance()
+        {
+            return Some(std::time::Duration::from_millis(500));
+        }
+        None
+    }
+
+    /// Submit only an empty queue signal; caches, sampling and model positions
+    /// survive unchanged. Failures require the owning worker to exit/reload.
+    pub fn maintain_idle_queue(&self) -> Result<()> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward
+            && model.needs_idle_queue_maintenance()
+        {
+            return model.maintain_idle_queue();
+        }
+        Ok(())
+    }
+
     /// The prefill chunk length when this backend can snapshot and resume a
     /// prompt prefix, which then happens only at multiples of it.
     pub fn prefix_chunk_tokens(&self) -> Option<usize> {

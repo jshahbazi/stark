@@ -266,6 +266,14 @@ Hybrid generation and scoring hold a macOS user-initiated, latency-critical
 process activity through request execution and GPU cleanup, then release it
 between requests. This expresses the request's activity lifetime; it does not
 reserve GPU resources or establish a fixed clock or throughput.
+Between complete requests, the native Lily-policy Qwen worker waits for input
+with a 500 ms poll timeout and sends an empty Metal queue signal on timeout.
+This avoids the measured idle queue wake penalty while keeping model state and
+the ten-minute prefix expiry unchanged. It creates no background thread or
+inference activity assertion; it ends at worker shutdown. Queue/input failures
+clear retained state and exit for reload. Official mixed-affine Qwen and other
+backends retain their existing idle behavior. Latency and idle resource evidence
+are in the [idle wake fix](benchmarks/2026-11-07-flashnext-idle-wake-fix.md).
 For Qwen3.8, the generation worker can also load the checkpoint's existing MTP
 head and enable one to three draft tokens per request through `mtp_drafts`.
 It remains off by default. The generic `mtp: true` request option chooses the

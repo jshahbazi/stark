@@ -447,6 +447,20 @@ impl LilyModel {
         Ok(())
     }
 
+    /// Keep the Lily queue resident between requests without touching model
+    /// state. Called on its owner thread, only after synchronous work drains.
+    pub fn maintain_idle_queue(&self) -> Result<()> {
+        if self.is_fenced() {
+            return Err(Error::Invalid("mixed precision context requires reload"));
+        }
+        self.context.wake().map_err(|_| Error::Invalid("mixed precision idle queue wake failed"))
+    }
+
+    /// Idle latency has been qualified for the Lily numerical policy only.
+    pub fn needs_idle_queue_maintenance(&self) -> bool {
+        !self.model.config.official_mlx_rounding()
+    }
+
     /// Explicit diagnostic mode for future passes; no payload is captured.
     pub fn set_stage_profiling(
         &mut self,

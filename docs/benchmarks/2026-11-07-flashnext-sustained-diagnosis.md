@@ -1,6 +1,8 @@
 # Flash-Next sustained throughput and idle wake diagnosis
 
 Date: 2026-11-07. This follows the [MoE projection experiment](2026-11-07-flashnext-moe-projections.md).
+The subsequent [production idle wake fix](2026-11-07-flashnext-idle-wake-fix.md)
+implements queue maintenance and records new source-bound results separately.
 The [aggregate receipt](data/flashnext-sustained-diagnosis-2026-11-07.json)
 retains all 128 measured diagnostic requests, source and executable hashes,
 host screens, clock coverage and native phase aggregates. Twenty-four declared

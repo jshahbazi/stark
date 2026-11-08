@@ -403,6 +403,14 @@ fn collect_tokens_with_clock_and_callback(
 pub(crate) trait GenerationBackend {
     type PreparedImage;
 
+    /// Optional owner-thread work between complete requests. No inference or
+    /// prefix state may be changed by this callback.
+    fn idle_maintenance_interval(&self) -> Option<Duration> {
+        None
+    }
+    fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
     fn eos_token_ids(&self) -> &[u32];
@@ -1052,6 +1060,65 @@ impl<B: GenerationBackend> GenerationWorker<B> {
     }
 }
 
+/// Wait without extending the retained prefix's original idle deadline on
+/// maintenance ticks. Returning input/EOF immediately avoids a poll-sized
+/// request delay; backends without maintenance retain their blocking behavior.
+fn wait_for_request<B: GenerationBackend>(
+    backend: &mut B,
+    input: &mut impl RequestInput,
+) -> Result<(), &'static str> {
+    wait_for_request_with_clock(backend, input, Instant::now)
+}
+
+fn wait_for_request_with_clock<B: GenerationBackend>(
+    backend: &mut B,
+    input: &mut impl RequestInput,
+    mut now: impl FnMut() -> Instant,
+) -> Result<(), &'static str> {
+    let interval = backend.idle_maintenance_interval().filter(|interval| !interval.is_zero());
+    let cache_limit = backend.prefix_cache_retained().then_some(Duration::from_secs(prefix_cache::IDLE_SECONDS));
+    let started = now();
+    let mut cache_remaining = cache_limit;
+    loop {
+        let timeout = match (interval, cache_remaining) {
+            (Some(tick), Some(cache)) => tick.min(cache),
+            (Some(tick), None) => tick,
+            (None, Some(cache)) => cache,
+            (None, None) => return Ok(()),
+        };
+        if input.wait_readable(timeout).map_err(|_| "protocol_read_failed")? {
+            if cache_remaining.is_some()
+                && cache_limit.is_some_and(|limit| now().saturating_duration_since(started) >= limit)
+            {
+                backend.clear_prefix_cache();
+            }
+            return Ok(());
+        }
+        if let Some(remaining) = cache_remaining {
+            let elapsed = now().saturating_duration_since(started);
+            if remaining <= timeout || cache_limit.is_some_and(|limit| elapsed >= limit) {
+                backend.clear_prefix_cache();
+                cache_remaining = None;
+            } else {
+                cache_remaining = cache_limit.map(|limit| limit.saturating_sub(elapsed));
+            }
+        }
+        if interval.is_some() {
+            backend.maintain_idle_queue()?;
+            // Maintenance itself can take time, including a slow device wake.
+            // Recompute before waiting again, even if input is already ready.
+            if cache_remaining.is_some() {
+                cache_remaining =
+                    cache_limit.map(|limit| limit.saturating_sub(now().saturating_duration_since(started)));
+                if cache_remaining.is_some_and(|remaining| remaining.is_zero()) {
+                    backend.clear_prefix_cache();
+                    cache_remaining = None;
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn run_lines<B: GenerationBackend>(
     worker: &mut GenerationWorker<B>,
     input: &mut impl RequestInput,
@@ -1115,17 +1182,10 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     }
     write_reply(output, &readiness)?;
     loop {
-        // Release retained state when the host stays idle.
-        if worker.backend.prefix_cache_retained() {
-            match input.wait_readable(Duration::from_secs(prefix_cache::IDLE_SECONDS)) {
-                Ok(true) => {},
-                Ok(false) => worker.backend.clear_prefix_cache(),
-                Err(_) => {
-                    worker.backend.clear_prefix_cache();
-                    worker.prepared = None;
-                    return Err("protocol_read_failed");
-                },
-            }
+        if let Err(code) = wait_for_request(&mut worker.backend, input) {
+            worker.backend.clear_prefix_cache();
+            worker.prepared = None;
+            return Err(code);
         }
         let mut bytes = Vec::new();
         let count = match Read::by_ref(input).take(MAX_REQUEST_BYTES as u64 + 1).read_until(b'\n', &mut bytes) {
@@ -1194,6 +1254,9 @@ mod tests {
     }
 
     struct FakeBackend {
+        idle_interval: Option<Duration>,
+        idle_calls: usize,
+        fail_idle: bool,
         max_context: Option<u32>,
         tokens: Vec<Result<u64, &'static str>>,
         eos: Vec<u32>,
@@ -1241,6 +1304,17 @@ mod tests {
     impl GenerationBackend for FakeBackend {
         type PreparedImage = FakePreparedImage;
 
+        fn idle_maintenance_interval(&self) -> Option<Duration> {
+            self.idle_interval
+        }
+        fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
+            self.idle_calls += 1;
+            if self.fail_idle {
+                Err("native_idle_maintenance_failed")
+            } else {
+                Ok(())
+            }
+        }
         fn vocab_size(&self) -> usize {
             8
         }
@@ -1481,6 +1555,9 @@ mod tests {
     }
     fn worker() -> GenerationWorker<FakeBackend> {
         GenerationWorker::new(FakeBackend {
+            idle_interval: None,
+            idle_calls: 0,
+            fail_idle: false,
             max_context: Some(1024),
             tokens: vec![Ok(3), Ok(4), Ok(1), Ok(7)],
             eos: vec![1],
@@ -3004,6 +3081,8 @@ mod tests {
     struct IdleInput {
         input: io::Cursor<Vec<u8>>,
         waits: Vec<bool>,
+        expected_timeouts: Vec<Duration>,
+        fail_wait: bool,
     }
 
     impl Read for IdleInput {
@@ -3032,7 +3111,10 @@ mod tests {
             &mut self,
             timeout: Duration,
         ) -> io::Result<bool> {
-            assert_eq!(timeout, Duration::from_secs(600));
+            if self.fail_wait {
+                return Err(io::Error::other("failed wait"));
+            }
+            assert_eq!(timeout, self.expected_timeouts.remove(0));
             Ok(self.waits.remove(0))
         }
     }
@@ -3044,7 +3126,9 @@ mod tests {
     ) -> Vec<Value> {
         let mut input = IdleInput {
             input: io::Cursor::new(lines.iter().flat_map(|line| line.iter().copied().chain(*b"\n")).collect()),
+            expected_timeouts: vec![Duration::from_secs(600); waits.len()],
             waits,
+            fail_wait: false,
         };
         let mut output = Vec::new();
         run_lines(worker, &mut input, &mut output).unwrap();
@@ -3069,5 +3153,118 @@ mod tests {
             run_requests(&mut prefix_worker(true), &[request.clone(), oversized, request.clone()], vec![true, true]);
         assert_eq!(replies[1]["error"], "request_too_large");
         assert_eq!(replies[2]["reused_input_tokens"], 0);
+    }
+
+    fn idle_input(
+        waits: Vec<bool>,
+        timeouts: Vec<Duration>,
+    ) -> IdleInput {
+        IdleInput {
+            input: io::Cursor::new(Vec::new()),
+            waits,
+            expected_timeouts: timeouts,
+            fail_wait: false,
+        }
+    }
+
+    #[test]
+    fn idle_maintenance_runs_without_a_retained_prefix_and_stops_at_eof() {
+        let mut worker = worker();
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut input = idle_input(vec![false, false, true], vec![Duration::from_millis(500); 3]);
+        let mut output = Vec::new();
+        assert_eq!(run_lines(&mut worker, &mut input, &mut output), Ok(()));
+        assert_eq!(worker.backend.idle_calls, 2);
+        assert_eq!(worker.backend.generation_calls, 0);
+        assert!(input.waits.is_empty());
+        assert_eq!(output.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).count(), 1);
+    }
+
+    #[test]
+    fn idle_maintenance_preserves_ready_input_and_prefix_state() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut input = idle_input(vec![false, true], vec![Duration::from_millis(500); 2]);
+        assert_eq!(wait_for_request(&mut worker.backend, &mut input), Ok(()));
+        assert_eq!(worker.backend.idle_calls, 1);
+        assert_eq!(reused(&mut worker, 3_000), 2048);
+    }
+
+    #[test]
+    fn idle_maintenance_does_not_extend_prefix_expiry() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut input = idle_input(
+            vec![false, false, false, true],
+            vec![
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                Duration::from_millis(250),
+                Duration::from_millis(500),
+            ],
+        );
+        let start = Instant::now();
+        let mut times =
+            [0, 500, 500, 599_750, 599_750, 600_000].into_iter().map(|ms| start + Duration::from_millis(ms));
+        assert_eq!(wait_for_request_with_clock(&mut worker.backend, &mut input, || times.next().unwrap()), Ok(()));
+        assert!(!worker.backend.prefix_cache_retained());
+        assert_eq!(worker.backend.idle_calls, 3);
+    }
+
+    #[test]
+    fn idle_failures_exit_and_clear_retained_state() {
+        for fail_wait in [false, true] {
+            let mut worker = prefix_worker(true);
+            assert_eq!(reused(&mut worker, 3_000), 0);
+            worker.backend.idle_interval = Some(Duration::from_millis(500));
+            worker.backend.fail_idle = !fail_wait;
+            let mut input = idle_input(vec![false], vec![Duration::from_millis(500)]);
+            input.fail_wait = fail_wait;
+            assert_eq!(
+                run_lines(&mut worker, &mut input, &mut Vec::new()),
+                Err(if fail_wait {
+                    "protocol_read_failed"
+                } else {
+                    "native_idle_maintenance_failed"
+                })
+            );
+            assert!(!worker.backend.prefix_cache_retained());
+        }
+    }
+
+    #[test]
+    fn ready_input_cannot_reuse_a_prefix_after_idle_expiry() {
+        for callback_crosses_deadline in [false, true] {
+            let mut worker = prefix_worker(true);
+            assert_eq!(reused(&mut worker, 3_000), 0);
+            worker.backend.idle_interval = Some(Duration::from_millis(500));
+            let mut input = idle_input(
+                if callback_crosses_deadline {
+                    vec![false, true]
+                } else {
+                    vec![true]
+                },
+                vec![
+                    Duration::from_millis(500);
+                    if callback_crosses_deadline {
+                        2
+                    } else {
+                        1
+                    }
+                ],
+            );
+            let start = Instant::now();
+            let mut times = if callback_crosses_deadline {
+                vec![0, 500, 600_001]
+            } else {
+                vec![0, 600_001]
+            }
+            .into_iter()
+            .map(|ms| start + Duration::from_millis(ms));
+            assert_eq!(wait_for_request_with_clock(&mut worker.backend, &mut input, || times.next().unwrap()), Ok(()));
+            assert!(!worker.backend.prefix_cache_retained());
+        }
     }
 }
