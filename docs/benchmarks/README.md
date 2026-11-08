@@ -7,10 +7,12 @@ Measured results, each bound to the source revision, build and host named inside
 **Qwen3.8-Flash-Next MoE projection experiment (2026-11-07).** Fixed-geometry
 expert gate/up and shared-first dispatch pass bounded numerical, scoring and
 prefix-restoration controls. The final synthetic combined projection improves
-by about 2.2%; no whole-model speedup is qualified. Matched timing attempts
-were ineligible or incomplete, and the next quiet window requires unlocking
-the benchmark console. See the [experiment report](2026-11-07-flashnext-moe-projections.md),
-[aggregate results](data/flashnext-moe-projections-2026-11-07.json) and
+by about 2.2%. A completed observed ABBA run measured **81.23 decode tok/s with
+two MTP drafts versus 85.50 baseline**, and **75.63 versus 80.33 tok/s with MTP
+off**. It has no quiet admission and four host-ineligible arms; the available
+results do not support promotion. See the [experiment report](2026-11-07-flashnext-moe-projections.md),
+[initial aggregate results](data/flashnext-moe-projections-2026-11-07.json),
+[completed observed run](data/flashnext-moe-matched-observed-2026-11-07.json) and
 [source patches](../archive/experiments/2026-11-07-flashnext-moe/README.md).
 This adds separate candidate evidence and does not supersede earlier results.
 

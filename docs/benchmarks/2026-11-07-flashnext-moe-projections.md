@@ -8,11 +8,12 @@ Engine baseline: `72b5aaef96c939809bc906d10d45a0eef70386c0`.
 [applyable source patches](../archive/experiments/2026-11-07-flashnext-moe/README.md)
 bind the variants and measurements separately.
 
-Status: both candidates pass the bounded numerical controls. A complete,
-host-eligible performance comparison is blocked by the locked benchmark
-console. No whole-model speedup is qualified. The fixed-gate/shared-first
-implementation is retained on this experimental branch. Performance
-qualification remains outstanding before release.
+Status: the final candidate completed an observed ABBA comparison at **81.23
+decode tok/s with two MTP drafts**, versus **85.50 tok/s for baseline**. With
+MTP off it measured **75.63 versus 80.33 tok/s**. Both candidates pass the
+bounded numerical controls. The completed run has no quiet admission and four
+host-ineligible arms, so no whole-model speedup is qualified. The
+fixed-gate/shared-first implementation remains experimental.
 
 ## Hypothesis
 
@@ -179,7 +180,8 @@ limit at 154.8% versus 150%. It is retained as an ineligible complete run.
 Its pooled decode rates were 82.61 to 82.92 tok/s with MTP off and 95.37 to
 95.54 with two drafts. The small differences are not a qualified benefit.
 
-The second candidate did not complete a candidate session before admission
+In these initial screened attempts, the second candidate did not complete a
+candidate session before admission
 timed out. Completed baseline cells and partial requests remain in their
 original receipts and are not used to claim a candidate gain.
 The five attempts retain 47 measured arms in total; available same-route
@@ -205,18 +207,62 @@ to the lock screen.
 
 A temporary `caffeinate -d -i -u -t 1800` assertion was started to keep the
 display/system awake during the requested window. It does not unlock the
-console or change persistent lock settings. Manual unlock is needed before
-the next timing attempt. No observed-only run or relaxed CPU/GPU threshold
+console or change persistent lock settings. Manual unlock was requested before
+another quiet-admitted attempt. No observed-only run or relaxed CPU/GPU threshold
 has been substituted for the requested quiet comparison.
 The temporary assertion was released before handoff.
+
+### Completed observed whole-model run
+
+A separate `--observe-host` run completed all four ABBA sessions and all 32
+measured arms on the final candidate. It uses the same pinned workers,
+checkpoint, 512-token source input, 256 sampled outputs, context 768, seed 42,
+temperature 1, top-k 20, top-p 0.95 and four blocks per loaded worker. A
+`caffeinate -d -i` assertion was owned by the benchmark process and ended
+with it. The console was still locked before this run. No quiet admission
+was attempted, and the host-screen thresholds were unchanged. This is a
+separate observed protocol from the initial screened attempts.
+
+The [complete aggregate receipt](data/flashnext-moe-matched-observed-2026-11-07.json)
+retains every measured arm, worker and harness hashes, artifact guards,
+sampling configuration, output hashes and host screens. Rates pool all eight
+requests per worker and MTP route as total decode steps divided by total
+decode seconds. Wall times are medians across those same eight requests.
+
+| Route | Baseline decode tok/s | Final candidate decode tok/s | Candidate rate change | Baseline median wall seconds | Candidate median wall seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MTP off | 80.33 | 75.63 | -5.86% | 3.5000 | 3.6358 |
+| MTP two drafts | 85.50 | 81.23 | -4.99% | 3.4038 | 3.4021 |
+
+| Session | Worker | MTP off decode tok/s | Two-draft decode tok/s | Host-eligible arms |
+| --- | --- | ---: | ---: | ---: |
+| 0 | Baseline | 80.82 | 86.75 | 7/8 |
+| 1 | Final candidate | 74.02 | 80.98 | 8/8 |
+| 2 | Final candidate | 77.31 | 81.49 | 6/8 |
+| 3 | Baseline | 79.86 | 84.28 | 7/8 |
+
+All same-route output hashes match across workers and repeats. The artifact
+and worker identity guards pass. No active compiler or external model CPU
+activity was observed, and thermal state remained nominal or fair. Four arms
+exceeded the 150% external CPU threshold, with a maximum of 222.73%; one also
+had two pageouts. Thus 28/32 arms pass their individual screens, and the run
+retains `timing_eligible: false`. No arm was removed or retried.
+
+The final candidate's observed decode rate is lower than baseline in both
+routes. Two-draft median complete-request wall time is essentially unchanged;
+MTP-off wall time is 3.88% higher. These measurements provide no evidence for
+promoting the candidate. The earlier roughly 95 tok/s measurements belong to
+the separate first-candidate run under its recorded machine conditions.
 
 ## Disposition
 
 The combined component improved by about 2.2% in the second synthetic window.
-That result does not establish request-latency or whole-model decode gains.
-The code, candidate patches, numerical evidence and interrupted benchmark
-receipts are retained for review; performance promotion remains blocked on
-an unlocked, eligible benchmark window.
+The completed observed whole-model run measured 81.23 tok/s with two drafts
+and 75.63 tok/s with MTP off, both below its matched baseline. No whole-model
+benefit is demonstrated. The code, candidate patches, numerical evidence and
+all benchmark receipts are retained for review. Performance promotion is
+unsupported by the available results; a quiet-qualified comparison remains
+outstanding.
 
 ## Reproduction
 
@@ -242,6 +288,8 @@ uv run --project tools/converter --locked --python 3.13.13 python scripts/benchm
 Use a new output directory for each attempt. Omitting `--quiet-scope session`
 reproduces the default per-request-admission protocol. Both require matching
 same-route hashes and every measured arm to pass its host screen. The
+completed observed run replaces `--screened --quiet-scope session` with
+`--observe-host`, retaining all arms and explicitly unqualified timing. The
 synthetic tests are ignored native tests under `stark_lily_core`:
 `flashnext_gate_up_shared_down_match_reference_bytes` and
 `flashnext_gate_up_shared_down_streaming_timing`. Run those separately from
