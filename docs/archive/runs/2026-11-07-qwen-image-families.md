@@ -309,8 +309,40 @@ no performance claim. An unrelated Lily pilot worker was observed after the
 replay; this was not a quiet-host benchmark. The private replay receipt SHA256
 is `7fd2dc2d8124d0ae471ba88aef6bbd508f7391695b2bf235c63d388ddc34b9e3`.
 Actual 27B and MoE worker lifecycle/cancellation rechecks on the production
-encoder remain pending. The small exact dense result does not qualify those
+encoder are recorded in the later release replay below. The small exact dense result does not qualify those
 larger checkpoints or explicit source-wide arithmetic policies numerically.
+
+### Release worker lifecycle replay
+
+The fresh Rust 1.98.1 worker at source
+`5b8d40258ad93631dd2a1217b3d07acd6282c748`, SHA256
+`5985412ddb84abc32fd3338c5384d394e0c52b5c95392152d61027ae407784b4`,
+passed actual dense 27B and quantized MoE 35B lifecycle replays sequentially.
+The worker excludes diagnostic selectors. Its sealed package contained 68
+Python files; every file hash and both worker/helper hashes were verified
+before the run, and the worker hash was checked again afterward. The seal
+manifest hash is
+`637fe2420d88ce77f22b9cb1bfa154bc06944df262037d697a1e980af2dddc51`.
+
+Both artifacts passed readiness and automatic local image checks, both solid
+color cases with distinct correct outputs, actual streaming cancellation
+requested after a delta, private staging cleanup, image-to-text recovery, and
+fresh-image recovery. The worker remained healthy before normal shutdown.
+The full artifact/config/tokenizer/processor/template identities matched
+their admitted schema-3 dense-v3 and MoE-v4 profiles. MTP remained disabled
+and image requests used no retained text prefix. No source download or model
+conversion was needed, and the prior passes and failures remain preserved.
+
+| Artifact | Lifecycle seconds | Sampled peak worker RSS | Minimum available memory | Receipt SHA256 |
+| --- | ---: | ---: | ---: | --- |
+| Dense 27B | 258.182 | 18,115,510,272 B | 72,408,694,784 B | `3893a10dd6d491e3eda3a016a55f2bcd46bb06dc8dba512d7a88b7c240d767d1` |
+| Quantized MoE 35B | 96.166 | 21,685,420,032 B | 73,724,690,432 B | `927fdb52e4ce4b1f1806052179a84aad81fe748a6e69079d7fbe88dc2e6761fc` |
+
+These elapsed and sampled memory values are guarded functional observations,
+with no performance claim. Neither resource guard fired, both harness runs
+exited successfully, and both workers were reaped before the next stage.
+Retained Lily was held for its separate final numerical correction and is
+not included in this release lifecycle replay.
 
 ## Primary references
 
