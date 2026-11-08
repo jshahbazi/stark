@@ -3,9 +3,10 @@
 Pinned starters have recorded native chat evidence. Additional candidates come
 from metadata-preflighted catalogue revisions and pinned native source profiles
 with complete route-specific memory plans.
-Ranking is an explainable resource/capacity heuristic, not measured answer
-quality or proof of OpenWork task competence. The converter and worker still
-validate every artifact.
+Ranking combines resource/capacity heuristics with comparable, attributed
+upstream benchmark references. These are not measurements of Stark artifacts
+or proof of OpenWork task competence. The converter and worker still validate
+every artifact.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from ._build_metadata import _signature, open_regular
 from .api_tools import TOOL_PARSERS
 from .guided_memory import config_identity, native_request_bytes
 from .model_inventory import MAX_HEADER_BYTES, _weights
+from .recommendation_benchmarks import load_registry
 from .registry import get_model
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, read_safetensors_header
 
@@ -683,7 +685,7 @@ def _ranking_key(recipe, host, installed, task, preference):
     )
 
 
-def _recommendation_reason(recipe, host, task, preference):
+def _recommendation_reason(recipe, host, task, preference, *, benchmark_used=False):
     reasons = [
         "The memory plan fits this Mac's RAM and GPU budget."
         if "gpu_available" in host
@@ -695,7 +697,16 @@ def _recommendation_reason(recipe, host, task, preference):
             if task == "code"
             else "The source identifies your selected task as an intended use."
         )
-    if preference == "speed":
+    if benchmark_used:
+        evaluation = {
+            "code": "coding benchmark",
+            "files": "tool-use benchmark",
+        }.get(task, "instruction-following benchmark")
+        reasons.append(
+            f"Published upstream {evaluation} results informed comparison with other scored models; "
+            "this Stark artifact has not been benchmarked."
+        )
+    elif preference == "speed":
         reasons.append("Favors a model with less weight data to read; response speed has not been measured.")
     elif recipe.logical_parameters:
         reasons.append(
@@ -725,7 +736,7 @@ def _license_label(value):
 
 
 def recommendation_report(
-    host, installed, excluded_recipe_ids=(), *, task="unsure", preference="balanced", candidates=None
+    host, installed, excluded_recipe_ids=(), *, task="unsure", preference="balanced", candidates=None, benchmarks=None
 ):
     candidates = tuple(RECIPES if candidates is None else candidates)
     task = task if task in TASKS else "unsure"
@@ -737,8 +748,13 @@ def recommendation_report(
         and installation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
     ]
     eligible.sort(key=lambda recipe: _ranking_key(recipe, host, installed, task, preference))
+    benchmarks = load_registry() if benchmarks is None else benchmarks
+    eligible, cohort, benchmark_used = benchmarks.rank(
+        eligible, task, preference, lambda recipe: _fit_tier(recipe, host)
+    )
     items = []
     for recipe in eligible[:3]:
+        evidence, benchmark_details = benchmarks.evidence(recipe, task, cohort, benchmark_used)
         ids = list(installed.get(recipe.id, ()))
         license_name = (
             recipe.native_profile.get("license")
@@ -766,7 +782,11 @@ def recommendation_report(
                 "installed_ids": ids,
                 "license": license_name,
                 "qualification": recipe.qualification,
-                "recommendation_reason": _recommendation_reason(recipe, host, task, preference),
+                "recommendation_reason": _recommendation_reason(
+                    recipe, host, task, preference, benchmark_used=recipe.id in benchmark_used
+                ),
+                "benchmarks": evidence,
+                "benchmark_details": benchmark_details,
                 "evidence": (
                     "recorded_native_checks"
                     if recipe.native_profile is not None and recipe.native_profile["native_workflow_checked"]
@@ -806,4 +826,9 @@ def recommendation_report(
         "message": message,
         "host": dict(host),
         "items": items,
+        "benchmark_ranking": {
+            "cohort": cohort.id if cohort is not None else None,
+            "applied": bool(benchmark_used),
+            "evidence_kind": "upstream_reference",
+        },
     }

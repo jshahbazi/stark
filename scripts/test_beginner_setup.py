@@ -337,7 +337,15 @@ struct BeginnerChecks {
                 "license": "test", "qualification": "Synthetic fixture", "caveats": [String]()
             ]
             guard let legacy = BeginnerModelReport.Item(raw), legacy.gpuRuntimeBytes == 100,
-                  legacy.memoryDetails.count == 1 else { return false }
+                  legacy.memoryDetails.count == 1, legacy.benchmarkDetails.isEmpty else { return false }
+            raw["benchmark_details"] = ["Published upstream reference: 42/100"]
+            guard BeginnerModelReport.Item(raw)?.benchmarkDetails.count == 1 else { return false }
+            for invalid in [true, [1], Array(repeating: "reference", count: 17),
+                            [String(repeating: "x", count: 2_001)]] as [Any] {
+                raw["benchmark_details"] = invalid
+                if BeginnerModelReport.Item(raw) != nil { return false }
+            }
+            raw.removeValue(forKey: "benchmark_details")
             raw["gpu_memory_bytes_estimate"] = 50
             guard let paged = BeginnerModelReport.Item(raw), paged.gpuRuntimeBytes == 50,
                   paged.memoryDetails.count == 3 else { return false }

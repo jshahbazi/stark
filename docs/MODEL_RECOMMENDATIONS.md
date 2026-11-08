@@ -1,9 +1,10 @@
 # Beginner recommendation evidence
 
 Beginner checks resource fit before ranking a bounded set of choices. Its
-current ranking uses resource/capacity heuristics and explicit task metadata.
-It has no measured coding, writing or file-task score. The native tool workflow
-checks in this repository establish specific protocol/lifecycle behavior;
+fallback uses resource/capacity heuristics and explicit task metadata. Balanced
+can reorder comparable scored options using an offline snapshot of published
+upstream benchmarks. These references do not measure Stark's quantized exports.
+Native tool workflow checks establish specific protocol/lifecycle behavior;
 they do not establish general coding-agent competence.
 
 ## Current native and recurrent coverage
@@ -46,26 +47,60 @@ reports remaining setup space and rereads this credit before installation.
 Text recipes do not enable image input or add a backend. Existing native prefix
 reuse and its artifact-specific qualification remain unchanged.
 
-## Proposed task evaluations
+## Published task references
 
-These evaluations are a plan. No benchmark runner, score import or benchmark
-ranking is implemented by the native-coverage change.
+`recommendation_benchmarks.json` contains aggregate scores, source URLs,
+immutable source revisions where available, content hashes, settings and
+explicit coverage gaps. There is no runtime leaderboard fetch or automatic
+name matching. `recommendation_benchmarks.py` validates this optional snapshot;
+an invalid snapshot falls back to resource ranking without disabling setup.
 
-| Beginner task | Recommended evidence | What it would establish |
+| Beginner task | Current reference | Limits |
 | --- | --- | --- |
-| Coding | [LiveCodeBench](https://livecodebench.github.io/) on one fixed recent window; later [SWE-bench Verified](https://www.swebench.com/verified) under one pinned agent harness | Code-problem pass rates first; repository issue resolution in the deeper track. They measure different tasks and should remain separate. |
-| Tool use across coding and file tasks | [BFCL](https://gorilla.cs.berkeley.edu/leaderboard.html) plus Stark/OpenWork workflow checks | Tool selection, arguments and multi-turn behavior under named tools and harnesses. A successful tool call is not a completed coding/file task. |
-| Writing, explaining text and everyday assistance | [IFEval](https://github.com/google-research/google-research/tree/master/instruction_following_eval) plus a small human-reviewed task suite | Explicit verifiable constraints; separate human rubrics for correctness, usefulness and writing quality. IFEval alone does not measure prose quality or factuality. |
-| Files | A local OpenWork task suite with known input files and expected outcomes | Grounded reading, correct edits, path/source attribution and completion using the real file/tool workflow. No generic language leaderboard establishes this integration. |
-| Unsure | Coverage of the general suite above | A general starting choice with stated evidence gaps. There is no separate universal score. |
+| Coding | LiveCodeBench v6, the same comparison table in the official Qwen3.8-Flash-Next and Qwen3.8-27B cards | Developer-reported reference scores for two parent models. Window, pass@k, sampling, execution policy and aggregation are undisclosed. Never combine this table with another publisher or leaderboard window. It does not measure repository issue resolution. |
+| Files | [BFCL v4](https://gorilla.cs.berkeley.edu/leaderboard.html), official 2026-04-12 overall CSV | Tool-use proxy under BFCL's harness. FC, Prompt and FC-thinking remain separate cohorts. This does not establish file-task completion or OpenWork integration. |
+| Text, everyday and unsure | [IFEval](https://github.com/google-research/google-research/tree/master/instruction_following_eval), published HF Open LLM Leaderboard BF16 chat results for seven Qwen2.5-Instruct models | Narrow instruction-following signal. The snapshot's generic score column does not identify the strict prompt/instruction aggregation, so its metric stays labeled as published. It does not measure prose quality, factuality or overall usefulness. |
 
-Start with a bounded LiveCodeBench window, instruction-following cases and the
-existing tool workflow suite. SWE-bench requires a much more expensive agent,
-repository and container harness; it belongs in a separate evaluation effort.
+The registry captured on 2026-11-08 contains 33 BFCL FC results, 11 Prompt
+results, one FC-thinking result, seven IFEval results and two developer-reported
+LiveCodeBench results. Inclusion in the score registry does not add engine or
+catalog support. Coverage is incomplete, particularly for newer native models.
+IFBench and Toolathlon are separate benchmarks and are not relabeled as IFEval
+or BFCL.
+
+### Comparison policy
+
+1. Apply the existing RAM, GPU, disk, chat-template and route checks first.
+2. Build the deterministic fallback order from comfortable memory headroom,
+   task tags and the selected capacity/memory preference.
+3. Select one task cohort with at least two distinct covered parent models.
+   Prefer greater eligible-model coverage, then benchmark-publisher evidence,
+   then cohort ID. Selection never uses score magnitude. Repeated quantizations
+   of one parent count once.
+4. For Balanced, sort only the scored slots within each memory-headroom tier by
+   descending score. Leave unknown models in their original slots; equal scores
+   preserve fallback order. Never merge FC/Prompt, versions, publishers or metrics.
+   The explicit Lighter model and More model capacity preferences retain their
+   resource objectives and display scores as reference information.
+5. Select up to three choices and show source, score, settings, whether the
+   result informed this comparison and the upstream-reference caveat in the
+   model details. The explanation names the narrow benchmark signal.
+
+Repository identity admits a model-level public reference even when the
+evaluated weights revision is unknown or differs from the candidate. This is
+reported as `model_repository_reference_only`. Evaluated revisions are retained
+when published; matching a repository never establishes artifact equivalence.
+
+Quantized exports can reference a parent's results only through a reviewed
+repository/revision binding whose pinned source card identifies that parent.
+The four initial bindings cover the Jundot Qwen3.8-27B export and three native
+Qwen3.8-Flash-Next exports. Changed revisions need review. Finetunes, Coder vs
+general Instruct variants and similarly named checkpoints do not inherit scores.
+The report retains both candidate identity and evaluated-parent identity.
 
 ## Score admission policy
 
-A usable score must identify the exact model and revision, quantization and
+A Stark artifact measurement must identify the exact model and revision, quantization and
 artifact hash, Stark worker build, tokenizer/template, context, sampling/MTP
 settings, benchmark split or dated window, evaluator/agent harness revision,
 completed case count and run date. Changing conversion or backend precision
@@ -77,9 +112,19 @@ from different agent setups are not interchangeable; the
 leaderboard comparisons. Keep component scores, coverage and uncertainty
 visible in evidence records rather than averaging unrelated percentages.
 
-Published upstream scores may be retained as attributed reference evidence.
+Published upstream scores rank only under the reference comparison policy above.
 They are not measurements of Stark's quantized exports. Missing results remain
 unknown and must not silently become a zero, a claimed win or an invented
-quality rating. Once comparable task results exist, they can rank choices that
-pass resource admission; resource estimates must not be relabeled as task
-quality.
+quality rating. Resource estimates must not be relabeled as task quality.
+
+## Later evaluation work
+
+MaxxBench is deferred until the user runs it against the models. This change
+adds no MaxxBench scores, runner or fabricated coverage. Admit future results
+with the exact artifact and run conditions above and define a separate cohort.
+
+Local OpenWork file tasks with known outcomes and human-reviewed writing and
+correctness checks remain needed. A fixed-window local LiveCodeBench run would
+replace developer references with artifact-bound coding evidence.
+[SWE-bench Verified](https://www.swebench.com/verified) requires its own pinned
+agent/container harness; scores from unrelated agent setups remain separate.

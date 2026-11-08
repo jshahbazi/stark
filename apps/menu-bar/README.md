@@ -302,7 +302,7 @@ budget. It ranks parameter capacity divided by
 reduces the penalty on larger candidates. **Lighter model** prefers lower weight
 traffic; and
 **More model capacity** prefers higher parameter counts. These are documented
-heuristics, with no measured tokens-per-second or answer-quality score. Unknown
+fallback heuristics, with no measured tokens-per-second or Stark artifact quality score. Unknown
 parameter counts receive no capacity credit. Installed copies break otherwise
 equal ties. The guide offers up to three choices and explains each choice's
 resource fit and evidence. CPU count and GPU name describe the machine; core
@@ -310,9 +310,16 @@ count alone does not establish inference speed.
 
 Native parameter counts are source-card architecture metadata, not packed
 tensor slot counts. MoE total parameter count does not describe active compute,
-memory fit or task quality. Current ranking has no task benchmark score.
+memory fit or task quality. Balanced also compares published task references:
+LiveCodeBench for coding, BFCL for file/tool tasks, and IFEval for instruction
+following in text/everyday/unsure. One published cohort can reorder only its
+scored slots within a memory-headroom tier; unknown models keep their fallback
+positions. Lighter model and More model capacity preserve their explicit
+resource priorities. Source/version/settings and upstream-reference caveats
+appear in model details. Public parent scores do not qualify Stark exports.
 The [recommendation evidence policy](../../docs/MODEL_RECOMMENDATIONS.md) describes
-the proposed task evaluations and the evidence required before scores rank choices.
+the imported coverage, exact comparison policy and future artifact evaluation
+requirements. MaxxBench remains deferred until model-specific runs exist.
 
 Discovery runs separately from generation, with three concurrent family lookups
 and a 65-second overall process limit. Successful nonempty catalog scans are

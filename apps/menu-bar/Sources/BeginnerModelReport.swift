@@ -25,6 +25,7 @@ struct BeginnerModelReport {
         let qualification: String
         let caveats: [String]
         let recommendationReason: String
+        let benchmarkDetails: [String]
 
         init?(_ raw: [String: Any]) {
             guard let id = BeginnerMetadata.string(raw["id"], limit: 128),
@@ -55,6 +56,10 @@ struct BeginnerModelReport {
                 gpuRuntimeBytes = gpu
             } else { gpuRuntimeBytes = runtime }
             installedIDs = ids; self.license = license; self.qualification = qualification; self.caveats = caveats
+            if let value = raw["benchmark_details"] {
+                guard let details = BeginnerMetadata.strings(value, count: 16, length: 2_000) else { return nil }
+                benchmarkDetails = details
+            } else { benchmarkDetails = [] }
             if raw["recommendation_reason"] != nil {
                 guard let reason = BeginnerMetadata.string(raw["recommendation_reason"], limit: 2_000) else { return nil }
                 recommendationReason = reason
