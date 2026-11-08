@@ -13,6 +13,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import run_maxxbench as runner
+from maxxbench_verifier_compat import CONTAINER_IMAGE_FORMAT, TRIAL_IMAGE_ATTRIBUTE
 
 
 def test_api_error_counts_keep_only_allowlisted_codes(monkeypatch):
@@ -466,9 +467,11 @@ def test_trial_captures_image_before_short_run_cleanup_and_includes_it_in_progre
     setup_finished = False
     image_removed = False
     commands = []
+    instances = []
 
     class Trial:
         def __init__(self):
+            instances.append(self)
             self._environment = SimpleNamespace(session_id="sample-task",
                                                 _env_vars=SimpleNamespace(main_image_name="incorrect-assumed-tag"))
 
@@ -489,7 +492,8 @@ def test_trial_captures_image_before_short_run_cleanup_and_includes_it_in_progre
     def inspect(command, **kwargs):
         assert setup_finished and not image_removed
         commands.append((command, kwargs))
-        return SimpleNamespace(returncode=0, stdout=("b" * 64 if command[1] == "ps" else image_id) + "\n")
+        output = "b" * 64 if command[1] == "ps" else json.dumps({"id": image_id, "reference": "sample-task-main:latest"})
+        return SimpleNamespace(returncode=0, stdout=output + "\n")
 
     monkeypatch.setattr(runner.subprocess, "run", inspect)
     receipt = asyncio.run(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
@@ -498,12 +502,55 @@ def test_trial_captures_image_before_short_run_cleanup_and_includes_it_in_progre
         "docker", "ps", "--all", "--no-trunc", "--filter", "label=com.docker.compose.project=sample-task",
         "--filter", "label=com.docker.compose.service=main", "--format", "{{.ID}}",
     ]
-    assert commands[1][0] == ["docker", "container", "inspect", "b" * 64, "--format", "{{.Image}}"]
+    assert commands[1][0] == ["docker", "container", "inspect", "b" * 64, "--format", CONTAINER_IMAGE_FORMAT]
     assert all(0 < options["timeout"] <= 5 and options["stderr"] == runner.subprocess.DEVNULL
                for _command, options in commands)
     assert "incorrect-assumed-tag" not in json.dumps(commands)
+    assert TRIAL_IMAGE_ATTRIBUTE not in instances[0].__dict__
+    assert "_setup_environment" not in instances[0].__dict__
     progress = json.loads((tmp_path / "trials/sample-task/progress.json").read_text())
     assert progress["environment_image_id"] == image_id and progress["environment_image_capture"] == "captured"
+
+
+def test_trial_cancellation_restores_preexisting_image_metadata_and_setup_pointer(tmp_path, monkeypatch):
+    config_module(monkeypatch)
+    original = {"id": "prior", "reference": "prior"}
+    captured = {"id": "sha256:" + "a" * 64, "reference": "sample-task-main:latest"}
+    instance = None
+    monkeypatch.setattr(runner, "capture_environment_image", lambda _trial: captured)
+
+    async def scenario():
+        started = asyncio.Event()
+
+        class Trial:
+            def __init__(self):
+                setattr(self, TRIAL_IMAGE_ATTRIBUTE, original)
+
+            @classmethod
+            async def create(cls, _config):
+                nonlocal instance
+                instance = cls()
+                return instance
+
+            async def _setup_environment(self):
+                return None
+
+            async def run(self):
+                await self._setup_environment()
+                started.set()
+                await asyncio.Event().wait()
+
+        running = asyncio.create_task(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
+        await started.wait()
+        assert getattr(instance, TRIAL_IMAGE_ATTRIBUTE) is captured
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert getattr(instance, TRIAL_IMAGE_ATTRIBUTE) is original
+        assert "_setup_environment" not in instance.__dict__
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("output", ["private-marker Docker diagnostic", "sha256:" + "g" * 64, ""])
@@ -534,7 +581,9 @@ def test_image_inspection_shares_one_five_second_budget_across_metadata_calls(mo
 
     def inspect(command, **kwargs):
         timeouts.append(kwargs["timeout"])
-        return SimpleNamespace(returncode=0, stdout="a" * 64 if command[1] == "ps" else "sha256:" + "b" * 64)
+        return SimpleNamespace(returncode=0, stdout="a" * 64 if command[1] == "ps" else json.dumps({
+            "id": "sha256:" + "b" * 64, "reference": "sample-task-main:latest",
+        }))
 
     monkeypatch.setattr(runner.subprocess, "run", inspect)
     assert runner.inspect_environment_image(trial) == "sha256:" + "b" * 64
@@ -550,10 +599,13 @@ def test_patch_pier_suppresses_exception_strings_and_traceback(tmp_path, monkeyp
             self.__dict__.update(kwargs)
 
     exception_module.ExceptionInfo = ExceptionInfo
-    trial_module.Trial = type("Trial", (), {})
+    async def original_verifier(*_args, **_kwargs):
+        return None
+
+    trial_module.Trial = type("Trial", (), {"_verify_with_separate_environment": original_verifier})
     monkeypatch.setitem(sys.modules, exception_module.__name__, exception_module)
     monkeypatch.setitem(sys.modules, trial_module.__name__, trial_module)
-    (tmp_path / "run.py").write_text("def patch_verifier_image_handoff(trial):\n    trial.patched = True\n")
+    (tmp_path / "run.py").write_text("def patch_verifier_image_handoff(trial):\n    trial.patched = True\n    trial._maxxbench_image_handoff = True\n")
     original_disable = logging.root.manager.disable
     original_traceback = traceback.format_exc
     try:

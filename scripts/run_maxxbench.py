@@ -32,6 +32,12 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
+from maxxbench_verifier_compat import (
+    TRIAL_IMAGE_ATTRIBUTE,
+    capture_environment_image,
+    patch_verifier_image_compat,
+)
+
 UPSTREAM_COMMIT = "1a0df5e9c5d4bccbae131b01830d478088fea947"
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -172,7 +178,7 @@ def preflight(upstream):
 
 
 def patch_pier(upstream):
-    """Retain upstream grading/image handoff; remove only exception logging."""
+    """Install stock grading/handoff, scoped compatibility and private errors."""
     from pier.models.trial.result import ExceptionInfo
     from pier.trial.trial import Trial
 
@@ -180,6 +186,7 @@ def patch_pier(upstream):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.patch_verifier_image_handoff(Trial)
+    patch_verifier_image_compat(Trial)
     logging.disable(logging.CRITICAL)
     # Pier writes this directly as well as through ExceptionInfo. Neither path
     # may serialize model-derived command/output text from an exception.
@@ -425,46 +432,10 @@ def model_bridge(profile, worker):
 
 
 def inspect_environment_image(trial):
-    """Read the main container's actual image ID within one five-second budget.
-
-    Pier's build Compose file omits ``image:``, so ``main_image_name`` need not
-    match the generated tag. Exact project/service labels identify its container.
-    """
-    import re
-
-    environment = getattr(trial, "_environment", None)
-    project = getattr(environment, "session_id", None)
-    # MaxxBench's task IDs already satisfy Pier's Compose-project sanitizer.
-    # Refuse an unexpected value rather than selecting a guessed project.
-    if not isinstance(project, str) or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,255}", project) is None:
-        return None
-    deadline = time.monotonic() + 5
-
-    def inspect(command):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None
-        return subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                              timeout=remaining, check=False)
-
-    try:
-        container = inspect([
-            "docker", "ps", "--all", "--no-trunc",
-            "--filter", "label=com.docker.compose.project=" + project,
-            "--filter", "label=com.docker.compose.service=main", "--format", "{{.ID}}",
-        ])
-        if container is None or container.returncode != 0:
-            return None
-        container_id = container.stdout.strip()
-        if re.fullmatch(r"[0-9a-f]{64}", container_id) is None:
-            return None
-        result = inspect(["docker", "container", "inspect", container_id, "--format", "{{.Image}}"])
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result is None:
-        return None
-    image_id = result.stdout.strip()
-    return image_id if result.returncode == 0 and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) else None
+    """Keep immutable evidence and a private buildable reference for handoff."""
+    image = capture_environment_image(trial)
+    setattr(trial, TRIAL_IMAGE_ATTRIBUTE, image)
+    return image["id"] if image is not None else None
 
 
 async def trial_run(Trial, upstream, task, directory, profile=None):
@@ -487,6 +458,9 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
     trial = None
     running = None
     original_setup = None
+    unset = object()
+    original_setup_override = unset
+    original_image = unset
     image_id = None
     image_checked = False
     state = "creating"
@@ -554,7 +528,9 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
         try:
             progress(True)
             trial = await Trial.create(config)
+            original_image = getattr(trial, TRIAL_IMAGE_ATTRIBUTE, unset)
             original_setup = getattr(trial, "_setup_environment", None)
+            original_setup_override = trial.__dict__.get("_setup_environment", unset)
             if callable(original_setup):
                 async def setup_and_capture():
                     nonlocal image_id, image_checked
@@ -591,7 +567,15 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
                 # before returning; there is no independent monitor task to leak.
                 await asyncio.gather(running, return_exceptions=True)
             if callable(original_setup):
-                trial._setup_environment = original_setup
+                if original_setup_override is unset:
+                    trial.__dict__.pop("_setup_environment", None)
+                else:
+                    trial._setup_environment = original_setup_override
+            if trial is not None:
+                if original_image is unset:
+                    trial.__dict__.pop(TRIAL_IMAGE_ATTRIBUTE, None)
+                else:
+                    setattr(trial, TRIAL_IMAGE_ATTRIBUTE, original_image)
             progress(False)
     rewards = result.verifier_result.rewards if result.verifier_result else None
     return {
@@ -626,7 +610,9 @@ def main(argv=None):
             raise ValueError("invalid_task_selection")
         tasks = args.task
     identity = {"upstream_commit": UPSTREAM_COMMIT, "manifest_sha256": digest(args.upstream / "tasks/manifest.json"),
-                "runner_sha256": digest(__file__), "selected_tasks": tasks, "release_tasks": 89,
+                "runner_sha256": digest(__file__),
+                "verifier_compat_sha256": digest(ROOT / "scripts/maxxbench_verifier_compat.py"),
+                "selected_tasks": tasks, "release_tasks": 89,
                 "created_at": datetime.now(UTC).isoformat(), "logging": "aggregate_only"}
     args.output.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.preflight_only:

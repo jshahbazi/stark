@@ -145,6 +145,35 @@ context/output/step limits. Do not remove failed attempts from the denominator
 or infer an 89-task score from a partial run. Full task success requires the
 upstream `reward == 1`; its partial metrics do not establish full success.
 
+## Separate verifier image compatibility
+
+Nineteen pinned tasks declare `ARG BASE_IMAGE` in their verifier Dockerfile.
+Pier's default source Compose file omits an explicit image name, so its
+calculated `main_image_name` can differ from the image actually built. The
+runner captures the exact main container's immutable image ID and actual
+image reference after environment setup. Before these verifiers run, the
+compatibility helper requires that reference to still resolve to the captured
+ID. Missing or changed identities are infrastructure failures.
+
+The pinned upstream handoff hook remains installed. It receives a disposable
+view that overrides only its image-name getter and verifier-context pointer.
+Methods delegated to the real environment retain their original variables;
+the loaded model, agent path, global environment and real Compose variables
+are unchanged. A private copied context handles the historical one-key
+`BASE_IMAGE` overrides in `abs-stepped-slices`,
+`adaptix-name-mapping-aliases` and `anko-typed-variable-bindings`. Exact release
+file hashes guard those three cases. Unexpected Compose content is rejected.
+Both layers of temporary contexts are removed on return, exception or
+cancellation, and source task files remain byte-identical.
+
+The helper hash is part of oracle and campaign identities. Its model-free
+tests execute the exact upstream hook against synthetic contexts, including
+cancellation and identity drift. These checks do not establish that the
+Docker builds or affected reference solutions pass; run the affected oracle
+paths before including them in a reported score. This adapter preserves the
+per-attempt force-build and image-ID policy described above; independent
+builds do not inherit claims of byte equivalence.
+
 ## Provenance
 
 [MaxxBench](https://github.com/unlap-labs/maxxbench) is Apache-2.0 and adapts
@@ -153,3 +182,11 @@ the individual upstream project licenses. The runner imports the pinned
 upstream image-handoff hook and does not copy or modify task instructions,
 reference patches or test expectations. mini-swe-agent remains an external,
 locked dependency; the adapter loads its packaged templates at runtime.
+
+`scripts/maxxbench_verifier_compat.py` is Stark's local compatibility layer for
+the pinned hook and Pier 0.3.1. The exact upstream `run.py` and its Apache-2.0
+license are retained under `scripts/fixtures/maxxbench/` solely for model-free
+tests; evaluations still import the separately checked out upstream runner.
+The three obsolete Compose overrides are recognized by source-bound SHA-256
+values. No benchmark task, reference patch, test expectation or dependency
+version is changed by this compatibility layer.
