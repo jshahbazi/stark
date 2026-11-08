@@ -90,4 +90,14 @@ Setup. Coding and Balanced were selected and discovery requested. The Mac
 locked during final visual verification; Computer Use reported that manual
 unlock was required. The installed bundle's complete desktop-pipeline replay
 independently confirmed the three scored Qwen choices in the table above with
-`used_for_ranking=true`. The visual result remains pending that unlock.
+`used_for_ranking=true`.
+
+After the user manually unlocked the Mac, visual verification completed in the
+installed Guided Setup window. Coding / Balanced displayed the already-installed
+Qwen3.8-Flash-Next MLX-Serve mixed export first, with no new download required.
+Its explanation states that published coding evidence drives priority among
+models that fit. Expanded model details showed LiveCodeBench v6 (Qwen developer
+table), 91.90/100 for the upstream Flash Next model, explicitly marked
+"Used to prioritize coding recommendations." The details retain the exact
+candidate revision and distinguish the upstream result from artifact evaluation.
+The window was left open with those details expanded; no model was started.
