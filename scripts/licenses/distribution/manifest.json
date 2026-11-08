@@ -230,7 +230,7 @@
           "sha256": "94e5875c338b5ac9471587e2b82535e13d5beed8a6483c0f503d782d71000d8c"
         }
       ],
-      "adaptation": "Larger Gemma 4 vision only: logical 72 F32 QK using CPUBlas no-downcast four-stream accumulation, 512-key online tiles, pinned NEON third-degree fexp_u20 with BF16 unnormalized exponential stores, eight-lane F32 denominator fold, four-stream BF16/F32 PV and final reciprocal. Fixed reused scratch replaces quadratic score storage. BF16-output Linear schedules, E2B/E4B, unified 12B and text attention dispatch are unchanged."
+      "adaptation": "Larger Gemma 4 vision only: logical 72 F32 QK using CPUBlas no-downcast four-stream accumulation, 512-key online tiles, pinned NEON third-degree fexp_u20 with BF16 unnormalized exponential stores, eight-lane F32 denominator fold and witnessed scalar denominator FMA, separately rounded prior PV rescaling, four-stream BF16/F32 PV and final reciprocal. Fixed reused scratch replaces quadratic score storage. BF16-output Linear schedules, E2B/E4B, unified 12B and text attention dispatch are unchanged."
     },
     "pytorch-qwen35-reference-silu": {
       "license": "BSD-3-Clause",

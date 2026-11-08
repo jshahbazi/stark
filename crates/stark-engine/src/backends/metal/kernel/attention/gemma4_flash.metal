@@ -60,7 +60,13 @@ PUBLIC KERNEL(Gemma4VisionFlashExpBF16)(const device float* scores,device bfloat
   }
   const float4 lanes=float4(partial[0]+partial[4],partial[1]+partial[5],partial[2]+partial[6],partial[3]+partial[7]);
   const float total=(lanes[0]+lanes[2])+(lanes[1]+lanes[3]);
-  state[row*3]=maximum; state[row*3+1]=total+factor*previous_sum; state[row*3+2]=factor;
+  state[row*3]=maximum; state[row*3+1]=fma(factor,previous_sum,total); state[row*3+2]=factor;
+}
+
+// Test-only dispatch: preserve the ordinary finish reciprocal in F32 for audit.
+PUBLIC KERNEL(Gemma4VisionFlashReciprocalF32)(const device float* state,device float* inverse,
+    constant uint& query_rows,constant uint& heads,const uint row AXIS(heads*query_rows,32)) {
+  inverse[row]=1.0f/state[row*3+1];
 }
 
 PUBLIC KERNEL(Gemma4VisionFlashPVF32)(const device bfloat* exponents,const device bfloat* values,
