@@ -6,10 +6,19 @@ Independently follows Google's Apache-2.0 checkpoint geometry and MIT MLX-VLM
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
-from ..streaming import ConversionError, TensorOperation, UnsupportedConversion, load_checkpoint, read_json
+from ..streaming import (
+    ConversionError,
+    TensorOperation,
+    UnsupportedConversion,
+    load_checkpoint,
+    read_json,
+    read_regular_bytes,
+)
 from .gemma4 import build_gemma4_plan
 
 REPO = "google/gemma-4-E2B-it"
@@ -53,6 +62,13 @@ for _profile in PROFILES.values():
         if _profile["model_dim"] not in (1536, 2560)
         else "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"
     )
+_CONFIG_HASHES = {
+    1536: "1b28f3d2c3100f6c594754b81107428bd7b822a7f48272ca681dae9d2ec38330",
+    2560: "33b10c02df3c2e8536cf323d29d53262aaa2f4d11dbe19bc729373fbe90295d4",
+    3840: "478c46e8d2c52d5c2d85bf67e3b3e8c90e7c9d91086cee27e3c267907e936bd9",
+    2816: "ed0c1eb3633de771906e9ba004a44cc5635bcc06ee2062077c3d2e88a50707d3",
+    5376: "e967dd38bc5cfd38bd09a995a7bf4a754075df2b46aba68f7fbb5a791e6d8dd1",
+}
 TOKENS = {"image": 258880, "vision_start": 255999, "vision_end": 258882, "video": 258884, "audio": 258881}
 GEOMETRY = {
     "model_type": "gemma4_vision",
@@ -147,7 +163,19 @@ def _unified_operations(tensors):
 
 
 def gemma4_vision_contract(source: Path, repo: str | None = None, revision: str | None = None) -> dict:
-    config = read_json(source / "config.json")
+    if repo is not None:
+        profile = PROFILES.get(repo)
+        if profile is None or revision != profile["revision"]:
+            raise UnsupportedConversion("Native Gemma image source differs from its pinned official profile")
+        # Hash and parse the same selected bytes. A local --repo conversion
+        # must not relabel a changed decoder as the official source.
+        payload = read_regular_bytes(source / "config.json")
+        if hashlib.sha256(payload).hexdigest() != _CONFIG_HASHES[profile["model_dim"]]:
+            raise UnsupportedConversion("Native Gemma image configuration differs from its pinned official source")
+        config = json.loads(payload)
+    else:
+        # Generic text planning and header-only component controls are separate.
+        config = read_json(source / "config.json")
     if any(config.get(key) is not None for key in ("quantization", "quantization_config")):
         raise UnsupportedConversion("Native Gemma image conversion requires merged BF16 source weights")
     vision = config.get("vision_config")
