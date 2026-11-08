@@ -38,8 +38,11 @@ from maxxbench_resources import (
 )
 from maxxbench_verifier_compat import (
     TRIAL_IMAGE_ATTRIBUTE,
+    SourcePlatformError,
     capture_environment_image,
+    patch_source_image_platform,
     patch_verifier_image_compat,
+    source_platform_metadata,
 )
 
 UPSTREAM_COMMIT = "1a0df5e9c5d4bccbae131b01830d478088fea947"
@@ -192,6 +195,7 @@ def patch_pier(upstream):
     spec.loader.exec_module(module)
     module.patch_verifier_image_handoff(Trial)
     patch_verifier_image_compat(Trial)
+    patch_source_image_platform(Trial)
     logging.disable(logging.CRITICAL)
     # Pier writes this directly as well as through ExceptionInfo. Neither path
     # may serialize model-derived command/output text from an exception.
@@ -439,6 +443,9 @@ def inspect_environment_image(trial):
     """Keep immutable evidence and a private buildable reference for handoff."""
     image = capture_environment_image(trial)
     setattr(trial, TRIAL_IMAGE_ATTRIBUTE, image)
+    source = source_platform_metadata(trial)
+    if source["selected"] is not None and source["observed"] is None:
+        raise SourcePlatformError("source_platform_unavailable")
     return image["id"] if image is not None else None
 
 
@@ -540,6 +547,7 @@ async def trial_run(Trial, upstream, task, directory, profile=None, *, ownership
             "task": task, "state": state, "phase": phase, "active": active,
             "elapsed_seconds": round(time.monotonic() - started, 3),
             "environment_image_id": image_id,
+            "source_platform": source_platform_metadata(trial),
             "environment_image_capture": "captured" if image_id else ("unavailable" if image_checked else "pending"),
             "updated_at": datetime.now(UTC).isoformat(), **delta,
         })
@@ -626,6 +634,7 @@ async def trial_run(Trial, upstream, task, directory, profile=None, *, ownership
         "agent_completed": False if timed_out or request_timed_out else None,
         "agent_metrics": agent_metrics,
         "environment_image_id": image_id,
+        "source_platform": source_platform_metadata(trial),
         "started_at": result.started_at.isoformat() if result.started_at else None,
         "finished_at": result.finished_at.isoformat() if result.finished_at else None,
     }
@@ -767,6 +776,8 @@ if __name__ == "__main__":
             "environment_identity_unavailable", "environment_identity_changed",
             "resource_snapshot_failed", "resource_cleanup_failed", "resource_identity_changed", "resource_ownership_unavailable",
             "campaign_identity_mismatch",
+            "source_platform_recipe_changed", "source_platform_task_changed", "source_platform_conflict",
+            "source_platform_policy_invalid", "source_platform_unavailable", "source_platform_changed",
             "artifact_changed", "artifact_empty",
         } else "runner_failed"
         emit({"event": "stopped", "failure": category})

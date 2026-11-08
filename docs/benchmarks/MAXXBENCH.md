@@ -197,6 +197,27 @@ force-build/no-cache policy and independent per-attempt image IDs remain in
 effect. Validate a bounded oracle's cleanup receipt and actual disk recovery
 before a long campaign; model-free checks do not measure reclaimed storage.
 
+## Cliffy source platform
+
+The pinned `cliffy-config-file-parsing` source recipe downloads and executes
+an x86-64 Deno binary. Its exact task ID and Dockerfile SHA-256 select
+`linux/amd64` through a copied Trial environment config. This setting reaches
+only that attempt's source and separate verifier environments. Original caller
+config, task files and global Docker settings remain unchanged. A changed
+recipe/task ID or a conflicting explicit platform fails admission.
+
+Each aggregate result and progress record includes `source_platform` with
+`selected`, `observed` and `dockerfile_sha256`. Cliffy's actual image platform
+must match the selected platform before agent execution. Image inspection
+shares the existing five-second capture budget and retains no config or labels.
+Other tasks keep their original config and null source-policy fields.
+
+The [controlled Cliffy oracle](../archive/runs/2026-11-08-cliffy-source-platform.md)
+passed all 38 feature and 451 regression checks. Its original default-platform
+failure remains unscored. Runner/helper changes require fresh oracle receipts;
+earlier source-bound passes remain historical controls rather than entries in
+the new cohort.
+
 ## Separate verifier image compatibility
 
 Nineteen pinned tasks declare `ARG BASE_IMAGE` in their verifier Dockerfile.

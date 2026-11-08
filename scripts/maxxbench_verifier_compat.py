@@ -1,4 +1,4 @@
-"""Scoped compatibility for the pinned MaxxBench/Pier verifier image handoff.
+"""Scoped source and verifier compatibility for pinned MaxxBench/Pier images.
 
 The upstream hook remains installed and receives a private delegation view.
 Actual environment methods stay bound to their original environment and vars.
@@ -18,9 +18,14 @@ import shutil
 import subprocess
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 TRIAL_IMAGE_ATTRIBUTE = "_stark_maxxbench_environment_image"
+TRIAL_SOURCE_PLATFORM_ATTRIBUTE = "_stark_maxxbench_source_platform"
+TRIAL_OBSERVED_PLATFORM_ATTRIBUTE = "_stark_maxxbench_observed_source_platform"
+_SOURCE_TASK = "cliffy-config-file-parsing"
+_SOURCE_DOCKERFILE_SHA256 = "2575713dcc93a27bc1b3b052aa02129f13d2dba753f7ca7fe97a796397d9bef1"
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _IMAGE_REFERENCE = re.compile(r"[a-z0-9][a-z0-9._:/-]{0,255}(?:@sha256:[0-9a-f]{64})?\Z")
 _BASE_IMAGE = re.compile(r"(?m)^\s*ARG\s+BASE_IMAGE\s*$")
@@ -36,6 +41,24 @@ _STALE_COMPOSE_SHA256 = {
 
 class VerifierHandoffError(ValueError):
     """A fixed infrastructure category with no native or Docker diagnostics."""
+
+
+class SourcePlatformError(ValueError):
+    """A fixed source-environment platform policy failure."""
+
+
+def source_platform_metadata(trial):
+    selection = getattr(trial, TRIAL_SOURCE_PLATFORM_ATTRIBUTE, None)
+    observed = getattr(trial, TRIAL_OBSERVED_PLATFORM_ATTRIBUTE, None)
+    expected = {"platform": "linux/amd64", "dockerfile_sha256": _SOURCE_DOCKERFILE_SHA256}
+    if selection is None:
+        return {"selected": None, "observed": None, "dockerfile_sha256": None}
+    if selection != expected:
+        raise SourcePlatformError("source_platform_policy_invalid")
+    if observed is not None and observed != "linux/amd64":
+        raise SourcePlatformError("source_platform_changed")
+    return {"selected": selection["platform"], "observed": observed,
+            "dockerfile_sha256": selection["dockerfile_sha256"]}
 
 
 def valid_image(value):
@@ -80,17 +103,33 @@ def capture_environment_image(trial):
         image = json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
         return None
-    return image if valid_image(image) else None
+    if not valid_image(image):
+        return None
+    source = source_platform_metadata(trial)
+    if source["selected"] is not None:
+        # Keep the complete container and image inspection within the original
+        # five-second budget; no extra blocking phase is added to progress.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SourcePlatformError("source_platform_unavailable")
+        try:
+            platform = verify_image_reference(image, timeout=remaining)
+        except VerifierHandoffError:
+            raise SourcePlatformError("source_platform_unavailable") from None
+        if platform != source["selected"]:
+            raise SourcePlatformError("source_platform_changed")
+        setattr(trial, TRIAL_OBSERVED_PLATFORM_ATTRIBUTE, platform)
+    return image
 
 
-def verify_image_reference(image):
+def verify_image_reference(image, *, timeout=5):
     """Verify the captured ID and return its allowlisted Linux build platform."""
     if not valid_image(image):
         raise VerifierHandoffError("verifier_base_image_unavailable")
     try:
         result = subprocess.run(
             ["docker", "image", "inspect", image["reference"]],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=timeout, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise VerifierHandoffError("verifier_base_image_unavailable") from None
@@ -121,16 +160,16 @@ def verify_image_reference(image):
     return f"{system}/{architecture}" + (f"/{variant}" if variant else "")
 
 
-def _verifier_config(config, env_config, platform):
-    """Copy only the verifier config; refuse conflicting explicit selectors."""
+def _platform_config(config, task_env, platform, error_class, category):
+    """Copy a config; refuse conflicting explicit selectors at Pier boundaries."""
     environment = config.environment
     persistent = environment.kwargs.get("persistent_env")
     if persistent is not None and not isinstance(persistent, dict):
-        raise VerifierHandoffError("verifier_base_image_platform_conflict")
-    settings = (os.environ, environment.env, getattr(env_config, "env", {}) or {}, persistent or {})
+        raise error_class(category)
+    settings = (os.environ, environment.env, task_env, persistent or {})
     for setting in settings:
         if "DOCKER_DEFAULT_PLATFORM" in setting and setting["DOCKER_DEFAULT_PLATFORM"] != platform:
-            raise VerifierHandoffError("verifier_base_image_platform_conflict")
+            raise error_class(category)
     copied = copy.deepcopy(config)
     copied.environment.env["DOCKER_DEFAULT_PLATFORM"] = platform
     # Pier kwargs take precedence over config.env at its factory boundary.
@@ -139,6 +178,51 @@ def _verifier_config(config, env_config, platform):
             **(copied.environment.kwargs["persistent_env"] or {}), "DOCKER_DEFAULT_PLATFORM": platform,
         }
     return copied
+
+
+def _verifier_config(config, env_config, platform):
+    return _platform_config(config, getattr(env_config, "env", {}) or {}, platform,
+                            VerifierHandoffError, "verifier_base_image_platform_conflict")
+
+
+def patch_source_image_platform(trial_class):
+    """Select AMD64 only for the pinned Cliffy recipe's x86-only Deno binary."""
+    if getattr(trial_class, "_stark_maxxbench_source_platform_patched", False):
+        return
+    original = trial_class.create.__func__
+
+    @classmethod
+    @functools.wraps(original)
+    async def create(cls, config):
+        path = config.task.path
+        selection = None
+        if path is not None and path.name == _SOURCE_TASK:
+            try:
+                recipe = path / "environment/Dockerfile"
+                checksum = hashlib.sha256(recipe.read_bytes()).hexdigest()
+                task = tomllib.loads((path / "task.toml").read_text())
+            except (OSError, ValueError):
+                raise SourcePlatformError("source_platform_recipe_changed") from None
+            if checksum != _SOURCE_DOCKERFILE_SHA256:
+                raise SourcePlatformError("source_platform_recipe_changed")
+            metadata = task.get("metadata")
+            environment = task.get("environment", {})
+            if not isinstance(metadata, dict) or metadata.get("task_id") != _SOURCE_TASK:
+                raise SourcePlatformError("source_platform_task_changed")
+            if not isinstance(environment, dict):
+                raise SourcePlatformError("source_platform_policy_invalid")
+            task_env = environment.get("env", {})
+            if not isinstance(task_env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in task_env.items()):
+                raise SourcePlatformError("source_platform_policy_invalid")
+            config = _platform_config(config, task_env, "linux/amd64", SourcePlatformError, "source_platform_conflict")
+            selection = {"platform": "linux/amd64", "dockerfile_sha256": checksum}
+        trial = await original(cls, config)
+        if selection is not None:
+            setattr(trial, TRIAL_SOURCE_PLATFORM_ATTRIBUTE, selection)
+        return trial
+
+    trial_class.create = create
+    trial_class._stark_maxxbench_source_platform_patched = True
 
 
 class _VariablesView:

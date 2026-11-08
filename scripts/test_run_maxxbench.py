@@ -11,6 +11,7 @@ import traceback
 from datetime import UTC, datetime
 from types import ModuleType, SimpleNamespace
 
+import maxxbench_verifier_compat as image_compat
 import pytest
 import run_maxxbench as runner
 from maxxbench_resources import TRIAL_RESOURCES_ATTRIBUTE, ImageOwnership, ResourceError
@@ -793,7 +794,11 @@ def test_patch_pier_suppresses_exception_strings_and_traceback(tmp_path, monkeyp
     async def original_verifier(*_args, **_kwargs):
         return None
 
-    trial_module.Trial = type("Trial", (), {"_verify_with_separate_environment": original_verifier})
+    async def original_create(cls, config):
+        return SimpleNamespace(config=config)
+
+    trial_module.Trial = type("Trial", (), {"_verify_with_separate_environment": original_verifier,
+                                           "create": classmethod(original_create)})
     monkeypatch.setitem(sys.modules, exception_module.__name__, exception_module)
     monkeypatch.setitem(sys.modules, trial_module.__name__, trial_module)
     (tmp_path / "run.py").write_text("def patch_verifier_image_handoff(trial):\n    trial.patched = True\n    trial._maxxbench_image_handoff = True\n")
@@ -803,8 +808,83 @@ def test_patch_pier_suppresses_exception_strings_and_traceback(tmp_path, monkeyp
         patched = runner.patch_pier(tmp_path)
         exception = ExceptionInfo.from_exception(RuntimeError("private-marker"))
         assert patched.patched is True
+        assert patched._stark_maxxbench_source_platform_patched is True
         assert "private-marker" not in json.dumps(exception.__dict__, default=str)
         assert traceback.format_exc() == "Exception details suppressed by Stark policy."
     finally:
         logging.disable(original_disable)
         traceback.format_exc = original_traceback
+
+
+def test_selected_and_observed_source_platform_are_bound_to_result_and_progress(tmp_path, monkeypatch):
+    config_module(monkeypatch)
+    image = {"id": "sha256:" + "a" * 64, "reference": "sample-task-main:latest"}
+    selection = {"platform": "linux/amd64", "dockerfile_sha256": image_compat._SOURCE_DOCKERFILE_SHA256}
+
+    class Trial:
+        def __init__(self):
+            self._environment = SimpleNamespace(session_id="sample-task")
+            setattr(self, image_compat.TRIAL_SOURCE_PLATFORM_ATTRIBUTE, selection)
+
+        @classmethod
+        async def create(cls, _config):
+            return cls()
+
+        async def _setup_environment(self):
+            return None
+
+        async def run(self):
+            await self._setup_environment()
+            snapshot = json.loads((tmp_path / "trials/sample-task/progress.json").read_text())
+            assert snapshot["source_platform"]["observed"] == "linux/amd64"
+            return trial_result()
+
+    def capture(trial):
+        setattr(trial, image_compat.TRIAL_OBSERVED_PLATFORM_ATTRIBUTE, "linux/amd64")
+        return image
+
+    monkeypatch.setattr(runner, "capture_environment_image", capture)
+    result = asyncio.run(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
+    expected = {"selected": "linux/amd64", "observed": "linux/amd64", "dockerfile_sha256": selection["dockerfile_sha256"]}
+    assert result["source_platform"] == expected
+    progress = json.loads((tmp_path / "trials/sample-task/progress.json").read_text())
+    assert progress["source_platform"] == expected
+
+
+def test_selected_source_requires_observed_platform_before_image_admission(monkeypatch):
+    trial = SimpleNamespace()
+    setattr(trial, image_compat.TRIAL_SOURCE_PLATFORM_ATTRIBUTE, {
+        "platform": "linux/amd64", "dockerfile_sha256": image_compat._SOURCE_DOCKERFILE_SHA256,
+    })
+    monkeypatch.setattr(runner, "capture_environment_image", lambda _trial: None)
+    with pytest.raises(image_compat.SourcePlatformError, match="^source_platform_unavailable$"):
+        runner.inspect_environment_image(trial)
+
+
+def test_unselected_source_hook_keeps_real_trial_instance_and_progress_operational(tmp_path, monkeypatch):
+    config_module(monkeypatch)
+
+    class Trial:
+        def __init__(self, config):
+            self.config = config
+            self._environment = SimpleNamespace(session_id="sample-task")
+
+        @classmethod
+        async def create(cls, config):
+            return cls(config)
+
+        async def _setup_environment(self):
+            return None
+
+        async def run(self):
+            await self._setup_environment()
+            snapshot = json.loads((tmp_path / "trials/sample-task/progress.json").read_text())
+            assert snapshot["source_platform"] == {"selected": None, "observed": None, "dockerfile_sha256": None}
+            return trial_result()
+
+    image_compat.patch_source_image_platform(Trial)
+    monkeypatch.setattr(runner, "capture_environment_image", lambda _trial: {
+        "id": "sha256:" + "a" * 64, "reference": "sample-task-main:latest",
+    })
+    result = asyncio.run(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
+    assert result["source_platform"] == {"selected": None, "observed": None, "dockerfile_sha256": None}
