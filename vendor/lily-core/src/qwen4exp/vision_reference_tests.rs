@@ -176,6 +176,13 @@ fn rotary_source_metrics(
         DType::BF16,
     )
     .unwrap();
+    let exact_angle_applied = Tensor::from_bytes(
+        context,
+        bytemuck::cast_slice(input),
+        &[n, 3456],
+        DType::BF16,
+    )
+    .unwrap();
     let pass = context.begin().unwrap();
     crate::kernels::vision::rotary_apply_reference(
         context,
@@ -195,7 +202,17 @@ fn rotary_source_metrics(
         n,
     )
     .unwrap();
+    crate::kernels::vision::rotary_apply_reference(
+        context,
+        &pass,
+        &exact_angle_applied,
+        &stages.view(3 * plane, &[n, 36]).unwrap(),
+        &stages.view(4 * plane, &[n, 36]).unwrap(),
+        n,
+    )
+    .unwrap();
     pass.commit_wait().unwrap();
+    let exact_angle_applied = exact_angle_applied.to_f32().unwrap();
     let source_applied = source_applied.to_f32().unwrap();
     let native_applied = native_applied.to_f32().unwrap();
     let source_mismatches = source_applied
@@ -208,9 +225,14 @@ fn rotary_source_metrics(
         .zip(safe)
         .filter(|(a, b)| a.to_bits() != b.to_bits())
         .count();
+    let exact_angle_mismatches = exact_angle_applied
+        .iter()
+        .zip(expected)
+        .filter(|(a, b)| bf16::from_f32(**a).to_bits() != b.to_bits())
+        .count();
     println!(
         "{}",
-        json!({"private_retained_rotary_stage_metrics":{"patches":n,"stages":stage_metrics,"source_application_mismatch_count":source_mismatches,"native_application_observer_mismatch_count":observer_mismatches}})
+        json!({"private_retained_rotary_stage_metrics":{"patches":n,"stages":stage_metrics,"source_application_mismatch_count":source_mismatches,"native_application_observer_mismatch_count":observer_mismatches,"source_angle_native_trig_mismatch_count":exact_angle_mismatches}})
     );
     assert_eq!(
         source_mismatches, 0,
