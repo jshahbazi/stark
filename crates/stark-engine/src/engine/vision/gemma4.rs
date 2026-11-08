@@ -33,6 +33,8 @@ use crate::{
 mod flash;
 #[cfg(test)]
 mod flash_reference_tests;
+#[cfg(test)]
+mod gelu_reference_tests;
 #[cfg(all(test, backend = "cpu"))]
 mod nople_diagnostics;
 #[cfg(test)]
