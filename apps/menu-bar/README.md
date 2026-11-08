@@ -263,8 +263,13 @@ handles recognized architecture/configuration and weight layouts; chat requires
 a template Stark can load and render; tool calling additionally requires a
 reviewed template wire format with a matching parser. Tool capability comes from
 the loaded artifact's template/parser check. Converting a model does not add a
-parser or enable tools. Candidates with unknown memory layouts,
-including recurrent/hybrid and native expert routes without a guide planner,
+parser or enable tools. The official Qwen2.5-Coder base checkpoints are excluded
+from Guided Setup: their tokenizers include chat templates, but their
+[source cards](https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B) identify pretrained completion models and advise against conversation
+without post-training. Their Instruct variants remain eligible. This exclusion
+does not establish instruction tuning or task competence for every other source.
+Candidates with unknown memory layouts, including recurrent/hybrid and native
+expert routes without a guide planner,
 remain available through Advanced. Catalog compatibility describes metadata
 support; it does not inherit another model's native qualification.
 
@@ -277,8 +282,12 @@ memory after releasing the previous worker. A running model's memory is never
 assumed to be reclaimable during recommendations.
 
 Ranking first prefers comfortable memory headroom, then explicit source task
-tags when available. **Balanced** uses parameter capacity divided by squared
-estimated runtime memory; **Lighter model** prefers lower weight traffic; and
+tags when available. **Balanced** scales its memory penalty to this Mac: its
+target is half the smaller of physical memory minus 2 GiB and 85% of Metal's
+budget. It ranks parameter capacity divided by
+`1 + (estimated runtime memory / target)^2`, so unused memory on a larger Mac
+reduces the penalty on larger candidates. **Lighter model** prefers lower weight
+traffic; and
 **More model capacity** prefers higher parameter counts. These are documented
 heuristics, with no measured tokens-per-second or answer-quality score. Unknown
 parameter counts receive no capacity credit. Installed copies break otherwise

@@ -294,14 +294,56 @@ def test_preferences_and_explicit_task_metadata_change_order():
     assert "intended use" in code["items"][0]["recommendation_reason"]
 
 
-def test_balanced_uses_a_memory_cost_knee_instead_of_largest_checkpoint():
+def test_balanced_penalizes_memory_cost_without_always_choosing_largest_checkpoint():
     small = guided.recipe_from_catalog(catalog_candidate(1))
     medium = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
-    large = guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=32_000_000_000))
+    large = guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=12_000_000_000))
     candidates = [small, medium, large]
     for preference, expected in (("balanced", medium), ("speed", small), ("answers", large)):
         report = guided.recommendation_report(gpu_resources(), {}, preference=preference, candidates=candidates)
         assert report["items"][0]["id"] == expected.id
+
+
+def recorded_coder_items():
+    fixture = Path(__file__).parent / "fixtures" / "guided_qwen25_coder_metadata.json"
+    return json.loads(fixture.read_text())["items"]
+
+
+def test_base_coder_is_not_an_assistant_even_with_a_supported_chat_tool_template():
+    base = next(item for item in recorded_coder_items() if item["name"] == "Qwen2.5-Coder-1.5B")
+    assert base["planning"]["chat_template_available"] and base["planning"]["supports_tools"]
+    for size in ("0.5", "1.5", "3", "7", "14", "32"):
+        candidate = deepcopy(base)
+        candidate["repo"] = f"Qwen/Qwen2.5-Coder-{size}B"
+        assert guided.recipe_from_catalog(candidate) is None
+    instructed = next(item for item in recorded_coder_items() if item["name"] == "Qwen2.5-Coder-1.5B-Instruct")
+    assert guided.recipe_from_catalog(instructed) is not None
+
+
+def test_balanced_coding_scales_from_16gb_to_128gb_with_recorded_source_metadata():
+    candidates = [recipe for item in recorded_coder_items() if (recipe := guided.recipe_from_catalog(item))]
+    large_host = gpu_resources()
+    large_host.update(
+        physical_memory_bytes=128 * guided.GIB,
+        gpu_memory_budget_bytes=107_520_000_000,
+        free_disk_bytes=63_720_000_000,
+        download_free_disk_bytes=63_720_000_000,
+    )
+    small_host = {**large_host, "physical_memory_bytes": 16 * guided.GIB, "gpu_memory_budget_bytes": 12 * guided.GIB}
+    for host, expected in ((small_host, "Qwen2.5-Coder-1.5B-Instruct"), (large_host, "Qwen2.5-Coder-14B-Instruct")):
+        report = guided.recommendation_report(host, {}, task="code", candidates=candidates)
+        assert report["items"][0]["name"] == expected
+        assert "this Mac's memory budget" in report["items"][0]["recommendation_reason"]
+        assert all(item["setup_disk_bytes_estimate"] <= host["free_disk_bytes"] for item in report["items"])
+        reversed_report = guided.recommendation_report(host, {}, task="code", candidates=reversed(candidates))
+        assert report == reversed_report
+    # More memory never waives the actual source + converted-copy setup space.
+    assert all(item["name"] != "Qwen2.5-Coder-32B-Instruct" for item in report["items"])
+    large_host.update(free_disk_bytes=256 * guided.GIB, download_free_disk_bytes=256 * guided.GIB)
+    capacity = guided.recommendation_report(large_host, {}, task="code", preference="answers", candidates=candidates)
+    assert capacity["items"][0]["name"] == "Qwen2.5-Coder-32B-Instruct"
+    lighter = guided.recommendation_report(large_host, {}, task="code", preference="speed", candidates=candidates)
+    assert lighter["items"][0]["name"] == "Qwen2.5-Coder-0.5B-Instruct"
 
 
 def test_large_query_head_count_includes_attention_prefill_workspace():

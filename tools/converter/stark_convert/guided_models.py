@@ -40,6 +40,11 @@ DENSE_ARCHITECTURES = frozenset(
 )
 # FunctionGemma requires a task-specific workflow and native loading qualification.
 GUIDED_TOOL_PARSERS = TOOL_PARSERS - {"functiongemma-v1"}
+# These official checkpoints are pretrained completion models even though their
+# tokenizers contain a chat/tool template. Qwen recommends post-training before
+# conversational use: https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B
+# Keep them in Advanced; a template alone does not establish assistant suitability.
+GUIDED_NON_CHAT_SOURCES = frozenset(f"Qwen/Qwen2.5-Coder-{size}B" for size in ("0.5", "1.5", "3", "7", "14", "32"))
 
 
 @dataclass(frozen=True)
@@ -210,6 +215,7 @@ def _recipe_from_catalog(item):
         or plan.get("chat_template_available") is not True
         or plan.get("supports_tools") is not True
         or plan.get("tool_parser") not in GUIDED_TOOL_PARSERS
+        or item.get("repo") in GUIDED_NON_CHAT_SOURCES
     ):
         return None
     bounds = {
@@ -500,12 +506,15 @@ def installation_allowed(recipe, host, *, installed=False):
     )
 
 
-def _fit_tier(recipe, host):
-    """A comfortable fit leaves 10% beyond the admission planning reserves."""
+def _planning_budget(host):
     physical = host["physical_memory_bytes"] - 2 * GIB
     budget = host.get("gpu_memory_budget_bytes")
-    planned = min(physical, budget * 85 // 100) if type(budget) is int and budget > 0 else physical
-    return int(recipe.runtime_memory * 110 <= planned * 100)
+    return min(physical, budget * 85 // 100) if type(budget) is int and budget > 0 else physical
+
+
+def _fit_tier(recipe, host):
+    """A comfortable fit leaves 10% beyond the admission planning reserves."""
+    return int(recipe.runtime_memory * 110 <= _planning_budget(host) * 100)
 
 
 def _ranking_key(recipe, host, installed, task, preference):
@@ -515,9 +524,14 @@ def _ranking_key(recipe, host, installed, task, preference):
     elif preference == "answers":
         objective = (-(recipe.logical_parameters or 0), recipe.runtime_memory)
     else:
-        # A memory-cost knee keeps balanced from always choosing the largest
-        # fitting checkpoint. This policy is a heuristic, not a quality score.
-        capacity_per_cost = Fraction((recipe.logical_parameters or 0) * GIB**2, recipe.runtime_memory**2)
+        # Below half the host's planning budget, prioritize capacity with a
+        # modest memory penalty. Above it, the penalty grows quadratically.
+        # A fixed parameters/memory^2 score picked the same tiny checkpoint on
+        # small and large Macs. This remains a heuristic, not a quality score.
+        target = _planning_budget(host) // 2
+        capacity_per_cost = Fraction(
+            (recipe.logical_parameters or 0) * target**2, target**2 + recipe.runtime_memory**2
+        )
         objective = (-capacity_per_cost, recipe.runtime_memory)
     return (
         *common,
@@ -547,7 +561,7 @@ def _recommendation_reason(recipe, host, task, preference):
         reasons.append(
             "Favors a larger model among options that leave memory headroom; answer quality has not been measured."
             if preference == "answers"
-            else "Balances model size with estimated memory use; answer quality has not been measured."
+            else "Balances model size with this Mac's memory budget; answer quality has not been measured."
         )
     else:
         reasons.append("Parameter capacity is unknown, so the choice uses resource fit and deterministic tie-breaks.")
