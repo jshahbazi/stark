@@ -30,6 +30,7 @@ use crate::{
     parameters::ParameterLoader,
 };
 
+mod decoder_contract;
 mod flash;
 #[cfg(test)]
 mod flash_reference_tests;
@@ -197,6 +198,7 @@ fn validate_contract(raw: &serde_json::Value) -> Result<ImageProfile, InvalidInp
                 && raw["decoder_config"]["transformer_config"]["model_dim"] == profile.model_dim
         })
         .ok_or(InvalidInput("unsupported Gemma image source and decoder profile"))?;
+    decoder_contract::validate_decoder(&raw["decoder_config"], profile)?;
     if raw["type"] != "Gemma4VisionLanguageModelConfig"
         || contract["schema_version"] != 4
         || contract["transport"] != "mediaref-v1"
@@ -829,8 +831,30 @@ mod contract_tests {
         run_nople_canonical_fixture::<crate::backends::metal::Metal>("metal");
     }
 
+    fn decoder_control(profile: ImageProfile) -> serde_json::Value {
+        let controls: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tools/converter/tests/fixtures/gemma4_image_profiles/decoder_controls.json"
+        ))
+        .unwrap();
+        let size = profile.repo.strip_prefix("google/gemma-4-").unwrap().strip_suffix("-it").unwrap();
+        inflate_decoder_control(&controls[size])
+    }
+
+    fn inflate_decoder_control(control: &serde_json::Value) -> serde_json::Value {
+        let mut decoder = control["decoder"].clone();
+        decoder["transformer_config"]["layer_configs"] = serde_json::Value::Array(
+            control["layer_order"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|index| control["layer_templates"][index.as_u64().unwrap() as usize].clone())
+                .collect(),
+        );
+        decoder
+    }
+
     fn config() -> serde_json::Value {
-        serde_json::json!({
+        let mut raw = serde_json::json!({
             "type":"Gemma4VisionLanguageModelConfig",
             "decoder_config":{"gemma4_image_embeddings":true,"vocab_size":VOCAB,
                 "transformer_config":{"model_dim":MODEL}},
@@ -844,7 +868,97 @@ mod contract_tests {
                     "position_embedding_size":10240,"default_output_length":280,"rms_norm_eps":1e-6,
                     "attention_bias":false,"standardize":false,"use_clipped_linears":true,
                     "hidden_activation":"gelu_pytorch_tanh","rope_parameters":{"rope_theta":100.0,"rope_type":"default"}}}
-        })
+        });
+        raw["decoder_config"] = decoder_control(PROFILES[0]);
+        raw
+    }
+
+    #[stark_test]
+    fn all_official_gemma_image_decoders_match_independent_header_only_controls() {
+        for profile in PROFILES {
+            let control = decoder_control(profile);
+            assert!(decoder_contract::validate_decoder(&control, profile).is_ok());
+            // Typed comparison accepts serialization of explicit defaults too.
+            let typed: crate::config::decoder::DecoderConfig = serde_json::from_value(control).unwrap();
+            assert!(decoder_contract::validate_decoder(&serde_json::to_value(typed).unwrap(), profile).is_ok());
+        }
+    }
+
+    #[stark_test]
+    fn retained_e2b_and_e4b_decoder_artifacts_keep_their_original_arithmetic() {
+        for (index, payload) in [
+            (
+                0,
+                include_str!(
+                    "../../../../../tools/converter/tests/fixtures/gemma4_image_profiles/e2b.retained-decoder.json"
+                ),
+            ),
+            (
+                1,
+                include_str!(
+                    "../../../../../tools/converter/tests/fixtures/gemma4_image_profiles/e4b.retained-decoder.json"
+                ),
+            ),
+        ] {
+            let control: serde_json::Value = serde_json::from_str(payload).unwrap();
+            let decoder = inflate_decoder_control(&control);
+            assert!(decoder_contract::validate_decoder(&decoder, PROFILES[index]).is_ok());
+        }
+    }
+
+    #[stark_test]
+    fn gemma_image_decoder_rejects_topology_rotary_and_precision_mutations() {
+        for profile in PROFILES {
+            let original = decoder_control(profile);
+            for (path, replacement) in [
+                ("/transformer_config/hidden_dim", serde_json::json!(128)),
+                ("/embedding_config/input_scale", serde_json::json!(1.0)),
+                ("/embedding_config/materialize_soft_cap", serde_json::json!(false)),
+                ("/transformer_config/layer_configs/0/mixer_config/num_heads", serde_json::json!(4)),
+                ("/transformer_config/layer_configs/0/mixer_config/num_groups", serde_json::json!(1)),
+                ("/transformer_config/layer_configs/0/mixer_config/head_dim", serde_json::json!(128)),
+                ("/transformer_config/layer_configs/0/mixer_config/sliding_window_size", serde_json::json!(16)),
+                ("/transformer_config/layer_configs/0/rope_config/base", serde_json::json!(100.0)),
+                ("/transformer_config/layer_configs/0/rope_config/max_sequence_length", serde_json::json!(1024)),
+                ("/transformer_config/layer_configs/0/pre_mlp_norm_config/epsilon", serde_json::json!(1e-5)),
+            ] {
+                let mut changed = original.clone();
+                *changed.pointer_mut(path).expect("control field missing") = replacement;
+                // E2B's first local KV count is already one.
+                if changed != original {
+                    assert!(decoder_contract::validate_decoder(&changed, profile).is_err());
+                }
+            }
+            for flag in ["reference_bf16", "materialize_prefill_scores", "qk_norm_full_width"] {
+                let mut changed = original.clone();
+                changed["transformer_config"]["layer_configs"][0]["mixer_config"][flag] = true.into();
+                assert!(decoder_contract::validate_decoder(&changed, profile).is_err());
+            }
+            let mut changed = original.clone();
+            changed["transformer_config"]["layer_configs"].as_array_mut().unwrap().truncate(2);
+            assert!(decoder_contract::validate_decoder(&changed, profile).is_err());
+            let mut changed = original.clone();
+            let layers = changed["transformer_config"]["layer_configs"].as_array_mut().unwrap();
+            let global =
+                layers.iter_mut().find(|layer| layer["rope_config"]["type"] == "ProportionalRoPEConfig").unwrap();
+            global["rope_config"]["base"] = 10000.0.into();
+            assert!(decoder_contract::validate_decoder(&changed, profile).is_err());
+            let mut changed = original.clone();
+            let layers = changed["transformer_config"]["layer_configs"].as_array_mut().unwrap();
+            let global =
+                layers.iter_mut().find(|layer| layer["rope_config"]["type"] == "ProportionalRoPEConfig").unwrap();
+            global["mixer_config"]["num_groups"] = 16.into();
+            assert!(decoder_contract::validate_decoder(&changed, profile).is_err());
+            let mut changed = original.clone();
+            if profile.model_dim == 2816 {
+                changed["transformer_config"]["layer_configs"][0]["mlp_config"]["active_experts"] = 4.into();
+            } else if profile.bidirectional {
+                changed["transformer_config"]["layer_configs"][0]["materialize_post_layer_scalar"] = false.into();
+            } else {
+                changed["ple_model_config"]["ple_dim"] = 128.into();
+            }
+            assert!(decoder_contract::validate_decoder(&changed, profile).is_err());
+        }
     }
 
     #[stark_test]
@@ -875,7 +989,7 @@ mod contract_tests {
         e4b["artifact_contract"]["family"]["id"] = profile.family.into();
         e4b["artifact_contract"]["source"]["repo"] = profile.repo.into();
         e4b["artifact_contract"]["source"]["revision"] = profile.revision.into();
-        e4b["decoder_config"]["transformer_config"]["model_dim"] = profile.model_dim.into();
+        e4b["decoder_config"] = decoder_control(profile);
         let selected = validate_contract(&e4b).expect("matching E4B profile rejected");
         assert_eq!(selected.model_dim, 2560);
         assert_eq!(selected.family, profile.family);
@@ -893,13 +1007,7 @@ mod contract_tests {
         larger["artifact_contract"]["family"]["id"] = profile.family.into();
         larger["artifact_contract"]["source"]["repo"] = profile.repo.into();
         larger["artifact_contract"]["source"]["revision"] = profile.revision.into();
-        larger["decoder_config"]["transformer_config"]["model_dim"] = profile.model_dim.into();
-        larger["decoder_config"]["gemma4_image_embeddings"] = false.into();
-        larger["decoder_config"]["scalar_image_embeddings"] = true.into();
-        larger["decoder_config"]["bidirectional_image_attention"] = true.into();
-        larger["decoder_config"]["transformer_config"]["layer_configs"] = serde_json::json!([{
-            "materialize_post_layer_scalar":true,"mixer_config":{"materialize_rope_bf16":true,"image_attention_policy":"causal"}
-        }]);
+        larger["decoder_config"] = decoder_control(profile);
         for (name, value) in [
             ("hidden_size", 1152),
             ("num_hidden_layers", 27),
@@ -930,13 +1038,7 @@ mod contract_tests {
         let profile = PROFILES[4];
         raw["artifact_contract"]["family"]["id"] = profile.family.into();
         raw["artifact_contract"]["source"] = serde_json::json!({"repo":profile.repo,"revision":profile.revision});
-        raw["decoder_config"]["transformer_config"]["model_dim"] = profile.model_dim.into();
-        raw["decoder_config"]["transformer_config"]["layer_configs"] = serde_json::json!([{
-            "materialize_post_layer_scalar":true,"mixer_config":{"materialize_rope_bf16":true,"image_attention_policy":"causal"}
-        }]);
-        raw["decoder_config"]["gemma4_image_embeddings"] = false.into();
-        raw["decoder_config"]["scalar_image_embeddings"] = true.into();
-        raw["decoder_config"]["bidirectional_image_attention"] = true.into();
+        raw["decoder_config"] = decoder_control(profile);
         raw["artifact_contract"]["vision_config"] = serde_json::json!({
             "model_type":"gemma4_unified_vision", "mm_embed_dim":3840,"mm_posemb_size":1120,
             "model_patch_size":48,"num_soft_tokens":280,"output_proj_dims":3840,
@@ -948,10 +1050,10 @@ mod contract_tests {
         assert!(validate_contract(&changed).is_err());
         let mut changed = raw.clone();
         changed["decoder_config"]["transformer_config"]["layer_configs"][0]["mixer_config"]["sliding_window_size"] =
-            1024.into();
+            512.into();
         assert!(validate_contract(&changed).is_err());
-        changed["decoder_config"]["transformer_config"]["layer_configs"][0]["mixer_config"]["image_attention_policy"] =
-            "windowed_same_image".into();
+        changed["decoder_config"]["transformer_config"]["layer_configs"][0]["mixer_config"]["sliding_window_size"] =
+            1024.into();
         assert!(validate_contract(&changed).is_ok());
         raw["decoder_config"]["transformer_config"]["layer_configs"][0]["materialize_post_layer_scalar"] = false.into();
         assert!(validate_contract(&raw).is_err());

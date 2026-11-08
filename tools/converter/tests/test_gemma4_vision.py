@@ -36,7 +36,18 @@ def source(tmp_path, model_dim=1536):
         "image_mean": [0.0] * 3,
         "image_std": [1.0] * 3,
     }
-    (tmp_path / "config.json").write_text(json.dumps(config))
+    if model_dim in (1536, 2560):
+        fixture = (
+            Path(__file__).parent
+            / "fixtures"
+            / "gemma4_image_profiles"
+            / ("e2b.config.json" if model_dim == 1536 else "e4b.config.json")
+        )
+        payload = fixture.read_bytes()
+        config = json.loads(payload)
+        (tmp_path / "config.json").write_bytes(payload)
+    else:
+        (tmp_path / "config.json").write_text(json.dumps(config))
     (tmp_path / "processor_config.json").write_text(json.dumps({"image_processor": processor}))
     return config, processor
 
@@ -150,8 +161,7 @@ def test_unified_12b_inventory_has_no_transformer_tower_and_strict_source_names(
     (tmp_path / "processor_config.json").write_text(
         json.dumps({"image_processor": processor, "image_seq_length": 280})
     )
-    repo = "google/gemma-4-12B-it"
-    contract = vision.gemma4_vision_contract(tmp_path, repo, vision.PROFILES[repo]["revision"])
+    contract = vision.gemma4_vision_contract(tmp_path)
     assert contract["family"] == {"id": "gemma4-12b-bf16-v1", "version": 1}
     tensors = {}
     shapes = {"patch_dense.weight": (3840, 6912), "patch_dense.bias": (3840,), "pos_embedding": (1120, 2, 3840)}
