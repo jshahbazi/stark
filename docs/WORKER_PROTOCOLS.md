@@ -129,7 +129,12 @@ Retained Lily uses its selected K/V format and loaded draft head when counting
 state, snapshots and decode/prefill scratch. The EXL3 bridge already bills device
 phases at its installed full context before loading; its host planner additionally
 admits token/readout workspaces. These checks do not change inference precision
-or replay tokens. Image processing keeps its separately qualified admission path.
+or replay tokens. Image requests also admit their decoder cache using expanded
+prepared-token counts, and check the selected virtual cache reservation against
+device buffer and shader-index limits. The prepared context remains bound:
+image Auto can reject a window that does not fit instead of shrinking that
+context. Encoder bounds and qualification remain separate; this decoder check
+does not estimate the encoder's complete peak.
 
 Planning never replays a prompt or generated token. A successful query preserves
 the retained prefix; the worker keeps an existing planned capacity while it still

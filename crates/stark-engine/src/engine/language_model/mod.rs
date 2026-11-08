@@ -306,6 +306,31 @@ impl<B: Backend> LanguageModel<B> {
         )
     }
 
+    /// Inventory decoder state and execution workspace for the complete
+    /// requested input/output span. Vision wrappers use this for their text
+    /// decoder; image-encoder execution has a separate admitted contract.
+    pub fn generation_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        if self.max_context_length().is_some_and(|maximum| context_tokens > maximum) {
+            return None;
+        }
+        let allocated = self.generation_allocation_context_length(input_tokens, context_tokens, max_new_tokens)?;
+        let estimate = self.context_memory_estimate(allocated, input_tokens)?;
+        let mut reserved = self.decoder.context_cache_buffer_bytes(context_tokens)?;
+        if let Some(head) = self.dense_mtp.as_ref().filter(|_| self.has_dense_mtp()) {
+            reserved = reserved.max(head.context_cache_buffer_bytes(context_tokens)?);
+        }
+        if self.engine.context.max_buffer_length().is_some_and(|limit| estimate.max_buffer_bytes.max(reserved) > limit)
+        {
+            return None;
+        }
+        estimate.total_bytes()
+    }
+
     /// Admit exact scoring's fresh state and all independently retained prompt
     /// chunk pools. Scoring reads the final prompt position without reserving
     /// an output token, so input may exactly fill the selected context.
@@ -330,7 +355,9 @@ impl<B: Backend> LanguageModel<B> {
         };
         // Dense MTP's predictor is not executed by score_next_token.
         let estimate = self.decoder.scoring_memory_estimate(allocated, input_tokens)?;
-        if self.engine.context.max_buffer_length().is_some_and(|limit| estimate.max_buffer_bytes > limit) {
+        let reserved = self.decoder.context_cache_buffer_bytes(context_tokens)?;
+        if self.engine.context.max_buffer_length().is_some_and(|limit| estimate.max_buffer_bytes.max(reserved) > limit)
+        {
             return None;
         }
         estimate.scoring_total_bytes(input_tokens, self.decoder.prefill_requires_separate_logits_row())

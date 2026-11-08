@@ -430,6 +430,19 @@ impl<B: Backend> Transformer<B> {
         )
     }
 
+    pub(crate) fn context_cache_buffer_bytes(
+        &self,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        self.layers.iter().try_fold(0usize, |maximum, (layer, _)| {
+            if layer.kv_source_layer_index.is_some() {
+                Some(maximum)
+            } else {
+                layer.mixer.context_cache_buffer_bytes(context_tokens).map(|bytes| maximum.max(bytes))
+            }
+        })
+    }
+
     /// Every owned layer cache can be rewound; shared KV layers own no state.
     pub(crate) fn prefix_reuse_supported(&self) -> bool {
         !self.multimodal_positions_supported

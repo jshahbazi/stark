@@ -48,15 +48,14 @@ fn admit_generation_memory(
     options: &GenerationOptions,
 ) -> Result<(), &'static str> {
     let input_tokens = u32::try_from(input_tokens).map_err(|_| "context_overflow")?;
-    let allocation_context = model
-        .generation_allocation_context_length(input_tokens, options.context_tokens, options.max_new_tokens)
-        .ok_or("context_overflow")?;
+    admit_memory_bytes(model.generation_memory_bytes(input_tokens, options.context_tokens, options.max_new_tokens))
+}
+
+fn admit_memory_bytes(request_bytes: Option<usize>) -> Result<(), &'static str> {
+    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
     let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
     let memory_budget = available.saturating_sub(256 * 1024 * 1024) / 4;
-    let safe_capacity = model
-        .automatic_context_length(input_tokens, allocation_context, memory_budget)
-        .ok_or("resource_budget_exceeded")?;
-    if allocation_context > safe_capacity {
+    if request_bytes > memory_budget {
         return Err("resource_budget_exceeded");
     }
     Ok(())
@@ -773,6 +772,10 @@ impl NativeBackend {
         };
         let retained = self.prefix_cache.take();
         self.pending_prefix = None;
+        // Prepared tokens include the expanded image placeholder. Image
+        // generation enters with an empty ordinary input slice.
+        let admission_input_tokens = u32::try_from(image.as_ref().map_or(input.len(), |image| image.tokens.len()))
+            .map_err(|_| "context_overflow")?;
         let mut state = match (&mut self.model, retained) {
             (NativeModel::Text(model), Some(entry)) if reused > 0 => {
                 // Finite sparse admission may previously have covered only a
@@ -798,18 +801,33 @@ impl NativeBackend {
             },
             (NativeModel::Vision(model), retained) => {
                 drop(retained);
+                admit_memory_bytes(model.decoder_generation_memory_bytes(
+                    admission_input_tokens,
+                    options.context_tokens,
+                    options.max_new_tokens,
+                ))?;
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma4Vision(model), retained) => {
                 drop(retained);
+                admit_memory_bytes(model.decoder_generation_memory_bytes(
+                    admission_input_tokens,
+                    options.context_tokens,
+                    options.max_new_tokens,
+                ))?;
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma3Vision(model), retained) => {
                 drop(retained);
+                admit_memory_bytes(model.decoder_generation_memory_bytes(
+                    admission_input_tokens,
+                    options.context_tokens,
+                    options.max_new_tokens,
+                ))?;
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?

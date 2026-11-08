@@ -123,6 +123,15 @@ pub trait Mixer<B: Backend>: Any + Send + Sync {
         None
     }
 
+    /// Largest individual cache address reservation that scales with context.
+    /// Recurrent mixers have constant state, already covered by their profile.
+    fn context_cache_buffer_bytes(
+        &self,
+        _context_tokens: u32,
+    ) -> Option<usize> {
+        Some(0)
+    }
+
     /// Whether every state this mixer creates can be rewound to a shorter
     /// prefix. Only full, non-ring attention caches qualify.
     fn prefix_reuse_supported(&self) -> bool {

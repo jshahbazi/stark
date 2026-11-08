@@ -475,6 +475,16 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
     pub fn max_context_length(&self) -> Option<u32> {
         self.language_model.max_context_length()
     }
+
+    /// Decoder-only admission; image-tower execution is separately qualified.
+    pub fn decoder_generation_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        self.language_model.generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)
+    }
     pub fn recommended_context_length(&self) -> Option<u32> {
         self.language_model.recommended_context_length()
     }

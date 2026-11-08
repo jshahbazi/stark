@@ -202,6 +202,13 @@ impl<B: Backend> Decoder<B> {
         self.transformer.max_context_length()
     }
 
+    pub(crate) fn context_cache_buffer_bytes(
+        &self,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        self.transformer.context_cache_buffer_bytes(context_tokens)
+    }
+
     fn workspace_memory_estimate(
         &self,
         context_tokens: u32,

@@ -2230,6 +2230,24 @@ mod tests {
     }
 
     #[test]
+    fn image_memory_rejection_releases_prepared_state_and_accepts_same_worker_retry() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        let prepared = post(&mut worker, image_prepare(&root));
+        worker.backend.tokens = vec![Err("resource_budget_exceeded")];
+        assert_eq!(post(&mut worker, image_generate(&prepared))["error"], "resource_budget_exceeded");
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(post(&mut worker, json!({"operation":"discard_image"}))["discarded"], false);
+        worker.backend.tokens = vec![Ok(3), Ok(1)];
+        let prepared = post(&mut worker, image_prepare(&root));
+        let retry = post(&mut worker, image_generate(&prepared));
+        assert_eq!(retry["input_tokens"], 7);
+        assert_eq!(retry["finish_reason"], "eos");
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 2);
+        assert_eq!(worker.backend.image_generations, 2);
+    }
+
+    #[test]
     fn image_preparation_is_opt_in_and_unknown_fields_remain_rejected() {
         let root = crate::media::tests::PrivateRoot::new();
         let mut vision_worker = image_worker(&root);

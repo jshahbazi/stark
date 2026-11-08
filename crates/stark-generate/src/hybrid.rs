@@ -665,6 +665,15 @@ impl GenerationBackend for HybridBackend {
         on_text: Option<&mut TextCallback<'_>>,
         on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
+        let input_tokens = u32::try_from(prepared.tokens.len()).map_err(|_| "context_overflow")?;
+        let end = input_tokens.checked_add(options.max_new_tokens).ok_or("context_overflow")?;
+        if end > options.context_tokens {
+            return Err("context_overflow");
+        }
+        // Prepared image tokens contribute to the same growing text caches.
+        // The separately bounded encoder is not an automatic-context planner.
+        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+        admit_request_memory(self.model.request_memory_bytes(end, input_tokens), available)?;
         self.clear_prefix_cache();
         self.last_mtp = None;
         self.nucleus_sampler.clear();

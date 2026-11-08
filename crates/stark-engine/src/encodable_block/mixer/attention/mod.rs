@@ -324,6 +324,22 @@ impl<B: Backend> Mixer<B> for Attention<B> {
         )
     }
 
+    fn context_cache_buffer_bytes(
+        &self,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        if self.max_rope_length.is_some_and(|maximum| context_tokens > maximum) {
+            return None;
+        }
+        crate::encodable_block::memory::attention_cache_buffer_bytes(
+            context_tokens,
+            self.head_dim,
+            self.num_kv_heads,
+            self.ring_capacity,
+            self.data_type.size_in_bytes(),
+        )
+    }
+
     fn prefix_reuse_supported(&self) -> bool {
         self.num_kv_heads.is_some() && self.ring_capacity.is_none()
     }

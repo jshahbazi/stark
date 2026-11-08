@@ -98,6 +98,27 @@ pub fn attention_estimate(
     Some(result)
 }
 
+/// Address reservation for one K/V cache buffer, independent of physical
+/// sparse mapping and of the request's shorter execution workspace.
+pub fn attention_cache_buffer_bytes(
+    context_tokens: u32,
+    head_dim: u32,
+    kv_heads: Option<u32>,
+    ring_capacity: Option<u32>,
+    element_bytes: usize,
+) -> Option<usize> {
+    let rows = ring_capacity
+        .map_or(context_tokens, |window| window.min(context_tokens))
+        .checked_add(crate::encodable_block::mixer::attention::ATTENTION_SUFFIX_CAPACITY)?;
+    match kv_heads {
+        Some(heads) => {
+            rows.checked_mul(heads)?.checked_mul(head_dim)?;
+            checked_bytes(&[rows, heads, head_dim], element_bytes)
+        },
+        None => Some(0),
+    }
+}
+
 impl MemoryEstimate {
     pub fn state(state_bytes: usize) -> Self {
         Self {
@@ -331,6 +352,10 @@ mod tests {
         let indexed_limit = u32::MAX / (8 * 128) - 1024;
         assert!(attention_estimate(indexed_limit, 1, 128, 8, Some(8), None, 3072, 2, false).is_some());
         assert!(attention_estimate(indexed_limit + 1, 1, 128, 8, Some(8), None, 3072, 2, false).is_none());
+        assert_eq!(attention_cache_buffer_bytes(4096, 64, Some(2), None, 2), Some(full.state_bytes / 2));
+        assert_eq!(attention_cache_buffer_bytes(4096, 64, Some(2), Some(256), 2), Some(ring.state_bytes / 2));
+        assert_eq!(attention_cache_buffer_bytes(4096, 64, None, None, 2), Some(0));
+        assert!(attention_cache_buffer_bytes(indexed_limit + 1, 128, Some(8), None, 2).is_none());
     }
 
     #[stark_test]
@@ -347,6 +372,18 @@ mod tests {
         let mut scratch = MemoryEstimate::default();
         scratch.add_scratch(&[65], 1, 1).unwrap();
         assert_eq!(scratch.max_buffer_bytes, 128);
+    }
+
+    #[stark_test]
+    fn sparse_short_request_still_checks_full_cache_address_reservation() {
+        let request = attention_estimate(200, 100, 64, 8, Some(2), None, 768, 2, false).unwrap();
+        let device_limit = 1024 * 1024;
+        assert!(request.max_buffer_bytes < device_limit);
+        assert!(attention_cache_buffer_bytes(2048, 64, Some(2), None, 2).unwrap() <= device_limit);
+        assert!(attention_cache_buffer_bytes(4096, 64, Some(2), None, 2).unwrap() > device_limit);
+        // Physical request growth can fit while the unchanged selected
+        // context's sparse address reservation exceeds the device limit.
+        assert_eq!(generation_allocation_context(100, 4096, 100, true), Some(200));
     }
 
     #[stark_test]
