@@ -2,7 +2,12 @@
 
 import pytest
 
-from mercury import MODEL, build_request, parse_response, supported_cases
+from mercury import MODEL, build_request, is_correct, parse_response, supported_cases
+
+
+def test_progress_normalizes_integer_score_gold_like_final_metrics():
+    assert is_correct({"labels": ["0", "1", "2"], "expected": 1}, [0.1, 0.8, 0.1])
+    assert not is_correct({"labels": ["0", "1", "2"], "expected": 2}, [0.1, 0.8, 0.1])
 
 
 def test_provider_limit_excludes_only_unsupported_synthetic_control():

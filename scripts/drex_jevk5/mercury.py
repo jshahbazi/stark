@@ -49,6 +49,13 @@ def build_request(case):
     return {"model": MODEL, **drex_request(case)}
 
 
+def is_correct(case, probabilities):
+    selected = case["labels"][
+        max(range(len(probabilities)), key=probabilities.__getitem__)
+    ]
+    return str(selected) == str(case["expected"])
+
+
 def supported_cases(cases):
     included, excluded = [], collections.Counter()
     for case in cases:
@@ -359,10 +366,7 @@ def run(args):
                 row["completed"] += 1
                 tier = "synthetic" if case["tier"] == "synthetic" else "public"
                 progress[tier]["completed"] += 1
-                progress[tier]["correct"] += (
-                    case["labels"][max(range(len(p)), key=p.__getitem__)]
-                    == case["expected"]
-                )
+                progress[tier]["correct"] += is_correct(case, p)
                 row["accuracy_progress"] = progress
                 save(args.output, report)
                 if row["completed"] % 25 == 0:

@@ -78,6 +78,9 @@ report **207 and 11**. Independent review confirmed this exact code path and
 the label types. The original receipt is preserved unchanged; the progress
 comparison is corrected separately with a regression test. The final metric
 calculation is unchanged by that correction.
+The exact measured harness is preserved in commit `5f38cb12`; its hash matches
+the untouched complete receipt. The later counter correction passes 21
+model-free tests, lint, formatting and repository policy checks.
 
 The [harness and setup](../../scripts/drex_jevk5/README.md) use locked Python
 dependencies. The primary command selects one complete round and reuses the

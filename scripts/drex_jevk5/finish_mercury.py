@@ -14,6 +14,7 @@ import time
 from mercury import (
     Client,
     build_request,
+    is_correct,
     parse_response,
     require,
     supported_cases,
@@ -141,10 +142,7 @@ def main():
             probabilities[case["id"]] = p
             usage.update(tokens)
             tier = "synthetic" if case["tier"] == "synthetic" else "public"
-            correct[tier] += (
-                case["labels"][max(range(len(p)), key=p.__getitem__)]
-                == case["expected"]
-            )
+            correct[tier] += is_correct(case, p)
             report["physical_requests_succeeded"] += 1
             report["correct_counts_on_remaining_only"] = dict(correct)
             report["usage"] = dict(usage)
