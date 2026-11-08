@@ -22,7 +22,6 @@ import logging
 import os
 import platform
 import secrets
-import shutil
 import signal
 import subprocess
 import sys
@@ -32,6 +31,7 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
+from maxxbench_resources import task_resources
 from maxxbench_verifier_compat import (
     TRIAL_IMAGE_ATTRIBUTE,
     capture_environment_image,
@@ -121,7 +121,7 @@ def aggregate_agent_metrics(result):
     } and type(value) in (int, float, bool)}
     if metadata.get("agent_status") in {
         "submitted", "Submitted", "LimitsExceeded", "FormatError", "run_error", "unknown",
-        "step_limit", "wall_time_limit", "format_error", "context_overflow", "model_error",
+        "step_limit", "wall_time_limit", "format_error", "context_overflow", "model_error", "RepeatedFormatError",
         "adapter_error",
     }:
         safe["agent_status"] = metadata["agent_status"]
@@ -612,6 +612,7 @@ def main(argv=None):
     identity = {"upstream_commit": UPSTREAM_COMMIT, "manifest_sha256": digest(args.upstream / "tasks/manifest.json"),
                 "runner_sha256": digest(__file__),
                 "verifier_compat_sha256": digest(ROOT / "scripts/maxxbench_verifier_compat.py"),
+                "resource_cleanup_sha256": digest(ROOT / "scripts/maxxbench_resources.py"),
                 "selected_tasks": tasks, "release_tasks": 89,
                 "created_at": datetime.now(UTC).isoformat(), "logging": "aggregate_only"}
     args.output.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -623,8 +624,9 @@ def main(argv=None):
     if args.oracle:
         with gpu_reservation(args.gpu_lock):
             for task in tasks:
-                emit({"event": "oracle_start", "task": task})
-                result = asyncio.run(trial_run(Trial, args.upstream, task, args.output / "oracle-trials"))
+                with task_resources(args.output / "resource-cleanup" / (task + ".json")):
+                    emit({"event": "oracle_start", "task": task})
+                    result = asyncio.run(trial_run(Trial, args.upstream, task, args.output / "oracle-trials"))
                 write_json(args.output / f"oracle-{task}.json", {**identity, **result})
                 emit({"event": "oracle_done", "task": task, "passed": result["passed"],
                       "infrastructure_exception": result["infrastructure_exception"]})
@@ -679,11 +681,10 @@ def main(argv=None):
                         bind_environment_image(task_images, profile["id"] + "/" + task,
                                                existing.get("environment_image_id"))
                         continue
-                    if shutil.disk_usage(args.output).free < 12 * 1024**3:
-                        raise ValueError("insufficient_disk_space")
-                    emit({"event": "trial_start", "profile": profile["id"], "task": task})
-                    result = asyncio.run(trial_run(Trial, args.upstream, task,
-                                                  args.output / profile["id"] / "trials", profile))
+                    with task_resources(args.output / profile["id"] / "resource-cleanup" / (task + ".json")):
+                        emit({"event": "trial_start", "profile": profile["id"], "task": task})
+                        result = asyncio.run(trial_run(Trial, args.upstream, task,
+                                                      args.output / profile["id"] / "trials", profile))
                     assert_artifact_unchanged(artifacts[profile["id"]])
                     image_id = result.get("environment_image_id")
                     if not result["infrastructure_exception"]:
@@ -719,6 +720,7 @@ if __name__ == "__main__":
             "model_bridge_protocol_failed", "model_bridge_ownership_unverified", "model_bridge_cleanup_failed",
             "model_bridge_shutdown_failed",
             "environment_identity_unavailable", "environment_identity_changed",
+            "resource_snapshot_failed", "resource_cleanup_failed", "resource_identity_changed",
             "campaign_identity_mismatch",
             "artifact_changed", "artifact_empty",
         } else "runner_failed"

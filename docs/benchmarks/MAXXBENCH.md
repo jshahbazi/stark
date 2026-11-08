@@ -145,6 +145,40 @@ context/output/step limits. Do not remove failed attempts from the denominator
 or infer an 89-task score from a partial run. Full task success requires the
 upstream `reward == 1`; its partial metrics do not establish full success.
 
+## Per-attempt Docker resources
+
+Both oracle and model attempts require at least 12 GiB of host free space
+before starting. Inside the existing serial benchmark reservation, the runner
+records protected image IDs, cache IDs, the builder worker identity and a hash
+of the existing volume set. After Pier finishes the attempt's environment
+cleanup, the runner removes only image IDs introduced during that attempt,
+using non-force exact-ID removal with `--no-prune` to preserve untagged parent
+images. An image still referenced by a container is
+retained and reported as incomplete cleanup.
+
+The runner then rechecks cache records. Only newly introduced, unshared,
+immutable, reclaimable records are eligible. Each deletion has an exact-ID
+filter and server-side private/immutable selectors; BuildKit protects active
+records. Baseline records remain protected even if their sharing state changes.
+The helper never invokes volume removal, container removal, image sweeping or
+unfiltered cache pruning. The [Buildx prune reference](https://docs.docker.com/reference/cli/docker/buildx/prune/)
+documents exact-ID selectors and their combination; the
+[disk-usage reference](https://docs.docker.com/reference/cli/docker/buildx/du/)
+describes mutable, shared and reclaimable records.
+
+Private `resource-cleanup/<task>.json` receipts contain ownership boundaries,
+attempted and confirmed deletion IDs, fixed failure categories and before/after
+host capacity. Docker diagnostics and build-cache descriptions are discarded.
+Builder changes or missing protected volumes stop cleanup before deletion.
+Failed cleanup aborts an otherwise successful attempt instead of implying
+that capacity was recovered. A receipt can retain protected, shared, mutable
+or active cache records; cleanup does not promise a fixed amount of free space.
+
+The resource helper hash participates in oracle and campaign identity. The
+force-build/no-cache policy and independent per-attempt image IDs remain in
+effect. Validate a bounded oracle's cleanup receipt and actual disk recovery
+before a long campaign; model-free checks do not measure reclaimed storage.
+
 ## Separate verifier image compatibility
 
 Nineteen pinned tasks declare `ARG BASE_IMAGE` in their verifier Dockerfile.

@@ -365,6 +365,24 @@ def test_trial_run_aggregates_do_not_serialize_rollout_or_arbitrary_metadata(tmp
     assert "rollout_details" not in json.dumps(receipt)
 
 
+def test_repeated_format_error_status_is_preserved_as_model_budget_outcome():
+    result = SimpleNamespace(model_dump=lambda: {"metadata": {"agent_status": "RepeatedFormatError"}})
+    assert runner.aggregate_agent_metrics(result)["metadata"]["agent_status"] == "RepeatedFormatError"
+
+
+def test_oracle_main_enforces_disk_guard_before_starting_trial(tmp_path, monkeypatch):
+    import maxxbench_resources
+
+    monkeypatch.setattr(runner, "preflight", lambda _path: ["sample-task"])
+    monkeypatch.setattr(runner, "patch_pier", lambda _path: object())
+    monkeypatch.setattr(runner, "digest", lambda _path: "a" * 64)
+    monkeypatch.setattr(runner, "gpu_reservation", lambda _path: contextlib.nullcontext())
+    monkeypatch.setattr(maxxbench_resources.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+    monkeypatch.setattr(runner, "trial_run", lambda *_args: pytest.fail("oracle ran despite insufficient disk"))
+    with pytest.raises(maxxbench_resources.ResourceError, match="insufficient_disk_space"):
+        runner.main(["--upstream", str(tmp_path / "upstream"), "--output", str(tmp_path / "output"), "--oracle"])
+
+
 def trial_result():
     return SimpleNamespace(verifier_result=SimpleNamespace(rewards={"reward": 1}), exception_info=None,
                            agent_result=None, started_at=datetime.now(UTC), finished_at=datetime.now(UTC))
