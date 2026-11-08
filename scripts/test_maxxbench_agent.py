@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from maxxbench_agent import (
@@ -12,12 +13,14 @@ from maxxbench_agent import (
     LocalOpenAIModel,
     MemoryOnlyAgent,
     PierEnvironmentBridge,
+    StarkMiniSweAgent,
     _agent_templates,
     clear_connection,
     configure_connection,
 )
 from minisweagent.agents.default import AgentConfig
 from minisweagent.exceptions import FormatError
+from pier.models.agent.context import AgentContext
 
 
 class FakeResponse:
@@ -270,7 +273,10 @@ class AdapterTests(unittest.TestCase):
             environment = Environment()
             bridge = PierEnvironmentBridge(environment, asyncio.get_running_loop())
             result = await asyncio.to_thread(bridge.execute, {"command": "pwd"}, "/app")
-            self.assertEqual(result, {"returncode": 0, "output": "ok"})
+            self.assertEqual(
+                result,
+                {"returncode": 0, "output": "ok", "exception_info": ""},
+            )
             self.assertEqual(environment.seen, ("pwd", "/app", 30))
 
         asyncio.run(exercise())
@@ -361,6 +367,247 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(agent.messages[-1]["extra"]["submission"], "")
 
         asyncio.run(exercise())
+
+    def test_full_adapter_runs_model_observation_and_submission(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        payloads = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "bash",
+                                        "arguments": '{"command":"sleep 30"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1200, "completion_tokens": 40},
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call-2",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "bash",
+                                        "arguments": '{"command":"echo check"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1260, "completion_tokens": 30},
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call-3",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "bash",
+                                        "arguments": '{"command":"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1320, "completion_tokens": 20},
+            },
+        ]
+        executed = []
+        exception_types = []
+
+        class FakeConnection:
+            def __init__(self, *args, **kwargs):
+                self.payload = payloads.pop(0)
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse(self.payload)
+
+            def close(self):
+                pass
+
+        class FakeEnvironment:
+            async def exec(self, command, cwd=None, timeout_sec=None):
+                executed.append(command)
+                if command == "sleep 30":
+                    raise RuntimeError("Command timed out after 30 seconds")
+                stdout = (
+                    "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n"
+                    if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in command
+                    else "check passed\n"
+                )
+                return type(
+                    "Result",
+                    (),
+                    {
+                        "stdout": stdout,
+                        "stderr": "",
+                        "return_code": 0,
+                    },
+                )()
+
+        original_handler = MemoryOnlyAgent.handle_uncaught_exception
+
+        def record_safe_exception_type(agent, error):
+            exception_types.append(type(error).__name__)
+            return original_handler(agent, error)
+
+        async def exercise():
+            agent = StarkMiniSweAgent(
+                logs_dir=Path("/tmp"),
+                model_name="stark-test",
+                max_tokens=4096,
+                temperature=0.0,
+                step_limit=250,
+            )
+            context = AgentContext()
+            with (
+                patch("maxxbench_agent._CancellableHTTPConnection", FakeConnection),
+                patch.object(
+                    MemoryOnlyAgent,
+                    "handle_uncaught_exception",
+                    record_safe_exception_type,
+                ),
+            ):
+                await agent.run("synthetic task metadata", FakeEnvironment(), context)
+            return context
+
+        context = asyncio.run(exercise())
+        self.assertEqual(exception_types, [])
+        self.assertEqual(context.metadata["agent_status"], "Submitted")
+        self.assertEqual(context.metadata["model_calls"], 3)
+        self.assertEqual(context.metadata["http_errors"], {"environment_timeout": 1})
+        self.assertEqual(context.n_input_tokens, 3780)
+        self.assertEqual(context.n_output_tokens, 90)
+        self.assertEqual(
+            executed,
+            ["sleep 30", "echo check", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"],
+        )
+        self.assertEqual(payloads, [])
+
+    def test_context_overflow_is_task_outcome_not_harness_exception(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        payload = {
+            "error": {
+                "message": "Conversation exceeds the context budget.",
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+            }
+        }
+
+        class ErrorConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse(payload, status=400)
+
+            def close(self):
+                pass
+
+        class FakeEnvironment:
+            async def exec(self, *args, **kwargs):
+                raise AssertionError("budget rejection must occur before commands")
+
+        async def exercise():
+            agent = StarkMiniSweAgent(logs_dir=Path("/tmp"), model_name="stark-test")
+            context = AgentContext()
+            with patch("maxxbench_agent._CancellableHTTPConnection", ErrorConnection):
+                await agent.run("synthetic task metadata", FakeEnvironment(), context)
+            return context
+
+        context = asyncio.run(exercise())
+        self.assertEqual(context.metadata["agent_status"], "context_overflow")
+        self.assertEqual(context.metadata["context_overflow_errors"], 1)
+        self.assertEqual(context.metadata["http_errors"], {"request_rejected": 1})
+        self.assertIsNone(context.metadata["adapter_error_type"])
+
+    def test_unexpected_adapter_error_fails_trial_after_safe_metrics(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": '{"command":"echo check"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+        }
+
+        class FakeConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse(payload)
+
+            def close(self):
+                pass
+
+        class BrokenEnvironment:
+            async def exec(self, *args, **kwargs):
+                raise RuntimeError("private command-specific exception text")
+
+        async def exercise():
+            agent = StarkMiniSweAgent(logs_dir=Path("/tmp"), model_name="stark-test")
+            context = AgentContext()
+            with (
+                patch("maxxbench_agent._CancellableHTTPConnection", FakeConnection),
+                self.assertRaisesRegex(RuntimeError, "^maxxbench_adapter_failed$"),
+            ):
+                await agent.run("synthetic task metadata", BrokenEnvironment(), context)
+            return context
+
+        context = asyncio.run(exercise())
+        self.assertEqual(context.metadata["agent_status"], "adapter_error")
+        self.assertEqual(context.metadata["adapter_error_type"], "RuntimeError")
+        self.assertEqual(
+            context.metadata["http_errors"], {"environment": 1, "agent": 1}
+        )
+        self.assertEqual(context.n_agent_steps, 1)
 
     def test_agent_save_never_serializes_conversation(self):
         class Model:

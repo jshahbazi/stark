@@ -116,6 +116,7 @@ def aggregate_agent_metrics(result):
     if metadata.get("agent_status") in {
         "submitted", "Submitted", "LimitsExceeded", "FormatError", "run_error", "unknown",
         "step_limit", "wall_time_limit", "format_error", "context_overflow", "model_error",
+        "adapter_error",
     }:
         safe["agent_status"] = metadata["agent_status"]
     errors = metadata.get("http_errors")
@@ -487,6 +488,7 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
     error_names = {
         "transport", "configuration", "request_rejected", "authentication", "endpoint",
         "rate_limited", "server", "http_other", "response_too_large", "invalid_response",
+        "environment", "environment_timeout", "cancelled", "agent",
     }
 
     def counters():
@@ -671,7 +673,8 @@ def main(argv=None):
                             raise ValueError("campaign_identity_mismatch")
                         if existing.get("infrastructure_exception"):
                             raise ValueError("trial_infrastructure_failed")
-                        bind_environment_image(task_images, task, existing.get("environment_image_id"))
+                        bind_environment_image(task_images, profile["id"] + "/" + task,
+                                               existing.get("environment_image_id"))
                         continue
                     if shutil.disk_usage(args.output).free < 12 * 1024**3:
                         raise ValueError("insufficient_disk_space")
@@ -681,7 +684,7 @@ def main(argv=None):
                     assert_artifact_unchanged(artifacts[profile["id"]])
                     image_id = result.get("environment_image_id")
                     if not result["infrastructure_exception"]:
-                        bind_environment_image(task_images, task, image_id)
+                        bind_environment_image(task_images, profile["id"] + "/" + task, image_id)
                         write_json(image_receipt, task_images)
                     write_json(destination, {**result, "campaign_sha256": campaign_id})
                     emit({"event": "trial_done", "profile": profile["id"], "task": task,

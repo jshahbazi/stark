@@ -173,6 +173,10 @@ class _CancellableHTTPConnection(http.client.HTTPConnection):
             super().connect()
 
 
+class ContextOverflowError(RuntimeError):
+    """Expected request-budget failure; report as task outcome, not harness fault."""
+
+
 class LocalOpenAIModel:
     """Small OpenAI chat-completions client with redacted error handling."""
 
@@ -264,10 +268,9 @@ class LocalOpenAIModel:
                 category = _safe_http_category(response.status)
                 overflow = _is_context_overflow_error(raw)
                 METRICS.record_error(category, context_overflow=overflow)
-                raise RuntimeError(
-                    "model request failed: "
-                    + ("context_overflow" if overflow else category)
-                )
+                if overflow:
+                    raise ContextOverflowError("context_overflow") from None
+                raise RuntimeError("model request failed: " + category)
             payload = json.loads(raw)
             message = payload["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
@@ -364,7 +367,11 @@ class PierEnvironmentBridge:
             raise RuntimeError("agent stopped")
         command = action.get("command")
         if not isinstance(command, str):
-            return {"returncode": 2, "output": "command rejected"}
+            return {
+                "returncode": 2,
+                "output": "command rejected",
+                "exception_info": "",
+            }
         future = asyncio.run_coroutine_threadsafe(
             self._environment.exec(
                 command, cwd=cwd or None, timeout_sec=self._command_timeout
@@ -378,7 +385,13 @@ class PierEnvironmentBridge:
         except concurrent.futures.TimeoutError:
             future.cancel()
             METRICS.record_error("environment_timeout")
-            raise RuntimeError("environment command timed out") from None
+            return self._timeout_output()
+        except RuntimeError as error:
+            if str(error).startswith("Command timed out after "):
+                METRICS.record_error("environment_timeout")
+                return self._timeout_output()
+            METRICS.record_error("environment")
+            raise RuntimeError("environment command failed") from None
         except Exception:  # noqa: BLE001 - suppress command exception details at this boundary
             METRICS.record_error("environment")
             raise RuntimeError("environment command failed") from None
@@ -401,7 +414,15 @@ class PierEnvironmentBridge:
                 }
             )
         output = "\n".join(part for part in (stdout, result.stderr) if part)
-        return {"returncode": result.return_code, "output": output}
+        return {
+            "returncode": result.return_code,
+            "output": output,
+            "exception_info": "",
+        }
+
+    def _timeout_output(self) -> dict[str, Any]:
+        message = f"Command timed out after {self._command_timeout} seconds."
+        return {"returncode": -1, "output": "", "exception_info": message}
 
     def get_template_vars(self, **kwargs):
         return {"system": "Linux", "release": "", "version": "", "machine": ""}
@@ -514,11 +535,18 @@ class StarkMiniSweAgent(BaseAgent):
             except Exception:  # noqa: BLE001, S110 - bounded cleanup intentionally drops details
                 pass
             raise
-        except Exception:  # noqa: BLE001 - suppress all model/task exception details
+        except ContextOverflowError:
+            status = "context_overflow"
+            submission = ""
+            failure_type = None
+        except Exception as error:  # noqa: BLE001 - retain only the safe exception type
             # No exception value, traceback, prompts, or output enters Pier logs.
             METRICS.record_error("agent")
-            status = "run_error"
+            failure_type = type(error).__name__
+            status = "adapter_error"
             submission = ""
+        else:
+            failure_type = None
 
         metrics_after = METRICS.snapshot()
         context.n_agent_steps = agent.n_calls
@@ -543,7 +571,10 @@ class StarkMiniSweAgent(BaseAgent):
                 metrics_after["context_overflow_errors"]
                 - metrics_before["context_overflow_errors"]
             ),
+            "adapter_error_type": failure_type,
         }
         # Pier persists this field as a result artifact; keep it empty and let
         # task.toml's existing collection hook gather the patch from the sandbox.
         context.metadata["submission_present"] = bool(submission)
+        if failure_type is not None:
+            raise RuntimeError("maxxbench_adapter_failed") from None

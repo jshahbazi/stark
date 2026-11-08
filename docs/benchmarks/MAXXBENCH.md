@@ -77,11 +77,22 @@ is an explicitly different benchmark configuration implemented by the isolated
 bridge; it is not a new public HTTP request field. Output requests above the
 production API's limit fail admission instead of being silently clamped.
 
+The local client allows 600 seconds per completion and 30 seconds per command.
+Command timeouts return fixed feedback to the agent so it can recover. The
+upstream task normally allows three hours for the agent and 30 minutes for its
+verifier. Context overflow is a recorded budget outcome. Unexpected adapter
+faults abort the attempt as infrastructure failures and cannot become model
+scores.
+
 First establish that a reference solution passes the installed grading path:
 
 ```sh
 uv run --locked scripts/run_maxxbench.py --upstream runtime/maxxbench-upstream --output runtime/maxxbench-oracle --oracle --task tomlkit-toml-table-converters
 ```
+
+Before reporting a full score, run the oracle for every selected task on the
+same Docker platform. A passing oracle for one task qualifies only that task's
+reference execution. Omitting `--task` from the oracle command checks all 89.
 
 Then run the same task for every configured artifact:
 
@@ -113,8 +124,11 @@ The separate verifier still receives the task's normal patch artifact.
 Private `runtime/` receipts bind results to the upstream manifest, complete
 artifact file hashes, worker/helper hashes, Python/dependency lock, source
 commit, host platform, runner/adapter/bridge hashes and declared settings.
-Task image IDs are captured and must match across artifacts for each task;
-environment drift aborts the comparison. Per-trial `progress.json` files expose
+Task image IDs are captured for every artifact/task attempt and checked when
+resuming that attempt. Upstream's `--force-build` also disables Docker's build
+cache; independent builds can have different image IDs. These receipts identify
+the actual environments and do not assert byte-identical builds across models.
+Per-trial `progress.json` files expose
 only elapsed time, phases and aggregate model-call/token/error counts so long
 attempts can be monitored without conversation logs.
 Per-file hash caches are reused only while device, inode, size, modification
