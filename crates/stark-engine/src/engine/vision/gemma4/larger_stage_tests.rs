@@ -273,13 +273,47 @@ fn gemma4_larger_full_attention_split_metal() {
     command.encode_copy(&output, &mut readback);
     command.end_encoding().submit().wait_until_completed().unwrap();
     let actual = buffer_to_vec::<M, bf16>(&readback);
+    let coordinates = actual
+        .iter()
+        .zip(&source_attention)
+        .enumerate()
+        .filter(|(_, (a, b))| a.to_f32().to_bits() != b.to_bits())
+        .map(|(index, _)| [index / 1152, (index % 1152) / 72, index % 72])
+        .collect::<Vec<_>>();
+    let coordinate_bytes = serde_json::to_vec(&coordinates).unwrap();
+    std::fs::write(root.join("native-full-attention-coordinates.json"), &coordinate_bytes).unwrap();
+    let selected_rows = coordinates
+        .iter()
+        .map(|value| value[0])
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert!(selected_rows.len() <= 6, "affected-row CPU replay budget exceeded");
+    #[cfg(backend = "cpu")]
+    let affected_cpu = if selected_rows.is_empty() {
+        Value::Null
+    } else {
+        checkpoint_flash_rows::<crate::backends::cpu::Cpu>(&selected_rows, "affected")
+    };
+    #[cfg(not(backend = "cpu"))]
+    let affected_cpu = Value::Null;
+    let affected_metal = if selected_rows.is_empty() {
+        Value::Null
+    } else {
+        checkpoint_flash_rows::<M>(&selected_rows, "affected")
+    };
     let report = json!({"scope":"full-first-layer-attention-split","case_index":1,"backend":"metal",
-        "tower_stages":measured,"same_canonical_input_attention":measure(&actual,&source_attention)});
+        "tower_stages":measured,"same_canonical_input_attention":measure(&actual,&source_attention),
+        "coordinate_file_sha256":format!("{:x}",Sha256::digest(&coordinate_bytes)),"affected_query_rows":selected_rows.len(),
+        "affected_rows_cpu":affected_cpu,"affected_rows_metal":affected_metal});
     std::fs::write(root.join("native-full-attention-split.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     println!("{report}");
 }
 
-fn checkpoint_flash_prefix<B: Backend>() {
+fn checkpoint_flash_rows<B: Backend>(
+    selected_rows: &[usize],
+    label: &str,
+) -> Value {
     use crate::tests::helpers::{buffer_to_vec, create_buffer_with_data};
     let root = PathBuf::from(std::env::var_os("STARK_GEMMA4_FIXTURE_PATH").unwrap());
     let manifest: Value = serde_json::from_slice(&read(&root, "manifest.json")).unwrap();
@@ -290,6 +324,13 @@ fn checkpoint_flash_prefix<B: Backend>() {
     let key_rows =
         manifest["cases"][1]["grid"][1].as_u64().unwrap() * manifest["cases"][1]["grid"][2].as_u64().unwrap();
     assert_eq!(key_rows, 2394);
+    assert!(
+        !selected_rows.is_empty()
+            && selected_rows.len() <= 8
+            && selected_rows.iter().all(|row| *row < key_rows as usize)
+    );
+    assert!(matches!(label, "prefix" | "affected"));
+    let query_rows = selected_rows.len();
     let context = B::Context::new().unwrap();
     let mut inputs = Vec::new();
     for key in ["prepared_queries_0", "prepared_keys_0", "prepared_values_0"] {
@@ -299,7 +340,7 @@ fn checkpoint_flash_prefix<B: Backend>() {
         let source = floats(&bytes);
         assert_eq!(source.len(), key_rows as usize * 1152);
         let rows = if key == "prepared_queries_0" {
-            8
+            query_rows
         } else {
             key_rows as usize
         };
@@ -312,7 +353,12 @@ fn checkpoint_flash_prefix<B: Backend>() {
                     (row * 16 + head) * 128
                 };
                 for channel in 0..72 {
-                    input[destination + channel] = bf16::from_f32(source[(row * 16 + head) * 72 + channel]);
+                    let source_row = if key == "prepared_queries_0" {
+                        selected_rows[row]
+                    } else {
+                        row
+                    };
+                    input[destination + channel] = bf16::from_f32(source[(source_row * 16 + head) * 72 + channel]);
                 }
             }
         }
@@ -321,42 +367,52 @@ fn checkpoint_flash_prefix<B: Backend>() {
     let record = &stages["attention_0"];
     let bytes = read(&root, record["file"].as_str().unwrap());
     assert_eq!(format!("{:x}", Sha256::digest(&bytes)), record["sha256"].as_str().unwrap());
-    let expected = floats(&bytes);
+    let source_attention = floats(&bytes);
+    let expected = selected_rows
+        .iter()
+        .flat_map(|row| source_attention[*row * 1152..(*row + 1) * 1152].iter().copied())
+        .collect::<Vec<_>>();
     let attention = super::super::flash::FlashAttention::<B>::new(&context).unwrap();
     let mut command = context.create_command_buffer(None, None).unwrap();
-    let mut q = command.allocate_scratch_for_shape(&[16, 8, 128], DataType::BF16).unwrap();
+    let mut q = command.allocate_scratch_for_shape(&[16, query_rows as u32, 128], DataType::BF16).unwrap();
     let mut k = command.allocate_scratch_for_shape(&[key_rows as u32, 16, 128], DataType::BF16).unwrap();
     let mut v = command.allocate_scratch_for_shape(&[key_rows as u32, 16, 128], DataType::BF16).unwrap();
     command.encode_copy(&inputs[0], &mut q);
     command.encode_copy(&inputs[1], &mut k);
     command.encode_copy(&inputs[2], &mut v);
-    let output = attention.encode(&q, &k, &v, 8, key_rows as u32, 16, &mut command).unwrap();
-    let mut readback = context.create_buffer(8 * 1152 * 2).unwrap();
+    let output = attention.encode(&q, &k, &v, query_rows as u32, key_rows as u32, 16, &mut command).unwrap();
+    let mut readback = context.create_buffer(query_rows * 1152 * 2).unwrap();
     command.encode_copy(&output, &mut readback);
     command.end_encoding().submit().wait_until_completed().unwrap();
     let actual = buffer_to_vec::<B, bf16>(&readback);
-    let different =
-        actual.iter().zip(&expected[..8 * 1152]).filter(|(a, b)| a.to_f32().to_bits() != b.to_bits()).count();
-    let report = json!({"scope":"checkpoint-flash-query-prefix","backend":B::NAME,"query_rows":8,"heads":16,
-        "different_bf16_elements":different,"metrics":compare(&actual,&expected[..8 * 1152])});
+    let different = actual.iter().zip(&expected).filter(|(a, b)| a.to_f32().to_bits() != b.to_bits()).count();
+    let scope = if label == "prefix" {
+        "checkpoint-flash-query-prefix"
+    } else {
+        "checkpoint-flash-affected-query-rows"
+    };
+    let report = json!({"scope":scope,"backend":B::NAME,"query_rows":query_rows,"heads":16,
+        "different_bf16_elements":different,"metrics":compare(&actual,&expected)});
     std::fs::write(
-        root.join(format!("native-prefix-flash-{}.json", B::NAME)),
+        root.join(format!("native-{label}-flash-{}.json", B::NAME)),
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
     println!("{report}");
-    assert_eq!(different, 0, "canonical all-head query prefix differs");
+    report
 }
 
 #[cfg(backend = "cpu")]
 #[stark_test]
 #[ignore]
 fn gemma4_larger_checkpoint_flash_prefix_cpu() {
-    checkpoint_flash_prefix::<crate::backends::cpu::Cpu>();
+    let report = checkpoint_flash_rows::<crate::backends::cpu::Cpu>(&[0, 1, 2, 3, 4, 5, 6, 7], "prefix");
+    assert_eq!(report["different_bf16_elements"], 0, "canonical CPU prefix differs");
 }
 
 #[stark_test]
 #[ignore]
 fn gemma4_larger_checkpoint_flash_prefix_metal() {
-    checkpoint_flash_prefix::<crate::backends::metal::Metal>();
+    let report = checkpoint_flash_rows::<crate::backends::metal::Metal>(&[0, 1, 2, 3, 4, 5, 6, 7], "prefix");
+    assert_eq!(report["different_bf16_elements"], 0, "canonical Metal prefix differs");
 }
