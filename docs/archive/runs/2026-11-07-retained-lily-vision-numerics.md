@@ -1,9 +1,51 @@
 # Retained Lily vision source numerics
 
-Date: 2026-11-07. Diagnostic source: `9064eef6`; attention candidate:
-`408381f8`; masked-scratch guard: `9aeea9b1`; integer-barrier candidate:
-`771ddfb3`. This record concerns the original-format retained Lily vision
-component. Full-worker lifecycle evidence remains in the separate
+Session date: 2026-11-07. Final component replay: 2026-11-08 00:53 UTC.
+
+The retained original-format Lily vision component passes its frozen source
+gate. Both synthetic inputs have zero numerical error at 0, 1 and all 27
+blocks: all six merged-output comparisons have RMS 0 and cosine 1. The final
+arithmetic candidate is `94ce9e1a`, integrated and sealed at
+`9b1c1e44b901528e5579163597606a4b3bb13493`.
+
+## Qualified component result
+
+| Case index | Patches | Blocks | Merged values | Relative RMS | Cosine |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 256 | 0 | 163,840 | 0 | 1 |
+| 0 | 256 | 1 | 163,840 | 0 | 1 |
+| 0 | 256 | 27 | 163,840 | 0 | 1 |
+| 1 | 4 | 0 | 2,560 | 0 | 1 |
+| 1 | 4 | 1 | 2,560 | 0 | 1 |
+| 1 | 4 | 27 | 2,560 | 0 | 1 |
+
+The fixed gate remains RMS at most 0.02 and cosine at least 0.999. Across
+499,200 merged BF16 values, the observed numerical error is zero. The first
+block's 17-stage sequence is also exact for both inputs. All 14 production
+contractions, 10 nonlinear controls, position and rotary controls, three
+production attention stages per input, seven independent attention-order
+controls per input, and all observer comparisons report zero mismatches.
+Both 65,280-input finite-BF16 GELU domain controls report zero mismatches and
+zero nonfinite outputs. The 54-stage `full_norm` diagnostic remains the
+legacy two-pass baseline, separate from the selected production Welford path.
+
+The Rust 1.98.1 test seal SHA256 is
+`4d6631c7a66b71a9d606671dbeccc1ceb502715eabbe9e5f090a045b5bf7556c`;
+the vendored Lily source tree is
+`25dfbb16004058500ea9b2cf8cb889408e17ddab`.
+The private receipt is `9b1c1e44-lily/component-result.json` in the integration
+checkout's ignored qualification folder. It exited 0, peaked at
+1,015,463,936 bytes RSS, observed at least 63,066,144,768 bytes available
+RAM, and did not trip the 4-GiB-RSS / 8-GiB-available guard. The wrapper took
+4.740 seconds; this includes test/reference work and is not a throughput
+benchmark. The qualification build used opt-level 3 with debug info disabled;
+older debug seals and failures remain preserved.
+
+This is a tower-component qualification on these source-bound controls.
+Fresh full-worker lifecycle, full-model answer quality, larger-grid controls
+and throughput are separate qualifications. At this seal, a fresh retained
+full-worker replay had not run because an unrelated model occupied the
+required memory. Existing worker evidence remains in the separate
 [image-family record](2026-11-07-qwen-image-families.md).
 
 ## Artifact and independent source
@@ -87,7 +129,7 @@ its script SHA256 is
 
 ## Arithmetic change and acceptance
 
-The vision attention kernel now rounds the QK result to BF16 and rounds the
+The initial attention candidate rounded the QK result to BF16 and rounded the
 scalar-scaled score to BF16. Its first tiled pass computes global F32
 softmax statistics. A second tiled QK pass casts globally normalized
 probabilities to BF16 before PV. Both passes retain 32-query/64-key tiles,
@@ -306,10 +348,65 @@ F32 positions multiply those frequencies, followed by F32 cosine/sine and
 separately rounded products are added before the single BF16 output cast.
 No attention policy or coordinate geometry changed for this diagnostic.
 
-Native candidate qualification is pending the root-owned build/replay at the
-time of this source checkpoint. Repository policy checks and `git diff
---check` pass. Rust sources were formatted with nightly-2026-10-01. Native
-builds and model-bound GPU work are centralized in the integration checkout.
+The safe/uncontracted rotary witness at integrated source `a1649a6a`, seal
+SHA256 `2bd7edacd22aff7f18e3cad9834b8b5696c4cda2b0935ceca681d11283d5ed5a`,
+reduced case-0 mismatches from 38 to 17 (0.00001410644 RMS), without closing
+the source gate. It was not promoted. Source F32 stages were then captured in
+the 189,255-byte rotary fixture, manifest SHA256
+`62d158ff6f64365ed54fa3465417b71f1bc538044c3486fb921c8401c9c32f3e`.
+
+Frequency/trig controls at integrated source `1d0fe455`, seal SHA256
+`93b6408c3d348c15be8e923e8d9da284400a29421452bdcee2cdaf52d64de3a1`,
+found seven of 18 native inverse frequencies differed by at most two F32 ULPs.
+Native angles differed at 3,104 of 9,216 values; native trig differed even at
+exact source angles (4,064 cosine and 4,064 sine values, at most two ULPs).
+Applying exact source coefficients was exact, and the staged native
+application matched the safe witness exactly. The follow-up `c31fc114` seal
+SHA256 `56e20caba19df6bb12ffc16a72be13d2bfb79296bd386d2d4af644a3ea99fe32`
+isolated eight remaining BF16 mismatches when only native trig was used at
+exact source angles. Both frequency construction and trig needed correction.
+
+The source-compatible host control at integrated source `96b6da7d`, seal
+SHA256 `7a828dd1c802447c45202bd1a884b3af59a2e6a61ea98ca7e6024de02b2970a5`,
+proved Rust F32 powf frequencies, block-major angles and the pinned SLEEF
+four-lane cos/sin schedule exactly matched source F32 bits for both cases.
+Its BF16 application also had zero mismatches. Production candidate
+`4172094d` uses this live arithmetic, with no fixture vectors, and two
+scratch-owned coefficient buffers bounded at 2,359,296 bytes total. Angles
+are finite and below 4,096; buffers are refreshed before the GPU pass and
+remain alive through completion. The standalone Boost license/attribution,
+vendor NOTICE and distribution source manifest identify the copied bodies.
+
+That production replay at integrated source `e7717364`, seal SHA256
+`5f5b4e3df3d86bd7b1fc86d758175d1a650753d34884f3bda02d49d699a2d037`,
+passed exact production F32 coefficient and BF16 rotary application checks.
+The first five sequence outputs became exact, moving the first discrepancy
+to attention (0.00017953088 RMS). The full case-0 RMS was 0.02741351 and
+still failed; case 1 remained exact. The failed receipt was preserved.
+
+Independent attention-order controls at integrated source `7e537d9d`, seal
+SHA256 `fed1c3cd71debab962f12c1674c7ea1a35f217e7d817cfd5ffcc44a48e17ca31`,
+were exact in all seven controls per input: source-order QK, scaled scores,
+scaling source QK, softmax on source scaled scores, PV on source P/V,
+combined probabilities and combined output. The ordinary path still
+differed at 131 BF16 case-0 outputs. Segmented and ordinary reference
+execution matched at every observed intermediate and final output.
+
+Production candidate `94ce9e1a` maps the witnessed aligned64/32-stream plus
+eight-term-tail QK fold onto one SIMD32 group per query, retains four complete
+key-range softmax sums with the crosswise fold, pinned SLEEF exp and reciprocal
+multiply, and four-stream PV. Three streaming passes use fixed register state
+without an N-by-N tensor or weight copies. The H1152/head72/16-head profile
+checks N <= 8,192, N divisible by four and SIMD width 32; other geometries
+retain NAX. Independent source controls, actual-production stage captures,
+hard source-bit checks and hard observer equality remain enabled in the
+ignored test. This candidate produced the qualified result at the top of
+this record. No reference output or acceptance gate was changed.
+
+Repository policy checks and `git diff --check` pass. Rust sources were
+formatted with nightly-2026-10-01. Native builds and model-bound GPU work
+were centralized in the integration checkout; no native target or weight
+download was created in the agent checkout.
 
 Image requests already clear and bypass generation prefix reuse; this
 component change retains that state policy. Image requests have no MTP path.

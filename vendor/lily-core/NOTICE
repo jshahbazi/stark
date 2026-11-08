@@ -140,3 +140,9 @@ sources also preserve the main engine's PyTorch BSD, embedded GGML MIT,
 SLEEF Boost and Arm Optimized Routines notices. Exact source revisions,
 file hashes and full distribution notices are recorded in UPSTREAM.md and
 the repository's scripts/licenses/distribution manifest and license files.
+
+The vision-only streaming attention and independent order controls retain
+the same pinned PyTorch contraction/softmax schedules and SLEEF expf_u10
+source lineage. The SLEEF copyright, LICENSE.sleef and ATTRIBUTION.sleef
+above also apply to those exponential helpers; the distribution manifest
+records the PyTorch BSD and embedded GGML MIT notices for the reductions.
