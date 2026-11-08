@@ -6,7 +6,7 @@ Date: 2026-11-08
 
 This report covers the complete **Audit inference size limits** conversation: the initial audit, shared-budget implementation, automatic execution for undeclared contexts, PR preparation, and the subsequent correctness review. It consolidates findings; it does not replace the source-bound run records linked below or backfill unrelated model optimization history.
 
-The implementation is in [PR #99](https://github.com/jshahbazi/stark/pull/99), with final tested runtime revision `9a3e72161332af6a27287c471c86a6491a7d89f5`. At this report's status check, that revision had 19 successful CI checks. The PR was **open and unmerged**. The installed app was not updated by this work.
+The implementation is in [PR #99](https://github.com/jshahbazi/stark/pull/99), with final tested runtime revision `9a3e72161332af6a27287c471c86a6491a7d89f5`. At the original report's status check, that revision had 19 successful CI checks and the PR was open. PR #99 subsequently merged on 2026-11-08 as `ea098a244e25dfe5be934809c1fb87344183ac0c`. The installed app was not updated by this work.
 
 The work removed shared policy limits that could reject requests before tokenization, added automatic output allowances and expanded memory admission and recovery. It established bounded compatibility results on specific Qwen artifacts and a synthetic recurrent fixture. **It established no measured speedup.** No inference kernels, weight precision or numerical execution policy were intentionally changed.
 
@@ -109,6 +109,6 @@ Follow-up work should be logged before execution:
 3. Qualify long input/output and filled allowances on each exact trained artifact. Add a genuine undeclared-context trained artifact and Dense MTP case when available.
 4. Run real-image hardware validation; retain separate decoder and encoder memory accounting. Prepared-context resizing and a complete encoder peak inventory remain unimplemented here.
 5. Measure conservative admission under memory pressure, including retained-state double charging. A current-memory observation is not a reservation and other processes can change it.
-6. Track merge, release and installation separately. This report records an open PR and tested builds, not deployment.
+6. Track merge, release and installation separately. Runtime PR #99 is merged; release and installation require their own evidence.
 
 Only aggregate results, hashes and reproducible conditions belong in public records. Prompts, completions, token vectors, probabilities, credentials, exception dumps, models and private runtime artifacts remain excluded.

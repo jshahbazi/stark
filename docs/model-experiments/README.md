@@ -31,7 +31,7 @@ Use totals only within their recorded scope; overlapping reruns must not be summ
 
 ## Attempt index
 
-All rows below link to the [complete findings and per-model matrix](../archive/runs/2026-11-08-context-resource-budget-findings.md). `CTX-NN` expands to `20261108-CTX-NN`. The implementation's runtime revision is `9a3e7216` in open [PR #99](https://github.com/jshahbazi/stark/pull/99); these rows do not claim merge, release or installation.
+All rows below link to the [complete findings and per-model matrix](../archive/runs/2026-11-08-context-resource-budget-findings.md). `CTX-NN` expands to `20261108-CTX-NN`. The implementation's runtime revision `9a3e7216` merged through [PR #99](https://github.com/jshahbazi/stark/pull/99) as `ea098a24`. This records runtime adoption; it does not establish release, installation or broader artifact qualification. This ledger and its workflow are a separate documentation addition.
 
 | ID | Scope and attempt | Recorded outcome | Disposition |
 | --- | --- | --- | --- |
