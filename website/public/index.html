@@ -1,6 +1,5 @@
-<!doctype html>
-<html lang="en">
-<head>
+<!DOCTYPE html>
+<html lang="en"><head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
@@ -19,7 +18,7 @@
   <link rel="canonical" href="https://starkengine.app/">
   <link rel="icon" href="assets/stark-engine.jpg" type="image/jpeg">
   <link rel="stylesheet" href="styles.css">
-  <script src="app.js" defer></script>
+  <script src="app.js" defer=""></script>
   <title>Stark — run local AI on your Mac</title>
 </head>
 <body>
@@ -131,9 +130,9 @@ open "$HOME/Applications/Stark.app"</code></pre>
           <div class="try-prompt"><span>TRY A SMALL FIRST TASK</span><p>“Explain what this project does. Don't change any files.”</p><small>Open a test project and review the answer.</small></div></div>
         </article>
 
-        <p class="developer-link" id="engine">Building your own app? <a href="technical.html#engine">Explore the API and native workers <span aria-hidden="true">↗</span></a></p>
-        <div data-app-support>
-          <p class="app-model-note">For tasks that read files or use tools, your model must support <strong>tool calling</strong>. In Stark's <strong>Connections</strong> window, look for “Tool use available” under the running model. Results depend on the model and the task; start small and review its work.</p>
+        <p class="developer-link" id="engine">Building your own app? <a href="technical.html#engine">Explore the API and native workers <span aria-hidden="true">↗</span></a><div><br></div></p>
+        <div data-app-support="">
+          
           <details class="setup-help"><summary>A few things that help on your first run <span aria-hidden="true">+</span></summary><div class="help-grid"><div><h3>Do I need both apps?</h3><p>Choose the one that fits your task. You can also chat directly in Stark using <strong>Open chat</strong> in Beginner or <strong>Open Playground → Chat</strong> in Advanced, without installing either.</p></div><div><h3>Where does the AI run?</h3><p>The selected Stark model runs on your Mac. OpenWork and OpenCode are separate apps; any extra services or plugins you enable have their own data practices.</p></div><div><h3>What if my model doesn't appear?</h3><p>Keep Stark open and confirm your model is running in <strong>Chat</strong> mode. Both apps need a model with a declared context limit. Follow the message in <strong>Connections → Apps</strong>; it will explain a model limitation or ask you to reopen the app.</p></div><div><h3>How do I stop access?</h3><p>Open <strong>Connections → Apps</strong> and choose <strong>Manage → Disconnect</strong> for that app. Use <strong>Stop</strong> in Manage Models to stop the model.</p></div></div></details>
           <details class="setup-help manual-connect"><summary>Connecting another app or using the OpenCode terminal? <span aria-hidden="true">+</span></summary><div><p>Other compatible native apps can use the <strong>Base URL</strong>, <strong>API key</strong> and <strong>Model ID</strong> under <strong>Connections → Other apps</strong>. Choose an OpenAI-compatible provider in your app and copy those settings there. The key is stored in macOS Keychain and reused across launches; the saved port stays the same unless you change it. Keep the key private.</p><p>The guided OpenCode connection is for <strong>OpenCode Desktop</strong>. A standalone terminal engine uses the manual API-key setup. Stark's API is available only on this Mac; direct requests from web pages are unsupported.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md">API setup, supported models and limits <span aria-hidden="true">↗</span></a></div></details>
         </div>
@@ -161,7 +160,8 @@ open "$HOME/Applications/Stark.app"</code></pre>
         <p class="cat-description">This app is named after my cat, Stark. Excellent company, very strong opinions about lap availability and food—not necessarily in that order.</p>
       </div>
     </section>
-    <div class="wrap footer-bottom"><div><p>An experimental, open-source Rust/Metal engine derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a> and modified like crazy. Upstream Uzu/Mirai history, copyright and notices are preserved.</p><p>Free, open source · Signed and notarized<br>Apple silicon · macOS 26.4+ · <a href="technical.html#model-fit">Check memory requirements</a>.</p><p>Experimental software. Model support and results vary; <a href="https://github.com/jshahbazi/stark/releases/latest">read the release notes</a>.</p></div><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Upstream provenance <span aria-hidden="true">↗</span></a></div>
+    <div class="wrap footer-bottom"><div><p>An open-source Rust/Metal engine originally derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a> and modified heavily.&nbsp; Model support and results vary.</p></div><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Upstream provenance <span aria-hidden="true">↗</span></a></div>
   </footer>
-</body>
-</html>
+
+
+</body></html>
