@@ -2,12 +2,11 @@ import warnings
 
 import pytest
 
+from stark_convert import tool_pythonic
 from stark_convert.tool_pythonic import (
-    MAX_ARGUMENT_BYTES,
     MAX_AST_DEPTH,
     MAX_AST_NODES,
     MAX_CALLS,
-    MAX_PAYLOAD_BYTES,
     parse_pythonic_payload,
 )
 
@@ -19,6 +18,12 @@ class Rejected(Exception):
 
 def parse(payload):
     return parse_pythonic_payload(payload, invalid=Rejected)
+
+
+@pytest.fixture
+def small_byte_budget(monkeypatch):
+    monkeypatch.setattr(tool_pythonic, "MAX_PAYLOAD_BYTES", 128 * 1024)
+    monkeypatch.setattr(tool_pythonic, "MAX_ARGUMENT_BYTES", 64 * 1024)
 
 
 def test_native_lfm_calls_scalars_and_json_composites():
@@ -91,18 +96,18 @@ def test_duplicate_keyword_and_duplicate_json_keys_rejected():
             parse(source)
 
 
-def test_call_and_payload_limits():
+def test_call_and_payload_limits(small_byte_budget):
     with pytest.raises(Rejected) as err:
         parse("[" + ",".join("f()" for _ in range(MAX_CALLS + 1)) + "]")
     assert err.value.category == "format"
     with pytest.raises(Rejected) as err:
-        parse("[f(x='" + "a" * MAX_PAYLOAD_BYTES + "')]")
+        parse("[f(x='" + "a" * tool_pythonic.MAX_PAYLOAD_BYTES + "')]")
     assert err.value.category == "limits"
 
 
-def test_argument_limit():
+def test_argument_limit(small_byte_budget):
     with pytest.raises(Rejected) as err:
-        parse("[f(x='" + "a" * MAX_ARGUMENT_BYTES + "')]")
+        parse("[f(x='" + "a" * tool_pythonic.MAX_ARGUMENT_BYTES + "')]")
     assert err.value.category == "limits"
 
 
@@ -144,3 +149,30 @@ def test_returned_value_depth_and_node_bounds():
     nested = "[f(x=" + "[" * (MAX_AST_DEPTH + 1) + "0" + "]" * (MAX_AST_DEPTH + 1) + ")]"
     with pytest.raises(Rejected):
         parse(nested)
+
+
+def test_shared_budget_accepts_string_larger_than_old_payload_and_argument_caps():
+    value = "é" * (300 * 1024)
+    assert len(value.encode("utf-8")) > 512 * 1024
+    assert parse(f"[f(x='{value}')]") == [("f", {"x": value})]
+
+
+def test_compact_payload_is_rejected_before_ast_allocation(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Over-budget source must be rejected before AST allocation.")
+
+    monkeypatch.setattr(tool_pythonic.ast, "parse", forbidden)
+    monkeypatch.setattr(tool_pythonic, "MAX_AST_NODES", 16)
+    with pytest.raises(Rejected) as raised:
+        parse("[f(x=[" + "0," * 64 + "0])]")
+    assert raised.value.category == "limits"
+
+
+def test_argument_boundary_counts_utf8_with_small_budget(monkeypatch):
+    monkeypatch.setattr(tool_pythonic, "MAX_PAYLOAD_BYTES", 128)
+    monkeypatch.setattr(tool_pythonic, "MAX_ARGUMENT_BYTES", 64)
+    value = "é" * 27 + "x"
+    assert parse(f"[f(x='{value}')]") == [("f", {"x": value})]
+    with pytest.raises(Rejected) as raised:
+        parse(f"[f(x='{value}y')]")
+    assert raised.value.category == "limits"

@@ -291,13 +291,13 @@ struct ChatOptions {
     var useModelSystemPrompt = true
     var systemPrompt = ""
     var contextTokens = 0
-    var maxNewTokens = 512
+    var maxNewTokens = 0
     var thinking = false
 
-    static func defaults(contextLimit: Int, outputLimit: Int) -> ChatOptions {
+    static func defaults(contextLimit: Int, outputLimit _: Int) -> ChatOptions {
         var options = ChatOptions()
         options.contextTokens = contextLimit
-        options.maxNewTokens = min(512, outputLimit, max(0, contextLimit - 1))
+        options.maxNewTokens = 0
         return options
     }
 }
@@ -1178,6 +1178,9 @@ final class EngineController: ObservableObject {
     private var input: FileHandle?
     private var output: FileHandle?
     private var pending = Data()
+    private let maxSafeWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
+    private var maxWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
+    private let workerWireLimitLock = NSLock()
     private let reader = DispatchQueue(label: "stark.desktop.reader")
     private var shuttingDown = false
     private var pendingMessageID: UUID?
@@ -1382,7 +1385,7 @@ final class EngineController: ObservableObject {
         }
         output = outgoing.fileHandleForReading
         output?.readabilityHandler = { [weak self] handle in
-            let bytes = handle.availableData
+            let bytes = handle.readData(ofLength: 65_536)
             guard !bytes.isEmpty else { handle.readabilityHandler = nil; return }
             self?.reader.async { [weak self] in self?.receive(bytes) }
         }
@@ -1402,16 +1405,21 @@ final class EngineController: ObservableObject {
 
     private func receive(_ bytes: Data) {
         pending.append(bytes)
-        guard pending.count <= 20 * 1024 * 1024 else {
-            pending.removeAll()
-            DispatchQueue.main.async { self.stop(); self.message = "Worker reply exceeded the size limit." }
-            return
-        }
         while let boundary = pending.firstIndex(of: 10) {
             let line = pending.prefix(upTo: boundary)
             pending.removeSubrange(...boundary)
+            guard line.count + 1 <= workerWireLimit() else {
+                pending.removeAll()
+                DispatchQueue.main.async { self.stop(); self.message = "Worker reply exceeded the size limit." }
+                return
+            }
             guard let value = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             DispatchQueue.main.async { [weak self] in self?.apply(value) }
+        }
+        guard pending.count <= workerWireLimit() else {
+            pending.removeAll()
+            DispatchQueue.main.async { self.stop(); self.message = "Worker reply exceeded the size limit." }
+            return
         }
     }
 
@@ -1521,6 +1529,11 @@ final class EngineController: ObservableObject {
             }
             guard let readyMode = PlaygroundMode(rawValue: event["mode"] as? String ?? "chat"), readyMode == mode,
                   event["model_id"] as? String == selectedID, state != "stopping" else { return }
+            guard applyResourceBudget(event) else {
+                state = "error"
+                message = "The runtime reported an invalid request budget. Quit and reopen Stark."
+                return
+            }
             if beginnerRunRequestID != nil {
                 clearConversation(); clearDecision()
                 beginnerRunRequestID = nil; beginnerRunBackup = nil
@@ -1876,7 +1889,7 @@ final class EngineController: ObservableObject {
             state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark."
             return false
         }
-        guard bytes.count < 1024 * 1024 else {
+        guard bytes.count + 1 <= workerWireLimit() else {
             errorMessage = "The prompt is too large. Send a shorter message."
             state = loadedID.isEmpty ? "idle" : "ready"
             message = loadedID.isEmpty ? "Stopped" : "Ready"
@@ -1885,6 +1898,38 @@ final class EngineController: ObservableObject {
         bytes.append(10)
         do { try input.write(contentsOf: bytes); return true }
         catch { state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark."; return false }
+    }
+
+    private func applyResourceBudget(_ event: [String: Any]) -> Bool {
+        guard let budget = event["resource_budget"] as? [String: Any] else {
+            setWorkerWireLimit(maxSafeWorkerWireBytes)
+            return true
+        }
+        guard let requestMiBValue = SupportMetadata.integer(budget["request_budget_mib"]),
+              requestMiBValue <= 64,
+              let requestMiB = Int(exactly: requestMiBValue),
+              (1...64).contains(requestMiB),
+              let inputBytesValue = SupportMetadata.integer(budget["input_bytes"]),
+              let inputBytes = Int(exactly: inputBytesValue),
+              inputBytes == requestMiB * 1024 * 1024,
+              let maxRequestBytesValue = SupportMetadata.integer(budget["max_request_bytes"]),
+              let maxRequestBytes = Int(exactly: maxRequestBytesValue),
+              maxRequestBytes == 6 * inputBytes + 2 * 1024 * 1024,
+              maxRequestBytes <= maxSafeWorkerWireBytes else { return false }
+        setWorkerWireLimit(maxRequestBytes)
+        return true
+    }
+
+    private func workerWireLimit() -> Int {
+        workerWireLimitLock.lock()
+        defer { workerWireLimitLock.unlock() }
+        return maxWorkerWireBytes
+    }
+
+    private func setWorkerWireLimit(_ value: Int) {
+        workerWireLimitLock.lock()
+        maxWorkerWireBytes = value
+        workerWireLimitLock.unlock()
     }
 
     /// Credential bytes travel only over the private app/backend pipe.
@@ -3073,7 +3118,7 @@ struct AdvancedOptionsView: View {
         _useModelSystemPrompt = State(initialValue: engine.options.useModelSystemPrompt)
         _systemPrompt = State(initialValue: engine.options.systemPrompt)
         _context = State(initialValue: String(engine.options.contextTokens))
-        _output = State(initialValue: String(engine.options.maxNewTokens))
+        _output = State(initialValue: engine.options.maxNewTokens == 0 ? "" : String(engine.options.maxNewTokens))
         _thinking = State(initialValue: engine.options.thinking)
         _mtpEnabled = State(initialValue: engine.mtpEnabled)
     }
@@ -3084,8 +3129,16 @@ struct AdvancedOptionsView: View {
                 ? "Context size must be between 2 and \(engine.contextLimit) tokens."
                 : "Conversation budget must be between 2 and \(engine.contextLimit) tokens (protocol range)."
         }
-        guard let maximum = Int(output), (1...engine.outputLimit).contains(maximum) else {
-            return "Output limit must be between 1 and \(engine.outputLimit) tokens."
+        let outputValue = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let automatic = outputValue.isEmpty || outputValue.caseInsensitiveCompare("Auto") == .orderedSame
+        if automatic {
+            if !engine.contextCapacityKnown && count == engine.contextLimit {
+                return "Set a finite conversation budget or choose an output limit for this model."
+            }
+            return nil
+        }
+        guard let maximum = Int(outputValue), (1...engine.outputLimit).contains(maximum) else {
+            return "Enter Auto or an output limit between 1 and \(engine.outputLimit) tokens."
         }
         return maximum < count ? nil : "Output limit must be smaller than context size."
     }
@@ -3111,14 +3164,14 @@ struct AdvancedOptionsView: View {
                 }
                 GridRow {
                     Text("Output limit (tokens)")
-                    TextField("Output limit", text: $output).textFieldStyle(.roundedBorder)
+                    TextField("Auto", text: $output).textFieldStyle(.roundedBorder)
                         .accessibilityLabel("Output limit in tokens")
                 }
             }
-            Text("Context includes the conversation and room for the full reply budget.")
+            Text("Auto uses all tokens left after the conversation, up to the model's generation limit.")
                 .font(.caption).foregroundStyle(.secondary)
             if !engine.contextCapacityKnown {
-                Text("This model does not declare a finite context maximum. The budget uses Stark's protocol range; memory and request byte limits still apply. Text requests allocate only the context they need.")
+                Text("This model has no finite context maximum. Set a finite conversation budget or choose an output limit before using Auto.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Toggle("Thinking mode", isOn: $thinking)
@@ -3132,8 +3185,8 @@ struct AdvancedOptionsView: View {
             if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
             Text(engine.contextCapacityKnown
-                 ? "Context defaults to the model's maximum. Custom limits stay in memory for this app session and are bounded by the running model."
-                 : "The default budget uses the protocol range without claiming a model context maximum. Custom budgets stay in memory for this app session.")
+                 ? "Context defaults to the model's maximum. Auto uses the remaining context for the reply."
+                 : "Set a finite conversation budget before using Auto with this model.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Restore Defaults") {
@@ -3142,12 +3195,17 @@ struct AdvancedOptionsView: View {
                     systemPrompt = defaults.systemPrompt; thinking = defaults.thinking
                     mtpEnabled = true
                     context = String(defaults.contextTokens)
-                    output = String(defaults.maxNewTokens)
+                    output = defaults.maxNewTokens == 0 ? "" : String(defaults.maxNewTokens)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Apply and New Chat") {
-                    guard let count = Int(context), let maximum = Int(output) else { return }
+                    guard let count = Int(context) else { return }
+                    let outputValue = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let maximum = outputValue.isEmpty || outputValue.caseInsensitiveCompare("Auto") == .orderedSame
+                        ? 0
+                        : (Int(outputValue) ?? -1)
+                    guard maximum >= 0 else { return }
                     var options = ChatOptions()
                     options.useModelSystemPrompt = useModelSystemPrompt
                     options.systemPrompt = systemPrompt

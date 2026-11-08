@@ -21,9 +21,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-MAX_TEXT_BODY_BYTES = 1024 * 1024
-MAX_IMAGE_BODY_BYTES = 6 * 1024 * 1024
-MAX_PENDING_BODY_BYTES = 24 * 1024 * 1024
+from .json_budget import check_json_structure
+from .resource_budget import PENDING_BYTES, WIRE_BYTES, available_memory_bytes
+
+MAX_TEXT_BODY_BYTES = WIRE_BYTES
+MAX_IMAGE_BODY_BYTES = WIRE_BYTES + 6 * 1024 * 1024
+MAX_PENDING_BODY_BYTES = PENDING_BYTES
 # OpenWork (16) plus OpenCode Desktop (8) managed capabilities share this admission table.
 MAX_API_CLIENTS = 24
 MAX_API_CLIENT_TTL_SECONDS = 120
@@ -469,11 +472,13 @@ class LocalAPI:
                     raw_length = content_lengths[0].strip()
                     if not raw_length or not raw_length.isascii() or not raw_length.isdecimal():
                         raise APIError(400, "Invalid Content-Length", "invalid_request")
-                    if len(raw_length.lstrip("0")) > 7:
+                    if len(raw_length.lstrip("0")) > len(str(MAX_IMAGE_BODY_BYTES)):
                         raise APIError(413, "Request body is too large", "body_too_large")
                     length = int(raw_length.lstrip("0") or "0")
                     if length > api._body_limit():
                         raise APIError(413, "Request body is too large", "body_too_large")
+                    if length > 1024 * 1024 and 3 * length > available_memory_bytes():
+                        raise APIError(429, "Available memory is too low for this request", "memory_pressure")
                     with api._body_lock:
                         if api._pending_body_bytes + length > MAX_PENDING_BODY_BYTES:
                             raise APIError(429, "Pending request bytes exceed the server budget", "body_budget_full")
@@ -486,6 +491,7 @@ class LocalAPI:
                         body = self.rfile.read(length)
                         if len(body) != length:
                             raise APIError(400, "Incomplete request body", "invalid_request")
+                        check_json_structure(body)
                         payload = json.loads(
                             body,
                             object_pairs_hook=self._pairs,

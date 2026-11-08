@@ -18,10 +18,9 @@ use stark_engine::{
     backends::metal::Metal,
     engine::{Engine, language_model::LanguageModel},
 };
+use stark_resource_budget::Budget;
 
 use crate::cache::{CacheEntry, LastScoreCache};
-
-const MAX_REQUEST_BYTES: usize = 1_048_576;
 
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -216,6 +215,7 @@ struct ScoreWorker<B> {
     digest_mode: bool,
     hits: u64,
     native_score_calls: u64,
+    budget: Budget,
 }
 
 #[derive(Serialize)]
@@ -458,10 +458,25 @@ impl ScoringBackend for NativeBackend {
 }
 
 impl<B: ScoringBackend> ScoreWorker<B> {
+    #[cfg(test)]
     fn new(
         backend: B,
         enabled: bool,
         digest_mode: bool,
+    ) -> Self {
+        Self::new_with_budget(
+            backend,
+            enabled,
+            digest_mode,
+            Budget::from_environment().expect("valid test resource budget"),
+        )
+    }
+
+    fn new_with_budget(
+        backend: B,
+        enabled: bool,
+        digest_mode: bool,
+        budget: Budget,
     ) -> Self {
         Self {
             backend,
@@ -469,6 +484,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
             digest_mode,
             hits: 0,
             native_score_calls: 0,
+            budget,
         }
     }
 
@@ -514,8 +530,14 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                 if text.is_empty() {
                     return Err("invalid_tokenization_request");
                 }
+                if text.len() > self.budget.input_bytes {
+                    return Err("resource_budget_exceeded");
+                }
                 let started = Instant::now();
                 let ids = self.backend.tokenize(text, add_special_tokens)?;
+                if ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>() {
+                    return Err("resource_budget_exceeded");
+                }
                 Ok(PendingReply {
                     value: json!({"token_ids":ids,"token_count":ids.len(),"token_ids_sha256":token_hash(&ids),
                     "vocab_size":self.backend.vocab_size(),"tokenization_seconds":started.elapsed().as_secs_f64(),
@@ -530,6 +552,14 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                 context_tokens,
                 temperature,
             } => {
+                if self.backend.vocab_size() > self.budget.input_bytes / std::mem::size_of::<f32>() {
+                    return Err("resource_budget_exceeded");
+                }
+                if input_token_ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>()
+                    || candidate_token_ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>()
+                {
+                    return Err("resource_budget_exceeded");
+                }
                 let started = Instant::now();
                 let previous = self.cache.take_matching(&input_token_ids, context_tokens);
                 validate_score(
@@ -563,6 +593,9 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                     || scores.logits.iter().any(|value| !value.is_finite())
                 {
                     return Err("invalid_score_values");
+                }
+                if scores.logits.len() > self.budget.input_bytes / std::mem::size_of::<f32>() {
+                    return Err("resource_budget_exceeded");
                 }
                 let readout_started = Instant::now();
                 let (logits, log_probabilities, candidate_probabilities) =
@@ -618,8 +651,8 @@ impl<B: ScoringBackend> ScoreWorker<B> {
         bytes: &[u8],
         output: &mut impl Write,
     ) -> Result<(), &'static str> {
-        let result = serde_json::from_slice::<ScoreRequest>(bytes)
-            .map_err(|_| "invalid_request")
+        let result = stark_resource_budget::check_json_structure(bytes, self.budget)
+            .and_then(|()| serde_json::from_slice::<ScoreRequest>(bytes).map_err(|_| "invalid_request"))
             .and_then(|request| self.handle(request));
         match result {
             Ok(pending) => {
@@ -654,8 +687,9 @@ pub(super) fn run_lines(
     digest_mode: bool,
     output: &mut impl Write,
 ) -> Result<(), &'static str> {
+    let budget = Budget::from_environment()?;
     let started = Instant::now();
-    let mut worker = ScoreWorker::new(NativeBackend::load(path)?, enabled, digest_mode);
+    let mut worker = ScoreWorker::new_with_budget(NativeBackend::load(path)?, enabled, digest_mode, budget);
     write_reply(
         output,
         &json!({"ready":true,"engine":"stark","version":"0.1.0",
@@ -668,6 +702,7 @@ pub(super) fn run_lines(
         "cache":worker.telemetry(false),
         "load_seconds":started.elapsed().as_secs_f64(),"vocab_size":worker.backend.vocab_size(),
         "max_context_tokens":worker.backend.max_context_length(),
+        "max_request_bytes":worker.budget.wire_bytes,"request_budget_bytes":worker.budget.input_bytes,
         "peak_memory_bytes":worker.backend.peak_memory_usage()}),
     )
     .map_err(|_| "protocol_write_failed")?;
@@ -766,7 +801,7 @@ fn run_request_loop<B: ScoringBackend, I: ScoreInput>(
             }
         }
         let mut bytes = Vec::new();
-        let count = match Read::by_ref(input).take(MAX_REQUEST_BYTES as u64 + 1).read_until(b'\n', &mut bytes) {
+        let count = match Read::by_ref(input).take(worker.budget.wire_bytes as u64 + 1).read_until(b'\n', &mut bytes) {
             Ok(count) => count,
             Err(_) => {
                 worker.cache.clear();
@@ -777,7 +812,7 @@ fn run_request_loop<B: ScoringBackend, I: ScoreInput>(
             worker.cache.clear();
             return Ok(());
         }
-        if bytes.len() > MAX_REQUEST_BYTES {
+        if bytes.len() > worker.budget.wire_bytes {
             worker.cache.clear();
             write_reply(output, &json!({"error":"request_too_large","cache":worker.telemetry(false)}))
                 .map_err(|_| "protocol_write_failed")?;

@@ -7,11 +7,10 @@ from pathlib import Path
 
 import pytest
 
+import stark_convert.api_tools as api_tools_module
 from stark_convert.api_request import parse_chat_request
 from stark_convert.api_tools import (
-    MAX_ARGUMENT_BYTES,
     MAX_TOOL_OUTPUT_BYTES,
-    MAX_TOOL_RESULT_BYTES,
     QWEN3_4B_TEMPLATE_SHA256,
     QWEN3_TEMPLATE_SHA256,
     QWEN35_XML_TEMPLATE_SHA256,
@@ -25,6 +24,22 @@ from stark_convert.api_tools import (
     validate_parser_tools,
 )
 from stark_convert.local_api import APIError
+
+# Keep parameterized malformed-wire fixtures compact; the autouse fixture
+# applies the same test budget to the implementation under test.
+MAX_ARGUMENT_BYTES = 64 * 1024
+
+
+@pytest.fixture(autouse=True)
+def _small_protocol_byte_budgets(monkeypatch):
+    # Exercise boundaries without allocating the production multi-megabyte cap.
+    for name in ("MAX_ARGUMENT_BYTES", "MAX_SCHEMA_BYTES"):
+        monkeypatch.setattr(api_tools_module, name, 64 * 1024)
+    monkeypatch.setattr(api_tools_module, "MAX_TOOL_OUTPUT_BYTES", 128 * 1024)
+    monkeypatch.setitem(globals(), "MAX_ARGUMENT_BYTES", 64 * 1024)
+    monkeypatch.setitem(globals(), "MAX_SCHEMA_BYTES", 64 * 1024)
+    monkeypatch.setitem(globals(), "MAX_TOOL_OUTPUT_BYTES", 128 * 1024)
+
 
 TOOL = {
     "type": "function",
@@ -227,15 +242,27 @@ def test_history_arguments_are_strict_json_objects(arguments):
         request(messages=messages)
 
 
+def test_argument_structure_is_bounded_before_json_allocation(monkeypatch):
+    from stark_convert import json_budget
+
+    monkeypatch.setattr(json_budget, "MAX_JSON_NODES", 8)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("oversized structures must be rejected before parsing")
+
+    monkeypatch.setattr(api_tools_module.json, "loads", forbidden)
+    with pytest.raises(APIError):
+        api_tools_module.strict_arguments('{"x":[0,0,0,0,0,0,0,0,0]}')
+
+
 def test_tool_argument_result_and_schema_bounds():
     messages = history()
     messages[1]["tool_calls"][0]["function"]["arguments"] = json.dumps({"x": "a" * MAX_ARGUMENT_BYTES})
     with pytest.raises(APIError):
         request(messages=messages)
     messages = history()
-    messages[-1]["content"] = "a" * (MAX_TOOL_RESULT_BYTES + 1)
-    with pytest.raises(APIError):
-        request(messages=messages)
+    messages[-1]["content"] = "a" * (256 * 1024 + 1)
+    assert request(messages=messages)["messages"][-1]["content"] == messages[-1]["content"]
     tool = copy.deepcopy(TOOL)
     tool["function"]["description"] = "a" * (256 * 1024)
     with pytest.raises(APIError):

@@ -65,6 +65,8 @@ def test_unknown_capacity_sizes_native_text_state_per_request(unknown_context, s
 
 
 def test_unknown_capacity_playground_also_reserves_only_its_request(unknown_context):
+    # A backend without a declared context needs an explicit output allowance.
+    unknown_context.maximum = 32
     worker = unknown_context.worker
     with patch.object(worker, "request", wraps=worker.request) as request:
         unknown_context.dispatch({"command": "generate", "text": "Synthetic playground request"})

@@ -31,6 +31,7 @@ optimized = [
 ]
 
 [dependencies]
+stark-resource-budget = { path = "../stark-resource-budget" }
 stark-engine = { path = "../stark-engine", default-features = false, features = ["metal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

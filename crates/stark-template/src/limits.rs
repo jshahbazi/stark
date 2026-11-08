@@ -5,12 +5,34 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-pub const MAX_CUMULATIVE_ALLOCATION: usize = 16 * 1024 * 1024;
-pub const MAX_LIVE_ALLOCATION: usize = 256 * 1024 * 1024;
+use stark_resource_budget::Budget;
+
+static MAX_CUMULATIVE_ALLOCATION: AtomicUsize = AtomicUsize::new(Budget::DEFAULT.template_cumulative_bytes);
+static MAX_LIVE_ALLOCATION: AtomicUsize = AtomicUsize::new(Budget::DEFAULT.template_live_bytes);
+static INPUT_BYTES: AtomicUsize = AtomicUsize::new(Budget::DEFAULT.input_bytes);
+static WIRE_BYTES: AtomicUsize = AtomicUsize::new(Budget::DEFAULT.wire_bytes);
 const CPU_SECONDS: libc::rlim_t = 2;
 
 static CUMULATIVE: AtomicUsize = AtomicUsize::new(0);
 static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+pub fn input_bytes() -> usize {
+    INPUT_BYTES.load(Ordering::Relaxed)
+}
+
+pub fn wire_bytes() -> usize {
+    WIRE_BYTES.load(Ordering::Relaxed)
+}
+
+/// Configure the disposable helper before reading or compiling any model data.
+pub fn configure() -> Result<(), &'static str> {
+    let budget = Budget::from_environment()?;
+    INPUT_BYTES.store(budget.input_bytes, Ordering::Relaxed);
+    WIRE_BYTES.store(budget.wire_bytes, Ordering::Relaxed);
+    MAX_CUMULATIVE_ALLOCATION.store(budget.template_cumulative_bytes, Ordering::Relaxed);
+    MAX_LIVE_ALLOCATION.store(budget.template_live_bytes, Ordering::Relaxed);
+    Ok(())
+}
 
 /// Ends a disposable helper without allocation, diagnostics, destructors or core dumps.
 pub fn terminate() -> ! {
@@ -45,8 +67,8 @@ unsafe impl GlobalAlloc for BoundedAllocator {
         &self,
         layout: Layout,
     ) -> *mut u8 {
-        charge(&CUMULATIVE, layout.size(), MAX_CUMULATIVE_ALLOCATION);
-        charge(&LIVE, layout.size(), MAX_LIVE_ALLOCATION);
+        charge(&CUMULATIVE, layout.size(), MAX_CUMULATIVE_ALLOCATION.load(Ordering::Relaxed));
+        charge(&LIVE, layout.size(), MAX_LIVE_ALLOCATION.load(Ordering::Relaxed));
         let result = unsafe { System.alloc(layout) };
         if result.is_null() {
             terminate();
@@ -58,8 +80,8 @@ unsafe impl GlobalAlloc for BoundedAllocator {
         &self,
         layout: Layout,
     ) -> *mut u8 {
-        charge(&CUMULATIVE, layout.size(), MAX_CUMULATIVE_ALLOCATION);
-        charge(&LIVE, layout.size(), MAX_LIVE_ALLOCATION);
+        charge(&CUMULATIVE, layout.size(), MAX_CUMULATIVE_ALLOCATION.load(Ordering::Relaxed));
+        charge(&LIVE, layout.size(), MAX_LIVE_ALLOCATION.load(Ordering::Relaxed));
         let result = unsafe { System.alloc_zeroed(layout) };
         if result.is_null() {
             terminate();
@@ -83,9 +105,9 @@ unsafe impl GlobalAlloc for BoundedAllocator {
         new_size: usize,
     ) -> *mut u8 {
         // Charge the entire replacement conservatively, including shrink/copy paths.
-        charge(&CUMULATIVE, new_size, MAX_CUMULATIVE_ALLOCATION);
+        charge(&CUMULATIVE, new_size, MAX_CUMULATIVE_ALLOCATION.load(Ordering::Relaxed));
         if new_size > layout.size() {
-            charge(&LIVE, new_size - layout.size(), MAX_LIVE_ALLOCATION);
+            charge(&LIVE, new_size - layout.size(), MAX_LIVE_ALLOCATION.load(Ordering::Relaxed));
         }
         let result = unsafe { System.realloc(pointer, layout, new_size) };
         if result.is_null() {
@@ -111,8 +133,8 @@ pub fn install_process_limits() -> bool {
     #[cfg(not(target_os = "macos"))]
     {
         let limit = libc::rlimit {
-            rlim_cur: MAX_LIVE_ALLOCATION as libc::rlim_t,
-            rlim_max: MAX_LIVE_ALLOCATION as libc::rlim_t,
+            rlim_cur: MAX_LIVE_ALLOCATION.load(Ordering::Relaxed) as libc::rlim_t,
+            rlim_max: MAX_LIVE_ALLOCATION.load(Ordering::Relaxed) as libc::rlim_t,
         };
         if unsafe { libc::setrlimit(libc::RLIMIT_AS, &limit) } != 0 {
             return false;

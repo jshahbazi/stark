@@ -99,12 +99,14 @@ def test_maximum_supported_image_body_passes_real_http_server():
 
 
 @pytest.mark.parametrize("images", [False, True])
-def test_text_body_above_one_mib_is_rejected_even_when_images_are_enabled(images):
+def test_text_body_above_input_cap_is_rejected_even_when_images_are_enabled(images, monkeypatch):
+    monkeypatch.setattr(local_api_module, "MAX_TEXT_BODY_BYTES", 256)
+    monkeypatch.setattr(local_api_module, "MAX_IMAGE_BODY_BYTES", 512)
     called = []
     api, info, port = start_api(lambda *_args: called.append(True) or {"choices": []}, images=images)
     try:
         body = json.dumps(
-            {"messages": [{"role": "user", "content": "x" * (1024 * 1024 + 1)}]},
+            {"messages": [{"role": "user", "content": "x" * 300}]},
             separators=(",", ":"),
         ).encode("ascii")
         assert len(body) > local_api_module.MAX_TEXT_BODY_BYTES
@@ -171,6 +173,29 @@ def test_pending_body_budget_rejects_before_read_and_releases_on_disconnect(monk
         if first is not None:
             first.close()
         assert wait_for_pending(api, 0)
+        api.close()
+
+
+def test_memory_pressure_rejects_large_body_before_read_and_allows_small_retry(monkeypatch):
+    monkeypatch.setattr(local_api_module, "available_memory_bytes", lambda: 1024)
+    called = []
+    api, info, port = start_api(lambda *_args: called.append(True) or {"choices": []})
+    connection = None
+    try:
+        connection = send_headers(port, info["api_key"], 1024 * 1024 + 1)
+        response = b""
+        while chunk := connection.recv(4096):
+            response += chunk
+        assert b"HTTP/1.1 429" in response
+        assert b"memory_pressure" in response
+        assert not called
+        assert wait_for_pending(api, 0)
+        status, _ = post_bytes(info, port, b"{}")
+        assert status == 200
+        assert called == [True]
+    finally:
+        if connection is not None:
+            connection.close()
         api.close()
 
 

@@ -660,7 +660,9 @@ class LocalAPITest(unittest.TestCase):
         try:
             conn.putrequest("POST", "/v1/chat/completions")
             conn.putheader("Authorization", "Bearer " + self.info["api_key"])
-            conn.putheader("Content-Length", str(1024 * 1024 + 1))
+            from stark_convert.local_api import MAX_TEXT_BODY_BYTES
+
+            conn.putheader("Content-Length", str(MAX_TEXT_BODY_BYTES + 1))
             conn.endheaders()
             self.assertEqual(conn.getresponse().status, 413)
         finally:

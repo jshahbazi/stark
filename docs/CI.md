@@ -67,8 +67,8 @@ Run the same checks CI runs before opening a pull request. Repository policy and
 uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
 uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py --test
 cargo +1.98.1 build --release --locked -p stark-template
-cargo +1.98.1 test --locked -p stark-template
-cargo +1.98.1 clippy --locked -p stark-template --all-targets -- -D warnings
+cargo +1.98.1 test --locked -p stark-template -p stark-resource-budget
+cargo +1.98.1 clippy --locked -p stark-template -p stark-resource-budget --all-targets -- -D warnings
 HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
 uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter
 uv run --project tools/converter --locked --python 3.13.13 ruff format --check tools/converter
@@ -95,7 +95,7 @@ uv run --project tools/converter --locked --python 3.13.13 python scripts/test_b
 Rust formatting, dependencies and the workers (Apple silicon with Xcode's Metal tools):
 
 ```sh
-cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template --check
+cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template -p stark-resource-budget --check
 cargo metadata --locked --format-version=1 > /dev/null
 cargo deny --locked --all-features check --warn unmaintained advisories licenses bans sources
 cargo test --locked -p stark-generate --no-default-features

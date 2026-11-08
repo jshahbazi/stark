@@ -40,7 +40,7 @@ For API credential or connection-setting changes, also run `uv run --project too
 Then run the checks for the area you changed; the complete list, matching CI, is in [CI local checks](docs/CI.md#local-checks). Most changes need these checks. Build the native template evaluator before running the converter suite:
 
 ```sh
-cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template --check
+cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template -p stark-resource-budget --check
 cargo +1.98.1 build --release --locked -p stark-template
 HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
 ```
