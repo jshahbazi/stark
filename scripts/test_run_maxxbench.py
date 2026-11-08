@@ -134,6 +134,8 @@ class BridgeProcess:
             "mtp_requested": "default", "mtp_default_enabled": False, "prefix_cache_supported": True,
             "prefix_chunk_tokens": 64, "worker_pid": 1234, "worker_sha256": "b" * 64,
             "template_helper_sha256": "c" * 64, "logging": "aggregate_only",
+            "api_byte_policy": {"step_limit": 400, "envelope": {}, "tool_profile": {"parser": "fixture-parser"}},
+            "api_byte_policy_sha256": "d" * 64, "tool_parser": "fixture-parser",
         }
         self.stopped_frame = {
             "event": "stopped", "failure": None, "cleanup_failed": False, "elapsed_seconds": 1.0,
@@ -174,6 +176,8 @@ class BridgeProcess:
 
 
 def bridge_patches(monkeypatch, tmp_path, process):
+    monkeypatch.setattr(runner, "protocol_policy", lambda _profile: (
+        None, {"step_limit": 400, "envelope": {}, "tool_profile": {"parser": "fixture-parser"}}, "d" * 64))
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: process)
 
     def run(command, **_kwargs):
@@ -262,6 +266,8 @@ def test_model_bridge_clears_adapter_credentials_before_process_shutdown(tmp_pat
 
 
 def test_model_bridge_reports_startup_failure_without_private_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "protocol_policy", lambda _profile: (
+        None, {"step_limit": 400, "envelope": {}, "tool_profile": {"parser": "fixture-parser"}}, "d" * 64))
     process = BridgeProcess(ready=False)
     process.stdout = io.StringIO("private text from child\n")
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: process)
@@ -296,6 +302,20 @@ def test_model_bridge_refuses_worker_pid_without_matching_parent(tmp_path, monke
     ):
         pytest.fail("unrelated worker PID was accepted")
     assert not process.native_signals
+
+
+@pytest.mark.parametrize("field,value", [("api_byte_policy", {"step_limit": 1}),
+                                       ("api_byte_policy_sha256", "e" * 64)])
+def test_model_bridge_rejects_different_protocol_capacity_before_trial(tmp_path, monkeypatch, field, value):
+    process = BridgeProcess()
+    process.ready_frame[field] = value
+    process.refresh_output()
+    bridge_patches(monkeypatch, tmp_path, process)
+    with pytest.raises(ValueError, match="model_bridge_protocol_failed"), runner.model_bridge(
+        profile(tmp_path), tmp_path / "stark-generate",
+    ):
+        pytest.fail("mismatched byte policy was accepted")
+    assert process.terminated
 
 
 @pytest.mark.parametrize("change", [{"private": "private-marker"}, {"failure": "bridge_failed"},
@@ -493,7 +513,7 @@ def test_completed_result_survives_cleanup_failure_and_next_task_is_not_started(
         receipt_path = output / "oracle-sample-task.json"
     else:
         adapter = ModuleType("maxxbench_agent")
-        adapter.configure_connection = lambda *_args: None
+        adapter.configure_connection = lambda *_args, **_kwargs: None
         monkeypatch.setitem(sys.modules, adapter.__name__, adapter)
         monkeypatch.setattr(runner, "fingerprint_artifact", lambda *_args: {"sha256": "a" * 64})
         monkeypatch.setattr(runner, "assert_artifact_unchanged", lambda *_args: None)
@@ -501,8 +521,9 @@ def test_completed_result_survives_cleanup_failure_and_next_task_is_not_started(
         monkeypatch.setattr(runner.platform, "platform", lambda: "unit-host")
         monkeypatch.setattr(runner.subprocess, "check_output", lambda *_args, **_kwargs: "a" * 40)
         monkeypatch.setattr(runner, "model_bridge_receipt", lambda *_args: contextlib.nullcontext((
-            {"base_url": "http://127.0.0.1:12345/v1", "model": "sample"}, "not-persisted", [],
+            {"base_url": "http://127.0.0.1:12345/v1", "model": "sample", "api_byte_policy": {}}, "not-persisted", [],
         )))
+        monkeypatch.setattr(runner, "protocol_policy", lambda _profile: (None, {}, "d" * 64))
         matrix = tmp_path / "matrix.json"
         matrix.write_text(json.dumps({"profiles": [{"id": "sample", "path": str(tmp_path / "model")}]}))
         arguments.extend(["--matrix", str(matrix)])

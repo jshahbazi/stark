@@ -47,9 +47,10 @@ class _DecodeError(Exception):
 
 
 class _Parser:
-    def __init__(self, text: str, invalid: Callable[[str], Exception]):
+    def __init__(self, text: str, invalid: Callable[[str], Exception], byte_limits):
         self.text = text
         self.invalid = invalid
+        self.byte_limits = byte_limits
         self.cursor = 0
         self.nodes = 0
         self.argument_start = 0
@@ -74,7 +75,7 @@ class _Parser:
 
     def check_argument_size(self) -> None:
         size = self.byte_offsets[self.cursor] - self.byte_offsets[self.argument_start]
-        if size > _MAX_ARGUMENT_BYTES:
+        if size > self.byte_limits.argument_bytes:
             self.fail("limits")
 
     def parse_name(self) -> str:
@@ -176,7 +177,7 @@ class _Parser:
         if any(marker in value for marker in _RESERVED):
             self.fail("format")
         try:
-            if len(value.encode("utf-8")) > _MAX_ARGUMENT_BYTES:
+            if len(value.encode("utf-8")) > self.byte_limits.argument_bytes:
                 self.fail("limits")
         except UnicodeEncodeError:
             self.fail("value")
@@ -233,7 +234,7 @@ class _Parser:
             if self.cursor == len(self.text):
                 break
             if len(calls) >= _MAX_CALLS:
-                self.fail("limits")
+                self.fail("count" if self.byte_limits.isolated else "limits")
             if not self.text.startswith(_OPEN, self.cursor):
                 self.fail("trailing" if calls else "format")
             self.cursor += len(_OPEN)
@@ -251,20 +252,28 @@ class _Parser:
         return calls
 
 
-def parse_functiongemma_calls(text: str, *, invalid: Callable[[str], Exception]) -> list[tuple[str, dict]]:
+def parse_functiongemma_calls(
+    text: str,
+    *,
+    invalid: Callable[[str], Exception],
+    byte_limits=None,
+) -> list[tuple[str, dict]]:
     """Decode one or more adjacent FunctionGemma call blocks.
 
     Whitespace may separate complete blocks. No prefix, commentary, or suffix
     is accepted. Tool name and schema checks remain the caller's responsibility.
     """
+    from .api_limits import PRODUCTION_BYTE_LIMITS
+
+    byte_limits = PRODUCTION_BYTE_LIMITS if byte_limits is None else byte_limits
     if not isinstance(text, str):
         raise invalid("format")
     try:
-        if len(text.encode("utf-8")) > _MAX_OUTPUT_BYTES:
+        if len(text.encode("utf-8")) > byte_limits.tool_output_bytes:
             raise invalid("limits")
     except UnicodeEncodeError:
         raise invalid("value") from None
-    parser = _Parser(text, invalid)
+    parser = _Parser(text, invalid, byte_limits)
     try:
         return parser.parse_calls()
     except _DecodeError as error:

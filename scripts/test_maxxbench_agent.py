@@ -2,19 +2,26 @@
 
 import asyncio
 import json
+import sys
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from maxxbench_agent import (
+    MAX_ERROR_JSON_BYTES,
+    MAX_RESPONSE_BYTES,
     METRICS,
+    SERIALIZER_VERSION,
     AggregateMetrics,
     LocalOpenAIModel,
     MemoryOnlyAgent,
     PierEnvironmentBridge,
     StarkMiniSweAgent,
     _agent_templates,
+    _connection_snapshot,
+    _json_bytes,
+    benchmark_protocol_envelope,
     clear_connection,
     configure_connection,
 )
@@ -35,6 +42,7 @@ class FakeResponse:
         return None
 
     def read(self, _limit=-1):
+        self.read_limit = _limit
         return self.payload
 
 
@@ -42,8 +50,68 @@ class AdapterTests(unittest.TestCase):
     def tearDown(self):
         clear_connection()
 
+    def test_compact_utf8_preserves_request_values_and_drops_no_unicode(self):
+        payload = {
+            "messages": [
+                {"role": "user", "content": "caf\u00e9\ne\u0301\\\"\ud55c\uae00"},
+                {"role": "tool", "tool_call_id": "call-1", "content": "\x00\t"},
+            ],
+            "tools": [{"name": "bash", "arguments": {"command": "printf caf\u00e9"}}],
+        }
+        encoded = _json_bytes(payload)
+        self.assertEqual(json.loads(encoded), payload)
+        self.assertIn("caf\u00e9".encode(), encoded)
+        self.assertNotIn(b"\\u00e9", encoded)
+        self.assertLess(len(encoded), len(json.dumps(payload).encode()))
+        with self.assertRaises(ValueError):
+            _json_bytes({"temperature": float("nan")})
+
+    def test_response_budget_is_bound_to_connection_and_resets(self):
+        policy = {
+            "response_body_bytes": MAX_RESPONSE_BYTES + 1,
+            "envelope": {"serializer_version": SERIALIZER_VERSION},
+        }
+        configure_connection("http://127.0.0.1:9000/v1", "key", "stark-test", byte_policy=policy)
+        self.assertEqual(_connection_snapshot()[2], MAX_RESPONSE_BYTES + 1)
+        clear_connection()
+        self.assertEqual(_connection_snapshot(), ("", "", MAX_RESPONSE_BYTES))
+        configure_connection("http://127.0.0.1:9000/v1", "key", "stark-test")
+        self.assertEqual(_connection_snapshot()[2], MAX_RESPONSE_BYTES)
+
+    def test_invalid_response_policy_does_not_change_connection(self):
+        configure_connection("http://127.0.0.1:9000/v1", "key", "stark-test")
+        before = _connection_snapshot()
+        for policy in (
+            [], {}, {"envelope": None},
+            {"response_body_bytes": True, "envelope": {"serializer_version": SERIALIZER_VERSION}},
+            {"response_body_bytes": MAX_ERROR_JSON_BYTES - 1, "envelope": {"serializer_version": SERIALIZER_VERSION}},
+            {"response_body_bytes": sys.maxsize, "envelope": {"serializer_version": SERIALIZER_VERSION}},
+            {"response_body_bytes": MAX_RESPONSE_BYTES, "envelope": {"serializer_version": "unknown"}},
+        ):
+            with self.subTest(policy_type=type(policy).__name__), self.assertRaises(ValueError):
+                configure_connection("http://127.0.0.1:9000/v1", "key", "stark-test", byte_policy=policy)
+            self.assertEqual(_connection_snapshot(), before)
+
+    def test_protocol_envelope_tracks_pinned_step_and_call_limits(self):
+        one = benchmark_protocol_envelope(1)
+        full = benchmark_protocol_envelope(400)
+        self.assertEqual(one["max_messages"], 2)
+        self.assertEqual(full["max_messages"], 6785)
+        self.assertEqual(full["max_calls"], 16)
+        self.assertEqual(full["serializer_version"], SERIALIZER_VERSION)
+        self.assertEqual(len(full["tool_schema_sha256"]), 64)
+        self.assertGreater(full["request_envelope_bytes"], one["request_envelope_bytes"])
+        self.assertEqual(full["response_envelope_bytes"], one["response_envelope_bytes"])
+        for invalid in (True, 0, -1, 1.5, "400"):
+            with self.subTest(value_type=type(invalid).__name__), self.assertRaises(ValueError):
+                benchmark_protocol_envelope(invalid)
+
     def test_model_request_uses_in_memory_auth_and_explicit_sampling(self):
-        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        response_limit = MAX_RESPONSE_BYTES + 123
+        configure_connection(
+            "http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test",
+            byte_policy={"response_body_bytes": response_limit, "envelope": {"serializer_version": SERIALIZER_VERSION}},
+        )
         payload = {
             "choices": [
                 {
@@ -76,7 +144,8 @@ class AdapterTests(unittest.TestCase):
                 self.request_data = (method, target, body, headers)
 
             def getresponse(self):
-                return FakeResponse(payload)
+                self.response = FakeResponse(payload)
+                return self.response
 
             def close(self):
                 pass
@@ -91,7 +160,7 @@ class AdapterTests(unittest.TestCase):
                 "stark-test",
                 observation_template=model_config["observation_template"],
                 format_error_template=model_config["format_error_template"],
-            ).query([{"role": "user", "content": "private prompt"}])
+            ).query([{"role": "user", "content": "private prompt caf\u00e9"}])
         connection = fake_connection
         self.assertEqual(
             connection_factory.call_args.kwargs["stop_event"].is_set(), False
@@ -102,6 +171,10 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(method, "POST")
         self.assertEqual(target, "/v1/chat/completions")
         self.assertEqual(headers["Authorization"], "Bearer ephemeral-key")
+        self.assertEqual(connection.response.read_limit, response_limit + 1)
+        self.assertEqual(body["messages"], [{"role": "user", "content": "private prompt caf\u00e9"}])
+        self.assertIn("caf\u00e9".encode(), request_body)
+        self.assertNotIn(b"\\u00e9", request_body)
         self.assertEqual(connection_factory.call_args.kwargs["timeout"], 1810.0)
         self.assertEqual(body["temperature"], 0.0)
         self.assertEqual(body["max_tokens"], 4096)
@@ -740,17 +813,13 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertIsNone(request_deadline.metadata["adapter_error_type"])
 
-        generation_failure = asyncio.run(exercise(503, "generation_failed"))
-        self.assertEqual(generation_failure.metadata["agent_status"], "adapter_error")
-        self.assertEqual(
-            generation_failure.metadata["http_errors"], {"server": 1, "agent": 1}
-        )
-        self.assertEqual(
-            generation_failure.metadata["api_error_codes"], {"generation_failed": 1}
-        )
-        self.assertEqual(
-            generation_failure.metadata["adapter_error_type"], "RuntimeError"
-        )
+        for code in ("generation_failed", "api_resource_limit"):
+            with self.subTest(code=code):
+                failure = asyncio.run(exercise(503, code))
+                self.assertEqual(failure.metadata["agent_status"], "adapter_error")
+                self.assertEqual(failure.metadata["http_errors"], {"server": 1, "agent": 1})
+                self.assertEqual(failure.metadata["api_error_codes"], {code: 1})
+                self.assertEqual(failure.metadata["adapter_error_type"], "RuntimeError")
 
     def test_model_tool_format_error_reenters_stock_format_loop(self):
         configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")

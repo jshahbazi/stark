@@ -12,6 +12,7 @@ from unittest import mock
 
 import maxxbench_stark_bridge as bridge
 import pytest
+from stark_convert.api_limits import APIByteLimits
 from stark_convert.local_api import APIError
 
 
@@ -21,7 +22,8 @@ def args(tmp_path, **changes):
     worker = tmp_path / "worker"
     worker.write_bytes(b"worker")
     values = {"model": model, "worker": worker, "model_id": "sample", "context": 32768,
-              "max_tokens": 4096, "thinking": True, "mtp": "off", "port": 0, "request_timeout": 10}
+              "max_tokens": 4096, "thinking": True, "mtp": "off", "port": 0, "request_timeout": 10,
+              "step_limit": 400, "protocol_envelope": {"fixture": True}}
     values.update(changes)
     return argparse.Namespace(**values)
 
@@ -41,6 +43,8 @@ class FakeDesktop:
         self.active_model = None
         self.stopped = False
         self.sink = kwargs["output"]
+        self.byte_policy = kwargs["benchmark_byte_policy"]
+        self.codec = {}
 
     def run(self, epoch, identifier, mode, *, guided_context):
         self.active_model, self.active_mode = identifier, mode
@@ -65,6 +69,8 @@ class FakeAPI:
         self.__class__.instances.append(self)
         self.closed = False
         self.key = kwargs["api_key"]
+        self.byte_limits = kwargs["byte_limits"]
+        self.max_connections = kwargs["max_connections"]
 
     def start(self):
         if self.fail_start:
@@ -83,6 +89,10 @@ def metadata(monkeypatch, tmp_path):
     helper = tmp_path / "helper"
     helper.write_bytes(b"helper")
     monkeypatch.setattr(bridge, "_template_executable", lambda: helper)
+    monkeypatch.setattr(bridge, "model_byte_policy", lambda *_args: (
+        APIByteLimits(), {"context_tokens": 32768, "output_tokens": 4096,
+                          "tool_profile": {"parser": "fixture-parser"}}, "d" * 64))
+    monkeypatch.setattr(bridge, "tool_parser_for", lambda _codec: "fixture-parser")
 
 
 def run_bridge(arguments):
@@ -105,6 +115,9 @@ def test_ready_has_only_aggregates_and_cleanup_removes_isolated_data(tmp_path):
     assert desktop.stopped and FakeAPI.instances[0].closed
     assert not desktop.data_dir.exists()
     assert desktop.models[0]["mtp_enabled"] is False
+    assert desktop.byte_policy == rows[0]["api_byte_policy"]
+    assert rows[0]["api_byte_policy_sha256"] == "d" * 64
+    assert FakeAPI.instances[0].max_connections == 1
 
 
 def test_startup_failure_is_content_free_and_closes_both_resources(tmp_path, monkeypatch):
@@ -166,3 +179,27 @@ def test_thinking_flag_reaches_template_without_changing_request_fields():
     with mock.patch.object(bridge.Desktop, "infer", return_value="reply") as infer:
         assert desktop.infer([], 100, seed=7) == "reply"
     assert infer.call_args.kwargs == {"seed": 7, "thinking": True}
+
+
+def test_protocol_policy_failure_never_loads_model_or_exposes_metadata_exception(tmp_path, monkeypatch):
+    def unavailable(*_args):
+        raise ValueError("private tokenizer marker")
+
+    monkeypatch.setattr(bridge, "model_byte_policy", unavailable)
+    result, raw, rows = run_bridge(args(tmp_path))
+    assert result == 1 and rows[0]["failure"] == "benchmark_protocol_capacity_unavailable"
+    assert "private" not in raw and not FakeDesktop.instances and not FakeAPI.instances
+
+
+def test_explicit_immutable_api_limits_reach_completion_without_global_override():
+    limits = APIByteLimits()
+    desktop = SimpleNamespace(api_complete=mock.Mock(return_value={"usage": {}}))
+    bridge.AggregateCompletions(desktop)({}, None, threading.Event(), byte_limits=limits)
+    assert desktop.api_complete.call_args.kwargs == {"byte_limits": limits}
+
+
+def test_loaded_parser_must_match_the_source_bound_shape_proof(tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge, "tool_parser_for", lambda _codec: "different-parser")
+    result, raw, rows = run_bridge(args(tmp_path))
+    assert result == 1 and rows[0]["failure"] == "benchmark_tool_profile_mismatch"
+    assert "private" not in raw and not FakeAPI.instances and FakeDesktop.instances[0].stopped

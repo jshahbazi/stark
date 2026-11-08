@@ -49,6 +49,28 @@ UPSTREAM_COMMIT = "1a0df5e9c5d4bccbae131b01830d478088fea947"
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def protocol_policy(profile):
+    """Load only the standalone metadata policy in the pinned runner environment."""
+    from maxxbench_agent import DEFAULT_STEP_LIMIT, benchmark_protocol_envelope
+
+    name = "maxxbench_api_limits"
+    module = sys.modules.get(name)
+    if module is None:
+        specification = importlib.util.spec_from_file_location(
+            name, ROOT / "tools/converter/stark_convert/api_limits.py")
+        module = importlib.util.module_from_spec(specification)
+        sys.modules[name] = module
+        try:
+            specification.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(name, None)
+            raise
+    steps = profile.get("step_limit", DEFAULT_STEP_LIMIT)
+    envelope = benchmark_protocol_envelope(steps)
+    return module.model_byte_policy(Path(profile["path"]).expanduser(), profile["context"],
+                                    profile["max_tokens"], steps, envelope)
+
+
 def digest(path):
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -228,12 +250,15 @@ def model_bridge(profile, worker):
     """Own the bridge and its verified native child; retain aggregate frames only."""
     import math
 
+    _limits, expected_policy, expected_policy_digest = protocol_policy(profile)
     key = secrets.token_hex(32)
     command = [str(ROOT / "tools/converter/.venv/bin/python"),
                str(ROOT / "scripts/maxxbench_stark_bridge.py"), "--worker", str(worker),
                "--model", str(Path(profile["path"]).expanduser()), "--model-id", profile["id"],
                "--context", str(profile["context"]), "--max-tokens", str(profile["max_tokens"]),
-               "--mtp", profile.get("mtp", "default"), "--request-timeout", "1800"]
+               "--mtp", profile.get("mtp", "default"), "--request-timeout", "1800",
+               "--step-limit", str(expected_policy["step_limit"]), "--protocol-envelope",
+               json.dumps(expected_policy["envelope"], sort_keys=True, allow_nan=False)]
     if profile.get("thinking", False):
         command.append("--thinking")
     environment = dict(os.environ, PATH=str(worker.parent) + os.pathsep + os.environ.get("PATH", ""),
@@ -247,7 +272,7 @@ def model_bridge(profile, worker):
     ready_fields = {
         "event", "base_url", "model", "context_tokens", "max_output_tokens", "template_enable_thinking",
         "mtp_requested", "mtp_default_enabled", "prefix_cache_supported", "prefix_chunk_tokens", "worker_pid",
-        "worker_sha256", "template_helper_sha256", "logging",
+        "worker_sha256", "template_helper_sha256", "logging", "api_byte_policy", "api_byte_policy_sha256", "tool_parser",
     }
     stopped_fields = {
         "event", "failure", "cleanup_failed", "elapsed_seconds", "requests", "completed", "prompt_tokens",
@@ -281,6 +306,9 @@ def model_bridge(profile, worker):
                 and all(isinstance(value[name], str) and re.fullmatch(r"[0-9a-f]{64}", value[name])
                         for name in ("worker_sha256", "template_helper_sha256"))
                 and value["logging"] == "aggregate_only"
+                and value["api_byte_policy"] == expected_policy
+                and value["api_byte_policy_sha256"] == expected_policy_digest
+                and value["tool_parser"] == expected_policy["tool_profile"]["parser"]
             )
         if value.get("event") != "stopped" or set(value) - stopped_fields:
             return False
@@ -288,6 +316,8 @@ def model_bridge(profile, worker):
             None, "credential_input_failed", "invalid_arguments", "invalid_model_id", "model_invalid",
             "model_admission_failed", "executable_changed_during_load", "requested_context_unavailable",
             "requested_output_limit_unavailable", "startup_cancelled", "api_model_unavailable", "bridge_failed",
+            "benchmark_protocol_capacity_unavailable",
+            "benchmark_tool_profile_mismatch",
         }:
             return False
         if "cleanup_failed" in value and type(value["cleanup_failed"]) is not bool:
@@ -703,6 +733,8 @@ def main(argv=None):
         return 0
     stable_identity = {key: value for key, value in identity.items() if key != "created_at"}
     stable_identity.update({"profiles": profiles, "worker_sha256": digest(args.worker),
+                            "api_byte_limits_sha256": digest(ROOT / "tools/converter/stark_convert/api_limits.py"),
+                            "api_byte_policies": {profile["id"]: protocol_policy(profile)[1] for profile in profiles},
                             "adapter_sha256": digest(ROOT / "scripts/maxxbench_agent.py"),
                             "bridge_sha256": digest(ROOT / "scripts/maxxbench_stark_bridge.py"),
                             "dependency_lock_sha256": digest(Path(__file__).with_suffix(".py.lock")),
@@ -720,7 +752,8 @@ def main(argv=None):
             assert_artifact_unchanged(artifacts[profile["id"]])
             emit({"event": "model_start", "profile": profile["id"]})
             with model_bridge_receipt(profile, args.worker, args.output / profile["id"] / "bridge-totals.json") as (ready, key, _frames):
-                maxxbench_agent.configure_connection(ready["base_url"], key, ready["model"])
+                maxxbench_agent.configure_connection(ready["base_url"], key, ready["model"],
+                                                    byte_policy=ready["api_byte_policy"])
                 write_json(args.output / profile["id"] / "identity.json", {**identity, **ready, "profile": profile})
                 for task in tasks:
                     assert_artifact_unchanged(artifacts[profile["id"]])
@@ -779,6 +812,9 @@ if __name__ == "__main__":
             "source_platform_recipe_changed", "source_platform_task_changed", "source_platform_conflict",
             "source_platform_policy_invalid", "source_platform_unavailable", "source_platform_changed",
             "artifact_changed", "artifact_empty",
+            "benchmark_protocol_capacity_unavailable", "tokenizer_byte_bound_unsupported",
+            "invalid_benchmark_byte_policy", "invalid_api_byte_limits",
+            "benchmark_tool_profile_unsupported", "benchmark_tool_profile_mismatch",
         } else "runner_failed"
         emit({"event": "stopped", "failure": category})
         sys.exit(1)

@@ -13,6 +13,8 @@ import re
 import tokenize
 import warnings
 
+from .api_limits import PRODUCTION_BYTE_LIMITS
+
 MAX_PAYLOAD_BYTES = 512 * 1024
 MAX_CALLS = 16
 MAX_ARGUMENT_BYTES = 64 * 1024
@@ -22,7 +24,7 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z", re.ASCII)
 _DECIMAL = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z", re.ASCII)
 
 
-def parse_pythonic_payload(payload: str, *, invalid) -> list[tuple[str, dict]]:
+def parse_pythonic_payload(payload: str, *, invalid, byte_limits=PRODUCTION_BYTE_LIMITS) -> list[tuple[str, dict]]:
     """Parse exactly ``[name(key=value,...), ...]`` or return ``invalid`` error.
 
     ``invalid(category)`` constructs the caller's sanitized APIError. Categories
@@ -35,7 +37,7 @@ def parse_pythonic_payload(payload: str, *, invalid) -> list[tuple[str, dict]]:
     if not isinstance(payload, str):
         reject()
     try:
-        if len(payload.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        if len(payload.encode("utf-8")) > byte_limits.tool_output_bytes:
             reject("limits")
     except UnicodeEncodeError:
         reject()
@@ -46,7 +48,9 @@ def parse_pythonic_payload(payload: str, *, invalid) -> list[tuple[str, dict]]:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             tree = ast.parse(payload, mode="eval")
-    except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
+    except (MemoryError, RecursionError):
+        reject("limits" if byte_limits.isolated else "format")
+    except (SyntaxError, ValueError, TypeError):
         reject()
 
     try:
@@ -148,7 +152,8 @@ def parse_pythonic_payload(payload: str, *, invalid) -> list[tuple[str, dict]]:
                         reject("value")
                     result[key] = value(item_node)
             try:
-                if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_ARGUMENT_BYTES:
+                encoded_size = len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+                if encoded_size > byte_limits.argument_bytes:
                     reject("limits")
             except (UnicodeEncodeError, ValueError, TypeError, RecursionError, OverflowError):
                 reject("value")
@@ -182,7 +187,7 @@ def parse_pythonic_payload(payload: str, *, invalid) -> list[tuple[str, dict]]:
                     pending_values.extend((v, depth + 1) for v in item)
                 elif isinstance(item, str):
                     item.encode("utf-8")
-            if len(json.dumps(args, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_ARGUMENT_BYTES:
+            if len(json.dumps(args, ensure_ascii=False, allow_nan=False).encode("utf-8")) > byte_limits.argument_bytes:
                 reject("limits")
         except (UnicodeEncodeError, ValueError, TypeError, RecursionError, OverflowError):
             reject("value")

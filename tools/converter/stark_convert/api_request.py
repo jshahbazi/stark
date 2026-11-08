@@ -7,7 +7,8 @@ import math
 import re
 from typing import Any
 
-from .api_tools import MAX_TOOL_RESULT_BYTES, normalize_calls, normalize_tool_options, validate_history
+from .api_limits import PRODUCTION_BYTE_LIMITS, APIByteLimits
+from .api_tools import normalize_calls, normalize_tool_options, validate_history
 from .local_api import APIError
 from .media import MediaError, parse_image_url
 
@@ -94,7 +95,7 @@ def _content(value: Any, images: list | None = None) -> str | list[dict]:
     return pieces if image_parts else "".join(part["text"] for part in pieces)
 
 
-def _messages(value: Any, images: list | None = None) -> list[dict]:
+def _messages(value: Any, images: list | None = None, *, byte_limits=PRODUCTION_BYTE_LIMITS) -> list[dict]:
     if not isinstance(value, list) or not value:
         raise _bad("messages must be a non-empty array.")
     result = []
@@ -116,7 +117,7 @@ def _messages(value: Any, images: list | None = None) -> list[dict]:
         if "tool_calls" in message:
             if role != "assistant":
                 raise _bad("tool_calls is supported only on assistant messages.")
-            calls = normalize_calls(message["tool_calls"])
+            calls = normalize_calls(message["tool_calls"], byte_limits=byte_limits)
         content = message.get("content")
         if content is None and calls:
             content = None
@@ -131,8 +132,12 @@ def _messages(value: Any, images: list | None = None) -> list[dict]:
             identifier = message.get("tool_call_id")
             if not isinstance(identifier, str) or not 1 <= len(identifier) <= 128:
                 raise _bad("Tool results require a bounded tool_call_id.")
-            if len(content.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
-                raise _bad("A tool result exceeds the 256 KiB byte limit.")
+            if len(content.encode("utf-8")) > byte_limits.tool_result_bytes:
+                raise _bad(
+                    "A tool result exceeds the 256 KiB byte limit."
+                    if not byte_limits.isolated
+                    else "A tool result exceeds the configured byte limit."
+                )
             normalized["tool_call_id"] = identifier
         elif "tool_call_id" in message:
             raise _bad("tool_call_id is supported only on tool-result messages.")
@@ -148,7 +153,13 @@ def _messages(value: Any, images: list | None = None) -> list[dict]:
 
 
 def parse_chat_request(
-    payload: Any, max_output: int, vocab_size: int, *, allow_images: bool = False, allow_tools: bool = False
+    payload: Any,
+    max_output: int,
+    vocab_size: int,
+    *,
+    allow_images: bool = False,
+    allow_tools: bool = False,
+    byte_limits: APIByteLimits = PRODUCTION_BYTE_LIMITS,
 ) -> dict[str, Any]:
     """Normalize content without exposing image bytes to templates or worker JSON."""
     if not isinstance(payload, dict):
@@ -245,8 +256,8 @@ def parse_chat_request(
     ):
         raise _bad("stop must contain at most four non-empty strings of at most 1024 characters.")
     images = [] if allow_images else None
-    messages = _messages(payload.get("messages"), images)
-    tool_options = normalize_tool_options(payload)
+    messages = _messages(payload.get("messages"), images, byte_limits=byte_limits)
+    tool_options = normalize_tool_options(payload, byte_limits=byte_limits)
     has_tool_history = validate_history(messages)
     if not allow_tools and (tool_options["tools"] or has_tool_history):
         raise _bad("The loaded model and chat template are not qualified for tool use.", "tools_unsupported")
@@ -258,7 +269,7 @@ def parse_chat_request(
         else sum(len(part.get("text", "").encode("utf-8")) for part in (message["content"] or []))
         for message in messages
     ) + sum(len(message.get("reasoning_content", "").encode("utf-8")) for message in messages)
-    if text_bytes > 1024 * 1024:
+    if text_bytes > byte_limits.message_text_bytes:
         raise APIError(413, "Message text exceeds the request limit.", "text_too_large")
     for item in stop:
         _content(item)

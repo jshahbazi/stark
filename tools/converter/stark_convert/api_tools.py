@@ -14,6 +14,7 @@ import math
 import re
 from typing import Any
 
+from .api_limits import PRODUCTION_BYTE_LIMITS
 from .local_api import APIError
 from .template_compat import MAX_TEMPLATE_BYTES, template_program_sha256
 from .tool_protocols import (
@@ -172,22 +173,22 @@ def _constant(_value):
     raise ValueError
 
 
-def strict_arguments(value: Any) -> dict:
+def strict_arguments(value: Any, *, byte_limits=PRODUCTION_BYTE_LIMITS) -> dict:
     if not isinstance(value, str):
         raise _bad("Function arguments must be a JSON object encoded as a string.")
     try:
-        if len(value.encode("utf-8")) > MAX_ARGUMENT_BYTES:
+        if len(value.encode("utf-8")) > byte_limits.argument_bytes:
             raise _bad("Function arguments exceed the byte limit.")
         parsed = json.loads(value, object_pairs_hook=_pairs, parse_constant=_constant)
     except (UnicodeEncodeError, ValueError, RecursionError):
         raise _bad("Function arguments must contain one complete, unambiguous JSON object.") from None
     if not isinstance(parsed, dict):
         raise _bad("Function arguments must contain a JSON object.")
-    bounded_json(parsed, MAX_ARGUMENT_BYTES, label="Function arguments")
+    bounded_json(parsed, byte_limits.argument_bytes, label="Function arguments")
     return parsed
 
 
-def normalize_calls(value: Any) -> list[dict]:
+def normalize_calls(value: Any, *, byte_limits=PRODUCTION_BYTE_LIMITS) -> list[dict]:
     if not isinstance(value, list) or not 1 <= len(value) <= MAX_CALLS:
         raise _bad("Assistant tool_calls must contain between 1 and 16 function calls.")
     result = []
@@ -202,7 +203,7 @@ def normalize_calls(value: Any) -> list[dict]:
             raise _bad("Only function tool calls with name and arguments are supported.", "unsupported_parameter")
         if not isinstance(function["name"], str) or not _NAME.fullmatch(function["name"]):
             raise _bad("Function names must be bounded ASCII identifiers.")
-        strict_arguments(function["arguments"])
+        strict_arguments(function["arguments"], byte_limits=byte_limits)
         ids.add(identifier)
         result.append({"id": identifier, "type": "function", "function": dict(function)})
     return result
@@ -234,13 +235,13 @@ def validate_history(messages: list[dict]) -> bool:
     return has_tools
 
 
-def normalize_tool_options(payload: dict) -> dict:
+def normalize_tool_options(payload: dict, *, byte_limits=PRODUCTION_BYTE_LIMITS) -> dict:
     tools = payload.get("tools")
     if tools is None:
         tools = []
     if not isinstance(tools, list) or len(tools) > MAX_TOOLS:
         raise _bad("tools must contain at most 64 function definitions.")
-    bounded_json(tools, MAX_SCHEMA_BYTES, label="Tool definitions")
+    bounded_json(tools, byte_limits.schema_bytes, label="Tool definitions")
     names = set()
     normalized = []
     for tool in tools:
@@ -299,7 +300,13 @@ def template_tools(tools, *, parser=None):
     return adapt_tools(tools, parser)
 
 
-def template_messages(messages: list[dict], *, parser=None, tools=None) -> list[dict]:
+def template_messages(
+    messages: list[dict],
+    *,
+    parser=None,
+    tools=None,
+    byte_limits=PRODUCTION_BYTE_LIMITS,
+) -> list[dict]:
     """Render call arguments as objects and align parallel results by call ID.
 
     The pinned Qwen template represents calls/results by order, with no call-ID
@@ -329,7 +336,10 @@ def template_messages(messages: list[dict], *, parser=None, tools=None) -> list[
             copy["tool_calls"] = [
                 {
                     **call,
-                    "function": {**call["function"], "arguments": strict_arguments(call["function"]["arguments"])},
+                    "function": {
+                        **call["function"],
+                        "arguments": strict_arguments(call["function"]["arguments"], byte_limits=byte_limits),
+                    },
                 }
                 for call in message["tool_calls"]
             ]
@@ -474,8 +484,8 @@ def _xml_types(schema, root, work, memo, depth=0, references=frozenset()):
     return _XML_UNKNOWN if unknown else result
 
 
-def _xml_tool_schemas(tools):
-    bounded_json(tools, MAX_SCHEMA_BYTES, label="Tool definitions")
+def _xml_tool_schemas(tools, *, byte_limits=PRODUCTION_BYTE_LIMITS):
+    bounded_json(tools, byte_limits.schema_bytes, label="Tool definitions")
     result = {}
     work, memo = [MAX_JSON_NODES], {}
     for tool in tools:
@@ -520,7 +530,7 @@ def _xml_tool_schemas(tools):
     return result
 
 
-def validate_parser_tools(tools: list[dict], parser: str | None) -> None:
+def validate_parser_tools(tools: list[dict], parser: str | None, *, byte_limits=PRODUCTION_BYTE_LIMITS) -> None:
     """Reject unsupported XML decoding schemas before queueing/generation.
 
     This determines parameter representations, not full JSON Schema validity.
@@ -530,7 +540,7 @@ def validate_parser_tools(tools: list[dict], parser: str | None) -> None:
     generating one is rejected because its wire value has no conclusive type.
     """
     if parser in _XML_PARSERS:
-        _xml_tool_schemas(tools)
+        _xml_tool_schemas(tools, byte_limits=byte_limits)
     if parser == "functiongemma-v1":
         validate_functiongemma_tools(tools)
     if parser == "lfm2-pythonic-v1":
@@ -627,7 +637,7 @@ def _tool_prefix_safe(prefix, *, initial_thinking=False):
     return quote is None and code_ticks == 0
 
 
-def _xml_parameter_value(body, types, invalid, parser):
+def _xml_parameter_value(body, types, invalid, parser, byte_limits):
     reserved = _XML_RESERVED + (
         ("<arg_key", "</arg_key", "<arg_value", "</arg_value") if parser == _GLM_PARSER else ()
     )
@@ -646,7 +656,11 @@ def _xml_parameter_value(body, types, invalid, parser):
     else:
         try:
             value = json.loads(body, object_pairs_hook=_pairs, parse_constant=_constant)
-        except (ValueError, RecursionError):
+        except (RecursionError, MemoryError):
+            if "string" in types:
+                return body
+            raise invalid("limits" if byte_limits.isolated else "value") from None
+        except ValueError:
             if "string" in types:
                 return body
             raise invalid("value") from None
@@ -672,12 +686,12 @@ def _xml_parameter_value(body, types, invalid, parser):
         return body
     if not matches:
         raise invalid("value")
-    bounded_json(value, MAX_ARGUMENT_BYTES, label="Function arguments")
+    bounded_json(value, byte_limits.argument_bytes, label="Function arguments")
     return value
 
 
-def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser):
-    schemas = _xml_tool_schemas(tools)
+def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser, byte_limits):
+    schemas = _xml_tool_schemas(tools, byte_limits=byte_limits)
     calls = []
     cursor = start
 
@@ -713,13 +727,13 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
             parameter, cursor = named_tag(cursor, "<parameter=")
             if parameter not in schemas[name] or parameter in arguments:
                 raise invalid("argument")
-            end = text.find("</parameter>", cursor, cursor + MAX_ARGUMENT_BYTES + len("</parameter>") + 1)
+            end = text.find("</parameter>", cursor, cursor + byte_limits.argument_bytes + len("</parameter>") + 1)
             if end < 0:
                 # A closing tag beyond the bounded window means an oversized value.
                 raise invalid("limits" if text.find("</parameter>", cursor) >= 0 else "format")
             body = text[cursor:end]
             argument_bytes += len(parameter.encode("utf-8")) + len(body.encode("utf-8"))
-            if argument_bytes > MAX_ARGUMENT_BYTES:
+            if argument_bytes > byte_limits.argument_bytes:
                 raise invalid("limits")
             if schemas[name][parameter] is _XML_UNKNOWN:
                 raise APIError(
@@ -729,7 +743,9 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
                     "tool_argument_type_unsupported",
                 )
             try:
-                arguments[parameter] = _xml_parameter_value(body, schemas[name][parameter], invalid, parser)
+                arguments[parameter] = _xml_parameter_value(
+                    body, schemas[name][parameter], invalid, parser, byte_limits
+                )
             except APIError as error:
                 if error.code == "invalid_tool_call":
                     raise
@@ -741,7 +757,7 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
         if not text.startswith("</tool_call>", cursor):
             raise invalid("format")
         try:
-            bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+            bounded_json(arguments, byte_limits.argument_bytes, label="Function arguments")
         except (APIError, ValueError, RecursionError):
             raise invalid("limits") from None
         try:
@@ -761,9 +777,9 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
     return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
 
 
-def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid):
+def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, byte_limits):
     """Decode the pinned GLM arg-key/value grammar without repairing output."""
-    schemas = _xml_tool_schemas(tools)
+    schemas = _xml_tool_schemas(tools, byte_limits=byte_limits)
     calls = []
     cursor = start
     while cursor < len(text):
@@ -795,12 +811,12 @@ def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
             if not text.startswith("<arg_value>", cursor):
                 raise invalid("format")
             cursor += len("<arg_value>")
-            end = text.find("</arg_value>", cursor, cursor + MAX_ARGUMENT_BYTES + len("</arg_value>") + 1)
+            end = text.find("</arg_value>", cursor, cursor + byte_limits.argument_bytes + len("</arg_value>") + 1)
             if end < 0:
                 raise invalid("limits" if text.find("</arg_value>", cursor) >= 0 else "format")
             body = text[cursor:end]
             argument_bytes += len(parameter.encode("utf-8")) + len(body.encode("utf-8"))
-            if argument_bytes > MAX_ARGUMENT_BYTES:
+            if argument_bytes > byte_limits.argument_bytes:
                 raise invalid("limits")
             if schemas[name][parameter] is _XML_UNKNOWN:
                 raise APIError(
@@ -810,8 +826,10 @@ def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
                     "tool_argument_type_unsupported",
                 )
             try:
-                arguments[parameter] = _xml_parameter_value(body, schemas[name][parameter], invalid, _GLM_PARSER)
-                bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+                arguments[parameter] = _xml_parameter_value(
+                    body, schemas[name][parameter], invalid, _GLM_PARSER, byte_limits
+                )
+                bounded_json(arguments, byte_limits.argument_bytes, label="Function arguments")
             except APIError as error:
                 if error.code in {"invalid_tool_call", "tool_argument_type_unsupported"}:
                     raise
@@ -860,7 +878,7 @@ def _pythonic_frame(body, closing, invalid):
 
 
 def _parse_additional_output(
-    text, tools, parser, finish_reason, parallel, call_id_prefix, choice, initial_thinking, invalid
+    text, tools, parser, finish_reason, parallel, call_id_prefix, choice, initial_thinking, invalid, byte_limits
 ):
     opening, closing, kind, argument_key = FORMATS[parser]
     start = text.find(opening)
@@ -903,18 +921,22 @@ def _parse_additional_output(
     if kind == "pythonic":
         from .tool_pythonic import parse_pythonic_payload
 
-        functions = parse_pythonic_payload(body, invalid=invalid)
+        functions = parse_pythonic_payload(body, invalid=invalid, byte_limits=byte_limits)
     elif kind == "functiongemma":
         from .tool_functiongemma import parse_functiongemma_calls
 
-        functions = parse_functiongemma_calls(text[start:], invalid=invalid)
+        functions = parse_functiongemma_calls(text[start:], invalid=invalid, byte_limits=byte_limits)
     else:
         try:
             decoded = json.loads(body, object_pairs_hook=_pairs, parse_constant=_constant)
-        except (ValueError, RecursionError):
+        except (RecursionError, MemoryError):
+            raise invalid("limits" if byte_limits.isolated else "format") from None
+        except ValueError:
             raise invalid("format") from None
         items = [decoded] if kind == "object" else decoded
-        if not isinstance(items, list) or len(items) > MAX_CALLS:
+        if isinstance(items, list) and len(items) > MAX_CALLS:
+            raise invalid("count")
+        if not isinstance(items, list):
             raise invalid("count")
         if not items:
             if parser != "smollm2-json-v1":
@@ -951,7 +973,7 @@ def _parse_additional_output(
         if parser == "functiongemma-v1" and not functiongemma_values_supported(arguments):
             raise invalid("value")
         try:
-            bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+            bounded_json(arguments, byte_limits.argument_bytes, label="Function arguments")
         except APIError:
             raise invalid("limits") from None
         calls.append(
@@ -993,8 +1015,9 @@ class ToolTextStream:
 
     _markers = ("<tool_call", "</tool_call")
 
-    def __init__(self, deliver, *, parser=None):
+    def __init__(self, deliver, *, parser=None, byte_limits=PRODUCTION_BYTE_LIMITS):
         self.deliver = deliver
+        self.byte_limits = byte_limits
         self._markers = TOOL_MARKERS if parser in FORMATS else self._markers
         self._bare_pending = parser in {"llama-json-v1", "phi4-json-v1"}
         self._bare_prefix = "{" if parser == "llama-json-v1" else "["
@@ -1010,7 +1033,7 @@ class ToolTextStream:
             self.bytes += len(text.encode("utf-8"))
         except UnicodeEncodeError:
             self.blocked = True
-        if self.bytes > MAX_TOOL_OUTPUT_BYTES:
+        if self.bytes > self.byte_limits.tool_output_bytes:
             self.blocked = True
         if self.blocked:
             self.tail = ""
@@ -1075,6 +1098,7 @@ def parse_tool_output(
     call_id_prefix: str,
     tool_choice: str | dict = "auto",
     initial_thinking: bool = False,
+    byte_limits=PRODUCTION_BYTE_LIMITS,
 ) -> tuple[dict, str]:
     """Parse only complete calls after generation; never repair model output.
 
@@ -1082,16 +1106,20 @@ def parse_tool_output(
     No call may be emitted before the native terminal frame is received.
     """
     try:
-        oversized = len(text.encode("utf-8")) > MAX_TOOL_OUTPUT_BYTES
+        oversized = len(text.encode("utf-8")) > byte_limits.tool_output_bytes
     except UnicodeEncodeError:
         oversized = True
     if oversized:
+        if byte_limits.isolated:
+            raise APIError(503, "Tool parser resource limit reached.", "api_resource_limit")
         raise APIError(502, "The model output exceeded the tool parser's limits.", "invalid_tool_call")
     message = {"role": "assistant", "content": text}
     reason = "length" if finish_reason in {"length", "context"} else "stop"
 
     def invalid(category):
         # Clients see which rule rejected the call, never what the model wrote.
+        if byte_limits.isolated and category == "limits":
+            return APIError(503, "Tool parser resource limit reached.", "api_resource_limit")
         return APIError(
             502,
             "The model produced an incomplete, invalid or unavailable tool call: "
@@ -1111,6 +1139,7 @@ def parse_tool_output(
             tool_choice,
             initial_thinking,
             invalid,
+            byte_limits,
         )
 
     start = text.find("<tool_call")
@@ -1145,9 +1174,11 @@ def parse_tool_output(
     if isinstance(tool_choice, dict):
         names &= {tool_choice["function"]["name"]}
     if parser == _GLM_PARSER:
-        return _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid)
+        return _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, byte_limits)
     if parser in _XML_PARSERS:
-        return _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser)
+        return _parse_xml_calls(
+            text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser, byte_limits
+        )
     calls = []
     cursor = start
     decoder = json.JSONDecoder(object_pairs_hook=_pairs, parse_constant=_constant)
@@ -1162,10 +1193,12 @@ def parse_tool_output(
         try:
             # Decode one JSON value before checking its closing delimiter. A
             # delimiter inside an argument string is ordinary argument data.
-            body = text[body_start : body_start + MAX_ARGUMENT_BYTES + 1024]
+            body = text[body_start : body_start + byte_limits.argument_bytes + 1024]
             call, body_size = decoder.raw_decode(body)
-            oversized = len(body[:body_size].encode("utf-8")) > MAX_ARGUMENT_BYTES + 1024
-        except (ValueError, RecursionError):
+            oversized = len(body[:body_size].encode("utf-8")) > byte_limits.argument_bytes + 1024
+        except (RecursionError, MemoryError):
+            raise invalid("limits" if byte_limits.isolated else "format") from None
+        except ValueError:
             # A value cut off by the bounded window is oversized rather than malformed.
             raise invalid("limits" if len(text) > body_start + len(body) else "format") from None
         if oversized:
@@ -1180,7 +1213,7 @@ def parse_tool_output(
         if call["name"] not in names:
             raise invalid("tool")
         try:
-            bounded_json(call["arguments"], MAX_ARGUMENT_BYTES, label="Function arguments")
+            bounded_json(call["arguments"], byte_limits.argument_bytes, label="Function arguments")
         except (APIError, ValueError, TypeError, RecursionError):
             raise invalid("limits") from None
         try:

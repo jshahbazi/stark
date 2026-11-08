@@ -21,10 +21,12 @@ import time
 import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import urlsplit
 
 from jinja2.exceptions import TemplateError
 
+from .api_limits import PRODUCTION_BYTE_LIMITS, APIByteLimits
 from .api_request import parse_chat_request
 from .api_tools import (
     ToolTextStream,
@@ -274,12 +276,39 @@ class Desktop:
     the HTTP contract.
     """
 
-    def __init__(self, executable, data_dir, output=None, timeout=300, score_executable=None, attachment_root=None):
+    def __init__(
+        self,
+        executable,
+        data_dir,
+        output=None,
+        timeout=300,
+        score_executable=None,
+        attachment_root=None,
+        *,
+        benchmark_byte_policy=None,
+    ):
         self.executable = executable
         self.score_executable = score_executable or Path(executable).with_name("stark-score")
         self.data_dir = data_dir.expanduser().absolute()
         self.output = output or sys.stdout
         self.timeout = timeout
+        self._benchmark_worker_kwargs = MappingProxyType({})
+        self._benchmark_template_kwargs = MappingProxyType({})
+        if benchmark_byte_policy is not None:
+            # This trusted Python-only setting is absent from the app/HTTP
+            # contract. Freeze the values before any model or helper is loaded.
+            from .template_runtime import TemplateRuntimeLimits
+
+            try:
+                native = benchmark_byte_policy["native_policy"]
+                worker_limits = {name: native[name] for name in ("request_byte_limit", "reply_byte_limit")}
+                if any(type(value) is not int or not 0 < value <= sys.maxsize for value in worker_limits.values()):
+                    raise ValueError
+                template_limits = TemplateRuntimeLimits(**native["template"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("benchmark_protocol_capacity_unavailable") from None
+            self._benchmark_worker_kwargs = MappingProxyType(worker_limits)
+            self._benchmark_template_kwargs = MappingProxyType({"runtime_limits": template_limits})
         self.lock = threading.RLock()
         self.write_lock = threading.Lock()
         self._completion_events = {}
@@ -1902,7 +1931,9 @@ class Desktop:
         vision = (
             config.get("type") in VISION_MODEL_TYPES or model_image_family(config, Path(model["path"])) is not None
         )
-        codec, template = (None, None) if vision else load_template(Path(model["path"]))
+        codec, template = (
+            (None, None) if vision else load_template(Path(model["path"]), **self._benchmark_template_kwargs)
+        )
         if mode == "decision" and vision:
             raise DesktopError("Vision-language artifacts support Chat mode only.")
         with self.lock:
@@ -1925,6 +1956,7 @@ class Desktop:
                     Path(model["path"]),
                     self.timeout,
                     gpu_memory_callback=on_gpu_memory,
+                    **self._benchmark_worker_kwargs,
                 )
             )
             self.worker = worker
@@ -1935,7 +1967,9 @@ class Desktop:
                 )
         ready = worker.read()
         if vision:
-            codec, template = load_template(Path(model["path"]), expected_hashes=worker.image_input)
+            codec, template = load_template(
+                Path(model["path"]), expected_hashes=worker.image_input, **self._benchmark_template_kwargs
+            )
         if mode == "decision":
             if (
                 ready.get("ready") is not True
@@ -2626,7 +2660,7 @@ class Desktop:
                 },
             }
 
-    def api_complete(self, payload, on_delta=None, cancelled=None):
+    def api_complete(self, payload, on_delta=None, cancelled=None, *, byte_limits=PRODUCTION_BYTE_LIMITS):
         """Run one chat completion for the HTTP API and return the response body.
 
         ``payload`` is the raw request object; it is validated under the lock, then
@@ -2641,6 +2675,8 @@ class Desktop:
         and the app shows the model as stopped).
         """
         cancelled = cancelled or threading.Event()
+        if not isinstance(byte_limits, APIByteLimits):
+            raise APIError(500, "Invalid API byte policy.", "internal_error")
         with self.lock:
             request = parse_chat_request(
                 payload,
@@ -2650,6 +2686,7 @@ class Desktop:
                     self.context_capacity_known and self.worker and getattr(self.worker, "images", False)
                 ),
                 allow_tools=True,
+                byte_limits=byte_limits,
             )
             maximum = request["maximum"]
             messages = request["messages"]
@@ -2667,9 +2704,9 @@ class Desktop:
                     "tools_unsupported",
                 )
             rendered_tools = render_tools(request)
-            validate_parser_tools(rendered_tools or [], parser)
+            validate_parser_tools(rendered_tools or [], parser, byte_limits=byte_limits)
             candidate = (
-                template_messages(messages, parser=parser, tools=rendered_tools)
+                template_messages(messages, parser=parser, tools=rendered_tools, byte_limits=byte_limits)
                 if tool_request
                 else [dict(m) for m in messages]
             )
@@ -2726,7 +2763,11 @@ class Desktop:
             self.emit("generation_progress", epoch, source="api", id=progress_id, model=identifier, **value)
 
         try:
-            tool_stream = ToolTextStream(on_delta, parser=parser) if tool_request and on_delta is not None else None
+            tool_stream = (
+                ToolTextStream(on_delta, parser=parser, byte_limits=byte_limits)
+                if tool_request and on_delta is not None
+                else None
+            )
             reply = self.infer(
                 candidate,
                 maximum,
@@ -2762,6 +2803,7 @@ class Desktop:
                         call_id_prefix=uuid.uuid4().hex,
                         tool_choice=request["tool_choice"],
                         initial_thinking=reply.get("_tool_initial_thinking", False),
+                        byte_limits=byte_limits,
                     )
                     if tool_request
                     else (
