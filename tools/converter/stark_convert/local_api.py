@@ -22,16 +22,11 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .json_budget import check_json_structure
-from .resource_budget import PENDING_BYTES, WIRE_BYTES, available_memory_bytes
+from .resource_budget import PENDING_BYTES, WIRE_BYTES, available_memory_bytes, json_parse_headroom_bytes
 
 MAX_TEXT_BODY_BYTES = WIRE_BYTES
 MAX_IMAGE_BODY_BYTES = WIRE_BYTES + 6 * 1024 * 1024
 MAX_PENDING_BODY_BYTES = PENDING_BYTES
-# json.loads(bytes) can hold both a decoded four-byte-wide JSON string and its
-# parsed string values at once. Reserve transient parsing headroom separately
-# from raw transport bytes, including bodies admitted by concurrent handlers.
-_JSON_PARSE_MEMORY_MULTIPLIER = 12
-_MEMORY_GUARDED_BODY_BYTES = 1024 * 1024
 # OpenWork (16) plus OpenCode Desktop (8) managed capabilities share this admission table.
 MAX_API_CLIENTS = 24
 MAX_API_CLIENT_TTL_SECONDS = 120
@@ -487,9 +482,7 @@ class LocalAPI:
                     with api._body_lock:
                         if api._pending_body_bytes + length > MAX_PENDING_BODY_BYTES:
                             raise APIError(429, "Pending request bytes exceed the server budget", "body_budget_full")
-                        parse_bytes = (
-                            _JSON_PARSE_MEMORY_MULTIPLIER * length if length > _MEMORY_GUARDED_BODY_BYTES else 0
-                        )
+                        parse_bytes = json_parse_headroom_bytes(length)
                         if parse_bytes and api._pending_parse_bytes + parse_bytes > available_memory_bytes():
                             raise APIError(429, "Available memory is too low for this request", "memory_pressure")
                         api._pending_body_bytes += length

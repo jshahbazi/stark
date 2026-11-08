@@ -78,6 +78,14 @@ not impose a 65,536-token ceiling on native worker requests.
 Template source size, sandbox restrictions, execution fuel and deadlines remain
 separate controls; see [chat template evaluation](GENERATION.md#chat-template-evaluation).
 
+The HTTP API and private app command pipe also check current parsing headroom
+for frames above 1 MiB, using twelve times the raw size as a conservative
+Unicode/JSON allowance. HTTP reserves that allowance across concurrent readers.
+The serialized app pipe checks while receiving a frame and immediately before
+decoding; a rejected frame drains through its newline so smaller commands and
+Stop remain available. This estimate does not reserve RAM or impose a hard RSS
+ceiling.
+
 ## Automatic execution for undeclared contexts
 
 The memory planner also admits Auto output for finite-context text models. Their

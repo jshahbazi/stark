@@ -202,7 +202,7 @@ impl<B: Backend> Decoder<B> {
         self.transformer.max_context_length()
     }
 
-    pub(crate) fn memory_estimate(
+    fn workspace_memory_estimate(
         &self,
         context_tokens: u32,
         input_tokens: u32,
@@ -220,9 +220,32 @@ impl<B: Backend> Decoder<B> {
                 embedding.add_memory_scratch(rows, &mut estimate)?;
             }
         }
+        Some(estimate)
+    }
+
+    pub(crate) fn memory_estimate(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        let mut estimate = self.workspace_memory_estimate(context_tokens, input_tokens)?;
         // Generation reads one final logit row during prefill, not a
         // prefill_rows*vocabulary matrix. Include sampler/readback workspace.
         estimate.add_scratch(&[self.embedding.vocab_size()], 4, 4)?;
+        Some(estimate)
+    }
+
+    pub(crate) fn scoring_memory_estimate(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        let mut estimate = self.workspace_memory_estimate(context_tokens, input_tokens)?;
+        let row = crate::encodable_block::memory::checked_bytes(&[self.embedding.vocab_size()], 4)?;
+        // Only the final chunk produces a vocabulary row. Keep its device
+        // readout, CPU conversion, candidate arrays and logits cache in one
+        // request-wide allowance, outside the per-chunk scratch multiplier.
+        estimate.add_state_buffers(row.checked_mul(16)?, row)?;
         Some(estimate)
     }
 

@@ -177,6 +177,28 @@ impl MemoryEstimate {
     pub fn total_bytes(&self) -> Option<usize> {
         self.state_bytes.checked_add(self.scratch_bytes)
     }
+
+    /// Scoring submits one independently owned scratch pool per prompt chunk
+    /// and retains every pending submission until the complete prompt is
+    /// encoded. Its peak therefore includes all chunk pools simultaneously.
+    pub fn scoring_total_bytes(
+        &self,
+        input_tokens: u32,
+        separate_final_row: bool,
+    ) -> Option<usize> {
+        if input_tokens == 0 {
+            return None;
+        }
+        let chunks = input_tokens.div_ceil(1024) as usize;
+        // A shorter last chunk or the 1023+1 readout split can populate an
+        // additional power-of-two page class. Earlier complete chunks use the
+        // profiled geometry; only the final pool needs a second inventory.
+        let last_rows = (input_tokens - 1) % 1024 + 1;
+        let extra_final = (input_tokens > 1024 && last_rows < 1024) || (separate_final_row && last_rows > 1);
+        self.state_bytes
+            .checked_add(self.scratch_bytes.checked_mul(chunks.checked_add(usize::from(extra_final))?)?)?
+            .checked_add((1024 * 1024usize).checked_mul(chunks)?)
+    }
 }
 
 /// Combine dense MTP's simultaneously retained target/predictor states and
@@ -273,6 +295,24 @@ mod tests {
         assert_eq!(automatic_context(10, dense, 800, profile), Some(100));
         assert!(generation_allocation_context(u32::MAX, u32::MAX, 1, true).is_none());
         assert!(generation_allocation_context(10, 20, 11, true).is_none());
+    }
+
+    #[stark_test]
+    fn scoring_admission_retains_all_chunk_pools_and_allows_full_prompt_context() {
+        let mut estimate = MemoryEstimate::state(100);
+        estimate.add_scratch(&[17], 1, 2).unwrap();
+        let one = estimate.scoring_total_bytes(1024, false).unwrap();
+        let two = estimate.scoring_total_bytes(1025, false).unwrap();
+        assert_eq!(one, 100 + 64 + 1024 * 1024);
+        assert_eq!(two, 100 + 3 * 64 + 2 * 1024 * 1024);
+        assert_eq!(estimate.scoring_total_bytes(1024, true), Some(100 + 128 + 1024 * 1024));
+        let mut readout = estimate.clone();
+        readout.add_state_buffers(64 * 1000, 4 * 1000).unwrap();
+        assert_eq!(readout.scoring_total_bytes(1024, false).unwrap() - one, 64 * 1000);
+        assert_eq!(readout.scoring_total_bytes(1025, false).unwrap() - two, 64 * 1000);
+        assert_eq!(estimate.scoring_total_bytes(0, false), None);
+        estimate.scratch_bytes = usize::MAX;
+        assert_eq!(estimate.scoring_total_bytes(2, true), None);
     }
 
     #[stark_test]

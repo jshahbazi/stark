@@ -26,6 +26,15 @@ def automatic_budget_mib(available_bytes):
     return max(16, min(64, available_bytes // (128 * 1024 * 1024)))
 
 
+def json_parse_headroom_bytes(raw_bytes):
+    """Conservative transient JSON allowance; this is not an RSS guarantee.
+
+    Decoding bytes can hold a four-byte-wide Unicode source and its parsed
+    values together. Small control/retry frames retain their existing path.
+    """
+    return 12 * raw_bytes if raw_bytes > 1024 * 1024 else 0
+
+
 _SETTING = os.environ.get("STARK_REQUEST_BUDGET_MIB", str(automatic_budget_mib(available_memory_bytes())))
 if not _SETTING.isascii() or not _SETTING.isdecimal() or len(_SETTING) not in (1, 2) or not 1 <= int(_SETTING) <= 64:
     raise SystemExit("Invalid STARK_REQUEST_BUDGET_MIB; expected a decimal integer from 1 through 64.")

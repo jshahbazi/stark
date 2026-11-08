@@ -306,6 +306,36 @@ impl<B: Backend> LanguageModel<B> {
         )
     }
 
+    /// Admit exact scoring's fresh state and all independently retained prompt
+    /// chunk pools. Scoring reads the final prompt position without reserving
+    /// an output token, so input may exactly fill the selected context.
+    pub fn scoring_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        if input_tokens == 0
+            || input_tokens > context_tokens
+            || self.speculator.is_some()
+            || self.max_context_length().is_some_and(|maximum| context_tokens > maximum)
+        {
+            return None;
+        }
+        let allocated = if self.max_context_length().is_some()
+            && self.engine.context.device_capabilities().contains(DeviceCapabilities::SPARSE_BUFFERS)
+        {
+            input_tokens
+        } else {
+            context_tokens
+        };
+        // Dense MTP's predictor is not executed by score_next_token.
+        let estimate = self.decoder.scoring_memory_estimate(allocated, input_tokens)?;
+        if self.engine.context.max_buffer_length().is_some_and(|limit| estimate.max_buffer_bytes > limit) {
+            return None;
+        }
+        estimate.scoring_total_bytes(input_tokens, self.decoder.prefill_requires_separate_logits_row())
+    }
+
     /// Plan a finite execution allocation from loaded geometry and a caller's
     /// memory headroom. This is not a trained model context-capacity claim.
     pub fn automatic_context_length(

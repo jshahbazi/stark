@@ -187,6 +187,17 @@ struct NativeScores {
     readout_seconds: f64,
 }
 
+fn admit_scoring_memory(
+    request_bytes: Option<usize>,
+    available: usize,
+) -> Result<(), &'static str> {
+    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+    if request_bytes > available.saturating_sub(256 * 1024 * 1024) / 4 {
+        return Err("resource_budget_exceeded");
+    }
+    Ok(())
+}
+
 trait ScoringBackend {
     fn idle_maintenance_interval(&self) -> Option<Duration> {
         None
@@ -397,6 +408,15 @@ impl ScoringBackend for NativeBackend {
         input: &[u32],
         context: u32,
     ) -> Result<NativeScores, &'static str> {
+        let input_tokens = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
+        let request_bytes = match &self.model {
+            NativeModel::Dense(model) => model.scoring_memory_bytes(input_tokens, context),
+            // Hybrid caches grow with committed prompt rows; unused selected
+            // capacity does not allocate additional cache storage here.
+            NativeModel::Hybrid(model) => model.request_memory_bytes(input_tokens, input_tokens),
+        };
+        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+        admit_scoring_memory(request_bytes, available)?;
         let NativeModel::Dense(model) = &self.model else {
             let NativeModel::Hybrid(model) = &mut self.model else {
                 unreachable!()
@@ -866,6 +886,7 @@ mod tests {
         idle_calls: usize,
         fail_idle: bool,
         fail_score: bool,
+        fail_resource: bool,
         fail_probe: bool,
         invalid_output: bool,
         fail_tokenize: bool,
@@ -915,6 +936,9 @@ mod tests {
             if self.fail_score {
                 return Err("native_scoring_failed");
             }
+            if self.fail_resource {
+                return Err("resource_budget_exceeded");
+            }
             Ok(NativeScores {
                 logits: if self.invalid_output {
                     vec![f32::NAN; 6]
@@ -938,6 +962,7 @@ mod tests {
                 idle_calls: 0,
                 fail_idle: false,
                 fail_score: false,
+                fail_resource: false,
                 fail_probe: false,
                 invalid_output: false,
                 fail_tokenize: false,
@@ -1164,6 +1189,31 @@ mod tests {
             assert_eq!(post(&mut worker, request(input, &[2, 3], context, 1.22))["cache_hit"], false);
         }
         assert_eq!(worker.backend.calls, 4);
+    }
+
+    #[test]
+    fn memory_admission_reports_recoverable_resource_errors() {
+        let available = 1024 * 1024 * 1024;
+        assert_eq!(admit_scoring_memory(None, available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(256 * 1024 * 1024), available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(128 * 1024 * 1024), available), Ok(()));
+    }
+
+    #[test]
+    fn scoring_memory_rejection_clears_logits_and_accepts_same_worker_retry() {
+        let mut worker = worker(true, false);
+        post(&mut worker, standard());
+        assert_eq!(post(&mut worker, standard())["cache_hit"], true);
+        worker.backend.fail_resource = true;
+        let full_context = request(&[2, 1], &[2, 3], 2, 1.0);
+        assert_eq!(post(&mut worker, full_context.clone())["error"], "resource_budget_exceeded");
+        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
+        worker.backend.fail_resource = false;
+        let retry = post(&mut worker, full_context.clone());
+        assert_eq!(retry["input_tokens"], 2);
+        assert_eq!(retry["cache_hit"], false);
+        assert_eq!(post(&mut worker, full_context)["cache_hit"], true);
+        assert_eq!(worker.backend.calls, 3);
     }
 
     #[test]

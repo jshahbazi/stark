@@ -1634,6 +1634,7 @@ def score_executable(tmp_path):
         "               'input_tokens':len(request['input_token_ids']),\n"
         "               'temperature':request['temperature'],'truncated':False}\n"
         "        if 'context fixture' in prompt: reply={'error':'context_overflow'}\n"
+        "        if 'resource fixture' in prompt: reply={'error':'resource_budget_exceeded'}\n"
         "    print(json.dumps(reply),flush=True)\n"
     )
     path.chmod(0o755)
@@ -1780,6 +1781,21 @@ def test_native_model_context_rejection_preserves_worker_and_allows_retry(deskto
     assert any("context limit" in event.get("message", "") for event in events(desktop))
     desktop.dispatch(decision_command())
     finish(desktop)
+    assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
+
+
+def test_decision_memory_rejection_preserves_worker_and_allows_retry(desktop, model, score_executable):
+    running_decision(desktop, model, score_executable)
+    worker = desktop.worker
+    desktop.dispatch(decision_command(text="resource fixture"))
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert not any(event["event"] == "decision" for event in events(desktop))
+    assert any("resource budget" in event.get("message", "") for event in events(desktop))
+    assert desktop.job is None
+    desktop.dispatch(decision_command())
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
     assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
 
 

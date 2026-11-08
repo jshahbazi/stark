@@ -74,7 +74,13 @@ from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
-from .resource_budget import INPUT_BYTES, REQUEST_BUDGET_MIB, WIRE_BYTES
+from .resource_budget import (
+    INPUT_BYTES,
+    REQUEST_BUDGET_MIB,
+    WIRE_BYTES,
+    available_memory_bytes,
+    json_parse_headroom_bytes,
+)
 from .sources import huggingface_repository
 from .tool_protocols import protocol_stop_ids
 from .vision_runtime import (
@@ -3059,7 +3065,7 @@ def serve(desktop):
     desktop.library()
     desktop.families()
     desktop.status("idle", "Choose a model to run")
-    pending = b""
+    pending = bytearray()
     discarding = False
     while True:
         if desktop.output_failed:
@@ -3070,27 +3076,46 @@ def serve(desktop):
         chunk = os.read(sys.stdin.fileno(), 65536)
         if not chunk:
             return
-        pending += chunk
-        while b"\n" in pending:
-            line, pending = pending.split(b"\n", 1)
+        while chunk:
+            newline = chunk.find(b"\n")
             if discarding:
+                if newline < 0:
+                    break
                 discarding = False
+                chunk = chunk[newline + 1 :]
                 continue
+            part = chunk if newline < 0 else chunk[:newline]
+            length = len(pending) + len(part)
+            headroom = json_parse_headroom_bytes(length)
+            error = None
+            if length > MAX_COMMAND_BYTES:
+                error = "App command is too large."
+            elif headroom and headroom > available_memory_bytes():
+                error = "Available memory is too low for this app command. Try a smaller request."
+            if error is not None:
+                pending.clear()
+                desktop.emit("error", message=error)
+                discarding = newline < 0
+                if discarding:
+                    break
+                chunk = chunk[newline + 1 :]
+                continue
+            pending.extend(part)
+            if newline < 0:
+                break
+            line = bytes(pending)
+            pending.clear()
+            chunk = chunk[newline + 1 :]
             try:
-                if len(line) > MAX_COMMAND_BYTES:
-                    raise DesktopError("App command is too large.")
                 check_json_structure(line)
+                if headroom and headroom > available_memory_bytes():
+                    raise DesktopError("Available memory is too low for this app command. Try a smaller request.")
                 if not desktop.dispatch(json.loads(line)):
                     return
             except DesktopError as error:
                 desktop.emit("error", message=str(error))
             except Exception:
                 desktop.emit("error", message="Invalid app command.")
-        if len(pending) > MAX_COMMAND_BYTES:
-            pending = b""
-            if not discarding:
-                desktop.emit("error", message="App command is too large.")
-            discarding = True
 
 
 def main(argv=None):
