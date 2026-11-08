@@ -131,6 +131,9 @@ def run(args):
                 focus_case, focus_mode = args.capture_mlp_down_case, "mlp"
             if args.capture_first_six_blocks_case is not None:
                 focus_case, focus_mode = args.capture_first_six_blocks_case, "blocks"
+            stage_layer = (
+                args.capture_full_attention_layer if focus_mode == "attention" else 0
+            )
             focused = focus_case is not None
             capture = args.capture_stages and (not focused or index == focus_case)
             original_rotary = modeling_gemma4.apply_multidimensional_rope
@@ -146,13 +149,14 @@ def run(args):
                 _index=index,
                 _stages=stages,
                 _focused=focus_mode if focused else None,
+                _layer=stage_layer,
             ):
                 if _focused == "attention":
                     if tag not in {
-                        "prepared_queries_0",
-                        "prepared_keys_0",
-                        "prepared_values_0",
-                        "attention_0",
+                        f"prepared_queries_{_layer}",
+                        f"prepared_keys_{_layer}",
+                        f"prepared_values_{_layer}",
+                        f"attention_{_layer}",
                     }:
                         return
                     full, head0 = True, False
@@ -196,23 +200,30 @@ def run(args):
                 }
 
             def rotated(
-                value, *parts, _rotary=original_rotary, _calls=rotary_calls, **kwargs
+                value,
+                *parts,
+                _rotary=original_rotary,
+                _calls=rotary_calls,
+                _layer=stage_layer,
+                **kwargs,
             ):
                 result = _rotary(value, *parts, **kwargs)
                 call = _calls[0]
                 _calls[0] += 1
-                if call < 2:
+                if call // 2 == _layer:
                     save_stage(
-                        "prepared_queries_0" if call == 0 else "prepared_keys_0",
+                        f"prepared_queries_{_layer}"
+                        if call % 2 == 0
+                        else f"prepared_keys_{_layer}",
                         result,
                         full=True,
                         head0=True,
                     )
                 return result
 
-            def capture_values(_module, _inputs, value):
-                save_stage("v_norm_0", value)
-                save_stage("prepared_values_0", value, full=True, head0=True)
+            def capture_values(_module, _inputs, value, _layer=stage_layer):
+                save_stage(f"v_norm_{_layer}", value)
+                save_stage(f"prepared_values_{_layer}", value, full=True, head0=True)
 
             if capture:
                 hooks.append(
@@ -225,7 +236,7 @@ def run(args):
                         lambda _m, _i, value: save_stage("patch_positions", value)
                     )
                 )
-                first = tower.encoder.layers[0]
+                first = tower.encoder.layers[stage_layer]
                 if args.capture_mlp_down_case is not None:
                     for tag, module in [
                         ("pre_ff_norm_0", first.pre_feedforward_layernorm),
@@ -269,7 +280,9 @@ def run(args):
                 )
                 hooks.append(
                     first.self_attn.o_proj.register_forward_pre_hook(
-                        lambda _m, inputs: save_stage("attention_0", inputs[0])
+                        lambda _m, inputs, layer=stage_layer: save_stage(
+                            f"attention_{layer}", inputs[0]
+                        )
                     )
                 )
                 for layer, module in enumerate(tower.encoder.layers):
@@ -352,8 +365,13 @@ def run(args):
         "complete": True,
     }
     if args.capture_full_attention_case is not None:
-        manifest["stage_focus"] = "first-layer-full-attention"
+        manifest["stage_focus"] = (
+            "selected-layer-full-attention"
+            if args.capture_full_attention_layer
+            else "first-layer-full-attention"
+        )
         manifest["stage_case_index"] = args.capture_full_attention_case
+        manifest["stage_layer_index"] = args.capture_full_attention_layer
     if args.capture_first_six_blocks_case is not None:
         manifest["stage_focus"] = "first-six-full-blocks"
         manifest["stage_case_index"] = args.capture_first_six_blocks_case
@@ -375,11 +393,16 @@ def main():
     for name in ("source", "fixtures", "output", "reference-lock"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--capture-stages", action="store_true")
+    parser.add_argument(
+        "--capture-full-attention-layer", type=int, choices=range(27), default=0
+    )
     focus = parser.add_mutually_exclusive_group()
     focus.add_argument("--capture-full-attention-case", type=int, choices=(0, 1, 2))
     focus.add_argument("--capture-mlp-down-case", type=int, choices=(0, 1, 2))
     focus.add_argument("--capture-first-six-blocks-case", type=int, choices=(0, 1, 2))
     args = parser.parse_args()
+    if args.capture_full_attention_layer and args.capture_full_attention_case is None:
+        parser.error("selected attention layer requires --capture-full-attention-case")
     if (
         args.capture_full_attention_case is not None
         or args.capture_mlp_down_case is not None
