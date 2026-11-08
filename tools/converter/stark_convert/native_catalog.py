@@ -11,7 +11,7 @@ QWEN_CHOICE = "qwen38-mixed"
 
 _NATIVE_CHOICES = {
     FAMILY_ID: (CHOICE,),
-    QWEN_FAMILY_ID: (QWEN_CHOICE,),
+    QWEN_FAMILY_ID: (QWEN_CHOICE, "qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"),
 }
 
 
@@ -74,6 +74,10 @@ def catalog_item(choice: str = CHOICE) -> dict:
         name = "GLM-5.3-Flash-GGUF"
     elif choice == QWEN_CHOICE:
         name = "Qwen3.8-Flash-Next-MLX-mixed-4_8bit"
+    elif choice == "qwen38-lily-q4-xl":
+        name = "Qwen3.8-Flash-Next-lily-q4-xl"
+    elif choice == "qwen38-mlx-serve-mixed":
+        name = "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
     else:
         raise ValueError("unknown native catalog choice")
     return {
@@ -85,7 +89,9 @@ def catalog_item(choice: str = CHOICE) -> dict:
         "parameter_count": None,
         "weight_bytes": source["weight_bytes"],
         "quantization": source["quantization"],
-        "artifact_modes": ["text"],
+        "artifact_modes": ["text", "vision-language"]
+        if choice in {"qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"}
+        else ["text"],
         "default_artifact_mode": "text",
         "downloadable": True,
         "model_group": None,

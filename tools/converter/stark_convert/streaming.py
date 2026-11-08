@@ -13,7 +13,7 @@ import math
 import os
 import struct
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO
 
@@ -621,6 +621,25 @@ def transpose_f32(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int) -> int
     return peak
 
 
+def transpose_vision_patch(op: TensorOperation, output: BinaryIO, chunk_bytes: int) -> int:
+    """Restore MLX Conv3d [H,T,P,P,C] to HF [H,C,T,P,P] without float casts."""
+    if len(op.sources) != 1 or len(op.sources[0].shape) != 5 or op.dtype != "BF16":
+        raise ConversionError("Invalid vision patch transpose")
+    source = op.sources[0]
+    h, t, p, q, c = source.shape
+    if source.dtype != "BF16" or not 0 < h <= 4096 or not 0 < t <= 8 or not 0 < p <= 64 or q != p or c != 3:
+        raise ConversionError("Invalid vision patch geometry")
+    if op.shape != (h, c, t, p, p):
+        raise ConversionError("Invalid vision patch output geometry")
+    count = t * p * p
+    row_bytes = count * c * source.itemsize
+    peak = 0
+    for row in range(h):
+        view = replace(source, shape=(count, c), offset=source.offset + row * row_bytes, nbytes=row_bytes)
+        peak = max(peak, transpose_tensor(view, output, chunk_bytes))
+    return peak
+
+
 class _HashingWriter:
     """Hash successful sequential writes without rereading the output payload.
 
@@ -742,6 +761,8 @@ def write_plan(
                     peak = max(peak, transpose_tensor(op.sources[0], output, chunk_bytes))
                 elif op.kind == "transpose_f32" and len(op.sources) == 1:
                     peak = max(peak, transpose_f32(op.sources[0], output, chunk_bytes))
+                elif op.kind == "vision_patch_transpose":
+                    peak = max(peak, transpose_vision_patch(op, output, chunk_bytes))
                 elif op.kind == "mlx_params":
                     from .compressed import write_mlx_params
 

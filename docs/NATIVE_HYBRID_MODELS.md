@@ -105,6 +105,36 @@ loader.
 An incomplete prepared folder is rejected before registration. The native
 loader remains responsible for tensor admission.
 
+## Retained Lily image artifacts
+
+Source builds containing the image-family integration can explicitly enable
+still-image input for the pinned `qwen38-lily-q4-xl` and
+`qwen38-mlx-serve-mixed` retained formats. An existing complete prepared folder
+can be upgraded without copying its model payloads:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare qwen38-lily-q4-xl --output models/qwen38-lily-q4-xl --upgrade-images
+```
+
+For a new preparation, add `--artifact-mode vision-language` to the matching
+preparation command. The helper writes a schema-6 `stark-image-artifact.json`
+binding the source, model shards, any external n-gram table, configuration,
+tokenizer, fixed processor recipe and standalone template. Native loading
+verifies the recorded payload hashes and retained BF16 tower before publishing
+image capability; automatic local checks must pass before image input is enabled.
+
+The path accepts one PNG/JPEG, clears generation-prefix reuse and keeps image
+MTP disabled. The pinned Lily Q4-XL artifact has source-bound vision-tower and
+worker lifecycle evidence. Preparation support for the separate MLX-Serve
+mixed-4/8-bit artifact does not establish its image execution qualification.
+Full retained-decoder numerical parity and image performance remain unverified.
+Installed releases can have earlier capabilities. See the
+[retained image preparation and validation record](archive/runs/2026-11-07-qwen-image-families.md#original-format-flash-next)
+for exact checkpoints, builds, memory admission and remaining limits.
+
+The PipeNetwork `qwen38-mixed` path remains text-only. Typed Uzu text conversion,
+described below, omits the vision tower and MTP.
+
 ## Qwen3.8 Uzu text artifacts
 
 The `qwen4_exp` converter accepts the implemented
@@ -285,7 +315,7 @@ quantization is unchanged. Lily batched verification retains ordinary decode ari
 captures GDN and convolution state, and rejection restores the committed
 prefix and n-gram history. The
 head and its speculative state add memory. See the
-[generation protocol](GENERATION.md#qwen38-multi-token-prediction) for settings,
+[generation protocol](GENERATION.md#multi-token-prediction) for settings,
 aggregate counters and sampling semantics. Scoring keeps MTP disabled.
 The official mixed-affine checkpoint's existing one-layer head is also
 supported, using `batched-affine-decode-exact-v1` verification to preserve its
@@ -293,8 +323,9 @@ ValueKey GDN, stock HC, affine-64 cache and BF16-valued head policy.
 Lily weights retain `batched-decode-exact-v1`. The official verifier uses
 its own short-row kernels and physical ValueKey rollback captures; both
 policies retain their ordinary target arithmetic.
-This path requires macOS 26 and Metal 4, uses the checkpoint's declared context
-maximum, and does not execute vision. Initial K/V and decode scratch
+The text path requires macOS 26 and Metal 4 and uses the checkpoint's declared
+context maximum. Images require the separate retained-image artifact described
+above. Initial K/V and decode scratch
 reserve at most 16,384 tokens and grow as needed; that reserve is not a token
 limit. Prefill scratch follows the current state capacity. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
@@ -529,7 +560,9 @@ and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-r
 record the remaining graph, kernel and prefill opportunities with source and
 license boundaries.
 
-These paths are text-only. They do not execute vision, video, audio or DFlash.
+The default prepared paths are text-only. Still images require the explicit
+retained Lily image preparation described above. Video, audio and DFlash are
+unsupported.
 MTP is available through the native Lily and official mixed-affine generation
 paths described above when the checkpoint contains its trained head. The
 ordinary GLM GGUF path does not execute its MTP layer; the explicitly selected

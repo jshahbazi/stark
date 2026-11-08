@@ -17,9 +17,9 @@ def test_legacy_glm_catalog_api_remains_compatible():
     assert native_catalog.allowed_choice(native_catalog.CHOICE)
 
 
-def test_qwen_native_catalog_offers_only_the_pinned_mixed_source():
+def test_qwen_native_catalog_preserves_text_source_and_adds_retained_image_choices():
     items = native_catalog.catalog_items(native_catalog.QWEN_FAMILY_ID)
-    assert len(items) == 1
+    assert len(items) == 3
     item = items[0]
     source = hybrid_prepare.SOURCES[native_catalog.QWEN_CHOICE]
     assert item["repo"] == source["weights_repo"]
@@ -30,6 +30,13 @@ def test_qwen_native_catalog_offers_only_the_pinned_mixed_source():
     assert native_catalog.catalog_item(native_catalog.QWEN_CHOICE) == item
     assert native_catalog.source_choice(native_catalog.QWEN_FAMILY_ID, item) == native_catalog.QWEN_CHOICE
     assert native_catalog.allowed_choice(native_catalog.QWEN_CHOICE)
+    for item in items[1:]:
+        assert item["artifact_modes"] == ["text", "vision-language"]
+        assert item["default_artifact_mode"] == "text"
+        assert native_catalog.source_choice(native_catalog.QWEN_FAMILY_ID, item) in {
+            "qwen38-lily-q4-xl",
+            "qwen38-mlx-serve-mixed",
+        }
 
 
 def test_native_catalog_rejects_other_families_and_mutated_items():

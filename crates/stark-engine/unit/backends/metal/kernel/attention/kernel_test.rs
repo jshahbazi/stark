@@ -230,6 +230,7 @@ fn run_single_pass_attention(
     let mut command_buffer = context.create_command_buffer(None, None).expect("Failed to create command buffer");
     let pooled_output = kernel.encode(
         AttentionArguments {
+            image_span: None,
             queries: &query_buffer,
             keys: &key_cache_buffer,
             values: &value_cache_buffer,
@@ -299,6 +300,7 @@ fn run_gemm_attention(
     let mut command_buffer = context.create_command_buffer(None, None).expect("Failed to create command buffer");
 
     let args = AttentionArguments {
+        image_span: None,
         queries: &query_buffer,
         keys: &key_buffer,
         values: &value_buffer,
@@ -482,6 +484,7 @@ fn run_two_pass_attention(
 
     let pooled_output = kernel.encode(
         AttentionArguments {
+            image_span: None,
             queries: &queries_buffer,
             keys: &keys_buffer,
             values: &values_buffer,
@@ -605,6 +608,7 @@ fn run_attention_with_kernel<B: Backend>(
         create_buffer_with_data::<B, u32>(context, &words)
     });
     let arguments = AttentionArguments {
+        image_span: None,
         queries: &queries,
         keys: &keys,
         values: &values,
@@ -743,4 +747,53 @@ fn attention_kernel_ring_matches_full_on_wrap() {
         None,
     );
     assert_eq_float::<bf16>(&full, &ring, 1e-2, "wrapped ring attention");
+}
+
+#[stark_test]
+fn source_single_pass_preserves_precise_uniform_average_at_bf16_tie() {
+    let context = <Metal as Backend>::Context::new().expect("Metal attention context");
+    let numerator = 4.716796875_f32;
+    let exact_quotient = 0.673828125_f32;
+    let reciprocal_product = numerator * (1.0_f32 / 7.0);
+    // Seven equal probabilities give this exactly representable BF16 midpoint.
+    // Division rounds to the even lower endpoint; a separately rounded F32
+    // reciprocal moves the product above the midpoint and changes that result.
+    assert_eq!(numerator / 7.0, exact_quotient);
+    assert_eq!(bf16::from_f32(exact_quotient).to_f32(), 0.671875);
+    assert_eq!(bf16::from_f32(reciprocal_product).to_f32(), 0.67578125);
+
+    for head_dim in [64, 128, 256] {
+        let queries = create_buffer_with_data::<Metal, bf16>(&context, &vec![bf16::ZERO; head_dim]);
+        let keys = create_buffer_with_data::<Metal, bf16>(&context, &vec![bf16::ZERO; 7 * head_dim]);
+        let mut values = vec![bf16::ZERO; 7 * head_dim];
+        values[..head_dim].fill(bf16::from_f32(4.71875));
+        values[head_dim..2 * head_dim].fill(bf16::from_f32(-0.001953125));
+        let values = create_buffer_with_data::<Metal, bf16>(&context, &values);
+        let mut config = super::default_attention_config::<bf16>(head_dim, 1, 1, true);
+        config.source_bf16_prefill = true;
+        let kernel = <<Metal as Backend>::Kernels as Kernels>::AttentionKernel::new(&context, config)
+            .expect("source single-pass attention");
+        let mut commands = context.create_command_buffer(None, None).expect("attention commands");
+        let result = kernel
+            .encode(
+                AttentionArguments {
+                    image_span: None,
+                    queries: &queries,
+                    keys: &keys,
+                    values: &values,
+                    suffix_length: 1,
+                    trie: None::<&<Metal as Backend>::GlobalBuffer>,
+                    sinks: None,
+                    cache: KVCacheView::full(6),
+                },
+                &mut commands,
+            )
+            .expect("source single-pass encode");
+        let mut output = create_buffer::<Metal, bf16>(&context, head_dim);
+        commands.encode_copy(&result, &mut output);
+        commands.end_encoding().submit().wait_until_completed().expect("source single-pass execution");
+        for actual in buffer_to_vec::<Metal, bf16>(&output) {
+            assert_eq!(actual.to_f32(), 0.671875, "source single-pass D{head_dim}");
+        }
+    }
 }

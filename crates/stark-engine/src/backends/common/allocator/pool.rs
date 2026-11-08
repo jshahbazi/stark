@@ -4,12 +4,16 @@ use parking_lot::Mutex;
 
 pub struct PoolAllocator<T> {
     pages: [Mutex<VecDeque<T>>; 32],
+    #[cfg(test)]
+    requested_bytes: std::sync::atomic::AtomicUsize,
 }
 
 impl<T> PoolAllocator<T> {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             pages: Default::default(),
+            #[cfg(test)]
+            requested_bytes: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -19,6 +23,8 @@ impl<T> PoolAllocator<T> {
         upstream: impl FnOnce(usize) -> Result<T, E>,
     ) -> Result<PoolAllocation<T>, E> {
         assert!(size > 0 && size <= 2 * 1024 * 1024 * 1024);
+        #[cfg(test)]
+        self.requested_bytes.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
 
         let page = if let Some(page) = self.pages[(size - 1).bit_width() as usize].lock().pop_front() {
             page
@@ -31,6 +37,13 @@ impl<T> PoolAllocator<T> {
             page: ManuallyDrop::new(page),
             range: (0..size).into(),
         })
+    }
+
+    /// Cumulative requested scratch, an upper bound on simultaneous requested
+    /// payload even when pages recycle. Excludes rounding and allocator overhead.
+    #[cfg(test)]
+    pub(crate) fn requested_bytes(&self) -> usize {
+        self.requested_bytes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn alias(

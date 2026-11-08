@@ -590,7 +590,7 @@ pub fn load(
     expert_usage_out: Option<PathBuf>,
     session_context: Option<SessionContext>,
 ) -> Result<ModelWeights> {
-    ensure!(!with_vision, "vendored Lily core does not load vision");
+    ensure!(!with_vision || config.vision.is_some(), "checkpoint has no retained vision tower");
     ensure!(!with_mtp || config.mtp.is_some(), "checkpoint has no MTP head");
     ensure!(
         expert_slots.is_none()
@@ -620,7 +620,7 @@ pub fn load_checkpoint(
     with_vision: bool,
     machine_memory: Option<u64>,
 ) -> Result<ModelWeights> {
-    ensure!(!with_vision, "vendored Lily core does not load vision");
+    ensure!(!with_vision || config.vision.is_some(), "checkpoint has no retained vision tower");
     ensure!(!with_mtp || config.mtp.is_some(), "checkpoint has no MTP head");
     // Every buffer allocated from here on that is still alive at the end is
     // a weight, or the expert cache's (filtered out below).

@@ -1,5 +1,6 @@
 """Metadata-only family browsing never downloads model weight payloads."""
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,43 @@ from stark_convert import model_catalog as catalog
 
 PIN = "a" * 40
 CATALOG_SEEDS = catalog._catalog_seeds
+
+
+def test_gemma3_image_wrapper_is_discoverable_with_bounded_large_tokenizer_metadata(tmp_path, monkeypatch):
+    from test_gemma3_vision import config_for_size
+
+    from stark_convert.gemma3_contract import PROCESSOR
+
+    hub = Hub()
+    repo = "google/gemma-3-4b-it"
+    config = {**config_for_size(2560), "torch_dtype": "bfloat16"}
+    template = "{{ messages }}"
+    # Metadata routing uses a synthetic reviewed program identity. Native
+    # execution and real template qualification remain separate model checks.
+    monkeypatch.setattr(catalog, "_GEMMA3_IMAGE_TEMPLATE", hashlib.sha256(template.encode()).hexdigest())
+    monkeypatch.setattr(catalog, "get_model", lambda _repo: {"adapter": None})
+    tokenizer_config = {"chat_template": template, "synthetic_padding": "x" * (1024 * 1024 + 128)}
+    hub.add(
+        tmp_path,
+        repo,
+        config,
+        names={
+            "config.json": 100,
+            "model.safetensors": 8_600_158_944,
+            "tokenizer_config.json": len(json.dumps(tokenizer_config)),
+            "preprocessor_config.json": 1024,
+        },
+        sidecars={"tokenizer_config.json": tokenizer_config, "preprocessor_config.json": PROCESSOR},
+    )
+    hub.discovered["gemma3"] = [repo]
+    report = catalog.family_catalog("gemma3", hub=hub)
+    assert report["status"] == "ready"
+    assert len(report["items"]) == 1
+    item = report["items"][0]
+    assert item["repo"] == repo and item["revision"] == PIN
+    assert item["artifact_modes"] == ["vision-language"]
+    assert item["default_artifact_mode"] == "vision-language"
+    assert not any(event[0] in {"head", "download"} and event[-1].endswith(".safetensors") for event in hub.events)
 
 
 @pytest.fixture(autouse=True)
@@ -497,8 +535,17 @@ def test_known_lily_source_remains_available_without_hub_search_results(tmp_path
     identities = {(item["repo"], item["revision"]) for item in report["items"]}
     assert (repo, revision) in identities
     mixed = SOURCES["qwen38-mixed"]
-    assert identities == {(repo, revision), (mixed["weights_repo"], mixed["weights_revision"])}
-    assert next(item for item in report["items"] if item["repo"] == repo)["quantization"] == "4-bit / 8-bit"
+    serve = SOURCES["qwen38-mlx-serve-mixed"]
+    assert identities == {
+        (repo, revision),
+        (mixed["weights_repo"], mixed["weights_revision"]),
+        (serve["weights_repo"], serve["weights_revision"]),
+    }
+    item = next(item for item in report["items"] if item["repo"] == repo)
+    assert item["quantization"] == source["quantization"]
+    from stark_convert.native_catalog import source_choice
+
+    assert source_choice("qwen4_exp", item) == "qwen38-lily-q4-xl"
     assert ("info", repo, {"revision": revision, "files_metadata": True, "timeout": 5}) in hub.events
     assert [event[2] for event in hub.events if event[0] == "download"] == ["config.json"]
 
@@ -513,6 +560,22 @@ def test_known_lily_source_cannot_silently_move_to_another_revision(tmp_path, mo
     report = catalog.family_catalog("qwen4_exp", hub=hub)
     assert not any(item["repo"] == source["weights_repo"] for item in report["items"])
     assert not [event for event in hub.events if event[0] == "download"]
+
+
+def test_native_mlx_serve_choice_keeps_its_immutable_revision_when_hub_head_moves(tmp_path, monkeypatch):
+    from stark_convert.hybrid_prepare import SOURCES
+
+    source = SOURCES["qwen38-mlx-serve-mixed"]
+    hub = Hub()
+    hub.add(tmp_path, source["weights_repo"], {"model_type": "qwen4_exp"}, revision=PIN)
+    # This fixed native choice does not depend on a Hub search or the main ref.
+    monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: [source["weights_repo"]])
+    report = catalog.family_catalog("qwen4_exp", hub=hub)
+    assert report["status"] == "ready"
+    assert [(item["repo"], item["revision"]) for item in report["items"]] == [
+        (source["weights_repo"], source["weights_revision"])
+    ]
+    assert not hub.events or all(event[0] == "list" for event in hub.events)
 
 
 def test_seed_declared_size_is_preserved_without_parsing_the_repository_name(tmp_path, monkeypatch):
@@ -667,6 +730,44 @@ def test_qwen35_quantized_and_unknown_processing_sources_remain_text_only(tmp_pa
     hub.discovered["qwen3_5"] = ["someone/Quantized", "someone/Unknown-processor"]
     items = catalog.family_catalog("qwen3_5", hub=hub)["items"]
     assert len(items) == 2 and all(item["artifact_modes"] == ["text"] for item in items)
+
+
+@pytest.mark.parametrize("complete_processing", [False, True])
+def test_bf16_qwen_moe_catalog_requires_image_metadata_and_never_offers_text(
+    tmp_path, monkeypatch, complete_processing
+):
+    from test_vision_bf16_moe import moe_geometry
+
+    from stark_convert import vision_family
+
+    template = b"synthetic reviewed BF16 MoE template"
+    monkeypatch.setattr(vision_family, "_TEMPLATE_SHA256", hashlib.sha256(template).hexdigest())
+    sidecars = (
+        {
+            "preprocessor_config.json": vision_family._PROCESSOR,
+            "chat_template.jinja": template,
+            "tokenizer_config.json": {},
+        }
+        if complete_processing
+        else {}
+    )
+    hub = Hub()
+    repo = "someone/BF16-MoE"
+    hub.add(
+        tmp_path,
+        repo,
+        moe_geometry(),
+        names={"model.safetensors": 70_000_000_000, "config.json": 100, **{key: 100 for key in sidecars}},
+        sidecars=sidecars,
+    )
+    hub.discovered["qwen3_5_moe"] = [repo]
+    items = catalog.family_catalog("qwen3_5_moe", hub=hub)["items"]
+    if complete_processing:
+        assert len(items) == 1 and items[0]["artifact_modes"] == ["vision-language"]
+        assert items[0]["default_artifact_mode"] == "vision-language"
+    else:
+        assert not items
+    assert not any(event[0] in {"head", "download"} and event[-1].endswith(".safetensors") for event in hub.events)
 
 
 def test_oversized_config_stops_at_head_and_never_reaches_download(tmp_path):
