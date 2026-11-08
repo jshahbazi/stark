@@ -181,6 +181,10 @@ fn attention_order_metrics(
         observer, 0,
         "private attention reference stage readbacks perturb ordinary execution"
     );
+    assert!(
+        metrics.iter().all(|metric| metric["mismatch_count"] == 0),
+        "private attention order witness exceeds exact source gate"
+    );
 }
 
 fn rotary_source_metrics(
@@ -885,7 +889,8 @@ fn operator_metrics(
             let stage_metrics = ["qk", "scaled", "probabilities"].iter().enumerate().map(|(stage_index, key)| {
                 let expected = checked_tensor(folder, &record["stages"][key]);
                 let (rms, cosine) = numerical_metric(&values[stage_index * plane..(stage_index + 1) * plane], &expected);
-                json!({"stage_index":stage_index,"elements":plane,"relative_rms":rms,"cosine":cosine})
+                let mismatches = values[stage_index * plane..(stage_index + 1) * plane].iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits()!=b.to_bits()).count();
+                json!({"stage_index":stage_index,"elements":plane,"relative_rms":rms,"cosine":cosine,"mismatch_count":mismatches})
             }).collect::<Vec<_>>();
             let traced = traced.to_f32().unwrap();
             let mismatches = traced.iter().zip(&actual).filter(|(a,b)| a.to_bits() != b.to_bits()).count();
@@ -893,6 +898,9 @@ fn operator_metrics(
             let (trace_rms, _) = numerical_metric(&traced, &ordinary);
             println!("{}", json!({"private_retained_attention_stage_metrics":{"patches":n,"stages":stage_metrics,"trace_to_ordinary_relative_rms":trace_rms,"trace_ordinary_mismatch_count":mismatches}}));
             assert_eq!(mismatches, 0, "private attention trace perturbs ordinary arithmetic");
+            assert!(stage_metrics.iter().all(|metric| metric["mismatch_count"] == 0), "private production attention stages exceed exact source gate");
+            let source_mismatches = actual.iter().zip(&expected).filter(|(a,b)| bf16::from_f32(**a).to_bits()!=b.to_bits()).count();
+            assert_eq!(source_mismatches, 0, "private production attention exceeds exact source gate");
         }
         json!({"operator_index":index,"elements":actual.len(),"relative_rms":rms,"cosine":cosine})
     }).collect()

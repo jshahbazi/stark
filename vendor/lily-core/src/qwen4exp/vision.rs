@@ -18,15 +18,16 @@
 //!    block) read as one `[N / 4, 4 H]` row, `fc1`, the exact erf GELU, `fc2`
 //!    into the text model's hidden size.
 //!
-//! Attention uses bounded-memory two-pass tiled softmax rather
+//! Attention uses bounded-memory three-pass streaming softmax rather
 //! than a score matrix through the GEMM: the engine already had a tensor-op
 //! flash kernel for the text path to derive it from, and materialising
 //! `[N, N]` scores per head costs about 0.5 GB of traffic per head and layer
 //! at 8 192 patches, 230 GB for the tower, which alone would take the
 //! latency budget. It rounds QK and scaled scores to BF16, computes softmax
 //! statistics in F32, and rounds normalized probabilities to BF16 before PV,
-//! matching the pinned eager source. The second QK pass avoids an N x N
-//! allocation. The text path uses separate kernels.
+//! matching the pinned eager source. Four query rows use one SIMD32 group
+//! each; source-order QK, normalization and PV retain fixed register state,
+//! avoiding an N x N allocation. The text path uses separate kernels.
 //!
 //! Everything runs in one serial pass per image; intermediates live in a
 //! [`VisionScratch`] that grows to the largest patch count seen.
