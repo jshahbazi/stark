@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import hashlib
 import http.client
 import ipaddress
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -52,10 +54,14 @@ DEFAULT_STEP_LIMIT = 250
 MODEL_REQUEST_TIMEOUT = 1810.0
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ERROR_JSON_BYTES = 64 * 1024
+MAX_PROTOCOL_CALLS = 16
+MAX_MODEL_NAME_BYTES = 256
+SERIALIZER_VERSION = "json-utf8-compact-v1"
 MODEL_FORMAT_ERROR_CODES = frozenset({"invalid_tool_call", "tool_choice_not_satisfied"})
 SAFE_API_ERROR_CODES = frozenset(
     {
         "invalid_request",
+        "api_resource_limit",
         "length_required",
         "invalid_json",
         "unsupported_parameter",
@@ -108,7 +114,92 @@ SAFE_API_ERROR_CODES = frozenset(
 _ENDPOINT = ""
 _AUTHORIZATION = ""
 _MODEL_NAME = ""
+_RESPONSE_MAX_BYTES = MAX_RESPONSE_BYTES
 _CONFIG_LOCK = threading.Lock()
+
+
+def _json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def benchmark_protocol_envelope(step_limit: int) -> dict[str, Any]:
+    """Bound the pinned agent's JSON framing without allocating its history.
+
+    Call N sends the two initial messages and at most N-1 groups containing
+    one assistant message and sixteen observations. Variable text and argument
+    bytes are covered by the tokenizer policy, outside this framing budget.
+    """
+    if type(step_limit) is not int or not 1 <= step_limit <= 1_000_000:
+        raise ValueError("invalid protocol step limit")
+    # The API permits 128-character result IDs. Control characters maximize
+    # their JSON width; generated assistant IDs are restricted to ASCII.
+    result_id = "\x00" * 128
+    call = {
+        "id": "x" * 128,
+        "type": "function",
+        "function": {"name": "x" * 64, "arguments": ""},
+    }
+    assistant = {
+        "role": "assistant",
+        "name": "x" * 64,
+        "content": "",
+        "reasoning_content": "",
+        "tool_calls": [call] * MAX_PROTOCOL_CALLS,
+    }
+    observation = {
+        "role": "tool",
+        "name": "x" * 64,
+        "tool_call_id": result_id,
+        "content": "",
+    }
+    initial = [
+        {"role": role, "name": "x" * 64, "content": ""}
+        for role in ("system", "user")
+    ]
+    request = {
+        "model": "\x00" * MAX_MODEL_NAME_BYTES,
+        "messages": [],
+        "tools": [BASH_TOOL],
+        "temperature": MODEL_TEMPERATURE,
+        "max_tokens": 2**32 - 1,
+        "seed": MODEL_SEED,
+    }
+    groups = step_limit - 1
+    max_messages = 2 + groups * (1 + MAX_PROTOCOL_CALLS)
+    request_envelope = (
+        len(_json_bytes(request))
+        + sum(len(_json_bytes(message)) for message in initial)
+        + groups
+        * (
+            len(_json_bytes(assistant))
+            + MAX_PROTOCOL_CALLS * len(_json_bytes(observation))
+        )
+        + max_messages - 1
+    )
+    counter = 2**64 - 1
+    response = {
+        "id": "x" * 128,
+        "object": "chat.completion",
+        "created": counter,
+        "model": "\x00" * MAX_MODEL_NAME_BYTES,
+        "choices": [{"index": 0, "message": assistant, "finish_reason": "tool_calls"}],
+        "usage": {
+            "prompt_tokens": counter,
+            "completion_tokens": counter,
+            "total_tokens": counter,
+            "prompt_tokens_details": {"cached_tokens": counter},
+        },
+    }
+    return {
+        "request_envelope_bytes": request_envelope,
+        "response_envelope_bytes": len(_json_bytes(response)),
+        "max_messages": max_messages,
+        "max_calls": MAX_PROTOCOL_CALLS,
+        "tool_schema_sha256": hashlib.sha256(_json_bytes([BASH_TOOL])).hexdigest(),
+        "serializer_version": SERIALIZER_VERSION,
+    }
 
 
 @dataclass
@@ -152,9 +243,24 @@ class AggregateMetrics:
 METRICS = AggregateMetrics()
 
 
-def configure_connection(base_url: str, key: str, model: str) -> None:
+def configure_connection(
+    base_url: str, key: str, model: str, *, byte_policy: dict[str, Any] | None = None
+) -> None:
     """Set host-process connection data without using environment/config files."""
-    global _ENDPOINT, _AUTHORIZATION, _MODEL_NAME
+    global _ENDPOINT, _AUTHORIZATION, _MODEL_NAME, _RESPONSE_MAX_BYTES
+    response_max = MAX_RESPONSE_BYTES
+    if byte_policy is not None:
+        if not isinstance(byte_policy, dict) or not isinstance(byte_policy.get("envelope"), dict):
+            raise ValueError("invalid benchmark byte policy")
+        response_max = byte_policy.get("response_body_bytes")
+        if (
+            type(response_max) is not int
+            or not MAX_ERROR_JSON_BYTES <= response_max < sys.maxsize
+            or byte_policy.get("envelope", {}).get("serializer_version") != SERIALIZER_VERSION
+        ):
+            raise ValueError("invalid benchmark byte policy")
+    if not isinstance(model, str) or len(model.encode("utf-8")) > MAX_MODEL_NAME_BYTES:
+        raise ValueError("invalid model name")
     parsed = urlsplit(base_url)
     host = parsed.hostname
     try:
@@ -180,20 +286,22 @@ def configure_connection(base_url: str, key: str, model: str) -> None:
         _ENDPOINT = endpoint
         _AUTHORIZATION = "Bearer " + key
         _MODEL_NAME = model
+        _RESPONSE_MAX_BYTES = response_max
 
 
 def clear_connection() -> None:
     """Drop the in-memory endpoint credential after a profile finishes."""
-    global _ENDPOINT, _AUTHORIZATION, _MODEL_NAME
+    global _ENDPOINT, _AUTHORIZATION, _MODEL_NAME, _RESPONSE_MAX_BYTES
     with _CONFIG_LOCK:
         _ENDPOINT = ""
         _AUTHORIZATION = ""
         _MODEL_NAME = ""
+        _RESPONSE_MAX_BYTES = MAX_RESPONSE_BYTES
 
 
-def _connection_snapshot() -> tuple[str, str]:
+def _connection_snapshot() -> tuple[str, str, int]:
     with _CONFIG_LOCK:
-        return _ENDPOINT, _AUTHORIZATION
+        return _ENDPOINT, _AUTHORIZATION, _RESPONSE_MAX_BYTES
 
 
 def _safe_http_category(status: int | None) -> str:
@@ -258,6 +366,8 @@ class LocalOpenAIModel:
         format_error_template: str,
         stop_event: threading.Event | None = None,
     ):
+        if not isinstance(model_name, str) or len(model_name.encode("utf-8")) > MAX_MODEL_NAME_BYTES:
+            raise ValueError("invalid model name")
         self.model_name = model_name
         self.timeout = timeout
         self.max_tokens = max_tokens
@@ -285,12 +395,12 @@ class LocalOpenAIModel:
         if self.stop_event.is_set():
             METRICS.record_error("cancelled")
             raise RuntimeError("agent stopped")
-        endpoint, authorization = _connection_snapshot()
+        endpoint, authorization, response_max_bytes = _connection_snapshot()
         if not endpoint:
             METRICS.record_error("configuration")
             raise RuntimeError("model endpoint unavailable")
 
-        body = json.dumps(
+        body = _json_bytes(
             {
                 "model": self.model_name,
                 "messages": [
@@ -301,7 +411,7 @@ class LocalOpenAIModel:
                 "max_tokens": self.max_tokens,
                 "seed": MODEL_SEED,
             }
-        ).encode("utf-8")
+        )
         headers = {"Content-Type": "application/json"}
         if authorization:
             headers["Authorization"] = authorization
@@ -327,8 +437,8 @@ class LocalOpenAIModel:
                 target += "?" + parsed_endpoint.query
             connection.request("POST", target, body=body, headers=headers)
             response = connection.getresponse()
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
-            if len(raw) > MAX_RESPONSE_BYTES:
+            raw = response.read(response_max_bytes + 1)
+            if len(raw) > response_max_bytes:
                 METRICS.record_error("response_too_large")
                 raise RuntimeError("model response rejected")
             if response.status < 200 or response.status >= 300:

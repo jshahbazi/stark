@@ -59,7 +59,7 @@ Create a private JSON matrix under `runtime/`. Each entry in `profiles` has:
     {
       "id": "artifact-name",
       "path": "/absolute/path/to/prepared/model",
-      "context": 32768,
+      "context": 40960,
       "max_tokens": 4096,
       "thinking": false,
       "mtp": "off",
@@ -76,6 +76,50 @@ require reasoning regardless of the optional thinking flag. `thinking: true`
 is an explicitly different benchmark configuration implemented by the isolated
 bridge; it is not a new public HTTP request field. Output requests above the
 production API's limit fail admission instead of being silently clamped.
+
+Each profile requests its exact artifact's declared maximum context: 40,960
+tokens for Qwen3 0.6B and 4B; 262,144 for Qwen3.8 Dense, Lily and Mixed and
+Flint; and 1,048,576 for GLM. Context includes prompt and requested output.
+There is no shared context cap, history trimming or observation clipping. The
+native per-response ceiling remains 4,096 generated tokens. These artifact
+metadata maxima do not establish long-context quality or runtime stability.
+Native admission must match the requested context; resource or admission
+failures remain unscored, with no automatic context reduction. Earlier 128K
+pilots remain source-bound historical feasibility evidence.
+
+The isolated bridge derives immutable transport and helper limits before model
+load. It scans the artifact's BPE/ByteLevel tokenizer, rejects unsupported or
+source-stripping transformations, and records the tokenizer SHA, normalizer,
+bound version and every numeric limit. A complete byte alphabet bounds source
+bytes by the full context times the longest decoded token span. NFC input uses
+the canonical-decomposition scalar bound of four: a source normalized to the
+tokenized text has at most four source scalars per normalized scalar, giving
+conservative factors of 16 for UTF-8 bytes and 28 for JSON wire bytes including
+the canonical argument-string layer (seven wire bytes per source scalar).
+Output limits use the generated-token budget and decoded byte bound without
+that input-normalization multiplier. Protocol framing comes from the pinned
+400-step or configured agent loop, its fixed bash schema and 16-call maximum.
+The incoming history also reserves up to `(steps - 1) * output_byte_bound` for
+earlier assistant text a template may discard, with its JSON escaping. This
+allowance does not enlarge the rendered-context output bound. Argument wire
+costs include both canonical JSON and request JSON plus measured root/key
+framing. Exact template SHA registrations bind the owning parser and its shape
+proof: XML's pinned `command: string` yields at most three argument-tree nodes;
+Hermes retains its generic 16,384-node guard. Readiness checks Desktop's actual
+parser against that profile. These proofs cover the pinned stock agent loop.
+
+The benchmark client sends compact UTF-8 JSON with unchanged parsed values.
+Its response budget also covers tool-argument serialization and HTTP JSON
+escaping. The server reserves pending bytes for one complete admitted body and
+uses one connection slot; it reads bounded chunks without preallocating from
+the maximum announced length. Worker token-vector framing and native template
+value, output, node, allocation and time guards derive from the same policy.
+The 1,800-second API request deadline still applies. Policy overflow,
+unsupported metadata, or a capacity guard failure is infrastructure evidence,
+not a model-quality outcome. Ordinary malformed tool calls retain the stock
+format-error retry behavior. Production API and helper defaults are unchanged.
+Readiness and campaign identity bind the complete policy and its digest, so a
+run cannot resume with a different byte admission policy.
 
 The host client allows 1810 seconds per completion, covering the bridge's
 1800-second request deadline, and 30 seconds per command.

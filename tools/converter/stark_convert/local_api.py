@@ -21,6 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from .api_limits import PRODUCTION_BYTE_LIMITS, APIByteLimits
+
 MAX_TEXT_BODY_BYTES = 1024 * 1024
 MAX_IMAGE_BODY_BYTES = 6 * 1024 * 1024
 MAX_PENDING_BODY_BYTES = 24 * 1024 * 1024
@@ -128,9 +130,14 @@ class LocalAPI:
         cancellable: bool = False,
         request_timeout: float = 300,
         write_timeout: float = 10,
+        byte_limits: APIByteLimits | None = None,
     ):
         self._models = models
         self._complete = complete
+        if byte_limits is not None and not isinstance(byte_limits, APIByteLimits):
+            raise ValueError("invalid_api_byte_limits")
+        self._byte_limits = PRODUCTION_BYTE_LIMITS if byte_limits is None else byte_limits
+        self._explicit_byte_limits = byte_limits is not None
         self._port = port
         self._max_connections = max_connections
         self._server: _BoundedHTTPServer | None = None
@@ -156,10 +163,29 @@ class LocalAPI:
         status = self._status() if self._status is not None else {}
         capabilities = status.get("capabilities", {}) if isinstance(status, dict) else {}
         return (
-            MAX_IMAGE_BODY_BYTES
+            self._byte_limits.image_body_bytes
             if isinstance(capabilities, dict) and capabilities.get("images") is True
-            else MAX_TEXT_BODY_BYTES
+            else self._byte_limits.text_body_bytes
         )
+
+    def _complete_request(self, payload, on_delta, cancelled):
+        options = {"byte_limits": self._byte_limits} if self._explicit_byte_limits else {}
+        if self._cancellable:
+            return self._complete(payload, on_delta, cancelled, **options)
+        if on_delta is not None:
+            return self._complete(payload, on_delta, **options)
+        return self._complete(payload, **options)
+
+    @staticmethod
+    def _read_body(stream, length):
+        """Reserve numerically; allocate only bytes actually received."""
+        body = bytearray()
+        while len(body) < length:
+            part = stream.read(min(64 * 1024, length - len(body)))
+            if not part:
+                raise APIError(400, "Incomplete request body", "invalid_request")
+            body.extend(part)
+        return body
 
     def start(self) -> dict[str, str]:
         with self._lock:
@@ -469,13 +495,15 @@ class LocalAPI:
                     raw_length = content_lengths[0].strip()
                     if not raw_length or not raw_length.isascii() or not raw_length.isdecimal():
                         raise APIError(400, "Invalid Content-Length", "invalid_request")
-                    if len(raw_length.lstrip("0")) > 7:
+                    significant = raw_length.lstrip("0") or "0"
+                    maximum = str(api._body_limit())
+                    if len(significant) > len(maximum) or (len(significant) == len(maximum) and significant > maximum):
                         raise APIError(413, "Request body is too large", "body_too_large")
-                    length = int(raw_length.lstrip("0") or "0")
+                    length = int(significant)
                     if length > api._body_limit():
                         raise APIError(413, "Request body is too large", "body_too_large")
                     with api._body_lock:
-                        if api._pending_body_bytes + length > MAX_PENDING_BODY_BYTES:
+                        if api._pending_body_bytes + length > api._byte_limits.pending_body_bytes:
                             raise APIError(429, "Pending request bytes exceed the server budget", "body_budget_full")
                         api._pending_body_bytes += length
                         reserved_body = length
@@ -483,9 +511,8 @@ class LocalAPI:
                     if content_type and content_type.split(";", 1)[0].strip().lower() != "application/json":
                         raise APIError(415, "Content-Type must be application/json", "unsupported_media_type")
                     try:
-                        body = self.rfile.read(length)
-                        if len(body) != length:
-                            raise APIError(400, "Incomplete request body", "invalid_request")
+                        # Allocate only received data, never the announced maximum.
+                        body = api._read_body(self.rfile, length)
                         payload = json.loads(
                             body,
                             object_pairs_hook=self._pairs,
@@ -496,7 +523,7 @@ class LocalAPI:
                         raise APIError(400, "Malformed JSON", "invalid_json") from None
                     if not isinstance(payload, dict):
                         raise APIError(400, "Request body must be an object", "invalid_request")
-                    if length > MAX_TEXT_BODY_BYTES and not self._contains_image(payload):
+                    if length > api._byte_limits.text_body_bytes and not self._contains_image(payload):
                         raise APIError(413, "Text request body is too large", "body_too_large")
                     if "stream" in payload and not isinstance(payload["stream"], bool):
                         raise APIError(400, "stream must be a boolean", "invalid_request")
@@ -507,9 +534,7 @@ class LocalAPI:
                         monitor = threading.Thread(target=self._monitor_peer, args=(cancelled,), daemon=True)
                         monitor.start()
                     if not streaming:
-                        result = (
-                            api._complete(payload, None, cancelled) if api._cancellable else api._complete(payload)
-                        )
+                        result = api._complete_request(payload, None, cancelled)
                     else:
                         ident = "chatcmpl-" + secrets.token_urlsafe(16)
                         created = int(time.time())
@@ -535,11 +560,7 @@ class LocalAPI:
                                 self._sse_write(self._sse_item(ident, model, created, {"content": text}))
 
                         try:
-                            result = (
-                                api._complete(payload, on_delta, cancelled)
-                                if api._cancellable
-                                else api._complete(payload, on_delta)
-                            )
+                            result = api._complete_request(payload, on_delta, cancelled)
                         except APIError as exc:
                             if started:
                                 self._sse_error(exc)

@@ -851,15 +851,30 @@ def test_tool_thinking_boundary_ignores_suffix_whitespace_without_changing_promp
         if deliver := options.get("on_delta"):
             for character in generated:
                 deliver(character)
-        return {"text": generated, "finish_reason": "eos", "input_tokens": 24, "output_tokens": 17,
-                "_tool_initial_thinking": not opened}
+        return {
+            "text": generated,
+            "finish_reason": "eos",
+            "input_tokens": 24,
+            "output_tokens": 17,
+            "_tool_initial_thinking": not opened,
+        }
 
     monkeypatch.setattr(desktop.worker, "request", request)
-    payload = {"messages": [{"role": "user", "content": "Synthetic boundary request"}], "tools": [{
-        "type": "function", "function": {"name": "lookup", "parameters": {
-            "type": "object", "properties": {"value": {"type": "integer"}},
-        }},
-    }]}
+    payload = {
+        "messages": [{"role": "user", "content": "Synthetic boundary request"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": {"type": "integer"}},
+                    },
+                },
+            }
+        ],
+    }
     deltas = []
     if opened == closed and known_tool:
         reply = desktop.api_complete(payload, on_delta=deltas.append if stream else None)

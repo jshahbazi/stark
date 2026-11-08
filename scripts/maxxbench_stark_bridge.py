@@ -22,6 +22,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from stark_convert.api_limits import model_byte_policy
+from stark_convert.api_tools import tool_parser_for
 from stark_convert.desktop import Desktop, model_valid
 from stark_convert.local_api import APIError, LocalAPI
 from stark_convert.template_runtime import _template_executable
@@ -74,12 +76,13 @@ class AggregateCompletions:
         self.elapsed_seconds = 0.0
         self.http_failures = Counter()
 
-    def __call__(self, payload, on_delta, cancelled):
+    def __call__(self, payload, on_delta, cancelled, *, byte_limits=None):
         started = time.monotonic()
         with self.lock:
             self.requests += 1
         try:
-            reply = self.desktop.api_complete(payload, on_delta, cancelled)
+            options = {} if byte_limits is None else {"byte_limits": byte_limits}
+            reply = self.desktop.api_complete(payload, on_delta, cancelled, **options)
             usage = reply.get("usage", {})
             with self.lock:
                 self.completed += 1
@@ -130,7 +133,13 @@ def serve_model(args, key, stop, *, desktop_class=BenchmarkDesktop, api_class=Lo
                 raise BridgeFailure("model_invalid")
             worker_hash = file_sha256(worker)
             helper_hash = file_sha256(_template_executable())
-            desktop = desktop_class(worker, Path(directory), output=sink, timeout=args.request_timeout)
+            try:
+                byte_limits, byte_policy, policy_digest = model_byte_policy(
+                    model, args.context, args.max_tokens, args.step_limit, args.protocol_envelope)
+            except (OSError, ValueError, TypeError):
+                raise BridgeFailure("benchmark_protocol_capacity_unavailable") from None
+            desktop = desktop_class(worker, Path(directory), output=sink, timeout=args.request_timeout,
+                                    benchmark_byte_policy=byte_policy)
             desktop.benchmark_thinking = args.thinking
             identifier = "maxxbench-model"
             row = {"id": identifier, "name": args.model_id, "path": str(model), "source": "local:maxxbench"}
@@ -148,12 +157,16 @@ def serve_model(args, key, stop, *, desktop_class=BenchmarkDesktop, api_class=Lo
                 if args.max_tokens > min(desktop.output_limit, args.context - 1):
                     raise BridgeFailure("requested_output_limit_unavailable")
                 desktop.api_maximum = args.max_tokens
+                actual_parser = tool_parser_for(desktop.codec)
+                if actual_parser != byte_policy["tool_profile"]["parser"]:
+                    raise BridgeFailure("benchmark_tool_profile_mismatch")
             if stop.is_set():
                 raise BridgeFailure("startup_cancelled")
             totals = AggregateCompletions(desktop)
             api = api_class(
                 desktop.api_models, totals, api_key=key, port=args.port,
                 status=desktop.api_status, cancellable=True, request_timeout=args.request_timeout,
+                byte_limits=byte_limits, max_connections=1,
             )
             desktop.api = api
             details = api.start()
@@ -169,6 +182,8 @@ def serve_model(args, key, stop, *, desktop_class=BenchmarkDesktop, api_class=Lo
                 "prefix_chunk_tokens": desktop.worker.prefix_chunk_tokens,
                 "worker_pid": getattr(getattr(desktop.worker, "process", None), "pid", None),
                 "worker_sha256": worker_hash, "template_helper_sha256": helper_hash,
+                "api_byte_policy": byte_policy, "api_byte_policy_sha256": policy_digest,
+                "tool_parser": actual_parser,
                 "logging": "aggregate_only",
             })
             stop.wait()
@@ -209,6 +224,8 @@ def parser():
     result.add_argument("--model-id", required=True)
     result.add_argument("--context", type=positive, required=True)
     result.add_argument("--max-tokens", type=positive, default=4096)
+    result.add_argument("--step-limit", type=positive, required=True)
+    result.add_argument("--protocol-envelope", type=json.loads, required=True)
     result.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=False)
     result.add_argument("--mtp", choices=("default", "on", "off"), default="default")
     result.add_argument("--port", type=int, default=0)
