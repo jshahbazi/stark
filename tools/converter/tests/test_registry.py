@@ -199,6 +199,16 @@ def test_dispatch_requires_an_implemented_specific_tuple():
     assert get_model("unregistered/model") is None
 
 
+@pytest.mark.parametrize("architecture", ["qwen4", "qwen4_text", "qwen4_moe"])
+def test_unimplemented_qwen4_names_do_not_alias_existing_qwen_adapters(architecture):
+    with pytest.raises(UnsupportedConversion):
+        architecture_for_config({"model_type": architecture})
+
+
+def test_qwen38_preview_marker_remains_explicitly_distinct_from_qwen4_names():
+    assert architecture_for_config({"model_type": "qwen4_exp"}) == "qwen4_exp"
+
+
 def test_hybrid_mlx_promotions_use_exact_pinned_checkpoint_names():
     qwen = {
         f"mlx-community/Qwen3.5-{size}-MLX-{bits}bit" for size in ("0.8B", "2B", "4B", "9B") for bits in (4, 8)

@@ -50,6 +50,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 
 | Location | What it holds |
 | --- | --- |
+| [Model experiment ledger](model-experiments/README.md) | Cross-model attempt index and recording template, including failed/inconclusive work, artifact-specific results and adoption status |
 | [benchmarks/](benchmarks/README.md) | Engine comparisons with a current-versus-superseded index, optimization records, and [conversion benchmarks](benchmarks/CONVERSION_BENCHMARKS.md) |
 | [validation/](validation/) | [Scoring parity](validation/SCORING_PARITY.md) against frozen Uzu references and [ColGrep generation acceptance](validation/GENERATION_COLGREP.md), each bound to a named build |
 | [archive/conversion/](archive/conversion/) | The converter replacement plan, milestone packets and their reviews |
@@ -58,6 +59,10 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [brand/](brand/README.md) | Logo provenance and colour tokens |
 
 New validation runs belong in the pull request that made the change, or under `archive/runs/` when they must be preserved; reference pages describe current behaviour only.
+
+The [Qwen 4 preparation record](archive/runs/2026-11-08-qwen4-release-readiness.md)
+records verified release signals, the existing preview conversion boundary,
+pinned metadata-only intake results and the release-specific implementation queue.
 
 The [Gemma 3 image run](archive/runs/2026-11-07-gemma3-images.md) records exact
 4B native parity, source-bound worker/API lifecycle, preservation controls

@@ -1,5 +1,12 @@
 # Adding model support
 
+Record each compatibility, memory, precision or performance attempt in the
+[model experiment ledger](model-experiments/README.md), including failed,
+inconclusive and abandoned trials. Use its [template](model-experiments/TEMPLATE.md)
+to bind the exact artifact, source, precision and workload. Keep implemented
+support, numerical qualification, measured speed and deployment as separate
+outcomes; preserve older source-bound records when an attempt changes.
+
 Every new model family, checkpoint template and import route must assess function
 tools as well as native execution. Complete the [tool-calling acceptance
 checks](#assess-and-qualify-function-tools) below. A missing parser must have an
