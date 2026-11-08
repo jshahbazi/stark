@@ -94,6 +94,20 @@ def test_native_glm_is_listed_without_generic_architecture_admission():
     assert preflight_model({"model_type": "glm5_next"}, mode="text")["reasons"] == ["unsupported_architecture"]
 
 
+@pytest.mark.parametrize("architecture", ["qwen4", "qwen4_text", "qwen4_moe"])
+def test_unimplemented_qwen4_names_do_not_inherit_qwen_support(architecture):
+    report = preflight_model({"model_type": architecture}, mode="text")
+    assert report["status"] == "unsupported"
+    assert report["reasons"] == ["unsupported_architecture"]
+    assert report["family_id"] is None
+
+
+def test_qwen38_preview_preflight_keeps_its_separate_family_id():
+    report = preflight_model({"model_type": "qwen4_exp"}, mode="text")
+    assert report["family_id"] == "qwen4_exp"
+    assert report["status"] == "conditional"
+
+
 @pytest.mark.parametrize("architecture", list(model_support.CONFIG_ADAPTERS.values()))
 @pytest.mark.parametrize("mode", ["text", "decision"])
 def test_each_family_has_explicit_app_modes_without_checkpoint_qualification(architecture, mode):
@@ -269,6 +283,17 @@ def test_resolver_rechecks_metadata_and_blocks_weights_for_unsupported_or_inconc
     with pytest.raises(error):
         sources.resolve_source(PRIMARY, hub=hub)
     assert all(not event[2].endswith(".safetensors") for event in hub.events if event[0] == "download")
+
+
+@pytest.mark.parametrize("architecture", ["qwen4", "qwen4_text", "qwen4_moe"])
+def test_unimplemented_qwen4_names_are_rejected_before_weight_retrieval(tmp_path, architecture):
+    root = files(tmp_path / "source")
+    (root / "config.json").write_text(json.dumps({"model_type": architecture}))
+    hub = ObservedHub({PRIMARY: root})
+    with pytest.raises(UnsupportedConversion):
+        sources.resolve_source(PRIMARY, hub=hub)
+    assert [event[2] for event in hub.events if event[0] == "download"] == ["config.json"]
+    assert all(not event[2].endswith(".safetensors") for event in hub.events if event[0] == "metadata")
 
 
 def test_resolver_checks_metadata_size_before_downloading_config(tmp_path):
