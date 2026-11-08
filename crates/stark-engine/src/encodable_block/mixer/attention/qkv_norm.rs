@@ -256,16 +256,7 @@ impl<B: Backend> QKVNorm<B> {
         let heads = if self.full_width {
             [
                 (query, 0, u32::from(q_heads > 0), q_heads * self.head_dim),
-                (
-                    &self.key,
-                    if kv > 0 {
-                        q_heads / kv
-                    } else {
-                        0
-                    },
-                    u32::from(kv > 0),
-                    kv * self.head_dim,
-                ),
+                (&self.key, q_heads.checked_div(kv).unwrap_or(0), u32::from(kv > 0), kv * self.head_dim),
                 (&self.value, q_heads + kv, kv, self.head_dim),
             ]
         } else {
@@ -311,49 +302,51 @@ impl<B: Backend> QKVNorm<B> {
                 && !head.config.has_biases
                 && !head.config.subtract_mean
                 && head.config.scale_offset.is_none_or(|offset| offset == 0.0)
+                && let Some(wide) = &head.wide_source
             {
-                if let Some(wide) = &head.wide_source {
-                    let element_bytes = DataType::BF16.size_in_bytes();
-                    let start = head_offset as usize * width as usize * element_bytes;
-                    let end = start + head_count as usize * width as usize * element_bytes;
-                    wide.encode(
-                        None::<&B::ScratchBuffer>,
-                        head.scales.as_ref(),
-                        None::<&B::GlobalBuffer>,
-                        buffer.reborrow().subrange_mut(start..end),
-                        None::<&mut B::ScratchBuffer>,
-                        None::<&B::GlobalBuffer>,
-                        head_count,
-                        width,
-                        head.config.epsilon,
-                        head.config.scale_offset.unwrap_or(0.0),
-                        1.0,
-                        command_buffer,
-                    );
-                    continue;
-                }
+                let element_bytes = DataType::BF16.size_in_bytes();
+                let start = head_offset as usize * width as usize * element_bytes;
+                let end = start + head_count as usize * width as usize * element_bytes;
+                wide.encode(
+                    None::<&B::ScratchBuffer>,
+                    head.scales.as_ref(),
+                    None::<&B::GlobalBuffer>,
+                    buffer.reborrow().subrange_mut(start..end),
+                    None::<&mut B::ScratchBuffer>,
+                    None::<&B::GlobalBuffer>,
+                    head_count,
+                    width,
+                    head.config.epsilon,
+                    head.config.scale_offset.unwrap_or(0.0),
+                    1.0,
+                    command_buffer,
+                );
+                continue;
             }
-            if self.full_width && batch_dim == 1 && width == 4096 && head_count == 1 {
-                if let Some(wide) = &head.wide_source {
-                    let element_bytes = DataType::BF16.size_in_bytes();
-                    let start = head_offset as usize * width as usize * element_bytes;
-                    let end = start + width as usize * element_bytes;
-                    wide.encode(
-                        None::<&B::ScratchBuffer>,
-                        head.scales.as_ref(),
-                        None::<&B::GlobalBuffer>,
-                        buffer.reborrow().subrange_mut(start..end),
-                        None::<&mut B::ScratchBuffer>,
-                        None::<&B::GlobalBuffer>,
-                        1,
-                        width,
-                        head.config.epsilon,
-                        head.config.scale_offset.unwrap_or(0.0),
-                        1.0,
-                        command_buffer,
-                    );
-                    continue;
-                }
+            if self.full_width
+                && batch_dim == 1
+                && width == 4096
+                && head_count == 1
+                && let Some(wide) = &head.wide_source
+            {
+                let element_bytes = DataType::BF16.size_in_bytes();
+                let start = head_offset as usize * width as usize * element_bytes;
+                let end = start + width as usize * element_bytes;
+                wide.encode(
+                    None::<&B::ScratchBuffer>,
+                    head.scales.as_ref(),
+                    None::<&B::GlobalBuffer>,
+                    buffer.reborrow().subrange_mut(start..end),
+                    None::<&mut B::ScratchBuffer>,
+                    None::<&B::GlobalBuffer>,
+                    1,
+                    width,
+                    head.config.epsilon,
+                    head.config.scale_offset.unwrap_or(0.0),
+                    1.0,
+                    command_buffer,
+                );
+                continue;
             }
             head.kernel.encode(
                 None::<&B::ScratchBuffer>,

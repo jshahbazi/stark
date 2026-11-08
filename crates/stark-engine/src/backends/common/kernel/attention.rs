@@ -191,6 +191,7 @@ impl AttentionKernelConfig {
             && !self.has_sinks
     }
 
+    #[cfg(any(feature = "cpu", test))]
     pub(crate) fn materializes_scores_for_rows(
         &self,
         rows: u32,
@@ -198,6 +199,7 @@ impl AttentionKernelConfig {
         self.materialize_prefill_scores && (9..1024).contains(&rows)
     }
 
+    #[cfg(any(feature = "cpu", test))]
     pub(crate) fn materializes_scores_for_geometry(
         &self,
         rows: u32,

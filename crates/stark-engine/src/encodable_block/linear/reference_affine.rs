@@ -27,6 +27,8 @@ pub(crate) fn has_source_affine_policy<B: Backend>(weights: &MatmulB<impl Buffer
 }
 
 #[inline]
+// The backend selects a thread-local witness only in unit-test builds.
+#[cfg_attr(not(test), allow(clippy::extra_unused_type_parameters))]
 pub(crate) fn is_affine_dot_witness_active<B: Backend>() -> bool {
     #[cfg(test)]
     {

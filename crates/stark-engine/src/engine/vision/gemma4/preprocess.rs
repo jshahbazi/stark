@@ -63,6 +63,7 @@ fn prepare_mode(
     prepare_rgb_mode(&image, unified)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_rgb(image: &RgbImage) -> Result<GemmaPatches, InvalidInput> {
     prepare_rgb_mode(image, false)
 }

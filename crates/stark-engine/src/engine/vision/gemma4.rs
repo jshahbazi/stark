@@ -599,6 +599,8 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
         };
         Ok(input?)
     }
+    // Keep the token ownership boundary consistent with the other image models.
+    #[allow(clippy::boxed_local)]
     pub fn prepare_prompt(
         &self,
         tokens: Box<[u64]>,

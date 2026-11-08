@@ -42,10 +42,11 @@ fn prefill_batch_ranges(
     let mut start = 0;
     while start < length {
         let mut end = start.saturating_add(maximum).min(length);
-        if let Some(image) = &image {
-            if end > image.start && end < image.end {
-                end = image.start;
-            }
+        if let Some(image) = &image
+            && end > image.start
+            && end < image.end
+        {
+            end = image.start;
         }
         if end <= start {
             return Err(InvalidInput("image prefill made no progress"));

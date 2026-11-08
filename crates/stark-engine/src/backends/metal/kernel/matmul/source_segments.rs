@@ -64,7 +64,7 @@ impl MatmulMetalKernel {
             widths.to_vec()
         };
         if widths.iter().try_fold(0u32, |sum, &width| sum.checked_add(width)) != Some(arguments.n)
-            || widths.iter().any(|&width| width == 0)
+            || widths.contains(&0)
         {
             return Err(invalid().into());
         }
