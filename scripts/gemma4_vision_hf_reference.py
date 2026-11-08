@@ -129,6 +129,8 @@ def run(args):
             focus_mode = "attention"
             if args.capture_mlp_down_case is not None:
                 focus_case, focus_mode = args.capture_mlp_down_case, "mlp"
+            if args.capture_first_six_blocks_case is not None:
+                focus_case, focus_mode = args.capture_first_six_blocks_case, "blocks"
             focused = focus_case is not None
             capture = args.capture_stages and (not focused or index == focus_case)
             original_rotary = modeling_gemma4.apply_multidimensional_rope
@@ -152,6 +154,10 @@ def run(args):
                         "prepared_values_0",
                         "attention_0",
                     }:
+                        return
+                    full, head0 = True, False
+                elif _focused == "blocks":
+                    if tag not in {f"block_{layer}" for layer in range(6)}:
                         return
                     full, head0 = True, False
                 elif _focused == "mlp":
@@ -348,6 +354,9 @@ def run(args):
     if args.capture_full_attention_case is not None:
         manifest["stage_focus"] = "first-layer-full-attention"
         manifest["stage_case_index"] = args.capture_full_attention_case
+    if args.capture_first_six_blocks_case is not None:
+        manifest["stage_focus"] = "first-six-full-blocks"
+        manifest["stage_case_index"] = args.capture_first_six_blocks_case
     if args.capture_mlp_down_case is not None:
         manifest["stage_focus"] = "first-layer-mlp-down"
         manifest["stage_case_index"] = args.capture_mlp_down_case
@@ -369,10 +378,12 @@ def main():
     focus = parser.add_mutually_exclusive_group()
     focus.add_argument("--capture-full-attention-case", type=int, choices=(0, 1, 2))
     focus.add_argument("--capture-mlp-down-case", type=int, choices=(0, 1, 2))
+    focus.add_argument("--capture-first-six-blocks-case", type=int, choices=(0, 1, 2))
     args = parser.parse_args()
     if (
         args.capture_full_attention_case is not None
         or args.capture_mlp_down_case is not None
+        or args.capture_first_six_blocks_case is not None
     ) and not args.capture_stages:
         parser.error("focused captures require --capture-stages")
     try:

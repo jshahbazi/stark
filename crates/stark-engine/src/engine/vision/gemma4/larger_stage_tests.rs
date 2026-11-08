@@ -23,9 +23,12 @@ fn gemma4_larger_tower_stage_reference_metal() {
     loader.tree().assert_all_tensors_validated().unwrap();
     let mut reports = Vec::new();
     for (case_index, case) in manifest["cases"].as_array().unwrap().iter().enumerate() {
+        let stages = case["stages"].as_object().unwrap();
+        if stages.is_empty() {
+            continue;
+        }
         let patches = preprocess::prepare(&read(&root, case["image"].as_str().unwrap())).unwrap();
         let rows = (patches.grid[1] * patches.grid[2]) as usize;
-        let stages = case["stages"].as_object().unwrap();
         let reference = |key: &str| {
             let record = &stages[key];
             let bytes = read(&root, record["file"].as_str().unwrap());
@@ -44,8 +47,11 @@ fn gemma4_larger_tower_stage_reference_metal() {
                 if !stages.contains_key(&key) {
                     return Ok(());
                 }
-                let all =
-                    tag.starts_with("prepared_") || matches!(tag, "encoder_final" | "standardized" | "projector_input");
+                let all = tag.starts_with("prepared_")
+                    || matches!(tag, "encoder_final" | "standardized" | "projector_input")
+                    || (manifest["stage_focus"] == "first-six-full-blocks"
+                        && tag == "block"
+                        && layer.is_some_and(|layer| layer < 6));
                 let bytes = if all {
                     value.size()
                 } else {
@@ -92,12 +98,18 @@ fn gemma4_larger_tower_stage_reference_metal() {
             } else {
                 full.to_vec()
             };
-            measured.push(json!({"stage":key,"metrics":compare(&actual,&reference(&key))}));
+            let expected = reference(&key);
+            let different = actual.iter().zip(&expected).filter(|(a, b)| a.to_f32().to_bits() != b.to_bits()).count();
+            measured
+                .push(json!({"stage":key,"different_bf16_elements":different,"metrics":compare(&actual,&expected)}));
         }
         assert!(all_tails_zero, "logical72 padding contains nonzero tail values");
         let mut patch_oracles = Vec::new();
         let mut pool_oracle = Value::Null;
         #[cfg(backend = "cpu")]
+        if stages.contains_key("patch_projection")
+            && stages.contains_key("encoder_final")
+            && stages.contains_key("standardized")
         {
             let patch_weights = tree
                 .leaf("patch_embedder.input_proj.weight")
