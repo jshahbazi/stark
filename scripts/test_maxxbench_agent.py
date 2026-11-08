@@ -548,7 +548,173 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(context.metadata["agent_status"], "context_overflow")
         self.assertEqual(context.metadata["context_overflow_errors"], 1)
         self.assertEqual(context.metadata["http_errors"], {"request_rejected": 1})
+        self.assertEqual(
+            context.metadata["api_error_codes"], {"context_length_exceeded": 1}
+        )
         self.assertIsNone(context.metadata["adapter_error_type"])
+
+    def test_model_tool_format_error_reenters_stock_format_loop(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        responses = [
+            (
+                502,
+                {
+                    "error": {
+                        "message": "The model produced an incomplete, invalid or unavailable tool call.",
+                        "type": "server_error",
+                        "code": "invalid_tool_call",
+                    }
+                },
+            ),
+            (
+                200,
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "bash",
+                                            "arguments": '{"command":"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}',
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1300, "completion_tokens": 25},
+                },
+            ),
+        ]
+
+        class FakeConnection:
+            def __init__(self, *args, **kwargs):
+                self.status, self.payload = responses.pop(0)
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse(self.payload, status=self.status)
+
+            def close(self):
+                pass
+
+        class FakeEnvironment:
+            async def exec(self, command, cwd=None, timeout_sec=None):
+                return type(
+                    "Result",
+                    (),
+                    {
+                        "stdout": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n",
+                        "stderr": "",
+                        "return_code": 0,
+                    },
+                )()
+
+        async def exercise():
+            agent = StarkMiniSweAgent(logs_dir=Path("/tmp"), model_name="stark-test")
+            context = AgentContext()
+            with patch("maxxbench_agent._CancellableHTTPConnection", FakeConnection):
+                await agent.run("synthetic task metadata", FakeEnvironment(), context)
+            return context
+
+        context = asyncio.run(exercise())
+        self.assertEqual(context.metadata["agent_status"], "Submitted")
+        self.assertEqual(context.metadata["model_calls"], 2)
+        self.assertEqual(context.metadata["api_error_codes"], {"invalid_tool_call": 1})
+        self.assertEqual(responses, [])
+
+    def test_authentication_api_code_remains_fatal(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        payload = {
+            "error": {
+                "message": "Invalid API key",
+                "type": "authentication_error",
+                "code": "invalid_api_key",
+            }
+        }
+
+        class AuthConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse(payload, status=401)
+
+            def close(self):
+                pass
+
+        model_config = _agent_templates()["model"]
+        model = LocalOpenAIModel(
+            "stark-test",
+            observation_template=model_config["observation_template"],
+            format_error_template=model_config["format_error_template"],
+        )
+        before = METRICS.snapshot()
+        with (
+            patch("maxxbench_agent._CancellableHTTPConnection", AuthConnection),
+            self.assertRaisesRegex(RuntimeError, "authentication"),
+        ):
+            model.query([{"role": "user", "content": "private"}])
+        after = METRICS.snapshot()
+        self.assertEqual(
+            after["api_error_codes"].get("invalid_api_key", 0)
+            - before["api_error_codes"].get("invalid_api_key", 0),
+            1,
+        )
+
+    def test_tool_choice_failure_is_a_format_error(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        payload = {
+            "error": {
+                "message": "The model did not satisfy the requested tool choice.",
+                "type": "server_error",
+                "code": "tool_choice_not_satisfied",
+            }
+        }
+
+        class ToolChoiceConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse(payload, status=502)
+
+            def close(self):
+                pass
+
+        model_config = _agent_templates()["model"]
+        model = LocalOpenAIModel(
+            "stark-test",
+            observation_template=model_config["observation_template"],
+            format_error_template=model_config["format_error_template"],
+        )
+        before = METRICS.snapshot()
+        with (
+            patch(
+                "maxxbench_agent._CancellableHTTPConnection",
+                ToolChoiceConnection,
+            ),
+            self.assertRaises(FormatError),
+        ):
+            model.query([{"role": "user", "content": "private"}])
+        self.assertEqual(
+            METRICS.snapshot()["api_error_codes"].get("tool_choice_not_satisfied", 0)
+            - before["api_error_codes"].get("tool_choice_not_satisfied", 0),
+            1,
+        )
 
     def test_unexpected_adapter_error_fails_trial_after_safe_metrics(self):
         configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")

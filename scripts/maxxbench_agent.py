@@ -51,6 +51,59 @@ MODEL_SEED = 0
 DEFAULT_STEP_LIMIT = 250
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ERROR_JSON_BYTES = 64 * 1024
+MODEL_FORMAT_ERROR_CODES = frozenset({"invalid_tool_call", "tool_choice_not_satisfied"})
+SAFE_API_ERROR_CODES = frozenset(
+    {
+        "invalid_request",
+        "length_required",
+        "invalid_json",
+        "unsupported_parameter",
+        "mtp_not_supported",
+        "invalid_messages",
+        "images_unsupported",
+        "too_many_images",
+        "invalid_image_url",
+        "invalid_image_detail",
+        "invalid_image",
+        "context_length_exceeded",
+        "context_capacity_unknown",
+        "request_too_large",
+        "tools_unsupported",
+        "invalid_tool_call",
+        "tool_choice_not_satisfied",
+        "invalid_api_key",
+        "origin_not_allowed",
+        "host_not_allowed",
+        "not_found",
+        "model_not_found",
+        "body_too_large",
+        "image_too_large",
+        "unsupported_media_type",
+        "server_busy",
+        "queue_full",
+        "queue_timeout",
+        "body_budget_full",
+        "request_cancelled",
+        "model_not_loaded",
+        "model_changed",
+        "server_stopped",
+        "server_shutdown",
+        "request_stopped",
+        "streaming_unavailable",
+        "stop_sequences_unavailable",
+        "generation_failed",
+        "request_timeout",
+        "internal_error",
+        "benchmark_completion_failed",
+        "http_error",
+        "text_too_large",
+        "api_client_limit",
+        "api_client_scope",
+        "api_not_running",
+        "invalid_api_client_command",
+        "stale_api_session",
+    }
+)
 _ENDPOINT = ""
 _AUTHORIZATION = ""
 _MODEL_NAME = ""
@@ -66,6 +119,7 @@ class AggregateMetrics:
     completion_tokens: int = 0
     context_overflow_errors: int = 0
     http_error_categories: dict[str, int] = field(default_factory=dict)
+    api_error_codes: dict[str, int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def record_error(self, category: str, *, context_overflow: bool = False) -> None:
@@ -84,7 +138,14 @@ class AggregateMetrics:
                 "completion_tokens": self.completion_tokens,
                 "context_overflow_errors": self.context_overflow_errors,
                 "http_error_categories": dict(self.http_error_categories),
+                "api_error_codes": dict(self.api_error_codes),
             }
+
+    def record_api_error(self, code: str | None) -> None:
+        if code not in SAFE_API_ERROR_CODES:
+            return
+        with self._lock:
+            self.api_error_codes[code] = self.api_error_codes.get(code, 0) + 1
 
 
 METRICS = AggregateMetrics()
@@ -150,14 +211,15 @@ def _safe_http_category(status: int | None) -> str:
     return "http_other"
 
 
-def _is_context_overflow_error(body: bytes) -> bool:
-    """Classify by Stark's fixed error code without retaining or logging text."""
+def _safe_api_error_code(body: bytes) -> str | None:
+    """Extract a known code from a bounded response, never its message."""
     try:
         payload = json.loads(body[:MAX_ERROR_JSON_BYTES])
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return False
+        return None
     error = payload.get("error") if isinstance(payload, dict) else None
-    return isinstance(error, dict) and error.get("code") == "context_length_exceeded"
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) and code in SAFE_API_ERROR_CODES else None
 
 
 class _CancellableHTTPConnection(http.client.HTTPConnection):
@@ -266,10 +328,18 @@ class LocalOpenAIModel:
                 raise RuntimeError("model response rejected")
             if response.status < 200 or response.status >= 300:
                 category = _safe_http_category(response.status)
-                overflow = _is_context_overflow_error(raw)
+                api_error_code = _safe_api_error_code(raw)
+                METRICS.record_api_error(api_error_code)
+                overflow = api_error_code == "context_length_exceeded"
                 METRICS.record_error(category, context_overflow=overflow)
                 if overflow:
                     raise ContextOverflowError("context_overflow") from None
+                if api_error_code in MODEL_FORMAT_ERROR_CODES:
+                    parse_toolcall_actions(
+                        [],
+                        format_error_template=self.format_error_template,
+                        template_kwargs={"finish_reason": "tool_calls"},
+                    )
                 raise RuntimeError("model request failed: " + category)
             payload = json.loads(raw)
             message = payload["choices"][0]["message"]
@@ -571,6 +641,11 @@ class StarkMiniSweAgent(BaseAgent):
                 metrics_after["context_overflow_errors"]
                 - metrics_before["context_overflow_errors"]
             ),
+            "api_error_codes": {
+                code: count - metrics_before["api_error_codes"].get(code, 0)
+                for code, count in metrics_after["api_error_codes"].items()
+                if count > metrics_before["api_error_codes"].get(code, 0)
+            },
             "adapter_error_type": failure_type,
         }
         # Pier persists this field as a result artifact; keep it empty and let

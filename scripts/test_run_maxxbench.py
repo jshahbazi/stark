@@ -15,6 +15,18 @@ import pytest
 import run_maxxbench as runner
 
 
+def test_api_error_counts_keep_only_allowlisted_codes(monkeypatch):
+    monkeypatch.setitem(sys.modules, "maxxbench_agent", SimpleNamespace(
+        SAFE_API_ERROR_CODES={"invalid_tool_call", "generation_failed"}))
+    result = SimpleNamespace(model_dump=lambda: {"metadata": {"api_error_codes": {
+        "invalid_tool_call": 2, "unknown": 1, "generation_failed": -1,
+        "private response text": 1, "invalid_api_key": "private credential",
+    }}})
+    assert runner.aggregate_agent_metrics(result)["metadata"]["api_error_codes"] == {
+        "invalid_tool_call": 2, "unknown": 1,
+    }
+
+
 def config_module(monkeypatch):
     module = ModuleType("pier.models.trial.config")
 

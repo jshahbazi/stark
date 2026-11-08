@@ -83,6 +83,9 @@ upstream task normally allows three hours for the agent and 30 minutes for its
 verifier. Context overflow is a recorded budget outcome. Unexpected adapter
 faults abort the attempt as infrastructure failures and cannot become model
 scores.
+Stark's fixed `invalid_tool_call` and `tool_choice_not_satisfied` codes feed the
+stock agent's format-error retry loop. Other HTTP failures remain infrastructure
+faults. Receipts retain allowlisted error-code counts without error messages.
 
 First establish that a reference solution passes the installed grading path:
 

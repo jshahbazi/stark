@@ -126,6 +126,12 @@ def aggregate_agent_metrics(result):
             "rate_limited", "server", "http_other", "response_too_large", "invalid_response",
             "environment", "environment_timeout", "cancelled", "agent",
         } and type(value) is int}
+    codes = metadata.get("api_error_codes")
+    adapter = sys.modules.get("maxxbench_agent")
+    allowed_codes = set(getattr(adapter, "SAFE_API_ERROR_CODES", ())) | {"unknown"}
+    if isinstance(codes, dict):
+        safe["api_error_codes"] = {key: value for key, value in codes.items()
+                                   if key in allowed_codes and type(value) is int and value >= 0}
     counts["metadata"] = safe
     return counts
 
@@ -502,6 +508,12 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
             name: value for name, value in errors.items()
             if name in error_names and type(value) is int and value >= 0
         } if isinstance(errors, dict) else {}
+        codes = values.get("api_error_codes", {})
+        allowed_codes = set(getattr(adapter, "SAFE_API_ERROR_CODES", ())) | {"unknown"}
+        safe["api_error_codes"] = {
+            key: value for key, value in codes.items()
+            if key in allowed_codes and type(value) is int and value >= 0
+        } if isinstance(codes, dict) else {}
         return safe
 
     baseline = counters()
@@ -513,6 +525,11 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
             name: value - baseline["http_error_categories"].get(name, 0)
             for name, value in current["http_error_categories"].items()
             if value > baseline["http_error_categories"].get(name, 0)
+        }
+        delta["api_error_codes"] = {
+            key: value - baseline["api_error_codes"].get(key, 0)
+            for key, value in current["api_error_codes"].items()
+            if value > baseline["api_error_codes"].get(key, 0)
         }
         phase = state
         if active and state == "running":
