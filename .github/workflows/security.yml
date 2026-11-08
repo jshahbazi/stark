@@ -74,6 +74,7 @@ jobs:
             -L Cargo.lock \
             -L vendor/lily-core/Cargo.lock \
             -L tools/uv.lock \
+            -L scripts/drex_jevk5/uv.lock \
             -L tools/converter/uv.lock \
             -L tools/stock_benchmark/mlx/uv.lock \
             -L tools/stock_benchmark/mlx_current/uv.lock \
@@ -91,6 +92,7 @@ jobs:
             --lockfile Cargo.lock \
             --lockfile vendor/lily-core/Cargo.lock \
             --lockfile tools/uv.lock \
+            --lockfile scripts/drex_jevk5/uv.lock \
             --lockfile tools/converter/uv.lock \
             --lockfile tools/stock_benchmark/mlx/uv.lock \
             --lockfile tools/stock_benchmark/mlx_current/uv.lock \

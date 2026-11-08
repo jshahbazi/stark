@@ -4,6 +4,15 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Drex Max v1 Q4 versus JevK5 BF16 (2026-11-08).** On 231 reused public
+JevBench cases, the upstream MLX Drex runner scored 212 correct versus 202 for
+Stark JevK5, with exact repeatability in two passes. Both passed 12 synthetic
+controls. Both Drex timing blocks failed host screens, so the
+[comparison](2026-11-08-drex-jevk5-comparison.md) retains observed latency and
+memory without claiming a qualified speed ratio. This tests available v1
+weights; the linked announcement's v1.1 weights were unreleased. It adds
+separate evidence and does not supersede prior source-bound results.
+
 **Cross-backend idle wake follow-up (2026-11-08).** Extends queue maintenance
 to official mixed-affine Flash-Next generation, native Flash-Next scoring and
 converted text generation on Metal4. The

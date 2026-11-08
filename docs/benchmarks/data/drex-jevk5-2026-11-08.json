@@ -1,0 +1,267 @@
+{
+  "schema": 1,
+  "status": "complete",
+  "probe": false,
+  "dataset": {
+    "case_count": 243,
+    "public_case_count": 231,
+    "synthetic_case_count": 12,
+    "dataset_sha256": "acf56888f47486fd8eba45d17a46372d65d911e2f57bc390474e7b41f37aae58",
+    "configuration_sha256": "70001de82eb6cdfa018e63bfcfe1968ca68a6fd669508cd6c08be70cd1d6e9bd",
+    "post_run_seal_sha256": "a825be816ca80c8c94739ab2556cc064d942b16c8b3da01daa5cd7cb13fe0003"
+  },
+  "source_commit": "7dc5183499eb9248ab6805474291980dbf0a57db",
+  "harness_sha256": "65033ea9c247178d8bd691dace992f9d67638d75e67d2cf97dee3584b278c5ee",
+  "dependency_lock_sha256": "98ac6c11b74fe4a0ba31e149a8b8855f55134f2324d59e3288e2d09bee55742e",
+  "host": {
+    "system": "macOS-26.7.2-arm64-arm-64bit-Mach-O",
+    "chip": "Apple M5 Max",
+    "memory_bytes": 137438953472
+  },
+  "protocol": {
+    "blocks": 2,
+    "order": "Jev,Drex then Drex,Jev",
+    "context_tokens": 8192,
+    "cache": "disabled; fresh complete forward per question",
+    "timing": "prepared inputs through model-native scoring, readout and private pipe; excludes tokenization/load/warmup",
+    "memory": "50ms sampled harness and child process tree RSS, including startup; shared pages may be counted twice; not Metal allocation",
+    "quality": "identical semantic cases; each model's own prompt/tokenization/readout/calibration",
+    "limits": "Different sizes, precision and runtimes. Reused public development set. Does not reproduce AA index or Drex v1.1."
+  },
+  "blocks": [
+    {
+      "block": 0,
+      "model": "jev",
+      "status": "complete",
+      "startup_and_first_warmup_seconds": 1.0403287500084843,
+      "sampled_peak_process_tree_rss_bytes": 8890908672,
+      "cases": 243,
+      "median_seconds": 0.04711470799520612,
+      "p95_seconds": 0.5164901659882162,
+      "total_seconds": 32.76974380260799,
+      "input_tokens": {
+        "min": 104,
+        "median": 208,
+        "max": 4033
+      },
+      "quality": {
+        "public": {
+          "cases": 231,
+          "argmax_correct": 202,
+          "brier": 0.18487996030711185,
+          "ece_10_bins": 0.029446153134145135
+        },
+        "synthetic": {
+          "cases": 12,
+          "argmax_correct": 12,
+          "brier": 0.008258769788709187,
+          "ece_10_bins": 0.03772812036826471
+        }
+      },
+      "sealed_jev_reference_max_probability_delta": 0.05514520494167541,
+      "vm_counter_delta": {
+        "Pageouts": 0,
+        "Swapouts": 0
+      },
+      "host_screen": {
+        "samples": 61,
+        "sampling_failures": 0,
+        "max_background_process_cpu_percent": 119.6759880076242,
+        "max_background_model_process_cpu_percent": 1.8065479818221226,
+        "cpu_guard_exceeded": false,
+        "background_model_active": false
+      },
+      "timing_screen_passed": true
+    },
+    {
+      "block": 0,
+      "model": "drex",
+      "status": "complete",
+      "startup_and_first_warmup_seconds": 1.7738031249900814,
+      "sampled_peak_process_tree_rss_bytes": 14880948224,
+      "cases": 243,
+      "median_seconds": 0.30873908297508024,
+      "p95_seconds": 4.124082583992276,
+      "total_seconds": 239.74526524665998,
+      "input_tokens": {
+        "min": 89,
+        "median": 168,
+        "max": 3965
+      },
+      "quality": {
+        "public": {
+          "cases": 231,
+          "argmax_correct": 212,
+          "brier": 0.120899758928618,
+          "ece_10_bins": 0.0436812385078116
+        },
+        "synthetic": {
+          "cases": 12,
+          "argmax_correct": 12,
+          "brier": 1.290168801554591e-07,
+          "ece_10_bins": 0.00020900368690490723
+        }
+      },
+      "vm_counter_delta": {
+        "Pageouts": 441,
+        "Swapouts": 551136
+      },
+      "host_screen": {
+        "samples": 425,
+        "sampling_failures": 0,
+        "max_background_process_cpu_percent": 258.5979752641898,
+        "max_background_model_process_cpu_percent": 0.0,
+        "cpu_guard_exceeded": true,
+        "background_model_active": false
+      },
+      "timing_screen_passed": false
+    },
+    {
+      "block": 1,
+      "model": "drex",
+      "status": "complete",
+      "startup_and_first_warmup_seconds": 2.6931234170042444,
+      "sampled_peak_process_tree_rss_bytes": 14881112064,
+      "cases": 243,
+      "median_seconds": 0.32405979101895355,
+      "p95_seconds": 4.575863500009291,
+      "total_seconds": 279.12771841837093,
+      "input_tokens": {
+        "min": 89,
+        "median": 168,
+        "max": 3965
+      },
+      "quality": {
+        "public": {
+          "cases": 231,
+          "argmax_correct": 212,
+          "brier": 0.120899758928618,
+          "ece_10_bins": 0.0436812385078116
+        },
+        "synthetic": {
+          "cases": 12,
+          "argmax_correct": 12,
+          "brier": 1.290168801554591e-07,
+          "ece_10_bins": 0.00020900368690490723
+        }
+      },
+      "vm_counter_delta": {
+        "Pageouts": 111,
+        "Swapouts": 77996
+      },
+      "host_screen": {
+        "samples": 497,
+        "sampling_failures": 0,
+        "max_background_process_cpu_percent": 226.8944405351351,
+        "max_background_model_process_cpu_percent": 1.8282175429909473,
+        "cpu_guard_exceeded": true,
+        "background_model_active": false
+      },
+      "timing_screen_passed": false
+    },
+    {
+      "block": 1,
+      "model": "jev",
+      "status": "complete",
+      "startup_and_first_warmup_seconds": 1.3850218750012573,
+      "sampled_peak_process_tree_rss_bytes": 8862400512,
+      "cases": 243,
+      "median_seconds": 0.06682158401235938,
+      "p95_seconds": 0.6431014589907136,
+      "total_seconds": 41.206768046249636,
+      "input_tokens": {
+        "min": 104,
+        "median": 208,
+        "max": 4033
+      },
+      "quality": {
+        "public": {
+          "cases": 231,
+          "argmax_correct": 202,
+          "brier": 0.18487996030711185,
+          "ece_10_bins": 0.029446153134145135
+        },
+        "synthetic": {
+          "cases": 12,
+          "argmax_correct": 12,
+          "brier": 0.008258769788709187,
+          "ece_10_bins": 0.03772812036826471
+        }
+      },
+      "sealed_jev_reference_max_probability_delta": 0.05514520494167541,
+      "vm_counter_delta": {
+        "Pageouts": 0,
+        "Swapouts": 0
+      },
+      "host_screen": {
+        "samples": 77,
+        "sampling_failures": 0,
+        "max_background_process_cpu_percent": 151.2140098962813,
+        "max_background_model_process_cpu_percent": 0.0,
+        "cpu_guard_exceeded": false,
+        "background_model_active": false
+      },
+      "timing_screen_passed": true
+    }
+  ],
+  "models": {
+    "jev": {
+      "model": "alibiserikbay/JevK5",
+      "revision": "c4f7fdb3aeab5582336406e78d3bef11bf98833d",
+      "parameters": "4B",
+      "weights": "BF16 native repack",
+      "weight_sha256": "ea3fd57de724a9cc34cce999f42e78f30245e11bdf18938377bd367d4bbf0dc3",
+      "temperature": 1.22,
+      "worker_sha256": "5dcc03fe336ca9f3c265dd6d6516227529d7e74c6ced9c23cdb830041a72ee79",
+      "config_sha256": "9e8e47e82f80cc37a0b318115df950f183a5e9823e57e36829647113201d357a",
+      "tokenizer_sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+    },
+    "drex": {
+      "model": "nace-ai/drex-max-v1-affine-q4",
+      "revision": "23f21ac6e664d3edb32faa7b55b0c8a7fb09134a",
+      "parameters": "27B",
+      "weights": "affine Q4 group 64; mixed BF16 control tensors",
+      "artifacts_sha256": {
+        "model.safetensors": "e9b0439e8c0cd994b54487c114b5d8fe683f10d2d05cb0f9407b2d869cfe51ac",
+        "pointer.bin": "a89619d4ee1a61e6eec8580ed6792ca609b8972c240730dc3d193dfa00f069dd",
+        "config.json": "a9113853630377c14c880e96042ae34d78845131cd03a93dfa36a6ac03524dd7",
+        "tokenizer.json": "e2326a296fa0119e728121a6bdfe87a9715d1b63db6eb45f02c8b4de5930f9e1",
+        "tokenizer_config.json": "c4a0148b66c08ecf7e966547c9aae40d8ee67b847a9dda7e478e6eee05916d02"
+      },
+      "source_commit": "d2fd26cdf211f87b9a6b1261995528629c9e1401",
+      "scorer_sha256": "938a01379d0eb416beb24c896681b1caa89cdba749a4d79acdb129783ab53ea9"
+    }
+  },
+  "paired_quality": {
+    "public": {
+      "cases": 231,
+      "jev_only_correct": 5,
+      "drex_only_correct": 15,
+      "drex_minus_jev_accuracy": 0.04329004329004329,
+      "paired_bootstrap_95_percentile_interval": [
+        0.004329004329004329,
+        0.08225108225108226
+      ],
+      "mcnemar_exact_two_sided_p": 0.04138946533203125
+    },
+    "synthetic": {
+      "cases": 12,
+      "jev_only_correct": 0,
+      "drex_only_correct": 0,
+      "drex_minus_jev_accuracy": 0,
+      "paired_bootstrap_95_percentile_interval": [
+        0,
+        0
+      ],
+      "mcnemar_exact_two_sided_p": 1.0
+    }
+  },
+  "repeatability_max_probability_delta": {
+    "drex": 0.0,
+    "jev": 0.0
+  },
+  "sleep_screen": {
+    "checked": true,
+    "sleep_events": 0
+  }
+}

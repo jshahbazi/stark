@@ -1,0 +1,9 @@
+{
+  "reference": "/absolute/path/to/private/sealed-jevbench",
+  "jev_model": "/absolute/path/to/converted-jevk5-with-conversion-receipt",
+  "jev_worker": "/absolute/path/to/stark/target/release/stark-score",
+  "drex_source": "/absolute/path/to/pinned-drex-decision-models",
+  "drex_model": "/absolute/path/to/drex-max-v1-affine-q4",
+  "context_tokens": 8192,
+  "blocks": 2
+}
