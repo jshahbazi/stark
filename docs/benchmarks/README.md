@@ -2,6 +2,12 @@
 
 Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Earlier archived comparison artifacts are under [archive/experiments](../archive/experiments/). Each report states where its source-bound aggregates are retained.
 
+Track each proposed optimization, failed approach and promotion decision in the
+[model experiment ledger](../model-experiments/README.md), using its
+[attempt template](../model-experiments/TEMPLATE.md). Keep the source-bound
+measurements and current/superseded benchmark status here; ledger entries link
+to them and must not broaden their claims.
+
 ## Current result
 
 **Cross-backend idle wake follow-up (2026-11-08).** Extends queue maintenance

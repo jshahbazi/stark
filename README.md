@@ -148,6 +148,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) before changi
 | Menu bar app | `apps/menu-bar/`; [build and usage](apps/menu-bar/README.md) |
 | CLI launcher, installer, release | `scripts/stark`, `install.sh`, `scripts/`; [installation](docs/INSTALLATION.md), [releasing](docs/RELEASING.md) |
 | Checks and validation | [CI](docs/CI.md), [validation records](docs/validation/), [benchmarks](docs/benchmarks/README.md) |
+| Model changes and experiments | [Attempt ledger and template](docs/model-experiments/README.md), [image-support findings](docs/model-experiments/2026-11-08-image-support-retrospective.md) |
 | Website | `website/`; [setup and publishing](website/README.md) |
 
 Build the workers with `cargo +1.98.1 build --release --locked -p stark-generate` and, separately, `cargo +1.98.1 build --release --locked -p stark-score --features optimized`. For checkout chat use `./scripts/stark chat --model-path /absolute/path/to/converted-model`. Start with the repository policy check, then the [checks for the area you changed](docs/CI.md#local-checks):

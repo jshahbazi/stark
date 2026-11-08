@@ -38,6 +38,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | --- | --- |
 | [Contributing](../CONTRIBUTING.md) | Toolchains, local checks, test layout, running a model-bound smoke test, where validation records go |
 | [Adding model support](MODEL_ONBOARDING.md) | Required tool-calling assessment, prefix reuse, artifact qualification and lifecycle checks for each new inference path |
+| [Model changes and experiments](model-experiments/README.md) | Attempt ledger, image-support retrospective, failed approaches, promotion decisions and a template for future correctness/performance work |
 | [Technical guide](TECHNICAL_OVERVIEW.md) | Components, engine module layout, feature flags, Python package layout, the app control protocol |
 | [CI and security checks](CI.md) | Workflows, what they cover and do not cover, dependency gates, caches, local equivalents |
 | [Releasing](RELEASING.md) | Signed and prebuilt release workflows, verification on a receiving Mac, DMG handling |
@@ -50,6 +51,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | Location | What it holds |
 | --- | --- |
 | [benchmarks/](benchmarks/README.md) | Engine comparisons with a current-versus-superseded index, optimization records, and [conversion benchmarks](benchmarks/CONVERSION_BENCHMARKS.md) |
+| [model-experiments/](model-experiments/README.md) | Cross-model attempt records and decisions linked to their canonical run and benchmark evidence |
 | [validation/](validation/) | [Scoring parity](validation/SCORING_PARITY.md) against frozen Uzu references and [ColGrep generation acceptance](validation/GENERATION_COLGREP.md), each bound to a named build |
 | [archive/conversion/](archive/conversion/) | The converter replacement plan, milestone packets and their reviews |
 | [archive/runs/](archive/runs/) | Dated validation and review write-ups, security baselines, CI measurements, website deployment and history-rewrite records |
