@@ -24,7 +24,7 @@ The caller owns the process: start it, hold its pipes, watch for exit, and termi
 
 ## Framing
 
-Requests and replies are UTF-8 JSON objects, one per line, terminated by `\n`. A request line, including its newline, is limited to 1 MiB (1,048,576 bytes). Both workers reply with exactly one terminal line per request, in request order. The generation worker can additionally emit zero or more `{"event":"delta",...}` lines before the terminal reply of a streaming request.
+Requests and replies are UTF-8 JSON objects, one per line, terminated by `\n`. A request line, including its newline, is limited to 1 MiB (1,048,576 bytes) by default. The generation worker also accepts a trusted host's explicit startup budget, acknowledged in readiness as described in [Generation](GENERATION.md#private-json-lines-protocol); the scoring limit is unchanged. Both workers reply with exactly one terminal line per request, in request order. The generation worker can additionally emit zero or more `{"event":"delta",...}` lines before the terminal reply of a streaming request.
 
 Requests are parsed strictly: unknown fields, wrong types, and missing required fields are rejected. A client cannot discover optional fields by sending them; use the readiness line instead.
 

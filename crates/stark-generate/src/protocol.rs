@@ -12,6 +12,7 @@ struct Arguments {
     model: PathBuf,
     staging: Option<PathBuf>,
     prefix_cache: bool,
+    request_byte_limit: Option<usize>,
 }
 
 fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<Arguments, &'static str> {
@@ -26,6 +27,7 @@ fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<Arguments, &'st
         model: PathBuf::from(path),
         staging: None,
         prefix_cache: false,
+        request_byte_limit: None,
     };
     while let Some(flag) = args.next() {
         if flag == OsStr::new("--vision-staging-root") && parsed.staging.is_none() {
@@ -33,6 +35,17 @@ fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<Arguments, &'st
             parsed.staging = Some(PathBuf::from(root));
         } else if flag == OsStr::new("--prefix-cache") && !parsed.prefix_cache {
             parsed.prefix_cache = true;
+        } else if flag == OsStr::new("--request-byte-limit") && parsed.request_byte_limit.is_none() {
+            let value = args.next().ok_or("invalid_arguments")?;
+            let value = value
+                .to_str()
+                .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+                .ok_or("invalid_arguments")?;
+            let value = value.parse::<usize>().map_err(|_| "invalid_arguments")?;
+            if value == 0 || value > isize::MAX as usize {
+                return Err("invalid_arguments");
+            }
+            parsed.request_byte_limit = Some(value);
         } else {
             return Err("invalid_arguments");
         }
@@ -77,6 +90,7 @@ pub fn main() {
             model: path,
             staging,
             prefix_cache,
+            request_byte_limit,
         } = arguments(std::env::args_os().skip(1))?;
         #[cfg(feature = "metal")]
         {
@@ -100,7 +114,8 @@ pub fn main() {
                 } else {
                     crate::hybrid::HybridBackend::load(&path, cancellation)?
                 };
-                let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+                let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?
+                    .with_request_byte_limit(request_byte_limit)?;
                 return crate::generation::run_lines(
                     &mut worker,
                     &mut crate::prefix_cache::StandardInput::reader(),
@@ -112,12 +127,13 @@ pub fn main() {
             } else {
                 crate::native::NativeBackend::load(&path, cancellation)?
             };
-            let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+            let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?
+                .with_request_byte_limit(request_byte_limit)?;
             crate::generation::run_lines(&mut worker, &mut crate::prefix_cache::StandardInput::reader(), &mut output)
         }
         #[cfg(not(feature = "metal"))]
         {
-            let _ = (path, staging, prefix_cache);
+            let _ = (path, staging, prefix_cache, request_byte_limit);
             Err::<(), _>("native_backend_unavailable")
         }
     }));
@@ -171,5 +187,27 @@ mod tests {
         ] {
             assert_eq!(parse(&args), Err("invalid_arguments"));
         }
+    }
+
+    #[test]
+    fn request_limit_is_a_trusted_positive_startup_option() {
+        let parsed =
+            arguments(["--model-path", "/model", "--request-byte-limit", "33554432"].into_iter().map(OsString::from))
+                .unwrap();
+        assert_eq!(parsed.request_byte_limit, Some(33554432));
+        for value in ["0", "-1", "+1", "not-a-number", "18446744073709551615"] {
+            assert_eq!(
+                arguments(["--model-path", "/model", "--request-byte-limit", value].into_iter().map(OsString::from)),
+                Err("invalid_arguments")
+            );
+        }
+        assert_eq!(
+            arguments(
+                ["--model-path", "/model", "--request-byte-limit", "32", "--request-byte-limit", "64"]
+                    .into_iter()
+                    .map(OsString::from)
+            ),
+            Err("invalid_arguments")
+        );
     }
 }
