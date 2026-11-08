@@ -109,6 +109,15 @@ Errors are replies of the form `{"error":CODE,"cache":{...}}`. Every error disca
 
 Every score request creates a fresh native state, runs the prompt in batches of up to 1,024 tokens, reads the logits at the final position, and drops the state. The worker suppresses native diagnostics and capture variables as described in [worker protocols](WORKER_PROTOCOLS.md#privacy-and-diagnostics) and opens no network listener.
 
+For native mixed-precision Qwen models, both workers maintain the Metal queue
+every 500 ms while waiting for a new complete request. Maintenance runs on the
+request owner thread, changes no model state or cached logits, and leaves hit
+and native-call counters unchanged. Buffered input and EOF bypass the wait.
+Input or maintenance failure discards the cache and exits with a static fatal
+error so the host can reload the worker. Dense scoring retains its existing
+blocking input wait. The [cross-backend wake study](benchmarks/2026-11-08-cross-backend-idle-wake.md)
+records the qualified artifact and cache/parity controls.
+
 ## Validation
 
 ```sh

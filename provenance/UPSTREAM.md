@@ -392,6 +392,17 @@ Existing source-bound BF16 normalization, activation and matrix primitives keep
 their existing PyTorch/SLEEF notices and attribution. See
 [Gemma 3 image artifacts](../docs/GEMMA3_IMAGES.md) for exact profile boundaries.
 
+## Idle queue scheduling
+
+The converted text generation worker's private Metal4 shared-event maintenance
+and the scoring worker's timed owner-thread input wait are original Stark
+adapter changes. An idle tick signals the existing command queue and waits
+with a bounded timeout; it adds no model dispatch, shader adaptation or
+numerical policy. Native mixed-precision Qwen reuses Lily's existing empty
+queue signal under both admitted numerical policies. The
+[cross-backend study](../docs/benchmarks/2026-11-08-cross-backend-idle-wake.md)
+binds the source patch, worker hashes and artifact-specific controls.
+
 ## Removed inherited code
 
 On 2026-10-25 the inherited Uzu code that no product component used was removed, together with the dependencies only it needed:

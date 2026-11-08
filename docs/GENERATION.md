@@ -430,6 +430,14 @@ Lifetime:
   - process exit
 - `tokenize` and `decode` keep it.
 
+Converted text models using Metal4 and native mixed-precision Qwen models
+maintain their existing command queue every 500 ms between complete requests.
+This owner-thread maintenance preserves retained state and the original
+600-second deadline; ticks cannot renew it. Queue/input failures clear the
+entry and exit for reload. Vision wrappers and other native hybrid backends
+retain their existing idle scheduling. The [cross-backend wake study](benchmarks/2026-11-08-cross-backend-idle-wake.md)
+records artifact-specific latency and restoration checks.
+
 Memory: on converted models the entry holds the KV cache of the previous request. On Qwen3-4B that is 144 KiB per token, about 2.7 GiB after an 18,500-token step, bounded by the state's capacity of `context_tokens` plus 1,024 rows. A request of that size already maps this memory while it runs; reuse keeps it resident until the next request or idle expiry. Native GLM and Qwen3.8 keep their completed attention caches in the loaded model; retention adds the snapshot of mutable recurrence and history. GLM also preserves the incomplete indexer pool. The Lily-format Qwen3.8 snapshot is about 110 MiB (36 GDN layers of 48 × 128 × 128 F32 state plus convolution windows); other graph geometries have their own memory cost.
 
 Privacy: the retained state and its prefix token IDs exist only in worker memory. They are never written to disk, logged, or included in replies; replies carry counts only. A faster first token reveals that the previous request shared a prefix, so hosts give each principal its own random scope. The desktop backend uses one scope per Playground conversation, per API session and master key, and per managed client grant. It rotates scopes on reset, revocation and key change, and sends `reset_cache` on revocation and API restart.

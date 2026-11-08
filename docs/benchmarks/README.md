@@ -4,6 +4,19 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Cross-backend idle wake follow-up (2026-11-08).** Extends queue maintenance
+to official mixed-affine Flash-Next generation, native Flash-Next scoring and
+converted text generation on Metal4. The
+[matched study](2026-11-08-cross-backend-idle-wake.md) binds separate artifacts,
+baseline/candidate/candidate/baseline controls, score-cache and full-vocabulary
+hash checks, prefix restoration, lifecycle and idle-resource results. This
+extends the original Lily-generation study below; its source-bound results
+remain unchanged.
+Official first-sample latency falls from 1.12–1.13 to 0.31–0.32 seconds;
+the fully screened dense repeat falls from 0.71–0.75 to about 0.62 seconds.
+Fresh scoring is observed at about 0.30 seconds, with a documented host-coverage
+gap in one primary candidate call.
+
 **Flash-Next idle wake fix (2026-11-07).** The native Lily-policy generation
 worker now signals its otherwise empty GPU queue every 500 ms while waiting
 for a new request. It retains prefix state and its original expiry deadline.

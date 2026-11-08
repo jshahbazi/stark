@@ -62,6 +62,19 @@ jobs:
           HF_HUB_OFFLINE: '1'
           TOKENIZERS_PARALLELISM: 'false'
         run: uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
+      - name: Test model-free benchmark contracts
+        run: >-
+          uv run --project tools/converter --locked --python 3.13.13 pytest -q
+          scripts/test_benchmark_qwen38_moe_crossover.py
+          scripts/test_benchmark_qwen38_cadence.py
+          scripts/test_benchmark_idle_wake.py
+          scripts/test_hybrid_host_metrics.py
+          scripts/test_qwen38_clock_metrics.py
+          scripts/test_qwen38_process_metrics.py
+          scripts/test_benchmark_qwen38_dense.py
+          scripts/test_benchmark_qwen38_mtp.py
+          scripts/test_benchmark_qwen38_pilot.py
+          scripts/test_benchmark_hybrid_context.py
       - name: Lint converter source and tests
         run: |
           uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter

@@ -645,9 +645,10 @@ impl LilyModel {
         self.context.wake().map_err(|_| Error::Invalid("mixed precision idle queue wake failed"))
     }
 
-    /// Idle latency has been qualified for the Lily numerical policy only.
+    /// Both admitted Lily and official affine policies share this same queue.
+    /// Queue maintenance changes no precision, sampling or model state.
     pub fn needs_idle_queue_maintenance(&self) -> bool {
-        !self.model.config.official_mlx_rounding()
+        true
     }
 
     /// Explicit diagnostic mode for future passes; no payload is captured.

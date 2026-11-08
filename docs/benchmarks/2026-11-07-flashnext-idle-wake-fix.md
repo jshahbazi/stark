@@ -2,6 +2,9 @@
 
 Date: 2026-11-07. This implements the queue-maintenance control from the
 [idle wake diagnosis](2026-11-07-flashnext-sustained-diagnosis.md).
+The [2026-11-08 follow-up](2026-11-08-cross-backend-idle-wake.md) separately
+tests official Flash-Next generation, Flash-Next scoring and converted dense
+Metal4 generation. This page retains its original Lily-generation results.
 Production source base: `5f974a939f9fa97d7d5935ea690b82c334e8397e`.
 The later [PR 98 main integration](../archive/runs/2026-11-07-flashnext-pr98-integration.md)
 records a rebuilt worker and separate post-merge controls. Original ABBA

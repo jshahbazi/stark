@@ -149,13 +149,17 @@ records the follow-up single-model crossover and absence of an accepted
 whole-model benefit. No candidate numerical or performance result is relabeled
 as validation of the restored source.
 
-The Stark generation adapter invokes the existing `MetalContext::wake` empty
-queue signal every 500 ms while waiting for a new request under the Lily
-numerical policy. This adds no vendored shader or precision change. Owner-thread
-maintenance preserves model state and the prefix-cache idle deadline, and exits
+The Stark generation and scoring adapters invoke the existing
+`MetalContext::wake` empty queue signal every 500 ms while waiting for a new
+request under the Lily or official mixed-affine numerical policy. This adds no
+vendored shader or precision change. Owner-thread maintenance preserves model
+state and the prefix-cache idle deadline, and exits
 on a queue fault. The
 [idle wake fix](../../docs/benchmarks/2026-11-07-flashnext-idle-wake-fix.md)
-records the production patch, matched latency, idle resource and state controls.
+records the original production patch, matched latency, idle resource and state
+controls. The [cross-backend follow-up](../../docs/benchmarks/2026-11-08-cross-backend-idle-wake.md)
+extends adapter eligibility and scoring input scheduling without changing
+vendored model or kernel code.
 
 The other eight upstream shader files retain their pinned source bytes. `stark_decode_rows.metal` and `stark_moe_decode_rows.metal` add verifier entry points compiled after the unchanged generic projection and expert shader bodies. Batch row is the fast grid axis, exposing parallel work and weight-cache reuse while retaining each row's original arithmetic. The original HC and generic projection/convolution entry points remain available for reference controls. These patches do not change checkpoint quantization or the selected precision policy. Numerical and performance qualification is recorded separately in the [kernel study](../../docs/benchmarks/QWEN38_KERNELS_2026_10_29.md) and [injection fusion study](../../docs/benchmarks/QWEN38_FUSION_2026_10_29.md).
 
