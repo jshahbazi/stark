@@ -50,6 +50,7 @@ MODEL_MAX_TOKENS = 4096
 MODEL_SEED = 0
 DEFAULT_STEP_LIMIT = 250
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_ERROR_JSON_BYTES = 64 * 1024
 _ENDPOINT = ""
 _AUTHORIZATION = ""
 _MODEL_NAME = ""
@@ -147,6 +148,16 @@ def _safe_http_category(status: int | None) -> str:
     if status >= 500:
         return "server"
     return "http_other"
+
+
+def _is_context_overflow_error(body: bytes) -> bool:
+    """Classify by Stark's fixed error code without retaining or logging text."""
+    try:
+        payload = json.loads(body[:MAX_ERROR_JSON_BYTES])
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    error = payload.get("error") if isinstance(payload, dict) else None
+    return isinstance(error, dict) and error.get("code") == "context_length_exceeded"
 
 
 class _CancellableHTTPConnection(http.client.HTTPConnection):
@@ -251,14 +262,7 @@ class LocalOpenAIModel:
                 raise RuntimeError("model response rejected")
             if response.status < 200 or response.status >= 300:
                 category = _safe_http_category(response.status)
-                overflow = any(
-                    term in raw[:4096].lower()
-                    for term in (
-                        b"context length",
-                        b"context window",
-                        b"too many tokens",
-                    )
-                )
+                overflow = _is_context_overflow_error(raw)
                 METRICS.record_error(category, context_overflow=overflow)
                 raise RuntimeError(
                     "model request failed: "

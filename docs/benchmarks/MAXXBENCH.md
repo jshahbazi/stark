@@ -113,6 +113,10 @@ The separate verifier still receives the task's normal patch artifact.
 Private `runtime/` receipts bind results to the upstream manifest, complete
 artifact file hashes, worker/helper hashes, Python/dependency lock, source
 commit, host platform, runner/adapter/bridge hashes and declared settings.
+Task image IDs are captured and must match across artifacts for each task;
+environment drift aborts the comparison. Per-trial `progress.json` files expose
+only elapsed time, phases and aggregate model-call/token/error counts so long
+attempts can be monitored without conversation logs.
 Per-file hash caches are reused only while device, inode, size, modification
 and change times remain identical. File-set/identity changes during a run abort
 the campaign. Resuming with a different identity is rejected.

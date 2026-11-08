@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from maxxbench_agent import (
+    METRICS,
     AggregateMetrics,
     LocalOpenAIModel,
     MemoryOnlyAgent,
@@ -16,12 +17,13 @@ from maxxbench_agent import (
     configure_connection,
 )
 from minisweagent.agents.default import AgentConfig
+from minisweagent.exceptions import FormatError
 
 
 class FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status=200):
         self.payload = json.dumps(payload).encode()
-        self.status = 200
+        self.status = status
 
     def __enter__(self):
         return self
@@ -117,6 +119,96 @@ class AdapterTests(unittest.TestCase):
         ):
             with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
                 configure_connection(endpoint, "ephemeral-key", "stark-test")
+
+    def test_stark_context_error_code_increments_overflow_metric(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        error_payload = {
+            "error": {
+                "message": "Conversation exceeds the context budget. Shorten messages or the reply limit.",
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+            }
+        }
+
+        class ErrorConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse(error_payload, status=400)
+
+            def close(self):
+                pass
+
+        model_config = _agent_templates()["model"]
+        model = LocalOpenAIModel(
+            "stark-test",
+            observation_template=model_config["observation_template"],
+            format_error_template=model_config["format_error_template"],
+        )
+        before = METRICS.snapshot()
+        with (
+            patch("maxxbench_agent._CancellableHTTPConnection", ErrorConnection),
+            self.assertRaisesRegex(RuntimeError, "context_overflow"),
+        ):
+            model.query([{"role": "user", "content": "private"}])
+        after = METRICS.snapshot()
+        self.assertEqual(
+            after["context_overflow_errors"] - before["context_overflow_errors"], 1
+        )
+        self.assertEqual(
+            after["http_error_categories"].get("request_rejected", 0)
+            - before["http_error_categories"].get("request_rejected", 0),
+            1,
+        )
+
+    def test_successful_length_finish_reason_is_not_http_overflow(self):
+        configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")
+        completion = {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "tool_calls": []},
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+        }
+
+        class LengthConnection:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return FakeResponse(completion, status=200)
+
+            def close(self):
+                pass
+
+        model_config = _agent_templates()["model"]
+        model = LocalOpenAIModel(
+            "stark-test",
+            observation_template=model_config["observation_template"],
+            format_error_template=model_config["format_error_template"],
+        )
+        before = METRICS.snapshot()
+        with (
+            patch("maxxbench_agent._CancellableHTTPConnection", LengthConnection),
+            self.assertRaises(FormatError),
+        ):
+            model.query([{"role": "user", "content": "private"}])
+        after = METRICS.snapshot()
+        self.assertEqual(
+            after["context_overflow_errors"], before["context_overflow_errors"]
+        )
+        self.assertEqual(
+            after["http_error_categories"], before["http_error_categories"]
+        )
 
     def test_model_abort_closes_inflight_request(self):
         configure_connection("http://127.0.0.1:9000/v1", "ephemeral-key", "stark-test")

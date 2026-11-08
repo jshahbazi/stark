@@ -78,7 +78,8 @@ jobs:
             -L tools/stock_benchmark/mlx/uv.lock \
             -L tools/stock_benchmark/mlx_current/uv.lock \
             -L tools/stock_benchmark/vllm/uv.lock \
-            -L uv.lock:scripts/ci/check_repository.py.lock; then
+            -L uv.lock:scripts/ci/check_repository.py.lock \
+            -L uv.lock:scripts/run_maxxbench.py.lock; then
             scan_status=0
           else
             scan_status=$?
@@ -95,7 +96,8 @@ jobs:
             --lockfile tools/stock_benchmark/mlx/uv.lock \
             --lockfile tools/stock_benchmark/mlx_current/uv.lock \
             --lockfile tools/stock_benchmark/vllm/uv.lock \
-            --lockfile scripts/ci/check_repository.py.lock
+            --lockfile scripts/ci/check_repository.py.lock \
+            --lockfile scripts/run_maxxbench.py.lock
 
   review:
     name: Dependency review

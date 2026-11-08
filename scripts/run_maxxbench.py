@@ -55,6 +55,16 @@ def bind_campaign(path, identity):
     return identity_digest(identity)
 
 
+def bind_environment_image(images, task, image_id):
+    import re
+
+    if not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
+        raise ValueError("environment_identity_unavailable")
+    if task in images and images[task] != image_id:
+        raise ValueError("environment_identity_changed")
+    images[task] = image_id
+
+
 def artifact_files(directory):
     return sorted(path for path in directory.rglob("*")
                   if path.is_file() and not any(part.startswith(".") for part in path.relative_to(directory).parts))
@@ -113,6 +123,7 @@ def aggregate_agent_metrics(result):
         safe["http_errors"] = {key: value for key, value in errors.items() if key in {
             "transport", "configuration", "request_rejected", "authentication", "endpoint",
             "rate_limited", "server", "http_other", "response_too_large", "invalid_response",
+            "environment", "environment_timeout", "cancelled", "agent",
         } and type(value) is int}
     counts["metadata"] = safe
     return counts
@@ -406,6 +417,25 @@ def model_bridge(profile, worker):
                 raise ValueError("model_bridge_shutdown_failed")
 
 
+def inspect_environment_image(trial):
+    """Read one local image identity; Docker diagnostics never enter artifacts."""
+    import re
+
+    environment = getattr(trial, "_environment", None)
+    name = getattr(getattr(environment, "_env_vars", None), "main_image_name", None)
+    if not isinstance(name, str) or re.fullmatch(r"[a-z0-9][a-z0-9_.:/-]{0,255}", name) is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", name, "--format", "{{.Id}}"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    image_id = result.stdout.strip()
+    return image_id if result.returncode == 0 and re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) else None
+
+
 async def trial_run(Trial, upstream, task, directory, profile=None):
     from pier.models.trial.config import (
         AgentConfig,
@@ -421,15 +451,112 @@ async def trial_run(Trial, upstream, task, directory, profile=None):
     )
     config = TrialConfig(task=TaskConfig(path=upstream / "tasks" / task), trials_dir=directory,
                          trial_name=task, agent=agent, environment=EnvironmentConfig(force_build=True))
+    progress_path = Path(directory) / task / "progress.json"
+    started = time.monotonic()
+    trial = None
+    running = None
+    original_setup = None
+    image_id = None
+    image_checked = False
+    state = "creating"
+    counter_names = ("calls", "prompt_tokens", "completion_tokens", "context_overflow_errors")
+    error_names = {
+        "transport", "configuration", "request_rejected", "authentication", "endpoint",
+        "rate_limited", "server", "http_other", "response_too_large", "invalid_response",
+    }
+
+    def counters():
+        adapter = sys.modules.get("maxxbench_agent")
+        metrics = getattr(adapter, "METRICS", None)
+        values = metrics.snapshot() if metrics is not None else {}
+        safe = {name: values.get(name, 0) if type(values.get(name)) is int and values[name] >= 0 else 0
+                for name in counter_names}
+        errors = values.get("http_error_categories", {})
+        safe["http_error_categories"] = {
+            name: value for name, value in errors.items()
+            if name in error_names and type(value) is int and value >= 0
+        } if isinstance(errors, dict) else {}
+        return safe
+
+    baseline = counters()
+
+    def progress(active):
+        current = counters()
+        delta = {name: max(0, current[name] - baseline[name]) for name in counter_names}
+        delta["http_error_categories"] = {
+            name: value - baseline["http_error_categories"].get(name, 0)
+            for name, value in current["http_error_categories"].items()
+            if value > baseline["http_error_categories"].get(name, 0)
+        }
+        phase = state
+        if active and state == "running":
+            # These are the pinned Pier result's timing fields; no task content
+            # or agent messages are inspected to infer a phase.
+            partial = getattr(trial, "_result", None)
+            for name in ("verifier", "agent_execution", "agent_setup", "environment_setup"):
+                timing = getattr(partial, name, None)
+                if (getattr(timing, "started_at", None) is not None
+                        and getattr(timing, "finished_at", None) is None):
+                    phase = name
+                    break
+        write_json(progress_path, {
+            "task": task, "state": state, "phase": phase, "active": active,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "environment_image_id": image_id,
+            "environment_image_capture": "captured" if image_id else ("unavailable" if image_checked else "pending"),
+            "updated_at": datetime.now(UTC).isoformat(), **delta,
+        })
+
     with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):  # noqa: ASYNC230 - local null sink only.
-        trial = await Trial.create(config)
-        result = await trial.run()
+        try:
+            progress(True)
+            trial = await Trial.create(config)
+            original_setup = getattr(trial, "_setup_environment", None)
+            if callable(original_setup):
+                async def setup_and_capture():
+                    nonlocal image_id, image_checked
+                    value = await original_setup()
+                    # Capture before agent execution; Pier can remove the image
+                    # while finalizing even a short attempt.
+                    image_id = inspect_environment_image(trial)
+                    image_checked = True
+                    progress(True)
+                    return value
+
+                trial._setup_environment = setup_and_capture
+            state = "running"
+            running = asyncio.create_task(trial.run(), name="maxxbench-trial-" + task)
+            while True:
+                progress(True)
+                # The inspection is bounded to five seconds. A 25-second poll
+                # also keeps progress updates within thirty seconds during it.
+                done, _pending = await asyncio.wait({running}, timeout=25)
+                if done:
+                    result = await running
+                    if not image_checked:
+                        image_id = inspect_environment_image(trial)
+                        image_checked = True
+                    state = "finished"
+                    break
+        except BaseException as error:
+            state = "cancelled" if isinstance(error, asyncio.CancelledError) else "failed"
+            raise
+        finally:
+            if running is not None and not running.done():
+                running.cancel()
+                # Pier owns environment cleanup in Trial.run's finally. Await it
+                # before returning; there is no independent monitor task to leak.
+                await asyncio.gather(running, return_exceptions=True)
+            if callable(original_setup):
+                trial._setup_environment = original_setup
+            progress(False)
     rewards = result.verifier_result.rewards if result.verifier_result else None
     return {
         "task": task, "rewards": rewards,
         "passed": bool(rewards and rewards.get("reward") == 1 and result.exception_info is None),
         "infrastructure_exception": result.exception_info.exception_type if result.exception_info else None,
         "agent_metrics": aggregate_agent_metrics(result.agent_result),
+        "environment_image_id": image_id,
         "started_at": result.started_at.isoformat() if result.started_at else None,
         "finished_at": result.finished_at.isoformat() if result.finished_at else None,
     }
@@ -502,6 +629,8 @@ def main(argv=None):
                             "stark_source_commit": subprocess.check_output(
                                 ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()})
     campaign_id = bind_campaign(args.output / "campaign.json", stable_identity)
+    image_receipt = args.output / "environment-images.json"
+    task_images = json.loads(image_receipt.read_text()) if image_receipt.exists() else {}
     with gpu_reservation(args.gpu_lock):
         for profile in profiles:
             assert_artifact_unchanged(artifacts[profile["id"]])
@@ -513,8 +642,12 @@ def main(argv=None):
                     assert_artifact_unchanged(artifacts[profile["id"]])
                     destination = args.output / profile["id"] / f"{task}.json"
                     if destination.exists():
-                        if json.loads(destination.read_text()).get("campaign_sha256") != campaign_id:
+                        existing = json.loads(destination.read_text())
+                        if existing.get("campaign_sha256") != campaign_id:
                             raise ValueError("campaign_identity_mismatch")
+                        if existing.get("infrastructure_exception"):
+                            raise ValueError("trial_infrastructure_failed")
+                        bind_environment_image(task_images, task, existing.get("environment_image_id"))
                         continue
                     if shutil.disk_usage(args.output).free < 12 * 1024**3:
                         raise ValueError("insufficient_disk_space")
@@ -522,6 +655,10 @@ def main(argv=None):
                     result = asyncio.run(trial_run(Trial, args.upstream, task,
                                                   args.output / profile["id"] / "trials", profile))
                     assert_artifact_unchanged(artifacts[profile["id"]])
+                    image_id = result.get("environment_image_id")
+                    if not result["infrastructure_exception"]:
+                        bind_environment_image(task_images, task, image_id)
+                        write_json(image_receipt, task_images)
                     write_json(destination, {**result, "campaign_sha256": campaign_id})
                     emit({"event": "trial_done", "profile": profile["id"], "task": task,
                           "passed": result["passed"], "infrastructure_exception": result["infrastructure_exception"]})
@@ -551,6 +688,7 @@ if __name__ == "__main__":
             "model_bridge_start_failed", "trial_infrastructure_failed", "insufficient_disk_space",
             "model_bridge_protocol_failed", "model_bridge_ownership_unverified", "model_bridge_cleanup_failed",
             "model_bridge_shutdown_failed",
+            "environment_identity_unavailable", "environment_identity_changed",
             "campaign_identity_mismatch",
             "artifact_changed", "artifact_empty",
         } else "runner_failed"

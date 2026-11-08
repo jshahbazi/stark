@@ -49,6 +49,24 @@ def test_campaign_binding_rejects_changed_identity_and_preserves_old_receipt(tmp
     assert json.loads(destination.read_text()) == original
 
 
+def test_environment_image_guard_accepts_same_image_and_rejects_drift_without_mutation():
+    images = {}
+    original = "sha256:" + "a" * 64
+    runner.bind_environment_image(images, "sample-task", original)
+    runner.bind_environment_image(images, "sample-task", original)
+    with pytest.raises(ValueError, match="environment_identity_changed"):
+        runner.bind_environment_image(images, "sample-task", "sha256:" + "b" * 64)
+    assert images == {"sample-task": original}
+
+
+@pytest.mark.parametrize("image_id", [None, "", "sha256:short", "sha256:" + "Z" * 64, {"private": "marker"}])
+def test_environment_image_guard_rejects_missing_or_malformed_image(image_id):
+    images = {}
+    with pytest.raises(ValueError, match="environment_identity_unavailable"):
+        runner.bind_environment_image(images, "sample-task", image_id)
+    assert images == {}
+
+
 def test_release_preflight_validates_pinned_revision_and_all_tasks_without_output(tmp_path, monkeypatch):
     tasks = tmp_path / "tasks"
     for index in range(89):
@@ -332,6 +350,148 @@ def test_trial_run_aggregates_do_not_serialize_rollout_or_arbitrary_metadata(tmp
     assert receipt["passed"] is True
     assert "private-marker" not in json.dumps(receipt)
     assert "rollout_details" not in json.dumps(receipt)
+
+
+def trial_result():
+    return SimpleNamespace(verifier_result=SimpleNamespace(rewards={"reward": 1}), exception_info=None,
+                           agent_result=None, started_at=datetime.now(UTC), finished_at=datetime.now(UTC))
+
+
+def test_trial_progress_records_only_per_trial_counter_deltas_and_phase(tmp_path, monkeypatch):
+    config_module(monkeypatch)
+    values = {"calls": 100, "prompt_tokens": 1000, "completion_tokens": 2000, "context_overflow_errors": 4,
+              "http_error_categories": {"transport": 3, "private-marker": 42},
+              "private": "private-marker prompt or response"}
+    adapter = ModuleType("maxxbench_agent")
+    adapter.METRICS = SimpleNamespace(snapshot=lambda: {**values, "http_error_categories": dict(values["http_error_categories"])})
+    monkeypatch.setitem(sys.modules, adapter.__name__, adapter)
+    observed = []
+    original_wait = asyncio.wait
+
+    async def scenario():
+        release = asyncio.Event()
+
+        class Trial:
+            @classmethod
+            async def create(cls, _config):
+                return cls()
+
+            async def run(self):
+                self._result = SimpleNamespace(agent_execution=SimpleNamespace(started_at=datetime.now(UTC), finished_at=None))
+                values.update(calls=102, prompt_tokens=1010, completion_tokens=2020, context_overflow_errors=5)
+                values["http_error_categories"]["transport"] += 1
+                await release.wait()
+                return trial_result()
+
+        waits = 0
+
+        async def wait(tasks, *, timeout):
+            nonlocal waits
+            assert timeout == 25
+            waits += 1
+            if waits == 1:
+                await asyncio.sleep(0)
+                return set(), tasks
+            observed.append(json.loads((tmp_path / "trials/sample-task/progress.json").read_text()))
+            release.set()
+            return await original_wait(tasks, timeout=timeout)
+
+        monkeypatch.setattr(runner.asyncio, "wait", wait)
+        result = await runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials")
+        assert result["passed"] is True
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+
+    asyncio.run(scenario())
+    active = observed[0]
+    assert active["active"] is True and active["phase"] == "agent_execution"
+    assert {name: active[name] for name in ("calls", "prompt_tokens", "completion_tokens", "context_overflow_errors")} == {
+        "calls": 2, "prompt_tokens": 10, "completion_tokens": 20, "context_overflow_errors": 1,
+    }
+    assert active["http_error_categories"] == {"transport": 1}
+    path = tmp_path / "trials/sample-task/progress.json"
+    final = json.loads(path.read_text())
+    assert final["state"] == "finished" and final["active"] is False
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert "private-marker" not in json.dumps(observed + [final])
+
+
+def test_trial_progress_cancellation_awaits_owned_trial_cleanup_without_task_leak(tmp_path, monkeypatch):
+    config_module(monkeypatch)
+
+    async def scenario():
+        started = asyncio.Event()
+        cleaned_up = asyncio.Event()
+
+        class Trial:
+            @classmethod
+            async def create(cls, _config):
+                return cls()
+
+            async def run(self):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    await asyncio.sleep(0)
+                    cleaned_up.set()
+
+        attempt = asyncio.create_task(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
+        await started.wait()
+        attempt.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await attempt
+        assert cleaned_up.is_set()
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+
+    asyncio.run(scenario())
+    final = json.loads((tmp_path / "trials/sample-task/progress.json").read_text())
+    assert final["state"] == "cancelled" and final["active"] is False
+
+
+def test_trial_captures_image_before_short_run_cleanup_and_includes_it_in_progress(tmp_path, monkeypatch):
+    config_module(monkeypatch)
+    image_id = "sha256:" + "a" * 64
+    setup_finished = False
+    image_removed = False
+    commands = []
+
+    class Trial:
+        def __init__(self):
+            self._environment = SimpleNamespace(_env_vars=SimpleNamespace(main_image_name="hb__sample-task"))
+
+        @classmethod
+        async def create(cls, _config):
+            return cls()
+
+        async def _setup_environment(self):
+            nonlocal setup_finished
+            setup_finished = True
+
+        async def run(self):
+            nonlocal image_removed
+            await self._setup_environment()
+            image_removed = True
+            return trial_result()
+
+    def inspect(command, **kwargs):
+        assert setup_finished and not image_removed
+        commands.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=image_id + "\n")
+
+    monkeypatch.setattr(runner.subprocess, "run", inspect)
+    receipt = asyncio.run(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
+    assert receipt["environment_image_id"] == image_id
+    assert commands[0][0] == ["docker", "image", "inspect", "hb__sample-task", "--format", "{{.Id}}"]
+    assert commands[0][1]["timeout"] == 5 and commands[0][1]["stderr"] == runner.subprocess.DEVNULL
+    progress = json.loads((tmp_path / "trials/sample-task/progress.json").read_text())
+    assert progress["environment_image_id"] == image_id and progress["environment_image_capture"] == "captured"
+
+
+@pytest.mark.parametrize("output", ["private-marker Docker diagnostic", "sha256:" + "g" * 64, ""])
+def test_image_inspection_does_not_return_arbitrary_docker_output(tmp_path, monkeypatch, output):
+    trial = SimpleNamespace(_environment=SimpleNamespace(_env_vars=SimpleNamespace(main_image_name="hb__sample-task")))
+    monkeypatch.setattr(runner.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=output))
+    assert runner.inspect_environment_image(trial) is None
 
 
 def test_patch_pier_suppresses_exception_strings_and_traceback(tmp_path, monkeypatch):

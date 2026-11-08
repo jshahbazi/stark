@@ -31,6 +31,7 @@ SCANNED_LOCKFILES = {
     "Cargo.lock",
     "vendor/lily-core/Cargo.lock",
     "scripts/ci/check_repository.py.lock",
+    "scripts/run_maxxbench.py.lock",
     "tools/uv.lock",
     "tools/converter/uv.lock",
     "tools/stock_benchmark/mlx/uv.lock",
