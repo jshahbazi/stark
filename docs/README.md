@@ -62,6 +62,12 @@ The [Gemma 3 image run](archive/runs/2026-11-07-gemma3-images.md) records exact
 4B native parity, source-bound worker/API lifecycle, preservation controls
 and the 12B/27B execution limits.
 
+The [Flash-Next optimization retrospective](benchmarks/2026-11-08-flashnext-optimization-retrospective.md)
+and [attempt ledger](model-experiments/2026-11-08-flashnext-optimization.md)
+track the pilot, rejected MoE candidates, sustained slowdown, generation/scoring
+wake fixes, dense Metal4 follow-up and tooling repairs. Each attempt keeps its
+model/artifact scope, implementation decision and evidence limits.
+
 The [Qwen3.5 family installation run](archive/runs/2026-10-27-qwen35-family-installation.md)
 records changed-weight conversion and automatic local image checks through the
 desktop, API and Swift controller.

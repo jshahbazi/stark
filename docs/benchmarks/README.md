@@ -203,6 +203,13 @@ engine throughput results remain bound to their original timing windows.
 
 ## Optimization records
 
+The [Flash-Next campaign retrospective](2026-11-08-flashnext-optimization-retrospective.md)
+consolidates the November 7–8 pilot, withdrawn projection candidates,
+sustained-throughput diagnosis, retained wake fixes and tooling repairs.
+Its [attempt ledger](../model-experiments/2026-11-08-flashnext-optimization.md)
+assigns stable IDs and separates implementation decisions from numerical and
+performance qualification. The original source-bound studies remain unchanged.
+
 The [Qwen3.8 optimization history](QWEN38_OPTIMIZATION_HISTORY.md) catalogs 142
 attempts and controls across the original F32 path, mixed precision, sampling,
 Metal kernels, Uzu execution and matched-checkpoint work. It records retained,

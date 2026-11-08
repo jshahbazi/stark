@@ -115,6 +115,15 @@ does not inherit another artifact's numerical validation.
 - Write Markdown without emojis and without shell heredocs in examples.
 - Put the evidence for a change (test counts, manual checks, measurements) in the pull request description. A record that must outlive the pull request goes under `docs/archive/runs/` with its date and the commit it describes; a benchmark goes under `docs/benchmarks/` and is added to the [benchmarks index](docs/benchmarks/README.md) with a note on what it supersedes.
 - Keep models, private fixtures, converted outputs and runtime artifacts out of Git; publish aggregate results and hashes only.
+- Record each model compatibility or optimization attempt under
+  `docs/model-experiments/`, with a stable `FAMILY-YYYYMMDD-NNN` ID. Include
+  failed, withdrawn, blocked and inconclusive attempts. Separate registration
+  date from execution date when backfilling older work. Bind the hypothesis,
+  artifact/build identity, precision policy, fixed controls, observed result,
+  implementation decision and next check to the canonical dated evidence;
+  [the Flash-Next ledger](docs/model-experiments/2026-11-08-flashnext-optimization.md)
+  shows this separation. Link IDs from the implementation PR and append new
+  source-bound runs when tooling or the decision changes.
 
 ### OpenWork managed connection
 
