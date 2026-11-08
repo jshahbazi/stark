@@ -3,6 +3,7 @@
 // BSD notice and attribution: scripts/licenses/distribution/.
 #include <metal_stdlib>
 #include "../common/dsl.h"
+#include "gemma4_flash_source_exp_table.h"
 
 #pragma METAL fp math_mode(safe)
 #pragma METAL fp contract(off)
@@ -35,6 +36,14 @@ static float2 gemma_flash_pair_mul(float2 a,float2 b) {
   const float l=fma(a.x,b.x,-h)+(a.x*b.y+a.y*b.x);
   return gemma_flash_pair_norm(h,l);
 }
+static float gemma_flash_round_scaled(float2 p,int k) {
+  if(k > -126) return ldexp(p.x+p.y,k);
+  const float h=ldexp(p.x,k+149), l=ldexp(p.y,k+149), integral=floor(h);
+  const float2 tail=gemma_flash_pair_add(float2(h,l),float2(-integral,0.0f));
+  const uint base=uint(integral);
+  const bool up=tail.x>0.5f || (tail.x==0.5f && (tail.y>0.0f || (tail.y==0.0f && (base&1u))));
+  return as_type<float>(base+uint(up));
+}
 static float gemma_flash_scalar_exp(float x) {
   // Caller supplies an old-maximum minus new-maximum: x <= 0, including -inf.
   if(x < -104.0f) return 0.0f;
@@ -57,19 +66,42 @@ static float gemma_flash_scalar_exp(float x) {
     float2(as_type<float>(0x310f76c7u),as_type<float>(0x24ff8d89u))};
   float2 p=c[12];
   for(int i=11;i>=0;--i) p=gemma_flash_pair_add(gemma_flash_pair_mul(p,r),c[i]);
-  if(k > -126) return ldexp(p.x+p.y,k);
   // Round in integer subnormal units before the bit cast, avoiding flush-to-zero
   // and a second subnormal arithmetic rounding at the underflow boundary.
-  const float h=ldexp(p.x,k+149), l=ldexp(p.y,k+149), integral=floor(h);
-  const float2 tail=gemma_flash_pair_add(float2(h,l),float2(-integral,0.0f));
-  const uint base=uint(integral);
-  const bool up=tail.x>0.5f || (tail.x==0.5f && (tail.y>0.0f || (tail.y==0.0f && (base&1u))));
-  return as_type<float>(base+uint(up));
+  return gemma_flash_round_scaled(p,k);
+}
+
+// Independently derived numerical compatibility policy: a=ln2/128,
+// 1+r*(a+a^3/32+r*a^2/2), with a mathematical 128-entry power table.
+// The original nearest policy above remains an independent test control.
+// Finite source controls establish compatibility, not host-source identity or
+// universal bit-exactness (one broad strict-source counterexample is retained).
+static float gemma_flash_source_exp(float x) {
+  if(x < -104.0f) return 0.0f;
+  if(x == 0.0f) return 1.0f;
+  const float2 z=gemma_flash_pair_mul(GEMMA4_FLASH_SOURCE_INV,float2(x,0.0f));
+  float k=rint(z.x);
+  float2 r=gemma_flash_pair_add(z,float2(-k,0.0f));
+  const bool odd=(int(k)&1)!=0;
+  if(r.x>0.5f || (r.x==0.5f && (r.y>0.0f || (r.y==0.0f && odd)))) k+=1.0f;
+  if(r.x< -0.5f || (r.x== -0.5f && (r.y<0.0f || (r.y==0.0f && odd)))) k-=1.0f;
+  r=gemma_flash_pair_add(z,float2(-k,0.0f));
+  const float2 p=gemma_flash_pair_add(gemma_flash_pair_mul(GEMMA4_FLASH_SOURCE_C0,r),GEMMA4_FLASH_SOURCE_C1);
+  const float2 t=gemma_flash_pair_mul(p,r);
+  const int index=int(k);
+  const float2 scale=GEMMA4_FLASH_SOURCE_POW2[index&127];
+  const float2 y=gemma_flash_pair_add(gemma_flash_pair_mul(t,scale),scale);
+  return gemma_flash_round_scaled(y,index>>7);
 }
 
 PUBLIC KERNEL(Gemma4VisionFlashScalarExpF32)(const device float* input,device float* output,
     constant uint& count,const uint row AXIS(count,32)) {
   output[row]=gemma_flash_scalar_exp(input[row]);
+}
+
+PUBLIC KERNEL(Gemma4VisionFlashSourceExpF32)(const device float* input,device float* output,
+    constant uint& count,const uint row AXIS(count,32)) {
+  output[row]=gemma_flash_source_exp(input[row]);
 }
 
 // Integer RNE survives arithmetic optimization; its result additionally crosses
@@ -106,7 +138,7 @@ PUBLIC KERNEL(Gemma4VisionFlashExpBF16)(const device float* scores,device bfloat
   const float previous_sum=key_start==0 ? 0.0f : state[row*3+1];
   float maximum=previous_max;
   for(uint column=0;column<512;++column) maximum=max(maximum,scores[base+column]);
-  const float factor=gemma_flash_scalar_exp(previous_max-maximum);
+  const float factor=gemma_flash_source_exp(previous_max-maximum);
   float partial[8]={};
   for(uint column=0;column<512;++column) {
     const float value=gemma_flash_fast_exp(scores[base+column]-maximum);

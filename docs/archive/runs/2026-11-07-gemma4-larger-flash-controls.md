@@ -162,3 +162,30 @@ fails RMS. Existing stage captures show its first eight-row block-prefix drift
 at block 5 (zero-based), after exact prefixes for blocks 0–4. These prefixes do
 not establish full-row agreement in earlier blocks. Larger-tower qualification
 therefore remains incomplete; no tolerance or source-reference change is made.
+
+Whole-pattern block replay subsequently establishes blocks 0–2 exactly, with the
+first full-block difference at block 3. The layer-3 split on sealed `b003b291`
+finds exact Q/K/V and one BF16 attention difference. Its CPU replay is exact;
+the Metal nearest policy differs once. Here the source scalar libm itself is one
+ULP from decimal-nearest. Substituting only source versus Metal factors reproduces
+zero versus one final BF16 difference, with all denominator/PV states exact.
+The original nearest helper and its independent passing tests are retained.
+
+A subsequent source-compatibility candidate uses mathematically generated
+128-entry powers and quadratic `1+r*(a+a³/32+r*a²/2)`, `a=ln(2)/128`, evaluated
+with compensated F32 pairs. This is a generic independently derived formula;
+no proprietary host code, tuned constants, table bytes or input-specific fixes
+are copied. Licensed ARM table/range-reduction references and the derivation are
+recorded in `provenance/UPSTREAM.md`. Host source identity is not claimed.
+
+The candidate agrees with all original 8,215 source-libm goldens plus five actual
+layer-3 factors. Their separate immutable fixture is 98,640 bytes, manifest
+SHA-256 `b4f24f125d2fc08966c6f3b29e9b8fa17db002494d1cbdc832cadff0963d46c5`.
+The old goldens are unchanged. Broader CPU coverage has 106,525 inputs: the
+compensated prototype matches the F64 mathematical formula everywhere, and both
+differ from source libm in one one-ULP result. That strict-source counterexample
+is retained privately, SHA-256
+`1bb4d3b41ee73d5a9c43d4ce1092a86181ea30e58d0331f89ac161fdfde7d8ce`.
+This is finite numerical evidence with a known counterexample, not universal
+libm emulation. Native source-bit controls and the unchanged three full-feature
+gates remain pending for this source-only candidate.

@@ -7,7 +7,7 @@ use super::*;
 use crate::{
     backends::common::{
         Kernels,
-        kernel::{Gemma4VisionFlashQKKernel, Gemma4VisionFlashScalarExpF32Kernel},
+        kernel::{Gemma4VisionFlashQKKernel, Gemma4VisionFlashScalarExpF32Kernel, Gemma4VisionFlashSourceExpF32Kernel},
     },
     tests::helpers::{buffer_to_vec, create_buffer_with_data},
 };
@@ -155,11 +155,26 @@ fn gemma4_larger_flash_qk_canonical_metal_fixture() {
     qk_check::<crate::backends::metal::Metal>();
 }
 
-fn scalar_exp_check<B: Backend>(source_policy: bool) {
-    let root = std::path::PathBuf::from(std::env::var_os("STARK_GEMMA4_SCALAR_EXP_FIXTURE_PATH").unwrap());
+fn scalar_exp_check<B: Backend>(
+    source_policy: bool,
+    source_implementation: bool,
+) {
+    let key = if source_implementation {
+        "STARK_GEMMA4_SOURCE_EXP_FIXTURE_PATH"
+    } else {
+        "STARK_GEMMA4_SCALAR_EXP_FIXTURE_PATH"
+    };
+    let root = std::path::PathBuf::from(std::env::var_os(key).unwrap());
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["scope"], "model-free-larger-vision-scalar-rescale-exp");
+    assert_eq!(
+        manifest["scope"],
+        if source_implementation {
+            "independent-larger-vision-source-rescale-exp"
+        } else {
+            "model-free-larger-vision-scalar-rescale-exp"
+        }
+    );
     assert_eq!(manifest["oracle"], "decimal-exp-100-digits-and-source-libm-expf");
     assert_eq!(manifest["torch_source_revision"], "5c4886908584029761b579af026dcfb627c84070");
     let count = manifest["count"].as_u64().unwrap() as usize;
@@ -185,10 +200,15 @@ fn scalar_exp_check<B: Backend>(source_policy: bool) {
     };
     let context = B::Context::new().unwrap();
     let input = create_buffer_with_data::<B, f32>(&context, &inputs);
-    let kernel = <B::Kernels as Kernels>::Gemma4VisionFlashScalarExpF32Kernel::new(&context).unwrap();
     let mut command = context.create_command_buffer(None, None).unwrap();
     let mut output = command.allocate_scratch_for_shape(&[count as u32], DataType::F32).unwrap();
-    kernel.encode(&input, &mut output, count as u32, &mut command);
+    if source_implementation {
+        let kernel = <B::Kernels as Kernels>::Gemma4VisionFlashSourceExpF32Kernel::new(&context).unwrap();
+        kernel.encode(&input, &mut output, count as u32, &mut command);
+    } else {
+        let kernel = <B::Kernels as Kernels>::Gemma4VisionFlashScalarExpF32Kernel::new(&context).unwrap();
+        kernel.encode(&input, &mut output, count as u32, &mut command);
+    }
     let mut readback = context.create_buffer(count * 4).unwrap();
     command.encode_copy(&output, &mut readback);
     command.end_encoding().submit().wait_until_completed().unwrap();
@@ -198,10 +218,19 @@ fn scalar_exp_check<B: Backend>(source_policy: bool) {
     let maximum_source_ulp = actual.iter().zip(&source).map(|(a, b)| a.to_bits().abs_diff(b.to_bits())).max().unwrap();
     let report = serde_json::json!({"scope":"independent-scalar-rescale-exp","backend":B::NAME,
         "policy":if source_policy{"source_libm"}else{"nearest_decimal"},"cases":count,
+        "source_implementation":source_implementation,
         "different_f32_elements":different,"source_f32_differences":source_differences,
         "maximum_source_ulp":maximum_source_ulp});
     std::fs::write(
-        root.join(format!("native-scalar-exp-{}.json", B::NAME)),
+        root.join(format!(
+            "native-{}scalar-exp-{}.json",
+            if source_implementation {
+                "source-"
+            } else {
+                ""
+            },
+            B::NAME
+        )),
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
@@ -214,12 +243,26 @@ fn scalar_exp_check<B: Backend>(source_policy: bool) {
 #[stark_test]
 #[ignore]
 fn gemma4_larger_scalar_exp_cpu_fixture() {
-    scalar_exp_check::<crate::backends::cpu::Cpu>(true);
+    scalar_exp_check::<crate::backends::cpu::Cpu>(true, false);
 }
 
 #[cfg(backend = "metal")]
 #[stark_test]
 #[ignore]
 fn gemma4_larger_scalar_exp_metal_fixture() {
-    scalar_exp_check::<crate::backends::metal::Metal>(false);
+    scalar_exp_check::<crate::backends::metal::Metal>(false, false);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+#[ignore]
+fn gemma4_larger_source_exp_cpu_fixture() {
+    scalar_exp_check::<crate::backends::cpu::Cpu>(true, true);
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+#[ignore]
+fn gemma4_larger_source_exp_metal_fixture() {
+    scalar_exp_check::<crate::backends::metal::Metal>(true, true);
 }

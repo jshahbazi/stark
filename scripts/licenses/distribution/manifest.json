@@ -305,6 +305,25 @@
         }
       ],
       "adaptation": "Pinned expf_u10 and positive log1pf_u10 branch for reference-only FP32 SiLU, softplus and decay. The log1p input is exp(x) with source softplus x<=20; the direct linear branch handles x>20. All arithmetic associations and explicit FMAs follow the pinned double-float helpers; legacy text activation/decay kernels remain unchanged."
+    },
+    "arm-larger-vision-scalar-exp-reference": {
+      "license": "MIT OR Apache-2.0 WITH LLVM-exception",
+      "selected_license": "MIT",
+      "license_file": "arm-optimized-routines-LICENSE",
+      "license_sha256": "650afbf29f214451e02241adc42534e82c9d6ae2b38e2444b92b5a1ffcaf9346",
+      "repository": "https://github.com/ARM-software/optimized-routines",
+      "source_revision": "20859d3fd9e797dde592c489c8ef7d383f778620",
+      "source_files": [
+        {
+          "path": "math/expf.c",
+          "sha256": "31cb4e66fa51bd28d95025e3a702e9b3c02cb91e8cbe31da73cf8eaf8d71aae7"
+        },
+        {
+          "path": "math/exp2f_data.c",
+          "sha256": "d58b44276cb8330ffb896c5adff2fc5d85d4b8a8bb809fbd51267a04347602f1"
+        }
+      ],
+      "adaptation": "Licensed numerical-method reference for table-based exponential range reduction. Larger Gemma vision scalar rescaling uses an independently derived128-power quadratic with mathematical Chebyshev coefficients and generated power constants, implemented with compensated F32 pairs. No proprietary host instructions, tuned coefficients or table bytes are copied; no Darwin-source identity or universal bit-exactness is claimed. Existing nearest policy remains a separate control."
     }
   },
   "packages": {
