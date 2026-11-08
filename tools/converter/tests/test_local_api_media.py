@@ -8,11 +8,12 @@ import time
 import pytest
 
 import stark_convert.local_api as local_api_module
+from stark_convert.api_limits import PRODUCTION_BYTE_LIMITS, APIByteLimits
 from stark_convert.local_api import APIError, LocalAPI
 from stark_convert.media import MAX_IMAGE_BYTES, parse_image_url
 
 
-def start_api(complete, *, images=True, cancellable=False):
+def start_api(complete, *, images=True, cancellable=False, byte_limits=None):
     api = LocalAPI(
         lambda: [{"id": "test-model"}],
         complete,
@@ -21,6 +22,7 @@ def start_api(complete, *, images=True, cancellable=False):
         cancellable=cancellable,
         status=lambda: {"capabilities": {"images": images}},
         request_timeout=10,
+        byte_limits=byte_limits,
     )
     info = api.start()
     port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
@@ -143,12 +145,15 @@ def test_over_cap_content_length_is_rejected_before_body_read(images):
         api.close()
 
 
-def test_pending_body_budget_rejects_before_read_and_releases_on_disconnect(monkeypatch):
-    monkeypatch.setattr(local_api_module, "MAX_TEXT_BODY_BYTES", 256)
-    monkeypatch.setattr(local_api_module, "MAX_IMAGE_BODY_BYTES", 512)
-    monkeypatch.setattr(local_api_module, "MAX_PENDING_BODY_BYTES", 400)
+def test_pending_body_budget_rejects_before_read_and_releases_on_disconnect():
+    limits = APIByteLimits(text_body_bytes=256, image_body_bytes=400, pending_body_bytes=400)
+    # Both requests are individually admissible; only their overlap exceeds
+    # the pending-byte budget. No request body is sent before the rejection.
+    assert max(256, 200) <= min(limits.text_body_bytes, limits.image_body_bytes, limits.pending_body_bytes)
+    assert 256 + 200 > limits.pending_body_bytes
     called = []
-    api, info, port = start_api(lambda *_args: called.append(True) or {"choices": []})
+    api, info, port = start_api(lambda *_args: called.append(True) or {"choices": []}, byte_limits=limits)
+    assert api._byte_limits is limits
     first = second = None
     try:
         first = send_headers(port, info["api_key"], 256)
@@ -172,20 +177,22 @@ def test_pending_body_budget_rejects_before_read_and_releases_on_disconnect(monk
             first.close()
         assert wait_for_pending(api, 0)
         api.close()
+    assert PRODUCTION_BYTE_LIMITS.pending_body_bytes == 24 * 1024 * 1024
 
 
 @pytest.mark.parametrize("failure", [False, True])
-def test_pending_budget_released_after_completion_success_or_failure(monkeypatch, failure):
-    monkeypatch.setattr(local_api_module, "MAX_PENDING_BODY_BYTES", 1024)
+def test_pending_budget_released_after_completion_success_or_failure(failure):
+    limits = APIByteLimits(text_body_bytes=256, image_body_bytes=512, pending_body_bytes=1024)
     called = []
 
-    def complete(_payload, _on_delta=None):
+    def complete(_payload, _on_delta=None, *, byte_limits):
+        assert byte_limits is limits
         called.append(True)
         if failure:
             raise APIError(400, "Invalid request.", "invalid_request")
         return {"choices": []}
 
-    api, info, port = start_api(complete)
+    api, info, port = start_api(complete, byte_limits=limits)
     try:
         body = json.dumps({"messages": [{"role": "user", "content": "test"}]}).encode("ascii")
         status, _ = post_bytes(info, port, body)
