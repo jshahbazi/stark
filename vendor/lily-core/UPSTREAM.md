@@ -82,12 +82,28 @@ Naoki Shibata/contributors copyright is preserved in both source headers,
 `ATTRIBUTION.sleef` and `NOTICE`; the Boost text is retained in
 `LICENSE.sleef`. The distribution source manifest records the pinned source
 hashes and adaptation. No reference vectors or checkpoint weights are embedded.
-Two scratch-owned F32 coefficient buffers cover at most 8,192 by36 elements
+Two scratch-owned F32 coefficient buffers cover at most 8,192 by 36 elements
 each, are refreshed before each image pass, and remain alive until GPU
-completion. Angles are finite and below4,096. Separate F32 products/addition
+completion. Angles are finite and below 4,096. Separate F32 products/addition
 are applied by the vision-only `vision_rotary.metal` before its BF16 store.
 Other retained geometries keep the existing rotary path. Exact source F32
 coefficient and BF16 application checks remain separate from the tower gate.
+
+`src/kernels/metal/vision_attention.metal` selects source-order streaming
+attention only for the measured H1152/head72/16-head vision geometry, N at
+most 8,192 and divisible by four, and a 32-lane execution width. QK retains
+the aligned64/32-stream reduction and separate eight-term tail; F32 softmax
+retains four interleaved sums, the crosswise fold, pinned SLEEF expf_u10 and
+reciprocal multiply; PV retains four F32 streams. Integer BF16 barriers
+preserve the QK, scaled-score and probability boundaries. Three streaming
+sweeps keep fixed register state without an N-by-N tensor or weight copies.
+Unsupported geometries retain the existing NAX route; text kernels are
+unchanged. Independent matrix reference kernels and a test-only observer
+compiled over the production body require source bit agreement and exact
+observed-versus-ordinary output. The distribution manifest records PyTorch,
+GGML and SLEEF source/license lineage; existing NOTICE and LICENSE.sleef apply.
+The retained component qualification is recorded in the numerical record;
+it does not itself qualify full-worker lifecycle or throughput.
 
 Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision. Explicitly admitted original-format image artifacts can load the retained BF16 vision tower; ordinary text loading keeps it disabled.
 
