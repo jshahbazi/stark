@@ -325,10 +325,11 @@ pub fn qkv_rope_2d_bf16(
 
 /// Full bidirectional attention over all `N` rows of `qkv` `[N, 3H]`
 /// (q | k | v, `heads` heads of [`ATTN_D`]), softmax in f32, into `out`
-/// `[N, H]`. One tensor-op threadgroup per 32-query tile and head, walking
-/// 64-key tiles twice. QK and scaled scores round to BF16; softmax statistics
-/// are F32; globally normalized probabilities round to BF16 before PV, matching
-/// the pinned eager source without allocating an N x N attention matrix.
+/// `[N, H]`. The measured profile uses four SIMD32 query rows per group and
+/// three streaming QK passes: maximum, source-order normalization and PV.
+/// QK uses the source32-stream aligned64 plus8-tail fold; normalized BF16 P
+/// uses source SLEEF/four-lane softmax, then four-stream PV. Scratch is fixed
+/// register state, with no N x N allocation. Other geometries retain NAX.
 pub fn attention_full_bf16(
     ctx: &MetalContext,
     pass: &ComputePass<'_>,
@@ -351,6 +352,27 @@ pub fn attention_full_bf16(
         qkv.dtype() == DType::BF16 && out.dtype() == DType::BF16,
         "attention expects BF16"
     );
+    ensure!(
+        n <= 8192 && scale.is_finite() && scale > 0.0,
+        "vision attention source bounds"
+    );
+    if h == 1152 && heads == 16 && n.is_multiple_of(4) {
+        let pipeline = ctx.pipeline(
+            "vision_attention_source_bf16",
+            include_str!("metal/vision_attention.metal"),
+            MslVersion::V4_0,
+        )?;
+        ensure!(
+            pipeline.thread_execution_width() == 32,
+            "vision source attention requires SIMD32"
+        );
+        return pass.dispatch_with(
+            &pipeline,
+            &[qkv.binding(), out.binding()],
+            &[Param::U32(n as u32), Param::F32(scale)],
+            Grid::Threadgroups { groups: (n / 4, 16, 1), threadgroup: (128, 1, 1) },
+        );
+    }
     let pipeline = ctx.pipeline("vision_attn_nax_d72", SOURCE, MslVersion::V4_0)?;
     pass.dispatch_with(
         &pipeline,
@@ -386,6 +408,28 @@ pub(crate) fn attention_stages_bf16(
         stages.dtype() == DType::F32 && stages.numel() == 3 * heads * n * n,
         "private attention trace size"
     );
+    if h == 1152 && heads == 16 && n.is_multiple_of(4) {
+        const SOURCE_TRACE: &str = concat!(
+            include_str!("metal/vision_attention.metal"),
+            "\n",
+            include_str!("metal/vision_attention_trace.metal")
+        );
+        let pipeline = ctx.pipeline(
+            "vision_attention_source_trace_bf16",
+            SOURCE_TRACE,
+            MslVersion::V4_0,
+        )?;
+        ensure!(
+            pipeline.thread_execution_width() == 32,
+            "private source attention trace requires SIMD32"
+        );
+        return pass.dispatch_with(
+            &pipeline,
+            &[qkv.binding(), out.binding(), stages.binding()],
+            &[Param::U32(n as u32), Param::F32(scale)],
+            Grid::Threadgroups { groups: (n / 4, 16, 1), threadgroup: (128, 1, 1) },
+        );
+    }
     let pipeline =
         ctx.pipeline("vision_attn_trace_nax_d72", TRACE_SOURCE, MslVersion::V4_0)?;
     pass.dispatch_with(
