@@ -1,6 +1,7 @@
 """Model-free tests for the private macOS process metrics helper."""
 
 import unittest
+from unittest.mock import patch
 
 from qwen38_process_metrics import delta, snapshot
 
@@ -39,4 +40,21 @@ class ProcessMetricsTests(unittest.TestCase):
         self.assertEqual(result["delta"], {})
 
     def test_snapshot_failure_is_metadata_only(self):
-        self.assertEqual(snapshot(0), {"available": False, "reason": "invalid_pid"})
+        for platform in ("darwin", "linux"):
+            for pid in (0, -1, True, None, "1", 1.5):
+                with self.subTest(platform=platform, pid=pid), \
+                        patch("qwen38_process_metrics.sys.platform", platform), \
+                        patch("qwen38_process_metrics.ctypes.CDLL") as load_library:
+                    self.assertEqual(snapshot(pid), {"available": False, "reason": "invalid_pid"})
+                    load_library.assert_not_called()
+
+    def test_snapshot_unsupported_platform_does_not_load_native_library(self):
+        with patch("qwen38_process_metrics.sys.platform", "linux"), \
+                patch("qwen38_process_metrics.ctypes.CDLL") as load_library:
+            self.assertEqual(snapshot(1), {"available": False, "reason": "unsupported"})
+            load_library.assert_not_called()
+
+    def test_snapshot_native_failure_does_not_expose_exception(self):
+        with patch("qwen38_process_metrics.sys.platform", "darwin"), \
+                patch("qwen38_process_metrics.ctypes.CDLL", side_effect=OSError("private detail")):
+            self.assertEqual(snapshot(1), {"available": False, "reason": "api_unavailable"})

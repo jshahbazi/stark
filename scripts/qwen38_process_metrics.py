@@ -70,10 +70,10 @@ def _mach_timebase(libsystem) -> tuple[int, int] | None:
 def snapshot(pid: int) -> dict[str, Any]:
     """Return a cumulative snapshot; failed APIs return availability only."""
     unavailable = {"available": False, "reason": "unsupported"}
-    if sys.platform != "darwin":
-        return unavailable
     if type(pid) is not int or pid <= 0:
         return {"available": False, "reason": "invalid_pid"}
+    if sys.platform != "darwin":
+        return unavailable
     try:
         libproc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
         bsd_info = ctypes.create_string_buffer(1024)
