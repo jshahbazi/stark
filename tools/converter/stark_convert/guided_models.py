@@ -29,7 +29,7 @@ import psutil
 from ._build_metadata import _signature, open_regular
 from .api_tools import TOOL_PARSERS
 from .guided_memory import config_identity, native_request_bytes
-from .guided_memory_profiles import ResidentProfile, qualified_profile
+from .guided_memory_profiles import ResidentProfile, qualified_profile, source_profile
 from .model_inventory import MAX_HEADER_BYTES, _weights
 from .recommendation_benchmarks import load_registry
 from .registry import get_model
@@ -153,6 +153,7 @@ def with_resident_profile(recipe, model):
     profile = qualified_profile(model, recipe.native_choice) if recipe.native_choice is not None else None
     if (
         profile is None
+        or profile != source_profile(recipe.native_choice, recipe.native_profile)
         or recipe.context_tokens > profile.maximum_context_tokens
         or profile.paged_weight_bytes != recipe.native_profile["paged_weight_bytes"]
         or (recipe.repo, recipe.revision, recipe.weight_bytes)
@@ -283,7 +284,8 @@ def native_recipes():
             native_choice=choice,
             native_profile=deepcopy(profile),
         )
-        recipes.append(replace(recipe, minimum_memory=recipe.runtime_memory + 2 * GIB))
+        planned = replace(recipe, resident_profile=source_profile(choice, profile))
+        recipes.append(replace(planned, minimum_memory=planned.runtime_memory + 2 * GIB))
     return tuple(recipes)
 
 

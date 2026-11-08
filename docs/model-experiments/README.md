@@ -62,6 +62,7 @@ All rows below link to the [complete findings and per-model matrix](../archive/r
 | ID | Scope and attempt | Recorded outcome | Disposition |
 | --- | --- | --- | --- |
 | 20261108-MEM-01 | Exact Lily Q4-XL and MLX-Serve mixed text artifacts on M5 Max 128 GiB; reconcile Beginner and native memory admission | Final trials passed 9/9 requests per artifact through near-32K, MTP on/off and reuse/fresh-scope hash agreement. Physical footprint stayed below 74 GiB, without additional swap. Earlier admission, compile, test, telemetry and staging failures are retained. | Adopted on branch; signed build installed; Coding + Balanced recommendation and actual Lily startup verified. |
+| 20261108-MEM-02 | [Fresh-install recipe-bound planning](../archive/runs/2026-11-08-fresh-guided-memory.md), independent of an installed copy | Empty-registry synthetic reproduction excluded Qwen at 100 GiB available. Source-bound planning correction and hardware/resource matrix validation in progress; no model run. | In progress on PR #104. |
 
 ## Public record boundary
 

@@ -72,7 +72,8 @@
         "model-00053-of-00055.safetensors": 1995444336,
         "model-00054-of-00055.safetensors": 1940779048,
         "model-00055-of-00055.safetensors": 1836369584
-      }
+      },
+      "native_profile_sha256": "df0e989b7299f5f52800701e59c6d5a23a38d3416a8f97868b3b616f1e836524"
     },
     "qwen38-mlx-serve-mixed": {
       "repo": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
@@ -187,7 +188,8 @@
         "model-00100.safetensors": 675430752,
         "model-vision.safetensors": 897901896,
         "ngram_table.bin": 32000153976
-      }
+      },
+      "native_profile_sha256": "33afa2488f722f5c885dcf5a0d66fd40645994f31ccecfc6cd8de17d610c4949"
     }
   },
   "maximum_mtp_drafts": 2

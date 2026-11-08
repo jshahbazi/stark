@@ -7,8 +7,7 @@ import pytest
 
 from stark_convert import guided_models as guided
 from stark_convert import recommendation_benchmarks as module
-from stark_convert.guided_memory_profiles import ResidentProfile
-from stark_convert.guided_memory_profiles import profiles as resident_profiles
+from stark_convert.guided_memory_profiles import source_profile
 
 
 def cohort(identity="test", *, benchmark="livecodebench", scores=None):
@@ -184,7 +183,7 @@ def test_coding_cohort_coverage_counts_parents_not_quantized_aliases():
     assert ranked == [small, other, large, duplicate]
 
 
-def test_native_coding_on_128gb_mac_prioritizes_installed_qwen_references_over_flint():
+def test_native_coding_on_128gb_mac_recommends_fresh_profiled_qwen_references_over_flint():
     native = guided.native_recipes()
     qwen = [recipe for recipe in native if recipe.native_choice in {"qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"}]
     machine = {
@@ -192,49 +191,28 @@ def test_native_coding_on_128gb_mac_prioritizes_installed_qwen_references_over_f
         "gpu_available": True,
         "unified_memory": True,
         "gpu_memory_budget_bytes": 115_448_725_504,
-        "free_disk_bytes": 64 * guided.GIB,
+        "free_disk_bytes": 256 * guided.GIB,
     }
     installed = {recipe.id: ["exact-source-installed-" + recipe.native_choice] for recipe in qwen}
-    # At 100 GiB currently available, the conservative 111 GiB plans are
-    # correctly ineligible. Bind the reviewed artifact-specific resident rows
-    # for the installed copies so this ranks the 88 GiB plans used at startup.
-    unqualified = guided.recommendation_report(machine, installed, candidates=native, task="code")
-    assert not any(item["id"] in installed for item in unqualified["items"])
-    policy = resident_profiles()
-    qualified = []
-    for recipe in native:
-        row = policy["profiles"].get(recipe.native_choice)
-        if row is None:
-            qualified.append(recipe)
-            continue
-        profile = ResidentProfile(
-            recipe.native_choice,
-            policy["policy"],
-            row["repo"],
-            row["revision"],
-            row["weight_bytes"],
-            row["paged_weight_bytes"],
-            policy["maximum_context_tokens"],
-            policy["maximum_mtp_drafts"],
-            policy["request_headroom_divisor"],
-            policy["paged_working_set_bytes"],
-            policy["host_reserve_bytes"],
-        )
-        planned = replace(recipe, resident_profile=profile)
-        qualified.append(replace(planned, minimum_memory=planned.runtime_memory + 2 * guided.GIB))
-    report = guided.recommendation_report(machine, installed, candidates=qualified, task="code")
+    assert all(recipe.resident_profile is not None for recipe in qwen)
+    assert all(
+        recipe.resident_profile == source_profile(recipe.native_choice, recipe.native_profile) for recipe in qwen
+    )
+    # Beginner can recommend a fresh pinned source at 100 GiB when the
+    # resident profile is source-bound and its setup space is available.
+    report = guided.recommendation_report(machine, {}, candidates=native, task="code")
     assert [item["repo"] for item in report["items"]] == [
         "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
         "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
         "RecursiveSI/flint-int4",
     ]
     for item in report["items"][:2]:
-        assert item["installed_ids"]
+        assert not item["installed_ids"]
         assert item["benchmarks"][0]["score"] == "91.9" and item["benchmarks"][0]["used_for_ranking"]
     assert report["benchmark_ranking"]["cohort"] == "qwen38-card-livecodebench-v6"
     assert report["items"][2]["benchmarks"] == []
     machine["gpu_memory_budget_bytes"] = 80 * guided.GIB
-    blocked = guided.recommendation_report(machine, installed, candidates=qualified, task="code")
+    blocked = guided.recommendation_report(machine, installed, candidates=native, task="code")
     assert [item["repo"] for item in blocked["items"]] == ["RecursiveSI/flint-int4"]
     assert not blocked["benchmark_ranking"]["applied"]
 

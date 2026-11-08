@@ -46,7 +46,12 @@ def test_every_fixed_native_source_has_a_separate_bound_plan():
     for recipe in recipes:
         source = hybrid.SOURCES[recipe.native_choice]
         assert recipe.repo == source["weights_repo"] and recipe.revision == source["weights_revision"]
-        assert recipe.runtime_memory > recipe.weight_bytes
+        if recipe.native_choice in {"qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"}:
+            assert recipe.resident_profile is not None
+            assert recipe.runtime_memory < recipe.weight_bytes
+        else:
+            assert recipe.resident_profile is None
+            assert recipe.runtime_memory > recipe.weight_bytes
         assert recipe.setup_bytes == recipe.installed_bytes + 4 * GIB
         assert recipe.context_tokens == 32768
         assert recipe.gpu_runtime_memory <= recipe.runtime_memory
@@ -61,11 +66,15 @@ def test_native_128gb_fit_distinguishes_gpu_paging_disk_and_installed_reuse():
     assert guided.installation_allowed(recipes["flint-int4"], host)
     for choice in ("qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"):
         recipe = recipes[choice]
-        assert recipe.runtime_memory > host["gpu_memory_budget_bytes"]
+        assert recipe.resident_profile is not None
+        assert recipe.runtime_memory < host["physical_memory_bytes"]
         assert recipe.gpu_runtime_memory < host["gpu_memory_budget_bytes"] * 85 // 100
         assert not guided.installation_allowed(recipe, host)
         assert guided.installation_allowed(recipe, host, installed=True)
-        assert guided.installation_allowed(recipe, {**host, "free_disk_bytes": 256 * GIB})
+        fresh = {**host, "free_disk_bytes": 256 * GIB}
+        assert guided.installation_allowed(recipe, fresh)
+        assert not guided.execution_allowed(recipe, {**fresh, "available_memory_bytes": recipe.runtime_memory - 1})
+        assert guided.execution_allowed(recipe, {**fresh, "available_memory_bytes": recipe.runtime_memory})
         assert not guided.installation_allowed(recipe, {**host, "gpu_memory_budget_bytes": 48 * GIB}, installed=True)
     for choice in ("glm53-q2", "qwen38-mixed"):
         assert not guided.installation_allowed(recipes[choice], host, installed=True)
@@ -78,6 +87,77 @@ def test_native_128gb_fit_distinguishes_gpu_paging_disk_and_installed_reuse():
         assert guided.installation_allowed(recipes[choice], larger)
     for recipe in recipes.values():
         assert not guided.installation_allowed(recipe, {**host, "physical_memory_bytes": 16 * GIB}, installed=True)
+
+
+@pytest.mark.parametrize("physical_gib", [16, 32, 64, 96, 128, 192, 256])
+def test_qwen_source_profile_physical_memory_matrix(physical_gib):
+    recipes = {recipe.native_choice: recipe for recipe in guided.native_recipes()}
+    for choice in ("qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"):
+        recipe = recipes[choice]
+        host = host_resources(
+            physical_memory_bytes=physical_gib * GIB,
+            available_memory_bytes=physical_gib * GIB,
+            gpu_memory_budget_bytes=physical_gib * GIB,
+        )
+        allowed = guided.installation_allowed(recipe, host, installed=True)
+        expected = physical_gib in {128, 192, 256} or (choice == "qwen38-lily-q4-xl" and physical_gib == 96)
+        assert allowed is expected
+
+
+@pytest.mark.parametrize("gpu_gib", [48, 80, 96, 97, 128])
+def test_qwen_source_profile_gpu_budget_matrix(gpu_gib):
+    recipes = {recipe.native_choice: recipe for recipe in guided.native_recipes()}
+    host = host_resources(
+        physical_memory_bytes=256 * GIB,
+        available_memory_bytes=200 * GIB,
+        gpu_memory_budget_bytes=gpu_gib * GIB,
+        free_disk_bytes=256 * GIB,
+    )
+    for choice in ("qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed"):
+        expected = gpu_gib in {97, 128} or (choice == "qwen38-lily-q4-xl" and gpu_gib == 96)
+        assert guided.installation_allowed(recipes[choice], host, installed=True) is expected
+
+
+@pytest.mark.parametrize("disk_gib", [32, 64, 80, 96, 128, 192, 256])
+def test_fresh_qwen_recommendation_requires_setup_disk_but_reuse_does_not(disk_gib):
+    recipe = next(recipe for recipe in guided.native_recipes() if recipe.native_choice == "qwen38-mlx-serve-mixed")
+    host = host_resources(
+        physical_memory_bytes=128 * GIB,
+        available_memory_bytes=recipe.runtime_memory,
+        gpu_memory_budget_bytes=115_448_725_504,
+        free_disk_bytes=disk_gib * GIB,
+        download_free_disk_bytes=0,
+    )
+    fresh = guided.recommendation_report(host, {}, candidates=[recipe], benchmarks=guided.load_registry())
+    reused = guided.recommendation_report(
+        host, {recipe.id: ["installed-copy"]}, candidates=[recipe], benchmarks=guided.load_registry()
+    )
+    assert bool(fresh["items"]) is (disk_gib in {128, 192, 256})
+    assert [item["id"] for item in reused["items"]] == [recipe.id]
+    assert reused["items"][0]["installed_ids"] == ["installed-copy"]
+
+
+def test_fresh_and_installed_qwen_recommendations_share_available_memory_boundary():
+    recipe = next(recipe for recipe in guided.native_recipes() if recipe.native_choice == "qwen38-mlx-serve-mixed")
+    base = host_resources(
+        physical_memory_bytes=128 * GIB,
+        available_memory_bytes=recipe.runtime_memory,
+        gpu_memory_budget_bytes=115_448_725_504,
+        free_disk_bytes=256 * GIB,
+        download_free_disk_bytes=0,
+    )
+    for installed in ({}, {recipe.id: ["installed-copy"]}):
+        at_threshold = guided.recommendation_report(
+            base, installed, candidates=[recipe], benchmarks=guided.load_registry()
+        )
+        below_threshold = guided.recommendation_report(
+            {**base, "available_memory_bytes": recipe.runtime_memory - 1},
+            installed,
+            candidates=[recipe],
+            benchmarks=guided.load_registry(),
+        )
+        assert [item["id"] for item in at_threshold["items"]] == [recipe.id]
+        assert below_threshold["items"] == []
 
 
 def test_native_uses_only_library_disk_and_keeps_missing_gpu_fail_closed():
@@ -182,6 +262,98 @@ def test_native_sources_are_considered_offline_without_catalog_candidates(tmp_pa
         assert report["items"][0]["repo"] == hybrid.SOURCES["flint-int4"]["weights_repo"]
         assert "Native hybrid" in report["message"]
         assert report["catalog_search"]["candidates_considered"] == len(guided.RECIPES) + len(hybrid.SOURCES)
+    finally:
+        host.stop(quiet=True)
+
+
+def test_fresh_native_qwen_recommendations_have_source_bound_memory_plans(tmp_path, monkeypatch):
+    host = Desktop(tmp_path / "unused-worker", tmp_path / "library", io.StringIO())
+    monkeypatch.setattr(
+        module,
+        "host_resources",
+        lambda _path: host_resources(
+            available_memory_bytes=100 * GIB,
+            free_disk_bytes=256 * GIB,
+            download_free_disk_bytes=0,
+        ),
+    )
+    hardware = {
+        "gpu_available": True,
+        "gpu_name": "Fixture Apple GPU",
+        "unified_memory": True,
+        "gpu_memory_budget_bytes": 115_448_725_504,
+        "cpu_cores": 18,
+    }
+    try:
+        host.publish_guided_models(
+            "code",
+            "balanced",
+            hardware,
+            {"excluded_recipe_ids": set(), "excluded_model_ids": set()},
+            "fresh",
+            {"items": [], "incomplete": True},
+        )
+        report = [json.loads(line) for line in host.output.getvalue().splitlines()][-1]["report"]
+        qwen = [
+            item
+            for item in report["items"]
+            if item["repo"].startswith(("fabiogreter/Qwen3.8-Flash-Next-lily", "ddalcu/Qwen3.8-Flash-Next-MLX-Serve"))
+        ]
+        assert len(qwen) == 2
+        assert all(item["runtime_memory_bytes_estimate"] <= 100 * GIB for item in qwen)
+        assert all(not item["installed_ids"] for item in qwen)
+    finally:
+        host.stop(quiet=True)
+
+
+def test_existing_matching_but_unqualified_copy_keeps_conservative_memory_plan(tmp_path, monkeypatch):
+    choice = "qwen38-mlx-serve-mixed"
+    host = Desktop(tmp_path / "unused-worker", tmp_path / "library", io.StringIO())
+    path = tmp_path / "incomplete-installed-copy"
+    path.mkdir()
+    host.models.append({"id": "matching-copy", "name": "Qwen Serve", "path": str(path)})
+    monkeypatch.setattr(
+        module,
+        "host_resources",
+        lambda _path: host_resources(
+            available_memory_bytes=100 * GIB,
+            free_disk_bytes=256 * GIB,
+            download_free_disk_bytes=0,
+        ),
+    )
+    monkeypatch.setattr(module, "model_valid", lambda _path: True)
+    monkeypatch.setattr(module, "model_display", lambda _model: None)
+    monkeypatch.setattr(module, "matches_recipe", lambda _path, recipe: recipe.native_choice == choice)
+    original_report = guided.recommendation_report
+    captured = {}
+
+    def capture(*args, **kwargs):
+        captured["candidates"] = kwargs["candidates"]
+        captured["installed"] = args[1]
+        return original_report(*args, **kwargs)
+
+    monkeypatch.setattr(module, "recommendation_report", capture)
+    try:
+        host.publish_guided_models(
+            "code",
+            "balanced",
+            {
+                "gpu_available": True,
+                "gpu_name": "Fixture Apple GPU",
+                "unified_memory": True,
+                "gpu_memory_budget_bytes": 115_448_725_504,
+                "cpu_cores": 18,
+            },
+            {"excluded_recipe_ids": set(), "excluded_model_ids": set()},
+            "unqualified-copy",
+            {"items": [], "incomplete": True},
+        )
+        candidate = next(item for item in captured["candidates"] if item.native_choice == choice)
+        assert candidate.resident_profile is None
+        assert candidate.runtime_memory == 111 * GIB
+        assert captured["installed"][candidate.id] == ["matching-copy"]
+        report = [json.loads(line) for line in host.output.getvalue().splitlines()][-1]["report"]
+        assert candidate.id not in {item["id"] for item in report["items"]}
     finally:
         host.stop(quiet=True)
 

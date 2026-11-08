@@ -1052,9 +1052,11 @@ class Desktop:
             if excluded["excluded_model_ids"].intersection(ids):
                 excluded_recipes.add(recipe.id)
             qualified = []
+            inspected = []
             for identifier in ids:
                 model = next(model for model, _display in valid_models if model["id"] == identifier)
                 planned = with_resident_profile(recipe, model["path"])
+                inspected.append(planned)
                 if planned.resident_profile is not None:
                     qualified.append((identifier, planned))
             if qualified:
@@ -1062,6 +1064,10 @@ class Desktop:
                 candidates[recipe.id] = recipe
                 preferred = [identifier for identifier, _planned in qualified]
                 ids = preferred + [identifier for identifier in ids if identifier not in preferred]
+            elif inspected:
+                # An existing copy must earn the installed-artifact plan; the
+                # source-only download estimate cannot authorize its startup.
+                candidates[recipe.id] = inspected[0]
             installed[recipe.id] = ids
         report = recommendation_report(
             self.guided_resources(hardware),

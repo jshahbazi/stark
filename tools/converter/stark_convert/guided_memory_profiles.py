@@ -41,6 +41,54 @@ def profiles():
     return raw
 
 
+def _resident_profile(raw, row, choice):
+    if (
+        sum(row["payloads"].values()) != row["weight_bytes"]
+        or not 0 <= row["paged_weight_bytes"] <= row["weight_bytes"]
+    ):
+        raise ValueError("Changed resident payload inventory")
+    return ResidentProfile(
+        choice,
+        raw["policy"],
+        row["repo"],
+        row["revision"],
+        row["weight_bytes"],
+        row["paged_weight_bytes"],
+        raw["maximum_context_tokens"],
+        raw["maximum_mtp_drafts"],
+        raw["request_headroom_divisor"],
+        raw["paged_working_set_bytes"],
+        raw["host_reserve_bytes"],
+    )
+
+
+def source_profile(choice, native_profile):
+    """Plan a pinned preparation before download, bound to its complete recipe.
+
+    This is planning evidence. The installed artifact is checked independently
+    before startup; a source match never waives that check.
+    """
+    try:
+        raw = profiles()
+        row = raw["profiles"][choice]
+        identity = hashlib.sha256(
+            json.dumps(native_profile, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if row["native_profile_sha256"] != identity:
+            return None
+        result = _resident_profile(raw, row, choice)
+        if (
+            native_profile["weights_source"] != {"repo": result.repo, "revision": result.revision}
+            or native_profile["weight_bytes"] != result.weight_bytes
+            or native_profile["paged_weight_bytes"] != result.paged_weight_bytes
+            or native_profile["context_tokens"] > result.maximum_context_tokens
+        ):
+            return None
+        return result
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def qualified_profile(model, choice):
     """Unknown, changed, linked or incomplete artifacts retain full accounting.
 
@@ -50,11 +98,7 @@ def qualified_profile(model, choice):
     try:
         raw = profiles()
         row = raw["profiles"][choice]
-        if (
-            sum(row["payloads"].values()) != row["weight_bytes"]
-            or not 0 <= row["paged_weight_bytes"] <= row["weight_bytes"]
-        ):
-            return None
+        result = _resident_profile(raw, row, choice)
         root = Path(model)
         if root.is_symlink() or not root.is_dir():
             return None
@@ -72,18 +116,6 @@ def qualified_profile(model, choice):
             info = payloads[name].lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_size != size:
                 return None
-        return ResidentProfile(
-            choice,
-            raw["policy"],
-            row["repo"],
-            row["revision"],
-            row["weight_bytes"],
-            row["paged_weight_bytes"],
-            raw["maximum_context_tokens"],
-            raw["maximum_mtp_drafts"],
-            raw["request_headroom_divisor"],
-            raw["paged_working_set_bytes"],
-            raw["host_reserve_bytes"],
-        )
+        return result
     except (OSError, ValueError, KeyError, TypeError):
         return None

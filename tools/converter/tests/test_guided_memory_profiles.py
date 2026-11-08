@@ -120,12 +120,16 @@ def test_qualified_and_unqualified_plans_share_recommendation_start_gate(tmp_pat
     # Keep the profile identity tied to this fixture's source and full sparse payload inventory.
     row = fixture["profiles"][recipe.native_choice]
     row.update(repo=recipe.repo, revision=recipe.revision, weight_bytes=recipe.weight_bytes)
+    row["native_profile_sha256"] = hashlib.sha256(
+        json.dumps(recipe.native_profile, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     # The production receipt totals and profile payload manifest must agree.
     payload_total = sum(row["payloads"].values())
     assert payload_total == row["weight_bytes"]
     profiled = guided.with_resident_profile(recipe, root)
     assert profiled.resident_profile is not None
-    assert recipe.runtime_memory == 111 * GIB
+    fallback_plan = guided.with_resident_profile(recipe, tmp_path / "no-artifact")
+    assert fallback_plan.runtime_memory == 111 * GIB
     assert profiled.runtime_memory == 88 * GIB
 
     host = {
@@ -151,7 +155,7 @@ def test_qualified_and_unqualified_plans_share_recommendation_start_gate(tmp_pat
     (root / "one.safetensors").unlink()
     fallback = guided.with_resident_profile(recipe, root)
     assert fallback.resident_profile is None
-    assert fallback.runtime_memory == recipe.runtime_memory
+    assert fallback.runtime_memory == fallback_plan.runtime_memory
     assert not guided.execution_allowed(fallback, host)
 
 
@@ -165,6 +169,37 @@ def test_payload_sum_and_native_paging_identity_mismatches_fail_closed(tmp_path,
     row["weight_bytes"] -= 1
     recipe = next(item for item in guided.native_recipes() if item.native_choice == choice)
     row.update(repo=recipe.repo, revision=recipe.revision, weight_bytes=recipe.weight_bytes)
+    row["native_profile_sha256"] = hashlib.sha256(
+        json.dumps(recipe.native_profile, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     assert resident.qualified_profile(root, choice) is not None
     row["paged_weight_bytes"] -= 1
     assert guided.with_resident_profile(recipe, root).resident_profile is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["weight", "revision", "paged", "geometry", "template"],
+)
+def test_source_profile_binds_canonical_native_recipe_revision_and_layout(change):
+    recipe = next(item for item in guided.native_recipes() if item.native_choice == "qwen38-mlx-serve-mixed")
+    planned = resident.source_profile(recipe.native_choice, recipe.native_profile)
+    assert planned is not None
+    assert (planned.repo, planned.revision, planned.weight_bytes, planned.paged_weight_bytes) == (
+        recipe.repo,
+        recipe.revision,
+        recipe.weight_bytes,
+        recipe.native_profile["paged_weight_bytes"],
+    )
+    changed = json.loads(json.dumps(recipe.native_profile))
+    if change == "weight":
+        changed["weight_bytes"] += 1
+    elif change == "revision":
+        changed["weights_source"]["revision"] = "f" * 40
+    elif change == "paged":
+        changed["paged_weight_bytes"] += 1
+    elif change == "geometry":
+        changed["geometry"]["num_hidden_layers"] += 1
+    else:
+        changed["template_sha256"] = "f" * 64
+    assert resident.source_profile(recipe.native_choice, changed) is None
