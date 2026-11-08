@@ -9,15 +9,35 @@ use std::io::{Read, Write};
 static ALLOCATOR: limits::BoundedAllocator = limits::BoundedAllocator;
 
 fn main() {
+    std::panic::set_hook(Box::new(|_| limits::terminate()));
+    let mut arguments = std::env::args_os().skip(1);
+    let mut self_test = false;
+    let mut configured = false;
+    while let Some(argument) = arguments.next() {
+        if argument == "--self-test" && !self_test {
+            self_test = true;
+        } else if argument == "--runtime-limits" && !configured {
+            let Some(value) = arguments.next().and_then(|value| value.into_string().ok()) else {
+                limits::terminate();
+            };
+            let Ok(value) = serde_json::from_str::<limits::RuntimeLimits>(&value) else {
+                limits::terminate();
+            };
+            if !limits::configure(value) {
+                limits::terminate();
+            }
+            configured = true;
+        } else {
+            limits::terminate();
+        }
+    }
+    if configured && !limits::guard_parent() {
+        limits::terminate();
+    }
     if !limits::install_process_limits() {
         limits::terminate();
     }
-    std::panic::set_hook(Box::new(|_| limits::terminate()));
-    let mut arguments = std::env::args_os().skip(1);
-    if let Some(argument) = arguments.next() {
-        if argument != "--self-test" || arguments.next().is_some() {
-            limits::terminate();
-        }
+    if self_test {
         let request = br#"{"source":"{{ value }}","arguments":{"value":"synthetic control"}}"#;
         if engine::evaluate(request).is_ok_and(|value| value == b"synthetic control") {
             let _ = std::io::stdout().write_all(b"{\"status\":\"ok\",\"protocol\":\"stark-template-v1\"}\n");
@@ -26,7 +46,7 @@ fn main() {
         limits::terminate();
     }
     let mut data = Vec::new();
-    if std::io::stdin().take((engine::MAX_REQUEST_BYTES + 1) as u64).read_to_end(&mut data).is_err() {
+    if std::io::stdin().take((limits::request_bytes() + 1) as u64).read_to_end(&mut data).is_err() {
         limits::terminate();
     }
     let (status, output) = match engine::evaluate(&data) {

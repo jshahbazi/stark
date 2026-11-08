@@ -317,6 +317,67 @@ fn source_request_output_and_structure_limits_are_enforced() {
 }
 
 #[test]
+fn trusted_process_limits_admit_large_context_without_changing_defaults() {
+    let text = "x".repeat(2 * 1024 * 1024);
+    let data = serde_json::to_vec(&json!({"source":"{{ value }}","arguments":{"value":text}})).unwrap();
+    let policy = json!({
+        "request_bytes":4*1024*1024, "value_bytes":4*1024*1024, "output_bytes":4*1024*1024,
+        "sequence_items":16384, "value_nodes":65536, "fuel":1_000_000,
+        "cumulative_allocation_bytes":usize::MAX, "live_allocation_bytes":256*1024*1024,
+        "cpu_seconds":4, "wall_seconds":10.0,
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stark-template"))
+        .args(["--runtime-limits", &policy.to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || input.write_all(&data));
+    let result = child.wait_with_output().unwrap();
+    assert!(writer.join().unwrap().is_ok());
+    assert!(result.status.success(), "trusted context policy was rejected");
+    assert!(result.stderr.is_empty());
+    assert_eq!(result.stdout.len(), 2 * 1024 * 1024 + 1);
+    assert!(result.stdout.first() == Some(&b'O') && result.stdout[1..].iter().all(|&byte| byte == b'x'));
+    let default = invoke("{{ value }}", json!({"value":"x".repeat(2*1024*1024)}));
+    assert!(!default.status.success(), "trusted limits leaked into a later helper");
+    let injected = bytes(
+        &serde_json::to_vec(&json!({"source":"{{ value }}", "arguments":{},
+        "runtime_limits":policy}))
+        .unwrap(),
+    );
+    assert!(!injected.status.success(), "request data changed helper limits");
+}
+
+#[test]
+fn trusted_structure_budget_admits_long_history_without_relaxing_source_sandbox() {
+    let policy = json!({
+        "request_bytes":4*1024*1024, "value_bytes":4*1024*1024, "output_bytes":4*1024*1024,
+        "sequence_items":100000, "value_nodes":100000, "fuel":4_000_000,
+        "cumulative_allocation_bytes":128*1024*1024, "live_allocation_bytes":256*1024*1024,
+        "cpu_seconds":4, "wall_seconds":10.0,
+    });
+    let request = serde_json::to_vec(&json!({"source":"{{ values|length }}",
+        "arguments":{"values":vec!["";70000]}}))
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stark-template"))
+        .args(["--runtime-limits", &policy.to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&request).unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success());
+    assert!(result.stderr.is_empty());
+    assert_eq!(result.stdout, b"O70000");
+    assert!(!bytes(&request).status.success(), "default structure guard changed");
+}
+
+#[test]
 fn unsupported_large_integer_inputs_do_not_silently_round() {
     for data in [
         br#"{"source":"{{ value }}","arguments":{"value":18446744073709551617}}"#.as_slice(),

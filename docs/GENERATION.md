@@ -62,7 +62,7 @@ and there is no Python rendering fallback. The caller transfers only bounded
 JSON over private pipes and keeps the existing model-worker transaction
 serialized.
 
-The evaluator limits template source to 256 KiB, the JSON request to 2 MiB,
+By default the evaluator limits template source to 256 KiB, the JSON request to 2 MiB,
 rendered output to 1 MiB, source tokens to 16,384, VM fuel to 1,000,000 and
 runtime recursion to 128. Input collections, value depth and node counts are
 also bounded. A process-wide allocator rejects more than 16 MiB of cumulative
@@ -72,13 +72,25 @@ size. This replaces the Python evaluator's estimated expansion/work budget with
 accounting of actual Rust allocation requests; it can reject expensive templates
 earlier. It does not measure resident memory, native stacks or allocator overhead.
 
-Each child has a hard 2-second CPU limit and disables core dumps and regular-file
+By default each child has a hard 2-second CPU limit and disables core dumps and regular-file
 output. The parent enforces a 5-second wall deadline and samples RSS every 10 ms,
 terminating the child above 256 MiB. This RSS watchdog is not a kernel-enforced
 memory ceiling. Other POSIX systems additionally apply a 256 MiB address-space
 limit. Cancellation terminates and reaps the disposable child. Template source,
 inputs, rendered output and compiler diagnostics are never logged or persisted
 by the evaluator.
+
+A trusted host can supply an explicit `TemplateRuntimeLimits` object when it
+loads a chat template. That object configures the disposable helper's byte,
+collection, node, fuel, allocation, CPU, RSS and wall budgets through private
+process arguments. It does not change production defaults, source-size and
+depth checks, filesystem/network restrictions or error privacy. Template data
+cannot raise these budgets. Context-sized benchmark profiles bind the numeric
+policy and helper executable separately; a larger budget is not evidence of
+model quality or stable inference at that context length. Compile-only source
+admission retains the default budgets. Expanded render helpers monitor their
+owning process and terminate when it exits; cancellation still kills and reaps
+the helper through the private process group.
 
 The helper exposes a restricted set of globals, methods and filters, with no
 filesystem loader or network access API. Unsupported operations, reflective
@@ -125,6 +137,14 @@ cargo +1.98.1 build --release --locked -p stark-template
 ## Private JSON-lines protocol
 
 Start the worker with `--model-path PATH`, where `PATH` is a converted model directory. The owning host may also pass `--vision-staging-root PATH` to enable the private media-reference transport and `--prefix-cache` to request [prefix reuse](#prefix-reuse). Models that contain a `speculator` directory are refused.
+
+The private pipe retains its 1 MiB request limit by default. A trusted host may
+set `--request-byte-limit N` before model loading; the worker acknowledges that
+exact positive limit in readiness as `request_byte_limit`. Requests cannot
+change it. The Python worker client accepts matching explicit request/reply
+budgets and rejects a missing or mismatched worker acknowledgement. Context
+checks still use the loaded model's token limit; no text or token sequence is
+truncated to fit a byte budget.
 
 ### Readiness
 
@@ -452,7 +472,7 @@ Errors are replies of the form `{"error":CODE}`. Codes are fixed strings; see [e
 
 | Class | Codes |
 | --- | --- |
-| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input not shorter than `context_tokens`), `request_too_large` (line over 1 MiB; the rest of the line is discarded), `generation_cancelled`, `mtp_not_supported`, `images_not_supported`, `invalid_image_reference`, `image_read_failed`, `invalid_image_request`, `invalid_prepared_image`, `image_request_setup_failed` |
+| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input not shorter than `context_tokens`), `request_too_large` (line over the configured request budget, 1 MiB by default; the rest of the line is discarded), `generation_cancelled`, `mtp_not_supported`, `images_not_supported`, `invalid_image_reference`, `image_read_failed`, `invalid_image_request`, `invalid_prepared_image`, `image_request_setup_failed` |
 | Fencing (error reply, then `{"ready":false,"error":"native_operation_failed"}` and exit 1) | `native_generation_failed`, `invalid_generation_output`, `invalid_tokenization_output`, `invalid_image_preparation_output`, `decoding_failed`, `cancel_channel_failed` |
 | Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `output_setup_failed`, `invalid_cancel_channel`, `invalid_vision_staging_root`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_backend_unavailable` (a build without the `metal` feature), `native_operation_failed` (panic during startup) |
 

@@ -107,8 +107,8 @@ class ChatImageError(ChatError):
 
 
 class _ChatTemplate(IsolatedTemplate):
-    def __init__(self, source):
-        super().__init__(runtime_template_source(source))
+    def __init__(self, source, *, runtime_limits=None):
+        super().__init__(runtime_template_source(source), runtime_limits=runtime_limits)
 
     def render_with_cancellation(self, cancelled, **arguments):
         try:
@@ -179,7 +179,7 @@ def read_model_config(model):
     return value
 
 
-def load_template(model, *, expected_hashes=None):
+def load_template(model, *, expected_hashes=None, runtime_limits=None):
     try:
         data = _chat_file(model / "config.json", 2 * 1024 * 1024)
         if expected_hashes is not None and hashlib.sha256(data).hexdigest() != expected_hashes["config_sha256"]:
@@ -247,7 +247,9 @@ def load_template(model, *, expected_hashes=None):
                 )
             ):
                 raise ValueError
-        template = _ChatTemplate(source)
+        template = (
+            _ChatTemplate(source) if runtime_limits is None else _ChatTemplate(source, runtime_limits=runtime_limits)
+        )
         return codec, template
     except TemplateHelperMissing:
         raise ChatError("Native chat-template helper is missing; rebuild or reinstall Stark.") from None
@@ -256,7 +258,14 @@ def load_template(model, *, expected_hashes=None):
 
 
 class Worker:
-    def __init__(self, executable, model, timeout, gpu_memory_callback=None):
+    def __init__(
+        self, executable, model, timeout, gpu_memory_callback=None, *, request_byte_limit=None, reply_byte_limit=None
+    ):
+        for value in (request_byte_limit, reply_byte_limit):
+            if value is not None and (type(value) is not int or not 0 < value <= sys.maxsize):
+                raise ChatError("Invalid worker transport limits.")
+        self.request_byte_limit = request_byte_limit
+        self.reply_byte_limit = reply_byte_limit
         self.timeout = timeout
         self.pending = b""
         self.cancellation = False
@@ -284,6 +293,8 @@ class Worker:
         self.prefix_cache = False
         self.prefix_chunk_tokens = None
         command = [str(executable), "--model-path", str(model)]
+        if request_byte_limit is not None:
+            command.extend(["--request-byte-limit", str(request_byte_limit)])
         try:
             config = read_model_config(Path(model))
         except (OSError, ValueError, ConversionError):
@@ -448,7 +459,7 @@ class Worker:
             if not chunk:
                 raise ChatError("Worker stopped; chat closed.")
             self.pending += chunk
-            if len(self.pending) > 16 * 1024 * 1024:
+            if len(self.pending) > (getattr(self, "reply_byte_limit", None) or 16 * 1024 * 1024):
                 raise ChatError("Worker reply exceeded the size limit; chat closed.")
         if getattr(self, "_image_deadline", None) is not None and time.monotonic() >= deadline:
             raise ChatError("Worker timed out; chat closed.")
@@ -461,6 +472,9 @@ class Worker:
                 if getattr(self, "_ready_seen", False):
                     raise ChatError("Unexpected worker readiness reply; restart the model.")
                 self._ready_seen = True
+                requested = getattr(self, "request_byte_limit", None)
+                if requested is not None and reply.get("request_byte_limit") != requested:
+                    raise ChatError("Worker transport policy was not admitted; rebuild or reinstall Stark.")
                 self.mtp = mtp_capabilities(reply)
                 self.prefix_cache = prefix_cache_enabled(reply)
                 self.prefix_chunk_tokens = reply["prefix_cache"]["chunk_tokens"] if self.prefix_cache else None
@@ -541,8 +555,12 @@ class Worker:
             self.request_sequence += 1
             request_id = self.request_sequence
             payload = {**payload, "request_id": request_id}
-        data = json.dumps(payload, ensure_ascii=False).encode() + b"\n"
-        if len(data) > 1024 * 1024:
+        if getattr(self, "request_byte_limit", None) is not None:
+            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        else:
+            encoded = json.dumps(payload, ensure_ascii=False)
+        data = encoded.encode() + b"\n"
+        if len(data) > (getattr(self, "request_byte_limit", None) or 1024 * 1024):
             raise ChatRequestTooLarge("Conversation exceeds the worker request limit; use /reset.")
         if getattr(self, "_image_deadline", None) is not None:
             self._write_image_frame(data)

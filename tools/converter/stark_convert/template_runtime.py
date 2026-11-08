@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from subprocess import Popen
 
@@ -34,6 +35,42 @@ POLL_SECONDS = 0.01
 ERROR = "The model's chat template is unsupported or exceeded its resource limits."
 
 
+@dataclass(frozen=True)
+class TemplateRuntimeLimits:
+    """Trusted per-helper resources, never accepted from template arguments."""
+
+    request_bytes: int
+    value_bytes: int
+    output_bytes: int
+    sequence_items: int
+    value_nodes: int
+    fuel: int
+    cumulative_allocation_bytes: int
+    live_allocation_bytes: int
+    cpu_seconds: int
+    wall_seconds: float
+
+    def __post_init__(self):
+        for name, value in asdict(self).items():
+            if name == "wall_seconds":
+                if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                    raise ValueError("Invalid template runtime limits.")
+            elif type(value) is not int or not 0 < value <= (
+                2 * sys.maxsize + 1 if name in {"cumulative_allocation_bytes", "fuel"} else sys.maxsize
+            ):
+                raise ValueError("Invalid template runtime limits.")
+
+
+def _default_limits():
+    # Resolve defaults at use time to preserve the existing testable guards.
+    return TemplateRuntimeLimits(
+        request_bytes=MAX_REQUEST_BYTES, value_bytes=MAX_OUTPUT_BYTES, output_bytes=MAX_OUTPUT_BYTES,
+        sequence_items=MAX_SEQUENCE_ITEMS, value_nodes=MAX_VALUE_NODES, fuel=1_000_000,
+        cumulative_allocation_bytes=MAX_EXPANSION_BYTES, live_allocation_bytes=MAX_CHILD_RSS,
+        cpu_seconds=CPU_SECONDS, wall_seconds=WALL_SECONDS,
+    )
+
+
 class TemplateRuntimeError(TemplateError):
     """A fixed, content-free evaluation failure."""
 
@@ -50,14 +87,17 @@ class TemplateHelperMissing(TemplateRuntimeError):
     """The native evaluator must be built or installed before rendering."""
 
 
-def _check_value(value):
+def _check_value(value, *, limits=None, cancelled=None):
     """Bound expanded containers, including repeated aliases, before conversion."""
+    limits = limits or _default_limits()
     pending = [(value, 0)]
     nodes = size = 0
     while pending:
+        if cancelled is not None and cancelled.is_set():
+            raise TemplateCancelled(ERROR)
         item, depth = pending.pop()
         nodes += 1
-        if nodes > MAX_VALUE_NODES or depth > MAX_VALUE_DEPTH:
+        if nodes > limits.value_nodes or depth > MAX_VALUE_DEPTH:
             raise TemplateRuntimeError(ERROR)
         if isinstance(item, str):
             size += len(item.encode("utf-8"))
@@ -72,10 +112,10 @@ def _check_value(value):
                 raise TemplateRuntimeError(ERROR)
             size += 32
         elif type(item) in (list, tuple, dict):
-            if len(item) > MAX_SEQUENCE_ITEMS:
+            if len(item) > limits.sequence_items:
                 raise TemplateRuntimeError(ERROR)
             children = len(item) * (2 if type(item) is dict else 1)
-            if nodes + len(pending) + children > MAX_VALUE_NODES:
+            if nodes + len(pending) + children > limits.value_nodes:
                 raise TemplateRuntimeError(ERROR)
             if type(item) is dict:
                 pending.extend((key, depth + 1) for key in item)
@@ -85,18 +125,21 @@ def _check_value(value):
             size += len(item) * 4
         else:
             raise TemplateRuntimeError(ERROR)
-        if size > MAX_OUTPUT_BYTES:
+        if size > limits.value_bytes:
             raise TemplateSizeLimit(ERROR)
     return size
 
 
-def _request_bytes(source, arguments):
-    _check_value(arguments)
+def _request_bytes(source, arguments, *, limits=None, cancelled=None):
+    limits = limits or _default_limits()
+    _check_value(arguments, limits=limits, cancelled=cancelled)
     data = bytearray()
     encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     for part in encoder.iterencode({"source": source, "arguments": arguments}):
+        if cancelled is not None and cancelled.is_set():
+            raise TemplateCancelled(ERROR)
         encoded = part.encode("utf-8")
-        if len(data) + len(encoded) > MAX_REQUEST_BYTES:
+        if len(data) + len(encoded) > limits.request_bytes:
             raise TemplateSizeLimit(ERROR)
         data.extend(encoded)
     return data
@@ -123,7 +166,7 @@ def _template_executable():
 class IsolatedTemplate:
     """A source-only handle; compilation and every render use a fresh Rust helper."""
 
-    def __init__(self, source):
+    def __init__(self, source, *, runtime_limits=None):
         if not isinstance(source, str) or not source or len(source) > MAX_SOURCE_BYTES:
             raise TemplateRuntimeError(ERROR)
         try:
@@ -132,6 +175,9 @@ class IsolatedTemplate:
         except UnicodeError:
             raise TemplateRuntimeError(ERROR) from None
         self._source = source
+        if runtime_limits is not None and not isinstance(runtime_limits, TemplateRuntimeLimits):
+            raise ValueError("Invalid template runtime limits.")
+        self._runtime_limits = runtime_limits
         self._executable = _template_executable()
         self._evaluate(None, None)
 
@@ -145,13 +191,22 @@ class IsolatedTemplate:
         import psutil
 
         child = None
-        deadline = time.monotonic() + WALL_SECONDS
+        # Source compilation has no context payload and keeps the default
+        # admission sandbox even when later renders use a larger policy.
+        selected_limits = self._runtime_limits if arguments is not None else None
+        limits = selected_limits or _default_limits()
+        deadline = time.monotonic() + limits.wall_seconds
         try:
             if cancelled is not None and cancelled.is_set():
                 raise TemplateCancelled(ERROR)
-            data = _request_bytes(self._source, arguments)
+            data = _request_bytes(self._source, arguments, limits=limits, cancelled=cancelled)
+            if cancelled is not None and cancelled.is_set():
+                raise TemplateCancelled(ERROR)
+            command = [str(self._executable)]
+            if selected_limits is not None:
+                command.extend(["--runtime-limits", json.dumps(asdict(limits), sort_keys=True, separators=(",", ":"))])
             child = Popen(
-                [str(self._executable)],
+                command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -171,7 +226,7 @@ class IsolatedTemplate:
                 if time.monotonic() >= deadline:
                     raise TemplateRuntimeError(ERROR)
                 try:
-                    if monitored.memory_info().rss > MAX_CHILD_RSS:
+                    if monitored.memory_info().rss > limits.live_allocation_bytes:
                         raise TemplateRuntimeError(ERROR)
                 except psutil.NoSuchProcess:
                     pass
@@ -192,7 +247,7 @@ class IsolatedTemplate:
                     chunk = os.read(child.stdout.fileno(), 65536)
                     if not chunk:
                         eof = True
-                    elif len(output) + len(chunk) <= MAX_OUTPUT_BYTES + 1:
+                    elif len(output) + len(chunk) <= limits.output_bytes + 1:
                         output.extend(chunk)
                     else:
                         raise TemplateRuntimeError(ERROR)

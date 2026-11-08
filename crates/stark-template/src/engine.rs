@@ -8,14 +8,11 @@ use minijinja::{
 use serde::Deserialize;
 use serde_json::Value as Json;
 
-pub const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+use crate::limits;
+
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
-const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
-const MAX_ITEMS: usize = 16384;
-const MAX_NODES: usize = 65536;
 const MAX_DEPTH: usize = 64;
 const MAX_TOKENS: usize = 16384;
-const FUEL: u64 = 1_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Failure {
@@ -52,13 +49,13 @@ fn check_json(
     size: &mut usize,
 ) -> Result<(), Failure> {
     *nodes += 1;
-    if *nodes > MAX_NODES || depth > MAX_DEPTH {
+    if *nodes > limits::value_nodes() || depth > MAX_DEPTH {
         return Err(Failure::Runtime);
     }
     match value {
         Json::String(value) => *size += value.len(),
         Json::Array(items) => {
-            if items.len() > MAX_ITEMS {
+            if items.len() > limits::sequence_items() {
                 return Err(Failure::Runtime);
             }
             *size += items.len() * 4;
@@ -67,7 +64,7 @@ fn check_json(
             }
         },
         Json::Object(items) => {
-            if items.len() > MAX_ITEMS {
+            if items.len() > limits::sequence_items() {
                 return Err(Failure::Runtime);
             }
             *size += items.len() * 4;
@@ -79,7 +76,7 @@ fn check_json(
         },
         _ => *size += 32,
     }
-    if *size > MAX_OUTPUT_BYTES {
+    if *size > limits::value_bytes() {
         return Err(Failure::Size);
     }
     Ok(())
@@ -308,7 +305,7 @@ fn bounded_range(arguments: Rest<i64>) -> Result<Value, Error> {
     } else {
         usize::try_from(((stop - start).abs() + step.abs() - 1) / step.abs()).map_err(|_| unsupported())?
     };
-    if length > MAX_ITEMS {
+    if length > limits::sequence_items() {
         return Err(unsupported());
     }
     Ok((0..length).map(|index| Value::from((start + index as i128 * step) as i64)).collect())
@@ -333,7 +330,7 @@ fn check_serializable(
     nodes: &mut usize,
 ) -> Result<(), Error> {
     *nodes += 1;
-    if depth > MAX_DEPTH || *nodes > MAX_NODES {
+    if depth > MAX_DEPTH || *nodes > limits::value_nodes() {
         return Err(unsupported());
     }
     match value.kind() {
@@ -344,11 +341,11 @@ fn check_serializable(
         },
         ValueKind::String | ValueKind::Bool | ValueKind::None => {},
         ValueKind::Seq | ValueKind::Map => {
-            if value.len().is_some_and(|length| length > MAX_ITEMS) {
+            if value.len().is_some_and(|length| length > limits::sequence_items()) {
                 return Err(unsupported());
             }
             for (index, child) in value.try_iter()?.enumerate() {
-                if index >= MAX_ITEMS {
+                if index >= limits::sequence_items() {
                     return Err(unsupported());
                 }
                 check_serializable(&child, depth + 1, nodes)?;
@@ -422,7 +419,7 @@ fn python_repr(
     nodes: &mut usize,
 ) -> Result<String, Error> {
     *nodes += 1;
-    if depth > MAX_DEPTH || *nodes > MAX_NODES {
+    if depth > MAX_DEPTH || *nodes > limits::value_nodes() {
         return Err(unsupported());
     }
     let result = match value.kind() {
@@ -458,7 +455,7 @@ fn python_repr(
             }
         },
         ValueKind::Seq | ValueKind::Iterable | ValueKind::Map => {
-            if value.len().is_some_and(|length| length > MAX_ITEMS) {
+            if value.len().is_some_and(|length| length > limits::sequence_items()) {
                 return Err(unsupported());
             }
             let mapping = value.kind() == ValueKind::Map;
@@ -468,7 +465,7 @@ fn python_repr(
                 "["
             });
             for (index, item) in value.try_iter()?.enumerate() {
-                if index >= MAX_ITEMS {
+                if index >= limits::sequence_items() {
                     return Err(unsupported());
                 }
                 if index > 0 {
@@ -479,7 +476,7 @@ fn python_repr(
                     result.push_str(": ");
                     result.push_str(&python_repr(&value.get_item(&item)?, true, depth + 1, nodes)?);
                 }
-                if result.len() > MAX_OUTPUT_BYTES {
+                if result.len() > limits::output_bytes() {
                     return Err(unsupported());
                 }
             }
@@ -492,7 +489,7 @@ fn python_repr(
         },
         _ => return Err(unsupported()),
     };
-    if result.len() > MAX_OUTPUT_BYTES {
+    if result.len() > limits::output_bytes() {
         return Err(unsupported());
     }
     Ok(result)
@@ -505,7 +502,7 @@ fn write_json(
     ensure_ascii: bool,
     depth: usize,
 ) -> Result<(), Error> {
-    if depth > MAX_DEPTH || output.len() > MAX_OUTPUT_BYTES {
+    if depth > MAX_DEPTH || output.len() > limits::output_bytes() {
         return Err(unsupported());
     }
     let newline = |output: &mut String, depth: usize| {
@@ -531,7 +528,7 @@ fn write_json(
         }),
         Json::Null => output.push_str("null"),
         Json::Array(items) => {
-            if items.len() > MAX_ITEMS {
+            if items.len() > limits::sequence_items() {
                 return Err(unsupported());
             }
             output.push('[');
@@ -551,7 +548,7 @@ fn write_json(
             output.push(']');
         },
         Json::Object(items) => {
-            if items.len() > MAX_ITEMS {
+            if items.len() > limits::sequence_items() {
                 return Err(unsupported());
             }
             let mut items: Vec<_> = items.iter().collect();
@@ -575,7 +572,7 @@ fn write_json(
             output.push('}');
         },
     }
-    if output.len() > MAX_OUTPUT_BYTES {
+    if output.len() > limits::output_bytes() {
         return Err(unsupported());
     }
     Ok(())
@@ -659,7 +656,7 @@ fn methods(
             let size = replacements
                 .checked_mul(new.len())
                 .and_then(|added| text.len().checked_sub(replacements * old.len())?.checked_add(added))
-                .filter(|size| *size <= MAX_OUTPUT_BYTES)
+                .filter(|size| *size <= limits::output_bytes())
                 .ok_or_else(unsupported)?;
             let result = text.replacen(old, new, limit);
             debug_assert_eq!(result.len(), size);
@@ -801,7 +798,7 @@ fn environment<'source>() -> Environment<'source> {
     environment.set_trim_blocks(true);
     environment.set_lstrip_blocks(true);
     environment.set_recursion_limit(128);
-    environment.set_fuel(Some(FUEL));
+    environment.set_fuel(Some(limits::fuel()));
     environment
 }
 
@@ -816,7 +813,7 @@ impl std::io::Write for Output {
         &mut self,
         bytes: &[u8],
     ) -> std::io::Result<usize> {
-        if bytes.len() > MAX_OUTPUT_BYTES.saturating_sub(self.bytes.len()) {
+        if bytes.len() > limits::output_bytes().saturating_sub(self.bytes.len()) {
             self.too_large = true;
             return Err(std::io::ErrorKind::OutOfMemory.into());
         }
@@ -829,7 +826,7 @@ impl std::io::Write for Output {
 }
 
 pub fn evaluate(data: &[u8]) -> Result<Vec<u8>, Failure> {
-    if data.len() > MAX_REQUEST_BYTES {
+    if data.len() > limits::request_bytes() {
         return Err(Failure::Size);
     }
     check_integer_tokens(data)?;

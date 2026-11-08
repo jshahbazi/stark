@@ -595,6 +595,8 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     prepared: Option<PreparedRequest<B::PreparedImage>>,
     /// `Some(enabled)` when the host requested prefix reuse at startup.
     prefix_cache: Option<bool>,
+    /// Trusted host transport policy; model requests cannot change it.
+    request_byte_limit: Option<usize>,
 }
 
 fn valid_ids(
@@ -659,7 +661,19 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             media,
             prepared: None,
             prefix_cache,
+            request_byte_limit: None,
         })
+    }
+
+    pub(crate) fn with_request_byte_limit(
+        mut self,
+        limit: Option<usize>,
+    ) -> Result<Self, &'static str> {
+        if limit.is_some_and(|limit| limit == 0 || limit > isize::MAX as usize) {
+            return Err("invalid_arguments");
+        }
+        self.request_byte_limit = limit;
+        Ok(self)
     }
 
     fn prefix_cache_enabled(&self) -> bool {
@@ -1138,6 +1152,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
         "generation_progress":"token-counts-v1",
         "stop_sequences":true,"cancellation":"pipe-v1"});
+    if let Some(limit) = worker.request_byte_limit {
+        readiness["request_byte_limit"] = json!(limit);
+    }
     if let Some(enabled) = worker.prefix_cache {
         readiness["prefix_cache"] = json!({"supported":enabled,"enabled":enabled,
             "chunk_tokens":worker.backend.prefix_cache_chunk_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
@@ -1202,7 +1219,8 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             }
         }
         let mut bytes = Vec::new();
-        let count = match Read::by_ref(input).take(MAX_REQUEST_BYTES as u64 + 1).read_until(b'\n', &mut bytes) {
+        let request_byte_limit = worker.request_byte_limit.unwrap_or(MAX_REQUEST_BYTES);
+        let count = match Read::by_ref(input).take(request_byte_limit as u64 + 1).read_until(b'\n', &mut bytes) {
             Ok(count) => count,
             Err(_) => {
                 worker.prepared = None;
@@ -1213,7 +1231,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             worker.prepared = None;
             return Ok(());
         }
-        if bytes.len() > MAX_REQUEST_BYTES {
+        if bytes.len() > request_byte_limit {
             worker.prepared = None;
             worker.backend.clear_prefix_cache();
             // Drain the rest of this frame so the next request remains independent.
@@ -2238,6 +2256,27 @@ mod tests {
         run_lines(&mut text, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
         let ready: Value = serde_json::from_slice(&output).unwrap();
         assert!(ready.get("image_input").is_none());
+    }
+
+    #[test]
+    fn trusted_request_limit_admits_large_tokenization_and_reports_policy() {
+        let input = json!({"operation":"tokenize","text":"x".repeat(MAX_REQUEST_BYTES),"add_special_tokens":false});
+        let mut bytes = serde_json::to_vec(&input).unwrap();
+        bytes.push(b'\n');
+        assert!(bytes.len() > MAX_REQUEST_BYTES);
+        let limit = bytes.len();
+        let mut configured = worker().with_request_byte_limit(Some(limit)).unwrap();
+        let mut output = Vec::new();
+        run_lines(&mut configured, &mut io::Cursor::new(bytes), &mut output).unwrap();
+        let frames = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(frames[0]["request_byte_limit"], limit);
+        assert_eq!(frames[1]["token_count"], 1);
+        assert_eq!(configured.backend.tokenization_calls, 1);
+        assert!(worker().with_request_byte_limit(Some(0)).is_err());
     }
 
     #[test]
