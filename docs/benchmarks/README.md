@@ -4,6 +4,15 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Mercury Decide JevBench comparison (2026-11-08).** A fresh complete run
+scored **207/231 public cases (89.61%)**, between Drex's 212 and JevK5's 202
+on the same public corpus. All 242 supported requests succeeded without
+failures or retries, including 11 synthetic controls. The
+[full comparison](2026-11-08-mercury-jevbench-comparison.md) records the one
+unsupported synthetic score control, HTTP timing limits and the corrected
+auxiliary progress-counter defect. It supersedes the initial Mercury
+attempt's incomplete status; prior source-bound local results remain unchanged.
+
 **Drex Max v1 Q4 versus JevK5 BF16 (2026-11-08).** On 231 reused public
 JevBench cases, the upstream MLX Drex runner scored 212 correct versus 202 for
 Stark JevK5, with exact repeatability in two passes. Both passed 12 synthetic

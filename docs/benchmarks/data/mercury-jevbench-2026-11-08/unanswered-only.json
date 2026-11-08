@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "scope": "unanswered_questions_only",
+  "status": "complete",
+  "dataset": {
+    "case_count": 243,
+    "public_case_count": 231,
+    "synthetic_case_count": 12,
+    "dataset_sha256": "acf56888f47486fd8eba45d17a46372d65d911e2f57bc390474e7b41f37aae58",
+    "configuration_sha256": "70001de82eb6cdfa018e63bfcfe1968ca68a6fd669508cd6c08be70cd1d6e9bd",
+    "post_run_seal_sha256": "a825be816ca80c8c94739ab2556cc064d942b16c8b3da01daa5cd7cb13fe0003"
+  },
+  "harness_sha256": "ee10930e6befcfddc62e075c06da0934f67ad00d6cf92b1d0865b1069889e61c",
+  "client_sha256": "d3412d79b1462373040fe480334ec2be197c9f40bbd63bee5fc1e003f5aad611",
+  "failed_run_sha256": "22e9492ff59c9408c4e9aaf6be8d9308c903b8ce6c203f47c19f7247c6223aa8",
+  "probe_receipts_sha256": [
+    "2133fbc839a9b1a9e65af3d3c132e2116c900f7570e99ba137eb5a85e25a607e",
+    "9f9636e3c571094b8a1ebce17e9416e708ad569199ab751b3dbf4b4f42bf5d74"
+  ],
+  "request_population_sha256": "a93e2790fb2c86ff85a35b6071dc4cd09746b8579a4f5de6af478ff99f3cb59f",
+  "prior_unique_answered": 208,
+  "eligible_cases": 242,
+  "planned_requests": 34,
+  "full_corpus_quality_recoverable": false,
+  "reason": "Prior successful readouts were not retained after process failure.",
+  "physical_requests_started": 34,
+  "physical_requests_succeeded": 34,
+  "minimum_dispatch_interval_seconds": 1.0,
+  "retries": 0,
+  "correct_counts_on_remaining_only": {
+    "public": 21,
+    "synthetic": 9
+  },
+  "usage": {
+    "input_tokens": 20446,
+    "output_tokens": 34
+  },
+  "unique_answered_after": 242,
+  "quality_on_remaining_only": {
+    "public": {
+      "cases": 24,
+      "argmax_correct": 21,
+      "brier": 0.16143771477817384,
+      "ece_10_bins": 0.06295015655949955
+    },
+    "synthetic": {
+      "cases": 10,
+      "argmax_correct": 10,
+      "brier": 4.802318342627804e-06,
+      "ece_10_bins": 0.0009561468702420362
+    }
+  },
+  "estimated_input_charge_usd": 0.00040892
+}

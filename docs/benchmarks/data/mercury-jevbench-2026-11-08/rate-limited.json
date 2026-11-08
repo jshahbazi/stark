@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "status": "failed",
+  "probe": false,
+  "model": "mercury-decide",
+  "endpoint": "https://api.inceptionlabs.ai/v1/decisions",
+  "started_utc": "2026-11-08T18:27:49Z",
+  "dataset": {
+    "case_count": 243,
+    "public_case_count": 231,
+    "synthetic_case_count": 12,
+    "dataset_sha256": "acf56888f47486fd8eba45d17a46372d65d911e2f57bc390474e7b41f37aae58",
+    "configuration_sha256": "70001de82eb6cdfa018e63bfcfe1968ca68a6fd669508cd6c08be70cd1d6e9bd",
+    "post_run_seal_sha256": "a825be816ca80c8c94739ab2556cc064d942b16c8b3da01daa5cd7cb13fe0003"
+  },
+  "coverage": {
+    "public_cases": 231,
+    "synthetic_cases": 11,
+    "excluded": {
+      "synthetic_score_over_10_levels": 1
+    }
+  },
+  "source_commit": "2fbf80966562e42b7374ac39c076eee55e3aaf4a",
+  "harness_sha256": "03bf72cddb95f00301f1570bd5560c233da94278d432583a829f9b2ddf568fcf",
+  "case_loader_sha256": "65033ea9c247178d8bd691dace992f9d67638d75e67d2cf97dee3584b278c5ee",
+  "dependency_lock_sha256": "98ac6c11b74fe4a0ba31e149a8b8855f55134f2324d59e3288e2d09bee55742e",
+  "request_population_sha256": "903079604cf99459c46b4bde38c999c42a5e4031302173a0a5f306ecb4cf26be",
+  "protocol": {
+    "rounds": 2,
+    "cases_per_round": 242,
+    "concurrency": 1,
+    "retries": 0,
+    "local_cache": "none",
+    "question_order": "original supplied criteria order",
+    "timing": "HTTP client wall time including connection setup, network and hosted provider; excludes response validation",
+    "model_identity": "hosted alias only; no immutable weight digest",
+    "estimated_input_usd_per_million": 0.02,
+    "limits": "reused public development corpus; hosted latency differs from prepared-input local scoring"
+  },
+  "physical_requests_started": 208,
+  "physical_requests_succeeded": 207,
+  "rounds": [
+    {
+      "round": 0,
+      "status": "failed",
+      "completed": 207
+    }
+  ],
+  "jev_baseline": {
+    "worker_sha256": "5dcc03fe336ca9f3c265dd6d6516227529d7e74c6ced9c23cdb830041a72ee79",
+    "weight_sha256": "ea3fd57de724a9cc34cce999f42e78f30245e11bdf18938377bd367d4bbf0dc3",
+    "checkpoint_revision": "c4f7fdb3aeab5582336406e78d3bef11bf98833d",
+    "cache": "disabled",
+    "temperature": 1.22,
+    "quality": {
+      "public": {
+        "cases": 231,
+        "argmax_correct": 202,
+        "brier": 0.18487996030711185,
+        "ece_10_bins": 0.029446153134145135
+      },
+      "synthetic": {
+        "cases": 11,
+        "argmax_correct": 11,
+        "brier": 0.008975355105937357,
+        "ece_10_bins": 0.03951150356580435
+      }
+    }
+  },
+  "failure_type": "HTTPError",
+  "http_status": 429
+}

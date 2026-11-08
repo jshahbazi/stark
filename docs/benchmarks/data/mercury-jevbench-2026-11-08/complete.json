@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "status": "complete",
+  "probe": false,
+  "model": "mercury-decide",
+  "endpoint": "https://api.inceptionlabs.ai/v1/decisions",
+  "started_utc": "2026-11-08T18:39:31Z",
+  "dataset": {
+    "case_count": 243,
+    "public_case_count": 231,
+    "synthetic_case_count": 12,
+    "dataset_sha256": "acf56888f47486fd8eba45d17a46372d65d911e2f57bc390474e7b41f37aae58",
+    "configuration_sha256": "70001de82eb6cdfa018e63bfcfe1968ca68a6fd669508cd6c08be70cd1d6e9bd",
+    "post_run_seal_sha256": "a825be816ca80c8c94739ab2556cc064d942b16c8b3da01daa5cd7cb13fe0003"
+  },
+  "coverage": {
+    "public_cases": 231,
+    "synthetic_cases": 11,
+    "excluded": {
+      "synthetic_score_over_10_levels": 1
+    }
+  },
+  "source_commit": "2fbf80966562e42b7374ac39c076eee55e3aaf4a",
+  "harness_sha256": "53fa02195c0570e8c4ea1950a5385af3c9f4a7ed1935e8aaa8539a4d555e09fe",
+  "case_loader_sha256": "65033ea9c247178d8bd691dace992f9d67638d75e67d2cf97dee3584b278c5ee",
+  "dependency_lock_sha256": "98ac6c11b74fe4a0ba31e149a8b8855f55134f2324d59e3288e2d09bee55742e",
+  "request_population_sha256": "903079604cf99459c46b4bde38c999c42a5e4031302173a0a5f306ecb4cf26be",
+  "protocol": {
+    "rounds": 1,
+    "cases_per_round": 242,
+    "concurrency": 1,
+    "max_rate_limit_retries_per_question": 3,
+    "retry_scope": "HTTP 429 only; successful questions are never retried",
+    "minimum_dispatch_interval_seconds": 1.0,
+    "local_cache": "none",
+    "question_order": "original supplied criteria order",
+    "timing": "HTTP client wall time including connection setup, network and hosted provider; excludes response validation",
+    "model_identity": "hosted alias only; no immutable weight digest",
+    "estimated_input_usd_per_million": 0.02,
+    "limits": "reused public development corpus; hosted latency differs from prepared-input local scoring"
+  },
+  "physical_requests_started": 242,
+  "physical_requests_succeeded": 242,
+  "rounds": [
+    {
+      "round": 0,
+      "status": "complete",
+      "completed": 242,
+      "usage": {
+        "input_tokens": 152625,
+        "output_tokens": 242
+      },
+      "accuracy_progress": {
+        "public": {
+          "completed": 231,
+          "correct": 193
+        },
+        "synthetic": {
+          "completed": 11,
+          "correct": 10
+        }
+      },
+      "median_http_seconds": 0.3125761250121286,
+      "p95_http_seconds": 0.4781789580010809,
+      "total_http_seconds": 79.59300597090623,
+      "response_population_sha256": "bc889863fd74928a09bf1472067274423f38d7efd13170f6dc7aea155c2514fa",
+      "estimated_input_charge_usd": 0.0030525,
+      "quality": {
+        "public": {
+          "cases": 231,
+          "argmax_correct": 207,
+          "brier": 0.162321732429597,
+          "ece_10_bins": 0.060516165373612596
+        },
+        "synthetic": {
+          "cases": 11,
+          "argmax_correct": 11,
+          "brier": 4.16648682016466e-06,
+          "ece_10_bins": 0.0009077653274718323
+        }
+      }
+    }
+  ]
+}

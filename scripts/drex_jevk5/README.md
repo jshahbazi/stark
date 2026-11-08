@@ -95,3 +95,86 @@ uv run --project scripts/drex_jevk5 --locked pytest scripts/drex_jevk5/test_comp
 uv run --project scripts/drex_jevk5 --locked ruff check scripts/drex_jevk5
 uv run --project scripts/drex_jevk5 --locked ruff format --check scripts/drex_jevk5
 ```
+
+## Mercury Decide hosted extension
+
+`mercury.py` evaluates the same semantic cases through Inception's
+[`POST /v1/decisions`](https://docs.inceptionlabs.ai/api-reference/decisions/create-a-decision)
+using the `mercury-decide` alias. The API does not expose an immutable weight
+digest. Native `choice`, `noul` and `score` answers are validated and aligned
+with the existing canonical answer identifiers. The complete 231-case public
+cohort is supported. One synthetic 16-level score control exceeds Mercury's
+documented ten-level score limit and is explicitly excluded; 11 synthetic
+controls remain. The original case and prior results are preserved.
+
+Supply `INCEPTION_API_KEY` in the process environment or an explicit local
+`--key-file` containing the key. Credentials never enter output artifacts.
+Use distinct unused output paths for the API admission probe and full run:
+
+```sh
+uv run --project scripts/drex_jevk5 --locked python scripts/drex_jevk5/mercury.py \
+  --config runtime/drex-jevk5-config.json --output runtime/mercury-probe.json --probe
+uv run --project scripts/drex_jevk5 --locked python scripts/drex_jevk5/mercury.py \
+  --config runtime/drex-jevk5-config.json --output runtime/mercury-full.json
+```
+
+The admission probe exercises all three question types and the largest choice
+set. The full run first refreshes local JevK5 probabilities over the exact
+supported cases, then makes two sequential Mercury passes. Jev worker indexes
+are looked up against the complete sealed population, preserving alignment
+across the omitted control. Check the configured Jev checkpoint revision
+against the original comparison's receipt before running. The hosted extension
+enforces the expected checkpoint revision, verifies its weight hash and records
+the worker, config and tokenizer hashes.
+
+There are no redirects, provider fallbacks, local output caches or retries of
+successful questions within a run. Counters are saved before dispatch, and an existing output path is
+refused. Interrupted or failed calls can have an unknown provider outcome or
+charge; inspect the recorded started/succeeded counts before deliberately
+starting a new run. The harness cannot resume from saved probabilities, because
+individual readouts are never persisted. Reusing a different output path
+explicitly starts another paid evaluation. Provider-side caching is outside
+the harness's control.
+
+Dispatch is paced at a minimum one-second interval by default; `--min-interval`
+sets that interval explicitly. Pacing is excluded from individual HTTP latency.
+Only HTTP 429 can be retried, up to `--rate-limit-retries` (default three),
+after at least 60 seconds or the provider's longer Retry-After interval.
+Earlier successful answers remain in memory during that backoff. Reported
+quota-exhaustion errors are not retried. Other errors terminate the run with
+safe diagnostics. Aggregate progress and usage are saved after every success.
+Full passes require every case to finish; a partial run is not a full score.
+`--rounds 1` selects one full pass; `--skip-local-baseline` avoids another
+local-model refresh when an existing aggregate baseline is sufficient.
+
+For the 2026-11-08 rate-limited attempt, `finish_mercury.py` supports the
+owner's unanswered-only recovery. It checks the failed sequential population
+hash and successful probe population hashes, excludes the answered prefix and
+all successful probe questions, then sends the remainder once. It does not
+refresh local models or replay the earlier questions:
+
+```sh
+uv run --project scripts/drex_jevk5 --locked python scripts/drex_jevk5/finish_mercury.py \
+  --config runtime/drex-jevk5-config.json \
+  --failed-run runtime/mercury-full.json \
+  --answered-probe runtime/mercury-probe.json \
+  --key-file /absolute/private/mercury-key.txt \
+  --output runtime/mercury-unanswered.json
+```
+
+Pass `--answered-probe` once for each successful probe receipt. Only a failed
+first-round HTTP 429 receipt is supported by this recovery helper. Existing
+output paths are refused. The helper checkpoints aggregate correct counts and
+usage after each successful response. It cannot reconstruct quality readouts
+that the failed full-pass process did not retain; its quality fields are
+explicitly limited to the newly completed subset.
+
+HTTP latency includes connection setup, network and hosted inference, measured
+from serialization-complete request dispatch through receipt and JSON parsing.
+It excludes response validation and local metric accounting. This differs from
+the prepared-input local scoring latency in the earlier comparison; it cannot
+isolate engine speed or provider compute. Input charge estimates use the
+published **2026-11-08 assumption of $0.02 per million input tokens**, with free
+output tokens, from the [official pricing page](https://docs.inceptionlabs.ai/get-started/models).
+They are usage arithmetic, not settled invoices. Native usage and exact call
+counts are reported separately for the probe and each full round.

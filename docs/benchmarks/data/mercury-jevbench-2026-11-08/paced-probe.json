@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "status": "complete",
+  "probe": true,
+  "model": "mercury-decide",
+  "endpoint": "https://api.inceptionlabs.ai/v1/decisions",
+  "started_utc": "2026-11-08T18:30:45Z",
+  "dataset": {
+    "case_count": 243,
+    "public_case_count": 231,
+    "synthetic_case_count": 12,
+    "dataset_sha256": "acf56888f47486fd8eba45d17a46372d65d911e2f57bc390474e7b41f37aae58",
+    "configuration_sha256": "70001de82eb6cdfa018e63bfcfe1968ca68a6fd669508cd6c08be70cd1d6e9bd",
+    "post_run_seal_sha256": "a825be816ca80c8c94739ab2556cc064d942b16c8b3da01daa5cd7cb13fe0003"
+  },
+  "coverage": {
+    "public_cases": 3,
+    "synthetic_cases": 1,
+    "excluded": {}
+  },
+  "source_commit": "2fbf80966562e42b7374ac39c076eee55e3aaf4a",
+  "harness_sha256": "d3412d79b1462373040fe480334ec2be197c9f40bbd63bee5fc1e003f5aad611",
+  "case_loader_sha256": "65033ea9c247178d8bd691dace992f9d67638d75e67d2cf97dee3584b278c5ee",
+  "dependency_lock_sha256": "98ac6c11b74fe4a0ba31e149a8b8855f55134f2324d59e3288e2d09bee55742e",
+  "request_population_sha256": "1d8fbf397ee10cc41f6a1ebb52a4112e678aa4062fda5a316c8f42763e0b8d22",
+  "protocol": {
+    "rounds": 1,
+    "cases_per_round": 4,
+    "concurrency": 1,
+    "retries": 0,
+    "minimum_dispatch_interval_seconds": 1.0,
+    "local_cache": "none",
+    "question_order": "original supplied criteria order",
+    "timing": "HTTP client wall time including connection setup, network and hosted provider; excludes response validation",
+    "model_identity": "hosted alias only; no immutable weight digest",
+    "estimated_input_usd_per_million": 0.02,
+    "limits": "reused public development corpus; hosted latency differs from prepared-input local scoring"
+  },
+  "physical_requests_started": 4,
+  "physical_requests_succeeded": 4,
+  "rounds": [
+    {
+      "round": 0,
+      "status": "complete",
+      "completed": 4,
+      "usage": {
+        "input_tokens": 817,
+        "output_tokens": 4
+      },
+      "median_http_seconds": 0.3870588544959901,
+      "p95_http_seconds": 0.619372083019698,
+      "total_http_seconds": 1.7268127090064809,
+      "response_population_sha256": "4f01dcaddec4fd7a09de702a832a23004806ca34668db22989b8d2853b5cb36b",
+      "estimated_input_charge_usd": 1.634e-05
+    }
+  ]
+}

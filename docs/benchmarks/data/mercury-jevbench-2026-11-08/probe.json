@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "status": "complete",
+  "probe": true,
+  "model": "mercury-decide",
+  "endpoint": "https://api.inceptionlabs.ai/v1/decisions",
+  "started_utc": "2026-11-08T18:26:32Z",
+  "dataset": {
+    "case_count": 243,
+    "public_case_count": 231,
+    "synthetic_case_count": 12,
+    "dataset_sha256": "acf56888f47486fd8eba45d17a46372d65d911e2f57bc390474e7b41f37aae58",
+    "configuration_sha256": "70001de82eb6cdfa018e63bfcfe1968ca68a6fd669508cd6c08be70cd1d6e9bd",
+    "post_run_seal_sha256": "a825be816ca80c8c94739ab2556cc064d942b16c8b3da01daa5cd7cb13fe0003"
+  },
+  "source_commit": "2fbf80966562e42b7374ac39c076eee55e3aaf4a",
+  "harness_sha256": "c553850dd1b1ae78eb0b2645872b9aaab021743ed90fef34163dd2c03267410f",
+  "case_loader_sha256": "65033ea9c247178d8bd691dace992f9d67638d75e67d2cf97dee3584b278c5ee",
+  "dependency_lock_sha256": "98ac6c11b74fe4a0ba31e149a8b8855f55134f2324d59e3288e2d09bee55742e",
+  "request_population_sha256": "1d8fbf397ee10cc41f6a1ebb52a4112e678aa4062fda5a316c8f42763e0b8d22",
+  "protocol": {
+    "rounds": 1,
+    "cases_per_round": 4,
+    "concurrency": 1,
+    "retries": 0,
+    "local_cache": "none",
+    "question_order": "original supplied criteria order",
+    "timing": "HTTP client wall time including connection setup, network and hosted provider; excludes response validation",
+    "model_identity": "hosted alias only; no immutable weight digest",
+    "estimated_input_usd_per_million": 0.02,
+    "limits": "reused public development corpus; hosted latency differs from prepared-input local scoring"
+  },
+  "physical_requests_started": 4,
+  "physical_requests_succeeded": 4,
+  "rounds": [
+    {
+      "round": 0,
+      "status": "complete",
+      "completed": 4,
+      "median_http_seconds": 0.3034754375112243,
+      "p95_http_seconds": 0.9746727080200799,
+      "total_http_seconds": 1.8539443330664653,
+      "usage": {
+        "input_tokens": 826,
+        "output_tokens": 4
+      },
+      "response_population_sha256": "6313b77915b5ca12e2a9ff87bb0f1e25e6ad4795897c94f8b68dfb9c4fbde692",
+      "estimated_input_charge_usd": 1.652e-05
+    }
+  ]
+}
