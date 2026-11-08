@@ -35,6 +35,7 @@ stark-score --score-model-path PATH [--consecutive-cache]
 | `load_seconds` | Model load time |
 | `vocab_size` | Upper bound for every token ID |
 | `max_context_tokens` | Loaded model's context maximum, or `null` when it has no finite maximum |
+| `request_budget_bytes`, `max_request_bytes` | Configured logical content budget and encoded request-line budget; see [resource budget](WORKER_PROTOCOLS.md#resource-budget) |
 | `peak_memory_bytes` | Engine peak memory, or `null` when unavailable |
 
 ## Requests
@@ -60,7 +61,7 @@ stark-score --score-model-path PATH [--consecutive-cache]
 | `context_tokens` | Positive 32-bit integer at most the model maximum reported in readiness; `input_token_ids` may be at most this long |
 | `temperature` | Finite and positive; the calibration temperature applied to the candidate distribution |
 
-The worker applies the loaded model's configured context capacity. It has no separate fixed token ceiling. The shared worker-line byte limit still applies to every request.
+The worker applies the loaded model's configured context capacity. It has no separate fixed token ceiling. The [automatic shared resource budget](WORKER_PROTOCOLS.md#resource-budget) applies to request content, four-byte-per-ID token storage and encoded lines. Available RAM at startup selects a 16–64 MiB logical budget, allowing 98–386 MiB encoded request lines including JSON escaping and framing. `STARK_REQUEST_BUDGET_MIB` is a developer/operator override accepting integers from 1 through 64. Resource admission does not guarantee every encoding of a full token window or establish full-context accuracy or performance.
 
 The reply:
 
@@ -96,10 +97,10 @@ Errors are replies of the form `{"error":CODE,"cache":{...}}`. Every error disca
 
 | Class | Codes |
 | --- | --- |
-| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_scoring_request` (bounds or duplicate candidates), `context_overflow` (context above the model maximum, or input longer than `context_tokens`), `invalid_tokenization_request` (empty text), `tokenization_failed` |
+| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_scoring_request` (bounds or duplicate candidates), `context_overflow` (context above the model maximum, or input longer than `context_tokens`), `resource_budget_exceeded` (logical content or token storage exceeds the configured budget), `invalid_tokenization_request` (empty text), `tokenization_failed` |
 | Fencing (error reply, then `{"ready":false,"error":"native_operation_failed"}` and exit 1) | `native_scoring_failed`, `invalid_score_values` (non-finite or wrong-sized logits) |
-| Terminating (error reply, then exit 0) | `request_too_large` (line over 1 MiB) |
-| Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `output_setup_failed`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_operation_failed` (panic during startup) |
+| Terminating (error reply, then exit 0) | `request_too_large` (line exceeds the configured encoded-frame budget) |
+| Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `invalid_resource_budget`, `output_setup_failed`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_operation_failed` (panic during startup) |
 
 ## Digest probe
 

@@ -105,6 +105,31 @@ def test_unknown_context_capacity_cli_still_enforces_custom_budget(model, capsys
     assert "Conversation exceeds the context budget" in capsys.readouterr().out
 
 
+def test_automatic_cli_output_uses_remaining_finite_context(model):
+    worker = FakeWorker(context_limit=512)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None, max_new_tokens=None), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert generated[0]["max_new_tokens"] == 492
+    assert generated[0]["context_tokens"] == 512
+
+
+def test_automatic_cli_output_uses_custom_budget_for_unknown_context(model):
+    worker = FakeWorker(context_limit=0xFFFFFFFF)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=2048, max_new_tokens=None), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert generated[0]["max_new_tokens"] == 2028
+    assert generated[0]["context_tokens"] == 2048
+
+
+def test_automatic_cli_output_requires_budget_for_unknown_context(model):
+    worker = FakeWorker(context_limit=0xFFFFFFFF)
+    with pytest.raises(ChatError, match="specify --context-tokens or --max-new-tokens"):
+        run_chat(options(model, context_tokens=None, max_new_tokens=None), worker)
+    assert worker.requests == []
+
+
 def test_history_reset_and_eof(model):
     worker = FakeWorker()
     with patch("sys.stdin", io.StringIO("first\nsecond\n/reset\nthird\n")):
@@ -239,11 +264,14 @@ def test_worker_rejects_invalid_reply_or_exit(tmp_path, reply):
     assert worker.process.poll() is not None
 
 
-def test_request_limit_is_checked_before_write(tmp_path):
+def test_request_limit_is_checked_before_write(tmp_path, monkeypatch):
+    from stark_convert import chat
+
+    monkeypatch.setattr(chat, "WIRE_BYTES", 128)
     worker = Worker(sys.executable, tmp_path, 2)
     try:
         with pytest.raises(ChatRequestTooLarge, match="request limit"):
-            worker.request({"text": "x" * 1024 * 1024})
+            worker.request({"text": "x" * 256})
     finally:
         worker.close()
 
@@ -256,7 +284,9 @@ def test_worker_request_limit_counts_encoded_bytes_and_newline(unit, over_limit)
     worker = Worker.__new__(Worker)
     worker.process = SimpleNamespace(stdin=io.BytesIO())
     worker.read = lambda: {"accepted": True}
-    limit = 1024 * 1024
+    from stark_convert import chat
+
+    limit = chat.WIRE_BYTES
     overhead = len(json.dumps({"text": ""}).encode()) + 1
     unit_bytes = len(json.dumps(unit, ensure_ascii=False).encode()) - 2
     count, padding = divmod(limit - overhead + int(over_limit), unit_bytes)
@@ -268,6 +298,32 @@ def test_worker_request_limit_counts_encoded_bytes_and_newline(unit, over_limit)
     else:
         assert worker.request(payload) == {"accepted": True}
         assert worker.process.stdin.tell() == limit
+
+
+def test_worker_request_respects_smaller_advertised_limit(monkeypatch):
+    from types import SimpleNamespace
+
+    from stark_convert import chat
+
+    monkeypatch.setattr(chat, "WIRE_BYTES", 128)
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    worker.read = lambda: {"accepted": True}
+    worker.max_request_bytes = 64
+    with pytest.raises(ChatRequestTooLarge):
+        worker.request({"text": "x" * 100})
+    assert worker.process.stdin.tell() == 0
+
+
+@pytest.mark.parametrize("error", ["request_too_large", "resource_budget_exceeded"])
+def test_worker_resource_budget_reply_is_recoverable(error):
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    worker.read = lambda: {"error": error}
+    with pytest.raises(ChatRequestTooLarge):
+        worker.request({"text": "short request"})
 
 
 def test_startup_failure_does_not_echo_worker_diagnostics(model, capsys):

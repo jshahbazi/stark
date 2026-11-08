@@ -13,6 +13,8 @@ from array import array
 from collections.abc import Callable
 from typing import NoReturn
 
+from .resource_budget import INPUT_BYTES
+
 _OPEN = "<start_function_call>call:"
 _CLOSE = "<end_function_call>"
 _ESCAPE = "<escape>"
@@ -32,8 +34,8 @@ _RESERVED = (
 
 # Match the converter's shared tool parser bounds without importing api_tools
 # (which routes to this decoder and would create a cycle).
-_MAX_OUTPUT_BYTES = 512 * 1024
-_MAX_ARGUMENT_BYTES = 64 * 1024
+_MAX_OUTPUT_BYTES = INPUT_BYTES
+_MAX_ARGUMENT_BYTES = INPUT_BYTES
 _MAX_DEPTH = 32
 _MAX_NODES = 16_384
 _MAX_CALLS = 16

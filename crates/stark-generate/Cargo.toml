@@ -12,6 +12,7 @@ metal = ["dep:stark-engine", "stark-engine/metal"]
 glm-exl3 = ["metal", "stark-engine/glm-exl3"]
 
 [dependencies]
+stark-resource-budget = { path = "../stark-resource-budget" }
 stark-engine = { path = "../stark-engine", default-features = false, optional = true }
 serde.workspace = true
 serde_json.workspace = true

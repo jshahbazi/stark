@@ -13,6 +13,7 @@ import re
 import subprocess
 
 from .chat import Worker, _popen_with_gpu_memory
+from .resource_budget import REQUEST_BUDGET_MIB
 
 LETTERS = "ABCDEFGHIJKLMNOP"
 SYSTEM = (
@@ -41,6 +42,7 @@ class ScoreWorker(Worker):
             if not key.startswith(("STARK_CAPTURE_", "UZU_CAPTURE_"))
             and key not in {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT"}
         }
+        environment["STARK_REQUEST_BUDGET_MIB"] = str(REQUEST_BUDGET_MIB)
         self.process, telemetry_fd = _popen_with_gpu_memory(
             [str(executable), "--score-model-path", str(model)],
             callback=gpu_memory_callback,

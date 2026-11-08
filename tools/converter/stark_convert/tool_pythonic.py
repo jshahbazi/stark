@@ -13,9 +13,11 @@ import re
 import tokenize
 import warnings
 
-MAX_PAYLOAD_BYTES = 512 * 1024
+from .resource_budget import INPUT_BYTES
+
+MAX_PAYLOAD_BYTES = INPUT_BYTES
 MAX_CALLS = 16
-MAX_ARGUMENT_BYTES = 64 * 1024
+MAX_ARGUMENT_BYTES = INPUT_BYTES
 MAX_AST_NODES = 16_384
 MAX_AST_DEPTH = 64
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z", re.ASCII)
@@ -40,40 +42,44 @@ def parse_pythonic_payload(payload: str, *, invalid) -> list[tuple[str, dict]]:
     except UnicodeEncodeError:
         reject()
 
+    # Bound lexical work before ast.parse can allocate a tree. A large quoted
+    # value remains one token; compact calls/containers cannot create an
+    # arbitrarily large AST within the content-byte envelope.
     try:
-        # Bound AST creation before walking; ast.parse only builds syntax and
-        # does not execute generated code.
+        previous = None
+        token_count = 0
+        for current in tokenize.generate_tokens(io.StringIO(payload).readline):
+            token_count += 1
+            if token_count > MAX_AST_NODES * 4:
+                reject("limits")
+            if current.type == tokenize.COMMENT:
+                reject()
+            if current.type in (
+                tokenize.ENCODING,
+                tokenize.NL,
+                tokenize.NEWLINE,
+                tokenize.INDENT,
+                tokenize.DEDENT,
+                tokenize.ENDMARKER,
+            ):
+                continue
+            if previous is not None:
+                if previous.type == tokenize.STRING and current.type == tokenize.STRING:
+                    reject("value")
+                if current.type == tokenize.STRING and previous.type == tokenize.NAME:
+                    reject("value")
+            previous = current
+        del previous
+    except (tokenize.TokenError, SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
+        reject()
+
+    try:
+        # Parsing only builds syntax; generated source is never compiled or run.
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             tree = ast.parse(payload, mode="eval")
     except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
         reject()
-
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(payload).readline))
-    except (tokenize.TokenError, IndentationError):
-        reject()
-    meaningful = [
-        t
-        for t in tokens
-        if t.type
-        not in (
-            tokenize.ENCODING,
-            tokenize.NL,
-            tokenize.NEWLINE,
-            tokenize.INDENT,
-            tokenize.DEDENT,
-            tokenize.COMMENT,
-            tokenize.ENDMARKER,
-        )
-    ]
-    if any(t.type == tokenize.COMMENT for t in tokens):
-        reject()
-    for previous, current in zip(meaningful, meaningful[1:], strict=False):
-        if previous.type == tokenize.STRING and current.type == tokenize.STRING:
-            reject("value")
-        if current.type == tokenize.STRING and previous.type == tokenize.NAME:
-            reject("value")
 
     pending = [(tree, 0)]
     count = 0

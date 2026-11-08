@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashSet,
     io::{BufRead, Read, Write},
     time::{Duration, Instant},
@@ -7,14 +7,15 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use stark_resource_budget::Budget;
 
 use crate::{
     media::{ImageLease, ImageReference, MediaStore, opaque_id, valid_id},
     prefix_cache::{self, CacheScope, RequestInput},
 };
 
-pub(crate) const MAX_NEW_TOKENS: u32 = 4_096;
-const MAX_REQUEST_BYTES: usize = 1_048_576;
+#[cfg(test)]
+const TEST_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EXTRA_STOPS: usize = 256;
 
 /// Protocol policy independent of the optional native/Metal dependency.
@@ -191,7 +192,6 @@ struct PreparedRequest<P> {
     image: P,
     metadata: PreparedImageMetadata,
     context_tokens: u32,
-    max_new_tokens: u32,
     _lease: ImageLease,
 }
 
@@ -522,6 +522,7 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     prepared: Option<PreparedRequest<B::PreparedImage>>,
     /// `Some(enabled)` when the host requested prefix reuse at startup.
     prefix_cache: Option<bool>,
+    budget: Budget,
 }
 
 fn valid_ids(
@@ -552,6 +553,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         prefix_cache: bool,
     ) -> Result<Self, &'static str> {
         let mtp = backend.mtp_capabilities();
+        let budget = Budget::from_environment()?;
         let default_drafts = backend.default_mtp_drafts();
         if backend.vocab_size() == 0
             || backend.vocab_size() > u32::MAX as usize
@@ -586,6 +588,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             media,
             prepared: None,
             prefix_cache,
+            budget,
         })
     }
 
@@ -626,7 +629,6 @@ impl<B: GenerationBackend> GenerationWorker<B> {
     ) -> Result<(), &'static str> {
         if options.context_tokens == 0
             || options.max_new_tokens == 0
-            || options.max_new_tokens > MAX_NEW_TOKENS
             || options.extra_stop_token_ids.len() > MAX_EXTRA_STOPS
             || options.stop.len() > 4
             || options.stop.iter().any(|s| s.is_empty() || s.chars().count() > 1024)
@@ -634,6 +636,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             || options.extra_stop_token_ids.iter().collect::<HashSet<_>>().len() != options.extra_stop_token_ids.len()
         {
             return Err("invalid_generation_request");
+        }
+        if options.max_new_tokens as usize > self.budget.input_bytes / std::mem::size_of::<u32>() {
+            return Err("resource_budget_exceeded");
         }
         self.resolve_mtp(None, Some(options.mtp_drafts))?;
         if self.backend.max_context_length().is_some_and(|max| options.context_tokens > max) {
@@ -689,39 +694,58 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             write_reply(output, &progress(0, 0.0, None))?;
         }
         let mut emitted = String::new();
+        let mut emitted_bytes = 0usize;
+        let mut progress_bytes = 0usize;
+        let sampled_tokens = Cell::new(0usize);
+        let output_byte_budget = self.budget.input_bytes;
         let generated = {
             // Text and progress callbacks share the same framed output sink.
             // Neither callback retains a borrow across the native invocation.
             let output = RefCell::new(&mut *output);
             let mut on_text = |text: &str| {
                 if !text.is_empty() {
-                    write_reply(&mut **output.borrow_mut(), &json!({"event":"delta","text":text}))?;
-                    emitted.push_str(text);
+                    let reserved_ids = sampled_tokens
+                        .get()
+                        .min(output_byte_budget / std::mem::size_of::<u32>())
+                        .saturating_mul(std::mem::size_of::<u32>());
+                    if emitted_bytes
+                        .checked_add(text.len())
+                        .is_none_or(|size| size > output_byte_budget.saturating_sub(reserved_ids))
+                    {
+                        return Err("resource_budget_exceeded");
+                    }
+                    if stream {
+                        write_reply(&mut **output.borrow_mut(), &json!({"event":"delta","text":text}))?;
+                    }
+                    emitted_bytes += text.len();
+                    if stream {
+                        emitted.push_str(text);
+                    }
                 }
                 Ok(())
             };
             let mut on_progress = |value: GenerationProgress| {
-                write_reply(
-                    &mut **output.borrow_mut(),
-                    &progress(value.sampled_tokens, value.elapsed_seconds, value.prefill_seconds),
-                )
+                sampled_tokens.set(value.sampled_tokens);
+                if stream {
+                    let frame = progress(value.sampled_tokens, value.elapsed_seconds, value.prefill_seconds);
+                    let encoded = serde_json::to_vec(&frame).map_err(|_| "protocol_serialization_failed")?;
+                    if progress_bytes.checked_add(encoded.len() + 1).is_some_and(|size| size <= output_byte_budget / 16)
+                    {
+                        write_reply(&mut **output.borrow_mut(), &frame)?;
+                        progress_bytes += encoded.len() + 1;
+                    }
+                }
+                Ok(())
             };
-            let on_text = if stream {
-                Some(&mut on_text as &mut TextCallback<'_>)
-            } else {
-                None
-            };
-            let on_progress = if stream {
-                Some(&mut on_progress as &mut ProgressCallback<'_>)
-            } else {
-                None
-            };
+            let on_text = Some(&mut on_text as &mut TextCallback<'_>);
+            let on_progress = Some(&mut on_progress as &mut ProgressCallback<'_>);
             match image {
                 Some(image) => self.backend.generate_image(image, options, on_text, on_progress)?,
                 None => self.backend.generate(input, options, on_text, on_progress)?,
             }
         };
         if !valid_ids(&generated.generated_token_ids, self.backend.vocab_size())
+            || generated.generated_token_ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>()
             || generated.sampled_tokens > options.max_new_tokens as usize
             || input_tokens + generated.sampled_tokens > options.context_tokens as usize
             || generated.sampled_tokens
@@ -734,6 +758,16 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             Some(text) => text.clone(),
             None => self.backend.decode(&generated.generated_token_ids, false)?,
         };
+        if text.len() > self.budget.input_bytes {
+            return Err("resource_budget_exceeded");
+        }
+        if text
+            .len()
+            .checked_add(generated.generated_token_ids.len() * std::mem::size_of::<u32>())
+            .is_none_or(|size| size > self.budget.input_bytes)
+        {
+            return Err("resource_budget_exceeded");
+        }
         if stream {
             let suffix = text.strip_prefix(&emitted).ok_or("decoding_failed")?;
             if !suffix.is_empty() {
@@ -787,6 +821,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         special: bool,
     ) -> Result<Vec<u32>, &'static str> {
         let ids = self.backend.tokenize(text, special)?;
+        if ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>() {
+            return Err("resource_budget_exceeded");
+        }
         if !valid_ids(&ids, self.backend.vocab_size()) {
             return Err("invalid_tokenization_output");
         }
@@ -803,6 +840,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 text,
                 add_special_tokens,
             } => {
+                if text.len() > self.budget.input_bytes {
+                    return Err("resource_budget_exceeded");
+                }
                 let ids = self.tokenize(&text, add_special_tokens)?;
                 Ok(json!({"token_ids":ids,"token_count":ids.len()}))
             },
@@ -810,10 +850,16 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 token_ids,
                 skip_special_tokens,
             } => {
+                if token_ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>() {
+                    return Err("resource_budget_exceeded");
+                }
                 if !valid_ids(&token_ids, self.backend.vocab_size()) {
                     return Err("invalid_decoding_request");
                 }
                 let text = self.backend.decode(&token_ids, skip_special_tokens)?;
+                if text.len() > self.budget.input_bytes {
+                    return Err("resource_budget_exceeded");
+                }
                 Ok(json!({"text":text,"token_count":token_ids.len()}))
             },
             Request::Generate {
@@ -852,14 +898,28 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 };
                 self.validate_options(&options)?;
                 let input = match (rendered_prompt, input_token_ids) {
-                    (Some(prompt), None) => self.tokenize(&prompt, false)?,
-                    (None, Some(ids)) => ids,
+                    (Some(prompt), None) => {
+                        if prompt.len() > self.budget.input_bytes {
+                            return Err("resource_budget_exceeded");
+                        }
+                        self.tokenize(&prompt, false)?
+                    },
+                    (None, Some(ids)) => {
+                        if ids.len() > self.budget.input_bytes / std::mem::size_of::<u32>() {
+                            return Err("resource_budget_exceeded");
+                        }
+                        ids
+                    },
                     _ => return Err("invalid_generation_request"),
                 };
                 if input.is_empty() || !valid_ids(&input, self.backend.vocab_size()) {
                     return Err("invalid_generation_request");
                 }
                 if input.len() >= context_tokens as usize {
+                    return Err("context_overflow");
+                }
+                if input.len().checked_add(max_new_tokens as usize).is_none_or(|total| total > context_tokens as usize)
+                {
                     return Err("context_overflow");
                 }
                 self.generate_completion(&input, None, input.len(), &options, stream, output)
@@ -871,6 +931,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 max_new_tokens,
                 request_id,
             } => {
+                if rendered_prompt.len() > self.budget.input_bytes {
+                    return Err("resource_budget_exceeded");
+                }
                 if !self.backend.supports_images() || self.media.is_none() {
                     return Err("images_not_supported");
                 }
@@ -928,7 +991,6 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     image,
                     metadata,
                     context_tokens,
-                    max_new_tokens,
                     _lease: staged.lease,
                 });
                 Ok(reply)
@@ -948,7 +1010,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if !valid_id(&prepared_id) || prepared.id != prepared_id {
                     return Err("invalid_prepared_image");
                 }
-                if prepared.context_tokens != context_tokens || prepared.max_new_tokens != max_new_tokens {
+                if prepared.context_tokens != context_tokens {
                     return Err("invalid_generation_request");
                 }
                 let options = GenerationOptions {
@@ -964,6 +1026,14 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     cache_scope: None,
                 };
                 self.validate_options(&options)?;
+                if prepared
+                    .metadata
+                    .input_tokens
+                    .checked_add(max_new_tokens as usize)
+                    .is_none_or(|total| total > context_tokens as usize)
+                {
+                    return Err("context_overflow");
+                }
                 if self.backend.cancelled(request_id)? {
                     return Err("generation_cancelled");
                 }
@@ -1003,7 +1073,8 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         bytes: &[u8],
         output: &mut impl Write,
     ) -> Result<(), &'static str> {
-        let request = serde_json::from_slice::<Request>(bytes).map_err(|_| "invalid_request");
+        let request = stark_resource_budget::check_json_structure(bytes, self.budget)
+            .and_then(|()| serde_json::from_slice::<Request>(bytes).map_err(|_| "invalid_request"));
         if !matches!(&request, Ok(Request::GenerateImage { .. } | Request::DiscardImage { .. })) {
             self.prepared = None;
         }
@@ -1061,7 +1132,10 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "mode":"text-generation-v1","operations":["tokenize","decode","generate"],
         "state_policy":"fresh-per-request","vocab_size":worker.backend.vocab_size(),
         "max_context_tokens":worker.backend.max_context_length().unwrap_or(u32::MAX),
-        "max_new_tokens":MAX_NEW_TOKENS,"eos_token_ids":worker.backend.eos_token_ids(),
+        "max_new_tokens":worker.backend.max_context_length().unwrap_or(u32::MAX).saturating_sub(1)
+            .min((worker.budget.input_bytes / std::mem::size_of::<u32>()).min(u32::MAX as usize) as u32),
+        "max_request_bytes":worker.budget.wire_bytes,"request_budget_bytes":worker.budget.input_bytes,
+        "eos_token_ids":worker.backend.eos_token_ids(),
         "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
         "generation_progress":"token-counts-v1",
         "stop_sequences":true,"cancellation":"pipe-v1"});
@@ -1128,7 +1202,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             }
         }
         let mut bytes = Vec::new();
-        let count = match Read::by_ref(input).take(MAX_REQUEST_BYTES as u64 + 1).read_until(b'\n', &mut bytes) {
+        let count = match Read::by_ref(input).take(worker.budget.wire_bytes as u64 + 1).read_until(b'\n', &mut bytes) {
             Ok(count) => count,
             Err(_) => {
                 worker.prepared = None;
@@ -1139,7 +1213,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             worker.prepared = None;
             return Ok(());
         }
-        if bytes.len() > MAX_REQUEST_BYTES {
+        if bytes.len() > worker.budget.wire_bytes {
             worker.prepared = None;
             worker.backend.clear_prefix_cache();
             // Drain the rest of this frame so the next request remains independent.
@@ -1920,7 +1994,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_handles_are_worker_scoped_and_bound_to_the_reserved_budget() {
+    fn prepared_handles_are_worker_scoped_and_generation_uses_actual_context_budget() {
         let root = crate::media::tests::PrivateRoot::new();
         let mut first = image_worker(&root);
         let mut second = image_worker(&root);
@@ -1928,12 +2002,18 @@ mod tests {
         post(&mut second, image_prepare(&root));
         assert_eq!(post(&mut second, image_generate(&prepared))["error"], "invalid_prepared_image");
         assert!(second.prepared.is_none());
+        let mut fitting = image_generate(&prepared);
+        fitting["max_new_tokens"] = json!(9);
+        assert_eq!(post(&mut first, fitting)["finish_reason"], "eos");
+        assert_eq!(first.backend.image_generations, 1);
+
+        let prepared = post(&mut first, image_prepare(&root));
         let mut changed = image_generate(&prepared);
-        changed["max_new_tokens"] = json!(7);
-        assert_eq!(post(&mut first, changed)["error"], "invalid_generation_request");
+        changed["max_new_tokens"] = json!(10);
+        assert_eq!(post(&mut first, changed)["error"], "context_overflow");
         assert!(first.prepared.is_none());
         assert_eq!(post(&mut first, image_generate(&prepared))["error"], "invalid_prepared_image");
-        assert_eq!(first.backend.image_generations, 0);
+        assert_eq!(first.backend.image_generations, 1);
         assert_eq!(second.backend.image_generations, 0);
     }
 
@@ -2068,9 +2148,10 @@ mod tests {
     fn image_readiness_is_separate_and_oversized_frames_and_eof_clear_preparation() {
         let root = crate::media::tests::PrivateRoot::new();
         let mut worker = image_worker(&root);
+        worker.budget = Budget::for_mib(1).unwrap();
         post(&mut worker, image_prepare(&root));
         let mut output = Vec::new();
-        run_lines(&mut worker, &mut io::Cursor::new(vec![b'x'; MAX_REQUEST_BYTES + 1]), &mut output).unwrap();
+        run_lines(&mut worker, &mut io::Cursor::new(vec![b'x'; TEST_WIRE_BYTES + 1]), &mut output).unwrap();
         let frames = output
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
@@ -2209,11 +2290,12 @@ mod tests {
     }
 
     #[test]
-    fn progress_reports_context_clipped_budget_and_precedes_empty_eos_reply() {
+    fn progress_reports_requested_budget_and_precedes_empty_eos_reply() {
         let mut worker = worker();
         worker.backend.tokens = vec![Ok(1)];
         let mut request = standard();
         request["context_tokens"] = json!(4);
+        request["max_new_tokens"] = json!(3);
         request["stream"] = json!(true);
         let mut output = Vec::new();
         worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
@@ -2250,6 +2332,29 @@ mod tests {
         worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
         let frame: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(frame, json!({"error":"context_overflow"}));
+    }
+
+    #[test]
+    fn non_streamed_output_and_requested_token_budget_obey_resource_budget() {
+        let mut worker = worker();
+        worker.budget = Budget {
+            mib: 1,
+            input_bytes: 4,
+            wire_bytes: 4096,
+            template_live_bytes: 4096,
+            template_cumulative_bytes: 4096,
+        };
+        let mut request = standard();
+        request["max_new_tokens"] = json!(1);
+        let reply = post(&mut worker, request);
+        assert_eq!(reply["error"], "resource_budget_exceeded");
+        assert_eq!(worker.backend.generation_calls, 1);
+
+        let mut request = standard();
+        request["max_new_tokens"] = json!(2);
+        let reply = post(&mut worker, request);
+        assert_eq!(reply["error"], "resource_budget_exceeded");
+        assert_eq!(worker.backend.generation_calls, 1);
     }
 
     #[test]
@@ -2493,7 +2598,7 @@ mod tests {
     #[test]
     fn length_and_context_limits_never_consume_an_extra_output_token() {
         let mut worker = worker();
-        for (context, maximum, reason) in [(16, 1, "length"), (2, 8, "context"), (2, 1, "length")] {
+        for (context, maximum, reason) in [(16, 1, "length"), (2, 1, "length")] {
             let mut request = standard();
             request["context_tokens"] = json!(context);
             request["max_new_tokens"] = json!(maximum);
@@ -2503,6 +2608,12 @@ mod tests {
             assert_eq!(value["finish_reason"], reason);
             assert!(worker.backend.drained.load(Ordering::SeqCst));
         }
+        let mut request = standard();
+        request["context_tokens"] = json!(2);
+        request["max_new_tokens"] = json!(8);
+        let value = post(&mut worker, request);
+        assert_eq!(value["error"], "context_overflow");
+        assert_eq!(worker.backend.generation_calls, 2);
     }
 
     #[test]
@@ -2578,7 +2689,6 @@ mod tests {
             json!({"context_tokens":16385}),
             json!({"context_tokens":1025}),
             json!({"max_new_tokens":0}),
-            json!({"max_new_tokens":4097}),
             json!({"input_token_ids":[]}),
             json!({"input_token_ids":[8]}),
             json!({"input_token_ids":[2,3],"context_tokens":2}),
@@ -2673,8 +2783,9 @@ mod tests {
     #[test]
     fn framed_protocol_recovers_from_malformed_and_oversized_lines() {
         let mut worker = worker();
+        worker.budget = Budget::for_mib(1).unwrap();
         let mut bytes = b"{\n".to_vec();
-        bytes.extend(vec![b'x'; MAX_REQUEST_BYTES + 30]);
+        bytes.extend(vec![b'x'; TEST_WIRE_BYTES + 30]);
         bytes.extend(b"\n");
         bytes.extend(serde_json::to_vec(&standard()).unwrap());
         bytes.extend(b"\n");
@@ -3059,14 +3170,20 @@ mod tests {
 
     #[test]
     fn prefix_cache_expires_while_idle_and_on_oversized_lines() {
+        let mut prefix = prefix_worker(true);
+        prefix.budget = Budget::for_mib(1).unwrap();
+        let wire_bytes = prefix.budget.wire_bytes;
         let request = serde_json::to_vec(&cached_request(3_000, Some(SCOPE))).unwrap();
-        let replies = run_requests(&mut prefix_worker(true), &[request.clone(), request.clone()], vec![true, true]);
+        let replies = run_requests(&mut prefix, &[request.clone(), request.clone()], vec![true, true]);
         assert_eq!(replies[1]["reused_input_tokens"], 2048);
-        let replies = run_requests(&mut prefix_worker(true), &[request.clone(), request.clone()], vec![false, true]);
+        let mut prefix = prefix_worker(true);
+        prefix.budget = Budget::for_mib(1).unwrap();
+        let replies = run_requests(&mut prefix, &[request.clone(), request.clone()], vec![false, true]);
         assert_eq!(replies[1]["reused_input_tokens"], 0, "idle expiry released the entry");
-        let oversized = vec![b' '; MAX_REQUEST_BYTES + 1];
-        let replies =
-            run_requests(&mut prefix_worker(true), &[request.clone(), oversized, request.clone()], vec![true, true]);
+        let oversized = vec![b' '; wire_bytes + 1];
+        let mut prefix = prefix_worker(true);
+        prefix.budget = Budget::for_mib(1).unwrap();
+        let replies = run_requests(&mut prefix, &[request.clone(), oversized, request.clone()], vec![true, true]);
         assert_eq!(replies[1]["error"], "request_too_large");
         assert_eq!(replies[2]["reused_input_tokens"], 0);
     }

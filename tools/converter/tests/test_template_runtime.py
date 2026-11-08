@@ -90,7 +90,7 @@ def test_compile_time_constant_expansion_is_guarded(source):
 def test_unbounded_primitives_fail_with_fixed_errors_and_leave_control_healthy(source):
     template = IsolatedTemplate(source)
     with pytest.raises(TemplateRuntimeError) as error:
-        template.render(messages=["x" * 1025])
+        template.render(messages=["x" * 8193])
     assert str(error.value) == template_runtime.ERROR
     assert source not in str(error.value)
     assert IsolatedTemplate("{{ messages[0] }}").render(messages=["healthy control"]) == "healthy control"
@@ -104,13 +104,18 @@ def test_unbounded_primitives_fail_with_fixed_errors_and_leave_control_healthy(s
         "{% for n in range(16000) %}{{ messages[0] }}{% endfor %}",
     ],
 )
-def test_all_output_buffers_are_capped(source):
+def test_all_output_buffers_are_capped(source, monkeypatch):
+    # Captured blocks are bounded by the native allocator as well as the final
+    # writer. A small test envelope exercises both without large allocations.
+    monkeypatch.setattr(template_runtime, "REQUEST_BUDGET_MIB", 1)
     with pytest.raises(TemplateRuntimeError):
-        IsolatedTemplate(source).render(messages=["x" * 1024])
+        IsolatedTemplate(source).render(messages=["x" * 8193])
 
 
 @pytest.mark.parametrize("route", ["capture", "concat", "list", "dict", "call", "method", "filter"])
-def test_aggregate_expansion_is_bounded_in_the_native_child(route):
+def test_aggregate_expansion_is_bounded_in_the_native_child(route, monkeypatch):
+    # Exercise the same allocator policy with a small developer-test envelope.
+    monkeypatch.setattr(template_runtime, "REQUEST_BUDGET_MIB", 1)
     # Individual results stay below the output cap; retained intermediates
     # exceed the native allocator's cumulative limit before they can escape.
     values = ["p * 16"] * 512
@@ -131,12 +136,13 @@ def test_aggregate_expansion_is_bounded_in_the_native_child(route):
         source = "{% set captured = dict(" + ",".join(f"k{index}={value}" for index, value in enumerate(values))
         source += ") %}ok"
     with pytest.raises(TemplateRuntimeError):
-        IsolatedTemplate(source).render(p="x" * (65536 if route in {"method", "filter"} else 4096))
+        IsolatedTemplate(source).render(p="x" * (131073 if route in {"method", "filter"} else 8193))
     assert IsolatedTemplate("{{ value }}").render(value="healthy control") == "healthy control"
 
 
 @pytest.mark.parametrize("route", ["list", "dict", "call"])
-def test_retained_slice_copies_are_bounded_in_the_native_child(route):
+def test_retained_slice_copies_are_bounded_in_the_native_child(route, monkeypatch):
+    monkeypatch.setattr(template_runtime, "REQUEST_BUDGET_MIB", 1)
     values = ["p[1:]"] * 512
     if route == "list":
         source = "{% set captured = [" + ",".join(values) + "] %}ok"
@@ -147,7 +153,7 @@ def test_retained_slice_copies_are_bounded_in_the_native_child(route):
         source = "{% set captured = dict(" + ",".join(f"k{index}={item}" for index, item in enumerate(values))
         source += ") %}ok"
     with pytest.raises(TemplateRuntimeError):
-        IsolatedTemplate(source).render(p="x" * 65536)
+        IsolatedTemplate(source).render(p="x" * 131073)
 
 
 def test_bounded_slicing_preserves_indexes_steps_and_empty_slices():
@@ -299,7 +305,7 @@ def test_source_input_and_ast_limits_fail_closed():
     with pytest.raises(TemplateRuntimeError):
         IsolatedTemplate("{{ x }}" * 20000)
     with pytest.raises(TemplateRuntimeError):
-        IsolatedTemplate("{{ messages }}").render(messages=["x" * template_runtime.MAX_REQUEST_BYTES])
+        IsolatedTemplate("{{ messages }}").render(messages=["x" * (template_runtime.MAX_OUTPUT_BYTES + 1)])
     with pytest.raises(TemplateRuntimeError):
         IsolatedTemplate("{{ messages }}").render(messages=[object()])
 

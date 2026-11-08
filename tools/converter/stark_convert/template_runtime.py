@@ -19,15 +19,16 @@ from subprocess import Popen
 
 from jinja2.exceptions import SecurityError, TemplateError
 
+from .resource_budget import INPUT_BYTES, REQUEST_BUDGET_MIB, TEMPLATE_LIVE_BYTES, WIRE_BYTES
+
 MAX_SOURCE_BYTES = 256 * 1024
-MAX_REQUEST_BYTES = 2 * 1024 * 1024
-MAX_OUTPUT_BYTES = 1024 * 1024
+MAX_REQUEST_BYTES = WIRE_BYTES
+MAX_OUTPUT_BYTES = INPUT_BYTES
 MAX_SEQUENCE_ITEMS = 16384
 MAX_VALUE_NODES = 65536
 MAX_VALUE_DEPTH = 64
 MAX_INTEGER_BITS = 8192
-MAX_CHILD_RSS = 256 * 1024 * 1024
-MAX_EXPANSION_BYTES = 16 * 1024 * 1024
+MAX_CHILD_RSS = TEMPLATE_LIVE_BYTES
 CPU_SECONDS = 2
 WALL_SECONDS = 5.0
 POLL_SECONDS = 0.01
@@ -158,6 +159,7 @@ class IsolatedTemplate:
                 bufsize=0,
                 close_fds=True,
                 start_new_session=True,
+                env={**os.environ, "STARK_REQUEST_BUDGET_MIB": str(REQUEST_BUDGET_MIB)},
             )
             monitored = psutil.Process(child.pid)
             os.set_blocking(child.stdin.fileno(), False)

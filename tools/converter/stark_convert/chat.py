@@ -20,6 +20,7 @@ from ._build_metadata import ConversionError, file_hash, open_regular
 from .generation_eta import progress_frame
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .mtp import mtp_capabilities, resolve_mtp
+from .resource_budget import REQUEST_BUDGET_MIB, WIRE_BYTES
 from .template_runtime import (
     IsolatedTemplate,
     TemplateCancelled,
@@ -38,6 +39,7 @@ from .vision_runtime import (
 
 _MAX_GPU_MEMORY_LINE = 128
 _MAX_GPU_MEMORY_BYTES = (1 << 63) - 1
+_LEGACY_MAX_REQUEST_BYTES = 1024 * 1024
 
 
 def _popen_with_gpu_memory(command, *, callback, **kwargs):
@@ -92,7 +94,7 @@ class ChatCancelled(ChatError):
 
 
 class ChatRequestTooLarge(ChatError):
-    """An oversized request rejected before writing any bytes to the worker."""
+    """A request rejected for exceeding the worker's resource budget."""
 
 
 class ChatImageError(ChatError):
@@ -127,6 +129,7 @@ def render_template(template, *, cancelled=None, **arguments):
 _RECOVERABLE_IMAGE_ERRORS = {
     "invalid_request",
     "request_too_large",
+    "resource_budget_exceeded",
     "images_not_supported",
     "invalid_image_reference",
     "image_read_failed",
@@ -275,7 +278,11 @@ class Worker:
                 bufsize=0,
                 start_new_session=True,
                 pass_fds=(read_fd,),
-                env=dict(os.environ, STARK_CANCEL_FD=str(read_fd)),
+                env=dict(
+                    os.environ,
+                    STARK_CANCEL_FD=str(read_fd),
+                    STARK_REQUEST_BUDGET_MIB=str(REQUEST_BUDGET_MIB),
+                ),
             )
         except BaseException:
             os.close(self.cancel_fd)
@@ -408,7 +415,7 @@ class Worker:
             if not chunk:
                 raise ChatError("Worker stopped; chat closed.")
             self.pending += chunk
-            if len(self.pending) > 16 * 1024 * 1024:
+            if len(self.pending) > WIRE_BYTES:
                 raise ChatError("Worker reply exceeded the size limit; chat closed.")
         if getattr(self, "_image_deadline", None) is not None and time.monotonic() >= deadline:
             raise ChatError("Worker timed out; chat closed.")
@@ -421,6 +428,15 @@ class Worker:
                 if getattr(self, "_ready_seen", False):
                     raise ChatError("Unexpected worker readiness reply; restart the model.")
                 self._ready_seen = True
+                advertised_limit = reply.get("max_request_bytes")
+                if advertised_limit is not None and (type(advertised_limit) is not int or advertised_limit < 1):
+                    raise ChatError("Invalid worker readiness reply; restart the model.")
+                self.max_request_bytes = (
+                    min(WIRE_BYTES, advertised_limit) if advertised_limit is not None else _LEGACY_MAX_REQUEST_BYTES
+                )
+                maximum_output = reply.get("max_new_tokens")
+                if type(maximum_output) is int and maximum_output > 0:
+                    self.max_new_tokens = maximum_output
                 self.mtp = mtp_capabilities(reply)
                 self.prefix_cache = prefix_cache_enabled(reply)
                 self.prefix_chunk_tokens = reply["prefix_cache"]["chunk_tokens"] if self.prefix_cache else None
@@ -502,7 +518,7 @@ class Worker:
             request_id = self.request_sequence
             payload = {**payload, "request_id": request_id}
         data = json.dumps(payload, ensure_ascii=False).encode() + b"\n"
-        if len(data) > 1024 * 1024:
+        if len(data) > min(WIRE_BYTES, getattr(self, "max_request_bytes", WIRE_BYTES)):
             raise ChatRequestTooLarge("Conversation exceeds the worker request limit; use /reset.")
         if getattr(self, "_image_deadline", None) is not None:
             self._write_image_frame(data)
@@ -524,6 +540,8 @@ class Worker:
             if "event" not in reply:
                 if isinstance(reply.get("error"), str) and reply["error"] in _FATAL_WORKER_ERRORS:
                     raise ChatError("Native worker failed; restart the model.")
+                if reply.get("error") in {"request_too_large", "resource_budget_exceeded"}:
+                    raise ChatRequestTooLarge("The worker rejected this request for exceeding its resource budget.")
                 if (control is not None and control.is_set()) or reply.get("error") == "generation_cancelled":
                     raise ChatCancelled("Request cancelled.")
                 if on_delta is not None and "error" not in reply and reply.get("text") != "".join(chunks):
@@ -632,13 +650,16 @@ class Worker:
             with self.media.stage(image) as reference:
                 aligned = True
                 try:
+                    requested_maximum = options["max_new_tokens"]
+                    automatic_maximum = requested_maximum in (None, 0)
+                    prepare_maximum = 1 if automatic_maximum else requested_maximum
                     prepared = self.request(
                         {
                             "operation": "prepare_image",
                             "image": reference,
                             "rendered_prompt": prompt,
                             "context_tokens": options["context_tokens"],
-                            "max_new_tokens": options["max_new_tokens"],
+                            "max_new_tokens": prepare_maximum,
                         },
                         cancelled=cancelled,
                     )
@@ -652,12 +673,22 @@ class Worker:
                         or type(prepared.get("image_tokens")) is not int
                         or not 0 < prepared["image_tokens"] <= self.image_input["max_image_tokens"]
                         or not prepared["image_tokens"] < prepared["input_tokens"]
-                        or prepared["input_tokens"] + options["max_new_tokens"] > options["context_tokens"]
+                        or prepared["input_tokens"] + prepare_maximum > options["context_tokens"]
                     ):
                         raise ChatError("Invalid image preparation reply; restart the model.")
                     self._last_image_tokens = prepared["image_tokens"]
+                    if automatic_maximum:
+                        maximum = min(
+                            getattr(self, "max_new_tokens", options["context_tokens"] - 1),
+                            options["context_tokens"] - prepared["input_tokens"],
+                        )
+                        if maximum < 1:
+                            raise ChatImageError("context_overflow")
+                    else:
+                        maximum = requested_maximum
+                    generate_options = {**options, "max_new_tokens": maximum}
                     reply = self.request(
-                        {**options, "operation": "generate_image", "prepared_id": identifier},
+                        {**generate_options, "operation": "generate_image", "prepared_id": identifier},
                         on_delta=on_delta,
                         cancelled=cancelled,
                         **({"on_progress": on_progress} if on_progress is not None else {}),
@@ -668,7 +699,7 @@ class Worker:
                         or type(reply.get("input_tokens")) is not int
                         or reply["input_tokens"] != prepared["input_tokens"]
                         or type(reply.get("output_tokens")) is not int
-                        or not 0 <= reply["output_tokens"] <= options["max_new_tokens"]
+                        or not 0 <= reply["output_tokens"] <= maximum
                         or reply.get("finish_reason")
                         not in {"eos", "stop_token", "stop_sequence", "length", "context"}
                     ):
@@ -833,8 +864,12 @@ def run_chat(args, worker):
     codec, template = load_template(args.model_path, expected_hashes=getattr(worker, "image_input", None))
     context_capacity_known = ready["max_context_tokens"] != 0xFFFFFFFF
     context = args.context_tokens if args.context_tokens is not None else ready["max_context_tokens"]
-    if context > ready["max_context_tokens"] or args.max_new_tokens > ready["max_new_tokens"]:
+    if context > ready["max_context_tokens"] or (
+        args.max_new_tokens is not None and args.max_new_tokens > ready["max_new_tokens"]
+    ):
         raise ChatError("Requested token limits exceed this worker's limits.")
+    if args.max_new_tokens is None and not context_capacity_known and context == ready["max_context_tokens"]:
+        raise ChatError("This model has no finite context maximum; specify --context-tokens or --max-new-tokens.")
     image = None
     if image_path is not None:
         if not context_capacity_known:
@@ -886,7 +921,7 @@ def run_chat(args, worker):
                     image,
                     {
                         "context_tokens": context,
-                        "max_new_tokens": args.max_new_tokens,
+                        "max_new_tokens": args.max_new_tokens or 0,
                         "sampling": {"mode": "greedy"},
                     },
                 )
@@ -895,14 +930,17 @@ def run_chat(args, worker):
                 count = tokens.get("token_count")
                 if not isinstance(count, int):
                     raise ChatError("Worker could not tokenize the conversation.")
-                if count + args.max_new_tokens > context:
+                maximum = args.max_new_tokens
+                if maximum is None:
+                    maximum = min(ready["max_new_tokens"], context - count)
+                if maximum < 1 or count + maximum > context:
                     print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")
                     continue
                 request = {
                     "operation": "generate",
                     "rendered_prompt": prompt,
-                    "context_tokens": context if context_capacity_known else count + args.max_new_tokens,
-                    "max_new_tokens": args.max_new_tokens,
+                    "context_tokens": context if context_capacity_known else count + maximum,
+                    "max_new_tokens": maximum,
                     "sampling": {"mode": "greedy"},
                 }
                 if capabilities["supported"]:
@@ -913,6 +951,9 @@ def run_chat(args, worker):
             if not isinstance(reply.get("text"), str) or "error" in reply:
                 raise ChatError("Generation failed; chat closed.")
         except ChatError as error:
+            if isinstance(error, ChatRequestTooLarge):
+                print(str(error))
+                continue
             if str(error).startswith("Conversation exceeds"):
                 print(str(error))
                 continue
@@ -930,7 +971,7 @@ def main(argv=None):
     parser.add_argument("--worker", type=Path, default=Path("stark-generate"), help=argparse.SUPPRESS)
     parser.add_argument("--system", help="System message (default: model metadata)")
     parser.add_argument("--context-tokens", type=int, help="Context budget (default: loaded model's maximum)")
-    parser.add_argument("--max-new-tokens", type=int, default=512, help="Reply budget (default: 512)")
+    parser.add_argument("--max-new-tokens", type=int, help="Reply budget (default: all remaining context)")
     parser.add_argument("--thinking", action="store_true", help="Enable reasoning for templates that support it")
     mtp = parser.add_mutually_exclusive_group()
     mtp.add_argument(
@@ -942,7 +983,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if (
         (args.context_tokens is not None and args.context_tokens < 1)
-        or args.max_new_tokens < 1
+        or (args.max_new_tokens is not None and args.max_new_tokens < 1)
         or not 0 < args.timeout < float("inf")
     ):
         parser.error("token limits and timeout must be positive and finite")

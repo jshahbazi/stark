@@ -59,6 +59,7 @@ from .guided_models import (
 )
 from .hybrid_prepare import SOURCES as NATIVE_SOURCES
 from .hybrid_prepare import prepared_identity
+from .json_budget import check_json_structure
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
 from .model_inventory import model_display, model_tool_support
@@ -71,11 +72,12 @@ from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
+from .resource_budget import INPUT_BYTES, REQUEST_BUDGET_MIB, WIRE_BYTES
 from .sources import huggingface_repository
 from .tool_protocols import protocol_stop_ids
 from .vision_runtime import supported_image_family
 
-MAX_COMMAND_BYTES = 1024 * 1024
+MAX_COMMAND_BYTES = WIRE_BYTES
 MAX_PROGRESS_BYTES = 4096
 MAX_SUPPORT_BYTES = 65536
 MAX_CATALOG_BYTES = 256 * 1024
@@ -325,7 +327,7 @@ class Desktop:
         self.context = None
         # None tracks each loaded model's maximum; retain custom requests across clamps.
         self.context_override = None
-        self.maximum = 512
+        self.maximum = 0
         self.generation_estimates = GenerationEstimates()
         self.system_prompt = None
         self.thinking = False
@@ -341,7 +343,7 @@ class Desktop:
         self.api_queue_limit = 8
         self.api_queue_timeout = 30
         self.api_context = self.context_limit
-        self.api_maximum = 4096
+        self.api_maximum = self.output_limit
         self.api_vocab = 0
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.data_dir.chmod(0o700)
@@ -1939,7 +1941,13 @@ class Desktop:
                 self.active_model, self.active_mode = identifier, mode
                 self.vocab_size = ready["vocab_size"]
                 self.messages = []
-                self.emit("ready", epoch, model_id=identifier, mode=mode)
+                self.emit(
+                    "ready",
+                    epoch,
+                    model_id=identifier,
+                    mode=mode,
+                    resource_budget=self.resource_budget_summary(),
+                )
                 self.status("ready", "Ready", epoch)
             return
         if (
@@ -1958,12 +1966,13 @@ class Desktop:
             worker.streaming = ready.get("streaming") == "text-delta-v1"
             worker.stop_sequences = ready.get("stop_sequences") is True
             worker.mtp = mtp_capabilities(ready)
+            worker.max_new_tokens = ready.get("max_new_tokens", 0)
             self.codec, self.template = codec, template
             self.context_limit = ready["max_context_tokens"]
             # The worker uses this integer as its wire ceiling when the model
             # declares no finite maximum. It is not a trained model capacity.
             self.context_capacity_known = ready["max_context_tokens"] != 0xFFFFFFFF
-            self.output_limit = min(4096, ready["max_new_tokens"], self.context_limit - 1)
+            self.output_limit = min(ready["max_new_tokens"], self.context_limit - 1)
             self.context = min(guided_context or self.context_override or self.context_limit, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
             self.api_context = min(guided_context or self.context_limit, self.context_limit)
@@ -1988,6 +1997,7 @@ class Desktop:
         # Prompts stay in memory; acknowledgements contain limits and capabilities.
         capability, enabled = self.mtp_settings()
         return {
+            "resource_budget": self.resource_budget_summary(),
             "context_tokens": self.context,
             "api_context_tokens": self.api_context,
             "max_new_tokens": self.maximum,
@@ -2011,6 +2021,14 @@ class Desktop:
             ),
             "tools": bool(self.active_mode == "chat" and tool_parser_for(self.codec)),
             "tool_parser": tool_parser_for(self.codec) if self.active_mode == "chat" else None,
+        }
+
+    @staticmethod
+    def resource_budget_summary():
+        return {
+            "request_budget_mib": REQUEST_BUDGET_MIB,
+            "input_bytes": INPUT_BYTES,
+            "max_request_bytes": WIRE_BYTES,
         }
 
     def mtp_settings(self):
@@ -2077,7 +2095,7 @@ class Desktop:
                 or type(context) is not int
                 or not 2 <= context <= self.context_limit
                 or type(maximum) is not int
-                or not 1 <= maximum <= min(self.output_limit, context - 1)
+                or not 0 <= maximum <= min(self.output_limit, context - 1)
                 or (system is not None and not isinstance(system, str))
                 or type(thinking) is not bool
             ):
@@ -2165,6 +2183,10 @@ class Desktop:
             )
         except (MediaError, ChatImageError) as error:
             raise DesktopError(str(error)) from None
+        except APIError as error:
+            if error.code == "output_limit_required":
+                raise DesktopError(error.message) from None
+            raise
         with self.lock:
             if epoch != self.epoch:
                 return
@@ -2335,6 +2357,16 @@ class Desktop:
         count = tokens.get("token_count")
         if not isinstance(count, int):
             raise ValueError
+        if maximum in (None, 0):
+            if not context_capacity_known and context == 0xFFFFFFFF:
+                raise APIError(
+                    400,
+                    "This model has no finite context maximum. Set a finite conversation budget or output limit.",
+                    "output_limit_required",
+                )
+            maximum = min(getattr(worker, "max_new_tokens", self.output_limit), context - count)
+            if maximum < 1:
+                raise DesktopError("Conversation is full. Start a new conversation and try again.")
         if count + maximum > context:
             raise DesktopError("Conversation is full. Start a new conversation and try again.")
         token_ids = tokens.get("token_ids")
@@ -2574,6 +2606,7 @@ class Desktop:
             capability, enabled = self.mtp_settings()
             return {
                 "status": "ok",
+                "resource_budget": self.resource_budget_summary(),
                 "model_loaded": self.active_model is not None and self.active_mode == "chat",
                 "busy": self.job is not None,
                 "queued_requests": len(self.api_queue),
@@ -2652,6 +2685,12 @@ class Desktop:
                     400,
                     "This model's chat template has no supported tool parser. Run a model with tool support in Stark.",
                     "tools_unsupported",
+                )
+            if maximum is None and not self.context_capacity_known:
+                raise APIError(
+                    400,
+                    "This model has no finite context maximum. Specify max_tokens for this request.",
+                    "output_limit_required",
                 )
             rendered_tools = render_tools(request)
             validate_parser_tools(rendered_tools or [], parser)
@@ -2801,7 +2840,7 @@ class Desktop:
         except ChatRequestTooLarge:
             raise APIError(
                 400,
-                "Rendered request exceeds the worker size limit. Shorten the conversation.",
+                "Request exceeds Stark's resource budget. Shorten the conversation or request less output.",
                 "request_too_large",
             ) from None
         except DesktopError:
@@ -3026,6 +3065,7 @@ def serve(desktop):
             try:
                 if len(line) > MAX_COMMAND_BYTES:
                     raise DesktopError("App command is too large.")
+                check_json_structure(line)
                 if not desktop.dispatch(json.loads(line)):
                     return
             except DesktopError as error:

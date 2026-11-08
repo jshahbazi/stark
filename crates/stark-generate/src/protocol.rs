@@ -78,6 +78,8 @@ pub fn main() {
             staging,
             prefix_cache,
         } = arguments(std::env::args_os().skip(1))?;
+        // Validate operator resource policy before model loading allocates native state.
+        let _request_budget = stark_resource_budget::Budget::from_environment()?;
         #[cfg(feature = "metal")]
         {
             let cancellation = crate::cancel::CancelSignal::from_environment()?;

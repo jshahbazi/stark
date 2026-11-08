@@ -25,19 +25,19 @@ cargo build --release --locked -p stark-generate
 
 The client renders the converted model's chat template in a Jinja sandbox, keeps the conversation in memory, and sends the complete conversation to one worker for each turn. For eligible text models the worker reuses the prompt prefix shared with the previous turn ([prefix reuse](#prefix-reuse)); `/reset` starts a new reuse scope. Replies appear when generation completes; the client does not stream. Type one message per line. `/help` lists commands, `/reset` clears the history, and `/exit`, `/quit`, Ctrl-D or Ctrl-C quit. Conversation history stays in memory.
 
-When a backend has no declared finite context maximum, the CLI treats its unsigned 32-bit ceiling as a protocol range. It allocates native text context only for the rendered input plus requested output, while enforcing an explicit `--context-tokens` budget. Image chat requires a declared finite model context.
+When a backend has no declared finite context maximum, the CLI treats its unsigned 32-bit ceiling as a protocol range. It allocates native text context only for the rendered input plus explicitly requested output. Automatic output requires a finite conversation budget; pass `--context-tokens` or choose an explicit `--max-new-tokens` limit. Omitting both returns an actionable `output_limit_required` error without reserving the protocol ceiling. Image chat requires a declared finite model context.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--system TEXT` | model metadata | System message; the template decides how it is rendered |
 | `--image PATH` | none | Attach one local PNG or JPEG image; requires passing host image evidence |
 | `--context-tokens N` | loaded model's maximum context | Context budget for prompt plus reply |
-| `--max-new-tokens N` | 512 | Reply budget |
+| `--max-new-tokens N` | remaining finite context after tokenization | Explicit reply budget when supplied |
 | `--thinking` | off | Enable reasoning for templates that support `enable_thinking` |
 | `--mtp`, `--no-mtp` | off | Enable or disable exact MTP for this terminal session; enabling uses the loaded model's recommended draft count |
 | `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
 
-Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits, thinking and a supported-model MTP toggle through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)). The app defaults MTP on for supported models and remembers an explicit choice per model; the terminal session defaults off.
+Generation is greedy. By default, the client tokenizes each rendered prompt and uses the remaining finite context for output, stopping on EOS or another termination condition. An explicit reply budget that does not fit beside the rendered prompt is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits, thinking and a supported-model MTP toggle through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)). The app defaults MTP on for supported models and remembers an explicit choice per model; the terminal session defaults off.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
@@ -60,21 +60,30 @@ and there is no Python rendering fallback. The caller transfers only bounded
 JSON over private pipes and keeps the existing model-worker transaction
 serialized.
 
-The evaluator limits template source to 256 KiB, the JSON request to 2 MiB,
-rendered output to 1 MiB, source tokens to 16,384, VM fuel to 1,000,000 and
-runtime recursion to 128. Input collections, value depth and node counts are
-also bounded. A process-wide allocator rejects more than 16 MiB of cumulative
-requested heap allocations, including JSON parsing, compilation, intermediate
-values, captures, slices and output. Reallocation charges the full replacement
-size. This replaces the Python evaluator's estimated expansion/work budget with
-accounting of actual Rust allocation requests; it can reject expensive templates
-earlier. It does not measure resident memory, native stacks or allocator overhead.
+The evaluator limits template source to 256 KiB, source tokens to 16,384,
+VM fuel to 1,000,000 and runtime recursion to 128. Input collections, value
+depth and node counts are also bounded. Request and output sizes use the
+[automatic shared resource budget](WORKER_PROTOCOLS.md#resource-budget), selected
+from available RAM at startup with a 16–64 MiB logical content envelope. With
+logical budget `B`, the encoded request is limited to `6B + 2 MiB`, and rendered
+output to `B`: automatically 98–386 MiB and 16–64 MiB respectively. Hosts pin
+the selected budget for child helpers; `STARK_REQUEST_BUDGET_MIB` is a
+developer/operator override, with no app setting required.
+
+A process-wide allocator bounds live requests at `128 MiB + 8B` and cumulative
+requests at `32 MiB + 32B`: automatically 256–640 MiB and 544–2,080 MiB.
+Accounting includes
+JSON parsing, compilation, intermediate values, captures, slices and output.
+Reallocation charges the full replacement size. This counts actual Rust
+allocation requests; it does not measure resident memory, native stacks or
+allocator overhead.
 
 Each child has a hard 2-second CPU limit and disables core dumps and regular-file
 output. The parent enforces a 5-second wall deadline and samples RSS every 10 ms,
-terminating the child above 256 MiB. This RSS watchdog is not a kernel-enforced
-memory ceiling. Other POSIX systems additionally apply a 256 MiB address-space
-limit. Cancellation terminates and reaps the disposable child. Template source,
+terminating the child above the selected live-allocation budget. This RSS
+watchdog is not a kernel-enforced memory ceiling. Other POSIX
+systems additionally apply that budget as an address-space limit. Cancellation
+terminates and reaps the disposable child. Template source,
 inputs, rendered output and compiler diagnostics are never logged or persisted
 by the evaluator.
 
@@ -122,6 +131,9 @@ cargo +1.98.1 build --release --locked -p stark-template
 
 ## Private JSON-lines protocol
 
+The readiness example below uses the automatic 16 MiB floor; the effective
+budget may be larger on a machine with more available memory.
+
 Start the worker with `--model-path PATH`, where `PATH` is a converted model directory. The owning host may also pass `--vision-staging-root PATH` to enable the private media-reference transport and `--prefix-cache` to request [prefix reuse](#prefix-reuse). Models that contain a `speculator` directory are refused.
 
 ### Readiness
@@ -130,7 +142,7 @@ On success the first line is a readiness object. This example's vocabulary,
 context limit, EOS IDs and MTP support vary by loaded model:
 
 ```json
-{"ready":true,"engine":"stark","version":"0.1.0","mode":"text-generation-v1","operations":["tokenize","decode","generate"],"state_policy":"fresh-per-request","vocab_size":151936,"max_context_tokens":262144,"max_new_tokens":4096,"eos_token_ids":[151645,151643],"sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1","stop_sequences":true,"cancellation":"pipe-v1","mtp":{"supported":false,"max_drafts":0,"recommended_drafts":0,"default_drafts":0,"operations":[]}}
+{"ready":true,"engine":"stark","version":"0.1.0","mode":"text-generation-v1","operations":["tokenize","decode","generate"],"state_policy":"fresh-per-request","vocab_size":151936,"max_context_tokens":262144,"max_new_tokens":262143,"request_budget_bytes":16777216,"max_request_bytes":102760448,"eos_token_ids":[151645,151643],"sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1","stop_sequences":true,"cancellation":"pipe-v1","mtp":{"supported":false,"max_drafts":0,"recommended_drafts":0,"default_drafts":0,"operations":[]}}
 ```
 
 | Field | Meaning |
@@ -141,14 +153,15 @@ context limit, EOS IDs and MTP support vary by loaded model:
 | `prefix_cache` | Present only when the worker was started with `--prefix-cache`: `supported`, `enabled`, `chunk_tokens` (the reuse grid, a multiple of 1,024: 1,024 for converted models and native GLM-5.3, 4,096 for native mixed-precision Qwen3.8), `idle_seconds` (600) and the reuse `key`. When enabled, `operations` also lists `reset_cache` |
 | `vocab_size` | Upper bound for every token ID |
 | `max_context_tokens` | Loaded model's configured maximum context; no global 16,384-token cap. A backend with no finite maximum reports the protocol's unsigned 32-bit maximum. |
-| `max_new_tokens` | Fixed cap of 4,096 output tokens per request |
+| `max_new_tokens` | Model context capacity minus one, or the unsigned 32-bit protocol ceiling minus one when no finite context is declared; actual input still consumes context |
+| `request_budget_bytes`, `max_request_bytes` | Configured logical content budget and encoded request-line budget, including the newline; see [resource budget](WORKER_PROTOCOLS.md#resource-budget) |
 | `eos_token_ids` | Stop IDs from the model's generation metadata, always honoured |
 | `streaming`, `stop_sequences`, `cancellation` | Capability tags for the features below |
 | `mtp` | Loaded-model MTP support, recommended/maximum draft counts, supported operations and exact-sampling policy; see [MTP](#multi-token-prediction) |
 
-The configured context is a token admission boundary. Available memory and the 1 MiB request-line limit still apply; accepting a model's published maximum does not qualify full-length numerical accuracy or performance.
+The configured context is a token admission boundary. Available memory and the configurable content/frame budgets still apply; accepting a model's published maximum does not qualify full-length numerical accuracy or performance.
 
-An image-capable model adds an `image_input` object without changing `mode: "text-generation-v1"` or the 1 MiB line framing. Its `version` is `mediaref-v1`, its `transport` is `owner-private-file-v1`, and it lists the `prepare_image`, `generate_image` and `discard_image` operations. The object identifies artifact schema 2 or 3, family profile/version, source/revision, SHA-256 hashes for the weights, config, tokenizer, processor and template, and the actual Metal runtime identity. The host applies its [evidence checks](#image-qualification) before exposing image input. See the [readiness implementation](../crates/stark-generate/src/generation.rs).
+An image-capable model adds an `image_input` object without changing `mode: "text-generation-v1"` or the shared line-framing budget. Its `version` is `mediaref-v1`, its `transport` is `owner-private-file-v1`, and it lists the `prepare_image`, `generate_image` and `discard_image` operations. The object identifies artifact schema 2 or 3, family profile/version, source/revision, SHA-256 hashes for the weights, config, tokenizer, processor and template, and the actual Metal runtime identity. The host applies its [evidence checks](#image-qualification) before exposing image input. See the [readiness implementation](../crates/stark-generate/src/generation.rs).
 
 ### Prepared image operations
 
@@ -185,7 +198,7 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `rendered_prompt` | String, tokenized with `add_special_tokens=false`. Supply exactly one of this field or `input_token_ids`. |
 | `input_token_ids` | Non-empty array of token IDs below `vocab_size`. |
 | `context_tokens` | Required, 1 through `max_context_tokens`. The input must be strictly shorter than this value so at least one output slot remains. |
-| `max_new_tokens` | Required, 1 through 4,096. |
+| `max_new_tokens` | Required, positive and at most `context_tokens - 1`; there is no separate fixed output-token ceiling. The actual rendered input and requested output must fit the context. |
 | `seed` | Optional unsigned 64-bit integer, default 0. Only stochastic sampling uses it. |
 | `sampling` | Optional, default `{"mode":"greedy"}`. See [Sampling](#sampling). |
 | `mtp` | Optional boolean, default `false`. `true` uses this model's `recommended_drafts`; `false` disables MTP. Unsupported models reject `true` with `mtp_not_supported`. Applies to text `generate` only. |
@@ -207,7 +220,7 @@ The terminal reply:
 | `input_tokens` | Number of prompt token IDs used |
 | `output_tokens` | Length of `generated_token_ids` |
 | `sampled_tokens` | `output_tokens` plus one when a terminal stop token was consumed |
-| `finish_reason` | `eos`, `stop_token`, `stop_sequence`, `length` (output budget reached) or `context` (fewer output slots were available than `max_new_tokens`) |
+| `finish_reason` | `eos`, `stop_token`, `stop_sequence`, `length` (output budget reached) or `context` (context boundary reached) |
 | `stop_token_id` | The terminal stop token, otherwise `null` |
 | `generation_seconds` | Wall-clock time for state setup, generation, cleanup and decoding |
 | `prefill_seconds` | Time from state setup until the first sampled token |
@@ -446,9 +459,9 @@ Errors are replies of the form `{"error":CODE}`. Codes are fixed strings; see [e
 
 | Class | Codes |
 | --- | --- |
-| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input not shorter than `context_tokens`), `request_too_large` (line over 1 MiB; the rest of the line is discarded), `generation_cancelled`, `mtp_not_supported`, `images_not_supported`, `invalid_image_reference`, `image_read_failed`, `invalid_image_request`, `invalid_prepared_image`, `image_request_setup_failed` |
+| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input and requested output exceed `context_tokens`), `resource_budget_exceeded` (logical content or token storage exceeds the configured budget), `request_too_large` (line exceeds the configured frame budget; the rest of the line is discarded), `generation_cancelled`, `mtp_not_supported`, `images_not_supported`, `invalid_image_reference`, `image_read_failed`, `invalid_image_request`, `invalid_prepared_image`, `image_request_setup_failed` |
 | Fencing (error reply, then `{"ready":false,"error":"native_operation_failed"}` and exit 1) | `native_generation_failed`, `invalid_generation_output`, `invalid_tokenization_output`, `invalid_image_preparation_output`, `decoding_failed`, `cancel_channel_failed` |
-| Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `output_setup_failed`, `invalid_cancel_channel`, `invalid_vision_staging_root`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_backend_unavailable` (a build without the `metal` feature), `native_operation_failed` (panic during startup) |
+| Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `invalid_resource_budget`, `output_setup_failed`, `invalid_cancel_channel`, `invalid_vision_staging_root`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_backend_unavailable` (a build without the `metal` feature), `native_operation_failed` (panic during startup) |
 
 A write failure on the reply pipe also ends the process with exit status 1.
 
