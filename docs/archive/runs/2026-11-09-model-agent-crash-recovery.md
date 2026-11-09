@@ -19,7 +19,7 @@ text state. Completion is per artifact, configuration and backend.
 | Qwen BF16 0.8B | Corrected MTP0 dispatch; 34/34 image-loaded and 28/28 text-only lifecycle checks; headed/headless and text-only/image-loaded MTP0/3 short timing passes | Independent head hidden-feature numerical tolerance failed; trace the first divergence before any precision edit |
 | Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Corrected full MoE lifecycle matrix was stopped by a foreign worker before case zero; repeat in an exclusive slot |
 | Gemma | E2B G4AP-02 unchanged short oracle passes exactly; G4AP-03 compiles and six tiny CPU/Metal committed-row controls pass | Long chained oracle failed at the first 512-token case; batch/cache controls did not execute. Diagnose attention/readout before worker integration |
-| GLM | Bounded accounting source review; eight arithmetic controls and five live supervisor cleanup controls pass; source pushed as `b76f560d` | Fresh full native build owns the next slot; actual bounded image/text/cache/performance and source-head MTP remain open |
+| GLM | Fresh worker/helper and native engine builds pass at `b76f560d`; arithmetic and live supervisor cleanup controls pass | First short run stopped on host pageouts before text completion. One retry granted after a stable quiet interval, with identical source and limits; image/cache/performance/MTP remain open |
 
 The installed app was closed without implicitly reopening it. The coordinator
 verified no competing model/compiler/app processes, 95% free memory and zero
@@ -340,3 +340,42 @@ The test stopped before the batched/cache controls. Peak RSS was 10.74 GB with
 zero foreign workers and zero paging, so this was a numerical failure, not a
 resource stop. All model/reference processes closed; the exclusive slot passed
 to GLM's fresh native build while Gemma investigates source arithmetic.
+Failed oracle aggregate SHA-256:
+`145a3048826a2752e1e98fc99cd02db2561e5871541ce32b72b4f0d0624a9183`;
+process guard `b012759ba2133ab40156dad04d32678096cab5f9c92887b66a2ede150f019f61`;
+failed-gate seal `9f3cd5141d088789c9086cf0d8145fdcb29e1e7cce3aae0e2435c1b637129b13`.
+The new chained-oracle tool is separately sealed as
+`be71c7475d16adaba90c8a0842ebad2ed0653944b2ff53df71a6cf3bd63fe3dd`;
+the prior short oracle remains unchanged.
+
+### GLM bounded initial execution
+
+Fresh worker/helper and native engine builds passed at the unchanged
+`b76f560d` runtime source. Worker SHA-256:
+`c8e528dc017809edb9c717b55c6c2dce6533e34259a4175988e9c8d4aa506f3d`;
+helper `7d8f92e9552a9fd4e898113d674dd3ad235f423f7ce8a03d1ed03a2f6380164d`.
+The pre-execution checkpoint
+`runtime/glm-image-source-2026-11-09/bounded09-pre-execution-checkpoint.json`
+SHA-256 is `1ff4591950b3ec059560a9d9f2df0130fdd2c942e1aa44b9429533c6ef7b1ce4`.
+It binds the exact command, driver, fixed flags, supervisor and source/artifacts.
+
+The first short control stopped on the unchanged pageout-growth watchdog during
+the first text-only request, before any completion or image stage. Entry available
+memory was 107,748,147,200 bytes; minimum observed was 91,591,655,424. Peak worker
+RSS was 767,393,792 bytes, footprint 737,154,592 and host wired growth
+3,830,464,512. Compression growth and swap were zero. The owned worker was
+cancelled/terminated and reaped; its supervisor joined without kill escalation.
+This is a host-screen/resource-deferred result, not a model/image pass or failure.
+Receipt SHA-256:
+`062f1ae36caa6e5266f534f85e8a821610a69e7a49d54e7de32edc9c04bfb9f1`.
+
+A subsequent independent ten-second screen found no model/app/compiler
+processes, stable pageout counter 5,503, zero swapouts/swap and no compressor
+growth. Available memory stayed between 110.278 and 110.334 GB. The coordinator
+granted one same-source, same-limits short retry with a new receipt; another
+stop requires diagnosis rather than an automatic loop or relaxed limits.
+
+Use actual available-byte measurements for peak admission. The earlier
+`memory_pressure -Q` percentage is not interchangeable with psutil's available
+bytes and must not be multiplied by physical RAM to infer a budget. Full-resident
+GLM and ddalcu remain held pending their complete plans and measured headroom.
