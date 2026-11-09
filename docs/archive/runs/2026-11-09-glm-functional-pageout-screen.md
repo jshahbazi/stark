@@ -1,7 +1,9 @@
 # 20261109-GLMVIS-10: functional-only GLM VM screen
 
-State: separately versioned supervisor proposal with source and cheap CPU
-controls. No model run is authorized by this record. Predecessor:
+State: separately versioned functional-only supervisor with source/CPU and
+real-child cleanup controls. Independent parent review approved one conditional
+short run after the queued Qwen and Gemma slots; no new model run has started.
+This record alone does not release the resource slot. Predecessor:
 [GLMVIS-09](2026-11-09-glm-bounded-image-execution.md).
 
 ## Problem and source evidence
@@ -96,8 +98,17 @@ and helper `7d8f92e9552a9fd4e898113d674dd3ad235f423f7ce8a03d1ed03a2f6380164d`.
 The new driver SHA256 is
 `e6b1ef48893df7613bdf54ceb90f8bec3086f5bc53efae3d9cea6f456da99fd4`.
 
-After independent supervisor review and an
-explicit serialized resource grant, the only proposed model sequence remains
+The parent independently reviewed the immutable supervisor diff and source,
+then accepted the exact-source five-child smoke. The private pre-execution
+checkpoint is
+`8ee39e269a5ce3bb09f4411f5319c146115ffbff46772b8b635768b7a1a867af`.
+It verifies all 1,262 build-source files and binds the exact next command,
+driver, supervisor, worker/helper, artifact manifest, fixed environment, prior
+failed receipts and remaining gate. The gate requires the queued slot release
+and a fresh available-memory/swap/foreign-model/Metal/owned-compiler screen.
+One attempt is allowed; a hard violation ends the grant without a retry.
+
+After that resource gate, the only authorized model sequence remains
 text-only eight tokens, image-loaded text eight tokens with exact output-hash
 agreement, an actual PNG request with one output token and zero MTP, then
 eight-token text recovery with the original output hash. Use
