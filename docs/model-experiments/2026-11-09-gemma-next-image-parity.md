@@ -1092,7 +1092,7 @@ hash, with actual MTP3 acceptance 34 of 85 per request and 63 committed target
 rows. The quick comparison remains **ineligible**: some boundary CPU samples
 exceed the unchanged 200% other-process ceiling, and the watcher reports
 unavailable process telemetry during intentional shutdown after 157 positive
-samples. Both workers' drain/join ownership predicates remain recorded; no
+samples. Its worker's drain/join ownership predicates remain recorded; no
 image timing arm runs. This receipt remains invalid for timing qualification:
 `384446c957b390ca2ab2d8eeb4f92ec4af00f534d310df5a099708389f026dee`.
 
@@ -1108,3 +1108,45 @@ supervisor, peak RSS 10,396,139,520 bytes, footprint 10,680,574,304 bytes and ze
 paging, swap or compressor growth. All owned workers and compilers close before
 handoff. Matching timing and the previously stated default-context/provisioning
 gates remain open; no acceleration or default enablement is claimed.
+
+### Prospective shutdown fix and one provisional comparison
+
+The private guardian's intentional shutdown race is corrected prospectively:
+only after an owned close is marked and a positive live sample exists may
+unavailable process telemetry end sampling. The observed host sample still
+checks every existing host cap before that branch; bounded owned drain, joined
+supervisor and final host/deadline checks remain required. Live-request or
+zero-positive-sample telemetry loss stays fatal. Eleven focused CPU controls
+pass, including transient host growth during closing that recovers before the
+final sample. Guard source is
+`b91beff561931e5a2744d4d6faf36e1f7280a755123d4dcdf1eacf139db769a2`,
+control receipt
+`92ea37b97784267399e3a456079e14c1cc95ebb56ba267a71e38cb1c30418d5e`.
+Earlier invalid timing receipts remain invalid.
+
+One new paired comparison completes with one worker per loading arm, one warm
+and six measured 64-token requests per MTP mode, identical prompt/context/seed,
+and no prefix reuse. All 28 output hashes match across loading arms and MTP0/3;
+both final guardians pass with zero paging, swap or compressor growth. The
+text-only measured rows exceed the unchanged 200% other-process CPU ceiling;
+the image-loaded rows meet it. All six rows per arm/mode are retained. These
+are provisional observed medians with no formal parity pass or widened bound:
+
+| Mode | Tower disabled | Images resident | Observed loading delta |
+| --- | ---: | ---: | ---: |
+| MTP0 | 93.89 tok/s | 95.26 tok/s | +1.46% |
+| MTP3, serial target | 62.44 tok/s | 65.76 tok/s | +5.33% |
+
+MTP3 is slower than MTP0 by 33.50% in the text arm and 30.97% with images
+resident; wall latency rises 46.76% and 41.43%, respectively. Each arm's six
+measured MTP3 requests actually accept 204 of 510 proposals. This is supported
+staged execution, not acceleration. Startup is excluded from these comparisons.
+Receipt SHA-256:
+`16cc1fe76d3a9a509888aeac4e5c6e39eceb1a577b059dd7f0f0feb634a18de5`;
+benchmark source
+`24ccbc977c1eae38983c4fd838d428b3f2d500bcb16283dd7ea03ec99c8f87c5`,
+preregistration
+`93140aa5569c8752127d4e1e696432a937828e09a51a1b315d98225151c50366`.
+All owned workers close before handoff; no further timing retries are planned.
+Normal default-context admission and automatic sidecar provisioning remain
+delivery work, separate from this provisional comparison.
