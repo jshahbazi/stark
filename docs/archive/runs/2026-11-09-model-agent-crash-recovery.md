@@ -296,3 +296,10 @@ This prepares safe bounded execution; it is not a full-model execution result.
 Qwen explicitly released its model/build slot to continue CPU-only numerical
 diagnosis. Gemma owns the next exclusive native build slot for its longer-context
 and transactional batched-verification candidate. GLM's native build follows.
+
+The idle app relaunch was subsequently traced to the computer-use service:
+the coordinator's post-Quit app-state query reopened the application. It was
+closed again using normal Quit and verified through inventory/process checks
+without another app-target query. No model/app process remained. This is not
+evidence of a Stark self-relaunch mechanism. Future post-Quit verification must
+avoid app APIs that implicitly open the selected application.
