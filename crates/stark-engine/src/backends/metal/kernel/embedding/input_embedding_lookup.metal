@@ -34,6 +34,7 @@ PUBLIC KERNEL(InputEmbeddingLookup)(
     const stark::quantization::QuantizationMode quantization_mode SPECIALIZE_IF(table_kind == EmbeddingTableKind::Quantized),
     const QuantizationMethod quantization_method SPECIALIZE_IF(table_kind == EmbeddingTableKind::Quantized),
     const bool use_hadamard SPECIALIZE,
+    const bool materialize_dequant SPECIALIZE,
     const uint dim_idx AXIS(model_dim, 256),
     const uint batch_idx AXIS(batch_size, 1)
 ) {
@@ -72,7 +73,8 @@ PUBLIC KERNEL(InputEmbeddingLookup)(
     } else {
       bias = -scale * (is_u4 ? 8.0f : 128.0f);
     }
-    loaded = float(T((scale * code + bias) * input_scale));
+    const float dequantized = scale * code + bias;
+    loaded = materialize_dequant ? float(T(dequantized) * T(input_scale)) : float(T(dequantized * input_scale));
   } else {
     const uint ladder_index = read_packed<4>(
         ladder_indices,

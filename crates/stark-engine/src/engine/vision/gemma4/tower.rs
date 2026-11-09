@@ -1,0 +1,528 @@
+//! Gemma 4 E2B/E4B native BF16 image encoder and soft-token projector.
+//!
+//! Equations/layout independently implemented from Google's Apache-2.0 Gemma 4
+//! checkpoint and MIT MLX-VLM 53ebd1647cb83549b482a031ea70ba9d9ea60a04.
+
+use half::bf16;
+
+use super::{super::tower::VisionTowerError, flash::FlashAttention};
+use crate::{
+    backends::common::{
+        Backend, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
+        kernel::{
+            AttentionSinglePassKernel, Gemma4VisionClampBF16Kernel, Gemma4VisionNormBF16Kernel,
+            Gemma4VisionPoolBF16Kernel, Gemma4VisionPoolStandardizedBF16Kernel, Gemma4VisionPrepareBF16Kernel,
+            Gemma4VisionPreparePaddedBF16Kernel, Gemma4VisionProductBF16Kernel, Gemma4VisionUnpadBF16Kernel,
+            TensorAddScaleKernel, VisionCastBF16Kernel, VisionGeluBF16Kernel, VisionMatmulBF16Kernel,
+        },
+    },
+    data_type::DataType,
+    parameters::ParameterTree,
+};
+
+const POSITIONS: u32 = 10240;
+
+pub(super) struct Linear<B: Backend> {
+    matrix: <B::Kernels as Kernels>::VisionMatmulBF16Kernel,
+    cast: <B::Kernels as Kernels>::VisionCastBF16Kernel,
+    clamp: <B::Kernels as Kernels>::Gemma4VisionClampBF16Kernel,
+    weights: B::GlobalBuffer,
+    input: u32,
+    output: u32,
+    clip: Option<[f32; 4]>,
+}
+
+impl<B: Backend> Linear<B> {
+    pub(super) fn new(
+        context: &B::Context,
+        tree: &ParameterTree<B>,
+        input: u32,
+        output: u32,
+        clipped: bool,
+    ) -> Result<Self, VisionTowerError<B>> {
+        let (weights, clip) = if clipped {
+            let mut clip = [0.0; 4];
+            for (i, name) in ["input_min", "input_max", "output_min", "output_max"].iter().enumerate() {
+                let values = tree.leaf(name)?.validate(&[], DataType::BF16)?.read_slice::<bf16>()?;
+                if values.len() != 1 || values[0].is_nan() {
+                    return Err(InvalidInput("invalid Gemma vision clipping scalar").into());
+                }
+                clip[i] = values[0].to_f32();
+            }
+            if clip[0] > clip[1] || clip[2] > clip[3] {
+                return Err(InvalidInput("unordered Gemma vision clipping bounds").into());
+            }
+            (tree.leaf("linear.weight")?.validate(&[output, input], DataType::BF16)?.read_buffer()?, Some(clip))
+        } else {
+            (tree.leaf("weight")?.validate(&[output, input], DataType::BF16)?.read_buffer()?, None)
+        };
+        Ok(Self {
+            matrix: <B::Kernels as Kernels>::VisionMatmulBF16Kernel::new(context).map_err(VisionTowerError::Backend)?,
+            cast: <B::Kernels as Kernels>::VisionCastBF16Kernel::new(context).map_err(VisionTowerError::Backend)?,
+            clamp: <B::Kernels as Kernels>::Gemma4VisionClampBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
+            weights,
+            input,
+            output,
+            clip,
+        })
+    }
+
+    pub(super) fn encode(
+        &self,
+        input: &B::ScratchBuffer,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        let clamped = if let Some(clip) = self.clip {
+            let mut values = commands.allocate_scratch_for_shape(&[rows, self.input], DataType::BF16)?;
+            self.clamp.encode(input, &mut values, rows * self.input, clip[0], clip[1], commands);
+            Some(values)
+        } else {
+            None
+        };
+        let input = clamped.as_ref().unwrap_or(input);
+        let mut full = commands.allocate_scratch_for_shape(&[rows, self.output], DataType::F32)?;
+        self.matrix.encode(input, &self.weights, &mut full, rows, self.output, self.input, self.input, 1, 32, commands);
+        let mut result = commands.allocate_scratch_for_shape(&[rows, self.output], DataType::BF16)?;
+        self.cast.encode(&full, &mut result, rows * self.output, commands);
+        if let Some(clip) = self.clip {
+            let mut clipped = commands.allocate_scratch_for_shape(&[rows, self.output], DataType::BF16)?;
+            self.clamp.encode(&result, &mut clipped, rows * self.output, clip[2], clip[3], commands);
+            Ok(clipped)
+        } else {
+            Ok(result)
+        }
+    }
+}
+
+struct Norm<B: Backend> {
+    kernel: <B::Kernels as Kernels>::Gemma4VisionNormBF16Kernel,
+    scales: B::GlobalBuffer,
+    width: u32,
+}
+
+impl<B: Backend> Norm<B> {
+    fn new(
+        context: &B::Context,
+        tree: &ParameterTree<B>,
+        width: u32,
+    ) -> Result<Self, VisionTowerError<B>> {
+        Ok(Self {
+            kernel: <B::Kernels as Kernels>::Gemma4VisionNormBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
+            scales: tree.leaf("weight")?.validate(&[width], DataType::BF16)?.read_buffer()?,
+            width,
+        })
+    }
+    fn encode(
+        &self,
+        input: &B::ScratchBuffer,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        let mut output = commands.allocate_scratch_for_shape(&[rows, self.width], DataType::BF16)?;
+        self.kernel.encode(input, &self.scales, &mut output, rows, self.width, 1e-6, 1, commands);
+        Ok(output)
+    }
+}
+
+struct Block<B: Backend> {
+    input_norm: Norm<B>,
+    post_attention: Norm<B>,
+    pre_ff: Norm<B>,
+    post_ff: Norm<B>,
+    q: Linear<B>,
+    k: Linear<B>,
+    v: Linear<B>,
+    o: Linear<B>,
+    q_norm: Norm<B>,
+    k_norm: Norm<B>,
+    gate: Linear<B>,
+    up: Linear<B>,
+    down: Linear<B>,
+}
+
+pub(crate) struct Gemma4VisionTower<B: Backend> {
+    width: u32,
+    heads: u32,
+    head_dim: u32,
+    mlp: u32,
+    padded_dim: u32,
+    standardization: Option<(B::GlobalBuffer, B::GlobalBuffer)>,
+    prepare_padded: <B::Kernels as Kernels>::Gemma4VisionPreparePaddedBF16Kernel,
+    unpad: <B::Kernels as Kernels>::Gemma4VisionUnpadBF16Kernel,
+    pool_standardized: <B::Kernels as Kernels>::Gemma4VisionPoolStandardizedBF16Kernel,
+    patch: Linear<B>,
+    positions: Box<[bf16]>,
+    blocks: Box<[Block<B>]>,
+    projector: Linear<B>,
+    norm: <B::Kernels as Kernels>::Gemma4VisionNormBF16Kernel,
+    prepare: <B::Kernels as Kernels>::Gemma4VisionPrepareBF16Kernel,
+    pool: <B::Kernels as Kernels>::Gemma4VisionPoolBF16Kernel,
+    product: <B::Kernels as Kernels>::Gemma4VisionProductBF16Kernel,
+    add: <B::Kernels as Kernels>::TensorAddScaleKernel,
+    gelu: <B::Kernels as Kernels>::VisionGeluBF16Kernel,
+    attention: <B::Kernels as Kernels>::AttentionSinglePassKernel,
+    source_attention: Option<FlashAttention<B>>,
+}
+
+impl<B: Backend> Gemma4VisionTower<B> {
+    pub(crate) fn new(
+        context: &B::Context,
+        tree: &ParameterTree<B>,
+        model_dim: u32,
+    ) -> Result<Self, VisionTowerError<B>> {
+        if !matches!(model_dim, 1536 | 2560 | 2816 | 5376) {
+            return Err(InvalidInput("unsupported Gemma vision projection width").into());
+        }
+        let (width, heads, head_dim, mlp, depth) = if matches!(model_dim, 2816 | 5376) {
+            (1152, 16, 72, 4304, 27)
+        } else {
+            (768, 12, 64, 3072, 16)
+        };
+        let padded_dim = if head_dim == 72 {
+            128
+        } else {
+            head_dim
+        };
+        let standardization = if matches!(model_dim, 2816 | 5376) {
+            Some((
+                tree.leaf("std_bias")?.validate(&[width], DataType::BF16)?.read_buffer()?,
+                tree.leaf("std_scale")?.validate(&[width], DataType::BF16)?.read_buffer()?,
+            ))
+        } else {
+            None
+        };
+        let mut blocks = Vec::with_capacity(depth);
+        for i in 0..depth {
+            let t = tree.subtree(&format!("encoder.layers.{i}"));
+            let linear = |name, input, output| {
+                Linear::new(context, &t.subtree(name), input, output, !matches!(model_dim, 2816 | 5376))
+            };
+            blocks.push(Block {
+                input_norm: Norm::new(context, &t.subtree("input_layernorm"), width)?,
+                post_attention: Norm::new(context, &t.subtree("post_attention_layernorm"), width)?,
+                pre_ff: Norm::new(context, &t.subtree("pre_feedforward_layernorm"), width)?,
+                post_ff: Norm::new(context, &t.subtree("post_feedforward_layernorm"), width)?,
+                q: linear("self_attn.q_proj", width, width)?,
+                k: linear("self_attn.k_proj", width, width)?,
+                v: linear("self_attn.v_proj", width, width)?,
+                o: linear("self_attn.o_proj", width, width)?,
+                q_norm: Norm::new(context, &t.subtree("self_attn.q_norm"), head_dim)?,
+                k_norm: Norm::new(context, &t.subtree("self_attn.k_norm"), head_dim)?,
+                gate: linear("mlp.gate_proj", width, mlp)?,
+                up: linear("mlp.up_proj", width, mlp)?,
+                down: linear("mlp.down_proj", mlp, width)?,
+            });
+        }
+        let positions = tree
+            .leaf("patch_embedder.position_embedding_table")?
+            .validate(&[2, POSITIONS, width], DataType::BF16)?
+            .read_slice::<bf16>()?;
+        if positions.iter().any(|value| !value.is_finite()) {
+            return Err(InvalidInput("nonfinite Gemma learned image positions").into());
+        }
+        Ok(Self {
+            width,
+            heads,
+            head_dim,
+            mlp,
+            padded_dim,
+            standardization,
+            source_attention: if matches!(model_dim, 2816 | 5376) {
+                Some(FlashAttention::new(context).map_err(VisionTowerError::Backend)?)
+            } else {
+                None
+            },
+            prepare_padded: <B::Kernels as Kernels>::Gemma4VisionPreparePaddedBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
+            unpad: <B::Kernels as Kernels>::Gemma4VisionUnpadBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
+            pool_standardized: <B::Kernels as Kernels>::Gemma4VisionPoolStandardizedBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
+            patch: Linear::new(context, &tree.subtree("patch_embedder.input_proj"), 768, width, false)?,
+            positions,
+            blocks: blocks.into_boxed_slice(),
+            projector: Linear::new(
+                context,
+                &tree.subtree("embed_vision.embedding_projection"),
+                width,
+                model_dim,
+                false,
+            )?,
+            norm: <B::Kernels as Kernels>::Gemma4VisionNormBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
+            prepare: <B::Kernels as Kernels>::Gemma4VisionPrepareBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
+            pool: <B::Kernels as Kernels>::Gemma4VisionPoolBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
+            product: <B::Kernels as Kernels>::Gemma4VisionProductBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
+            add: <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, DataType::BF16, true)
+                .map_err(VisionTowerError::Backend)?,
+            gelu: <B::Kernels as Kernels>::VisionGeluBF16Kernel::new(context).map_err(VisionTowerError::Backend)?,
+            attention: <B::Kernels as Kernels>::AttentionSinglePassKernel::new(
+                context,
+                DataType::BF16,
+                padded_dim,
+                false,
+                false,
+                false,
+                false,
+                false,
+            )
+            .map_err(VisionTowerError::Backend)?,
+        })
+    }
+
+    fn attention(
+        &self,
+        q: &B::ScratchBuffer,
+        k: &B::ScratchBuffer,
+        v: &B::ScratchBuffer,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        if let Some(attention) = &self.source_attention {
+            return attention.encode(q, k, v, rows, rows, self.heads, commands);
+        }
+        let mut output = commands.allocate_scratch_for_shape(&[rows, self.heads * self.padded_dim], DataType::BF16)?;
+        // Reuse the native online-softmax kernel: no quadratic score storage
+        // and no intermediate BF16 probability materialization.
+        self.attention.encode(
+            q,
+            k,
+            v,
+            &mut output,
+            1,
+            rows,
+            self.padded_dim,
+            self.heads * self.padded_dim,
+            self.padded_dim,
+            self.heads * self.padded_dim,
+            None,
+            1.0,
+            None::<&B::ScratchBuffer>,
+            None,
+            None::<&B::ScratchBuffer>,
+            self.heads,
+            rows,
+            commands,
+        );
+        if self.head_dim != self.padded_dim {
+            let mut unpadded = commands.allocate_scratch_for_shape(&[rows, self.width], DataType::BF16)?;
+            self.unpad.encode(&output, &mut unpadded, rows * self.width, self.head_dim, self.padded_dim, commands);
+            Ok(unpadded)
+        } else {
+            Ok(output)
+        }
+    }
+
+    pub(crate) fn encode(
+        &self,
+        patches: &[bf16],
+        grid: [u32; 3],
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, VisionTowerError<B>> {
+        self.encode_with_observer(patches, grid, commands, &mut |_, _, _, _| Ok(()))
+    }
+
+    pub(crate) fn encode_with_observer<F>(
+        &self,
+        patches: &[bf16],
+        grid: [u32; 3],
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        observer: &mut F,
+    ) -> Result<B::ScratchBuffer, VisionTowerError<B>>
+    where
+        F: FnMut(
+            &'static str,
+            Option<u32>,
+            &B::ScratchBuffer,
+            &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        ) -> Result<(), B::Error>,
+    {
+        let [temporal, height, width] = grid;
+        let rows = height
+            .checked_mul(width)
+            .filter(|rows| *rows > 0 && *rows <= 2520)
+            .ok_or(InvalidInput("Gemma image patch budget exceeded"))?;
+        if temporal != 1
+            || !height.is_multiple_of(3)
+            || !width.is_multiple_of(3)
+            || height >= POSITIONS
+            || width >= POSITIONS
+            || patches.len() != (rows * 768) as usize
+            || patches.iter().any(|value| !value.is_finite())
+        {
+            return Err(InvalidInput("invalid Gemma image patches").into());
+        }
+        let source = commands.allocate_constant_from_slice(patches).map_err(VisionTowerError::Backend)?;
+        let mut uploaded =
+            commands.allocate_scratch_for_shape(&[rows, 768], DataType::BF16).map_err(VisionTowerError::Backend)?;
+        commands.encode_copy(&source, &mut uploaded);
+        let mut hidden = self.patch.encode(&uploaded, rows, commands).map_err(VisionTowerError::Backend)?;
+        observer("patch_projection", None, &hidden, commands).map_err(VisionTowerError::Backend)?;
+        let mut positions = Vec::with_capacity((rows * self.width) as usize);
+        let mut cos = Vec::with_capacity((rows * self.head_dim) as usize);
+        let mut sin = Vec::with_capacity((rows * self.head_dim) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                for channel in 0..self.width {
+                    positions.push(bf16::from_f32(
+                        self.positions[(x * self.width + channel) as usize].to_f32()
+                            + self.positions[((POSITIONS + y) * self.width + channel) as usize].to_f32(),
+                    ));
+                }
+                for coordinate in [x, y] {
+                    for channel in 0..self.head_dim / 2 {
+                        let pair = channel % (self.head_dim / 4);
+                        let angle = coordinate as f32 / 100f32.powf((2 * pair) as f32 / (self.head_dim / 2) as f32);
+                        cos.push(bf16::from_f32(angle.cos()));
+                        sin.push(bf16::from_f32(angle.sin()));
+                    }
+                }
+            }
+        }
+        let positions = commands.allocate_constant_from_slice(&positions).map_err(VisionTowerError::Backend)?;
+        let cos = commands.allocate_constant_from_slice(&cos).map_err(VisionTowerError::Backend)?;
+        let sin = commands.allocate_constant_from_slice(&sin).map_err(VisionTowerError::Backend)?;
+        self.add.encode(
+            None::<&B::ScratchBuffer>,
+            &positions,
+            &mut hidden,
+            rows * self.width,
+            rows * self.width,
+            1.0,
+            commands,
+        );
+        observer("patch_positions", None, &hidden, commands).map_err(VisionTowerError::Backend)?;
+        let one = commands
+            .allocate_constant_from_slice(&vec![bf16::ONE; self.width as usize])
+            .map_err(VisionTowerError::Backend)?;
+        for (layer, block) in self.blocks.iter().enumerate() {
+            let normalized = block.input_norm.encode(&hidden, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("input_norm", Some(layer as u32), &normalized, commands).map_err(VisionTowerError::Backend)?;
+            let q = block.q.encode(&normalized, rows, commands).map_err(VisionTowerError::Backend)?;
+            let k = block.k.encode(&normalized, rows, commands).map_err(VisionTowerError::Backend)?;
+            let v = block.v.encode(&normalized, rows, commands).map_err(VisionTowerError::Backend)?;
+            for (tag, value) in [("q_raw", &q), ("k_raw", &k), ("v_raw", &v)] {
+                observer(tag, Some(layer as u32), value, commands).map_err(VisionTowerError::Backend)?;
+            }
+            let q = block.q_norm.encode(&q, rows * self.heads, commands).map_err(VisionTowerError::Backend)?;
+            let k = block.k_norm.encode(&k, rows * self.heads, commands).map_err(VisionTowerError::Backend)?;
+            let mut normalized_v = commands
+                .allocate_scratch_for_shape(&[rows, self.width], DataType::BF16)
+                .map_err(VisionTowerError::Backend)?;
+            self.norm.encode(&v, &one, &mut normalized_v, rows * self.heads, self.head_dim, 1e-6, 0, commands);
+            for (tag, value) in [("q_norm", &q), ("k_norm", &k), ("v_norm", &normalized_v)] {
+                observer(tag, Some(layer as u32), value, commands).map_err(VisionTowerError::Backend)?;
+            }
+            let mut queries = commands
+                .allocate_scratch_for_shape(&[self.heads, rows, self.padded_dim], DataType::BF16)
+                .map_err(VisionTowerError::Backend)?;
+            let mut keys = commands
+                .allocate_scratch_for_shape(&[rows, self.heads * self.padded_dim], DataType::BF16)
+                .map_err(VisionTowerError::Backend)?;
+            let mut values = commands
+                .allocate_scratch_for_shape(&[rows, self.heads * self.padded_dim], DataType::BF16)
+                .map_err(VisionTowerError::Backend)?;
+            if self.padded_dim != self.head_dim {
+                self.prepare_padded.encode(
+                    &q,
+                    &k,
+                    &normalized_v,
+                    &mut queries,
+                    &mut keys,
+                    &mut values,
+                    &cos,
+                    &sin,
+                    rows,
+                    self.heads,
+                    self.head_dim,
+                    self.padded_dim,
+                    commands,
+                );
+            } else {
+                self.prepare.encode(
+                    &q,
+                    &k,
+                    &normalized_v,
+                    &mut queries,
+                    &mut keys,
+                    &mut values,
+                    &cos,
+                    &sin,
+                    rows,
+                    self.heads,
+                    self.head_dim,
+                    commands,
+                );
+            }
+            for (tag, value) in [("prepared_queries", &queries), ("prepared_keys", &keys), ("prepared_values", &values)]
+            {
+                observer(tag, Some(layer as u32), value, commands).map_err(VisionTowerError::Backend)?;
+            }
+            let attention =
+                self.attention(&queries, &keys, &values, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("attention", Some(layer as u32), &attention, commands).map_err(VisionTowerError::Backend)?;
+            let projected = block.o.encode(&attention, rows, commands).map_err(VisionTowerError::Backend)?;
+            let residual =
+                block.post_attention.encode(&projected, rows, commands).map_err(VisionTowerError::Backend)?;
+            self.add.encode(
+                None::<&B::ScratchBuffer>,
+                &residual,
+                &mut hidden,
+                rows * self.width,
+                rows * self.width,
+                1.0,
+                commands,
+            );
+            let normalized = block.pre_ff.encode(&hidden, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("pre_ff_norm", Some(layer as u32), &normalized, commands).map_err(VisionTowerError::Backend)?;
+            let mut gate = block.gate.encode(&normalized, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("gate_pre_gelu", Some(layer as u32), &gate, commands).map_err(VisionTowerError::Backend)?;
+            let up = block.up.encode(&normalized, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("up_projection", Some(layer as u32), &up, commands).map_err(VisionTowerError::Backend)?;
+            self.gelu.encode(&mut gate, rows * self.mlp, 1, commands);
+            observer("gate_post_gelu", Some(layer as u32), &gate, commands).map_err(VisionTowerError::Backend)?;
+            let mut product = commands
+                .allocate_scratch_for_shape(&[rows, self.mlp], DataType::BF16)
+                .map_err(VisionTowerError::Backend)?;
+            self.product.encode(&gate, &up, &mut product, rows * self.mlp, commands);
+            observer("mlp_product", Some(layer as u32), &product, commands).map_err(VisionTowerError::Backend)?;
+            observer("mlp_down_input", Some(layer as u32), &product, commands).map_err(VisionTowerError::Backend)?;
+            let down = block.down.encode(&product, rows, commands).map_err(VisionTowerError::Backend)?;
+            observer("mlp_down_output", Some(layer as u32), &down, commands).map_err(VisionTowerError::Backend)?;
+            let residual = block.post_ff.encode(&down, rows, commands).map_err(VisionTowerError::Backend)?;
+            self.add.encode(
+                None::<&B::ScratchBuffer>,
+                &residual,
+                &mut hidden,
+                rows * self.width,
+                rows * self.width,
+                1.0,
+                commands,
+            );
+            observer("block", Some(layer as u32), &hidden, commands).map_err(VisionTowerError::Backend)?;
+        }
+        observer("encoder_final", None, &hidden, commands).map_err(VisionTowerError::Backend)?;
+        let output_rows = rows / 9;
+        let mut pooled = commands
+            .allocate_scratch_for_shape(&[output_rows, self.width], DataType::BF16)
+            .map_err(VisionTowerError::Backend)?;
+        if let Some((bias, scale)) = &self.standardization {
+            self.pool_standardized.encode(&hidden, bias, scale, &mut pooled, width, height, self.width, commands);
+        } else {
+            self.pool.encode(&hidden, &mut pooled, width, height, self.width, commands);
+        }
+        observer("standardized", None, &pooled, commands).map_err(VisionTowerError::Backend)?;
+        let mut normalized = commands
+            .allocate_scratch_for_shape(&[output_rows, self.width], DataType::BF16)
+            .map_err(VisionTowerError::Backend)?;
+        self.norm.encode(&pooled, &one, &mut normalized, output_rows, self.width, 1e-6, 0, commands);
+        observer("projector_input", None, &normalized, commands).map_err(VisionTowerError::Backend)?;
+        self.projector.encode(&normalized, output_rows, commands).map_err(VisionTowerError::Backend)
+    }
+}

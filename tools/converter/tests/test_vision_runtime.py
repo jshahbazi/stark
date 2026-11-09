@@ -42,6 +42,42 @@ def contract(**overrides):
     return value
 
 
+def test_gemma3_capabilities_bind_schema_and_fixed_siglip_geometry():
+    value = contract(
+        artifact_schema_version=5,
+        model_source="google/gemma-3-4b-it",
+        model_revision="093f9f388b31de276ce2de164bdc2081324b9767",
+        family_profile="gemma3-siglip-bf16-v1",
+        family_version=1,
+        max_processed_pixels=802816,
+        max_patches=4096,
+        max_image_tokens=256,
+    )
+    assert vision_runtime.image_input_contract(value) == value
+    for change in (
+        {"artifact_schema_version": 3},
+        {"family_profile": vision_runtime.CONFIGURED_FAMILY_PROFILE},
+        {"max_image_tokens": 1024},
+        {"max_processed_pixels": 1048576},
+        {"max_patches": 1024},
+        {"family_version": True},
+    ):
+        assert vision_runtime.image_input_contract({**value, **change}) is None
+
+
+def test_gemma3_stored_family_cannot_migrate_to_another_root_or_schema():
+    family = {"profile": "gemma3-siglip-bf16-v1", "version": 1}
+    config = {"type": "Gemma3VisionLanguageModelConfig", "artifact_contract": {"schema_version": 5, "family": family}}
+    assert vision_runtime.artifact_image_family(config) == family
+    assert vision_runtime.supported_vision_schema(config["type"], 5)
+    assert not vision_runtime.supported_vision_schema(config["type"], True)
+    assert vision_runtime.artifact_image_family({**config, "type": "Qwen35VisionLanguageModelConfig"}) is None
+    assert (
+        vision_runtime.artifact_image_family({**config, "artifact_contract": {"schema_version": 3, "family": family}})
+        is None
+    )
+
+
 class Resource:
     def __init__(self, text):
         self.text = text

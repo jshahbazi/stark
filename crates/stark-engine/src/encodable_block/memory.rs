@@ -25,6 +25,26 @@ pub fn checked_bytes(
         .filter(|&size| size <= isize::MAX as usize)
 }
 
+/// Sparse finite caches reserve address space for the selected context, but
+/// only commit rows reached by this request. Dense and undeclared contexts
+/// continue to admit their entire selected allocation.
+pub fn generation_allocation_context(
+    input_tokens: u32,
+    context_tokens: u32,
+    max_new_tokens: u32,
+    sparse_finite_context: bool,
+) -> Option<u32> {
+    let requested = input_tokens.checked_add(max_new_tokens)?;
+    if input_tokens == 0 || max_new_tokens == 0 || requested > context_tokens {
+        return None;
+    }
+    Some(if sparse_finite_context {
+        requested
+    } else {
+        context_tokens
+    })
+}
+
 pub fn attention_estimate(
     context_tokens: u32,
     input_tokens: u32,
@@ -76,6 +96,27 @@ pub fn attention_estimate(
     let mut result = scratch(prefill_rows, prefill_sequence)?.sequential(scratch(1, decode_sequence)?)?;
     result.set_state_buffers(state_bytes, state_bytes / 2);
     Some(result)
+}
+
+/// Address reservation for one K/V cache buffer, independent of physical
+/// sparse mapping and of the request's shorter execution workspace.
+pub fn attention_cache_buffer_bytes(
+    context_tokens: u32,
+    head_dim: u32,
+    kv_heads: Option<u32>,
+    ring_capacity: Option<u32>,
+    element_bytes: usize,
+) -> Option<usize> {
+    let rows = ring_capacity
+        .map_or(context_tokens, |window| window.min(context_tokens))
+        .checked_add(crate::encodable_block::mixer::attention::ATTENTION_SUFFIX_CAPACITY)?;
+    match kv_heads {
+        Some(heads) => {
+            rows.checked_mul(heads)?.checked_mul(head_dim)?;
+            checked_bytes(&[rows, heads, head_dim], element_bytes)
+        },
+        None => Some(0),
+    }
 }
 
 impl MemoryEstimate {
@@ -156,6 +197,28 @@ impl MemoryEstimate {
 
     pub fn total_bytes(&self) -> Option<usize> {
         self.state_bytes.checked_add(self.scratch_bytes)
+    }
+
+    /// Scoring submits one independently owned scratch pool per prompt chunk
+    /// and retains every pending submission until the complete prompt is
+    /// encoded. Its peak therefore includes all chunk pools simultaneously.
+    pub fn scoring_total_bytes(
+        &self,
+        input_tokens: u32,
+        separate_final_row: bool,
+    ) -> Option<usize> {
+        if input_tokens == 0 {
+            return None;
+        }
+        let chunks = input_tokens.div_ceil(1024) as usize;
+        // A shorter last chunk or the 1023+1 readout split can populate an
+        // additional power-of-two page class. Earlier complete chunks use the
+        // profiled geometry; only the final pool needs a second inventory.
+        let last_rows = (input_tokens - 1) % 1024 + 1;
+        let extra_final = (input_tokens > 1024 && last_rows < 1024) || (separate_final_row && last_rows > 1);
+        self.state_bytes
+            .checked_add(self.scratch_bytes.checked_mul(chunks.checked_add(usize::from(extra_final))?)?)?
+            .checked_add((1024 * 1024usize).checked_mul(chunks)?)
     }
 }
 
@@ -241,6 +304,39 @@ mod tests {
     }
 
     #[stark_test]
+    fn finite_sparse_admission_counts_requested_growth_and_dense_reservation() {
+        let profile = |context: u32| Some(MemoryEstimate::state(context as usize * 8));
+        let short = generation_allocation_context(10, 1000, 10, true).unwrap();
+        assert_eq!(short, 20);
+        assert_eq!(automatic_context(10, short, 800, profile), Some(short));
+        let growing = generation_allocation_context(10, 1000, 500, true).unwrap();
+        assert_eq!(automatic_context(10, growing, 800, profile), Some(100));
+        let dense = generation_allocation_context(10, 1000, 10, false).unwrap();
+        assert_eq!(dense, 1000);
+        assert_eq!(automatic_context(10, dense, 800, profile), Some(100));
+        assert!(generation_allocation_context(u32::MAX, u32::MAX, 1, true).is_none());
+        assert!(generation_allocation_context(10, 20, 11, true).is_none());
+    }
+
+    #[stark_test]
+    fn scoring_admission_retains_all_chunk_pools_and_allows_full_prompt_context() {
+        let mut estimate = MemoryEstimate::state(100);
+        estimate.add_scratch(&[17], 1, 2).unwrap();
+        let one = estimate.scoring_total_bytes(1024, false).unwrap();
+        let two = estimate.scoring_total_bytes(1025, false).unwrap();
+        assert_eq!(one, 100 + 64 + 1024 * 1024);
+        assert_eq!(two, 100 + 3 * 64 + 2 * 1024 * 1024);
+        assert_eq!(estimate.scoring_total_bytes(1024, true), Some(100 + 128 + 1024 * 1024));
+        let mut readout = estimate.clone();
+        readout.add_state_buffers(64 * 1000, 4 * 1000).unwrap();
+        assert_eq!(readout.scoring_total_bytes(1024, false).unwrap() - one, 64 * 1000);
+        assert_eq!(readout.scoring_total_bytes(1025, false).unwrap() - two, 64 * 1000);
+        assert_eq!(estimate.scoring_total_bytes(0, false), None);
+        estimate.scratch_bytes = usize::MAX;
+        assert_eq!(estimate.scoring_total_bytes(2, true), None);
+    }
+
+    #[stark_test]
     fn attention_geometry_accounts_for_precision_ring_and_shared_cache() {
         let full = attention_estimate(4096, 20, 64, 8, Some(2), None, 768, 2, false).unwrap();
         assert_eq!(full.state_bytes, (4096 + 1024) * 2 * 64 * 2 * 2);
@@ -256,6 +352,10 @@ mod tests {
         let indexed_limit = u32::MAX / (8 * 128) - 1024;
         assert!(attention_estimate(indexed_limit, 1, 128, 8, Some(8), None, 3072, 2, false).is_some());
         assert!(attention_estimate(indexed_limit + 1, 1, 128, 8, Some(8), None, 3072, 2, false).is_none());
+        assert_eq!(attention_cache_buffer_bytes(4096, 64, Some(2), None, 2), Some(full.state_bytes / 2));
+        assert_eq!(attention_cache_buffer_bytes(4096, 64, Some(2), Some(256), 2), Some(ring.state_bytes / 2));
+        assert_eq!(attention_cache_buffer_bytes(4096, 64, None, None, 2), Some(0));
+        assert!(attention_cache_buffer_bytes(indexed_limit + 1, 128, Some(8), None, 2).is_none());
     }
 
     #[stark_test]
@@ -272,6 +372,18 @@ mod tests {
         let mut scratch = MemoryEstimate::default();
         scratch.add_scratch(&[65], 1, 1).unwrap();
         assert_eq!(scratch.max_buffer_bytes, 128);
+    }
+
+    #[stark_test]
+    fn sparse_short_request_still_checks_full_cache_address_reservation() {
+        let request = attention_estimate(200, 100, 64, 8, Some(2), None, 768, 2, false).unwrap();
+        let device_limit = 1024 * 1024;
+        assert!(request.max_buffer_bytes < device_limit);
+        assert!(attention_cache_buffer_bytes(2048, 64, Some(2), None, 2).unwrap() <= device_limit);
+        assert!(attention_cache_buffer_bytes(4096, 64, Some(2), None, 2).unwrap() > device_limit);
+        // Physical request growth can fit while the unchanged selected
+        // context's sparse address reservation exceeds the device limit.
+        assert_eq!(generation_allocation_context(100, 4096, 100, true), Some(200));
     }
 
     #[stark_test]

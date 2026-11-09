@@ -158,7 +158,7 @@ where
                 .create_command_buffer(Some("score prefill batch"), Some(allocation_pool))
                 .map_err(LanguageModelScoreError::Backend)?;
             let last_batch = batch_idx + 1 == number_of_batches;
-            let split = last_batch && self.decoder.prefill_cache_skips_trailing_layers() && batch.len() > 1;
+            let split = last_batch && self.decoder.prefill_requires_separate_logits_row() && batch.len() > 1;
             let parts = if split {
                 [Some((&batch[..batch.len() - 1], false)), Some((&batch[batch.len() - 1..], true))]
             } else {

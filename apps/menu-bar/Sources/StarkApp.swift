@@ -444,12 +444,16 @@ struct ModelFamily: Identifiable {
         case "qwen3": return "Qwen3"
         case "qwen2": return "Qwen2"
         case "qwen3_5": return "Qwen3.5"
+        case "qwen3_5_moe": return "Qwen3.5 MoE"
         case "qwen4_exp": return "Qwen3.8 Flash Next"
         case "glm5_next": return "GLM-5.3 Flash"
         case "llama": return "Llama"
         case "mistral": return "Mistral"
         case "gemma2": return "Gemma 2"
+        case "gemma3": return "Gemma 3 images"
         case "gemma3_text": return "Gemma 3"
+        case "gemma4_text": return "Gemma 4"
+        case "olmo3": return "OLMo 3"
         case "phi3": return "Phi-3"
         case "granite": return "Granite"
         case "smollm3": return "SmolLM3"
@@ -826,9 +830,47 @@ final class ModelManagementState: ObservableObject {
 }
 
 struct ModelsInventory {
+    static func readableName(_ savedName: String, display: InstalledModelDisplay?) -> String {
+        let generatedSuffix = "-[0-9a-f]{8,40}$"
+        let generated = savedName.range(of: generatedSuffix, options: .regularExpression) != nil
+        let savedBase = savedName.replacingOccurrences(of: generatedSuffix, with: "", options: .regularExpression)
+        func sourceKey(_ name: String) -> String {
+            name.replacingOccurrences(of: "(?i)-MLX(?:-Serve)?(?=-|$)", with: "", options: .regularExpression)
+                .lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+        var title = savedName
+        if let display, display.repositoryURL != nil, sourceKey(savedBase) == sourceKey(display.groupName) {
+            title = display.groupName
+        } else if generated, savedBase.range(of: "^qwen38-flash-next-(?:mixed-4-8bit|lily-q4-xl)$",
+                                            options: .regularExpression) != nil {
+            // Legacy native installs used these preparation names plus a revision.
+            title = savedBase
+        }
+        // Packaging and precision already have their own metadata columns.
+        if display?.quantization != nil {
+            title = title.replacingOccurrences(
+                of: "(?i)-(?:MLX(?:-Serve)?-)?(?:mixed-[48][_-][48]bit|lily-q4-xl|[48]-?bit|bf16|fp16|gguf)$",
+                with: "", options: .regularExpression)
+        }
+        title = title.replacingOccurrences(of: "(?i)-MLX(?:-Serve)?(?=-|$)", with: "", options: .regularExpression)
+        title = title.replacingOccurrences(of: "(?i)^qwen38(?=-|$)", with: "Qwen3.8", options: .regularExpression)
+        title = title.replacingOccurrences(of: "(?i)^qwen(?=[0-9])", with: "Qwen", options: .regularExpression)
+        title = title.replacingOccurrences(of: "(?i)^glm(?=-|[0-9])", with: "GLM", options: .regularExpression)
+        let words = title.replacingOccurrences(of: "_", with: "-").split(separator: "-")
+        let readable = words.map { word in
+            if word.range(of: "^(?:[0-9]+(?:\\.[0-9]+)?[bB]|[qQ][0-9]+)$", options: .regularExpression) != nil {
+                return word.uppercased()
+            }
+            return word.prefix(1).uppercased() + word.dropFirst()
+        }.joined(separator: " ")
+        return readable.isEmpty ? savedName : readable.replacingOccurrences(
+            of: "(?i)Mixed 4 8bit$", with: "(Mixed 4/8-bit)", options: .regularExpression)
+    }
+
     struct Model: Identifiable {
         let id: String
         let name: String
+        let displayName: String
         let isRunning: Bool
         let quantization: String?
         let weightBytes: Int64?
@@ -871,13 +913,14 @@ struct ModelsInventory {
     init(models: [InstalledModel], loadedID: String, registry: ModelFamilyRegistry?,
          query: String = "", sort: ModelBrowserSort = .nameAscending) {
         func row(_ model: InstalledModel) -> Model {
-            Model(id: model.id, name: model.name, isRunning: !loadedID.isEmpty && model.id == loadedID,
+            Model(id: model.id, name: model.name, displayName: Self.readableName(model.name, display: model.display),
+                  isRunning: !loadedID.isEmpty && model.id == loadedID,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
                   sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode,
                   sourceName: model.display?.groupID ?? model.apiID, repositoryURL: model.display?.repositoryURL,
                   toolSupport: model.display?.toolSupport ?? .unchecked)
         }
-        let allModels = models.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }.map(row)
+        let allModels = models.map(row).sorted { Self.ordered($0.displayName, $1.displayName, $0.id, $1.id) }
         let candidates = Dictionary(grouping: models) { model in model.display.map { "source:" + $0.groupID } ?? "model:" + model.id }
         let allGroups = candidates.flatMap { key, entries -> [Group] in
             let first = entries[0]
@@ -890,8 +933,8 @@ struct ModelsInventory {
                           family: first.display?.familyID.flatMap(ModelFamily.displayName(for:)), models: rows)]
         }
         func groupOrder(_ first: Group, _ second: Group) -> Bool {
-            let firstName = first.models.count == 1 ? first.models[0].name : first.name
-            let secondName = second.models.count == 1 ? second.models[0].name : second.name
+            let firstName = first.models.count == 1 ? first.models[0].displayName : first.name
+            let secondName = second.models.count == 1 ? second.models[0].displayName : second.name
             return sort.precedes(firstName, id: first.id, size: first.totalBytes,
                                  secondName, id: second.id, size: second.totalBytes)
         }
@@ -899,14 +942,14 @@ struct ModelsInventory {
         groups = allGroups.compactMap { group in
             var visible = group.models.filter { model in
                 !hasSearchQuery ||
-                ModelBrowserSearch.matches(query, fields: [group.name, group.family ?? "", model.name, model.sourceName,
+                ModelBrowserSearch.matches(query, fields: [group.name, group.family ?? "", model.name, model.displayName, model.sourceName,
                                                            model.sourceRevision ?? "", model.artifactMode?.title ?? "",
                                                            model.isRunning ? "Running" : ""] + model.detailLabels)
             }
             if sort == .sizeAscending || sort == .sizeDescending {
                 visible.sort { first, second in
-                    sort.precedes(first.name, id: first.id, size: first.weightBytes.map(Double.init),
-                                  second.name, id: second.id, size: second.weightBytes.map(Double.init))
+                    sort.precedes(first.displayName, id: first.id, size: first.weightBytes.map(Double.init),
+                                  second.displayName, id: second.id, size: second.weightBytes.map(Double.init))
                 }
             }
             return visible.isEmpty ? nil : Group(id: group.id, name: group.name, family: group.family, models: visible)
@@ -1387,11 +1430,7 @@ final class EngineController: ObservableObject {
             }
         }
         output = outgoing.fileHandleForReading
-        output?.readabilityHandler = { [weak self] handle in
-            let bytes = handle.readData(ofLength: 65_536)
-            guard !bytes.isEmpty else { handle.readabilityHandler = nil; return }
-            self?.reader.async { [weak self] in self?.receive(bytes) }
-        }
+        observeBackendOutput(outgoing.fileHandleForReading)
         do {
             try child.run()
             process = child
@@ -1403,6 +1442,16 @@ final class EngineController: ObservableObject {
             state = "error"
             message = "Cannot start the bundled runtime. Reinstall Stark."
             attachmentStaging = nil
+        }
+    }
+
+    private func observeBackendOutput(_ handle: FileHandle) {
+        handle.readabilityHandler = { [weak self] handle in
+            // The backend keeps stdout open between JSONL events. A fixed-size
+            // read can wait for the rest of that size and starve short replies.
+            let bytes = handle.availableData
+            guard !bytes.isEmpty else { handle.readabilityHandler = nil; return }
+            self?.reader.async { [weak self] in self?.receive(bytes) }
         }
     }
 
@@ -2085,7 +2134,7 @@ final class EngineController: ObservableObject {
     }
 
     func requestBeginnerModels(task: String, excludingModelID: String? = nil, preference: String = "balanced") {
-        guard ["everyday", "text", "code", "unsure"].contains(task) else { return }
+        guard ["everyday", "text", "files", "code", "unsure"].contains(task) else { return }
         guard ["balanced", "speed", "answers"].contains(preference) else { return }
         let requestID = UUID().uuidString.lowercased()
         beginnerRequestID = requestID; beginnerChoicesLoading = true; beginnerChoicesError = nil
@@ -2568,6 +2617,27 @@ struct InstallStageView: View {
     }
 }
 
+struct CatalogQuantizationPicker: View {
+    let choices: [CatalogQuantizationFilter]
+    @Binding var selection: CatalogQuantizationFilter
+
+    private var picker: some View {
+        Picker("Quantization", selection: $selection) {
+            ForEach(choices, id: \.self) { choice in Text(choice.title).tag(choice) }
+        }.labelsHidden().accessibilityLabel("Model quantization")
+    }
+
+    var body: some View {
+        // A segmented control's minimum width includes every full label. Keep
+        // that intrinsic width from expanding the fixed-size Manage Models view.
+        ViewThatFits(in: .horizontal) {
+            picker.pickerStyle(.segmented).fixedSize(horizontal: true, vertical: false)
+            picker.pickerStyle(.menu).frame(minWidth: 0, maxWidth: .infinity)
+                .help(selection.title)
+        }
+    }
+}
+
 struct ModelsView: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var navigation: ModelManagementState
@@ -2660,9 +2730,7 @@ struct ModelsView: View {
                             visionConversion: $navigation.visionConversion)
             } else {
                 if selectedFamily != nil {
-                    Picker("Quantization", selection: quantizationBinding) {
-                        ForEach(quantizationTabs, id: \.self) { choice in Text(choice.title).tag(choice) }
-                    }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("Model quantization")
+                    CatalogQuantizationPicker(choices: quantizationTabs, selection: quantizationBinding)
                 }
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -2822,7 +2890,7 @@ struct ModelsView: View {
 
     private func savedModelRow(_ model: ModelsInventory.Model, family: String?) -> some View {
         HStack(spacing: 10) {
-            Text(model.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+            Text(model.displayName).font(.callout.weight(.medium)).lineLimit(2).truncationMode(.tail)
                 .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
             Text(model.quantization ?? "—").font(.caption).foregroundStyle(.secondary)
                 .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
@@ -2843,7 +2911,7 @@ struct ModelsView: View {
             removalButton(model).frame(width: 22)
         }.frame(minHeight: 32)
             .help(savedModelHelp(model, family: family))
-            .accessibilityElement(children: .contain).accessibilityLabel(model.name)
+            .accessibilityElement(children: .contain).accessibilityLabel(model.displayName)
     }
 
     private func savedModelHelp(_ model: ModelsInventory.Model, family: String?) -> String {
@@ -3038,7 +3106,7 @@ struct InstallView: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 Toggle("Enable image input when converting", isOn: $visionConversion).disabled(engine.busy)
-                Text("Image conversion supports compatible dense Qwen3.5 BF16 models and merged fine-tunes. Vision installs check support on this Mac and stop the running model.")
+                Text("Image input is available for compatible Qwen and Gemma models. Stark checks each model’s image support on this Mac during installation and stops the running model.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Text("Models stay on this Mac. Conversion may take several minutes.")
@@ -3164,7 +3232,7 @@ struct AdvancedOptionsView: View {
                         .accessibilityLabel("Output limit in tokens")
                 }
             }
-            Text("Auto uses all tokens left after the conversation, up to the model's generation limit.")
+            Text("Auto uses the remaining context, within the model's limits and available memory.")
                 .font(.caption).foregroundStyle(.secondary)
             if !engine.contextCapacityKnown {
                 Text("This model does not declare a context maximum. Auto sizes execution from the model's state requirements and available memory.")
@@ -3181,7 +3249,7 @@ struct AdvancedOptionsView: View {
             if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
             Text(engine.contextCapacityKnown
-                 ? "Context defaults to the model's maximum. Auto uses the remaining context for the reply."
+                 ? "Context defaults to the model's maximum. Auto admits the reply within available memory."
                  : "Auto chooses a memory-bounded execution allowance. A custom conversation budget sets an upper bound.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
@@ -3389,9 +3457,9 @@ struct ChatContentView: View {
             if ["length", "context"].contains(engine.finishReason) {
                 Text(engine.finishReason == "length" && engine.options.maxNewTokens > 0
                      ? "Reply reached your output limit. Increase it or choose Auto in Advanced Options."
-                     : (engine.contextCapacityKnown
-                        ? "Reply used the remaining conversation context. Start a new chat for more room."
-                        : "Reply reached the available execution budget."))
+                     : (engine.finishReason == "context"
+                        ? "Reply reached the current context limit. Review Advanced Options or start a new chat for more room."
+                        : "Reply reached the available context or execution budget."))
                     .font(.caption).foregroundStyle(.orange)
             }
             if engine.supportsImages {

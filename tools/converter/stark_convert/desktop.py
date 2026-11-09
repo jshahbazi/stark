@@ -14,6 +14,7 @@ import secrets
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -53,11 +54,14 @@ from .generation_eta import GenerationEstimates
 from .guided_models import (
     MAX_EXCLUSIONS,
     TASKS,
+    execution_allowed,
     host_resources,
     installation_allowed,
     matches_recipe,
+    native_recipes,
     recipe_from_catalog,
     recommendation_report,
+    with_resident_profile,
 )
 from .hybrid_prepare import SOURCES as NATIVE_SOURCES
 from .hybrid_prepare import prepared_identity
@@ -74,10 +78,21 @@ from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
-from .resource_budget import INPUT_BYTES, REQUEST_BUDGET_MIB, WIRE_BYTES
+from .resource_budget import (
+    INPUT_BYTES,
+    REQUEST_BUDGET_MIB,
+    WIRE_BYTES,
+    available_memory_bytes,
+    json_parse_headroom_bytes,
+)
 from .sources import huggingface_repository
 from .tool_protocols import protocol_stop_ids
-from .vision_runtime import supported_image_family
+from .vision_runtime import (
+    VISION_MODEL_TYPES,
+    model_image_family,
+    supported_image_family,
+    supported_vision_schema,
+)
 
 MAX_COMMAND_BYTES = WIRE_BYTES
 MAX_PROGRESS_BYTES = 4096
@@ -121,6 +136,112 @@ def native_download_stage(data_dir, choice):
         os.close(descriptor)
 
 
+def native_setup_credit(data_dir, recipe):
+    """Already allocated payload in this exact, idle, owned native download.
+
+    Sparse logical file sizes are not disk credit. Paths stay inside the
+    backend; the report exposes only an aggregate byte count.
+    """
+    source = NATIVE_SOURCES[recipe.native_choice]
+    root = data_dir / "native-downloads"
+    identity = hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest()[:16]
+    directory = root / (recipe.native_choice + "-" + identity)
+    descriptor = None
+    try:
+        from ._build_metadata import open_regular
+        from .streaming import ConversionError
+
+        device = data_dir.stat().st_dev
+
+        def bounded_metadata(path):
+            with open_regular(path) as handle:
+                info = os.fstat(handle.fileno())
+                if info.st_dev != device or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                    raise ValueError("foreign native staging metadata")
+                data = handle.read(16385)
+                if len(data) > 16384:
+                    raise ValueError("excessive native staging metadata")
+                return data
+
+        for path in (root, directory):
+            info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_dev != device or info.st_uid != os.geteuid():
+                return 0
+        descriptor = os.open(directory / ".lock", os.O_RDONLY | os.O_NOFOLLOW)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stage = directory / "model"
+        if stage.is_symlink():
+            return 0
+        completed = stage.exists()
+        if completed:
+            if not matches_recipe(stage, recipe):
+                return 0
+        else:
+            stage = directory / "model.native-download"
+            if stage.is_symlink() or not stage.is_dir():
+                return 0
+            marker = stage / "stark-download.json"
+            if json.loads(bounded_metadata(marker)) != {"choice": recipe.native_choice, "source": source}:
+                return 0
+        if stage.is_symlink() or not stage.is_dir():
+            return 0
+        allocated, seen = {}, 0
+        payloads, incomplete = {}, {}
+        for entry in recipe.native_profile["payload_files"]:
+            payloads[entry["path"]] = entry
+            if recipe.native_choice == "glm53-q2":
+                payloads[Path(entry["path"]).name] = entry  # The helper flattens its four GGUF shards.
+            incomplete[entry["incomplete_path"]] = entry
+        pending = [(stage, 0)]
+        while pending:
+            path, depth = pending.pop()
+            if depth > 8:
+                return 0
+            for child in path.iterdir():
+                seen += 1
+                if seen > 4096:
+                    return 0
+                info = child.lstat()
+                if info.st_dev != device or info.st_uid != os.geteuid() or stat.S_ISLNK(info.st_mode):
+                    return 0
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append((child, depth + 1))
+                elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    return 0
+                else:
+                    relative = child.relative_to(stage).as_posix()
+                    entry = payloads.get(relative)
+                    if entry is not None:
+                        if info.st_size != entry["bytes"]:
+                            continue
+                        if not completed:
+                            metadata_path = stage / ".cache/huggingface/download" / (entry["path"] + ".metadata")
+                            try:
+                                values = bounded_metadata(metadata_path).decode("ascii").splitlines()
+                                valid = (
+                                    len(values) == 3
+                                    and values[:2] == [source["weights_revision"], entry["etag"]]
+                                    and math.isfinite(float(values[2]))
+                                    and float(values[2]) >= info.st_mtime - 1
+                                )
+                            except (OSError, ValueError, ConversionError):
+                                valid = False
+                            if not valid:
+                                continue
+                    else:
+                        entry = incomplete.get(relative)
+                        if entry is None or info.st_size > entry["bytes"]:
+                            continue
+                    size = min(info.st_size, info.st_blocks * 512)
+                    allocated[entry["path"]] = max(size, allocated.get(entry["path"], 0))
+        return min(sum(allocated.values()), recipe.weight_bytes)
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError, ConversionError):
+        return 0
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def cancellation_error(cancelled):
     if getattr(cancelled, "reason", None) == "deadline":
         return APIError(504, "Request deadline exceeded.", "request_timeout")
@@ -160,13 +281,11 @@ def model_valid(path):
         config = read_model_config(path)
         if not isinstance(config.get("decoder_config"), dict):
             return False
-        if config.get("type") == "Qwen35VisionLanguageModelConfig":
+        if config.get("type") in VISION_MODEL_TYPES:
             codec = config.get("token_codec_config", {})
             contract = config.get("artifact_contract")
-            if (
-                not isinstance(contract, dict)
-                or type(contract.get("schema_version")) is not int
-                or contract["schema_version"] not in (2, 3)
+            if not isinstance(contract, dict) or not supported_vision_schema(
+                config["type"], contract.get("schema_version")
             ):
                 return False
             return (
@@ -808,6 +927,9 @@ class Desktop:
             resources["supported"] = (
                 resources.get("supported") is True and hardware["gpu_available"] and hardware["unified_memory"]
             )
+            resources["native_setup_credit_bytes"] = {
+                recipe.native_choice: native_setup_credit(self.data_dir, recipe) for recipe in native_recipes()
+            }
         return resources
 
     def cancel_guided_discovery(self):
@@ -897,8 +1019,9 @@ class Desktop:
             if generation is not None and generation != self.guided_discovery_generation:
                 return
             models = [dict(model) for model in self.models]
-        candidates = {recipe.id: recipe for recipe in RECIPES}
-        sources = {(recipe.repo, recipe.revision) for recipe in RECIPES}
+        starters = (*RECIPES, *native_recipes()) if hardware is not None else RECIPES
+        candidates = {recipe.id: recipe for recipe in starters}
+        sources = {(recipe.repo, recipe.revision) for recipe in starters}
         if discovery is not None:
             for item in discovery["items"]:
                 recipe = recipe_from_catalog(item)
@@ -912,7 +1035,7 @@ class Desktop:
             for model in models
             if model.get("artifact_mode", "text") == "text" and model_valid(Path(model["path"]))
         ]
-        for recipe in candidates.values():
+        for recipe in tuple(candidates.values()):
             ids = [
                 model["id"]
                 for model, display in valid_models
@@ -928,6 +1051,23 @@ class Desktop:
             ]
             if excluded["excluded_model_ids"].intersection(ids):
                 excluded_recipes.add(recipe.id)
+            qualified = []
+            inspected = []
+            for identifier in ids:
+                model = next(model for model, _display in valid_models if model["id"] == identifier)
+                planned = with_resident_profile(recipe, model["path"])
+                inspected.append(planned)
+                if planned.resident_profile is not None:
+                    qualified.append((identifier, planned))
+            if qualified:
+                recipe = qualified[0][1]
+                candidates[recipe.id] = recipe
+                preferred = [identifier for identifier, _planned in qualified]
+                ids = preferred + [identifier for identifier in ids if identifier not in preferred]
+            elif inspected:
+                # An existing copy must earn the installed-artifact plan; the
+                # source-only download estimate cannot authorize its startup.
+                candidates[recipe.id] = inspected[0]
             installed[recipe.id] = ids
         report = recommendation_report(
             self.guided_resources(hardware),
@@ -1026,8 +1166,8 @@ class Desktop:
                 self.install,
                 "installing",
                 "Checking starting model…",
-                "huggingface",
-                recipe.repo,
+                "native" if recipe.native_choice is not None else "huggingface",
+                recipe.native_choice or recipe.repo,
                 "text",
                 "text",
                 request_id,
@@ -1073,14 +1213,12 @@ class Desktop:
             if epoch != self.epoch:
                 return
             self.close_worker()
+            model = next((entry for entry in self.models if entry["id"] == identifier), None)
+        if model is None or recipe is None or not matches_recipe(model["path"], recipe):
+            raise DesktopError("The installed model changed. Check the starting models again.")
+        recipe = with_resident_profile(recipe, model["path"])
         resources = self.guided_resources(hardware)
-        available = resources.get("available_memory_bytes")
-        if (
-            recipe is None
-            or not installation_allowed(recipe, resources, installed=True)
-            or type(available) is not int
-            or available < recipe.runtime_memory
-        ):
+        if not execution_allowed(recipe, resources):
             raise DesktopError("Not enough memory is available to start this model. Close other apps and try again.")
         self.run(epoch, identifier, "chat", guided_context=recipe.context_tokens, guided_request_id=request_id)
 
@@ -1592,8 +1730,8 @@ class Desktop:
         guided_recipe = self.bound_guided_recipe(guided_recipe_id) if guided_recipe_id is not None else None
         if guided_recipe_id is not None and (
             guided_recipe is None
-            or kind != "huggingface"
-            or source != guided_recipe.repo
+            or kind != ("native" if guided_recipe.native_choice is not None else "huggingface")
+            or source != (guided_recipe.native_choice or guided_recipe.repo)
             or expected_revision != guided_recipe.revision
             or artifact_mode != "text"
             or support_mode != "text"
@@ -1632,7 +1770,11 @@ class Desktop:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
             if converted:
                 config = read_model_config(path)
-                stored_mode = "vision-language" if config.get("type") == "Qwen35VisionLanguageModelConfig" else "text"
+                stored_mode = (
+                    "vision-language"
+                    if (config.get("type") in VISION_MODEL_TYPES or model_image_family(config, path) is not None)
+                    else "text"
+                )
                 if artifact_mode is not None and selected_mode != stored_mode:
                     raise DesktopError("The selected conversion mode does not match this Stark artifact.")
                 selected_mode = stored_mode
@@ -1649,10 +1791,10 @@ class Desktop:
             if (
                 native_item is None
                 or expected_revision != native_item["revision"]
-                or selected_mode != "text"
-                or support_mode not in (None, "text")
+                or selected_mode not in native_item["artifact_modes"]
+                or support_mode not in (None, selected_mode)
             ):
-                raise DesktopError("Choose a pinned native text model from the catalogue.")
+                raise DesktopError("Choose a pinned native model from the catalogue.")
             source_key, name, converted = "huggingface:" + native_item["repo"], native_item["name"], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
@@ -1738,6 +1880,8 @@ class Desktop:
                 command = [sys.executable, "-I", "-B", "-m"]
                 if kind == "native":
                     command.extend(["stark_convert.hybrid_prepare", source, "--output", str(output)])
+                    if selected_mode == "vision-language":
+                        command.extend(["--artifact-mode", "vision-language"])
                 else:
                     command.extend(
                         [
@@ -1840,13 +1984,14 @@ class Desktop:
         """Check a family artifact before publishing it, with one loaded worker."""
         config = read_model_config(path)
         contract = config.get("artifact_contract", {})
-        if (
-            config.get("type") != "Qwen35VisionLanguageModelConfig"
-            or not isinstance(contract, dict)
-            or contract.get("schema_version") != 3
+        family = model_image_family(config, path)
+        if config.get("type") not in VISION_MODEL_TYPES and family is None:
+            return None
+        if not isinstance(contract, dict) or (
+            (family or {}).get("profile") != "qwen38-lily-retained-bf16-vision-v1"
+            and contract.get("schema_version") not in (3, 4, 5)
         ):
             return None
-        family = contract.get("family")
         if not supported_image_family(family):
             raise DesktopError("This image model family is not supported.")
         with self.lock:
@@ -1892,7 +2037,10 @@ class Desktop:
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
-        vision = read_model_config(Path(model["path"])).get("type") == "Qwen35VisionLanguageModelConfig"
+        config = read_model_config(Path(model["path"]))
+        vision = (
+            config.get("type") in VISION_MODEL_TYPES or model_image_family(config, Path(model["path"])) is not None
+        )
         codec, template = (None, None) if vision else load_template(Path(model["path"]))
         if mode == "decision" and vision:
             raise DesktopError("Vision-language artifacts support Chat mode only.")
@@ -2363,11 +2511,13 @@ class Desktop:
         if maximum in (None, 0):
             if count >= context:
                 raise DesktopError("Conversation is full. Start a new conversation and try again.")
-            if context_capacity_known:
+            if context_capacity_known and not getattr(worker, "generation_budget", False):
                 maximum = min(getattr(worker, "max_new_tokens", self.output_limit), context - count)
             else:
                 try:
-                    context, maximum = automatic_generation_budget(worker, count, context, cancelled=cancelled)
+                    context, maximum = automatic_generation_budget(
+                        worker, count, context, context_capacity_known=context_capacity_known, cancelled=cancelled
+                    )
                 except ChatBudgetUnavailable as error:
                     raise APIError(503, str(error), "automatic_output_unavailable") from None
             if maximum < 1:
@@ -3044,7 +3194,7 @@ def serve(desktop):
     desktop.library()
     desktop.families()
     desktop.status("idle", "Choose a model to run")
-    pending = b""
+    pending = bytearray()
     discarding = False
     while True:
         if desktop.output_failed:
@@ -3055,27 +3205,46 @@ def serve(desktop):
         chunk = os.read(sys.stdin.fileno(), 65536)
         if not chunk:
             return
-        pending += chunk
-        while b"\n" in pending:
-            line, pending = pending.split(b"\n", 1)
+        while chunk:
+            newline = chunk.find(b"\n")
             if discarding:
+                if newline < 0:
+                    break
                 discarding = False
+                chunk = chunk[newline + 1 :]
                 continue
+            part = chunk if newline < 0 else chunk[:newline]
+            length = len(pending) + len(part)
+            headroom = json_parse_headroom_bytes(length)
+            error = None
+            if length > MAX_COMMAND_BYTES:
+                error = "App command is too large."
+            elif headroom and headroom > available_memory_bytes():
+                error = "Available memory is too low for this app command. Try a smaller request."
+            if error is not None:
+                pending.clear()
+                desktop.emit("error", message=error)
+                discarding = newline < 0
+                if discarding:
+                    break
+                chunk = chunk[newline + 1 :]
+                continue
+            pending.extend(part)
+            if newline < 0:
+                break
+            line = bytes(pending)
+            pending.clear()
+            chunk = chunk[newline + 1 :]
             try:
-                if len(line) > MAX_COMMAND_BYTES:
-                    raise DesktopError("App command is too large.")
                 check_json_structure(line)
+                if headroom and headroom > available_memory_bytes():
+                    raise DesktopError("Available memory is too low for this app command. Try a smaller request.")
                 if not desktop.dispatch(json.loads(line)):
                     return
             except DesktopError as error:
                 desktop.emit("error", message=str(error))
             except Exception:
                 desktop.emit("error", message="Invalid app command.")
-        if len(pending) > MAX_COMMAND_BYTES:
-            pending = b""
-            if not discarding:
-                desktop.emit("error", message="App command is too large.")
-            discarding = True
 
 
 def main(argv=None):

@@ -40,6 +40,8 @@ use crate::{
 };
 
 mod family;
+pub mod gemma3;
+pub mod gemma4;
 
 #[cfg(test)]
 mod logit_tests;
@@ -498,8 +500,13 @@ impl<B: Backend> Engine<B> {
         let model_dim = language_config.decoder_config.transformer_config.model_dim;
         let vocab_size = language_config.decoder_config.vocab_size;
         let weights = verified.get("model.safetensors").ok_or(InvalidInput("missing native vision weights"))?;
-        let loader = ParameterLoader::new(weights, &*self.context)?
-            .with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+        let numerical_profile =
+            if matches!(admission.profile, family::FamilyProfile::AffineV3 | family::FamilyProfile::MoeV4) {
+                NumericalProfile::Qwen35AffineBF16
+            } else {
+                NumericalProfile::Qwen35ReferenceBF16
+            };
+        let loader = ParameterLoader::new(weights, &*self.context)?.with_numerical_profile(numerical_profile);
         let tower = VisionTower::new(&*self.context, &admission.tower, &loader.tree().subtree("vision"))?;
         let language_model = self.language_model_from_config(
             model_path,
@@ -577,6 +584,17 @@ impl<B: Backend> VisionLanguageModel<B> {
 
     pub fn max_context_length(&self) -> Option<u32> {
         self.language_model.max_context_length()
+    }
+
+    /// Decoder-only admission for plain text or a prepared image prompt.
+    /// The bounded image encoder is qualified independently.
+    pub fn decoder_generation_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        self.language_model.generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)
     }
 
     pub fn recommended_context_length(&self) -> Option<u32> {

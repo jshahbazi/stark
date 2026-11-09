@@ -289,6 +289,80 @@ impl<B: Backend> LanguageModel<B> {
         self.context_memory_estimate(2, 1).is_some()
     }
 
+    /// Bound physical request growth without charging unused sparse address
+    /// space from a finite model's configured context to a short request.
+    pub fn generation_allocation_context_length(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<u32> {
+        crate::encodable_block::memory::generation_allocation_context(
+            input_tokens,
+            context_tokens,
+            max_new_tokens,
+            self.max_context_length().is_some()
+                && self.engine.context.device_capabilities().contains(DeviceCapabilities::SPARSE_BUFFERS),
+        )
+    }
+
+    /// Inventory decoder state and execution workspace for the complete
+    /// requested input/output span. Vision wrappers use this for their text
+    /// decoder; image-encoder execution has a separate admitted contract.
+    pub fn generation_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        if self.max_context_length().is_some_and(|maximum| context_tokens > maximum) {
+            return None;
+        }
+        let allocated = self.generation_allocation_context_length(input_tokens, context_tokens, max_new_tokens)?;
+        let estimate = self.context_memory_estimate(allocated, input_tokens)?;
+        let mut reserved = self.decoder.context_cache_buffer_bytes(context_tokens)?;
+        if let Some(head) = self.dense_mtp.as_ref().filter(|_| self.has_dense_mtp()) {
+            reserved = reserved.max(head.context_cache_buffer_bytes(context_tokens)?);
+        }
+        if self.engine.context.max_buffer_length().is_some_and(|limit| estimate.max_buffer_bytes.max(reserved) > limit)
+        {
+            return None;
+        }
+        estimate.total_bytes()
+    }
+
+    /// Admit exact scoring's fresh state and all independently retained prompt
+    /// chunk pools. Scoring reads the final prompt position without reserving
+    /// an output token, so input may exactly fill the selected context.
+    pub fn scoring_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        if input_tokens == 0
+            || input_tokens > context_tokens
+            || self.speculator.is_some()
+            || self.max_context_length().is_some_and(|maximum| context_tokens > maximum)
+        {
+            return None;
+        }
+        let allocated = if self.max_context_length().is_some()
+            && self.engine.context.device_capabilities().contains(DeviceCapabilities::SPARSE_BUFFERS)
+        {
+            input_tokens
+        } else {
+            context_tokens
+        };
+        // Dense MTP's predictor is not executed by score_next_token.
+        let estimate = self.decoder.scoring_memory_estimate(allocated, input_tokens)?;
+        let reserved = self.decoder.context_cache_buffer_bytes(context_tokens)?;
+        if self.engine.context.max_buffer_length().is_some_and(|limit| estimate.max_buffer_bytes.max(reserved) > limit)
+        {
+            return None;
+        }
+        estimate.scoring_total_bytes(input_tokens, self.decoder.prefill_requires_separate_logits_row())
+    }
+
     /// Plan a finite execution allocation from loaded geometry and a caller's
     /// memory headroom. This is not a trained model context-capacity claim.
     pub fn automatic_context_length(

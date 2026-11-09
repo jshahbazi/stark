@@ -27,6 +27,7 @@ def unknown_context(desktop, model):
     def ready(worker):
         result = read(worker)
         result["max_context_tokens"] = PROTOCOL_CEILING
+        result["generation_budget"] = "memory-context-v1"
         return result
 
     with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=ready):
@@ -144,7 +145,7 @@ def test_unknown_capacity_sizes_native_text_state_per_request(unknown_context, s
 
 
 def test_unknown_capacity_playground_also_reserves_only_its_request(unknown_context):
-    # A backend without a declared context needs an explicit output allowance.
+    # Explicit output reserves only the actual input plus that allowance.
     unknown_context.maximum = 32
     worker = unknown_context.worker
     with patch.object(worker, "request", wraps=worker.request) as request:

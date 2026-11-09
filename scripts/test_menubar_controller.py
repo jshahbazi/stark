@@ -213,6 +213,29 @@ extension EngineController {
         }
         let apiFirst = String(repeating: "a", count: 32), apiSecond = String(repeating: "b", count: 32)
         switch scenario {
+        case "backend-short-replies":
+            let backend = Pipe()
+            engine.observeBackendOutput(backend.fileHandleForReading)
+            defer {
+                backend.fileHandleForReading.readabilityHandler = nil
+                try? backend.fileHandleForWriting.close()
+                try? backend.fileHandleForReading.close()
+            }
+            engine.state = "starting"
+            for message in ["Fixture backend ready", "Fixture next reply"] {
+                let event = ["event": "status", "state": "idle", "message": message]
+                var bytes = try! JSONSerialization.data(withJSONObject: event)
+                bytes.append(10)
+                backend.fileHandleForWriting.write(bytes)
+                // The writer deliberately remains open, as in the real app.
+                guard pump({ engine.state == "idle" && engine.message == message }) else { return false }
+            }
+            return true
+        case "beginner-files-task-transport":
+            engine.requestBeginnerModels(task: "files")
+            let request = command()
+            return engine.beginnerChoicesLoading && request["command"] as? String == "guided_models"
+                && request["task"] as? String == "files"
         case "beginner-recommendation-fences":
             engine.requestBeginnerModels(task: "unsure")
             let request = command()
@@ -841,7 +864,8 @@ extension EngineController {
             guard let payload = try? JSONSerialization.jsonObject(with: Data(backendError.utf8)) as? [String: Any],
                   let registry = payload["registry"] as? [String: Any], let report = payload["report"] as? [String: Any] else { return false }
             engine.apply(["event": "model_families", "report": registry])
-            guard let families = engine.modelFamilies?.families, families.count == 15,
+            guard let families = engine.modelFamilies?.families,
+                  let declared = registry["families"] as? [[String: Any]], families.count == declared.count,
                   let classifier = families.first(where: { $0.modelKind == "classifier" }),
                   classifier.modes.values.allSatisfy({ $0.status == .unsupported }),
                   let qwen3 = families.first(where: { $0.id == "qwen3" }),
@@ -900,8 +924,8 @@ extension EngineController {
             raw["families"] = Array(families.reversed())
             guard let registry = ModelFamilyRegistry(raw),
                   let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
-            return rows.map(\.name) == ["Gemma 2", "Gemma 3", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
-                "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.8 Flash Next", "SmolLM3"] &&
+            return rows.map(\.name) == ["Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
+                "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
             engine.apply(["event": "models", "models": [
@@ -920,6 +944,31 @@ extension EngineController {
             for key in ["family_id", "quantization", "weight_bytes", "source_revision"] { unknown[key] = NSNull() }
             guard let descriptor = InstalledModelDisplay(unknown) else { return false }
             return descriptor.familyID == nil && descriptor.quantization == nil && descriptor.weightBytes == nil && descriptor.sourceRevision == nil
+        case "models-display-native-families":
+            for (familyID, familyName, repository) in [
+                ("olmo3", "OLMo 3", "allenai/Olmo-3-7B-Instruct"),
+                ("gemma3", "Gemma 3 images", "google/gemma-3-4b-it"),
+                ("qwen3_5_moe", "Qwen3.5 MoE", "mlx-community/Qwen3.5-35B-A3B-4bit"),
+                ("gemma4_text", "Gemma 4", "google/gemma-4-E2B-it")
+            ] {
+                var raw = modelDisplay("repo:" + repository, name: repository.split(separator: "/").last.map(String.init) ?? repository)
+                raw["family_id"] = familyID
+                guard ModelFamily.displayName(for: familyID) == familyName,
+                      let display = InstalledModelDisplay(raw),
+                      display.repositoryURL?.absoluteString == "https://huggingface.co/" + repository,
+                      display.familyID == familyID, display.quantization == "BF16",
+                      display.weightBytes == 1_190_000_000,
+                      display.sourceRevision == String(repeating: "a", count: 40) else { return false }
+                let inventory = ModelsInventory(
+                    models: [InstalledModel(id: familyID, name: repository, path: "/private/" + familyID,
+                                            apiID: familyID, display: display)],
+                    loadedID: "", registry: nil
+                )
+                guard inventory.groups.count == 1,
+                      inventory.groups[0].family == familyName,
+                      inventory.groups[0].name == repository.split(separator: "/").last.map(String.init) else { return false }
+            }
+            return true
         case "models-display-malformed":
             let mutations: [(String, Any)] = [
                 ("schema_version", 2), ("schema_version", true), ("group_id", ""),
@@ -1223,6 +1272,33 @@ extension EngineController {
             return !inventory.groups[0].models[0].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models[1].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models.filter(\.isRunning).map(\.id) == ["text"]
+        case "models-readable-names":
+            var lily = modelDisplay("repo:owner/Qwen3.8-Flash-Next-lily-q4-xl", name: "Qwen3.8-Flash-Next-lily-q4-xl")
+            lily["quantization"] = "Lily q4-xl (Q4_K)"
+            var compact = modelDisplay("repo:owner/Qwen3-4B-4bit", name: "Qwen3-4B-4bit")
+            compact["quantization"] = "4-bit"
+            let saved = "qwen38-flash-next-lily-q4-xl-0f94842e"
+            let dense = modelDisplay("repo:owner/Qwen3-0.6B", name: "Qwen3-0.6B")
+            let fixtures = [variant("lily", name: saved, display: lily),
+                            variant("mixed", name: "qwen38-flash-next-mixed-4-8bit-788c07a8", display: nil),
+                            variant("small", name: "qwen3-4b-4bit", display: compact),
+                            variant("dense", name: "qwen3-dense", display: dense),
+                            variant("custom", name: "JevK5", display: nil)]
+            let inventory = ModelsInventory(models: fixtures, loadedID: "lily", registry: nil)
+            let rows = Dictionary(uniqueKeysWithValues: inventory.models.map { ($0.id, $0) })
+            guard rows["lily"]?.displayName == "Qwen3.8 Flash Next", rows["lily"]?.name == saved,
+                  rows["lily"]?.quantization == "Lily q4-xl (Q4_K)",
+                  rows["mixed"]?.displayName == "Qwen3.8 Flash Next (Mixed 4/8-bit)",
+                  rows["small"]?.displayName == "Qwen3 4B", rows["custom"]?.displayName == "JevK5",
+                  rows["dense"]?.displayName == "Qwen3 Dense",
+                  inventory.runningGroup?.models.first?.id == "lily" else { return false }
+            for query in [saved, "0f94842e", "Qwen3.8 Flash Next"] {
+                guard ModelsInventory(models: fixtures, loadedID: "", registry: nil, query: query).models.contains(where: { $0.id == "lily" }) else { return false }
+            }
+            return ModelsInventory.readableName("My preferred model", display: InstalledModelDisplay(lily)) == "My preferred model"
+                && ModelsInventory.readableName("my-favorite-model", display: InstalledModelDisplay(lily)) == "My Favorite Model"
+                && ModelsInventory.readableName("experiment-deadbeef", display: nil) == "Experiment Deadbeef"
+                && ModelsInventory.readableName("---", display: nil) == "---"
         case "models-visible-row-name-sort":
             let aliases = [
                 variant("zeta", name: "Zeta", display: modelDisplay("owner/first", name: "Alpha")),
@@ -2323,6 +2399,9 @@ exit(EngineController.exercise(scenario, backendError: backendError) ? 0 : 1)
     "Apple silicon macOS required",
 )
 class ControllerLifecycleTests(unittest.TestCase):
+    def test_small_backend_replies_do_not_wait_for_pipe_close(self):
+        self.exercise("backend-short-replies")
+
     def test_connected_application_activity_does_not_show_playground_timing(self):
         self.exercise("generation-progress-external-activity")
 
@@ -2384,6 +2463,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_beginner_recommendations_reject_stale_or_invalid_reports(self):
         self.exercise("beginner-recommendation-fences")
+
+    def test_beginner_files_task_reaches_guided_model_backend(self):
+        self.exercise("beginner-files-task-transport")
 
     def test_beginner_cancellation_preserves_the_current_worker_and_history(self):
         self.exercise("beginner-cancel-preserves-current")
@@ -2548,6 +2630,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_model_display_metadata_cannot_change_runtime_capabilities(self):
         self.exercise("models-display-event")
 
+    def test_installed_model_display_accepts_olmo3_and_gemma4_families(self):
+        self.exercise("models-display-native-families")
+
     def test_tool_labels_distinguish_protocol_support_and_never_grant_live_capabilities(self):
         self.exercise("models-tool-support-labels")
 
@@ -2632,6 +2717,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_grouped_text_and_image_variants_have_distinct_stored_mode_label(self):
         self.exercise("models-artifact-mode-label")
+
+    def test_readable_model_names_preserve_saved_identity_precision_and_search(self):
+        self.exercise("models-readable-names")
 
     def test_catalog_family_changes_and_close_fence_late_results(self):
         self.exercise("image-catalog-stale-family")

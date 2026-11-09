@@ -182,7 +182,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        matches!(self.schema_version, 2 | 3)
+        matches!(self.schema_version, 2..=6)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
@@ -197,6 +197,64 @@ impl ImageArtifactIdentity<'_> {
     }
 }
 
+/// Bind each implementation profile to its artifact schema and actual geometry.
+/// Capability recognition never implies that an artifact has been qualified.
+fn image_family_limits(
+    profile: &str,
+    version: u32,
+    schema: u32,
+    geometry: (u32, u32),
+) -> Option<(u32, u32, u32)> {
+    let (expected_geometry, patches, tokens) = match (profile, version, schema) {
+        ("qwen35-dense-bf16-merged-v1", 1, 2 | 3)
+        | ("qwen35-dense-bf16-merged-v2", 2, 3)
+        | ("qwen35-dense-affine-merged-v3", 3, 3)
+        | ("qwen35-moe-affine-merged-v4", 4, 3)
+        | ("qwen35-moe-bf16-merged-v5", 5, 3)
+        | ("qwen38-lily-retained-bf16-vision-v1", 1, 6) => ((16, 2), 4096, 1024),
+        (
+            "gemma4-e2b-bf16-v1"
+            | "gemma4-e4b-bf16-v1"
+            | "gemma4-31b-bf16-v1"
+            | "gemma4-12b-bf16-v1"
+            | "gemma4-26b-a4b-bf16-v1",
+            1,
+            4,
+        ) => ((16, 3), 2520, 280),
+        ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
+        _ => return None,
+    };
+    (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
+}
+
+#[cfg(test)]
+mod image_family_tests {
+    use super::image_family_limits;
+
+    #[test]
+    fn family_handshakes_require_matching_schema_version_and_geometry() {
+        for (profile, version, schema, geometry, expected) in [
+            ("qwen35-dense-bf16-merged-v2", 2, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-dense-affine-merged-v3", 3, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-moe-affine-merged-v4", 4, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-moe-bf16-merged-v5", 5, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, (16, 2), (4096, 1024, 1048576)),
+            ("gemma4-e2b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-e4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-31b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-12b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-26b-a4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma3-siglip-bf16-v1", 1, 5, (14, 4), (4096, 256, 802816)),
+        ] {
+            assert_eq!(image_family_limits(profile, version, schema, geometry), Some(expected));
+            assert_eq!(image_family_limits(profile, version + 1, schema, geometry), None);
+            assert_eq!(image_family_limits(profile, version, 1, geometry), None);
+            assert_eq!(image_family_limits(profile, version, schema, (1, 1)), None);
+        }
+        assert_eq!(image_family_limits("unimplemented", 1, 5, (14, 4)), None);
+    }
+}
+
 struct PreparedRequest<P> {
     id: String,
     image: P,
@@ -205,20 +263,32 @@ struct PreparedRequest<P> {
     _lease: ImageLease,
 }
 
-fn valid_image_metadata(metadata: &PreparedImageMetadata) -> bool {
+fn valid_image_metadata(
+    metadata: &PreparedImageMetadata,
+    geometry: (u32, u32),
+) -> bool {
+    let (patch_size, merge_size) = geometry;
+    let (max_patches, max_image_tokens) = match geometry {
+        (16, 2) => (4096, 1024),
+        (16, 3) => (2520, 280),
+        (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
+        _ => return false,
+    };
     let [temporal, height, width] = metadata.grid;
     temporal == 1
         && height > 0
         && width > 0
-        && height.is_multiple_of(2)
-        && width.is_multiple_of(2)
-        && height.checked_mul(width).is_some_and(|patches| patches <= 4096 && patches / 4 == metadata.image_tokens)
-        && metadata.processed_dimensions[0].checked_div(16) == Some(width)
-        && metadata.processed_dimensions[1].checked_div(16) == Some(height)
-        && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(16))
+        && height.is_multiple_of(merge_size)
+        && width.is_multiple_of(merge_size)
+        && height.checked_mul(width).is_some_and(|patches| {
+            patches <= max_patches && patches / (merge_size * merge_size) == metadata.image_tokens
+        })
+        && metadata.processed_dimensions[0].checked_div(patch_size) == Some(width)
+        && metadata.processed_dimensions[1].checked_div(patch_size) == Some(height)
+        && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(patch_size))
         && metadata.input_tokens >= metadata.image_tokens as usize + 2
         && metadata.image_tokens > 0
-        && metadata.image_tokens <= 1024
+        && metadata.image_tokens <= max_image_tokens
 }
 
 #[derive(Clone)]
@@ -413,6 +483,14 @@ fn collect_tokens_with_clock_and_callback(
 pub(crate) trait GenerationBackend {
     type PreparedImage;
 
+    /// Optional owner-thread work between complete requests. No inference or
+    /// prefix state may be changed by this callback.
+    fn idle_maintenance_interval(&self) -> Option<Duration> {
+        None
+    }
+    fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
     /// Select a safe context capacity for text generation. Backends with a
@@ -468,6 +546,9 @@ pub(crate) trait GenerationBackend {
         options: &GenerationOptions,
     ) -> Result<u32, &'static str> {
         Ok(options.mtp_drafts)
+    }
+    fn image_geometry(&self) -> (u32, u32) {
+        (16, 2)
     }
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
         None
@@ -1037,7 +1118,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if self.backend.cancelled(request_id)? {
                     return Err("generation_cancelled");
                 }
-                if !valid_image_metadata(&metadata) {
+                if !valid_image_metadata(&metadata, self.backend.image_geometry()) {
                     return Err("invalid_image_preparation_output");
                 }
                 if metadata
@@ -1194,6 +1275,65 @@ impl<B: GenerationBackend> GenerationWorker<B> {
     }
 }
 
+/// Wait without extending the retained prefix's original idle deadline on
+/// maintenance ticks. Returning input/EOF immediately avoids a poll-sized
+/// request delay; backends without maintenance retain their blocking behavior.
+fn wait_for_request<B: GenerationBackend>(
+    backend: &mut B,
+    input: &mut impl RequestInput,
+) -> Result<(), &'static str> {
+    wait_for_request_with_clock(backend, input, Instant::now)
+}
+
+fn wait_for_request_with_clock<B: GenerationBackend>(
+    backend: &mut B,
+    input: &mut impl RequestInput,
+    mut now: impl FnMut() -> Instant,
+) -> Result<(), &'static str> {
+    let interval = backend.idle_maintenance_interval().filter(|interval| !interval.is_zero());
+    let cache_limit = backend.prefix_cache_retained().then_some(Duration::from_secs(prefix_cache::IDLE_SECONDS));
+    let started = now();
+    let mut cache_remaining = cache_limit;
+    loop {
+        let timeout = match (interval, cache_remaining) {
+            (Some(tick), Some(cache)) => tick.min(cache),
+            (Some(tick), None) => tick,
+            (None, Some(cache)) => cache,
+            (None, None) => return Ok(()),
+        };
+        if input.wait_readable(timeout).map_err(|_| "protocol_read_failed")? {
+            if cache_remaining.is_some()
+                && cache_limit.is_some_and(|limit| now().saturating_duration_since(started) >= limit)
+            {
+                backend.clear_prefix_cache();
+            }
+            return Ok(());
+        }
+        if let Some(remaining) = cache_remaining {
+            let elapsed = now().saturating_duration_since(started);
+            if remaining <= timeout || cache_limit.is_some_and(|limit| elapsed >= limit) {
+                backend.clear_prefix_cache();
+                cache_remaining = None;
+            } else {
+                cache_remaining = cache_limit.map(|limit| limit.saturating_sub(elapsed));
+            }
+        }
+        if interval.is_some() {
+            backend.maintain_idle_queue()?;
+            // Maintenance itself can take time, including a slow device wake.
+            // Recompute before waiting again, even if input is already ready.
+            if cache_remaining.is_some() {
+                cache_remaining =
+                    cache_limit.map(|limit| limit.saturating_sub(now().saturating_duration_since(started)));
+                if cache_remaining.is_some_and(|remaining| remaining.is_zero()) {
+                    backend.clear_prefix_cache();
+                    cache_remaining = None;
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn run_lines<B: GenerationBackend>(
     worker: &mut GenerationWorker<B>,
     input: &mut impl RequestInput,
@@ -1243,21 +1383,22 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             .filter(ImageArtifactIdentity::valid)
             .ok_or("invalid_model_config")?;
         let runtime_identity = worker.backend.runtime_identity().ok_or("invalid_model_config")?;
-        let (family_profile, family_version) = worker
-            .backend
-            .image_family_profile()
-            .filter(|(profile, version)| {
-                matches!((*profile, *version), ("qwen35-dense-bf16-merged-v1", 1) | ("qwen35-dense-bf16-merged-v2", 2))
-            })
-            .ok_or("invalid_model_config")?;
+        let (family_profile, family_version) = worker.backend.image_family_profile().ok_or("invalid_model_config")?;
         let (model_source, model_revision) = worker.backend.image_source_identity().ok_or("invalid_model_config")?;
+        let (max_patches, max_image_tokens, max_processed_pixels) = image_family_limits(
+            family_profile,
+            family_version,
+            identity.schema_version,
+            worker.backend.image_geometry(),
+        )
+        .ok_or("invalid_model_config")?;
         readiness["image_input"] = json!({
             "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],
             "formats":["image/jpeg","image/png"],"max_images":1,
             "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":32_000_000,
             "max_source_dimension":16_384,
-            "max_processed_pixels":1_048_576,"max_patches":4096,"max_image_tokens":1024,
+            "max_processed_pixels":max_processed_pixels,"max_patches":max_patches,"max_image_tokens":max_image_tokens,
             "artifact_schema_version":identity.schema_version,"model_source":model_source,
             "model_revision":model_revision,"family_profile":family_profile,"family_version":family_version,
             "artifact_sha256":identity.artifact_sha256,"config_sha256":identity.config_sha256,
@@ -1269,17 +1410,10 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     }
     write_reply(output, &readiness)?;
     loop {
-        // Release retained state when the host stays idle.
-        if worker.backend.prefix_cache_retained() {
-            match input.wait_readable(Duration::from_secs(prefix_cache::IDLE_SECONDS)) {
-                Ok(true) => {},
-                Ok(false) => worker.backend.clear_prefix_cache(),
-                Err(_) => {
-                    worker.backend.clear_prefix_cache();
-                    worker.prepared = None;
-                    return Err("protocol_read_failed");
-                },
-            }
+        if let Err(code) = wait_for_request(&mut worker.backend, input) {
+            worker.backend.clear_prefix_cache();
+            worker.prepared = None;
+            return Err(code);
         }
         let mut bytes = Vec::new();
         let count = match Read::by_ref(input).take(worker.budget.wire_bytes as u64 + 1).read_until(b'\n', &mut bytes) {
@@ -1348,6 +1482,9 @@ mod tests {
     }
 
     struct FakeBackend {
+        idle_interval: Option<Duration>,
+        idle_calls: usize,
+        fail_idle: bool,
         max_context: Option<u32>,
         tokens: Vec<Result<u64, &'static str>>,
         eos: Vec<u32>,
@@ -1395,6 +1532,17 @@ mod tests {
     impl GenerationBackend for FakeBackend {
         type PreparedImage = FakePreparedImage;
 
+        fn idle_maintenance_interval(&self) -> Option<Duration> {
+            self.idle_interval
+        }
+        fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
+            self.idle_calls += 1;
+            if self.fail_idle {
+                Err("native_idle_maintenance_failed")
+            } else {
+                Ok(())
+            }
+        }
         fn vocab_size(&self) -> usize {
             8
         }
@@ -1586,8 +1734,18 @@ mod tests {
             self.images.then_some((self.family_profile, self.family_version))
         }
 
+        fn image_geometry(&self) -> (u32, u32) {
+            if self.family_profile == "gemma4-e2b-bf16-v1" {
+                (16, 3)
+            } else {
+                (16, 2)
+            }
+        }
+
         fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
-            self.images.then_some(if self.image_schema == 3 {
+            self.images.then_some(if self.image_schema == 4 {
+                ("google/gemma-4-E2B-it", Some("3e22461f65e89153144f8adb70e3b8c2cc9845a7"))
+            } else if self.image_schema == 3 {
                 ("local:synthetic-merged-model", None)
             } else {
                 ("Qwen/Qwen3.5-0.8B", Some("2fc06364715b967f1860aea9cf38778875588b17"))
@@ -1631,9 +1789,21 @@ mod tests {
                 },
                 PreparedImageMetadata {
                     input_tokens: 7,
-                    image_tokens: 4,
-                    grid: [1, 4, 4],
-                    processed_dimensions: [64, 64],
+                    image_tokens: if self.image_schema == 4 {
+                        1
+                    } else {
+                        4
+                    },
+                    grid: if self.image_schema == 4 {
+                        [1, 3, 3]
+                    } else {
+                        [1, 4, 4]
+                    },
+                    processed_dimensions: if self.image_schema == 4 {
+                        [48, 48]
+                    } else {
+                        [64, 64]
+                    },
                 },
             ))
         }
@@ -1651,6 +1821,9 @@ mod tests {
     }
     fn worker() -> GenerationWorker<FakeBackend> {
         GenerationWorker::new(FakeBackend {
+            idle_interval: None,
+            idle_calls: 0,
+            fail_idle: false,
             max_context: Some(1024),
             tokens: vec![Ok(3), Ok(4), Ok(1), Ok(7)],
             eos: vec![1],
@@ -2057,6 +2230,24 @@ mod tests {
     }
 
     #[test]
+    fn image_memory_rejection_releases_prepared_state_and_accepts_same_worker_retry() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        let prepared = post(&mut worker, image_prepare(&root));
+        worker.backend.tokens = vec![Err("resource_budget_exceeded")];
+        assert_eq!(post(&mut worker, image_generate(&prepared))["error"], "resource_budget_exceeded");
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(post(&mut worker, json!({"operation":"discard_image"}))["discarded"], false);
+        worker.backend.tokens = vec![Ok(3), Ok(1)];
+        let prepared = post(&mut worker, image_prepare(&root));
+        let retry = post(&mut worker, image_generate(&prepared));
+        assert_eq!(retry["input_tokens"], 7);
+        assert_eq!(retry["finish_reason"], "eos");
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 2);
+        assert_eq!(worker.backend.image_generations, 2);
+    }
+
+    #[test]
     fn image_preparation_is_opt_in_and_unknown_fields_remain_rejected() {
         let root = crate::media::tests::PrivateRoot::new();
         let mut vision_worker = image_worker(&root);
@@ -2238,6 +2429,40 @@ mod tests {
             );
             assert!(output.is_empty());
         }
+    }
+
+    #[test]
+    fn gemma_image_readiness_and_preparation_use_three_by_three_pooling() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        worker.backend.image_schema = 4;
+        worker.backend.family_profile = "gemma4-e2b-bf16-v1";
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let ready: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(ready["image_input"]["artifact_schema_version"], 4);
+        assert_eq!(ready["image_input"]["max_image_tokens"], 280);
+        assert_eq!(ready["image_input"]["max_patches"], 2520);
+        assert_eq!(ready["image_input"]["max_processed_pixels"], 645120);
+        assert_eq!(ready["image_input"]["qualification"], "unverified");
+        let prepared = post(&mut worker, image_prepare(&root));
+        assert_eq!(prepared["image_tokens"], 1);
+        assert_eq!(prepared["grid"], json!([1, 3, 3]));
+        assert!(prepared.get("prepared_id").is_some());
+        let metadata = PreparedImageMetadata {
+            input_tokens: 7,
+            image_tokens: 1,
+            grid: [1, 3, 3],
+            processed_dimensions: [48, 48],
+        };
+        assert!(valid_image_metadata(&metadata, (16, 3)));
+        assert!(!valid_image_metadata(&metadata, (16, 2)));
+        assert!(!valid_image_metadata(&metadata, (16, 0)));
+        worker.backend.image_schema = 3;
+        assert_eq!(
+            run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut Vec::new()),
+            Err("invalid_model_config")
+        );
     }
 
     #[test]
@@ -2735,12 +2960,34 @@ mod tests {
 
     #[test]
     fn image_metadata_accepts_long_text_contexts() {
-        assert!(valid_image_metadata(&PreparedImageMetadata {
-            input_tokens: 16_385,
-            image_tokens: 4,
-            grid: [1, 4, 4],
-            processed_dimensions: [64, 64],
-        }));
+        assert!(valid_image_metadata(
+            &PreparedImageMetadata {
+                input_tokens: 16_385,
+                image_tokens: 4,
+                grid: [1, 4, 4],
+                processed_dimensions: [64, 64],
+            },
+            (16, 2)
+        ));
+    }
+
+    #[test]
+    fn gemma3_preparation_requires_its_complete_fixed_grid() {
+        let mut metadata = PreparedImageMetadata {
+            input_tokens: 273,
+            image_tokens: 256,
+            grid: [1, 64, 64],
+            processed_dimensions: [896, 896],
+        };
+        assert!(valid_image_metadata(&metadata, (14, 4)));
+        assert!(!valid_image_metadata(&metadata, (16, 2)));
+        metadata.grid = [1, 32, 64];
+        metadata.processed_dimensions = [896, 448];
+        metadata.image_tokens = 128;
+        assert!(!valid_image_metadata(&metadata, (14, 4)));
+        metadata.grid = [1, 64, 64];
+        metadata.processed_dimensions = [896, 896];
+        assert!(!valid_image_metadata(&metadata, (14, 4)));
     }
 
     #[test]
@@ -3252,6 +3499,8 @@ mod tests {
     struct IdleInput {
         input: io::Cursor<Vec<u8>>,
         waits: Vec<bool>,
+        expected_timeouts: Vec<Duration>,
+        fail_wait: bool,
     }
 
     impl Read for IdleInput {
@@ -3280,7 +3529,10 @@ mod tests {
             &mut self,
             timeout: Duration,
         ) -> io::Result<bool> {
-            assert_eq!(timeout, Duration::from_secs(600));
+            if self.fail_wait {
+                return Err(io::Error::other("failed wait"));
+            }
+            assert_eq!(timeout, self.expected_timeouts.remove(0));
             Ok(self.waits.remove(0))
         }
     }
@@ -3292,7 +3544,9 @@ mod tests {
     ) -> Vec<Value> {
         let mut input = IdleInput {
             input: io::Cursor::new(lines.iter().flat_map(|line| line.iter().copied().chain(*b"\n")).collect()),
+            expected_timeouts: vec![Duration::from_secs(600); waits.len()],
             waits,
+            fail_wait: false,
         };
         let mut output = Vec::new();
         run_lines(worker, &mut input, &mut output).unwrap();
@@ -3323,5 +3577,118 @@ mod tests {
         let replies = run_requests(&mut prefix, &[request.clone(), oversized, request.clone()], vec![true, true]);
         assert_eq!(replies[1]["error"], "request_too_large");
         assert_eq!(replies[2]["reused_input_tokens"], 0);
+    }
+
+    fn idle_input(
+        waits: Vec<bool>,
+        timeouts: Vec<Duration>,
+    ) -> IdleInput {
+        IdleInput {
+            input: io::Cursor::new(Vec::new()),
+            waits,
+            expected_timeouts: timeouts,
+            fail_wait: false,
+        }
+    }
+
+    #[test]
+    fn idle_maintenance_runs_without_a_retained_prefix_and_stops_at_eof() {
+        let mut worker = worker();
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut input = idle_input(vec![false, false, true], vec![Duration::from_millis(500); 3]);
+        let mut output = Vec::new();
+        assert_eq!(run_lines(&mut worker, &mut input, &mut output), Ok(()));
+        assert_eq!(worker.backend.idle_calls, 2);
+        assert_eq!(worker.backend.generation_calls, 0);
+        assert!(input.waits.is_empty());
+        assert_eq!(output.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).count(), 1);
+    }
+
+    #[test]
+    fn idle_maintenance_preserves_ready_input_and_prefix_state() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut input = idle_input(vec![false, true], vec![Duration::from_millis(500); 2]);
+        assert_eq!(wait_for_request(&mut worker.backend, &mut input), Ok(()));
+        assert_eq!(worker.backend.idle_calls, 1);
+        assert_eq!(reused(&mut worker, 3_000), 2048);
+    }
+
+    #[test]
+    fn idle_maintenance_does_not_extend_prefix_expiry() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut input = idle_input(
+            vec![false, false, false, true],
+            vec![
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                Duration::from_millis(250),
+                Duration::from_millis(500),
+            ],
+        );
+        let start = Instant::now();
+        let mut times =
+            [0, 500, 500, 599_750, 599_750, 600_000].into_iter().map(|ms| start + Duration::from_millis(ms));
+        assert_eq!(wait_for_request_with_clock(&mut worker.backend, &mut input, || times.next().unwrap()), Ok(()));
+        assert!(!worker.backend.prefix_cache_retained());
+        assert_eq!(worker.backend.idle_calls, 3);
+    }
+
+    #[test]
+    fn idle_failures_exit_and_clear_retained_state() {
+        for fail_wait in [false, true] {
+            let mut worker = prefix_worker(true);
+            assert_eq!(reused(&mut worker, 3_000), 0);
+            worker.backend.idle_interval = Some(Duration::from_millis(500));
+            worker.backend.fail_idle = !fail_wait;
+            let mut input = idle_input(vec![false], vec![Duration::from_millis(500)]);
+            input.fail_wait = fail_wait;
+            assert_eq!(
+                run_lines(&mut worker, &mut input, &mut Vec::new()),
+                Err(if fail_wait {
+                    "protocol_read_failed"
+                } else {
+                    "native_idle_maintenance_failed"
+                })
+            );
+            assert!(!worker.backend.prefix_cache_retained());
+        }
+    }
+
+    #[test]
+    fn ready_input_cannot_reuse_a_prefix_after_idle_expiry() {
+        for callback_crosses_deadline in [false, true] {
+            let mut worker = prefix_worker(true);
+            assert_eq!(reused(&mut worker, 3_000), 0);
+            worker.backend.idle_interval = Some(Duration::from_millis(500));
+            let mut input = idle_input(
+                if callback_crosses_deadline {
+                    vec![false, true]
+                } else {
+                    vec![true]
+                },
+                vec![
+                    Duration::from_millis(500);
+                    if callback_crosses_deadline {
+                        2
+                    } else {
+                        1
+                    }
+                ],
+            );
+            let start = Instant::now();
+            let mut times = if callback_crosses_deadline {
+                vec![0, 500, 600_001]
+            } else {
+                vec![0, 600_001]
+            }
+            .into_iter()
+            .map(|ms| start + Duration::from_millis(ms));
+            assert_eq!(wait_for_request_with_clock(&mut worker.backend, &mut input, || times.next().unwrap()), Ok(()));
+            assert!(!worker.backend.prefix_cache_retained());
+        }
     }
 }

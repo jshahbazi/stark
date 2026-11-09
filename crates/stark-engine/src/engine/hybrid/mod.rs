@@ -7,6 +7,9 @@ pub mod activity;
 pub mod finite_guard;
 pub mod flint;
 pub mod glm;
+pub mod guided_admission;
+mod image;
+pub use image::PreparedHybridImage;
 #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
 mod glm_exl3;
 #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
@@ -16,6 +19,7 @@ mod glm_metal;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod lily;
 pub mod math;
+mod memory;
 pub mod profile;
 pub mod qwen;
 #[cfg(feature = "metal")]
@@ -33,6 +37,8 @@ use tokenizers::Tokenizer;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("native hybrid image request cancelled")]
+    Cancelled,
     #[error("invalid native hybrid model: {0}")]
     Invalid(&'static str),
     #[error("unsupported native hybrid model: {0}")]
@@ -245,6 +251,7 @@ pub struct Model {
     vocab_size: usize,
     max_context: u32,
     eos: Vec<u32>,
+    image_artifact: Option<image::artifact::ImageArtifact>,
 }
 
 impl Model {
@@ -258,7 +265,7 @@ impl Model {
         path: &Path,
         with_mtp: bool,
     ) -> Result<Self> {
-        Self::load_with_policy(path, with_mtp, false)
+        Self::load_with_policy(path, with_mtp, false, false)
     }
 
     /// Explicit source-bound native profile or private validation stage. The
@@ -268,7 +275,16 @@ impl Model {
         path: &Path,
         with_mtp: bool,
     ) -> Result<Self> {
-        Self::load_with_policy(path, with_mtp, Self::native_decode_stage_available())
+        Self::load_with_policy(path, with_mtp, Self::native_decode_stage_available(), false)
+    }
+
+    /// Load the original-format Qwen tower explicitly. Converted text exports
+    /// and other hybrid architectures cannot acquire image capability here.
+    pub fn load_with_image_support(
+        path: &Path,
+        with_mtp: bool,
+    ) -> Result<Self> {
+        Self::load_with_policy(path, with_mtp, false, true)
     }
 
     pub const fn native_decode_stage_available() -> bool {
@@ -293,11 +309,20 @@ impl Model {
         path: &Path,
         with_mtp: bool,
         native_decode_stage: bool,
+        with_images: bool,
     ) -> Result<Self> {
         let _ = native_decode_stage;
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
-        let _ = with_mtp;
+        let _ = (with_mtp, with_images);
         let outer = config(path)?;
+        if with_images && !mixed_precision_checkpoint(&outer) {
+            return Err(Error::Unsupported("retained original-format Qwen image tower required"));
+        }
+        let image_artifact = if with_images {
+            Some(image::artifact::ImageArtifact::admit(path)?)
+        } else {
+            None
+        };
         if outer.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE) {
             return Self::load_uzu(path);
         }
@@ -376,7 +401,10 @@ impl Model {
         } else if mixed_precision_checkpoint(&outer) {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             {
-                let model = lily::LilyModel::load_with_mtp(path, with_mtp)?;
+                let model = lily::LilyModel::load_with_options(path, with_mtp, with_images)?;
+                if with_images {
+                    model.validate_image_tokenizer(&tokenizer)?;
+                }
                 if model.vocab_size() != vocab_size || model.position() != 0 {
                     return Err(Error::Invalid("mixed precision metadata mismatch"));
                 }
@@ -399,13 +427,92 @@ impl Model {
             };
             (forward, max_context)
         };
+        if let Some(artifact) = &image_artifact {
+            artifact.unchanged(path)?;
+        }
         Ok(Self {
             forward,
             tokenizer,
             vocab_size,
             max_context,
             eos,
+            image_artifact,
         })
+    }
+
+    pub fn supports_images(&self) -> bool {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return self.image_artifact.is_some() && model.supports_images();
+        }
+        false
+    }
+
+    pub fn image_artifact_identity(&self) -> Option<&crate::engine::vision::VisionArtifactIdentity> {
+        self.image_artifact.as_ref().map(|artifact| &artifact.identity)
+    }
+
+    pub fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
+        self.image_artifact.as_ref().map(|artifact| (artifact.source.as_str(), Some(artifact.revision.as_str())))
+    }
+
+    pub fn image_family_profile(&self) -> Option<(&'static str, u32)> {
+        self.image_artifact.as_ref().map(|_| (image::artifact::PROFILE, 1))
+    }
+
+    pub fn prepare_image(
+        &self,
+        encoded: &[u8],
+    ) -> Result<PreparedHybridImage> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.prepare_image(encoded);
+        }
+        let _ = encoded;
+        Err(Error::Unsupported("native image preparation unavailable"))
+    }
+
+    pub fn prepare_image_prompt(
+        &self,
+        tokens: &[u32],
+        image: &PreparedHybridImage,
+        context_capacity: u32,
+    ) -> Result<Box<[u32]>> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.prepare_image_prompt(tokens, image, context_capacity as usize);
+        }
+        let _ = (tokens, image, context_capacity);
+        Err(Error::Unsupported("native image prompt unavailable"))
+    }
+
+    /// Consume an expanded image prompt and return its first target logits.
+    /// Image state never participates in generation prefix reuse.
+    pub fn prefill_image(
+        &mut self,
+        tokens: &[u32],
+        image: PreparedHybridImage,
+    ) -> Result<Vec<f32>> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.prefill_image(tokens, image);
+        }
+        let _ = (tokens, image);
+        Err(Error::Unsupported("native image prefill unavailable"))
+    }
+
+    pub fn prefill_image_controlled<F: FnMut() -> bool>(
+        &mut self,
+        tokens: &[u32],
+        image: PreparedHybridImage,
+        should_cancel: F,
+    ) -> Result<Vec<f32>> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.prefill_image_controlled(tokens, image, should_cancel);
+        }
+        let _ = (tokens, image, should_cancel);
+        Err(Error::Unsupported("native image prefill unavailable"))
     }
 
     fn load_uzu(path: &Path) -> Result<Self> {
@@ -450,6 +557,7 @@ impl Model {
                 vocab_size,
                 max_context,
                 eos,
+                image_artifact: None,
             })
         }
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
@@ -466,6 +574,53 @@ impl Model {
     }
     pub fn max_context_length(&self) -> u32 {
         self.max_context
+    }
+
+    /// Allocation admission uses the loaded execution family and cache policy.
+    /// The returned context remains bounded by the model's declared capacity.
+    pub fn automatic_context_length(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+    ) -> Option<u32> {
+        crate::encodable_block::memory::automatic_context(
+            input_tokens,
+            maximum.min(self.max_context),
+            memory_budget_bytes,
+            |context| {
+                self.request_memory_bytes(context, input_tokens)
+                    .map(crate::encodable_block::memory::MemoryEstimate::state)
+            },
+        )
+    }
+
+    pub fn supports_automatic_context_planning(&self) -> bool {
+        self.request_memory_bytes(2.min(self.max_context), 1).is_some()
+    }
+
+    /// Conservative peak inventory. Existing cached allocations are charged
+    /// again, so low headroom can reject reuse without changing model state.
+    pub fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        if input_tokens == 0 || context_tokens < input_tokens || context_tokens > self.max_context {
+            return None;
+        }
+        let state = match &self.forward {
+            Forward::Flint(model) => model.request_memory_bytes(context_tokens)?,
+            Forward::Glm(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
+            Forward::Qwen(model) => model.request_memory_bytes(context_tokens)?,
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            // The bridge's loader bills all device phases at its installed
+            // full context, including MTP and prefix-copy peak, before load.
+            Forward::GlmExl3(_) => 0,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
+        };
+        memory::sum(&[state, memory::host_workspace(context_tokens, input_tokens, self.vocab_size)?])
     }
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos
@@ -828,6 +983,30 @@ impl Model {
                 Err(Error::Unsupported("native greedy stream unavailable"))
             },
         }
+    }
+
+    /// Owner-thread maintenance while the generation worker waits for input.
+    /// Other backends retain their existing idle behavior.
+    pub fn idle_maintenance_interval(&self) -> Option<std::time::Duration> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward
+            && model.needs_idle_queue_maintenance()
+        {
+            return Some(std::time::Duration::from_millis(500));
+        }
+        None
+    }
+
+    /// Submit only an empty queue signal; caches, sampling and model positions
+    /// survive unchanged. Failures require the owning worker to exit/reload.
+    pub fn maintain_idle_queue(&self) -> Result<()> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward
+            && model.needs_idle_queue_maintenance()
+        {
+            return model.maintain_idle_queue();
+        }
+        Ok(())
     }
 
     /// The prefill chunk length when this backend can snapshot and resume a

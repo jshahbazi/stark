@@ -78,6 +78,9 @@ use super::ExpertCacheStats;
 use super::vision::{self, VisionScratch};
 
 use super::config::{GateAct, Qwen4ExpConfig};
+
+#[path = "request_memory.rs"]
+mod request_memory;
 use super::ngram::{NgramHasher, NgramStorage, NgramTable, StagedRows};
 use super::positions::{ImageSpan, Positions};
 use super::weights::{
@@ -2028,6 +2031,17 @@ impl Qwen4ExpModel {
         vision: Option<&VisionInput<'_>>,
     ) -> Result<()> {
         self.prefill_chunks(ctx, state, s, tokens, draw, vision, None).map(drop)
+    }
+
+    /// Stark's bounded image worker: retain the ordinary final target readout
+    /// while allowing cancellation between completed prefill command buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill_with_vision_until(
+        &self, ctx: &MetalContext, state: &mut DecodeState, s: &mut Scratch,
+        tokens: &[u32], draw: Option<Draw<'_>>, vision: Option<&VisionInput<'_>>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<usize> {
+        self.prefill_chunks(ctx, state, s, tokens, draw, vision, Some(stop))
     }
 
     /// [`Self::prefill_with_vision`] without a draw that stops before the

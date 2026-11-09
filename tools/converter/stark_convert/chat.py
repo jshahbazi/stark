@@ -31,8 +31,11 @@ from .template_runtime import (
 from .tool_protocols import runtime_template_source
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
+    LILY_FAMILY_PROFILE,
+    VISION_MODEL_TYPES,
     family_image_input_contract,
     image_input_contract,
+    model_image_family,
     qualified_image_worker,
     supported_image_family,
 )
@@ -101,8 +104,8 @@ class ChatBudgetUnavailable(ChatError):
     """An older worker cannot yet plan automatic memory-bounded execution."""
 
 
-def automatic_generation_budget(worker, input_tokens, context_tokens, *, cancelled=None):
-    """Ask the loaded backend to size unknown-capacity execution after tokenization."""
+def automatic_generation_budget(worker, input_tokens, context_tokens, *, context_capacity_known=False, cancelled=None):
+    """Ask the loaded backend to admit execution after tokenization."""
     if not getattr(worker, "generation_budget", False):
         raise ChatBudgetUnavailable("Update Stark's worker to enable automatic output for this model.")
     reply = worker.request(
@@ -119,7 +122,7 @@ def automatic_generation_budget(worker, input_tokens, context_tokens, *, cancell
         or type(maximum) is not int
         or maximum != context - input_tokens
         or maximum > getattr(worker, "max_new_tokens", 0xFFFFFFFE)
-        or reply.get("context_capacity_known") is not False
+        or reply.get("context_capacity_known") is not context_capacity_known
         or reply.get("budget_kind") != "memory"
     ):
         raise ChatError("Invalid automatic execution budget; restart the model.")
@@ -218,17 +221,52 @@ def load_template(model, *, expected_hashes=None):
         source = codec["prompt_template"]
         if codec.get("type") != "ChatCodecConfig" or not isinstance(source, str) or not source:
             raise ValueError
-        if config.get("type") == "Qwen35VisionLanguageModelConfig":
+        image_family = model_image_family(config, model)
+        if config.get("type") in VISION_MODEL_TYPES or image_family is not None:
             # Only the recognized program may reach Jinja compilation. An
             # immutable sandbox does not bound arbitrary template computation.
             template_hashes = {
                 "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
                 "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
             }
+            if config.get("type") == "Gemma4VisionLanguageModelConfig":
+                descriptor = config.get("artifact_contract", {}).get("family", {})
+                template_hashes = (
+                    {"ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"}
+                    if descriptor
+                    in (
+                        {"id": profile, "version": 1}
+                        for profile in ("gemma4-31b-bf16-v1", "gemma4-12b-bf16-v1", "gemma4-26b-a4b-bf16-v1")
+                    )
+                    else {"0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"}
+                )
+            elif config.get("type") == "Gemma3VisionLanguageModelConfig":
+                template_hashes = {"7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"}
+            elif image_family == {"profile": LILY_FAMILY_PROFILE, "version": 1}:
+                template_hashes = {
+                    "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+                    "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+                }
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
-            if supported_image_family(family) and family["profile"] == CONFIGURED_FAMILY_PROFILE:
+            if (
+                config.get("type") == "Qwen35VisionLanguageModelConfig"
+                and supported_image_family(family)
+                and family["profile"]
+                in {
+                    CONFIGURED_FAMILY_PROFILE,
+                    "qwen35-dense-affine-merged-v3",
+                    "qwen35-moe-affine-merged-v4",
+                    "qwen35-moe-bf16-merged-v5",
+                }
+            ):
                 template_hashes.add("a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715")
+                if family["profile"] in {
+                    "qwen35-dense-affine-merged-v3",
+                    "qwen35-moe-affine-merged-v4",
+                    "qwen35-moe-bf16-merged-v5",
+                }:
+                    template_hashes.add("c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041")
             copied = _chat_file(model / "chat_template.jinja", 256 * 1024)
             if (
                 len(data) > 1024 * 1024
@@ -282,7 +320,9 @@ class Worker:
             config = read_model_config(Path(model))
         except (OSError, ValueError, ConversionError):
             config = {}
-        if isinstance(config, dict) and config.get("type") == "Qwen35VisionLanguageModelConfig":
+        if isinstance(config, dict) and (
+            config.get("type") in VISION_MODEL_TYPES or model_image_family(config, Path(model)) is not None
+        ):
             from .image_checks import ImageCheckError, preflight_family_memory
 
             try:
@@ -965,10 +1005,12 @@ def run_chat(args, worker):
                 maximum = args.max_new_tokens
                 request_context = context
                 if maximum is None:
-                    if context_capacity_known:
+                    if context_capacity_known and not worker.generation_budget:
                         maximum = min(ready["max_new_tokens"], context - count)
                     else:
-                        request_context, maximum = automatic_generation_budget(worker, count, context)
+                        request_context, maximum = automatic_generation_budget(
+                            worker, count, context, context_capacity_known=context_capacity_known
+                        )
                 if maximum < 1 or count + maximum > context:
                     print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")
                     continue
@@ -1025,7 +1067,7 @@ def main(argv=None):
         parser.error("token limits and timeout must be positive and finite")
     worker = None
     try:
-        if read_model_config(args.model_path).get("type") != "Qwen35VisionLanguageModelConfig":
+        if read_model_config(args.model_path).get("type") not in VISION_MODEL_TYPES:
             load_template(args.model_path)
         print("Loading model...", file=sys.stderr)
         worker = Worker(args.worker, args.model_path, args.timeout)

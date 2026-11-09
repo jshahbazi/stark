@@ -19,6 +19,19 @@ entries do not enable reuse; the loaded worker's readiness contract remains the
 runtime authority. Follow the [model-family support contract](MODEL_SUPPORT.md),
 [generation contract](GENERATION.md#prefix-reuse) and [repository rules](../AGENTS.md).
 
+## Record changes and experiments
+
+Create or extend a [model experiment record](model-experiments/README.md) for
+each compatibility, correctness, memory, precision, state or performance attempt.
+Use the [template](model-experiments/TEMPLATE.md) to bind the hypothesis,
+baseline, candidate and fixed gates before running it. Record failed and
+inconclusive, abandoned and resource-deferred attempts as well as passes, and separate the observed result
+from the decision to enable or ship it. Link the attempt ID from the PR.
+The ledger points to canonical run and benchmark evidence; it does not replace
+that evidence or qualify other checkpoints. Keep implemented support, numerical
+qualification, measured speed and deployment as separate outcomes; preserve
+older source-bound records when an attempt changes.
+
 ## Bind the implementation and artifact
 
 Record the source repository and immutable revision, weight/configuration/

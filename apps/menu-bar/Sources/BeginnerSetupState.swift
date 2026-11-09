@@ -2,13 +2,14 @@ import Combine
 import Foundation
 
 enum BeginnerTask: String, CaseIterable, Identifiable {
-    case everyday, text, code, unsure
+    case everyday, text, files, code, unsure
 
     var id: String { rawValue }
     var title: String {
         switch self {
         case .everyday: return "Writing and everyday help"
-        case .text: return "Text and files"
+        case .text: return "Explain text"
+        case .files: return "Work with files"
         case .code: return "Help with code"
         case .unsure: return "I’m not sure"
         }
@@ -16,7 +17,8 @@ enum BeginnerTask: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .everyday: return "Emails, ideas, and questions"
-        case .text: return "Explain notes or work with a folder in OpenWork"
+        case .text: return "Summaries, notes, and explanations"
+        case .files: return "Read or edit a folder in OpenWork"
         case .code: return "Understand an error or a small project"
         case .unsure: return "Choose a starting point for me"
         }
@@ -25,6 +27,7 @@ enum BeginnerTask: String, CaseIterable, Identifiable {
         switch self {
         case .everyday: return "pencil.line"
         case .text: return "doc.text"
+        case .files: return "folder"
         case .code: return "chevron.left.forwardslash.chevron.right"
         case .unsure: return "questionmark.circle"
         }
@@ -98,6 +101,7 @@ struct BeginnerModelChoice: Identifiable, Equatable {
     var source = ""
     var revision = ""
     var qualification = ""
+    var benchmarkSourceURL: URL? = nil
     var availabilityMessage: String? = nil
 
     func installed(as modelID: String) -> BeginnerModelChoice {

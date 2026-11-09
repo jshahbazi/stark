@@ -389,7 +389,7 @@ def write_metadata(
     expected_type = _MODEL_TYPES.get(model_entry.get("config_class"))
     if expected_type is None:
         raise UnsupportedMetadata("Unsupported metadata architecture.")
-    if expected_type == "qwen3_5":
+    if expected_type in {"qwen3_5", "qwen3_5_moe"}:
         from .adapters.qwen35 import normalize_qwen35_config
 
         hf_config = normalize_qwen35_config(hf_config)

@@ -15,7 +15,9 @@ GLM repositories remain outside generic converter preflight. The registry also
 includes a `qwen4_exp` converter for Lily-format Qwen3.8 text models. It writes
 a self-contained typed `Qwen38LanguageModelConfig` artifact with canonical
 MLX storage and unchanged mixed quantization, sharing the existing specialized
-Qwen kernels. Vision and MTP tensors are omitted from this converter path. The
+Qwen kernels. Vision and MTP tensors are omitted from this typed text-converter
+path. Retained Lily checkpoints have a separate pinned native image path; that
+image support does not come from the `qwen4_exp` text artifact. The
 ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
 backend has an unchanged `headless-reference` default and a separately staged
 `--profile bf16-native-experimental` profile that includes the BF16 draft head,
@@ -62,11 +64,37 @@ load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
 
+Qwen3.5 MoE image conversion has two schema-3 profiles: affine-quantized source
+weights use `qwen35-moe-affine-merged-v4`, while complete BF16 source weights
+use `qwen35-moe-bf16-merged-v5`. Both produce BF16 artifacts; the BF16-source
+route is image-only. Catalog discovery requires the source's
+supported processor and reviewed template before offering that mode; BF16 MoE
+text/Decision conversion remains unsupported. This is structural implementation
+coverage. Full official 35B execution and reference parity are unverified; each
+artifact still needs native admission and local image checks. The
+[vision family contract](VISION_FAMILY_CONTRACT.md) records the numerical policy,
+source layout, limits and disabled prefix-reuse disposition.
+
 New model and inference paths follow the [model onboarding workflow](MODEL_ONBOARDING.md),
 including generation prefix-reuse implementation where exact restoration is
 possible and a recorded blocker where it is unavailable. The family registry
 does not grant this runtime capability or transfer qualification between
 checkpoints and quantizations.
+[OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) use the ordinary native Metal text path.
+OLMo 3 adds whole-projection Q/K normalization and post-norm residual branches.
+Gemma 4 text paths include dense PLE E2B/E4B and bounded no-PLE 31B layouts.
+Pinned schema-4 BF16 image profiles cover E2B, E4B, 12B unified, 26B-A4B and
+31B. Audio and video execution remain unsupported. E2B has a canonical HF CPU
+image-feature comparison within the 2% gate on three fixtures plus bounded
+worker and chat-client lifecycle checks; E4B has separate source and execution
+validation. The 12B embedder and 26B MoE paths have component checks. The pinned
+31B tower/projector passes all three unchanged canonical feature gates, with
+relative RMS at most 0.00110689. Full 12B/26B/31B checkpoint generation is
+unqualified. Installed desktop UI execution and image performance are
+unmeasured. Exact checkpoint evidence remains tied to its reference profile and
+engine build. See the
+[original E2B validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md)
+and [31B vision component record](archive/runs/2026-11-07-gemma4-larger-vision-qualified-component.md).
 
 ## Browsing and removing models
 
@@ -87,10 +115,10 @@ in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
 Conversion-only families are omitted. Cards show whether each model supports
 text or text and images. Downloads automatically include image support when
-available for that artifact. Currently,
-this requires the full Qwen3.5 BF16 model's vision configuration and processing
-metadata to pass inspection. Image support still needs the normal installation
-and local runtime checks.
+available for that artifact. This requires metadata confirming a supported
+Qwen3.5 vision wrapper, BF16 vision tower and reviewed processor; decoder weights
+may use a supported affine profile. Image support still needs the normal
+installation and local runtime checks.
 The download and preparation progress remain in the browser. Completion adds
 the model to the library without selecting it for use.
 
@@ -126,9 +154,12 @@ registration. Download progress remains indeterminate until the stored byte
 total is verified. GLM image input and Decision mode are unavailable.
 Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
 its fixed Q8 control projections. Embedding/reranking tasks, known internal test
-models, quantized vision, unsupported MoE families, adapter-only and unsupported
-packed formats are excluded. The implemented Qwen3.8 text path includes its
-MoE graph.
+models, quantized vision towers, MoE architectures outside the implemented
+Qwen3.5 and Qwen3.8 paths, adapter-only and unsupported packed formats are
+excluded. Qwen image profiles can retain supported packed decoder matrices
+alongside a complete BF16 vision tower. The
+implemented Qwen3.8 text path includes its MoE graph; Qwen3.5 BF16 MoE image
+conversion is a separate image-only path.
 An uncatalogued compatible fine-tune can appear. This is
 a metadata-filtered list of compatible candidates; gated, inaccessible or unsupported
 repositories may be omitted.
@@ -182,7 +213,7 @@ The registry uses these mode identifiers:
 | --- | --- |
 | `text` | Text chat through a converted language artifact and the generation worker. |
 | `decision` | Generic answer-choice scoring through a text artifact, compatible template/tokenizer and scoring worker. |
-| `vision-language` | Image chat through the supported full vision artifact and local image checks. |
+| `vision-language` | Image chat through supported full vision artifacts and model-specific host checks. Current paths include the Qwen3.5 schemas and Gemma 4 E2B BF16 schema 4. |
 
 Decision scoring uses temperature 1 and produces a comparative distribution over
 the supplied choices. A compatible family does not establish calibration or

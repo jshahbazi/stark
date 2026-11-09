@@ -70,7 +70,7 @@ def executable(tmp_path):
         "wire=6*budget+2*1024*1024\n"
         "print(json.dumps({'ready':True,'mode':'text-generation-v1',"
         "'max_context_tokens':8192,'max_new_tokens':8192,'max_request_bytes':wire,"
-        "'streaming':'text-delta-v1','generation_budget':'memory-context-v1'}),flush=True)\n"
+        "'streaming':'text-delta-v1'}),flush=True)\n"
         "for line in sys.stdin:\n"
         "    request=json.loads(line)\n"
         "    if request['operation']=='plan_generation':\n"
@@ -322,6 +322,77 @@ def test_api_requests_publish_content_free_progress_to_the_app(desktop, model, m
     assert progress[1]["ttft_seconds"] == 0.2
     assert not progress[0]["calibrated"] and progress[3]["calibrated"]
     assert lifecycle(desktop) == ["generating", *["generation_progress"] * 3, "metrics", "ready"] * 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_finite_auto_uses_memory_admission_and_preserves_reported_capacity(desktop, model, stream):
+    running(desktop, model)
+    worker = desktop.worker
+    worker.generation_budget = True
+    original = worker.request
+    planned, generated = [], []
+
+    def request(payload, **options):
+        if payload["operation"] == "plan_generation":
+            planned.append(payload)
+            return {
+                "context_tokens": 1024,
+                "max_new_tokens": 1024 - payload["input_tokens"],
+                "context_capacity_known": True,
+                "budget_kind": "memory",
+            }
+        if payload["operation"] == "generate":
+            generated.append(payload)
+        return original(payload, **options)
+
+    with patch.object(worker, "request", side_effect=request):
+        desktop.api_complete(
+            {"messages": [{"role": "user", "content": "synthetic request"}], "stream": stream},
+            on_delta=(lambda _: None) if stream else None,
+        )
+    assert planned == [{"operation": "plan_generation", "input_tokens": 20, "context_tokens": 8192}]
+    assert generated[0]["context_tokens"] == 1024
+    assert generated[0]["max_new_tokens"] == 1004
+    assert desktop.api_models()[0]["context_length"] == 8192
+    assert desktop.api_models()[0]["context_capacity_known"] is True
+    assert desktop.worker is worker and worker.process.poll() is None
+
+
+def test_finite_auto_memory_rejection_keeps_worker_for_explicit_retry(desktop, model):
+    from stark_convert.chat import ChatRequestTooLarge
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    worker = desktop.worker
+    worker.generation_budget = True
+    original = worker.request
+
+    def request(payload, **options):
+        if payload["operation"] == "plan_generation":
+            raise ChatRequestTooLarge("Automatic execution cannot fit safely in available memory.")
+        return original(payload, **options)
+
+    with patch.object(worker, "request", side_effect=request):
+        with pytest.raises(APIError) as rejected:
+            desktop.api_complete({"messages": [{"role": "user", "content": "synthetic request"}]})
+        assert rejected.value.code == "request_too_large"
+        assert desktop.api_complete({"messages": [{"role": "user", "content": "synthetic retry"}], "max_tokens": 16})[
+            "choices"
+        ]
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert desktop.job is None
+
+
+def test_legacy_finite_auto_keeps_remaining_context_behavior(desktop, model):
+    running(desktop, model)
+    worker = desktop.worker
+    worker.generation_budget = False
+    with patch.object(worker, "request", wraps=worker.request) as request:
+        desktop.api_complete({"messages": [{"role": "user", "content": "synthetic request"}]})
+    assert all(call.args[0]["operation"] != "plan_generation" for call in request.call_args_list)
+    generated = [call.args[0] for call in request.call_args_list if call.args[0]["operation"] == "generate"]
+    assert generated[0]["context_tokens"] == 8192
+    assert generated[0]["max_new_tokens"] == 8172
 
 
 def test_serialized_api_requests_never_interleave_progress(desktop, model, monkeypatch):
@@ -1376,6 +1447,7 @@ def test_api_default_output_plans_unknown_context_without_user_options(desktop, 
         reply = read(worker, *args, **kwargs)
         if reply.get("ready") is True:
             reply["max_context_tokens"] = 0xFFFFFFFF
+            reply["generation_budget"] = "memory-context-v1"
         return reply
 
     with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=unknown_ready):
@@ -1403,6 +1475,7 @@ def test_unknown_context_playground_auto_uses_memory_plan_without_unloading_work
         reply = read(worker, *args, **kwargs)
         if reply.get("ready") is True:
             reply["max_context_tokens"] = 0xFFFFFFFF
+            reply["generation_budget"] = "memory-context-v1"
         return reply
 
     with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=unknown_ready):
@@ -1572,6 +1645,7 @@ def score_executable(tmp_path):
         "               'input_tokens':len(request['input_token_ids']),\n"
         "               'temperature':request['temperature'],'truncated':False}\n"
         "        if 'context fixture' in prompt: reply={'error':'context_overflow'}\n"
+        "        if 'resource fixture' in prompt: reply={'error':'resource_budget_exceeded'}\n"
         "    print(json.dumps(reply),flush=True)\n"
     )
     path.chmod(0o755)
@@ -1718,6 +1792,21 @@ def test_native_model_context_rejection_preserves_worker_and_allows_retry(deskto
     assert any("context limit" in event.get("message", "") for event in events(desktop))
     desktop.dispatch(decision_command())
     finish(desktop)
+    assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
+
+
+def test_decision_memory_rejection_preserves_worker_and_allows_retry(desktop, model, score_executable):
+    running_decision(desktop, model, score_executable)
+    worker = desktop.worker
+    desktop.dispatch(decision_command(text="resource fixture"))
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert not any(event["event"] == "decision" for event in events(desktop))
+    assert any("resource budget" in event.get("message", "") for event in events(desktop))
+    assert desktop.job is None
+    desktop.dispatch(decision_command())
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
     assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
 
 

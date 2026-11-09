@@ -1,12 +1,14 @@
 //! Isolated exact-token scoring protocol. Request content is never diagnostic data.
+#[cfg(test)]
+use std::io::Cursor;
 use std::{
     collections::HashSet,
     fs::{File, OpenOptions},
-    io::{self, BufRead, Read, Write},
-    os::unix::fs::OpenOptionsExt,
+    io::{self, BufRead, BufReader, Read, Write},
+    os::{fd::FromRawFd, unix::fs::OpenOptionsExt},
     path::Path,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -185,7 +187,24 @@ struct NativeScores {
     readout_seconds: f64,
 }
 
+fn admit_scoring_memory(
+    request_bytes: Option<usize>,
+    available: usize,
+) -> Result<(), &'static str> {
+    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+    if request_bytes > available.saturating_sub(256 * 1024 * 1024) / 4 {
+        return Err("resource_budget_exceeded");
+    }
+    Ok(())
+}
+
 trait ScoringBackend {
+    fn idle_maintenance_interval(&self) -> Option<Duration> {
+        None
+    }
+    fn maintain_idle(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
     fn peak_memory_usage(&self) -> Option<usize>;
@@ -349,6 +368,18 @@ impl NativeBackend {
 }
 
 impl ScoringBackend for NativeBackend {
+    fn idle_maintenance_interval(&self) -> Option<Duration> {
+        match &self.model {
+            NativeModel::Hybrid(model) => model.idle_maintenance_interval(),
+            NativeModel::Dense(_) => None,
+        }
+    }
+    fn maintain_idle(&mut self) -> Result<(), &'static str> {
+        match &self.model {
+            NativeModel::Hybrid(model) => model.maintain_idle_queue().map_err(|_| "native_idle_maintenance_failed"),
+            NativeModel::Dense(_) => Ok(()),
+        }
+    }
     fn vocab_size(&self) -> usize {
         self.vocab_size
     }
@@ -377,6 +408,15 @@ impl ScoringBackend for NativeBackend {
         input: &[u32],
         context: u32,
     ) -> Result<NativeScores, &'static str> {
+        let input_tokens = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
+        let request_bytes = match &self.model {
+            NativeModel::Dense(model) => model.scoring_memory_bytes(input_tokens, context),
+            // Hybrid caches grow with committed prompt rows; unused selected
+            // capacity does not allocate additional cache storage here.
+            NativeModel::Hybrid(model) => model.request_memory_bytes(input_tokens, input_tokens),
+        };
+        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+        admit_scoring_memory(request_bytes, available)?;
         let NativeModel::Dense(model) = &self.model else {
             let NativeModel::Hybrid(model) = &mut self.model else {
                 unreachable!()
@@ -686,14 +726,110 @@ pub(super) fn run_lines(
         "peak_memory_bytes":worker.backend.peak_memory_usage()}),
     )
     .map_err(|_| "protocol_write_failed")?;
-    let mut stdin = io::stdin().lock();
+    run_request_loop(&mut worker, &mut StandardInput::reader(), output)
+}
+
+trait ScoreInput: BufRead {
+    fn wait_readable(
+        &mut self,
+        timeout: Duration,
+    ) -> io::Result<bool>;
+}
+
+#[cfg(test)]
+impl<T: AsRef<[u8]>> ScoreInput for Cursor<T> {
+    fn wait_readable(
+        &mut self,
+        _timeout: Duration,
+    ) -> io::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// stdin wrapper that does not close descriptor 0 and whose read-ahead is
+/// visible to the timed wait below.
+struct StandardInput(std::mem::ManuallyDrop<File>);
+
+impl StandardInput {
+    fn reader() -> BufReader<Self> {
+        // SAFETY: descriptor 0 remains open for the process lifetime and this
+        // ManuallyDrop wrapper never closes it.
+        let file = unsafe { File::from_raw_fd(libc::STDIN_FILENO) };
+        BufReader::with_capacity(64 * 1024, Self(std::mem::ManuallyDrop::new(file)))
+    }
+}
+
+impl Read for StandardInput {
+    fn read(
+        &mut self,
+        buffer: &mut [u8],
+    ) -> io::Result<usize> {
+        self.0.read(buffer)
+    }
+}
+
+impl ScoreInput for BufReader<StandardInput> {
+    fn wait_readable(
+        &mut self,
+        timeout: Duration,
+    ) -> io::Result<bool> {
+        if !self.buffer().is_empty() {
+            return Ok(true);
+        }
+        let mut descriptor = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let milliseconds = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+        loop {
+            match unsafe { libc::poll(&mut descriptor, 1, milliseconds) } {
+                0 => return Ok(false),
+                count if count > 0 => return Ok(true),
+                _ => {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                },
+            }
+        }
+    }
+}
+
+fn run_request_loop<B: ScoringBackend, I: ScoreInput>(
+    worker: &mut ScoreWorker<B>,
+    input: &mut I,
+    output: &mut impl Write,
+) -> Result<(), &'static str> {
+    let interval = worker.backend.idle_maintenance_interval().filter(|interval| !interval.is_zero());
     loop {
+        if let Some(interval) = interval {
+            match input.wait_readable(interval) {
+                Ok(true) => {},
+                Ok(false) => {
+                    if worker.backend.maintain_idle().is_err() {
+                        worker.cache.clear();
+                        return Err("native_operation_failed");
+                    }
+                    continue;
+                },
+                Err(_) => {
+                    worker.cache.clear();
+                    return Err("protocol_read_failed");
+                },
+            }
+        }
         let mut bytes = Vec::new();
-        let count = Read::by_ref(&mut stdin)
-            .take(worker.budget.wire_bytes as u64 + 1)
-            .read_until(b'\n', &mut bytes)
-            .map_err(|_| "protocol_read_failed")?;
+        let count = match Read::by_ref(input).take(worker.budget.wire_bytes as u64 + 1).read_until(b'\n', &mut bytes) {
+            Ok(count) => count,
+            Err(_) => {
+                worker.cache.clear();
+                return Err("protocol_read_failed");
+            },
+        };
         if count == 0 {
+            worker.cache.clear();
             return Ok(());
         }
         if bytes.len() > worker.budget.wire_bytes {
@@ -746,13 +882,28 @@ mod tests {
 
     struct FakeBackend {
         calls: usize,
+        idle_interval: Option<Duration>,
+        idle_calls: usize,
+        fail_idle: bool,
         fail_score: bool,
+        fail_resource: bool,
         fail_probe: bool,
         invalid_output: bool,
         fail_tokenize: bool,
         max_context: Option<u32>,
     }
     impl ScoringBackend for FakeBackend {
+        fn idle_maintenance_interval(&self) -> Option<Duration> {
+            self.idle_interval
+        }
+        fn maintain_idle(&mut self) -> Result<(), &'static str> {
+            self.idle_calls += 1;
+            if self.fail_idle {
+                Err("private_idle_error")
+            } else {
+                Ok(())
+            }
+        }
         fn vocab_size(&self) -> usize {
             6
         }
@@ -785,6 +936,9 @@ mod tests {
             if self.fail_score {
                 return Err("native_scoring_failed");
             }
+            if self.fail_resource {
+                return Err("resource_budget_exceeded");
+            }
             Ok(NativeScores {
                 logits: if self.invalid_output {
                     vec![f32::NAN; 6]
@@ -804,7 +958,11 @@ mod tests {
         ScoreWorker::new(
             FakeBackend {
                 calls: 0,
+                idle_interval: None,
+                idle_calls: 0,
+                fail_idle: false,
                 fail_score: false,
+                fail_resource: false,
                 fail_probe: false,
                 invalid_output: false,
                 fail_tokenize: false,
@@ -833,6 +991,166 @@ mod tests {
     }
     fn standard() -> Value {
         request(&[1, 2], &[2, 3], 8192, 1.22)
+    }
+
+    enum InputEvent {
+        Timeout,
+        Data(Vec<u8>),
+        Eof,
+        Error,
+    }
+
+    struct ScriptInput {
+        current: Vec<u8>,
+        at: usize,
+        events: std::collections::VecDeque<InputEvent>,
+    }
+
+    impl ScriptInput {
+        fn new(events: impl IntoIterator<Item = InputEvent>) -> Self {
+            Self {
+                current: Vec::new(),
+                at: 0,
+                events: events.into_iter().collect(),
+            }
+        }
+    }
+
+    impl Read for ScriptInput {
+        fn read(
+            &mut self,
+            output: &mut [u8],
+        ) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let count = available.len().min(output.len());
+            output[..count].copy_from_slice(&available[..count]);
+            self.consume(count);
+            Ok(count)
+        }
+    }
+
+    impl BufRead for ScriptInput {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            Ok(&self.current[self.at..])
+        }
+        fn consume(
+            &mut self,
+            amount: usize,
+        ) {
+            self.at = (self.at + amount).min(self.current.len());
+        }
+    }
+
+    impl ScoreInput for ScriptInput {
+        fn wait_readable(
+            &mut self,
+            _timeout: Duration,
+        ) -> io::Result<bool> {
+            if !self.fill_buf()?.is_empty() {
+                return Ok(true);
+            }
+            self.current.clear();
+            self.at = 0;
+            match self.events.pop_front().unwrap_or(InputEvent::Eof) {
+                InputEvent::Timeout => Ok(false),
+                InputEvent::Data(bytes) => {
+                    self.current = bytes;
+                    Ok(true)
+                },
+                InputEvent::Eof => Ok(true),
+                InputEvent::Error => Err(io::Error::other("private input error")),
+            }
+        }
+    }
+
+    fn input_line(request: Value) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn run_script(
+        worker: &mut ScoreWorker<FakeBackend>,
+        events: impl IntoIterator<Item = InputEvent>,
+    ) -> Result<Vec<Value>, &'static str> {
+        let mut input = ScriptInput::new(events);
+        let mut output = Vec::new();
+        let result = run_request_loop(worker, &mut input, &mut output);
+        let replies = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        result.map(|()| replies)
+    }
+
+    #[test]
+    fn idle_tick_preserves_consecutive_cache_and_hit_is_bit_exact() {
+        let mut worker = worker(true, false);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let line = input_line(standard());
+        let replies = run_script(
+            &mut worker,
+            [InputEvent::Data(line.clone()), InputEvent::Timeout, InputEvent::Data(line), InputEvent::Eof],
+        )
+        .unwrap();
+        assert_eq!(worker.backend.idle_calls, 1);
+        assert_eq!(worker.backend.calls, 1);
+        assert_eq!(replies[0]["cache_hit"], false);
+        assert_eq!(replies[1]["cache_hit"], true);
+        for field in ["logits", "log_probabilities", "candidate_probabilities"] {
+            let fresh = replies[0][field].as_array().unwrap();
+            let hit = replies[1][field].as_array().unwrap();
+            assert_eq!(fresh.len(), hit.len());
+            for (fresh, hit) in fresh.iter().zip(hit) {
+                assert_eq!(fresh.as_f64().unwrap().to_bits(), hit.as_f64().unwrap().to_bits());
+            }
+        }
+        assert_eq!(worker.hits, 1);
+        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
+    }
+
+    #[test]
+    fn buffered_request_bypasses_idle_wait_and_eof_clears_cache() {
+        let mut worker = worker(true, false);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut both = input_line(standard());
+        both.extend(input_line(standard()));
+        let replies = run_script(&mut worker, [InputEvent::Data(both), InputEvent::Eof]).unwrap();
+        assert_eq!(worker.backend.idle_calls, 0);
+        assert_eq!(replies[1]["cache_hit"], true);
+        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
+    }
+
+    #[test]
+    fn idle_maintenance_failure_clears_cache_and_returns_static_fatal_error() {
+        let mut worker = worker(true, false);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        worker.backend.fail_idle = true;
+        let result = run_script(&mut worker, [InputEvent::Data(input_line(standard())), InputEvent::Timeout]);
+        assert_eq!(result, Err("native_operation_failed"));
+        assert_eq!(worker.backend.calls, 1);
+        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
+    }
+
+    #[test]
+    fn input_wait_failure_clears_cache_and_returns_static_error() {
+        let mut worker = worker(true, false);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let result = run_script(&mut worker, [InputEvent::Data(input_line(standard())), InputEvent::Error]);
+        assert_eq!(result, Err("protocol_read_failed"));
+        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
+    }
+
+    #[test]
+    fn oversized_line_clears_cache_and_returns_existing_protocol_error() {
+        let mut worker = worker(true, false);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut bytes = vec![b'x'; worker.budget.wire_bytes + 1];
+        bytes.push(b'\n');
+        let replies = run_script(&mut worker, [InputEvent::Data(bytes)]).unwrap();
+        assert_eq!(replies[0]["error"], "request_too_large");
+        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
     }
 
     #[test]
@@ -871,6 +1189,31 @@ mod tests {
             assert_eq!(post(&mut worker, request(input, &[2, 3], context, 1.22))["cache_hit"], false);
         }
         assert_eq!(worker.backend.calls, 4);
+    }
+
+    #[test]
+    fn memory_admission_reports_recoverable_resource_errors() {
+        let available = 1024 * 1024 * 1024;
+        assert_eq!(admit_scoring_memory(None, available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(256 * 1024 * 1024), available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(128 * 1024 * 1024), available), Ok(()));
+    }
+
+    #[test]
+    fn scoring_memory_rejection_clears_logits_and_accepts_same_worker_retry() {
+        let mut worker = worker(true, false);
+        post(&mut worker, standard());
+        assert_eq!(post(&mut worker, standard())["cache_hit"], true);
+        worker.backend.fail_resource = true;
+        let full_context = request(&[2, 1], &[2, 3], 2, 1.0);
+        assert_eq!(post(&mut worker, full_context.clone())["error"], "resource_budget_exceeded");
+        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
+        worker.backend.fail_resource = false;
+        let retry = post(&mut worker, full_context.clone());
+        assert_eq!(retry["input_tokens"], 2);
+        assert_eq!(retry["cache_hit"], false);
+        assert_eq!(post(&mut worker, full_context)["cache_hit"], true);
+        assert_eq!(worker.backend.calls, 3);
     }
 
     #[test]

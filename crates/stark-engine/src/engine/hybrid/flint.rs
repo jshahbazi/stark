@@ -203,6 +203,39 @@ pub struct FlintModel {
 }
 
 impl FlintModel {
+    pub(super) fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        let c = &self.config;
+        let context = context_tokens as usize;
+        if context == 0 || context > c.context {
+            return None;
+        }
+        let rows = c.layers.iter().try_fold(0usize, |total, layer| {
+            total.checked_add(if layer.sliding {
+                context.min(c.window)
+            } else {
+                context
+            })
+        })?;
+        let row = super::memory::sum(&[
+            super::memory::bytes(&[2, c.kv_heads, c.dim], 4)?,
+            super::memory::bytes(&[2], size_of::<Vec<f32>>())?,
+        ])?;
+        // VecDeque storage growth can overlap old and replacement descriptors;
+        // twice the complete row payload also covers allocator rounding.
+        let cache = super::memory::bytes(&[rows, row], 2)?;
+        let width = c
+            .hidden
+            .max(c.intermediate)
+            .max(c.expert_intermediate.checked_mul(c.active)?)
+            .max(c.shared_intermediate)
+            .max(c.heads.checked_mul(c.dim)?);
+        let work = super::memory::bytes(&[width], 256)?;
+        super::memory::sum(&[cache, work, 512 * 1024 * 1024])
+    }
+
     pub fn new(
         weights: Weights,
         config: &Value,
