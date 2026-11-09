@@ -17,10 +17,11 @@ def test_exact_paged_artifact_budget_counts_selected_weights_and_peak_reserves()
     required = memory.retained_check_memory(value)
     assert memory._LILY_RESIDENT + memory._LILY_PAGED + memory._LILY_MTP < memory._LILY_TOTAL
     assert memory._LILY_TOTAL - memory._LILY_RESIDENT - memory._LILY_PAGED - memory._LILY_MTP < 1024**2
-    assert memory._LILY_RESERVES["initial_state"] > 394_616_832
-    assert memory._LILY_RESERVES["decoder_scratch"] > 62_914_560
+    assert memory._LILY_RESERVES["initial_state"] > 394_616_832 + 23_089_152
+    assert memory._LILY_RESERVES["decoder_scratch"] >= 256 * 1024**2 + 346_788_072
+    assert memory._LILY_RESERVES["prefill_scratch"] >= 2 * 1024**3 + 83_886_080
     assert memory._LILY_RESERVES["paged_working_set"] >= 2 * 2048 * 16 * 3 * 4096
-    assert required == memory._LILY_RESIDENT + sum(memory._LILY_RESERVES.values())
+    assert required == memory._LILY_RESIDENT + memory._LILY_MTP + sum(memory._LILY_RESERVES.values())
     # A 96 GiB observation admits this pinned paged recipe, while retaining a
     # substantial reserve above the resident weights. Counting the whole file
     # payload would incorrectly reject the same observation.
