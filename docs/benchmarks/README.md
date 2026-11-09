@@ -12,6 +12,13 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Retained Lily vision-loaded text MTP (2026-11-08).** A
+[short paired check](2026-11-08-lily-vision-text-mtp.md) observes 104.71 tok/s
+on the previous text-only worker and 105.49 tok/s with vision and text MTP
+loaded, identical outputs, zero image drafts and correct post-image text/cache
+recovery. Two warm observations per arm; no host/thermal screening. This does
+not supersede the longer Lily studies below.
+
 **Qwen vision artifact text prefix reuse (2026-11-08).** On the official
 Qwen3.5-0.8B BF16 artifact, 32 exactness cases pass and cached follow-ups reuse
 1,024 tokens. Four observations per timing arm show follow-up first-token
