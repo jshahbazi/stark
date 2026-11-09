@@ -18,7 +18,7 @@ text state. Completion is per artifact, configuration and backend.
 | --- | --- | --- |
 | Qwen BF16 0.8B | Corrected MTP0 dispatch; expanded 48/48 image-loaded and 26/26 text-only lifecycle checks, plus prior matrices; headed/headless and loading-mode MTP0/3 short timing passes | Reference FC, all-head reference linears and head-only materialized SiLU do not satisfy full hidden-feature limits. No production head precision change; isolate attention boundaries next |
 | Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Functional-only MoE04 stopped before case zero at its 64-GiB available-memory floor, without swap/compression growth. Audit per-token prefill histories before another run |
-| Gemma | G4AP05 passes all three assistant steps, transactional controls and actual 3/3 draft acceptance at 512/513/1024/1026; 1026 boundary-cache handoff passes | At 1792 the raw oracle differs only in exact cutoff ties; actual-mask diagnostic and canonical readout pass. Independently review a versioned tie-aware oracle, then qualify long batch/cache. Serving MTP and performance remain open |
+| Gemma | G4AP05 passes 15/15 assistant steps under independently reviewed mathematical top-k tie policy, actual 3/3 acceptance at all five lengths through 1792, transactional controls and 1024-boundary cache handoff | Integrate qualified E2B assistant into normal worker and qualify full lifecycle/performance. Original raw tied-index mismatch remains recorded; serving MTP is still disabled |
 | GLM | `b76f560d` builds and accounting controls pass; tiny 64-MiB mapping control passes sixty blits and owner cleanup without pressure | Full functional run hit a hard compression limit. Tiny control did not reproduce it; prepare a tiny staged first-use Control/Q5 shader test. Full-model image/cache/MTP/performance remain held |
 
 The installed app was closed without implicitly reopening it. The coordinator
@@ -39,7 +39,7 @@ authorized here.
 The separate chat subsequently completed its validation batch and opened its
 own PR #117. The coordinator explicitly reserved the GPU/native-test window
 again. Qwen's causal diagnostics, Gemma's further trace and GLM's tiny control
-completed. Gemma's versioned long-oracle replay is next after independent review;
+completed. Gemma's independently reviewed versioned long-oracle replay passed;
 Qwen and GLM prepare source changes. The reservation remains explicit, with
 other native tests held. Full GLM execution and a MoE retry are not authorized
 by this queue entry.
@@ -629,6 +629,27 @@ oracle must prove actual reference-mask support too, reject non-tied changes,
 retain unchanged numerical limits, pass meaningful negative controls and receive
 independent review before execution. Serving MTP and the >512 guard remain
 unchanged pending qualification and integration.
+
+The new `mathematical-topk-canonical-tie-v1` qualification proves both actual
+native and actual reference mask support, uses reference top-k values rather
+than unstable tied indices, and rejects every non-tied mismatch. Fourteen CPU
+controls include invalid actual reference selection and valid alternate cutoff
+tie selection. Helper SHA
+`d47525f9d46bb0a5051f3982cf88e3fb697751c141ff009bd994a351f1a2f597`;
+wrapper `3fd623cc257a5e188d9a107163cf1a7377f48bc478d7162436a0631a3ae587f8`.
+Independent GLM review found no confirmed policy blocker before execution.
+
+The unchanged `75e5eff5` engine then passes all 15 assistant steps under this
+versioned contract, all five actual three-draft rounds (3/3 accepted each),
+ordinary-target equality, supplied full/partial/reject/zero/cancel/fresh controls
+and the 1792-token cache handoff at boundary 1024 with suffix 768. Changed-tail
+and 1026-token suffix-two checks pass too. Receipt:
+`15a0a1b79b62948bd1dde63bff1b2a64b309e40850b787e2f7611ad32a482ac3`.
+Guard `ab79d846a4b5182eb09f69354cbb70266519fde0c0128c0f169f8f15065d08c8`
+reports zero paging/foreign workers and peak 12.534 GB below the unchanged
+12-GiB cap. All owned native/reference processes exit. The original 1792 raw
+comparison remains false and retained. This is component qualification, not
+normal-worker loading, serving enablement or a performance measurement.
 
 GLM's corrected first-use audit identifies layer-zero `attn_q` as kind-13 Q5_K,
 not Q8 merely because Q8 tensors occur elsewhere. `Control::pre` also triggers
