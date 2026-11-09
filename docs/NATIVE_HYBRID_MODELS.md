@@ -124,7 +124,13 @@ verifies the recorded payload hashes and retained BF16 tower before publishing
 image capability; automatic local checks must pass before image input is enabled.
 
 The path accepts one PNG/JPEG, clears generation-prefix reuse and keeps image
-MTP disabled. The pinned Lily Q4-XL artifact has source-bound vision-tower and
+MTP disabled. A retained image-loaded model also loads its declared MTP head
+for ordinary text requests. Text readiness exposes the normal supported draft
+counts and keeps the model's existing default; explicit image requests always
+use zero drafts. Text snapshots match MTP enabled/disabled, reported as
+`mtp-enabled` in the cache key. The exact Lily startup memory recipe includes
+the resident head and its state/scratch even while image execution has MTP off.
+The pinned Lily Q4-XL artifact has source-bound vision-tower and
 worker lifecycle evidence. Preparation support for the separate MLX-Serve
 mixed-4/8-bit artifact does not establish its image execution qualification.
 Full retained-decoder numerical parity and image performance remain unverified.

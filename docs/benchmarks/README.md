@@ -13,11 +13,21 @@ qualification; the ledger is not a completed historical backfill.
 ## Current result
 
 **Qwen dense image-default parity (2026-11-09).** The complete 27B image artifact
-now runs text MTP and restores exact 1,024-token target/predictor prefixes. The
-short [text-path comparison](2026-11-09-qwen-dense-image-text-parity.md) finds a
-large remaining regression: 61.091 versus 3.394 decode tok/s at matching MTP3
-settings and output hashes. This is a failed bounded parity observation, not a
-shipped speed fix; the earlier qualified text benchmarks remain unchanged.
+now preserves its ordinary optimized text graph and batched MTP while the image
+tower stays loaded. The [QDIP-07 comparison](2026-11-09-qwen-dense-image-text-parity.md)
+measures 48.309 versus 48.315 decode tok/s at MTP3 on a matched 64-token workload;
+MTP0 also shows no observed regression. Output hashes and all 14 nonperiodic
+near-capacity cache/lifecycle controls pass. The earlier 94.44% regression is
+preserved as a failed predecessor. This is bounded Jundot artifact evidence;
+startup, broader workloads, other models and installed-release behavior remain
+separate qualifications.
+
+**Retained Lily vision-loaded text MTP (2026-11-08).** A
+[short paired check](2026-11-08-lily-vision-text-mtp.md) observes 104.71 tok/s
+on the previous text-only worker and 105.49 tok/s with vision and text MTP
+loaded, identical outputs, zero image drafts and correct post-image text/cache
+recovery. Two warm observations per arm; no host/thermal screening. This does
+not supersede the longer Lily studies below.
 
 **Qwen vision artifact text prefix reuse (2026-11-08).** On the official
 Qwen3.5-0.8B BF16 artifact, 32 exactness cases pass and cached follow-ups reuse

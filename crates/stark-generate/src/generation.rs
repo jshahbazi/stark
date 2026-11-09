@@ -2230,6 +2230,29 @@ mod tests {
     }
 
     #[test]
+    fn image_requests_keep_drafts_zero_between_mtp_text_requests() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut backend = worker().backend;
+        backend.images = true;
+        backend.mtp = Some(capabilities(3, 2));
+        backend.default_mtp_drafts = 2;
+        let mut worker = GenerationWorker::new(backend).unwrap();
+        worker.media = Some(MediaStore::open(&root.0).unwrap());
+        assert_eq!(post(&mut worker, standard())["mtp"]["drafts"], 2);
+        let prepared = post(&mut worker, image_prepare(&root));
+        let mut forbidden = image_generate(&prepared);
+        forbidden["mtp_drafts"] = json!(2);
+        assert_eq!(post(&mut worker, forbidden)["error"], "invalid_request");
+        let prepared = post(&mut worker, image_prepare(&root));
+        let reply = post(&mut worker, image_generate(&prepared));
+        assert!(reply.get("error").is_none());
+        assert_eq!(reply["mtp"]["drafts"], 0);
+        assert_eq!(worker.backend.image_generations, 1);
+        assert_eq!(post(&mut worker, standard())["mtp"]["drafts"], 2);
+        assert_eq!(worker.backend.mtp_requests, [2, 0, 2]);
+    }
+
+    #[test]
     fn image_memory_rejection_releases_prepared_state_and_accepts_same_worker_retry() {
         let root = crate::media::tests::PrivateRoot::new();
         let mut worker = image_worker(&root);
