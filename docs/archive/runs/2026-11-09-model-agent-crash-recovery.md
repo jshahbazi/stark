@@ -16,9 +16,9 @@ text state. Completion is per artifact, configuration and backend.
 
 | Family | Completed resumed gates | Open gate / next action |
 | --- | --- | --- |
-| Qwen BF16 0.8B | Corrected MTP0 dispatch; 48/48 image-loaded and 26/26 text-only lifecycle checks; headed/headless and loading-mode MTP0/3 short timing passes. Source sigmoid/SiLU candidate passes stages 1/2 exactly | Stage 0 hidden maximum remains 0.09375 against unchanged 0.0625 limit. Targeted test-head projection reduction fix is under review; no production arithmetic change |
+| Qwen BF16 0.8B | Corrected MTP0 dispatch; 48/48 image-loaded and 26/26 text-only lifecycle checks; prior loading-mode MTP0/3 timing passes. Targeted MLX head projection reduction now passes the complete original numerical gate | Passing correction is still test-selected; apply the head-only production policy, then repeat actual cache and quick paired text/MTP checks. Ordinary target/MTP0 graph remains unchanged |
 | Qwen affine 0.8B / 35B MoE | Physical-256 prefill and completion-order fixes built. Actual 35B 1026-token cache 4/4 passes and matches old-worker output; sampled footprint 30.9 to 25.9 GB. Quick text-only/image-loaded comparison 39.25/39.42 tokens/s | Original 1792-token matrix remains stopped, not passed. Short comparison covers this affine artifact only; full BF16 MoE and executable MoE head remain unqualified |
-| Gemma | G4AP05 passes 15/15 assistant steps through 1792. Staged worker 136 unit tests, 9/9 smoke checks, 37/37 image-loaded and 34/34 text-only lifecycle checks pass; all 34 common outputs agree | Quick comparison stopped on the first text MTP3 assertion, before a valid speed result; preserve exact failed aggregate before diagnosing. Default serving MTP remains disabled pending completion |
+| Gemma | G4AP05 passes 15/15 assistant steps through 1792. Staged worker 136 unit tests, 9/9 smoke checks, 37/37 image-loaded and 34/34 text-only lifecycle checks pass; all 31 common non-null output hashes agree | Quick comparison stopped on the first text MTP3 assertion, before a valid speed result; preserve exact failed aggregate before diagnosing. Default serving MTP remains disabled pending completion |
 | GLM | `b76f560d` builds and accounting controls pass; tiny mapping control passes sixty blits; staged owned-buffer Control/Q5 initialization passes without pressure | Full functional run hit a hard compression limit; neither tiny test reproduces it. Audit actual GGUF mapping/Metal registration geometry before another full load. Full-model image/cache/MTP/performance remain held |
 
 The installed app was closed without implicitly reopening it. The coordinator
@@ -900,8 +900,9 @@ replaced by fully materialized high-entropy private files before freezing the
 minimal owned/dedicated/full contrast. No full model retry or further variants
 are authorized by this checkpoint.
 
-Gemma's corrected text-only lifecycle passes 34/34 with all common output hashes
-matching the image-loaded run, receipt
+Gemma's corrected text-only lifecycle passes 34/34 with all 31 common non-null
+output hashes matching the image-loaded run (the other three cases cancel or
+reject a request), receipt
 `96c0bf84619f91294c48a91c1b8a6d1e15b01061ae2850b45eb3be47f18faa77`.
 The quick 64-token comparison then stops on its first text-only MTP3 assertion;
 receipt `f46eeff9f461d9c2fc699a28d2245e8285e73dc9cb8ffc5c5e42b2f40774a42b`.
@@ -911,3 +912,19 @@ predicate is not established. Retain the failed receipt, save aggregate
 predicates before assertion, and diagnose one short text pair. No performance
 comparison is claimed. Qwen owns the next bounded head check; Gemma and GLM hold
 native execution until that window closes.
+
+The reviewed Qwen head projection correction now passes the entire original
+numerical gate without changing tolerances. Native and MLX-reference guarded
+phases both pass in 2.340 seconds. Test binary:
+`76bb6f2c504f83bea816640e65fcc65a0e029b77174884006b0e8ec86a6b65a3`;
+driver receipt `977a18d56e4fee208b1fc4cce0199682b26373db14dc14e1efbccb05eb8c35d2`;
+full comparison `a2113e272ed7f6b18c457e7e41ebac13c2dccb7ec43e5cf79bcb108538974913`.
+The six-file source patch is
+`e1fc498050dcb3de21226b5f4c151eb7e67e19b962d0adf61a93071ef21e5732`.
+Independent review caught and fixed effective buffer alignment, 64-bit pointer
+products and a missing trait import before compilation. Two control phases
+pass; a third exits successfully but lacks process telemetry and remains
+excluded, with no retry or guardian relaxation. No primitive phase was needed.
+The passing path is test-selected, so production head-only adoption and actual
+worker cache/timing checks remain necessary. Qwen released all processes and
+Gemma owns the next single text diagnostic.
