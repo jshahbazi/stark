@@ -1,5 +1,8 @@
 # Model change and experiment ledger
 
+Current continuation: [Gemma3 cache and Gemma4 assistant implementation](2026-11-09-gemma-next-image-parity.md)
+records attempts `20261109-G3IP-01` and `20261109-G4AP-01`; execution is pending.
+
 Use this directory to track attempts to make a model work correctly or run faster.
 Record unsuccessful, invalid and resource-deferred attempts alongside successful
 ones. A later passing run does not erase the earlier result.

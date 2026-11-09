@@ -1,7 +1,8 @@
 # Gemma 4 assistant conversion and native text MTP plan
 
-Status: source metadata and native interface gaps inspected; assistant conversion
-and execution are unimplemented. Gemma 4 has upstream MTP assistants, and remains
+Status: source metadata and native interface gaps inspected; strict companion
+conversion is implemented on the continuation branch and awaits execution.
+Assistant execution is unimplemented. Gemma 4 has upstream MTP assistants, and remains
 an open Stark implementation task. Image loading must preserve future text MTP;
 image requests keep zero drafts. Follow [model onboarding](MODEL_ONBOARDING.md)
 and the [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md).
@@ -71,7 +72,13 @@ target execution and qualification; small-profile evidence will not transfer.
 | E: cache, images and default loading | Load target+tower+assistant by the ordinary image-default route. Inventory resident weights, target/ring snapshots, activation handoffs, assistant state and verification/scratch peaks. Integrate complete head-aware prefix reuse and host capability reporting. | Text MTP/cache→real image with zero drafts/proposals/reuse→fresh text MTP→cached text MTP; failures/cancellation/restart and MTP selection switches. Match text-only versus image-loaded speed with MTP off/on. Head stripping or a text-only fallback cannot close this stage. |
 | F: E4B and later artifacts | Repeat complete qualification for E4B, then larger targets and each intended precision/format. | Each exact pair has its own artifact/binary/reference hashes, numerical, memory, cache/lifecycle and performance evidence. Release/install status remains separate. |
 
-Stages A–F remain open. No assistant payload conversion, draft execution or MTP
-speed result was performed by this metadata/plan increment. The current
+Stages A–F remain open. The [continuation](model-experiments/2026-11-09-gemma-next-image-parity.md)
+adds exact source/target binding and complete companion tensor/permutation
+admission. No assistant payload conversion, draft execution or MTP speed result
+has passed yet. The pinned Transformers 5.15.1 candidate generator and assistant
+confirm that all four layers borrow target KV without maintaining predictor KV,
+and all proposals within a round use the same absolute rotary position. The
+target's final normalized activation and embedding feed the first proposal;
+later proposals chain the assistant's post-projected activation. The current
 [cache follow-up](benchmarks/2026-11-09-gemma4-warmed-cache.md) addresses normal
 text prefix execution while this assistant work remains outstanding.
