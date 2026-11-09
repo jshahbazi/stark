@@ -15,6 +15,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 | --- | --- |
 | [Image-support retrospective](2026-11-08-image-support-retrospective.md) | Conversation-wide findings, model coverage, validation mistakes, review, delivery and remaining work |
 | [Qwen image attempts](2026-11-08-qwen-images.md) | BF16 and affine dense Qwen, affine and BF16-source MoE, retained Flash-Next/Lily numerical repairs and resource controls |
+| [QMOE-20261109-01: MoE image-loaded text cache](../archive/runs/2026-11-09-qwen35-moe-image-text-parity.md) | Exact affine-v4 artifact text/cache/image-transition checks; source MTP inventory and separately pending BF16-v5 and matched loading-mode performance |
 | [Gemma image attempts](2026-11-08-gemma-images.md) | Gemma 3 processor/convolution fixes; Gemma 4 efficient, unified, MoE and larger-tower attempts; decoder admission and retained compatibility |
 | [20261108-VTP-01/02/04: vision artifact text prefix reuse](../archive/runs/2026-11-08-vision-text-prefix-reuse.md) | First recipe missed reuse coverage with exact outputs; stable-prefix and final restore-fence workers passed all 32 numerical/lifecycle cases on official Qwen3.5-0.8B BF16 |
 | [20261108-VTP-03: paired vision text prefix timing](../benchmarks/2026-11-08-qwen35-vision-text-prefix.md) | Four observations per arm; bounded first-token benefit, cache-cold cost and snapshot payload; other artifacts and host-screened performance remain unqualified |
