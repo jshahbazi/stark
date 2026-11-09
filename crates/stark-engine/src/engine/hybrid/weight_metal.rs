@@ -45,6 +45,10 @@ mod kquant_mma_tests;
 #[path = "glm_first_use_pressure_tests.rs"]
 mod first_use_pressure_tests;
 
+#[cfg(test)]
+#[path = "glm_mapping_pressure_tests.rs"]
+mod mapping_pressure_tests;
+
 struct Executor {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,

@@ -1,8 +1,8 @@
 # 20261109-GLMMEM-16: first-weight mapping source plan
 
-State: source/header audit and separately authorized bounded CPU fixture
-preparation pass. No file mapping, new native build or Metal execution. Full
-GLM execution remains held.
+State: source/header audit and separately authorized CPU preparation pass.
+Minimal three-way native control source is frozen, unbuilt and unexecuted.
+No actual file mapping or Metal execution. Full GLM execution remains held.
 This follows [GLMMEM-15](2026-11-09-glm-first-use-control-diagnostic.md), which
 passed its no-file tiny Control/Q5 discriminator without reproducing pressure.
 
@@ -98,3 +98,32 @@ the logical packed payload hash is
 `6985b8b6a850af5095bbe7696e5049af2ce7aa1dbbfc81341dd15d8dd442cf1b`.
 Fixtures and raw bytes remain ignored/private. Native control and watcher
 implementation, source review, build and execution are still pending.
+
+## Final minimal scope
+
+Review identified that sparse holes can use shared zero pages. The unexecuted
+sparse fixtures remain separate. A new private set writes deterministic
+SHAKE256 bytes seeded by absolute chunk index throughout its 64/256/512 MiB
+extents, then restores the identical 23 MB view. All 872,415,232 bytes are
+materialized. It derives from authenticated private bytes and reads zero new
+bytes from the original GGUF. Receipt:
+`16a90b68f2a9a6b265464687bfab5c48ac4f31d10a7d453d92a5586a31390624`.
+Preparation can warm file backing; it does not establish a cold-paging control.
+
+Following the instruction to keep the fix focused, the frozen control uses only
+the existing 512 MiB fixture in three fresh children: owned buffer, dedicated
+range NoCopy, and full-region NoCopy. The dedicated arm also retains a full CPU
+mapping, matching production's simultaneous CPU owner. There is no additional
+format, backend, upload policy or fixture variant to implement.
+
+The control reuses the reviewed first-use supervisor `125d1a40…`, tightening
+only compressor growth to zero. Twenty-two reused/injected CPU controls pass,
+receipt `40ae58673deb5d7669c0d0a97fe589d25a5f66893dfdd0b6f9a0c3e06d73dbe5`.
+Frozen source registration is
+`da149ce31e5f46d8b207a257a807d58c5dd73dbbb1deec66ec3a8eee604d1a6b`;
+native patch `4be38da7145dd0ca10b7c0850254312c53de4ec3015477aa3e52d8c5d9da29b7`;
+driver `f1809553d7a975bf93ca71dc85bc97c83c7ed73c1dad07ce348bd57284c05921`.
+Formatting, repository policy and diff checks pass. Build and Metal execution
+require a separate grant. If this bounded contrast cannot choose a minimal
+per-view ownership fix, stop with the concrete pressure blocker. It does not
+clear the original 49.3 GB backing object or full model by itself.
