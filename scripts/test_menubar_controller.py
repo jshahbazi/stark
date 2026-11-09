@@ -147,8 +147,8 @@ extension EngineController {
         func catalogItem(_ id: String = "entry") -> [String: Any] {
             ["id": id, "repo": "example/model", "revision": String(repeating: "a", count: 40), "name": "Model 2",
              "size_label": "0.6B", "parameter_count": Int64(600_000_000), "weight_bytes": Int64(1_200_000_000),
-             "quantization": "BF16", "artifact_modes": ["text", "vision-language"],
-             "default_artifact_mode": "vision-language", "downloadable": true, "installed_ids": [String]()]
+             "quantization": "BF16", "artifact_modes": ["text"],
+             "default_artifact_mode": "text", "downloadable": true, "installed_ids": [String]()]
         }
         func groupedCatalogItem(_ id: String, repo: String, name: String, group: String, groupName: String,
                                 publisher: String, size: String? = "0.6B", quantization: String = "BF16",
@@ -1248,7 +1248,7 @@ extension EngineController {
             engine.state = "ready"
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
-            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            engine.installCatalogItem(id: "entry")
             _ = command()
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             engine.stopModel(id: "fixture-model")
@@ -1581,7 +1581,7 @@ extension EngineController {
                   !engine.catalogItemIsDownloaded(visible.groups[0].items[0], artifactMode: .text),
                   CatalogBrowserInventory(items: catalog.items, query: "BF16", quantization: filter).groups.isEmpty,
                   CatalogBrowserInventory(items: catalog.items, quantization: .all).groups[0].items.count == 4 else { return false }
-            engine.installCatalogItem(id: visible.groups[0].items[0].id, artifactMode: .text)
+            engine.installCatalogItem(id: visible.groups[0].items[0].id)
             let request = command()
             return request["command"] as? String == "install_catalog" && request["entry_id"] as? String == "available-four" &&
                 request["catalog_request_id"] as? String == browse["request_id"] as? String &&
@@ -1628,16 +1628,18 @@ extension EngineController {
                 conflicted.groups.allSatisfy({ $0.items.count == 1 }) &&
                 CatalogBrowserInventory(items: catalog.items, query: "Spoofed").groups.isEmpty
         case "catalog-browser-live-search":
-            let raw = [
+            var raw = [
                 groupedCatalogItem("compact", repo: "owner/Cafe-0.6B-4bit", name: "Café-0.6B-4bit", group: "1", groupName: "Café Model", publisher: "owner", quantization: "4-bit"),
                 groupedCatalogItem("full", repo: "owner/Cafe-0.6B", name: "Café-0.6B", group: "1", groupName: "Café Model", publisher: "owner")
             ]
+            raw[1]["artifact_modes"] = ["text", "vision-language"]
+            raw[1]["default_artifact_mode"] = "vision-language"
             guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
             let visible = CatalogBrowserInventory(items: catalog.items, query: " CAFE 4bit 0.6b ")
             guard visible.groups.count == 1, visible.groups[0].items.map(\.id) == ["compact"] else { return false }
             return CatalogBrowserInventory(items: catalog.items, query: "cafe 8-bit").groups.isEmpty &&
                 CatalogBrowserInventory(items: catalog.items, query: "aAaAaAa").groups.first?.items.count == 2 &&
-                CatalogBrowserInventory(items: catalog.items, query: "images").groups.first?.items.count == 2 &&
+                CatalogBrowserInventory(items: catalog.items, query: "images").groups.first?.items.map(\.id) == ["full"] &&
                 CatalogBrowserInventory(items: catalog.items, query: "").groups.first?.items.count == 2 &&
                 ModelBrowserSearch.matches("  - .  ", fields: []) &&
                 ModelBrowserSearch.matches("4 bit", fields: ["4-bit"]) &&
@@ -1685,7 +1687,7 @@ extension EngineController {
             guard let catalog = engine.catalog,
                   let selected = CatalogBrowserInventory(items: catalog.items, query: "4bit", sort: .nameDescending).groups.first?.items.first,
                   selected.id == "compact", selected.repo == "owner/Model-4bit" else { return false }
-            engine.installCatalogItem(id: selected.id, artifactMode: .text)
+            engine.installCatalogItem(id: selected.id)
             let request = command()
             return request["command"] as? String == "install_catalog" && request["entry_id"] as? String == "compact" &&
                 request["catalog_request_id"] as? String == browse["request_id"] as? String &&
@@ -1757,7 +1759,7 @@ extension EngineController {
             var callbacks = 0; engine.onInstalled = { callbacks += 1 }
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
-            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            engine.installCatalogItem(id: "entry")
             let install = command()
             guard install["command"] as? String == "install_catalog", install["catalog_request_id"] as? String == browse["request_id"] as? String,
                   install["artifact_mode"] as? String == "text", engine.busy, engine.downloadProgress.state == "waiting" else { return false }
@@ -1774,11 +1776,30 @@ extension EngineController {
             var item = catalogItem(); item["installed_ids"] = ["downloaded"]
             engine.apply(catalogReply(refresh, items: [item]))
             return engine.catalogItemIsDownloaded(engine.catalog!.items[0], artifactMode: .text)
+        case "catalog-install-includes-images":
+            var item = catalogItem()
+            item["artifact_modes"] = ["text", "vision-language"]
+            // Image capability wins even if an older catalog defaults to text.
+            item["default_artifact_mode"] = "text"
+            item["installed_ids"] = ["fixture-model"]
+            engine.requestModelCatalog(familyID: "qwen3_5")
+            let browse = command(); engine.apply(catalogReply(browse, items: [item]))
+            guard let parsed = engine.catalog?.items.first,
+                  parsed.installationMode == .visionLanguage,
+                  !engine.catalogItemIsDownloaded(parsed, artifactMode: parsed.installationMode) else { return false }
+            engine.installCatalogItem(id: "entry")
+            let install = command()
+            guard install["command"] as? String == "install_catalog",
+                  install["artifact_mode"] as? String == "vision-language",
+                  engine.catalogInstallation?.artifactMode == .visionLanguage else { return false }
+            engine.apply(["event": "models", "models": [["id": "fixture-model", "name": "Model", "path": "/private/model",
+                                                          "artifact_mode": "vision-language"]]])
+            return engine.catalogItemIsDownloaded(parsed, artifactMode: parsed.installationMode)
         case "catalog-install-survives-browser-cancel":
             var callbacks = 0; engine.onInstalled = { callbacks += 1 }
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
-            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            engine.installCatalogItem(id: "entry")
             let install = command()
             engine.apply(["event": "progress", "phase": "download", "state": "running",
                           "completed_bytes": Int64(10), "total_bytes": Int64(20)])
@@ -1800,7 +1821,7 @@ extension EngineController {
         case "catalog-install-stale-error":
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
-            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            engine.installCatalogItem(id: "entry")
             let install = command()
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             engine.apply(["event": "error", "request_id": "stale-request", "message": "Stale catalog error"])
@@ -1814,7 +1835,7 @@ extension EngineController {
             engine.imageVerification = "locally_tested"
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
-            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            engine.installCatalogItem(id: "entry")
             let install = command()
             engine.apply(["event": "error", "request_id": "unrelated", "message": "Unrelated rejection"])
             guard engine.state == "installing", engine.busy, engine.catalogInstallation != nil else { return false }
@@ -1828,7 +1849,7 @@ extension EngineController {
             var callbacks = 0; engine.onInstalled = { callbacks += 1 }
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
-            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            engine.installCatalogItem(id: "entry")
             let install = command()
             engine.apply(["event": "status", "state": "idle", "message": "Model installed"])
             engine.apply(["event": "models", "models": [["id": "downloaded", "name": "First model", "path": "/private/first", "artifact_mode": "text"]]])
@@ -1839,7 +1860,7 @@ extension EngineController {
         case "catalog-stop-fence":
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
-            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            engine.installCatalogItem(id: "entry")
             let install = command()
             engine.stop(); _ = command()
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
@@ -2897,6 +2918,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_install_image_check_events_are_state_guarded(self):
         self.exercise("image-install-check-state-guard")
+
+    def test_catalog_install_automatically_includes_available_images(self):
+        self.exercise("catalog-install-includes-images")
 
 
 if __name__ == "__main__":

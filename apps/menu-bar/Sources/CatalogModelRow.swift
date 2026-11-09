@@ -2,7 +2,6 @@ import SwiftUI
 
 struct CatalogModelRow: View {
     let item: FamilyModelCatalog.Item
-    @Binding var artifactMode: ModelArtifactMode
     let downloaded: Bool
     let busy: Bool
     let showsRepositoryLink: Bool
@@ -72,12 +71,7 @@ struct CatalogModelRow: View {
                     .font(.caption).help(item.repo)
                     .accessibilityLabel("View " + item.repo + " on Hugging Face")
             }
-            if item.artifactModes.count > 1 {
-                Picker("Install", selection: $artifactMode) {
-                    ForEach(item.artifactModes, id: \.self) { Text($0.title).tag($0) }
-                }.labelsHidden().frame(width: 145).controlSize(.small).disabled(busy)
-                    .accessibilityLabel("Version for " + item.name)
-            }
+            Text(item.installationMode.title).font(.caption).foregroundStyle(.secondary)
             Group {
                 if downloaded {
                     Label("Downloaded", systemImage: "checkmark.circle.fill")
