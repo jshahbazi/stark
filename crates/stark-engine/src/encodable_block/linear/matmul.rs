@@ -129,7 +129,10 @@ impl<B: Backend> LinearMatmul<B> {
 
         let biases = load_biases(weights_data_type, output_data_type, output_dim, bias_tree)?;
 
-        let reference_linear = weights_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16;
+        let reference_linear = matches!(
+            weights_tree.numerical_profile(),
+            NumericalProfile::Qwen35ReferenceBF16 | NumericalProfile::QwenMtpSourceBF16
+        );
         #[cfg(test)]
         let reference_linear =
             reference_linear || weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears;
@@ -145,11 +148,13 @@ impl<B: Backend> LinearMatmul<B> {
                 ));
             }
             let reference = ReferenceBF16Matmul::new(context).map_err(LinearMatmulError::BackendError)?;
+            let source_wide = weights_tree.numerical_profile() == NumericalProfile::QwenMtpSourceBF16;
             #[cfg(test)]
-            let reference = if weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears
-                && std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some()
-            {
-                reference.validation_with_mlx_wide(context).map_err(LinearMatmulError::BackendError)?
+            let source_wide = source_wide
+                || (weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears
+                    && std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some());
+            let reference = if source_wide {
+                reference.with_mlx_wide(context).map_err(LinearMatmulError::BackendError)?
             } else {
                 reference
             };

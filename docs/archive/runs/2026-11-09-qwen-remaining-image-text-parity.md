@@ -845,3 +845,79 @@ admitted full-BF16 dense target/head route, preserve MTP0 target dispatch, then
 run the existing actual cache and loading-mode MTP0/3 checks on that production
 build. Mixed-affine 27B, Lily and absent full BF16 MoE payload retain their
 separate boundaries.
+
+### QNIP production full-BF16 dense head: implemented and checked
+
+The source-rounded projection, sigmoid and SiLU policy is now selected without
+test flags for the qualified official 0.8B dense target/head geometry: model
+width 1,024, hidden width 3,584, 24 target layers, and predictor attention
+8 query / 2 KV heads of width 256. Admission also requires the incoming Legacy
+policy and metadata proving every target and predictor matrix is full BF16.
+This inspection allocates no weights. The override remains inside the predictor
+tree; the target, readout, MTP0 dispatch and incoming reference graphs keep their
+existing arithmetic. Packed/mixed targets, including BF16 heads attached to
+mixed-affine 27B or Lily, retain their previous policy. Larger full-BF16 sizes
+remain unqualified.
+
+The predictor estimate now charges each F32 projection accumulator's allocator
+size class separately: widths `D, 5D, D, 2H, D`, totaling 76 MiB of rounded pages
+at 1,024 rows, plus the separately estimated decode row. Loaded head weights
+remain resident; inactive MTP0 predictor request state stays excluded. Reviewed
+production patch: `30d911b6315c9b53a8de70f979520e879a837d38decc4637070d8f07e430d68c`.
+All 851 source identities match the prebuild seal
+`d293cbd57cbd3e0b5529b1ee1abc7d3a298f5e6708dd6442f07a5f4b5d4de71a`.
+
+The engine builds in 95 seconds; three focused CPU controls pass for geometry,
+storage eligibility and subtree isolation. The existing full numerical replay
+passes with all head experiment selectors removed. Target normalization remains
+exact; hidden maxima are `0/0.03125/0`, logit maxima
+`0.03125/0.0625/0.00390625`, and all six top-one checks match. Both strict phases
+have positive samples, passing guards, zero paging/compression/swap growth and
+owned drain/join. Aggregate:
+`6623e7f7a8ae2e525b55623c670fbe226a67fbe19c9023862c67e17523300ff3`;
+unchanged gate:
+`e8a23de5c1ca1724be3b16bdcc69224c9e67160ed1b0c6343334ce1f9158f239`.
+
+Production worker
+`e97b3302cc8c133def0a599071d46889e62c75463a9eca0512074a44b1d64962`
+builds in 53 seconds, contains no head experiment selectors, and uses matching
+helper `fbfb62ff5744999c263468f6fc610409ab74a1c3bb877b86bb6291a4cfacdf67`
+with a passing self-test. On the same exact headed artifacts, the 1,026-token
+quick lifecycle passes 28/28 text-only and 34/34 images-loaded controls. These
+cover MTP0/1/2/3 switches, exact 1,024-token restoration, greedy and seeded
+fresh/cached agreement, scope/context/reset/error/cancel transitions, real-image
+zero-MTP/reuse and following fresh text. Receipts:
+`fea98a94c76f3df11eb5197b1a2c655cb949cc4b4f975996faf32533cf0d7deb` and
+`d109469821fcabad541137fe48f9404fc215c444f6fae06c7dc3f2859a58a25f`.
+Both guards pass; peak footprints are 2.227/2.501 GB, with zero observed paging,
+compression and swap growth. This bounded replay does not extend the earlier
+1,792-token evidence to the new executable.
+
+The quiet short loading-mode comparison uses one worker per arm, one warm and
+three measured requests per MTP depth, input 16, context 2,048, greedy seed 42
+and budget 64. Every request emits 62 tokens before EOS; output hashes agree
+across loading modes and greedy MTP depths.
+
+| Median | Text-only MTP0 | Images-loaded MTP0 | Text-only MTP3 | Images-loaded MTP3 |
+| --- | --- | --- | --- | --- |
+| Decode tokens/s | 270.3723 | 269.3605 | 137.8075 | 137.7101 |
+| First token, ms | 9.710 | 9.953 | 11.081 | 10.992 |
+| Wall time, ms | 243.218 | 244.538 | 462.351 | 461.822 |
+
+All fixed 5% loading-mode comparisons pass, independently of the recipe's
+variability allowance. MTP3 is 49.03% slower than MTP0 on this small model;
+234 proposals / 111 accepted tokens are recorded per measured arm. This is
+correct resident MTP support, without an acceleration claim. Both timing guards
+have positive samples, zero paging/compression/swap growth and owned drain/join;
+their functional-only performance-ineligible marker is preserved. Receipt:
+`6bc0e36c5b570b084967928bef47757448edcc7c8470c95a879232c185b94d1c`.
+Startup is separate: 0.443 seconds text-only / 6.694 seconds images loaded,
+including image artifact verification.
+
+The first timing receipt
+`0ba1ce2183ffc4bd03336817fd4105ad99deccd90a8c5883787e04b8d084969f`
+is retained and excluded after the coordinator reported concurrent package
+provisioning. Only that short timing was repeated; functional/numerical checks
+were not relabeled or rerun. All owned workers and compilers are closed and the
+hardware slot is released. The absent full BF16 MoE payload, retained ddalcu
+memory hold and full MoE 1,792-token lifecycle remain separate open work.

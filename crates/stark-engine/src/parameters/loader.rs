@@ -51,6 +51,8 @@ pub(crate) enum NumericalProfile {
     Qwen35ReferenceBF16,
     /// BF16 activation boundaries with canonical packed affine matrices.
     Qwen35AffineBF16,
+    /// Qualified full-BF16 dense predictor only; target/norm policy stays unchanged.
+    QwenMtpSourceBF16,
     /// Test-only causal experiment: full BF16 linears with all other operators unchanged.
     #[cfg(test)]
     QwenMtpReferenceLinears,
@@ -199,9 +201,40 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
         ParameterTree {
             loader: self,
             prefix: None,
-            #[cfg(test)]
-            validation_profile: None,
+            profile_override: None,
         }
+    }
+
+    /// Inspect both target and predictor storage, without allocating weights.
+    /// A BF16 predictor attached to a packed/mixed target is not eligible.
+    /// The qualified head retains Legacy norms; other incoming policies stay intact.
+    pub(crate) fn qwen_target_and_head_full_bf16(&self) -> bool {
+        use crate::config::weight_matrix::AnyWeightMatrixSpec;
+        if self.numerical_profile != NumericalProfile::Legacy {
+            return false;
+        }
+        let mut target = false;
+        let mut head = false;
+        for (name, value) in &self.metadata {
+            if !(name.starts_with("decoder.") || name.starts_with("mtp.")) || !name.ends_with(".spec") {
+                continue;
+            }
+            if !matches!(
+                serde_json::from_str::<AnyWeightMatrixSpec>(value),
+                Ok(AnyWeightMatrixSpec::FullPrecisionSpec(_))
+            ) {
+                return false;
+            }
+            let Some(tensor) = self.index.get(&format!("{}.weights", name.trim_end_matches(".spec"))) else {
+                return false;
+            };
+            if tensor.data_type != DataType::BF16 {
+                return false;
+            }
+            target |= name.starts_with("decoder.");
+            head |= name.starts_with("mtp.");
+        }
+        target && head
     }
 }
 
@@ -281,8 +314,7 @@ impl<'a, 'leaf, B: Backend> ParameterLeaf<'a, 'leaf, B, true> {
 pub struct ParameterTree<'loader, B: Backend> {
     loader: &'loader ParameterLoader<'loader, B>,
     prefix: Option<String>,
-    #[cfg(test)]
-    validation_profile: Option<NumericalProfile>,
+    profile_override: Option<NumericalProfile>,
 }
 
 impl<'loader, B: Backend> ParameterTree<'loader, B> {
@@ -290,22 +322,20 @@ impl<'loader, B: Backend> ParameterTree<'loader, B> {
         self.loader.representation_copy_bytes.clone()
     }
     pub(crate) fn numerical_profile(&self) -> NumericalProfile {
-        #[cfg(test)]
-        if let Some(profile) = self.validation_profile {
+        if let Some(profile) = self.profile_override {
             return profile;
         }
         self.loader.numerical_profile
     }
 
-    #[cfg(test)]
-    pub(crate) fn validation_with_numerical_profile(
+    pub(crate) fn with_numerical_profile(
         &self,
         profile: NumericalProfile,
     ) -> Self {
         Self {
             loader: self.loader,
             prefix: self.prefix.clone(),
-            validation_profile: Some(profile),
+            profile_override: Some(profile),
         }
     }
 
@@ -323,8 +353,7 @@ impl<'loader, B: Backend> ParameterTree<'loader, B> {
         Self {
             loader: self.loader,
             prefix: Some(self.join_prefix(name)),
-            #[cfg(test)]
-            validation_profile: self.validation_profile,
+            profile_override: self.profile_override,
         }
     }
 
@@ -453,20 +482,56 @@ mod payload_tests {
     }
 
     #[stark_test]
-    fn validation_profile_is_scoped_and_does_not_select_reference_activations() {
+    fn head_profile_override_is_scoped_and_does_not_select_reference_activations() {
         let context = <Cpu as Backend>::Context::new().unwrap();
         let file = tensor_file(1, &[0]);
         let loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
         let root = loader.tree();
-        let head = root.subtree("mtp").validation_with_numerical_profile(NumericalProfile::QwenMtpReferenceLinears);
+        let head = root.subtree("mtp").with_numerical_profile(NumericalProfile::QwenMtpSourceBF16);
         assert_eq!(
             head.subtree("transformer").subtree("mixer").numerical_profile(),
-            NumericalProfile::QwenMtpReferenceLinears
+            NumericalProfile::QwenMtpSourceBF16
         );
         assert!(!head.numerical_profile().qwen35_bf16_activations());
         assert_eq!(root.numerical_profile(), NumericalProfile::Legacy);
         assert_eq!(root.subtree("decoder").numerical_profile(), NumericalProfile::Legacy);
         assert_eq!(loader.tree().subtree("mtp").numerical_profile(), NumericalProfile::Legacy);
+    }
+
+    #[stark_test]
+    fn head_source_policy_requires_full_bf16_target_and_head_storage() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(1, &[0]);
+        let mut loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+        assert!(!loader.qwen_target_and_head_full_bf16());
+        for prefix in ["decoder.projection", "mtp.fusion"] {
+            loader
+                .metadata
+                .insert(format!("{prefix}.spec"), r#"{"type":"FullPrecisionSpec","layout":"output_input"}"#.into());
+            loader.index.insert(
+                format!("{prefix}.weights"),
+                super::ParameterMetadata {
+                    shape: vec![1, 1].into_boxed_slice(),
+                    data_type: DataType::BF16,
+                    offset: 0,
+                    size: 2,
+                },
+            );
+        }
+        assert!(loader.qwen_target_and_head_full_bf16());
+        loader.set_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+        assert!(!loader.qwen_target_and_head_full_bf16());
+        loader.set_numerical_profile(NumericalProfile::Legacy);
+        loader.index.get_mut("decoder.projection.weights").unwrap().data_type = DataType::F32;
+        assert!(!loader.qwen_target_and_head_full_bf16());
+        loader.index.get_mut("decoder.projection.weights").unwrap().data_type = DataType::BF16;
+        // A packed target plus unchanged BF16 head must stay on its old policy.
+        loader.metadata.insert(
+            "decoder.projection.spec".into(),
+            r#"{"type":"MLXSpec","bits":4,"group_size":64,"layout":"output_input"}"#.into(),
+        );
+        assert!(!loader.qwen_target_and_head_full_bf16());
+        assert_eq!(loader.allocated_buffer_bytes.get(), 0);
     }
 
     #[stark_test]

@@ -159,10 +159,18 @@ impl<B: Backend> Engine<B> {
                 if mtp.model_dim != config.decoder_config.transformer_config.model_dim {
                     return Err(crate::encodable_block::qwen_mtp::QwenMtpError::Invalid);
                 }
+                let head_tree = weight_loader.tree().subtree("mtp");
+                let head_tree = if mtp.source_bf16_geometry(&config.decoder_config.transformer_config)
+                    && weight_loader.qwen_target_and_head_full_bf16()
+                {
+                    head_tree.with_numerical_profile(crate::parameters::NumericalProfile::QwenMtpSourceBF16)
+                } else {
+                    head_tree
+                };
                 crate::encodable_block::qwen_mtp::QwenMtp::new(
                     mtp,
                     config.decoder_config.transformer_config.layer_configs.len(),
-                    &weight_loader.tree().subtree("mtp"),
+                    &head_tree,
                     self.context.as_ref(),
                 )
             })

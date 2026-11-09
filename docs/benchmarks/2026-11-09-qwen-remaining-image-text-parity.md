@@ -251,3 +251,33 @@ resource supervisor; its performance-ineligible marker is preserved. Receipt:
 Startup remains material and separate: image-loaded verification takes about
 74 seconds, text-only about two seconds. Earlier timings retain their original
 16-token budget and executable boundary.
+
+## Qualified 0.8B full-BF16 production head continuation
+
+The bounded Legacy/full-BF16 dense 0.8B head policy now passes the original
+numerical gate without test selectors, followed by 28 text-only and 34
+images-loaded lifecycle controls on production worker `e97b3302`. The target
+graph and ordinary MTP0 dispatch remain unchanged; other sizes and packed/mixed
+targets retain their existing policy. See the [source-bound record](../archive/runs/2026-11-09-qwen-remaining-image-text-parity.md)
+for exact identities, resource limits and prior rejected candidates.
+
+One worker per loading arm, one warm plus three measured requests per depth,
+input 16 / context 2,048 / greedy seed 42 / budget 64 yields 62 emitted tokens
+before EOS on every request, with matching hashes across arms and MTP depths.
+
+| Median | Text-only | Images loaded |
+| --- | --- | --- |
+| MTP0 decode tokens/s | 270.3723 | 269.3605 |
+| MTP0 first token / wall, ms | 9.710 / 243.218 | 9.953 / 244.538 |
+| MTP3 decode tokens/s | 137.8075 | 137.7101 |
+| MTP3 first token / wall, ms | 11.081 / 462.351 | 10.992 / 461.822 |
+
+All fixed 5% loading-mode comparisons pass without using the variability
+allowance. MTP3 is 49.03% slower than MTP0 on this small artifact; no MTP speedup
+is claimed. Both guards pass with positive samples and zero observed paging,
+compression and swap growth. The functional supervisor's performance-ineligible
+marker remains intact; this is a short source-bound comparison. Receipt:
+`6bc0e36c5b570b084967928bef47757448edcc7c8470c95a879232c185b94d1c`.
+Startup, separate from inference, is 0.443 / 6.694 seconds, including image
+artifact verification. The earlier timing receipt `0ba1ce21` is excluded after
+reported concurrent package provisioning; only timing was repeated.

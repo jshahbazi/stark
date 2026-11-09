@@ -1,12 +1,11 @@
 //! Internal contiguous BF16 linear for the admitted Qwen3.5 reference profile.
 
-#[cfg(test)]
-use crate::backends::common::kernel::MlxHeadMatmulBF16Kernel;
 use crate::{
     backends::common::{
         Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
         kernel::{
-            ReferenceGatherMatmulBF16Kernel, ReferenceRoundBF16F32Kernel, VisionCastBF16Kernel, VisionMatmulBF16Kernel,
+            MlxHeadMatmulBF16Kernel, ReferenceGatherMatmulBF16Kernel, ReferenceRoundBF16F32Kernel,
+            VisionCastBF16Kernel, VisionMatmulBF16Kernel,
         },
     },
     data_type::DataType,
@@ -17,7 +16,6 @@ pub(crate) struct ReferenceBF16Matmul<B: Backend> {
     cast: <B::Kernels as Kernels>::VisionCastBF16Kernel,
     round_f32: <B::Kernels as Kernels>::ReferenceRoundBF16F32Kernel,
     gather: <B::Kernels as Kernels>::ReferenceGatherMatmulBF16Kernel,
-    #[cfg(test)]
     mlx_head: Option<<B::Kernels as Kernels>::MlxHeadMatmulBF16Kernel>,
 }
 
@@ -28,13 +26,11 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
             cast: <B::Kernels as Kernels>::VisionCastBF16Kernel::new(context)?,
             round_f32: <B::Kernels as Kernels>::ReferenceRoundBF16F32Kernel::new(context)?,
             gather: <B::Kernels as Kernels>::ReferenceGatherMatmulBF16Kernel::new(context)?,
-            #[cfg(test)]
             mlx_head: None,
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn validation_with_mlx_wide(
+    pub(crate) fn with_mlx_wide(
         mut self,
         context: &B::Context,
     ) -> Result<Self, B::Error> {
@@ -81,9 +77,7 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
         if input_end > input.size() || weights.size() != weight_bytes {
             return Err(invalid().into());
         }
-        #[cfg(test)]
         let source_wide = self.mlx_head.as_ref().filter(|_| (2..=5).contains(&m) && n > 1);
-        #[cfg(test)]
         if source_wide.is_some() {
             // BufferRef can already describe a subview. Check the effective
             // byte offsets before reinterpreting either operand as bfloat4.
@@ -98,7 +92,6 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
             return Err(invalid().into());
         }
         let mut output = commands.allocate_scratch_for_shape(&[m, n], output_type)?;
-        #[cfg(test)]
         if let Some(source) = source_wide {
             source.encode(input.subrange(input_offset..input_end), weights, &mut accumulated, m, n, k, commands);
         } else {
@@ -115,19 +108,6 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
                 commands,
             );
         }
-        #[cfg(not(test))]
-        self.dot.encode(
-            input.subrange(input_offset..input_end),
-            weights,
-            &mut accumulated,
-            m,
-            n,
-            k,
-            k,
-            1,
-            32,
-            commands,
-        );
         if output_type == DataType::BF16 {
             self.cast.encode(&accumulated, &mut output, elements, commands);
         } else {

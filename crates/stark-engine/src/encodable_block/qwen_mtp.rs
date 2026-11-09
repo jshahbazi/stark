@@ -40,6 +40,7 @@ pub struct QwenMtp<B: Backend> {
     hidden_norm: Normalization<B>,
     fusion: Box<dyn Linear<B>>,
     transformer: Transformer<B>,
+    source_projection_widths: Option<[u32; 5]>,
     #[cfg(test)]
     validation_reference_fusion: Option<Box<dyn Linear<B>>>,
 }
@@ -86,6 +87,13 @@ impl<B: Backend> QwenMtp<B> {
             // concatenation use BF16, matching fuse_inputs and predictor pass.
             estimate.add_scratch(&[rows, self.model_dim], 2, 4)?;
             estimate.add_scratch(&[rows, self.model_dim, 2], 2, 1)?;
+            if let Some(widths) = self.source_projection_widths {
+                // F32 fusion, QKVG, attention out, MLP up/gate and down
+                // accumulators; charge each allocator size class separately.
+                for width in widths {
+                    estimate.add_scratch(&[rows, width], 4, 1)?;
+                }
+            }
         }
         Some(estimate)
     }
@@ -108,17 +116,20 @@ impl<B: Backend> QwenMtp<B> {
         {
             return Err(QwenMtpError::Invalid);
         }
+        let source_operators = tree.numerical_profile() == crate::parameters::NumericalProfile::QwenMtpSourceBF16;
         #[cfg(test)]
-        let validation_transformer_config = if std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some() {
-            // This causal experiment combines reference head linears with the
-            // source's BF16 sigmoid/SiLU boundaries. Never alter target policy,
-            // normalization, attention or artifact metadata to repair a gate.
-            if std::env::var_os("STARK_TEST_HEAD_REFERENCE_LINEARS").is_none()
+        let source_operators = source_operators || std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some();
+        #[cfg(test)]
+        if std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some()
+            && (std::env::var_os("STARK_TEST_HEAD_REFERENCE_LINEARS").is_none()
                 || std::env::var_os("STARK_TEST_HEAD_REFERENCE_FUSION").is_some()
-                || tree.numerical_profile() != crate::parameters::NumericalProfile::Legacy
-            {
-                return Err(QwenMtpError::Invalid);
-            }
+                || tree.numerical_profile() != crate::parameters::NumericalProfile::Legacy)
+        {
+            return Err(QwenMtpError::Invalid);
+        }
+        let source_transformer_config = if source_operators {
+            // Keep the admitted predictor's source BF16 sigmoid/SiLU boundaries
+            // local; its target graph and normalization policy stay unchanged.
             let mut transformer = config.transformer_config.clone();
             let crate::config::mlp::AnyMLPConfig::DenseMLPConfig(mlp) = &mut transformer.layer_configs[0].mlp_config
             else {
@@ -136,8 +147,7 @@ impl<B: Backend> QwenMtp<B> {
             None
         };
         let transformer_config = &config.transformer_config;
-        #[cfg(test)]
-        let transformer_config = validation_transformer_config.as_ref().unwrap_or(transformer_config);
+        let transformer_config = source_transformer_config.as_ref().unwrap_or(transformer_config);
         #[cfg(test)]
         let validation_tree = if std::env::var_os("STARK_TEST_HEAD_REFERENCE_LINEARS").is_some() {
             if std::env::var_os("STARK_TEST_HEAD_REFERENCE_FUSION").is_some()
@@ -145,7 +155,7 @@ impl<B: Backend> QwenMtp<B> {
             {
                 return Err(QwenMtpError::Invalid);
             }
-            Some(tree.validation_with_numerical_profile(crate::parameters::NumericalProfile::QwenMtpReferenceLinears))
+            Some(tree.with_numerical_profile(crate::parameters::NumericalProfile::QwenMtpReferenceLinears))
         } else {
             None
         };
@@ -189,6 +199,17 @@ impl<B: Backend> QwenMtp<B> {
         Ok(Self {
             target_layer: config.target_layer,
             model_dim: config.model_dim,
+            source_projection_widths: if source_operators {
+                Some([
+                    config.model_dim,
+                    config.model_dim.checked_mul(5).ok_or(QwenMtpError::Invalid)?,
+                    config.model_dim,
+                    config.transformer_config.hidden_dim.checked_mul(2).ok_or(QwenMtpError::Invalid)?,
+                    config.model_dim,
+                ])
+            } else {
+                None
+            },
             embedding_norm: norm("embedding_norm")?,
             hidden_norm: norm("hidden_norm")?,
             fusion: <dyn Linear<B>>::new(
