@@ -167,7 +167,8 @@ on one line, and installation controls move below the details when space is
 limited. The publisher link on a single-variant card, or the source icon on each
 row of a multi-variant card, opens its exact Hugging Face repository, including
 the publisher of a quantized export.
-When text and image artifacts are both offered, choose which to install. Sort
+Each row shows its text or text-and-image capability. Downloads automatically
+include image support when available for that artifact. Sort
 the family overview by name A–Z or Z–A; family detail sorts by name in either
 direction or model size ascending or descending. Unknown numeric values stay last
 in either direction. Download and preparation progress
