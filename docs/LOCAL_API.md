@@ -103,13 +103,14 @@ empty operation list. Capabilities are cleared when the worker stops or the
 model changes; Decision mode does not expose MTP. The app shows a
 **Multi-token prediction (MTP)** toggle under **Advanced Options** when the
 loaded model supports it. **Apply and New Chat** saves the choice with the other
-options; **Restore Defaults** selects MTP on.
+options; **Restore Defaults** selects that model's MTP default.
 
 `defaults.mtp` is the active model's effective saved choice. Registered models
-default to on when the loaded worker supports MTP. Each model remembers its own
+default off for Gemma and full-BF16 Qwen3.5-0.8B; other supported models retain
+their existing default on. Each model remembers its own
 boolean preference in the private model registry across stops, switches and
 application restarts. Existing registry entries without a saved choice also
-default to on; an explicitly saved off choice stays off. The preference becomes
+use that model-specific default; an explicit saved choice is preserved. The preference becomes
 inactive when the loaded worker lacks support and is retained for a later
 supported worker. The preference-only command below preserves the chat; applying
 Advanced Options starts a new chat without reloading the model.

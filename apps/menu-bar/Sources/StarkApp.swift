@@ -259,11 +259,12 @@ struct InstalledModel: Identifiable, Equatable {
     let display: InstalledModelDisplay?
     let artifactMode: ModelArtifactMode?
     let removal: InstalledModelRemoval?
+    let source: String?
 
     init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil,
-         artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil) {
+         artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil, source: String? = nil) {
         self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.display = display
-        self.artifactMode = artifactMode; self.removal = removal
+        self.artifactMode = artifactMode; self.removal = removal; self.source = source
     }
 }
 
@@ -1167,6 +1168,7 @@ final class EngineController: ObservableObject {
     @Published private(set) var toolParser = ""
     @Published private(set) var supportsMTP = false
     @Published private(set) var mtpEnabled = false
+    private var mtpVerificationPolicy = ""
     @Published var apiContextTokens = 0
     @Published var apiMaxNewTokens = 0
     @Published var messages: [ChatMessage] = []
@@ -1313,6 +1315,13 @@ final class EngineController: ObservableObject {
     }
     var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
     var activeName: String { activeModel?.name ?? "No model running" }
+    var defaultMTPEnabled: Bool {
+        if mtpVerificationPolicy.hasPrefix("gemma4-") { return false }
+        guard let display = activeModel?.display else { return true }
+        return !(display.familyID?.hasPrefix("gemma") == true
+            || ((display.groupID == "repo:Qwen/Qwen3.5-0.8B" || activeModel?.source == "huggingface:Qwen/Qwen3.5-0.8B")
+                && display.quantization == "BF16"))
+    }
     var startableModel: InstalledModel? {
         if let stoppedModel, let model = models.first(where: { $0.id == stoppedModel.id }) { return model }
         return models.first { $0.id == selectedID }
@@ -1490,7 +1499,7 @@ final class EngineController: ObservableObject {
                 return InstalledModel(id: id, name: name, path: path, apiID: $0["api_id"] as? String ?? name,
                                       display: InstalledModelDisplay($0["display"]),
                                       artifactMode: $0["artifact_mode"] == nil ? .text : ModelArtifactMode(rawValue: $0["artifact_mode"] as? String ?? ""),
-                                      removal: InstalledModelRemoval($0["removal"]))
+                                      removal: InstalledModelRemoval($0["removal"]), source: $0["source"] as? String)
             }
             if !models.contains(where: { $0.id == selectedID }) && !(catalogInstallation != nil && selectedID.isEmpty) {
                 selectedID = models.first?.id ?? ""
@@ -1818,9 +1827,10 @@ final class EngineController: ObservableObject {
               recommended > 0, recommended <= maximum,
               let operations = capability["operations"] as? [String], operations.contains("generate"),
               let enabled = SupportMetadata.boolean(event["mtp_enabled"]) else {
-            supportsMTP = false; mtpEnabled = false
+            supportsMTP = false; mtpEnabled = false; mtpVerificationPolicy = ""
             return
         }
+        mtpVerificationPolicy = capability["verification"] as? String ?? ""
         supportsMTP = true; mtpEnabled = enabled
     }
 
@@ -3243,7 +3253,9 @@ struct AdvancedOptionsView: View {
                 .font(.caption).foregroundStyle(.secondary)
             if engine.supportsMTP && engine.loadedID == modelID {
                 Toggle("Multi-token prediction (MTP)", isOn: $mtpEnabled)
-                Text("Can speed up text generation by drafting and verifying extra tokens. On by default; your choice is saved for this model. Image requests run with MTP off.")
+                Text(engine.defaultMTPEnabled
+                     ? "Can speed up text generation by drafting and verifying extra tokens. On by default; your choice is saved for this model. Image requests run with MTP off."
+                     : "Off by default for this model. You can turn it on for text generation; your choice is saved. Image requests run with MTP off.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
@@ -3257,7 +3269,7 @@ struct AdvancedOptionsView: View {
                     let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit)
                     useModelSystemPrompt = defaults.useModelSystemPrompt
                     systemPrompt = defaults.systemPrompt; thinking = defaults.thinking
-                    mtpEnabled = true
+                    mtpEnabled = engine.defaultMTPEnabled
                     context = String(defaults.contextTokens)
                     output = defaults.maxNewTokens == 0 ? "" : String(defaults.maxNewTokens)
                 }

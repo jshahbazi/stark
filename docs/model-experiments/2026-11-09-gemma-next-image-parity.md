@@ -1150,3 +1150,34 @@ preregistration
 All owned workers close before handoff; no further timing retries are planned.
 Normal default-context admission and automatic sidecar provisioning remain
 delivery work, separate from this provisional comparison.
+
+## 20261109-G4AP-08: measured-speed default preference
+
+The user selects MTP off by default for Gemma and the measured full-BF16
+Qwen3.5-0.8B route, retaining explicit opt-in. The desktop's previous missing
+preference fallback enabled every supported head despite the worker's zero
+default draft count. The new fallback uses the live Gemma verification policy
+or inspected Gemma family, and the exact Qwen repository identity combined with
+the existing inventory's inspected BF16 layout. Exact registry source identity
+is a preference-only fallback for measured Qwen derivatives without a conversion
+receipt; it does not establish runtime capability. Other repositories and
+packed precisions retain their previous defaults. Explicit saved booleans and
+request-local overrides win; positive recommended draft counts remain available
+for opt-in. Image selection is unchanged.
+
+The app's explanation and Restore Defaults use the same model-specific policy,
+including the live Gemma policy when display metadata is absent. The existing
+registry source is carried as an optional model-row field so a local model
+renamed to the Qwen repository cannot trigger the source fallback through its
+API alias. CPU checks cover both default-off routes, missing-receipt identity,
+the renamed-local negative, opt-in, persistence, overrides and unchanged other
+model defaults. This preference change does not enable the Gemma staging build
+feature, provision the companion or relax its context qualification bounds.
+
+The final source patch is independently reviewed at SHA-256
+`7bf09cea712a0f94a5e90d93368e5b83610c2f7b7906d875c988639eae35d02a`.
+Validation passes 102 model-free desktop/MTP tests, 41 existing inventory-layout
+tests and the focused production Swift controller CPU case. The Swift receipt
+is `911af67491dcdaa918227e9ed9562b2eff1ee445be646aaee58607528ab2ae93`.
+Repository policy and diff checks pass. No model, Metal run, installed-app
+reload or preference migration is performed for this change.
