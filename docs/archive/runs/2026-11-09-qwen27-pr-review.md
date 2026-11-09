@@ -33,6 +33,11 @@ performance run.
   partitioned exports, vision, MTP and hybrid-image memory. The native template
   helper was rebuilt from this checkout before the Python run.
 - Package-scoped formatting, repository policy and whitespace checks passed.
+- Hosted repository checks subsequently found a two-character Python line-length
+  violation in the converter's MTP tensor filter. Ruff formatting corrected that
+  line; converter lint and all 188 converter formatting checks then passed
+  locally. This follow-up changes no Rust inference code or model payload and
+  does not relabel the frozen benchmark evidence.
 
 No GPU benchmark was repeated because integration did not change the qualified
 Qwen execution path. Startup remains separate, the speed study is short, and

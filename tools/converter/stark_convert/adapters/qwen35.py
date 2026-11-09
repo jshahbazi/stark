@@ -737,7 +737,9 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     )
     if mtp_config is not None:
         ignored = {
-            name for name in ignored if not name.startswith(("mtp.", "language_model.mtp.", "model.language_model.mtp."))
+            name
+            for name in ignored
+            if not name.startswith(("mtp.", "language_model.mtp.", "model.language_model.mtp."))
         }
     if set(tensors) != expected | ignored:
         raise ConversionError("Qwen3.5 checkpoint has unexpected tensors")
