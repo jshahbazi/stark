@@ -177,8 +177,8 @@ All rows below link to the [complete findings and per-model matrix](../archive/r
 | ID | Scope and attempt | Recorded outcome | Disposition |
 | --- | --- | --- | --- |
 | 20261109-ADM-01 | [Initial Playground correction](2026-11-09-resource-admission.md): remove fixed content/generation fractions and correct Lily resident accounting | Model-free checks and short Qwen native controls passed; original private request was not replayed. | Adopted at `b9e904fe`; installation was pending. |
-| 20261109-ADM-02 | [Follow-up ceiling audit](2026-11-09-resource-admission.md): Decision fraction, stale Auto allowance and progress cutoff | Native boundary, Auto growth and late-progress controls passed; Python startup diagnostic pending. | Adopted on branch; packaging pending. |
-| 20261109-ADM-03 | [Signed installation and actual Flash Next control](2026-11-09-resource-admission.md) | Planned; no runtime or installation result yet. | Pending. |
+| 20261109-ADM-02 | [Follow-up ceiling audit](2026-11-09-resource-admission.md): Decision fraction, stale Auto allowance and progress cutoff | Native boundary, Auto growth and late-progress controls passed. Python startup failures reproduced by the fixture's two-second deadline; six normal isolated repeats passed. | Adopted at `de60be71`; included in installed build. |
+| 20261109-ADM-03 | [Signed installation and actual Flash Next control](2026-11-09-resource-admission.md) | Two short Auto requests admitted the declared 262,144 context; bounded follow-up passed on the same worker. No swap growth/guard trigger; all 459 installed overlay hashes matched. Full-window execution untested. | Signed development build installed and opened; Ready observed. |
 
 ## Public record boundary
 
