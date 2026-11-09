@@ -1,7 +1,8 @@
 # 20261109-GLMMEM-16: first-weight mapping source plan
 
-State: source and one pinned header audited. No tensor payload read, file
-mapping, new native build or Metal execution. Full GLM execution remains held.
+State: source/header audit and separately authorized bounded CPU fixture
+preparation pass. No file mapping, new native build or Metal execution. Full
+GLM execution remains held.
 This follows [GLMMEM-15](2026-11-09-glm-first-use-control-diagnostic.md), which
 passed its no-file tiny Control/Q5 discriminator without reproducing pressure.
 
@@ -77,3 +78,23 @@ This is one pressure discriminator. It implements no backend, upload policy,
 mapping default, admission relaxation or production text-performance change.
 Growth with bounded fixture extent would be evidence to investigate, without
 clearing a 49.3 GB backing object or the full 109 GB model.
+
+## Authorized CPU preparation
+
+After review of this scope, the private Python preparer read exactly 23,068,672
+original-file bytes with successful Darwin `F_NOCACHE`. Descriptor identity
+matched the header audit before and after reading. It did not map the source
+or invoke Metal/native code.
+
+Three read-only private sparse files have 64/256/512 MiB extents and the same
+23,085,056-byte initialized view, 9,408-byte logical offset and exact tensor
+payload. Actual allocated disk totals 69,255,168 bytes. Four invalid-range
+controls rejected before source I/O, and all three fixtures rejected an actual
+one-byte wrong-offset hash comparison.
+
+The private preparation receipt is
+`5e112a4b7ab2325a86a3496fef09a804136e1c1359ae76d8f20f6f5fb7a686e3`;
+the logical packed payload hash is
+`6985b8b6a850af5095bbe7696e5049af2ce7aa1dbbfc81341dd15d8dd442cf1b`.
+Fixtures and raw bytes remain ignored/private. Native control and watcher
+implementation, source review, build and execution are still pending.
