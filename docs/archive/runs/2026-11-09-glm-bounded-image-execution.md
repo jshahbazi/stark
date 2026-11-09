@@ -100,3 +100,47 @@ supervisor cleanup, source compilation and actual memory qualification remain
 pending the serialized slot and independent watchdog review. A 32 GiB RSS
 rejection remains a recorded resource failure even if reclaimable file pages
 explain it; the limit is not raised automatically.
+
+## Compiled candidate and next execution checkpoint
+
+Both fresh isolated builds now pass at exact code revision
+`b76f560d54d251f207cdca870b1136dec7076e2b`: Rust 1.98.1 release worker/helper and
+the pinned-nightly release native engine test target. All 1,262 recorded source
+files stayed unchanged during both builds. Their common source-graph digest is
+`a2c9fad27a697206d70f0661b2116675d14f4fec4d1648d78729360b819d81f6`.
+
+The actual freshly compiled native accounting control passes: one test,
+zero failures. Its private receipt is
+`7573f9d5c9a8fb29b8f66e391a54479656118f8e24dbf6ab694a3680d4455ec7`.
+This updates the earlier source-extracted CPU evidence without relabeling it.
+Worker SHA256:
+`c8e528dc017809edb9c717b55c6c2dce6533e34259a4175988e9c8d4aa506f3d`;
+helper SHA256:
+`7d8f92e9552a9fd4e898113d674dd3ad235f423f7ce8a03d1ed03a2f6380164d`.
+
+The exact supervisor now also continuously rejects foreign native workers and
+the installed Stark app, while terminating only its owned process. Its SHA256
+is `7848ec39a115a41bd517cb36d1499fe84dc2a0b523412c5a4af6ae8e9cdd0c37`.
+Five live tiny-child cases pass on that exact source, including cooperative
+cancel, termination, constructor/base-close failure and early exit. Receipt:
+`1c2a360ab9a5bb62a8b9305ed5c669acfa53d6e8f2ad4df3970daae2401f587a`.
+Success requires positive sample count, no violation, owned child reaped and
+supervisor joined.
+
+Before starting a model, the private checkpoint binds the exact next command,
+driver, fixed environment, source/binaries, artifact and watcher identities:
+`1ff4591950b3ec059560a9d9f2df0130fdd2c942e1aa44b9429533c6ef7b1ce4`.
+Driver SHA256:
+`01a0969158ff333cd0a3ad74da8060ece645a6eca070bd3ef8cbae9ff8f2e13c`.
+The next authorized control is sequential text-only eight tokens, image-loaded
+text eight tokens with exact output-hash agreement, an actual PNG request with
+one output token, then eight-token text recovery. It grants no cache, MTP or
+performance promotion. The first retained-fixture AST preflight failed before
+any model; corrected fixture extraction and the newly built helper pass their
+separate CPU preflight.
+
+A background shader build in the separate resource-budget checkout was
+identified from executable/cwd metadata. The initial functional control may
+proceed under the unchanged strict memory/foreign-model screens; no quiet-host
+or performance claim may be derived from that run. Benchmarks require a later
+quiet slot. No model has run at this checkpoint.
