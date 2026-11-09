@@ -13,6 +13,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261109-GLMMEM-14: upstream Metal memory source review](../archive/runs/2026-11-09-glm-metal-upstream-memory-review.md) | Pinned llama.cpp/MLX source separates wrapped ranges, residency, live/cache memory and lazy PSOs; licenses/hash provenance recorded; next tiny Control→Q5 diagnostic retained, actual pressure unattributed and full model held |
 | [20261109-GLMMEM-13: first-use pressure audit](../archive/runs/2026-11-09-glm-first-use-pressure-audit.md) | Exact wired/ready failure boundary and first-use source order audited; separate GLM eager-library/PSOs precede first Q5_K projection; one tiny Control/Q5 diagnostic proposed with compiler-service telemetry; no new native/model execution |
 | [20261109-GLMMEM-12: owned upload source candidate](../archive/runs/2026-11-09-glm-owned-upload-source-candidate.md) | Bounded private CPU ownership prototype compiles and passes four tiny controls; whole-bank99GB/token route explicitly reference-only/nonpromotable; no engine/Metal/model integration or speed claim |
 | [20261109-GLMMEM-11: nonmodel mapping lifecycle](../archive/runs/2026-11-09-glm-mapping-lifecycle-diagnostic.md) | Review corrected periodic checksum gap; CPU/build and one tiny Metal run pass all four cases/60 copies plus wrong-offset control with zero paging/compression; wrapper zero differs from retained task footprint; full-model failure unreproduced, no production change/retry |
