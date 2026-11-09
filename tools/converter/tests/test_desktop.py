@@ -1418,6 +1418,17 @@ def test_output_limit_above_4096_reaches_worker(desktop, model):
     assert generate["max_new_tokens"] == 5000
 
 
+def test_playground_default_output_uses_remaining_finite_context(desktop, model):
+    running(desktop, model)
+    assert desktop.maximum == 0
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.dispatch({"command": "generate", "text": "automatic Playground output fixture"})
+        finish(desktop)
+    generate = [call.args[0] for call in request.call_args_list if call.args[0].get("operation") == "generate"][-1]
+    assert generate["max_new_tokens"] == 8172
+    assert any(event["event"] == "reply" for event in events(desktop))
+
+
 def test_api_default_output_uses_remaining_finite_context(desktop, model):
     running(desktop, model)
     with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
