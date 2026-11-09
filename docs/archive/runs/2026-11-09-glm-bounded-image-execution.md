@@ -180,3 +180,35 @@ bytes; no resident load is granted. Source receipt:
 Later decisions must use fresh available bytes and a separately reviewed full
 peak. Bounded parity alone does not qualify speed against the earlier fast
 resident normal-text recipe or authorize changing the normal default.
+
+### Quiet-host retry result
+
+The one registered retry passed its fresh no-compiler/no-model/app and memory
+entry screen. It again stopped on strict global pageout growth during the
+first text-only request, before any completion or image stage. Readiness took
+0.44 seconds; this is an unqualified functional observation, not a startup or
+inference benchmark. The private receipt is
+`e4ebed01ad400f1fc756eeec2eb2dbfc5d2ad883d287d6a05ac6ad6077c47a36`.
+
+| Retry observation | Value |
+| --- | ---: |
+| Initial available bytes | 109,388,103,680 |
+| Minimum observed available bytes | 94,429,216,768 |
+| Peak worker RSS bytes | 772,243,456 |
+| Peak worker physical-footprint bytes | 722,671,136 |
+| Peak host wired-growth bytes | 3,682,631,680 |
+| Compressor growth / swap used / swapouts | 0 / 0 / 0 |
+| Supervisor samples | 14 |
+
+An immediate later sample saw pageouts rise from 5,503 to 5,605 while swapouts
+remained zero. The receipt does not preserve the exact counter at the first
+breach, and the global counter alone does not identify the writer or cause.
+The supervisor cancelled and terminated only its owned worker, reaped it and
+joined; no kill escalation was needed. All owned model/compiler processes
+closed, the exclusive slot was released, and no further retry or limit
+relaxation is adopted.
+
+Both attempts remain resource-deferred by the fixed host screen. Complete
+image generation, cache correctness, MTP and matched performance remain open.
+The request-accounting fix is compiled and CPU-checked; these interrupted
+attempts do not qualify the bounded recipe for a normal default.
