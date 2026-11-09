@@ -3413,7 +3413,12 @@ struct ChatContentView: View {
             }.frame(minHeight: 180, maxHeight: .infinity)
                 .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
             if ["length", "context"].contains(engine.finishReason) {
-                Text("Reply reached the token limit. Clear the conversation to start fresh.").font(.caption).foregroundStyle(.orange)
+                Text(engine.finishReason == "length" && engine.options.maxNewTokens > 0
+                     ? "Reply reached your output limit. Increase it or choose Auto in Advanced Options."
+                     : (engine.finishReason == "context"
+                        ? "Reply reached the current context limit. Review Advanced Options or start a new chat for more room."
+                        : "Reply reached the available context or execution budget."))
+                    .font(.caption).foregroundStyle(.orange)
             }
             if engine.supportsImages {
                 Text(engine.imageVerificationNote).font(.caption).foregroundStyle(.secondary)
