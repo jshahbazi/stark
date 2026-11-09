@@ -80,7 +80,9 @@ do not change the binary, workload or measurements in the table above.
 The official BF16 source contains 15 predictor tensors, so the older headless
 export is **not** proof of MTP absence. BF16 predictor retention, raw norm-gain
 policy, schema upgrade and strict native contracts are implemented separately;
-actual head execution/speed is still unqualified. The two exact affine sources
+actual head execution/speed was unqualified at this original run. The continuation
+below updates its cache and speed evidence while retaining a failed numerical
+head gate. The two exact affine sources
 contain no predictor tensors despite a config declaration. Official BF16 MoE
 has 785 predictor tensors, including per-expert matrices; its full payload is
 absent and is a separate blocker.
@@ -110,3 +112,71 @@ No result here supersedes the separate qualified 27B or retained Lily records.
 Eight-bit dense, other sizes, BF16 heads, official BF16 MoE, actual ddalcu,
 installed-release admission and complete lifecycle matrices retain their own
 qualification gates.
+
+## Official BF16 head: ordinary MTP0 continuation
+
+This section supersedes the earlier pending actual-head cache and short-speed
+claims for the exact official Qwen3.5-0.8B derivative. It does not supersede the
+headless table or qualify the entire model family. Source `e4144be5`, worker
+`1e592b4816b159f230a64d71555dac842a0dcd7d59e68169f95a4e67a908add1`,
+image payload `31934dd3d9a4121f91b48519475ba51b7ef926ace338d43a833899c40ead98b4`
+and its exact text control are bound in the [continuation record](../archive/runs/2026-11-09-qwen-remaining-image-text-parity.md#final-qualification-continuation).
+The head remains loaded; MTP0 now selects the ordinary optimized target stream
+and target-only snapshot. Positive draft depths keep predictor sessions, with
+exact depth/graph misses on a representation switch. The prior predictor-session
+MTP0 run was about half as fast; it remains a separately recorded failed attempt.
+
+All timings use the registered context 2,048, 16-token input, greedy seed 42,
+64-output budget and ABBA loads. Valid EOS produces 62 output tokens. One warmup
+and three measured requests per load give six measured requests per arm/depth.
+Loading is excluded; the worker's prefill duration is a first-token proxy.
+
+| Matched comparison | Baseline decode tok/s | Candidate decode tok/s | Change | Baseline / candidate first-token proxy ms | Baseline / candidate request ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Image-loaded headless → headed, MTP0 | 299.031 | 294.968 | −1.36% | 10.225 / 9.540 | 222.159 / 223.176 |
+| Headed text-only → image-loaded, MTP0 | 299.377 | 299.810 | +0.14% | 10.481 / 10.113 | 222.205 / 220.910 |
+| Headed text-only → image-loaded, MTP3 | 149.586 | 153.860 | +2.86% | 12.175 / 11.062 | 428.730 / 414.884 |
+
+Every strict five-percent median gate passes. Decode ranges remain broad, with
+registered variability bounds of 12.89%, 16.93% and 10.90%, respectively. These
+quick controls establish bounded parity and removal of inactive-predictor cost;
+they do not establish a speedup. MTP3 proposes 468 and accepts 222 drafts in
+each loading arm's six measured requests. MTP0 proposes zero. Same-mode output
+hashes match across arms; greedy MTP0/MTP3 hashes also happen to match on this
+workload. MTP3 is slower than ordinary MTP0 on this small model.
+
+The loading-mode run records guarded startup separately: 0.422–0.465 seconds
+for its text controls and 6.388–6.585 seconds for admitted image artifacts. Peak sampled
+RSS across its four loads is 2,126,823,424 bytes. All measured paging deltas are
+zero and thermal screens are eligible. A hard preflight and continuous watch
+reject foreign model workers; every accepted load has no competing worker and
+no watchdog stop. An earlier contaminated partial attempt is preserved and
+excluded, rather than pooled into these measurements.
+
+Actual lifecycle checks pass **34/34 image-loaded** and **28/28 text-only**:
+nonperiodic 1,792-token prompts, seeded MTP0 and MTP3 fresh/cached equality,
+0/1/2/3 switches, exact 1,024-row reuse, scope/context/reset/error/cancellation,
+and real image zero-MTP execution followed by fresh/repeated text. A native tiny
+hybrid test additionally exercises multi-token ordinary-stream greedy/seeded
+snapshot restoration. These are bounded cases, not all contexts or workloads.
+
+The independent pinned MLX common-input head replay **fails** its unchanged
+normalized-hidden maximum-absolute-error limit: 0.25/0.125/0.140625 exceed
+0.0625, despite sub-one-percent relative RMS, passing logit limits and all
+top-one matches. First-divergence diagnosis remains open. Cache/speed passes
+do not close that numerical gate or imply original-training equivalence.
+
+| Continuation aggregate receipt | SHA-256 |
+| --- | --- |
+| Headed/headless MTP0 ABBA | `88880038813cdfc7b85eb1cb6fa3ff43910cd89d78d85a221a4c246f8abf580f` |
+| Headed loading-mode MTP0/3 ABBA | `a5154274e9e9d4f9830de4c4693460424b667d8f8a194bd99308c52c8f7d9d7c` |
+| Image-loaded lifecycle | `4a0ca99e3a1f1954278b6dcd546ba43da9f001aed874e9b3c12961a68063163b` |
+| Text-only lifecycle | `3c36e91dc62ec388f492a8ac877f357c1b85fb7541733e785ae52aa97f1af963` |
+| Ordinary hybrid toy | `6412ef65e68fb418b406be8decb88723ab93f52004096b24b9db300bbb36431f` |
+| Failed independent numerical gates | `3626be445f0ec47d288fb127fc707fabcb25da62daac34beabc13511c8810dc2` |
+
+The corrected affine MoE lifecycle continuation was resource-deferred when an
+external installed worker reloaded; no case completed. The [retained ddalcu
+memory plan](../archive/runs/2026-11-09-ddalcu-default-image-memory-plan.md) is
+source/header-only and its full run remains held. Official BF16 MoE payloads
+are absent; its expert-predictor component test does not qualify full execution.

@@ -294,3 +294,111 @@ After Qwen closed all owned workers and handed the resource slot to Gemma,
 another installed Stark worker appeared outside this task. Further model/Metal
 work is held for coordinator review. Its presence does not establish the cause
 of the preceding machine crash.
+
+## Final qualification continuation
+
+The user subsequently unloaded the installed model. The coordinator verified
+the machine's quiet state and granted Qwen the exclusive slot after Gemma's
+bounded controls completed. This continuation uses the unchanged production
+candidate at `e4144be5`, worker `1e592b48…`, and a fresh pinned-nightly native
+test target. The existing tiny hybrid fixture is retained; its converted weight
+SHA-256 is `156f79e885165762545012fde03c4c453d6631e5c1cc633acb44d8fe4dbc95ab`.
+
+Before execution, register the following remaining gates separately: the newly
+extended ordinary-stream toy test; actual headed image/text lifecycle matrices
+with seeded MTP0 and 0/1/2/3 switches; same-build headed/headless MTP0 ABBA;
+headed image/text MTP0 and MTP3 ABBA; independent pinned MLX head replay; and the
+corrected affine MoE lifecycle matrix. Each mode's cached result must equal its
+own fresh result, and matched loading-mode timing outputs must match exactly.
+Ordinary and predictor drivers may use different floating-point operation order;
+cross-mode greedy agreement is recorded separately and is not substituted for
+same-mode cache equality.
+
+The MoE image payload was freshly rehashed and still matches `2f762b26…`.
+Its bounded private watchdog is registered at 40 GiB worker RSS, at least
+64 GiB observed available memory, zero paging, eight GiB free disk and ten
+minutes per load. The previously proved 19,495,956,480 shared parameter bytes
+are an allocation inventory, not a residency guarantee. This separate recipe
+does not relax the small model's 12 GiB RSS guard. The 107 GB retained ddalcu
+load remains held for a complete memory plan.
+
+The fresh native test executable is
+`daf7b79d7614a61ac990d3d6b71683ddfde5bf5c0bfe2cf87da5acf0ae9b3119`.
+The extended tiny hybrid test passes: direct ordinary-stream multi-token
+greedy/seeded fresh-versus-restored checks, predictor-depth controls and inactive
+predictor request-memory separation all execute. Sampled peak RSS is 73,482,240
+bytes, zero paging, with the watchdog unstopped. This closes the source review's
+toy-test coverage gap; actual BF16 headed-worker matrices remain separate.
+
+The new ordinary-dispatch worker passes **34/34 image-loaded** and **28/28
+text-only** actual BF16-headed lifecycle controls at the registered nonperiodic
+1,792-token/context-2,048 input. MTP0 seeded fresh/cached results match exactly;
+switches among depths zero, one, two and three miss, and same-mode repeats
+reuse exactly 1,024 rows. Image rejection/execution and subsequent text recovery
+pass in the image-loaded matrix. Image-loaded peak sampled RSS is 2,156,576,768
+bytes, with zero pageout/swap-in/swap-out deltas and no watchdog stops.
+Receipts: `4a0ca99e3a1f1954278b6dcd546ba43da9f001aed874e9b3c12961a68063163b`
+and `3c36e91dc62ec388f492a8ac877f357c1b85fb7541733e785ae52aa97f1af963`.
+
+The pre-benchmark quiet-process screen then finds another app-build worker
+outside this task. All Qwen workers are closed; timing is held again for
+coordinator review. No result from that competing-worker interval is promoted.
+
+After the coordinator verifies the other task's worker is closed, same-build
+headed/headless image-loaded MTP0 ABBA completes with matching output hashes,
+zero paging and no watchdog stops. Decode medians are 294.968/299.031 tok/s
+(headed/headless), a 1.36% loss; first-token proxies are 9.540/10.225 ms and
+whole-request medians 223.176/222.159 ms. All three strict five-percent median
+gates pass. Decode ranges are 278.630–299.565 and 283.816–303.090 tok/s;
+the registered variability bound is 12.89%, so this short run is not precise
+evidence of a speedup. It closes the earlier roughly twofold inactive-predictor
+overhead for this workload and exact BF16 artifact. Receipt:
+`88880038813cdfc7b85eb1cb6fa3ff43910cd89d78d85a221a4c246f8abf580f`.
+
+An installed worker subsequently reappears after that completed comparison.
+The next loading-mode timing attempt starts despite its printed quiet screen
+and exits incomplete after three rows. That launch was a harness oversight;
+receipt `db0e90fbd0f336ad7cc9b7f24910e8209f3556959f38b578d854c27dc475f72f`
+is excluded. The coordinator unloads the model normally. The validation-only
+watchdog now rejects competing workers before launch and continuously watches
+for another worker, terminating only its own process if one appears. Active
+guard records are retained even when a timing load fails.
+
+The corrected watched loading-mode ABBA passes on the same `1e592b48…` worker:
+MTP0 text/image decode medians are **299.377/299.810 tok/s**, first-token proxies
+10.481/10.113 ms and request medians 222.205/220.910 ms. MTP3 medians are
+**149.586/153.860 tok/s**, 12.175/11.062 ms and 428.730/414.884 ms. Every strict
+five-percent median gate passes. Each arm's six measured MTP3 requests propose
+468 and accept 222 drafts; each MTP0 arm proposes zero. All outputs contain
+62 tokens before valid EOS and match exactly within mode across loading arms.
+Every measured row has zero paging and eligible thermal status; no foreign
+worker or watchdog stop is observed. Decode ranges remain broad:
+278.683–304.024 / 279.764–304.168 at MTP0 and 144.127–152.280 /
+151.923–155.110 at MTP3. Registered variability bounds are 16.93% and 10.90%,
+so these quick controls establish bounded parity, not a measured speedup.
+Receipt: `a5154274e9e9d4f9830de4c4693460424b667d8f8a194bd99308c52c8f7d9d7c`.
+
+The independent pinned MLX head replay completes but **fails the registered
+maximum-absolute hidden-state gate**. Target normalization is bit-exact;
+normalized-hidden relative RMS is 0.62–0.84%, all replayed top-one logits match,
+and logit errors pass their fixed bounds (maximum 0.15625, relative RMS below
+one percent). However, hidden maximum absolute errors are 0.25, 0.125 and
+0.140625 across the three stages, exceeding the unchanged 0.0625 limit.
+This is a real failed numerical attempt, not a passed head qualification.
+Norm-gain rounding and predictor eager boundaries require diagnosis. Gate
+receipt: `3626be445f0ec47d288fb127fc707fabcb25da62daac34beabc13511c8810dc2`;
+raw aggregate comparison: `7d90aa8a29eba87970a0f1e2a1ceeec443e771985ee93ae68d2f9e15e7c8ce99`.
+
+The affine MoE continuation is stopped before its first cache case by the
+continuous foreign-worker watch: an installed model reloads again. The owned
+MoE worker reaches 20,723,073,024 sampled RSS bytes, minimum available memory
+83,612,221,440 bytes and zero paging; no RAM/RSS limit is reached. This is a
+resource-deferred foreign-worker attempt, not a model numerical failure or a
+cache pass. Receipt: `65f9afac8e10ea71619f3bb7c31bf4c7074bd2e7bc3efd19bbc04f03f97b204d`.
+The slot is released for other coordinated builds while first-divergence
+diagnostics remain source/CPU-only.
+
+The [ddalcu memory plan](2026-11-09-ddalcu-default-image-memory-plan.md) now
+inventories all headers and source owners, including resident target experts,
+the actual head/tower, paged n-gram worst case, the 16,384-capacity floor and
+growth-inclusive request buffers. Its full run remains held for review.
