@@ -2567,6 +2567,7 @@ struct MenuView: View {
             HStack(spacing: 8) {
                 Button(interface.mode == .beginner ? "Guided setup" : "Manage Models", action: manage)
                     .buttonStyle(.borderedProminent)
+                Spacer(minLength: 0)
                 Button("Start model", action: engine.startModel).disabled(!engine.canStartModel)
                     .help(engine.startableModel.map { "Start " + $0.displayName } ?? "Choose a model first")
                 Button("Stop model", action: engine.stop).disabled(!engine.canStopCurrentModel)
