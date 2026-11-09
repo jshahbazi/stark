@@ -155,3 +155,27 @@ See the
 6. Update family ledgers with source identity, aggregate results, remaining gate
    and the next command/recipe before handing off. Keep this coordinator record
    linked from the plan; store private native receipts under ignored runtime paths.
+
+## Hardware validation resumed after app unload
+
+The user unloaded the installed Stark model and requested continued fixes and
+benchmarks on 2026-11-09. The coordinator verified no `stark-generate`, `cargo`
+or `rustc` processes, 87% system memory free and zero swap. The external-worker
+hold above is resolved. This does not resolve GLM/ddalcu's separate full-model
+peak-memory requirements.
+
+| Owner | Pushed restart checkpoint | Resumed gate |
+| --- | --- | --- |
+| Gemma | `9053f805932ace8be7258d46d9eadd999d138c52` | First exclusive Metal/model slot: dedicated committed-query controls, unchanged E2B oracle, serial verification and 512/513 boundary controls; then fix/qualify integration and performance |
+| Qwen | `e4144be510de3379c7a318977c91cdf2a6b3edee` | Next exclusive slot: ordinary headed MTP0 restoration, corrected image/text lifecycle matrices, short matched MTP0/3 and headed/headless benchmarks, independent head numerics and MoE cache controls |
+| GLM | `cc4e5aa2` | Source/CPU work toward a complete bounded-command memory plan and safe execution; review the plan before requesting a full-model slot |
+
+Qwen's candidate builds, 135 worker tests and three CPU prefix tests pass.
+Independent source review found no confirmed blocker; it identified a missing
+ordinary-stream test, now added for runtime execution. Gemma's fresh build and
+two dedicated CPU controls pass; independent source review found no reportable
+defect. These are build/component gates, not completed real-model qualification.
+
+Agents must continue through their pending gates and resolve actual failures,
+preserving failed measurements and updating their ledgers. Only one model/Metal
+run owns the machine at a time. No additional PR is authorized by this resume.

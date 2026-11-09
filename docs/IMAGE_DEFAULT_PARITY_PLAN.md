@@ -100,9 +100,10 @@ serialized by the coordinating agent; source work proceeds in isolated worktrees
 
 The follow-up agents were launched after PR #114 was opened. After reboot,
 small Qwen controls ran first and Gemma resumed its saved build; source work
-continues in parallel. Model/Metal launches are paused while an installed
-non-agent Stark worker occupies approximately 71 GiB RSS. GLM and ddalcu full
-loads also require complete peak-memory review. Coordinate GPU and heavy build
+continues in parallel. The user unloaded the installed Stark model; the
+coordinator verified no remaining model worker and resumed exclusive hardware
+slots, Gemma first then Qwen. GLM and ddalcu full loads still require complete
+peak-memory review. Coordinate GPU and heavy build
 ownership through the recovery checkpoint rather than the original queue.
 Check available disk before
 each build/download; preserve an eight-GiB reserve and all existing model
