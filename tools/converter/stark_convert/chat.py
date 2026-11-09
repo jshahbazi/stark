@@ -31,6 +31,7 @@ from .template_runtime import (
 from .tool_protocols import runtime_template_source
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
+    GLM_FAMILY_PROFILE,
     LILY_FAMILY_PROFILE,
     VISION_MODEL_TYPES,
     family_image_input_contract,
@@ -247,6 +248,8 @@ def load_template(model, *, expected_hashes=None):
                     "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
                     "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
                 }
+            elif image_family == {"profile": GLM_FAMILY_PROFILE, "version": 1}:
+                template_hashes = {"34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891"}
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
             if (

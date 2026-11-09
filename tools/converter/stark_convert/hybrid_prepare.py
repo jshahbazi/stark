@@ -365,7 +365,8 @@ def prepare(
     artifact_mode: str = "text",
 ) -> dict:
     if artifact_mode not in {"text", "vision-language"} or (
-        artifact_mode == "vision-language" and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}
+        artifact_mode == "vision-language"
+        and choice not in {"glm53-q2", "qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}
     ):
         raise ValueError("unsupported native artifact mode")
     progress = reporter(progress)
@@ -388,6 +389,10 @@ def prepare(
     else:
         marker.write_text(json.dumps(identity, sort_keys=True))
     disk_bytes = source["weight_bytes"] + (0 if source.get("ngram_in_weight_bytes") else source.get("ngram_bytes", 0))
+    if artifact_mode == "vision-language" and choice == "glm53-q2":
+        from .glm_vision import SIDECAR
+
+        disk_bytes += SIDECAR["size"]
     if not offline and shutil.disk_usage(output.parent).free < disk_bytes + 4 * 1024**3:
         # Account for a resumable completed shard already in our owned staging
         # directory. Hugging Face handles its own incomplete-file recovery.
@@ -465,9 +470,7 @@ def prepare(
         progress.emit("conversion", "running", force=True)
     receipt = finish_metadata(stage, choice)
     if artifact_mode == "vision-language":
-        from .hybrid_vision import prepare_image_artifact
-
-        prepare_image_artifact(stage, choice)
+        _prepare_images(stage, choice, offline=offline)
     # Publish only the completed, metadata-bound directory. The download remains
     # resumable on all preceding failures and is never treated as a ready model.
     _publish(stage, output)
@@ -477,6 +480,40 @@ def prepare(
     return {**receipt, "weight_bytes": weight_bytes, "status": "prepared"}
 
 
+def _prepare_images(directory: Path, choice: str, *, offline: bool = False, sidecar: Path | None = None) -> dict:
+    if choice != "glm53-q2":
+        if sidecar is not None:
+            raise ValueError("unexpected native vision sidecar")
+        from .hybrid_vision import prepare_image_artifact
+
+        return prepare_image_artifact(directory, choice)
+    from .glm_vision import SIDECAR, SIDECAR_PATH, _source, prepare_image_artifact
+
+    # Establish the complete pinned decoder before any sidecar download.
+    _source(directory)
+    if sidecar is None:
+        vision = directory / "vision"
+        if vision.is_symlink() or vision.exists() and not vision.is_dir():
+            raise ValueError("invalid GLM image sidecar directory")
+        target = directory / SIDECAR_PATH
+        if target.is_symlink():
+            raise ValueError("invalid GLM image sidecar file")
+        if not target.exists():
+            if not offline and shutil.disk_usage(directory).free < SIDECAR["size"] + 4 * 1024**3:
+                raise ValueError("insufficient disk space for GLM vision sidecar")
+            vision.mkdir(mode=0o700, exist_ok=True)
+            snapshot_download(
+                SIDECAR["repo"],
+                revision=SIDECAR["revision"],
+                allow_patterns=[SIDECAR["filename"]],
+                local_dir=vision,
+                local_files_only=offline,
+                max_workers=1,
+            )
+        sidecar = target
+    return prepare_image_artifact(directory, sidecar)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", choices=tuple(SOURCES))
@@ -484,6 +521,7 @@ def main(argv=None):
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--artifact-mode", choices=("text", "vision-language"), default="text")
     parser.add_argument("--upgrade-images", action="store_true", help="Upgrade the existing --output folder in place")
+    parser.add_argument("--vision-sidecar", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--progress-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     progress_sink = None
@@ -491,10 +529,10 @@ def main(argv=None):
         if args.progress_fd is not None:
             progress_sink = FDProgressSink(args.progress_fd)
         if args.upgrade_images:
-            from .hybrid_vision import prepare_image_artifact
-
-            receipt = prepare_image_artifact(args.output, args.model)
+            receipt = _prepare_images(args.output, args.model, offline=args.offline, sidecar=args.vision_sidecar)
         else:
+            if args.vision_sidecar is not None:
+                raise ValueError("local vision sidecar requires existing-artifact upgrade")
             options = {"artifact_mode": args.artifact_mode} if args.artifact_mode != "text" else {}
             receipt = prepare(args.model, args.output, offline=args.offline, progress=progress_sink, **options)
     except (Exception, KeyboardInterrupt):

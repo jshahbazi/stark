@@ -21,7 +21,7 @@ const MAX_PIXELS: u64 = 6272000;
 const MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 const STD: [f32; 3] = [0.26862954, 0.2613026, 0.2757771];
 
-pub(super) struct Patches {
+pub(in crate::engine::hybrid) struct Patches {
     pub data: Box<[f32]>,
     pub grid: [u32; 3],
     pub dimensions: [u32; 2],

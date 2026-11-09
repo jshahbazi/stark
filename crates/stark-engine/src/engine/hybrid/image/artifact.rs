@@ -51,7 +51,7 @@ pub(in crate::engine::hybrid) struct ImageArtifact {
     signatures: BTreeMap<String, Vec<u64>>,
 }
 
-fn open(path: &Path) -> Result<File> {
+pub(in crate::engine::hybrid) fn open(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -63,7 +63,7 @@ fn open(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn signature(file: &File) -> Result<Vec<u64>> {
+pub(in crate::engine::hybrid) fn signature(file: &File) -> Result<Vec<u64>> {
     let m = file.metadata()?;
     #[cfg(unix)]
     return Ok(vec![
@@ -79,7 +79,7 @@ fn signature(file: &File) -> Result<Vec<u64>> {
     Ok(vec![m.len()])
 }
 
-fn read(
+pub(in crate::engine::hybrid) fn read(
     path: &Path,
     maximum: u64,
 ) -> Result<Vec<u8>> {
@@ -96,7 +96,7 @@ fn read(
     Ok(bytes)
 }
 
-fn hash(
+pub(in crate::engine::hybrid) fn hash(
     path: &Path,
     maximum: u64,
 ) -> Result<(String, Vec<u64>, u64)> {

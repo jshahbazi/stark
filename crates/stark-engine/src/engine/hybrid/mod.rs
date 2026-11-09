@@ -253,6 +253,7 @@ pub struct Model {
     max_context: u32,
     eos: Vec<u32>,
     image_artifact: Option<image::artifact::ImageArtifact>,
+    glm_images: Option<glm_vision::Images>,
 }
 
 impl Model {
@@ -279,13 +280,13 @@ impl Model {
         Self::load_with_policy(path, with_mtp, Self::native_decode_stage_available(), false)
     }
 
-    /// Load the original-format Qwen tower explicitly. Converted text exports
-    /// and other hybrid architectures cannot acquire image capability here.
+    /// Load an admitted original-format tower. Each architecture retains its
+    /// own image artifact and state path; text-only exports cannot acquire it.
     pub fn load_with_image_support(
         path: &Path,
         with_mtp: bool,
     ) -> Result<Self> {
-        Self::load_with_policy(path, with_mtp, false, true)
+        Self::load_with_policy(path, with_mtp, Self::native_decode_stage_available(), true)
     }
 
     pub const fn native_decode_stage_available() -> bool {
@@ -315,11 +316,25 @@ impl Model {
         let _ = native_decode_stage;
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
         let _ = (with_mtp, with_images);
-        let outer = config(path)?;
-        if with_images && !mixed_precision_checkpoint(&outer) {
+        let mut outer = config(path)?;
+        if with_images && outer.get("expert_streaming").is_some() {
+            return Err(Error::Unsupported("GLM EXL3 image embedding ABI is not implemented"));
+        }
+        let glm_images_requested = with_images
+            && outer.get("model_type").and_then(Value::as_str) == Some("glm5_next")
+            && outer.get("expert_streaming").is_none();
+        if with_images && !mixed_precision_checkpoint(&outer) && !glm_images_requested {
             return Err(Error::Unsupported("retained original-format Qwen image tower required"));
         }
-        let image_artifact = if with_images {
+        let glm_artifact = if glm_images_requested {
+            Some(glm_vision::artifact::Artifact::admit(path)?)
+        } else {
+            None
+        };
+        if let Some(artifact) = &glm_artifact {
+            outer = artifact.config.clone();
+        }
+        let image_artifact = if with_images && !glm_images_requested {
             Some(image::artifact::ImageArtifact::admit(path)?)
         } else {
             None
@@ -338,8 +353,11 @@ impl Model {
             .and_then(Value::as_u64)
             .filter(|n| *n > 0 && *n <= u32::MAX as u64)
             .ok_or(Error::Invalid("context size"))? as u32;
-        let tokenizer =
-            Arc::new(Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| Error::Invalid("tokenizer"))?);
+        let tokenizer = if let Some(artifact) = &glm_artifact {
+            artifact.tokenizer.clone()
+        } else {
+            Arc::new(Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| Error::Invalid("tokenizer"))?)
+        };
         let vocab = tokenizer.get_vocab(true);
         if vocab.is_empty() || vocab.values().any(|&id| id as usize >= vocab_size) {
             return Err(Error::Invalid("tokenizer vocabulary"));
@@ -349,14 +367,21 @@ impl Model {
             extend_eos(value, &mut eos, vocab_size)?;
         }
         let generation_path = path.join("generation_config.json");
-        if generation_path.exists() {
+        // GLM image artifacts consume only the admitted metadata buffers.
+        // Preparation already folds generation EOS into this bound config.
+        if glm_artifact.is_none() && generation_path.exists() {
             let generation = json_file(&generation_path, 1024 * 1024)?;
             if let Some(value) = generation.get("eos_token_id") {
                 extend_eos(value, &mut eos, vocab_size)?;
             }
         }
         let tokenizer_path = path.join("tokenizer_config.json");
-        if tokenizer_path.exists() {
+        if let Some(artifact) = &glm_artifact {
+            if let Some(token) = artifact.config.pointer("/token_codec_config/eos_token").and_then(Value::as_str) {
+                let id = tokenizer.token_to_id(token).ok_or(Error::Invalid("GLM image EOS token"))?;
+                extend_eos(&Value::from(id), &mut eos, vocab_size)?;
+            }
+        } else if tokenizer_path.exists() {
             let metadata = json_file(&tokenizer_path, 2 * 1024 * 1024)?;
             if let Some(value) = metadata.get("eos_token").filter(|value| !value.is_null()) {
                 let token = value
@@ -420,6 +445,9 @@ impl Model {
             #[cfg(feature = "metal")]
             weight_metal::initialize()?;
             let weights = weights::Weights::open(path)?;
+            if let Some(artifact) = &glm_artifact {
+                artifact.bind_decoder(&weights)?;
+            }
             let forward = match outer.get("model_type").and_then(Value::as_str) {
                 Some("flint") => Forward::Flint(flint::FlintModel::new(weights, &outer)?),
                 Some("glm5_next") => Forward::Glm(glm::GlmModel::new(weights, &outer)?),
@@ -431,6 +459,7 @@ impl Model {
         if let Some(artifact) = &image_artifact {
             artifact.unchanged(path)?;
         }
+        let glm_images = glm_artifact.map(|artifact| glm_vision::Images::load(path, artifact)).transpose()?;
         Ok(Self {
             forward,
             tokenizer,
@@ -438,10 +467,14 @@ impl Model {
             max_context,
             eos,
             image_artifact,
+            glm_images,
         })
     }
 
     pub fn supports_images(&self) -> bool {
+        if matches!(self.forward, Forward::Glm(_)) && self.glm_images.is_some() {
+            return true;
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return self.image_artifact.is_some() && model.supports_images();
@@ -450,21 +483,41 @@ impl Model {
     }
 
     pub fn image_artifact_identity(&self) -> Option<&crate::engine::vision::VisionArtifactIdentity> {
-        self.image_artifact.as_ref().map(|artifact| &artifact.identity)
+        self.glm_images
+            .as_ref()
+            .map(|images| &images.artifact.identity)
+            .or_else(|| self.image_artifact.as_ref().map(|artifact| &artifact.identity))
     }
 
     pub fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
-        self.image_artifact.as_ref().map(|artifact| (artifact.source.as_str(), Some(artifact.revision.as_str())))
+        self.glm_images.as_ref().map(|images| images.artifact.source()).or_else(|| {
+            self.image_artifact.as_ref().map(|artifact| (artifact.source.as_str(), Some(artifact.revision.as_str())))
+        })
     }
 
     pub fn image_family_profile(&self) -> Option<(&'static str, u32)> {
-        self.image_artifact.as_ref().map(|_| (image::artifact::PROFILE, 1))
+        if self.glm_images.is_some() {
+            Some((glm_vision::artifact::PROFILE, 1))
+        } else {
+            self.image_artifact.as_ref().map(|_| (image::artifact::PROFILE, 1))
+        }
+    }
+
+    pub fn image_geometry(&self) -> (u32, u32) {
+        if self.glm_images.is_some() {
+            (14, 2)
+        } else {
+            (16, 2)
+        }
     }
 
     pub fn prepare_image(
         &self,
         encoded: &[u8],
     ) -> Result<PreparedHybridImage> {
+        if let Some(images) = &self.glm_images {
+            return images.prepare(encoded);
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return model.prepare_image(encoded);
@@ -479,6 +532,12 @@ impl Model {
         image: &PreparedHybridImage,
         context_capacity: u32,
     ) -> Result<Box<[u32]>> {
+        if let Some(images) = &self.glm_images {
+            if context_capacity > self.max_context {
+                return Err(Error::Invalid("GLM image context capacity"));
+            }
+            return images.prompt(tokens, image, context_capacity);
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return model.prepare_image_prompt(tokens, image, context_capacity as usize);
@@ -494,20 +553,48 @@ impl Model {
         tokens: &[u32],
         image: PreparedHybridImage,
     ) -> Result<Vec<f32>> {
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        if let Forward::Lily(model) = &mut self.forward {
-            return model.prefill_image(tokens, image);
-        }
-        let _ = (tokens, image);
-        Err(Error::Unsupported("native image prefill unavailable"))
+        self.prefill_image_controlled(tokens, image, || false)
     }
 
     pub fn prefill_image_controlled<F: FnMut() -> bool>(
         &mut self,
         tokens: &[u32],
         image: PreparedHybridImage,
-        should_cancel: F,
+        mut should_cancel: F,
     ) -> Result<Vec<f32>> {
+        if self.glm_images.is_some() {
+            if let Forward::Glm(model) = &mut self.forward {
+                model.invalidate_image_prefix();
+            }
+        }
+        if self.is_fenced() {
+            return Err(Error::Invalid("image prefill requires a healthy model"));
+        }
+        if tokens.is_empty()
+            || tokens.len() > self.max_context as usize
+            || tokens.iter().any(|token| *token as usize >= self.vocab_size)
+        {
+            self.reset_after_error();
+            return Err(Error::Invalid("image prefill token bounds"));
+        }
+        if let (Forward::Glm(model), Some(images)) = (&mut self.forward, &self.glm_images) {
+            let start = images.span(tokens, &image)?;
+            if should_cancel() {
+                return Err(Error::Cancelled);
+            }
+            let features = match images.encode(image, &mut should_cancel) {
+                Ok(features) => features,
+                Err(Error::Cancelled) => {
+                    model.reset();
+                    return Err(Error::Cancelled);
+                },
+                Err(error) => {
+                    model.fence_image_failure();
+                    return Err(error);
+                },
+            };
+            return model.prefill_image_embeddings(tokens, start, &features, &mut should_cancel);
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &mut self.forward {
             return model.prefill_image_controlled(tokens, image, should_cancel);
@@ -559,6 +646,7 @@ impl Model {
                 max_context,
                 eos,
                 image_artifact: None,
+                glm_images: None,
             })
         }
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
@@ -621,7 +709,14 @@ impl Model {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Forward::Lily(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
         };
-        memory::sum(&[state, memory::host_workspace(context_tokens, input_tokens, self.vocab_size)?])
+        // Charge mapped vision weights and bounded projector/attention scratch
+        // for the loaded instance even when the current request is text-only.
+        let images = if self.glm_images.is_some() {
+            1_164_010_176usize.checked_add(512 * 1024 * 1024)?
+        } else {
+            0
+        };
+        memory::sum(&[state, images, memory::host_workspace(context_tokens, input_tokens, self.vocab_size)?])
     }
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos

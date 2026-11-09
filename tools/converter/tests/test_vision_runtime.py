@@ -65,6 +65,42 @@ def test_gemma3_capabilities_bind_schema_and_fixed_siglip_geometry():
         assert vision_runtime.image_input_contract({**value, **change}) is None
 
 
+def test_glm_capabilities_bind_source_schema_and_native_patch_budget():
+    value = contract(
+        artifact_schema_version=7,
+        model_source="unsloth/GLM-5.3-Flash-GGUF",
+        model_revision="a38483c8cd5df544f53d70fb281afe97369d5ab6",
+        family_profile=vision_runtime.GLM_FAMILY_PROFILE,
+        family_version=1,
+        max_processed_pixels=200704,
+        max_patches=1024,
+        max_image_tokens=256,
+    )
+    assert vision_runtime.image_input_contract(value) == value
+    for change in (
+        {"artifact_schema_version": 6},
+        {"model_source": "another/GLM-5.3-Flash"},
+        {"model_revision": "f" * 40},
+        {"family_version": True},
+        {"max_patches": 4096},
+        {"max_processed_pixels": 1048576},
+        {"max_image_tokens": 1024},
+    ):
+        assert vision_runtime.image_input_contract({**value, **change}) is None
+    assert (
+        vision_runtime.artifact_image_family(
+            {
+                "type": "Qwen35VisionLanguageModelConfig",
+                "artifact_contract": {
+                    "schema_version": 3,
+                    "family": {"profile": vision_runtime.GLM_FAMILY_PROFILE, "version": 1},
+                },
+            }
+        )
+        is None
+    )
+
+
 def test_gemma3_stored_family_cannot_migrate_to_another_root_or_schema():
     family = {"profile": "gemma3-siglip-bf16-v1", "version": 1}
     config = {"type": "Gemma3VisionLanguageModelConfig", "artifact_contract": {"schema_version": 5, "family": family}}

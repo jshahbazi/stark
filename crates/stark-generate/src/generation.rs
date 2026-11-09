@@ -182,7 +182,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        matches!(self.schema_version, 2..=6)
+        matches!(self.schema_version, 2..=7)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
@@ -222,6 +222,7 @@ fn image_family_limits(
             4,
         ) => ((16, 3), 2520, 280),
         ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
+        ("glm53-flash-bf16-vision-v1", 1, 7) => ((14, 2), 1024, 256),
         _ => return None,
     };
     (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
@@ -245,6 +246,7 @@ mod image_family_tests {
             ("gemma4-12b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma4-26b-a4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma3-siglip-bf16-v1", 1, 5, (14, 4), (4096, 256, 802816)),
+            ("glm53-flash-bf16-vision-v1", 1, 7, (14, 2), (1024, 256, 200704)),
         ] {
             assert_eq!(image_family_limits(profile, version, schema, geometry), Some(expected));
             assert_eq!(image_family_limits(profile, version + 1, schema, geometry), None);
@@ -271,6 +273,7 @@ fn valid_image_metadata(
     let (max_patches, max_image_tokens) = match geometry {
         (16, 2) => (4096, 1024),
         (16, 3) => (2520, 280),
+        (14, 2) => (1024, 256),
         (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
         _ => return false,
     };

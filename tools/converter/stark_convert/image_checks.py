@@ -68,6 +68,17 @@ def preflight_family_memory(model: Path, config: dict) -> None:
 
             if psutil.virtual_memory().available < retained_check_memory(retained):
                 raise ImageCheckError("Not enough available memory to check this image model.")
+        else:
+            from .glm_vision import prepared_image_identity as glm_image_identity
+
+            native = glm_image_identity(model)
+            if native is not None:
+                # A coarse load preflight, not a peak-memory qualification.
+                # Native planning additionally bills exact target state and
+                # prefix-copy allocations for the requested context.
+                size = sum(record["size"] for record in native["weight_files"].values())
+                if psutil.virtual_memory().available < size + 8 * 1024**3:
+                    raise ImageCheckError("Not enough available memory to check this image model.")
         return
     family = artifact_image_family(config) if contract.get("schema_version") == 4 else contract.get("family")
     if not supported_image_family(family):
@@ -196,6 +207,7 @@ def check_identity(worker) -> dict:
         "chat.py",
         "vision_runtime.py",
         "hybrid_vision.py",
+        "glm_vision.py",
         "hybrid_image_memory.py",
         "media.py",
         "_build_metadata.py",

@@ -652,6 +652,9 @@ impl GenerationBackend for HybridBackend {
     fn image_family_profile(&self) -> Option<(&str, u32)> {
         self.model.image_family_profile()
     }
+    fn image_geometry(&self) -> (u32, u32) {
+        self.model.image_geometry()
+    }
     fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
         self.model.image_source_identity()
     }

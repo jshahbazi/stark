@@ -68,3 +68,62 @@ metadata/symlink rejection and strict scalar/path contracts. Formatting/lint,
 whitespace and repository-policy checks pass. These are preparation/inspection
 controls; actual runtime integration remains in progress and catalog defaults
 have not been enabled by this increment.
+
+## Native integration source, before runtime qualification
+
+The next increment connects schema-7 GLM artifact admission and its separately
+mapped vision tower to the native model and generation worker. It preserves
+F32 vision patches, binds request preparation to one loaded owner, expands the
+fixed still-image token span and sends tower features through the previously
+checked causal embedding bridge. It invalidates native snapshot ownership at
+image entry, clears captures, resets on cancellation, and fences the model after
+an uncertain device error. Ordinary text continues through the existing graph.
+Request planning conservatively charges the resident sidecar and 512 MiB vision
+scratch even when the current request is text.
+
+Admission now pins the complete finished source config
+`d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd`,
+the original tokenizer
+`19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d`
+and source template
+`34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891`.
+Both converter inspection and native admission reject a coherently rehashed
+alternate text graph or tokenizer. The native loader parses only its exact
+hash-bound config/tokenizer buffers. Its EOS policy uses the admitted finished
+text config (preparation already folds generation EOS into it) and admitted
+token-codec EOS; it does not reopen auxiliary generation/tokenizer metadata.
+Actual mapped decoder descriptors must match the four payload descriptors that
+were hashed. The sidecar retains its independent mapped-descriptor check.
+
+An independent source review found the earlier separately reopened metadata
+could escape that binding during parent-directory substitution. The loader now
+owns the admitted buffers, with a directory-replacement control. That review also
+found that a geometry-only config check did not establish the complete pinned
+decoder graph; the fixed finished-config identity closes that gap. The reviewer
+rechecked both fixes and found no further source/state blocker. This review did
+not run a model or qualify memory/performance.
+
+Host functionality recognition now understands the GLM schema/source/native
+14-by-2 geometry, the pinned template and the separate sidecar. It remains
+distinct from an execution receipt. Preparation can fetch only the pinned
+sidecar into `vision/` or use the already verified local sidecar; it cannot
+silently add a fifth decoder shard. Source planning reports execution as
+unchecked, rather than inferring a runtime result from metadata.
+
+The current focused Python pass is **186 passed**, including 33 GLM
+source/preparation controls and the shared preparation, handshake and image
+checks. Lint, changed-file Rust formatting, whitespace and repository policy
+checks pass. The complete pinned installed source still passes bounded
+source/config/tokenizer inspection without decoder payload I/O. A full
+converter pass with a preserved older helper produced 6,826 passed, 96 skipped
+and one large-request boundary failure; that case passes using the newer
+preserved helper, and a final full pass is pending. No native compilation or
+full GGUF image execution result is claimed for this integration increment.
+
+The EXL3 image ABI remains unimplemented and fails explicitly. The image loader
+retains native decode-stage selection rather than hardcoding it off; the EXL3
+head/default-three policy must still be exercised after its image bridge exists.
+Ordinary GGUF predictor execution also remains missing. Catalog defaults,
+full image generation, loaded-image text cache/performance and both backend MTP
+gates remain open. Native build/model work is deferred while shared disk space
+is below the required 8 GiB reserve; no additional model payload was requested.

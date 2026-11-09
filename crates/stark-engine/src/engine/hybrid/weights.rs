@@ -959,6 +959,25 @@ impl Weights {
             m.ctime_nsec() as u64,
         ])
     }
+
+    /// Descriptor identities in the same sorted shard order used by open().
+    pub(super) fn mapped_file_signatures(&self) -> Result<Vec<Vec<u64>>> {
+        self.files
+            .iter()
+            .map(|mapping| {
+                let m = mapping._file.metadata()?;
+                Ok(vec![
+                    m.dev(),
+                    m.ino(),
+                    m.len(),
+                    m.mtime() as u64,
+                    m.mtime_nsec() as u64,
+                    m.ctime() as u64,
+                    m.ctime_nsec() as u64,
+                ])
+            })
+            .collect()
+    }
     pub fn has(
         &self,
         name: &str,

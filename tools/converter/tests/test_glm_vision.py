@@ -35,7 +35,7 @@ def test_glm_source_plan_retains_head_declaration_without_granting_runtime_capab
     original = deepcopy(value)
     result = plan(value)
     assert result["declared_mtp_layers"] == 1
-    assert result["image_execution"] == "unimplemented"
+    assert result["image_execution"] == "not_checked"
     assert result["weight_admission"] == "not_checked"
     assert result["required_vision_sidecar"]["filename"] == "mmproj-BF16.gguf"
     assert result["required_vision_sidecar"]["size"] == 1_164_010_176
@@ -103,6 +103,19 @@ def local_glm_source(tmp_path, monkeypatch):
     (directory / "tokenizer.json").write_text("{}")
     (directory / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages[0]['content'] }}"}))
     hybrid_prepare.finish_metadata(directory, "glm53-q2")
+    monkeypatch.setattr(
+        glm_vision, "CONFIG_SHA256", hashlib.sha256((directory / "config.json").read_bytes()).hexdigest()
+    )
+    monkeypatch.setattr(
+        glm_vision, "TOKENIZER_SHA256", hashlib.sha256((directory / "tokenizer.json").read_bytes()).hexdigest()
+    )
+    monkeypatch.setattr(
+        glm_vision,
+        "TEMPLATE_SHA256",
+        hashlib.sha256(
+            json.loads((directory / "config.json").read_bytes())["token_codec_config"]["prompt_template"].encode()
+        ).hexdigest(),
+    )
     sidecar = tmp_path / "mmproj-BF16.gguf"
     sidecar.write_bytes(b"tower")
     monkeypatch.setattr(
@@ -124,6 +137,49 @@ def test_glm_image_upgrade_preserves_decoder_and_shares_sidecar_outside_split_se
         path = directory / name
         assert (path.stat().st_ino, path.read_bytes()) == expected
     assert glm_vision.prepare_image_artifact(directory, sidecar) == value
+
+
+def test_glm_image_prepare_downloads_only_pinned_nested_sidecar(local_glm_source, monkeypatch):
+    from stark_convert import hybrid_prepare
+
+    directory, sidecar = local_glm_source
+    calls = []
+
+    def download(repo, **kwargs):
+        calls.append((repo, kwargs))
+        (kwargs["local_dir"] / glm_vision.SIDECAR["filename"]).write_bytes(sidecar.read_bytes())
+
+    monkeypatch.setattr(hybrid_prepare, "snapshot_download", download)
+    value = hybrid_prepare._prepare_images(directory, "glm53-q2", offline=True)
+    assert glm_vision.prepared_image_identity(directory) == value
+    assert len(list(directory.glob("*.gguf"))) == 4
+    assert calls == [
+        (
+            glm_vision.SIDECAR["repo"],
+            {
+                "revision": glm_vision.SIDECAR["revision"],
+                "allow_patterns": [glm_vision.SIDECAR["filename"]],
+                "local_dir": directory / "vision",
+                "local_files_only": True,
+                "max_workers": 1,
+            },
+        )
+    ]
+
+
+def test_glm_image_prepare_local_sidecar_has_no_network_fallback(local_glm_source, monkeypatch):
+    from stark_convert import hybrid_prepare
+
+    directory, sidecar = local_glm_source
+    monkeypatch.setattr(
+        hybrid_prepare, "snapshot_download", lambda *args, **kwargs: pytest.fail("unexpected download")
+    )
+    value = hybrid_prepare._prepare_images(directory, "glm53-q2", sidecar=sidecar)
+    assert glm_vision.prepared_image_identity(directory) == value
+    (directory / glm_vision.SIDECAR_PATH).unlink()
+    (directory / glm_vision.SIDECAR_PATH).symlink_to(sidecar)
+    with pytest.raises(ValueError, match="sidecar file"):
+        hybrid_prepare._prepare_images(directory, "glm53-q2")
 
 
 @pytest.mark.parametrize("mutation", ["decoder", "sidecar", "processor", "template", "symlink"])
@@ -174,5 +230,26 @@ def test_glm_image_upgrade_keeps_native_image_config_checks_after_hash_rebinding
     source["config_sha256"] = hashlib.sha256(encoded).hexdigest()
     (directory / "native-source.json").write_text(json.dumps(source))
     with pytest.raises(ValueError, match="vision profile"):
+        glm_vision.prepare_image_artifact(directory, sidecar)
+    assert glm_vision.prepared_image_identity(directory) is None
+
+
+@pytest.mark.parametrize("mutation", ["text_graph", "tokenizer", "template"])
+def test_glm_finished_profile_rejects_coherently_rehashed_alternate_metadata(local_glm_source, mutation):
+    directory, sidecar = local_glm_source
+    glm_vision.prepare_image_artifact(directory, sidecar)
+    value = json.loads((directory / "config.json").read_bytes())
+    if mutation == "text_graph":
+        value["text_config"]["num_hidden_layers"] = 1
+    elif mutation == "tokenizer":
+        (directory / "tokenizer.json").write_text('{"changed":true}')
+    else:
+        value["token_codec_config"]["prompt_template"] = "changed"
+    encoded = json.dumps(value).encode()
+    (directory / "config.json").write_bytes(encoded)
+    source = json.loads((directory / "native-source.json").read_bytes())
+    source["config_sha256"] = hashlib.sha256(encoded).hexdigest()
+    (directory / "native-source.json").write_text(json.dumps(source))
+    with pytest.raises(ValueError, match="finished source identity"):
         glm_vision.prepare_image_artifact(directory, sidecar)
     assert glm_vision.prepared_image_identity(directory) is None

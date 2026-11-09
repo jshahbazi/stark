@@ -31,6 +31,7 @@ _GEMMA4_PROFILES = {
 }
 GEMMA3_FAMILY_PROFILE = "gemma3-siglip-bf16-v1"
 LILY_FAMILY_PROFILE = "qwen38-lily-retained-bf16-vision-v1"
+GLM_FAMILY_PROFILE = "glm53-flash-bf16-vision-v1"
 _VISION_SCHEMAS = {
     "Qwen35VisionLanguageModelConfig": (2, 3),
     "Gemma4VisionLanguageModelConfig": (4,),
@@ -50,6 +51,7 @@ _FAMILY_VERSIONS = {
     "qwen35-moe-affine-merged-v4": 4,
     "qwen35-moe-bf16-merged-v5": 5,
     LILY_FAMILY_PROFILE: 1,
+    GLM_FAMILY_PROFILE: 1,
 }
 
 
@@ -118,7 +120,7 @@ def image_input_contract(value: object) -> dict | None:
         or type(value.get("max_images")) is not int
         or value["max_images"] != 1
         or type(value.get("artifact_schema_version")) is not int
-        or value["artifact_schema_version"] not in (2, 3, 4, 5, 6)
+        or value["artifact_schema_version"] not in (2, 3, 4, 5, 6, 7)
         or any(not isinstance(value.get(key), str) or _HASH.fullmatch(value[key]) is None for key in _ARTIFACT_HASHES)
         or not isinstance(operations, list)
         or any(not isinstance(item, str) for item in operations)
@@ -155,6 +157,8 @@ def image_input_contract(value: object) -> dict | None:
         return None
     if (value["artifact_schema_version"] == 6) != (value.get("family_profile") == LILY_FAMILY_PROFILE):
         return None
+    if (value["artifact_schema_version"] == 7) != (value.get("family_profile") == GLM_FAMILY_PROFILE):
+        return None
     return dict(value)
 
 
@@ -164,6 +168,14 @@ def family_image_input_contract(value: object) -> bool:
         return False
     source, revision = value.get("model_source"), value.get("model_revision")
     gemma = value.get("family_profile") in _GEMMA4_PROFILES
+    if value.get("family_profile") == GLM_FAMILY_PROFILE and (
+        value.get("artifact_schema_version") != 7
+        or (source, revision) != ("unsloth/GLM-5.3-Flash-GGUF", "a38483c8cd5df544f53d70fb281afe97369d5ab6")
+        or value.get("max_patches") != 1024
+        or value.get("max_image_tokens") != 256
+        or value.get("max_processed_pixels") != 200704
+    ):
+        return False
     if value.get("family_profile") == LILY_FAMILY_PROFILE and (
         value.get("artifact_schema_version") != 6
         or (source, revision)
@@ -237,7 +249,7 @@ def artifact_image_family(config: object) -> dict | None:
         family
         if supported_image_family(family)
         and family["profile"] not in _GEMMA4_PROFILES
-        and family["profile"] not in {GEMMA3_FAMILY_PROFILE, LILY_FAMILY_PROFILE}
+        and family["profile"] not in {GEMMA3_FAMILY_PROFILE, LILY_FAMILY_PROFILE, GLM_FAMILY_PROFILE}
         else None
     )
 
@@ -249,7 +261,11 @@ def model_image_family(config: object, model: Path) -> dict | None:
         return family
     from .hybrid_vision import prepared_image_identity
 
-    return {"profile": LILY_FAMILY_PROFILE, "version": 1} if prepared_image_identity(model) is not None else None
+    if prepared_image_identity(model) is not None:
+        return {"profile": LILY_FAMILY_PROFILE, "version": 1}
+    from .glm_vision import prepared_image_identity as glm_image_identity
+
+    return {"profile": GLM_FAMILY_PROFILE, "version": 1} if glm_image_identity(model) is not None else None
 
 
 def supported_image_family(value: object) -> bool:

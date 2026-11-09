@@ -524,6 +524,7 @@ impl GlmModel {
         features: &[f32],
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<Vec<f32>> {
+        self.invalidate_image_prefix();
         let hidden = self.config.hidden;
         if tokens.is_empty()
             || tokens.len() > self.config.max_context
@@ -574,9 +575,30 @@ impl GlmModel {
         })();
         if let Err(error) = transaction {
             self.reset();
+            #[cfg(feature = "metal")]
+            if !matches!(error, Error::Cancelled) {
+                // A failed tower/fusion device operation cannot establish a
+                // reusable completion state. A host reset never clears this.
+                self.cleanup_failed = true;
+            }
             return Err(error);
         }
         Ok(result)
+    }
+
+    /// An image request overwrites KV rows, so old native snapshots must lose
+    /// ownership even when an image fails before causal prefill starts.
+    pub(super) fn invalidate_image_prefix(&mut self) {
+        self.prefix_instance = prefix::next_instance();
+        self.reset();
+    }
+
+    pub(super) fn fence_image_failure(&mut self) {
+        self.invalidate_image_prefix();
+        #[cfg(feature = "metal")]
+        {
+            self.cleanup_failed = true;
+        }
     }
 
     fn step_inner_reference(
@@ -2950,8 +2972,6 @@ mod tests {
         assert!(maximum_error <= 1e-4 && relative_rms_error <= 1e-4, "GLM complete forward reference gate failed");
     }
 
-    /// This checks only production source headers and admission. Sparse stub
-    /// payloads may be supplied; this test never performs a forward operation.
     #[stark_test]
     #[ignore]
     fn glm_image_embedding_fusion_matches_identical_text_rows_and_resets_on_cancel() {
@@ -2970,7 +2990,9 @@ mod tests {
         }
         let continuation = model.step(5).unwrap();
         let features = model.weights.row("token_embd.weight", 2).unwrap();
+        let old_instance = model.prefix_instance;
         let actual = model.prefill_image_embeddings(&tokens, 1, &features, &mut || false).unwrap();
+        assert_ne!(old_instance, model.prefix_instance, "image must invalidate native snapshot ownership");
         assert!(actual == baseline, "GLM identical embedding fusion changed logits");
         assert!(model.captured.is_none() && model.capture_at.is_none());
         assert!(model.step(5).unwrap() == continuation, "GLM image continuation changed state");
@@ -2986,8 +3008,17 @@ mod tests {
         assert!(model.captured.is_none() && model.capture_at.is_none());
         let mut invalid = features.clone();
         invalid[0] = f32::NAN;
+        let before_failure = model.prefix_instance;
         assert!(model.prefill_image_embeddings(&tokens, 1, &invalid, &mut || false).is_err());
+        assert_ne!(before_failure, model.prefix_instance, "failed image must invalidate snapshot ownership");
         assert_eq!(model.position, 0);
+        #[cfg(feature = "metal")]
+        {
+            model.fence_image_failure();
+            model.reset();
+            assert!(model.is_fenced());
+            assert!(model.step(1).is_err());
+        }
     }
 
     #[stark_test]

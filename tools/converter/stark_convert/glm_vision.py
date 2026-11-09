@@ -28,6 +28,11 @@ SIDECAR = {
 MANIFEST = "stark-image-artifact.json"
 SIDECAR_PATH = "vision/mmproj-BF16.gguf"
 PRECISION = "f32-vision-activations-v1"
+# The finished native config includes the complete original text graph and
+# source template/EOS metadata. A rehashed shorter graph is another artifact.
+CONFIG_SHA256 = "d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd"
+TOKENIZER_SHA256 = "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d"
+TEMPLATE_SHA256 = "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891"
 # Public X-Linked-Size / X-Linked-ETag at the immutable source revision,
 # independently rechecked before the native-image integration attempt.
 DECODER_FILES = {
@@ -155,7 +160,7 @@ def plan_image_source(config_bytes: bytes, *, metadata_repo: str, metadata_revis
         "required_vision_sidecar": dict(SIDECAR),
         "declared_mtp_layers": text["num_nextn_predict_layers"],
         "weight_admission": "not_checked",
-        "image_execution": "unimplemented",
+        "image_execution": "not_checked",
     }
 
 
@@ -221,9 +226,15 @@ def _source(directory: Path) -> dict:
         or not _matches(source.get("weight_bytes"), base["weight_bytes"])
     ):
         raise ValueError("unsupported GLM image metadata source")
-    plan_image_source(
-        _read(directory / "config.json", 1024 * 1024), metadata_repo=METADATA_REPO, metadata_revision=METADATA_REVISION
-    )
+    config_bytes = _read(directory / "config.json", 1024 * 1024)
+    plan_image_source(config_bytes, metadata_repo=METADATA_REPO, metadata_revision=METADATA_REVISION)
+    config = json.loads(config_bytes, object_pairs_hook=_unique_object)
+    if (
+        hashlib.sha256(config_bytes).hexdigest() != CONFIG_SHA256
+        or hashlib.sha256(_read(directory / "tokenizer.json", 64 * 1024 * 1024)).hexdigest() != TOKENIZER_SHA256
+        or hashlib.sha256(config["token_codec_config"]["prompt_template"].encode()).hexdigest() != TEMPLATE_SHA256
+    ):
+        raise ValueError("unsupported GLM finished source identity")
     return base
 
 

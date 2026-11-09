@@ -11,20 +11,32 @@ use crate::engine::vision::preprocess::{PreparedImage, PreprocessLimits, decode_
 /// or serialized through this interface. Preparing an image does no GPU work.
 pub struct PreparedHybridImage {
     pub(super) owner: Arc<()>,
-    pub(super) prepared: PreparedImage,
+    pub(super) prepared: Patches,
+}
+
+pub(super) enum Patches {
+    Qwen(PreparedImage),
+    Glm(super::glm_vision::preprocess::Patches),
 }
 
 impl PreparedHybridImage {
     pub fn grid(&self) -> [u32; 3] {
-        self.prepared.grid
+        match &self.prepared {
+            Patches::Qwen(image) => image.grid,
+            Patches::Glm(image) => image.grid,
+        }
     }
 
     pub fn image_token_count(&self) -> u32 {
-        self.prepared.grid[1] * self.prepared.grid[2] / 4
+        let grid = self.grid();
+        grid[1] * grid[2] / 4
     }
 
     pub fn processed_dimensions(&self) -> [u32; 2] {
-        [self.prepared.resized_width, self.prepared.resized_height]
+        match &self.prepared {
+            Patches::Qwen(image) => [image.resized_width, image.resized_height],
+            Patches::Glm(image) => image.dimensions,
+        }
     }
 }
 
@@ -45,7 +57,7 @@ pub(super) fn prepare(
     }
     Ok(PreparedHybridImage {
         owner,
-        prepared,
+        prepared: Patches::Qwen(prepared),
     })
 }
 

@@ -486,7 +486,10 @@ impl LilyModel {
             self.reset();
             self.set_mtp_enabled(false)?;
             self.ensure_context_capacity(tokens.len())?;
-            let pixels: Vec<f32> = image.prepared.patches.iter().map(|value| value.to_f32()).collect();
+            let super::image::Patches::Qwen(prepared) = &image.prepared else {
+                return Err(Error::Invalid("image processor family"));
+            };
+            let pixels: Vec<f32> = prepared.patches.iter().map(|value| value.to_f32()).collect();
             // Fence the instance until every tower/prefill completion and the
             // target readout have succeeded. Reset drains submitted work.
             self.usable = false;
