@@ -3,8 +3,10 @@
 Status: source metadata and native interface gaps inspected; strict companion
 conversion and actual E2B draft execution are implemented on the continuation
 branch. Three real proposals, fixed target position, ordinary target-root
-agreement and drained cancellation/retry pass. The independent masked-logit
-numerical gate fails and remains open. Worker MTP remains unimplemented. Gemma 4 has upstream
+agreement and drained cancellation/retry pass. The first numerical gate failed;
+the assistant-only eager-BF16 follow-up now matches the unchanged short-input
+oracle exactly. Serial verification controls pass, while actual acceptance is
+zero of three drafts on that input. Worker MTP remains unimplemented. Gemma 4 has upstream
 MTP assistants, and remains
 an open Stark implementation task. Image loading must preserve future text MTP;
 image requests keep zero drafts. Follow [model onboarding](MODEL_ONBOARDING.md)
@@ -90,12 +92,14 @@ contains native four-layer/pre/post-projection and centroid-mask components,
 plus a target frame that captures only the final normalized prefill activation.
 These compile and execute three real E2B proposals with the image tower resident.
 The first source oracle passes root-embedding equality, first-proposal equality,
-feedback and centroid bounds, but fails the masked-logit bound; no tolerance
-was relaxed. See the [continuation attempt](model-experiments/2026-11-09-gemma-next-image-parity.md)
+feedback and centroid bounds, but fails the masked-logit bound. The separate
+eager-BF16 score/probability follow-up matches all three numerical planes
+exactly, without relaxing a tolerance. See the [continuation attempt](model-experiments/2026-11-09-gemma-next-image-parity.md)
 for separate passed and failed controls. The source BF16 committed-query
 follow-up and consuming serial target-verification component compile, and the
-dedicated committed-query CPU controls pass. The new Metal, target-verification
-and source-oracle execution controls remain held. Drafting positions above 512
+dedicated committed-query CPU/Metal, serial verification and short-input
+source-oracle controls pass. Normal-worker lifecycle/cache and useful-speed
+qualification remain open. Drafting positions above 512
 are rejected pending a separately qualified extra-row handoff; ordinary target
 context support is unchanged. Batched verification/rollback, head-aware caching,
 worker/default loading and useful MTP speed remain open. The current

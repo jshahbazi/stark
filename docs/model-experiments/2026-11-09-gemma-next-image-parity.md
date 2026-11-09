@@ -344,3 +344,39 @@ slot. Recovery did not kill or unload that worker. No Gemma model was loaded
 after restart. The masked-logit limits remain maximum absolute error 0.5 and
 relative L2 error 0.02. The prior failed oracle, old-text benchmark ineligibility,
 E4B/wide-handoff gaps and disabled serving MTP remain unchanged.
+
+### Exact E2B follow-up execution after the resource hold cleared
+
+After the user unloaded the installed Stark model, the coordinator confirmed
+no worker/compiler processes, 87% free memory and zero swap before granting
+the exclusive first execution slot. The saved script ran unchanged on source
+`9053f805` and the sealed final executable. Both dedicated committed-query
+Metal controls pass. The exact E2B component/oracle test passes in 40.57 seconds,
+with 10,417,152,160-byte peak footprint and zero swaps.
+
+The unchanged pinned one-step eager-BF16 oracle now matches feedback, centroid
+scores and masked logits exactly: maximum absolute and relative L2 errors are
+zero for all three. Root embedding and first greedy proposal are identical;
+selected-token support difference is zero across 4,096 selected tokens, with
+no cutoff tie ambiguity. This closes the declared short-input component
+numerical gate for the new assistant-only BF16 score/probability policy.
+The original failed G4AP-01 receipt and its original arithmetic remain separate.
+
+Three actual proposals execute with the image tower resident. Their aggregate
+hash is unchanged. **Zero of those three actual proposals were accepted** by
+the target on this input. Serial ordinary-output equality, supplied all-accept
+and partial-accept controls, deliberate rejection, zero drafts and drained
+cancellation/fresh recovery all pass. These supplied acceptance controls do
+not establish useful real-model acceptance or speed. Position-512 drafting,
+position-513 rejection and ordinary target continuation to 514 pass. The
+boundary control is functional; numerical parity at that boundary remains open.
+Strict wrong-size/hash/symlink/target/instance admission controls pass.
+
+Aggregate receipt SHA-256
+`770a6bc0ba68b628a445d27956c027dfdcc0d21f910e95cbf647eff3de6b61a1`;
+execution/receipt seal SHA-256
+`c2a53fd8b6cc97747f8ec4cefd2326521fff9340ed2680c69cfd526d334c2ae4`.
+All owned model/reference processes closed before the explicit Qwen handoff.
+Serving MTP remains disabled. Normal-worker integration, head-aware prefix
+reuse, multi-round/lifecycle controls, wide source handoff, useful real
+acceptance and matched text-only/image-loaded MTP performance remain open.
