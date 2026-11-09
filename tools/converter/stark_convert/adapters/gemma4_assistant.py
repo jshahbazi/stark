@@ -2,8 +2,9 @@
 
 Source architecture: Transformers 5.15.1 modeling_gemma4_assistant.py,
 SHA-256 a77e67673ce7d2248294e361c3c074c29d8d6a092655d7b27b95fc9777a2d0d1,
-Copyright 2026 HuggingFace Team, Apache-2.0. Source tensors are preserved;
-this companion is not a standalone chat model and grants no runtime capability.
+Copyright 2026 HuggingFace Team, Apache-2.0. BF16 matrices/scalars are preserved
+and normalization values widen exactly to F32 for native blocks. This companion
+is not a standalone chat model and grants no runtime capability.
 """
 
 from __future__ import annotations
@@ -104,6 +105,54 @@ def _config_bytes(path: Path) -> bytes:
     return raw
 
 
+def _native_layout(tensors):
+    """Map to existing native linear/norm blocks without altering matrices."""
+    operations, metadata = [], {}
+
+    def matrix(destination, *sources):
+        inputs = tuple(tensors[name] for name in sources)
+        shape = (sum(t.shape[0] for t in inputs), inputs[0].shape[1])
+        operations.append(
+            TensorOperation(
+                "assistant." + destination + ".weights", inputs, "BF16", shape, "copy" if len(inputs) == 1 else "fuse"
+            )
+        )
+        metadata["assistant." + destination + ".spec"] = json.dumps(
+            {"type": "FullPrecisionSpec", "layout": "output_input"}, sort_keys=True
+        )
+
+    def norm(destination, source):
+        value = tensors[source]
+        operations.append(
+            TensorOperation("assistant." + destination + ".scales", (value,), "F32", value.shape, "cast_f32")
+        )
+
+    for projection in ("pre_projection", "post_projection"):
+        matrix(projection + ".weights", projection + ".weight")
+    matrix("readout.weights", "model.embed_tokens.weight")
+    matrix("centroids.weights", "masked_embedding.centroids.weight")
+    ordering = tensors["masked_embedding.token_ordering"]
+    operations.append(TensorOperation("assistant.token_ordering", (ordering,), ordering.dtype, ordering.shape))
+    norm("output_norm", "model.norm.weight")
+    for index in range(4):
+        src, dst = f"model.layers.{index}", f"layers.{index}"
+        for output, original in (
+            ("pre_mixer_norm", "input_layernorm"),
+            ("post_mixer_norm", "post_attention_layernorm"),
+            ("pre_mlp_norm", "pre_feedforward_layernorm"),
+            ("post_mlp_norm", "post_feedforward_layernorm"),
+        ):
+            norm(dst + "." + output, src + "." + original + ".weight")
+        norm(dst + ".mixer.query_norm", src + ".self_attn.q_norm.weight")
+        matrix(dst + ".mixer.qkvg_projection.weights", src + ".self_attn.q_proj.weight")
+        matrix(dst + ".mixer.out_projection.weights", src + ".self_attn.o_proj.weight")
+        matrix(dst + ".mlp.up_projection.weights", src + ".mlp.up_proj.weight", src + ".mlp.gate_proj.weight")
+        matrix(dst + ".mlp.down_projection.weights", src + ".mlp.down_proj.weight")
+        scalar = tensors[src + ".layer_scalar"]
+        operations.append(TensorOperation("assistant." + dst + ".post_layer_scalar", (scalar,), "BF16", (1,)))
+    return tuple(operations), metadata
+
+
 def build_gemma4_assistant_plan(source: Path, *, target: Path) -> ConversionPlan:
     """Plan an exact, separately bound companion without importing a framework.
 
@@ -154,13 +203,10 @@ def build_gemma4_assistant_plan(source: Path, *, target: Path) -> ConversionPlan
     ):
         raise ConversionError("Gemma assistant tensor inventory, dtype or shape mismatch")
     _validate_ordering(tensors["masked_embedding.token_ordering"])
-    operations = tuple(
-        TensorOperation("assistant." + name, (tensors[name],), dtype, shape)
-        for name, (dtype, shape) in sorted(expected.items())
-    )
+    operations, metadata = _native_layout(tensors)
     companion = {
         "type": "Gemma4AssistantConfig",
-        "schema_version": 1,
+        "schema_version": 2,
         "source": {"repo": profile["repo"], "revision": profile["revision"], "config_sha256": digest},
         "target": {
             "source": {"repo": target_source["repo"], "revision": target_source["revision"]},
@@ -173,11 +219,13 @@ def build_gemma4_assistant_plan(source: Path, *, target: Path) -> ConversionPlan
         "num_centroids": 2048,
         "centroid_top_k": 32,
         "execution": "single-position-read-only-target-kv-v1",
+        "precision": "source-bf16-matrices-and-scalars-f32-exact-norm-scales-v1",
     }
+    metadata["stark.gemma4_assistant"] = json.dumps(companion, sort_keys=True, separators=(",", ":"))
     return ConversionPlan(
         decoder_config=companion,
         operations=operations,
-        metadata={"stark.gemma4_assistant": json.dumps(companion, sort_keys=True, separators=(",", ":"))},
+        metadata=metadata,
         input_bytes=sum(t.nbytes for t in tensors.values()),
         source_tensors=len(tensors),
         input_tensors=tuple(tensors[name] for name in sorted(tensors)),

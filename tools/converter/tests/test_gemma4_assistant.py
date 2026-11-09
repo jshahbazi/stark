@@ -58,9 +58,18 @@ def fixture(tmp_path, monkeypatch, *, backbone=1536):
 def test_complete_companion_inventory_and_explicit_target_binding(tmp_path, monkeypatch, backbone, payload):
     source, target, _ = fixture(tmp_path, monkeypatch, backbone=backbone)
     plan = assistant.build_gemma4_assistant_plan(source, target=target)
-    assert len(plan.operations) == plan.source_tensors == 50
-    assert plan.input_bytes == sum(op.nbytes for op in plan.operations) == payload
-    assert all(op.kind == "copy" and op.name.startswith("assistant.") for op in plan.operations)
+    assert plan.source_tensors == 50 and len(plan.operations) == 46
+    assert plan.input_bytes == payload
+    # Exact BF16 norm values widen to F32; fused up/gate rows keep source bytes.
+    assert sum(op.nbytes for op in plan.operations) == payload + 11264
+    assert all(op.kind in ("copy", "fuse", "cast_f32") and op.name.startswith("assistant.") for op in plan.operations)
+    assert sum(op.kind == "fuse" for op in plan.operations) == 4
+    assert sum(op.kind == "cast_f32" for op in plan.operations) == 21
+    readout = next(op for op in plan.operations if op.name == "assistant.readout.weights.weights")
+    assert readout.shape == (262144, 256) and readout.dtype == "BF16"
+    specs = [json.loads(value) for key, value in plan.metadata.items() if key.endswith(".spec")]
+    assert len(specs) == 20
+    assert all(value == {"type": "FullPrecisionSpec", "layout": "output_input"} for value in specs)
     assert plan.decoder_config["type"] == "Gemma4AssistantConfig"
     assert plan.decoder_config["execution"] == "single-position-read-only-target-kv-v1"
     assert (
