@@ -60,7 +60,11 @@ def family_definition(family: str = FAMILY_ID) -> dict:
             },
             "vision-language": {
                 "status": "unsupported",
-                "message": "Image input is not supported for this model family.",
+                "message": (
+                    "GLM-5.3 Flash supports images upstream; image execution is not implemented in Stark yet."
+                    if family == FAMILY_ID
+                    else "Image input is not supported by this native artifact."
+                ),
                 "caveats": [],
             },
         },
