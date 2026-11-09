@@ -2,9 +2,9 @@
 
 This is the implementation and qualification worklist derived from the
 [model status inventory](MODEL_IMAGE_STATUS.md). Source baseline: main
-`af3e37aa`, refreshed against main `4a494e34` on 2026-11-09.
-[PR #110](https://github.com/jshahbazi/stark/pull/110) is merged;
-[PR #112](https://github.com/jshahbazi/stark/pull/112) remains open.
+`af3e37aa`, refreshed against main `5a615cd2` on 2026-11-09.
+[PR #110](https://github.com/jshahbazi/stark/pull/110) and
+[PR #112](https://github.com/jshahbazi/stark/pull/112) are merged.
 Their results qualify only their named artifacts; merging does not establish
 release or installed-app support. No model was run to create this worklist.
 
@@ -36,6 +36,21 @@ The three required results are independent:
    Image requests still have zero drafts/proposals, followed by valid text MTP.
 
 ## Family work queue
+
+### Branch qualification updates
+
+These updates supersede the original queue's descriptions of missing code for
+the exact artifacts below. They describe branch evidence, not installed-release
+support or completion of every family gate.
+
+| Scope | Current result | Still open |
+| --- | --- | --- |
+| IMGPAR-03, Jundot Qwen3.8-27B | [QDIP-07](archive/runs/2026-11-09-qwen27-shared-weight-fast-text.md), commit `7a8cca8b`: compatible head retained; optimized text graph and batched MTP restored with shared weights; paired 64-token MTP0/3 rates show no image-loading regression; all 14 nonperiodic cache/lifecycle checks pass | Other checkpoints, readouts, contexts, full image numerical qualification and host/release qualification remain separate |
+| IMGPAR-07, Gemma 4 E2B/E4B | [G4IP-02 branch record](https://github.com/jshahbazi/stark/blob/codex/gemma4-image-parity/docs/benchmarks/2026-11-09-gemma4-image-text-parity.md), commit `7468dbc4`: full-prompt replay fixed; 207 checks per artifact and warmed cache timing pass. The earlier `81b85f88` cache qualification is explicitly withdrawn | Assistant MTP conversion/execution and larger-profile qualification remain open; short text loading-mode results keep their original scope |
+| IMGPAR-08/09, Qwen3.5 MoE | Commit `4d8c2f54`: seven bounded affine-v4 cache/image controls pass | Matched text speed, full BF16 execution and its expert predictor remain open; the tested affine export contains no executable MTP head |
+| IMGPAR-15, GLM-5.3 Flash | Commit `1d399016`: native vision components and private fusion have CPU/reference controls; source capability is confirmed | Actual sidecar/Metal image execution, normal dispatch, cache, text speed and backend-specific MTP qualification remain unfinished |
+
+### Original qualification scopes
 
 IDs identify work items, not experiments already executed. Create source-bound
 attempt records before implementing or running each item. Priorities put known
@@ -73,10 +88,16 @@ serialized by the coordinating agent; source work proceeds in isolated worktrees
 
 | Scope | Branch | Ownership |
 | --- | --- | --- |
-| IMGPAR-01/02/03: Qwen3.5 dense BF16/affine and Qwen3.8-27B | [codex/qwen-dense-image-parity](https://github.com/jshahbazi/stark/tree/codex/qwen-dense-image-parity) | Shared Qwen vision conversion and dense text MTP integration; grouped to avoid conflicting changes |
-| IMGPAR-08/09: Qwen3.5 MoE affine/BF16 | [codex/qwen-moe-image-parity](https://github.com/jshahbazi/stark/tree/codex/qwen-moe-image-parity) | MoE artifact admission, actual head inventory and model-bound text/cache checks; coordinate shared APIs with dense work |
-| IMGPAR-07/10/11/12: Gemma 4 | [codex/gemma4-image-parity](https://github.com/jshahbazi/stark/tree/codex/gemma4-image-parity) | Exact attention-ring snapshots, shared-KV/PLE state and small-profile qualification first |
+| IMGPAR-03: reviewed Qwen3.8-27B fix | [PR #114](https://github.com/jshahbazi/stark/pull/114), `codex/qwen-dense-image-parity` | Reviewed and locally checked; hosted CI and merge remain separate gates. This branch stays frozen while follow-up work uses a new branch |
+| IMGPAR-01/02/08/09, then 04/05/13: remaining Qwen dense, MoE and retained routes | [codex/qwen-image-parity-next](https://github.com/jshahbazi/stark/tree/codex/qwen-image-parity-next) | One agent owns shared text-graph/weight infrastructure: headless dense BF16/affine first, affine MoE next, then distinct BF16/expert-head and retained-artifact gaps |
+| IMGPAR-06/07/10/11/12/14: Gemma 3 and Gemma 4 | [codex/gemma-image-parity-next](https://github.com/jshahbazi/stark/tree/codex/gemma-image-parity-next) | One agent owns ring/worker integration: actual Gemma 3 4B cache/parity first, then native Gemma 4 assistant conversion/execution; larger/quantized artifacts keep individual gates |
 | IMGPAR-15: GLM-5.3 Flash | [codex/glm-image-parity](https://github.com/jshahbazi/stark/tree/codex/glm-image-parity) | Vision preparation/execution and backend-specific text cache, performance and supported MTP; source/artifact inventory first |
+
+The follow-up agents were launched after PR #114 was opened. GPU and heavy
+build ownership passes GLM → remaining Qwen → Gemma. Check available disk before
+each build/download; preserve an eight-GiB reserve and all existing model
+payloads. Only each agent's own reproducible build outputs may be retired after
+sealing evidence. A resource-deferred artifact remains unfinished.
 
 GLM-5.3 Flash is assigned in IMGPAR-15. The upstream [model card](https://huggingface.co/zai-org/GLM-5.3-Flash)
 and [configuration at Stark's pinned metadata revision](https://huggingface.co/zai-org/GLM-5.3-Flash/blob/04c4e9e95c5da8862dced7e5056455116f83a7e0/config.json)
