@@ -402,3 +402,37 @@ The [ddalcu memory plan](2026-11-09-ddalcu-default-image-memory-plan.md) now
 inventories all headers and source owners, including resident target experts,
 the actual head/tower, paged n-gram worst case, the 16,384-capacity floor and
 growth-inclusive request buffers. Its full run remains held for review.
+
+### QNIP first-divergence trace and second MoE continuation
+
+The private first-layer trace now reproduces the unmodified normal predictor
+path bit for bit. Test engine
+`998e94ffe9ad70d7bf4992defc187e03a6417996eec094d2551204e7f90fdba6`
+contains only test instrumentation over `bd3e781`; production arithmetic is
+unchanged. Export receipt
+`4ab178f5462f784f03ac181cf08d5aadad48ab0c115e0c8198433d930adcbc30`
+passes 1/1 controls with zero paging and no foreign worker. Earlier trace-only
+attempts are retained separately: one compile error, a constant-handle lifetime
+assertion in the new harness, and foreign-test preflight deferrals are not
+numerical passes. Dropping the test constant handle before command completion
+resolves that harness assertion.
+
+The unchanged pinned MLX replay reports exact embedding, embedding norm and
+hidden norm. Its first mismatch is the head fusion projection: maximum absolute
+error `0.001953125`, relative RMS `0.00251255`. Replaying the FC with native norm
+inputs gives the same difference. The manual trace's final hidden output is
+bit-exact with the actual normal-path first head output, so the diagnostic does
+not introduce the discrepancy. Pinned aggregate receipt:
+`6f97ce9bb56dee634f5a97417ede3ab46dd978d4e3bdea839b0fad4d40d8a41b`.
+The original full-head numerical gate still fails; no tolerance or production
+arithmetic policy changes follow from this diagnostic alone. A test-only
+parallel reference-FC experiment is prepared for both prefill and single-row
+head execution and awaits its coordinated build/model slot.
+
+The second corrected affine MoE continuation also stops before its first cache
+case when a separate resource-budget native engine test appears. Receipt
+`796f63f3e47bd60c548eed1a5da3d59ac9b775c96819b41e5e47dfdef46aef60`
+records peak sampled RSS `20,722,958,336` bytes, minimum available memory
+`84,208,844,800` bytes and zero paging. It is a foreign-process deferral with
+zero cache cases, not a model or memory-limit failure. The owned worker is
+closed and the hardware slot is released to the next coordinated family.
