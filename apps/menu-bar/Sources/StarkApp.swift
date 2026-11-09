@@ -632,6 +632,10 @@ struct FamilyModelCatalog {
             modelGroup = CatalogModelGroup(raw["model_group"])
         }
 
+        var installationMode: ModelArtifactMode {
+            artifactModes.contains(.visionLanguage) ? .visionLanguage : .text
+        }
+
         var detailLabels: [String] {
             [sizeLabel, quantization, weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }]
                 .compactMap { $0 }
@@ -2259,10 +2263,11 @@ final class EngineController: ObservableObject {
         models.contains { item.installedIDs.contains($0.id) && $0.artifactMode == artifactMode }
     }
 
-    func installCatalogItem(id: String, artifactMode: ModelArtifactMode) {
+    func installCatalogItem(id: String) {
         guard !busy, let requestID = catalogRequestID, let catalog = catalog, catalog.status == .ready,
               let item = catalog.items.first(where: { $0.id == id }), item.downloadable,
-              item.artifactModes.contains(artifactMode), !catalogItemIsDownloaded(item, artifactMode: artifactMode) else { return }
+              !catalogItemIsDownloaded(item, artifactMode: item.installationMode) else { return }
+        let artifactMode = item.installationMode
         errorMessage = nil; resetInstallProgress(kind: "huggingface")
         let supportID = UUID().uuidString.lowercased()
         pendingSupportRequestID = supportID; activeInstallRequestID = supportID
@@ -2639,7 +2644,6 @@ struct ModelsView: View {
     let onDone: () -> Void
     let onRun: (String) -> Void
     @State private var selectedFamily: ModelsInventory.Family?
-    @State private var artifactChoices: [String: ModelArtifactMode] = [:]
     @State private var removalConfirmation: ModelRemovalConfirmation?
     @State private var savedQuery = ""
     @State private var familiesQuery = ""
@@ -2769,7 +2773,7 @@ struct ModelsView: View {
                         else { LazyVStack(spacing: 4) {
                             ForEach(visibleFamilies(families)) { family in
                                 Button {
-                                    selectedFamily = family; artifactChoices = [:]; catalogQuery = ""; catalogQuantization = .all
+                                    selectedFamily = family; catalogQuery = ""; catalogQuantization = .all
                                     engine.requestModelCatalog(familyID: family.id)
                                 } label: {
                                     HStack {
@@ -2835,7 +2839,7 @@ struct ModelsView: View {
                 }
             }
         }.padding(24).frame(width: 640, height: 580)
-            .onAppear { selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all }
+            .onAppear { selectedFamily = nil; catalogQuantization = .all }
             .onChange(of: navigation.tab) { leaveFamily() }
             .onChange(of: quantizationTabs) {
                 guard !engine.catalogLoading, engine.catalog?.status == .ready,
@@ -2944,13 +2948,8 @@ struct ModelsView: View {
     }
 
     private func leaveFamily() {
-        selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all
+        selectedFamily = nil; catalogQuantization = .all
         engine.cancelModelCatalog()
-    }
-
-    private func selectedMode(_ item: FamilyModelCatalog.Item) -> ModelArtifactMode {
-        if let choice = artifactChoices[item.id], item.artifactModes.contains(choice) { return choice }
-        return item.defaultArtifactMode
     }
 
     @ViewBuilder
@@ -3017,10 +3016,9 @@ struct ModelsView: View {
             ForEach(group.items) { item in
                 if item.id != group.items.first?.id { Divider().padding(.vertical, 6) }
                 CatalogModelRow(item: item,
-                    artifactMode: Binding(get: { selectedMode(item) }, set: { artifactChoices[item.id] = $0 }),
-                    downloaded: engine.catalogItemIsDownloaded(item, artifactMode: selectedMode(item)),
+                    downloaded: engine.catalogItemIsDownloaded(item, artifactMode: item.installationMode),
                     busy: engine.busy, showsRepositoryLink: group.items.count > 1) {
-                        engine.installCatalogItem(id: item.id, artifactMode: selectedMode(item))
+                        engine.installCatalogItem(id: item.id)
                     }
             }
         }.padding(.horizontal, 12).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)

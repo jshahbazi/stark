@@ -113,11 +113,12 @@ family overview sorts by name A–Z or Z–A; family detail sorts by name in eit
 direction or model size ascending or descending. Unknown numeric values sort last
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
-Conversion-only families are omitted. Cards offer text or image artifacts when
-both are available. Image output is selected by default only when metadata
-confirms a supported Qwen3.5 vision wrapper, BF16 vision tower and reviewed
-processor; decoder weights may use a supported affine profile. An image choice
-still needs the normal installation and local runtime checks.
+Conversion-only families are omitted. Cards show whether each model supports
+text or text and images. Downloads automatically include image support when
+available for that artifact. This requires metadata confirming a supported
+Qwen3.5 vision wrapper, BF16 vision tower and reviewed processor; decoder weights
+may use a supported affine profile. Image support still needs the normal
+installation and local runtime checks.
 The download and preparation progress remain in the browser. Completion adds
 the model to the library without selecting it for use.
 
@@ -127,7 +128,7 @@ precisions present in its current catalogue. Tabs come from the full current
 family list; search and sort narrow/reorder the selected tab without refetching
 metadata. If a selected format disappears after refresh, the view returns to
 **All models**. Switching families also resets that filter. The row's source ID,
-download status and text/image choice remain unchanged by filtering.
+download status and image capability remain unchanged by filtering.
 Same-publisher size and quantization variants share a card. Base, Instruct,
 Thinking, context-length variants and fine-tunes remain distinct. A cross-publisher
 group is allowed only for a registered MLX 4-bit/8-bit export whose tokenizer
