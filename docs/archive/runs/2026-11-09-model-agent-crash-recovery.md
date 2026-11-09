@@ -12,6 +12,21 @@ support is the default; preserve exact text caching, matched normal text
 performance and supported text MTP. Image requests use zero drafts and invalidate
 text state. Completion is per artifact, configuration and backend.
 
+## Latest coordinating checkpoint
+
+| Family | Completed resumed gates | Open gate / next action |
+| --- | --- | --- |
+| Qwen BF16 0.8B | Corrected MTP0 dispatch; 34/34 image-loaded and 28/28 text-only lifecycle checks; headed/headless and text-only/image-loaded MTP0/3 short timing passes | Independent head hidden-feature numerical tolerance failed; trace the first divergence before any precision edit |
+| Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Corrected full MoE lifecycle matrix was stopped by a foreign worker before case zero; repeat in an exclusive slot |
+| Gemma | E2B G4AP-02 unchanged short oracle passes exactly; G4AP-03 compiles and six tiny CPU/Metal committed-row controls pass | Long chained oracle failed at the first 512-token case; batch/cache controls did not execute. Diagnose attention/readout before worker integration |
+| GLM | Bounded accounting source review; eight arithmetic controls and five live supervisor cleanup controls pass; source pushed as `b76f560d` | Fresh full native build owns the next slot; actual bounded image/text/cache/performance and source-head MTP remain open |
+
+The installed app was closed without implicitly reopening it. The coordinator
+verified no competing model/compiler/app processes, 95% free memory and zero
+swap before Gemma's actual E2B gate. Gemma released its processes after the failed
+long gate; GLM now owns the native build slot. Qwen and Gemma continue CPU-only
+numerical diagnosis. No PR is authorized here.
+
 ## Ownership and source checkpoints
 
 | Owner | Branch and recovered HEAD | Worktree | Next gate |
@@ -303,3 +318,25 @@ closed again using normal Quit and verified through inventory/process checks
 without another app-target query. No model/app process remained. This is not
 evidence of a Stark self-relaunch mechanism. Future post-Quit verification must
 avoid app APIs that implicitly open the selected application.
+
+### Gemma longer-context candidate built
+
+G4AP-03's first compile caught a missing buffer trait import; the corrected
+candidate compiled without changing the reviewed rollback control flow.
+Test binary SHA-256:
+`e225f41a1cd02dd1812c41dc72413b65e35c58d38daea28e5a4090963f11af81`;
+source graph `8aa840984a76fd25d9a564d25dd9025a573e394e04cdc6894ac819571d78d397`.
+Six tiny controls pass: new preaccept exact-row CPU/Metal checks plus the four
+existing committed-query checks. Its actual E2B long chained oracle, batched
+verification/repair and prefix controls are running under a continuous
+foreign-worker and memory/paging supervisor. Those gates are not yet passed.
+
+The first 512-token long case subsequently failed the unchanged oracle gate.
+Step-one feedback/centroids stayed within their tolerances, but masked-logit
+maximum absolute error was 55.125 with relative L2 0.01727 and 256 support
+differences. Step-three feedback maximum error 0.625 also failed. All three greedy
+proposals and root embeddings still matched; that does not pass the oracle.
+The test stopped before the batched/cache controls. Peak RSS was 10.74 GB with
+zero foreign workers and zero paging, so this was a numerical failure, not a
+resource stop. All model/reference processes closed; the exclusive slot passed
+to GLM's fresh native build while Gemma investigates source arithmetic.
