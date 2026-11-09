@@ -570,3 +570,55 @@ This is a hard resource rejection, without cache or speed qualification. No
 retry or limit reduction follows. A source-bound prefill/workspace memory review
 is required before another model run; full BF16 MoE and retained ddalcu gates
 remain separately blocked as recorded above.
+
+### QNIP head-only materialized SiLU: rejected full-head gate
+
+A metadata-only derivative retains the exact headed text payload and changes
+only the predictor MLP's existing `materialize_sigmoid` option. It runs with the
+previous test-only exact-FC selector on engine `12aad35c`; target arithmetic and
+the other head projections remain unchanged. Pinned MLX v0.32.4
+[`activations.py`](https://github.com/ml-explore/mlx/blob/36969c094354086e15d2a327a9c50feb20b9cf11/python/mlx/nn/layers/activations.py),
+[`unary_ops.h`](https://github.com/ml-explore/mlx/blob/36969c094354086e15d2a327a9c50feb20b9cf11/mlx/backend/metal/kernels/unary_ops.h)
+and `bf16_math.h` motivate the BF16 sigmoid materialization experiment; this is
+a source-specific arithmetic candidate. Local primary-source archive manifest:
+`446eb1d2ff9d175cea3f54731a17f1a10b94052406f86b8e17a151317982cad0`.
+
+The three bounded export/reference phases complete with zero paging and no
+foreign worker. The eight earlier native stages are byte-identical to the
+FC-only control. Common-input MLP maximum error improves from `0.015625` to
+`0.00390625`, with relative RMS `0.002713832`; attention remains unchanged at
+`0.00390625` maximum error. Nevertheless the complete-head hidden errors are
+`0.25/0.125/0.1875`, above the unchanged `0.0625` limit. All logit/top-one gates
+pass. The candidate is rejected and no production arithmetic is adopted.
+Full-gate receipt: `4ed2abf75b92c6b3058fb4e47db2acee99ba5064dc257bfb6e66b7b07af2df0b`;
+local replay: `88b611dd7f71f151d3f3cef6ebaddaf2e02e0e267b0787fba1129fa30d28980b`;
+unchanged-earlier-stage control:
+`8e01d77971f2405c232857aafa8c57096da3f6a3795422e62a27e0199555d6f5`.
+
+### QNIP frozen MoE prefill source audit
+
+The audit binds the failed functional run to worker `4010b86e`, its original
+source head `0d7aea46dfd902f87e255fe2f25c90ee58cd76cc`, and the original source
+seal. Six relevant files match that commit and have no listed dirty override:
+DeltaNet, ordinary stream, scratch pool, Qwen MoE, routed experts and chunked
+GDN. Ordinary flat prefill already updates one F32 recurrent state in place;
+speculative rewind records rank-update inputs separately. The proposed
+per-token full-state-history explanation is disproven for this worker.
+Route-local scratch also returns immediately to the pool's size bins.
+
+The stream encodes the entire 1,792-token input into one command buffer across
+the logical 1,024/768 chunks. At least six dispatches per selected route imply
+`1,966,080` routed dispatches per 1,024-token, 40-layer chunk and `3,440,640`
+for that complete input. These are source-derived lower bounds, not measured
+command-heap sizes or proof of the resource stop's cause. Apple's
+[`MTL4CommandAllocator.allocatedSize()`](https://developer.apple.com/documentation/metal/mtl4commandallocator/allocatedsize%28%29)
+permits direct attribution separately from payload scratch. A test-only tiny
+affine routed-layer probe is prepared, without execution or a new full-model
+grant at this checkpoint. It will measure heap growth and completed-allocator
+reuse; reset does not imply shrinking the retained high-water capacity.
+
+A possible later fixed 256-token execution cap must submit and wait between
+physical chunks while preserving the logical 1,024-token prefix grid. It also
+keeps the existing chunked GDN threshold of 256. Changing batch shapes needs
+new numerical, cache and matched-performance controls. No production chunk
+policy, full-model retry or memory-floor change is adopted by this audit.

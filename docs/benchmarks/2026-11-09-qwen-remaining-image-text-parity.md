@@ -208,3 +208,12 @@ Pageouts, swap and compressor growth are zero. All workers close, no retry is
 made, and no timing from that functional policy is performance eligible. See
 receipt `31b0c7bed7a4362e56669a061b56ba097e54675853ac00bb64b37f3b3ebeab92`
 and the continuation record for the complete hard-limit measurements.
+
+The subsequent head-only BF16 sigmoid-materialization candidate improves the
+common-input MLP error but still fails complete-head hidden limits
+(`0.25/0.125/0.1875`). It supplies no speed or production qualification; gate
+receipt `4ed2abf75b92c6b3058fb4e47db2acee99ba5064dc257bfb6e66b7b07af2df0b`.
+Frozen-worker source audit rules out ordinary per-token full recurrent-state
+histories. Command-heap attribution is pending a tiny operator diagnostic;
+dispatch counts alone do not establish the memory stop's cause. The MoE cache
+matrix remains open with zero completed cases and no further retry granted.
