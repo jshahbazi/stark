@@ -2612,6 +2612,27 @@ struct InstallStageView: View {
     }
 }
 
+struct CatalogQuantizationPicker: View {
+    let choices: [CatalogQuantizationFilter]
+    @Binding var selection: CatalogQuantizationFilter
+
+    private var picker: some View {
+        Picker("Quantization", selection: $selection) {
+            ForEach(choices, id: \.self) { choice in Text(choice.title).tag(choice) }
+        }.labelsHidden().accessibilityLabel("Model quantization")
+    }
+
+    var body: some View {
+        // A segmented control's minimum width includes every full label. Keep
+        // that intrinsic width from expanding the fixed-size Manage Models view.
+        ViewThatFits(in: .horizontal) {
+            picker.pickerStyle(.segmented).fixedSize(horizontal: true, vertical: false)
+            picker.pickerStyle(.menu).frame(minWidth: 0, maxWidth: .infinity)
+                .help(selection.title)
+        }
+    }
+}
+
 struct ModelsView: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var navigation: ModelManagementState
@@ -2705,9 +2726,7 @@ struct ModelsView: View {
                             visionConversion: $navigation.visionConversion)
             } else {
                 if selectedFamily != nil {
-                    Picker("Quantization", selection: quantizationBinding) {
-                        ForEach(quantizationTabs, id: \.self) { choice in Text(choice.title).tag(choice) }
-                    }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("Model quantization")
+                    CatalogQuantizationPicker(choices: quantizationTabs, selection: quantizationBinding)
                 }
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -3438,7 +3457,12 @@ struct ChatContentView: View {
             }.frame(minHeight: 180, maxHeight: .infinity)
                 .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
             if ["length", "context"].contains(engine.finishReason) {
-                Text("Reply reached the token limit. Clear the conversation to start fresh.").font(.caption).foregroundStyle(.orange)
+                Text(engine.finishReason == "length" && engine.options.maxNewTokens > 0
+                     ? "Reply reached your output limit. Increase it or choose Auto in Advanced Options."
+                     : (engine.finishReason == "context"
+                        ? "Reply reached the current context limit. Review Advanced Options or start a new chat for more room."
+                        : "Reply reached the available context or execution budget."))
+                    .font(.caption).foregroundStyle(.orange)
             }
             if engine.supportsImages {
                 Text(engine.imageVerificationNote).font(.caption).foregroundStyle(.secondary)
