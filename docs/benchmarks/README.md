@@ -12,6 +12,13 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Remaining Qwen headless image-loaded text controls (2026-11-09).**
+The [bounded comparison](2026-11-09-qwen-remaining-image-text-parity.md)
+extends immutable shared fast text storage to BF16 0.8B, affine 0.8B and affine
+MoE 35B. Matched MTP0 decode, first-token and request medians pass the registered
+five-percent bound. Complete cache/lifecycle matrices, BF16 source heads, other
+artifacts and retained ddalcu remain separate open gates.
+
 **Qwen dense image-default parity (2026-11-09).** The complete 27B image artifact
 now preserves its ordinary optimized text graph and batched MTP while the image
 tower stays loaded. The [QDIP-07 comparison](2026-11-09-qwen-dense-image-text-parity.md)

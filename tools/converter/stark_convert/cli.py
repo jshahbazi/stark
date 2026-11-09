@@ -36,7 +36,7 @@ from .registry import (
 from .sources import SourceSnapshot, huggingface_repository, resolve_source
 from .streaming import ConversionError, UnsupportedConversion, read_json, read_regular_bytes, write_plan
 from .vision_contract import REPO as VISION_REPO
-from .vision_contract import source_rules, validate_vision_source
+from .vision_contract import source_rules, validate_vision_source, vision_output_contract
 from .vision_family import (
     ALTERNATE_OUTPUT_TOKENIZER_SHA256,
     COMPONENT_FILES,
@@ -333,6 +333,8 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
 
         planners["gemma3"] = build_gemma3_vision_plan
     tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
+    if artifact_contract is not None:
+        artifact_contract = vision_output_contract(artifact_contract, tensors.mtp_config)
     if artifact_contract is not None and artifact_contract["schema_version"] == 3:
         validate_family_plan(tensors)
         if any(
@@ -352,7 +354,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             raise UnsupportedConversion(
                 "Vision family requires merged BF16 matrices or admitted affine decoder planes and BF16/F32 controls"
             )
-    if artifact_contract is not None and adapter == "qwen3_5":
+    if artifact_contract is not None and adapter in {"qwen3_5", "qwen3_5_moe"}:
         for layer in tensors.decoder_config["transformer_config"]["layer_configs"]:
             if layer["rope_config"] is not None:
                 layer["rope_config"] = {

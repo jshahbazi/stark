@@ -550,7 +550,7 @@ fn validate_tensor_header_with_specs(
         if let Some(prefix) = name.strip_suffix(".weights")
             && supplied_specs.is_none()
             && *dtype == "BF16"
-            && prefix.starts_with("decoder.")
+            && (prefix.starts_with("decoder.") || prefix.starts_with("mtp."))
         {
             specs.insert(format!("{prefix}.spec"), json!({"type":"FullPrecisionSpec","layout":if matches!(prefix, "decoder.embedding.embedding" | "decoder.embedding.input_embedding") {"input_output"} else {"output_input"}}));
         }
@@ -646,7 +646,7 @@ mod tests {
             );
             header.insert(name.clone(), json!({"dtype":dtype,"shape":shape,"data_offsets":[offset,offset+size]}));
             if let Some(prefix) = name.strip_suffix(".weights") {
-                if *dtype == "BF16" && prefix.starts_with("decoder.") {
+                if *dtype == "BF16" && (prefix.starts_with("decoder.") || prefix.starts_with("mtp.")) {
                     metadata.insert(format!("{prefix}.spec"), Value::String(json!({"type":"FullPrecisionSpec","layout":if matches!(prefix, "decoder.embedding.embedding" | "decoder.embedding.input_embedding") {"input_output"} else {"output_input"}}).to_string()));
                 }
             }
@@ -675,6 +675,33 @@ mod tests {
         assert!(validate_header(&changed, bytes + 8, 8).is_err());
         assert!(validate_header(&header, bytes + 7, 8).is_err());
         assert!(validate_header(&header, bytes + 9, 8).is_err());
+    }
+
+    #[stark_test]
+    fn bf16_header_binds_specs_for_every_admitted_predictor_matrix() {
+        let mut tensors = expected_tensors();
+        for (name, shape) in [
+            ("fusion.weights.weights", vec![1024, 2048]),
+            ("transformer.layers.0.mixer.qkvg_projection.weights.weights", vec![5120, 1024]),
+            ("transformer.layers.0.mixer.out_projection.weights.weights", vec![1024, 2048]),
+            ("transformer.layers.0.mlp.up_projection.weights.weights", vec![7168, 1024]),
+            ("transformer.layers.0.mlp.down_projection.weights.weights", vec![1024, 3584]),
+        ] {
+            tensors.insert(format!("mtp.{name}"), ("BF16", shape));
+        }
+        let (header, bytes) = valid_header_for(&tensors);
+        assert!(validate_tensor_header(&header, bytes + 8, 8, &tensors).is_ok());
+        let mut missing = header.clone();
+        missing["__metadata__"].as_object_mut().unwrap().remove("mtp.fusion.weights.spec");
+        assert!(validate_tensor_header(&missing, bytes + 8, 8, &tensors).is_err());
+        let mut changed = header.clone();
+        changed["__metadata__"]["mtp.fusion.weights.spec"] =
+            json!("{\"type\":\"MLXSpec\",\"bits\":4,\"group_size\":64,\"layout\":\"output_input\"}");
+        assert!(validate_tensor_header(&changed, bytes + 8, 8, &tensors).is_err());
+        let mut extra = header;
+        extra["__metadata__"]["mtp.unreviewed.weights.spec"] =
+            json!("{\"type\":\"FullPrecisionSpec\",\"layout\":\"output_input\"}");
+        assert!(validate_tensor_header(&extra, bytes + 8, 8, &tensors).is_err());
     }
 
     #[stark_test]

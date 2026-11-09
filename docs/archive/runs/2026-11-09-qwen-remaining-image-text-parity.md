@@ -54,6 +54,92 @@ Keep at least eight GiB disk free; seal and retire only this run's disposable
 build output if needed. Models, private inputs/outputs, token vectors and native
 artifacts remain ignored. Publish aggregate results and hashes only.
 
-## Results
+### Registered bounded MoE timing recipe
 
-In progress. No new execution or speed claim is established by this registration.
+Before timing, QNIP-03 fixes 16 output tokens for its short matched affine-MoE
+comparison, with the same context, input, greedy seed, ABBA loads and repetitions
+above. Prior reference-graph cache controls already showed substantial per-token
+expert overhead. This shorter workload bounds resource occupancy without changing
+settings after observing candidate speed. Small dense controls retain 64 outputs.
+Cache/lifecycle correctness uses eight outputs independently of the speed run.
+
+## Current results and remaining gates
+
+The [source-bound benchmark](../../benchmarks/2026-11-09-qwen-remaining-image-text-parity.md)
+records passing short MTP0 speed comparisons for the three exact older headless
+exports. Their candidate image/text decode medians are 304.108/303.618 tok/s for
+BF16 0.8B, 661.392/659.888 for affine 0.8B, and 39.960/39.988 for affine MoE.
+Independent receipt recomputation agrees. This qualifies the recorded speed
+workload, not each complete family or its source predictor.
+
+The fast graph now covers BF16 fixed/dynamic, affine dense and affine MoE.
+Actual loaded tests prove canonical ordinary-text configuration and immutable
+shared storage, including 18,119,393,280 shared MoE expert-bank bytes. Retained
+prefixes carry graph identity; changed-graph state cannot be reused. The frozen
+27B path and its prior evidence remain separate and intact.
+
+The first nonperiodic 1,792-token/context-2,048 BF16 cache matrix passes eleven
+cases. Its next case mistakenly expects reuse after changing scope; the worker
+correctly misses. The corrected full recipe is sealed but not yet run. All
+three full lifecycle matrices, including real-image transitions, remain open.
+
+### Actual predictor inventory and implementation
+
+| Source | Pinned revision | Index tensors / predictor tensors | Disposition |
+| --- | --- | ---: | --- |
+| Official Qwen3.5-0.8B BF16 | `2fc06364715b967f1860aea9cf38778875588b17` | 488 / 15 | Complete local source. Retain the 12 canonical head tensors; old headless image export is not source absence. Actual head admission/execute/speed remains open. |
+| MLX Qwen3.5-0.8B 4-bit | `5d894f8cc4ef3e6c88537bf3746ed262f549da6a` | 847 / 0 | Exact source has no head payload despite config declaration. No MTP capability is claimed. |
+| MLX Qwen3.5-35B-A3B 4-bit | `1e20fd8d42056f870933bf98ca6211024744f7ec` | 2,090 / 0 | Exact source has no head payload; fast expert storage and short speed comparison pass. |
+| Official Qwen3.5-35B-A3B BF16 | `59d61f3ce65a6d9863b86d2e96597125219dc754` | 1,811 / 785 | Index fetched within approved one-MiB metadata bound; full payload absent. Implemented per-expert canonical bank planning and strict native contract; runtime qualification blocked. |
+
+BF16 expert index SHA-256:
+`d8d0b7ca4e61ae107e3e87a3ff21136b3ac7c789e64bb24267227ca804e04205`.
+Its 768 expert matrices are separate per-expert up/gate/down tensors; they cannot
+be treated as the dense head or assumed to share the trunk's source layout.
+Tiny fixtures preserve all source matrices and raw norm gain offset one.
+Incomplete source heads and dedicated predictor embeddings fail closed.
+
+The pinned oMLX implementation at `2165e75726ba83d9651dbaced61c97728da77bba`
+uses post-final-norm target features in its actual driver and priming path.
+The BF16 candidate uses this proposal feature convention with target rejection
+verification; this is not a claim of original-training feature equivalence.
+Native raw BF16 scales use F32 gain-plus-one, rather than inheriting the affine
+source's pre-folded norm gains or its rounding evidence. New BF16 execution and
+performance need their own tests. MTP remains controlled by the request policy.
+
+The first appended BF16 candidate preserved a planner text RoPE in the image
+decoder and correctly failed admission. A corrected metadata derivative keeps
+the exact reference image decoder while its predictor keeps ordinary text
+RoPE. Native header validation then exposed a real bug: its BF16 spec whitelist
+accepted decoder matrices but rejected legitimate predictor matrix specs.
+The fix binds specs for both namespaces, with missing/changed/extra-spec
+negative tests. Conversion of a retained pinned BF16 head also selects schema 3
+before component hashing, preserving the frozen older headless schema-2 tuple.
+These latest native changes require a new compiled execution check.
+
+Independent source review also found that the MoE converter did not apply the
+image target RoPE rewrite. It now rewrites both dense and MoE image targets,
+leaving the separately cloned predictor's ordinary text RoPE intact. Tiny CLI
+fixtures check headed and headless BF16 MoE outputs. The five affected converter
+test modules pass 190 tests; Ruff and package-scoped native formatting checks
+pass. Frozen headless reference JSON remains unchanged; explicitly headless
+source fixtures still reproduce it, while incomplete-head fixtures now assert
+the intended rejection. These source/component checks do not replace the blocked
+native build and actual predictor run.
+
+### Resource stop and unqualified work
+
+All model workers are closed. After the speed controls and partial cache run,
+available disk fell below the fixed eight-GiB reserve. This run's test and worker
+build targets were sealed and retired; bounded explicitly authorized old Qwen
+generated outputs were also retired, preserving standalone binaries and all
+models. Free space remained below the reserve and varied while heavy work was
+stopped. Native builds, model loads and downloads remain stopped until the
+reserve plus the next phase's bounded allocation is available.
+
+Actual BF16 head execution/cache/MTP0+3 speed, full cache matrices, dense 8-bit,
+other sizes, BF16 MoE full payload, and retained ddalcu execution remain open.
+The installed ddalcu source is complete (101 shards, 75,303,252,216 bytes), but
+has no admitted image manifest. Any upgrade must use isolated metadata/hardlink
+views and preserve the installed artifact; no backbone copy or model deletion
+has been performed. Lily's prior proof does not qualify ddalcu.
