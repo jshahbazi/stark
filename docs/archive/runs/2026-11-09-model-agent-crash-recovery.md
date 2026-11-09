@@ -179,3 +179,23 @@ defect. These are build/component gates, not completed real-model qualification.
 Agents must continue through their pending gates and resolve actual failures,
 preserving failed measurements and updating their ledgers. Only one model/Metal
 run owns the machine at a time. No additional PR is authorized by this resume.
+
+### Resumed Gemma numerical gate
+
+On the sealed `9053f805` candidate, both dedicated committed-KV Metal controls
+passed. The same pinned E2B oracle then passed its unchanged gates: feedback,
+centroids and masked logits all had zero maximum absolute error and zero relative
+L2 error; root, support and first greedy proposal matched exactly. Three actual
+proposals were target-verified. Supplied all/zero/partial/rejected acceptance
+controls, cancellation/fresh controls and 512-admit/513-reject with ordinary
+continuation passed. Runtime was
+40.57 seconds, approximately 10.4 GB peak memory and zero swaps.
+
+The actual sampled round accepted zero of three proposals. This qualifies the
+tested component's correctness, not acceleration or normal worker integration.
+Serving/default loading, complete head-aware cache lifecycle and useful matched
+performance remain open. The agent released all model processes and handed the
+exclusive hardware slot to Qwen, continuing Gemma integration in source.
+The oracle/serial receipt SHA-256 is
+`770a6bc0ba68b628a445d27956c027dfdcc0d21f910e95cbf647eff3de6b61a1`;
+execution seal `c2a53fd8b6cc97747f8ec4cefd2326521fff9340ed2680c69cfd526d334c2ae4`.
