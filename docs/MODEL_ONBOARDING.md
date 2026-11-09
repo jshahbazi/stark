@@ -206,6 +206,13 @@ allocator overhead and transient copies. Record observed peak memory when
 available. Keep timing observations separate
 from correctness results. A successful restore does not establish a speedup.
 
+Choose the model's MTP default by measured speed: use whichever supported
+setting is faster, MTP on or off, in a matched comparison on representative text
+requests. Record the artifact, backend, draft depth and timing evidence for that
+choice. Supporting an MTP head does not by itself justify enabling it by
+default. Preserve an explicit user override and keep image support enabled by
+default independently of this choice.
+
 Update the current support documentation with one of these dispositions:
 
 | Disposition | Required evidence |

@@ -1030,3 +1030,33 @@ All current workers and compilers are closed. The coordinator explicitly
 released the GPU reservation back to the separate resource-budget chat. Any
 further native/model work requires a new coordinated window; current defaults
 work is source/Python-only. GLM remains stopped at its recorded resource blocker.
+
+The requested default change is pushed in Gemma branch commit
+`2a747763fd88c7ad4ddf8fed42838482e31a6ed6`, clean. Native and CLI defaults were
+already zero; the desktop now defaults Gemma and the exact inspected BF16
+Qwen3.5-0.8B route off when no preference is saved. Stored user choices and
+explicit request overrides remain authoritative, positive draft recommendations
+remain available for opt-in, and image defaults are unchanged. The app's copy
+and Reset behavior match the backend. Missing-receipt artifacts can use exact
+registry source plus inspected BF16 for preference scope; an API alias or model
+name cannot establish that identity. An optional existing source label flows
+to the app for this purpose and never grants inference capability.
+
+Root reviewed the frozen patch
+`7bf09cea712a0f94a5e90d93368e5b83610c2f7b7906d875c988639eae35d02a`.
+Validation passes 102 desktop/MTP cases, 41 inventory cases and the actual
+model-free Swift controller MTP case, including missing identity, saved choices,
+manual opt-in, Reset, other precisions/repos and misleading local names. Swift
+receipt `911af67491dcdaa918227e9ed9562b2eff1ee445be646aaee58607528ab2ae93`
+records that run. No model, Metal suite or installed-app reload was performed.
+The installed Stark worker was left untouched. All owned test/compiler
+processes closed; the release notification found the separate chat archived.
+No further native/model work is queued.
+
+The user's general policy is now recorded in `docs/MODEL_ONBOARDING.md`:
+**measured speed decides the MTP default; choose whichever supported setting is
+faster, on or off.** Keep explicit user overrides and default image support
+independent. This is an onboarding decision based on measurements, without a new
+runtime autotuning framework. Gemma's automatic assistant provisioning and
+broader opt-in context qualification remain open; this defaults change does not
+enable the staged feature in normal builds or imply complete family delivery.

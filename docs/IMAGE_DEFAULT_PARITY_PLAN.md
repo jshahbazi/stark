@@ -27,6 +27,11 @@ Based on the 2026-11-09 quick measurements, the user explicitly selected MTP
 explicit opt-in where qualified; keep image support enabled by default. This
 does not change the defaults of other Qwen models.
 
+For future models, measured speed decides the MTP default: choose the faster
+supported on/off setting in a matched text comparison and retain the evidence.
+An available head alone is not a reason to default MTP on. Explicit user choices
+continue to override the model default.
+
 Only admit image execution after its normal model-specific checks. If the
 implementation is missing or unqualified, report that gap and finish the work;
 do not hide a regression by making image support an optional escape hatch or
