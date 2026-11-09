@@ -117,7 +117,7 @@ checks pass. The complete pinned installed source still passes bounded
 source/config/tokenizer inspection without decoder payload I/O. A full
 converter pass with a preserved older helper produced 6,826 passed, 96 skipped
 and one large-request boundary failure; that case passes using the newer
-preserved helper, and a final full pass is pending. No native compilation or
+preserved helper. No native compilation or
 full GGUF image execution result is claimed for this integration increment.
 
 The EXL3 image ABI remains unimplemented and fails explicitly. The image loader
@@ -127,3 +127,24 @@ Ordinary GGUF predictor execution also remains missing. Catalog defaults,
 full image generation, loaded-image text cache/performance and both backend MTP
 gates remain open. Native build/model work is deferred while shared disk space
 is below the required 8 GiB reserve; no additional model payload was requested.
+
+## Final converter pass and predictor inventory
+
+At source `b08fa969221af7cb40fee277c2f3496416093554`, the final complete
+converter suite passes: **6,830 passed, 96 skipped, zero failures** in 261.67 s.
+The exact template-helper binary is
+`ca479d2225f41bf28aee11655b2285470ac114bc4b910c105d79f5738c7e4e63`.
+Private source-file/hash/count evidence is sealed in receipt
+`34fcec66b60c476b361c249aecfca7c0a22ee10646fa0040fdfd677343542a54`.
+This is a CPU host/converter result, with no native GLM execution claim.
+
+Bounded inspection of the installed four decoder headers consumed 9,518,781
+header bytes and found 1,412 tensors overall. The declared predictor follows
+the 45 target layers and contains 29 tensors, including the embedding/hidden
+projection and norms, attention/indexer and expert block. Source metadata
+declares one predictor layer and shared MTP index selection. The private
+inventory receipt is
+`5829de67d2f05432e4f269032c5b8d8f3d9ba1aef05386e90a5730b1ac0a5d55`.
+This confirms actual retained head weights; it does not execute them. The GGUF
+predictor implementation remains required, separately from the existing EXL3
+text MTP implementation and its still missing image ABI.

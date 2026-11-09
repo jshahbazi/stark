@@ -13,7 +13,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
-| [20261109-GLMVIS-05: complete GLM image worker integration](../archive/runs/2026-11-09-glm-image-worker-integration.md) | Pinned preparation and native dispatch source wired; 186 focused Python controls pass and independent admission review fixes applied; native compilation/full GGUF image/default/cache/performance/MTP gates remain open |
+| [20261109-GLMVIS-05: complete GLM image worker integration](../archive/runs/2026-11-09-glm-image-worker-integration.md) | Pinned preparation/native dispatch source wired; 6,830 converter tests pass and independent admission fixes applied; actual GGUF predictor inventory confirms 29 retained head tensors; native compilation/full image/default/cache/performance/MTP gates remain open |
 | [20261109-GLMVIS-04: actual GLM vision sidecar on Metal](../archive/runs/2026-11-09-glm-actual-vision-components.md) | Complete actual BF16/F32 sidecar tower matches a private F32 reference; native PNG/tower and synthetic decoder fusion pass; full GLM image requests/default dispatch/cache/performance/MTP remain unfinished |
 | [20261109-GLMVIS-02: native GLM vision components](../archive/runs/2026-11-09-glm-native-vision-components.md) | GLM processor/tower/sidecar contract and embedding fusion; CPU/attention/synthetic causal controls pass; actual sidecar, Metal, default image dispatch and cache/performance/MTP qualification remain unfinished |
 | [20261109-GLMVIS-01: GLM image source planning](../archive/runs/2026-11-09-glm-image-parity.md) | Pinned vision-sidecar identity/header, bounded source planning and backend-specific implementation sequence; image execution/cache/performance/MTP remain unqualified |
