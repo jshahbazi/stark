@@ -565,6 +565,8 @@ where
     /// Transactional full-accept target batch. Rejected speculation is first
     /// completely restored, then repaired through serial committed inputs.
     /// Ordinary partial-ring acceptance is never requested or relaxed.
+    /// Experimental component only: batched target arithmetic is not qualified
+    /// for general greedy continuations. Staged serving uses the serial verifier.
     pub fn verify_gemma4_assistant_greedy_batch(
         &self,
         mut frame: Gemma4AssistantTargetFrame<B>,

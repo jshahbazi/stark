@@ -102,7 +102,7 @@ impl NativeBackend {
                     return Some(Err("native_generation_failed"));
                 };
                 let round = if greedy {
-                    // Preserve the numerically qualified transactional batch.
+                    // Keep exact ordinary target arithmetic across all rounds.
                     model.assistant_greedy_round(head, current, drafts, &mut control)
                 } else {
                     // Exact-rejection sampling owns complete q distributions;
@@ -196,7 +196,7 @@ impl NativeBackend {
             "verified_rows":verified_rows,"repaired_rows":repaired_rows,
             "draft_seconds":draft_seconds,"verify_seconds":verify_seconds,
             "verification":GEMMA4_ASSISTANT_VERIFICATION_POLICY,
-            "verification_method":if greedy {"transactional-greedy-batch"} else {"exact-rejection-serial"},
+            "verification_method":if greedy {"greedy-serial-target"} else {"exact-rejection-serial"},
             "qualified_context_max":2048,"qualified_draft_position_max":1792,
             "resident_target_and_vision_bytes":model.resident_parameter_bytes(),
             "image_tower_resident":model.image_tower_resident(),

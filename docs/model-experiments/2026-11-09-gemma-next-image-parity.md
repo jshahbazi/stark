@@ -1056,3 +1056,55 @@ cannot be removed or treated as default-context support without evidence.
 The strict companion conversion plan exists and is CPU-tested, but has no
 catalog/CLI installation caller supplying the sidecar. No default enablement
 or family completion is claimed from the staged lifecycle results.
+
+## 20261109-G4AP-07: ordinary-shape serial greedy verification
+
+The aggregate-before-assert diagnostic identifies the earlier 64-token failure
+precisely: both MTP0 and MTP3 complete with 64 tokens, valid metadata and no
+reuse, but their greedy output hashes differ. MTP3 actually accepts 31 of 90
+proposals across 32 rounds, including six full three-draft acceptances. Only
+output equality fails; this is not a metadata error or native failure. Receipt
+`16724b349f43eac774859630346be5ce920aaae97bc25489c13c109e32c53e48`
+has a passing final guardian and zero paging, swap or compressor growth.
+The prior batch component controls do not qualify general greedy serving.
+
+The independently reviewed minimal fix routes the staged greedy wrapper to
+the existing serial greedy target verifier. Actual assistant drafts and
+acceptance remain enabled; ordinary target/MTP0 arithmetic, head numerics,
+stochastic sampling and prefix-cache logic are unchanged. The experimental
+batch component implementation remains separate. Per-request metadata now
+reports `greedy-serial-target`. Patch SHA-256:
+`994609722160856c47e0dfdec6b23befc6d0ee5ce63cba58cd8fafc92a8be678`.
+
+A build-recipe substitution accidentally selects a new target directory; its
+owned compiler group is stopped after 19.68 seconds and that interrupted
+receipt is retained. The corrected build reuses the prior checkout-owned
+target and passes in 51.43 seconds with all source hashes unchanged. Formatting,
+repository policy and the focused metadata CPU test pass. The new worker is
+`e45092162cf3a14c799a99fdd0ee80f8d8c939b24008a9c88c6e8fb2a92a97ea`,
+matching helper remains `77e45824`, and source/binary seal is
+`89f07e1e752b67228dba95dc3f9e76ee86861d277314769974035c4f511e1d0e`.
+The 1,186-file source graph is
+`25808a8e466e20a023c2a99d86839b82c695ac61992f09c300f1d7302d87aa76`.
+
+All fourteen text-arm 64-token requests now produce the exact ordinary MTP0
+hash, with actual MTP3 acceptance 34 of 85 per request and 63 committed target
+rows. The quick comparison remains **ineligible**: some boundary CPU samples
+exceed the unchanged 200% other-process ceiling, and the watcher reports
+unavailable process telemetry during intentional shutdown after 157 positive
+samples. Both workers' drain/join ownership predicates remain recorded; no
+image timing arm runs. This receipt remains invalid for timing qualification:
+`384446c957b390ca2ab2d8eeb4f92ec4af00f534d310df5a099708389f026dee`.
+
+The new worker separately passes all 37 images-resident lifecycle cases,
+including greedy/stochastic actual acceptance and rejection, exact prefix
+reuse, mode/scope/context changes, stop/cap, early and mid-generation cancel,
+reset/error recovery and image-zero-MTP invalidation. The serial stop case
+emits three tokens with two committed rows and a separate unprocessed carry;
+it does not claim speculative extra rows. Post-stop/cache equality passes.
+Receipt `08bbfe482109ee1fc245dc599d56c2b706b9176abf710a1d20c43fe03a5c3463`
+has a passing guardian with 143 positive samples, drained worker and joined
+supervisor, peak RSS 10,396,139,520 bytes, footprint 10,680,574,304 bytes and zero
+paging, swap or compressor growth. All owned workers and compilers close before
+handoff. Matching timing and the previously stated default-context/provisioning
+gates remain open; no acceleration or default enablement is claimed.

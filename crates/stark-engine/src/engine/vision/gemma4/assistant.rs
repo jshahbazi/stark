@@ -196,7 +196,9 @@ where
                 self.language_model.draft_gemma4_assistant_greedy_controlled(&frame, head, first, drafts, cancelled)?;
             let draft_seconds = started.elapsed().as_secs_f64();
             let started = Instant::now();
-            let verified = self.language_model.verify_gemma4_assistant_greedy_batch(frame, &proposals, cancelled)?;
+            // Preserve ordinary one-row target arithmetic for staged serving.
+            // The experimental batch verifier has a separate component gate.
+            let verified = self.language_model.verify_gemma4_assistant_greedy_serial(frame, &proposals, cancelled)?;
             Ok(Gemma4AssistantGeneratedRound {
                 verified,
                 proposed: proposals.len(),
