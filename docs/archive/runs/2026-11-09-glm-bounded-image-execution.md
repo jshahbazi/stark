@@ -144,3 +144,39 @@ identified from executable/cwd metadata. The initial functional control may
 proceed under the unchanged strict memory/foreign-model screens; no quiet-host
 or performance claim may be derived from that run. Benchmarks require a later
 quiet slot. No model has run at this checkpoint.
+
+## Initial strict-screen interruption and one registered retry
+
+The initial bounded attempt reached text-only worker readiness in 1.52 seconds.
+The strict global pageout guard then stopped its first text request before any
+completion or image stage. Available memory started at 107,748,147,200 bytes;
+minimum observed was 91,591,655,424. Peak worker RSS was 767,393,792 bytes,
+physical footprint 737,154,592, and host wired growth 3,830,464,512; compressor
+growth was zero and swap stayed zero. These observations do not establish a
+complete request peak. The supervisor cancelled and terminated only its owned
+worker, then reaped it and joined. No cache/image/MTP/performance pass exists.
+
+Disposition: resource-deferred by a valid host screen, with cause unproven.
+The private failed receipt is
+`062f1ae36caa6e5266f534f85e8a821610a69e7a49d54e7de32edc9c04bfb9f1`.
+It retained the baseline pageout count and the growth rejection but not the
+exact breach counter. A separate later sample observed seven additional
+pageouts and no swapouts; this cannot attribute them to the worker or the
+background shader compiler.
+
+One retry is registered after an independent ten-second quiet-host screen
+found stable pageouts/swapouts, zero swap and no model/compiler/app processes.
+It must use the same code, bounded flags, watcher and strict limits, with a
+fresh 64 GiB entry screen and a new private receipt. A repeated guard rejection
+ends this execution grant; no retry loop or automatic limit change is allowed.
+
+The full resident recipe was separately refreshed against actual available
+bytes. Including the complete inventories, copies, image work and a 16 GiB
+host margin requires 127,935,842,312 bytes for an image transaction, or
+130,723,838,088 with the declared head payload additionally reserved before any
+active head state. The contemporaneous sample had 110,152,630,272 available
+bytes; no resident load is granted. Source receipt:
+`1b78195c3a316432176501d0e0c3e7eb301ae82cccce1af164cea4fc3d59cbc0`.
+Later decisions must use fresh available bytes and a separately reviewed full
+peak. Bounded parity alone does not qualify speed against the earlier fast
+resident normal-text recipe or authorize changing the normal default.
