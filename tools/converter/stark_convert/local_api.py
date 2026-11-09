@@ -479,8 +479,6 @@ class LocalAPI:
                     length = int(raw_length.lstrip("0") or "0")
                     if length > api._body_limit():
                         raise APIError(413, "Request body is too large", "body_too_large")
-                    if length > 1024 * 1024 and 3 * length > available_memory_bytes():
-                        raise APIError(429, "Available memory is too low for this request", "memory_pressure")
                     with api._body_lock:
                         if api._pending_body_bytes + length > MAX_PENDING_BODY_BYTES:
                             raise APIError(429, "Pending request bytes exceed the server budget", "body_budget_full")
