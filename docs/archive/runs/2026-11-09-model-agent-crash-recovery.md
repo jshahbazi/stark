@@ -24,8 +24,15 @@ text state. Completion is per artifact, configuration and backend.
 The installed app was closed without implicitly reopening it. The coordinator
 verified no competing model/compiler/app processes, 95% free memory and zero
 swap before Gemma's actual E2B gate. Gemma released its processes after the failed
-long gate; GLM now owns the native build slot. Qwen and Gemma continue CPU-only
-numerical diagnosis. No PR is authorized here.
+long gate, and GLM completed its builds and two stopped short attempts. Qwen now
+owns the next diagnostic build/model window, Gemma's trace is queued afterward,
+and GLM prepares a separately registered functional-only supervisor in source.
+Repeated external Metal tests from `stark-playground-resource-budget` are caught
+by the preflight. The user authorized cross-chat coordination, and that chat
+confirmed its current GPU run finished and it is holding new GPU/model runs.
+The exclusive queue is Qwen diagnostics/MoE cache, Gemma's bounded trace, then
+GLM's functional-only short control. The coordinator must explicitly hand the
+GPU back afterward. No PR is authorized here.
 
 ## Ownership and source checkpoints
 
@@ -418,3 +425,26 @@ paged; resident experts must not be described as paged. Initial state capacity i
 leaves insufficient reviewed margin against actual available bytes. Full loading
 stays held. Source-plan receipt:
 `dcd593dab1b589a4cf013506324aedb3d042a8b2e79891c1080de11e9e1a1716`.
+
+### Functional-only supervisor approved and GPU coordination established
+
+GLM registration `19ead868` preserves the strict09 failed attempts and adds a
+separately versioned functional10 recipe. Independent review of immutable patch
+`a498b1d4d3320d0fd77cdfba279581d256cc3830bb7cdcfeb55296e03c3728f8`
+approved the source change: hard available/RSS/footprint/wired/compression/swap
+and owner-cleanup guards remain; global pageouts are timestamped diagnostics;
+all functional10 performance eligibility is explicitly false. Fourteen injected
+controls and five real child-process cleanup controls pass.
+Supervisor SHA-256:
+`9860befa761a1b7fabc563ddb873e6854fcbeb072e52b7fe6755bb83bb096b6e`;
+live-smoke receipt `a40ec46f2ec143b92e55e6ffd6e7fb2c868c8263a0c30c0ce02cfbc7a9782983`.
+One initial short functional run is conditionally authorized in its queued slot,
+with the same runtime source/binaries and bounded flags. No resident/MTP/cache
+matrix or performance promotion is implied.
+
+After explicit human authorization, the coordinator messaged the separate
+resource-budget chat to finish/drain its current Metal test and hold new GPU
+tests, model loads and app reloads. Its compact status acknowledged that its
+GPU run finished and it is continuing CPU checks/review. No external process
+was killed. This resolves the immediate interference; future starts still
+require fresh preflight and an explicit GPU handback at the queue boundary.
