@@ -536,3 +536,37 @@ Common-input norms and residuals remain exact. Attention output is
 All processes close with zero paging and no foreign worker. No arithmetic is
 adopted; the next diagnostic must isolate projection and activation primitives
 on identical operands rather than change the whole head profile.
+
+### QNIP functional-only MoE monitor: hard available-memory stop
+
+The coordinating review separately authorizes one functional cache-only
+attempt. Global Pageouts are diagnostic for this new policy, with performance
+eligibility always false. The previous strict-pageout attempt remains failed.
+Hard limits are retained or strengthened: 64 GiB actual psutil available memory,
+40 GiB RSS/physical footprint, 8 GiB free disk, 600 seconds, zero swap used and
+Swapins/Swapouts growth, plus compressor growth strictly below 1 GiB and a
+continuous foreign-owner watch. The supervisor and exact-artifact driver receive
+independent source review. Twenty-one policy/ownership controls pass, including
+nine real tiny owned children, injected spawn failure with reused-descriptor
+protection, final-deadline sample binding and post-drain acceptance. Private
+preregistration: `6ff8fba9d33e9b9742bdfa0d38e0797293e6692f39b9431ef47cfa3a366119a9`;
+smoke receipt: `b6e415da58b4b95adecfe13e18d7f6e5fa351b63c8dbfa4cc2e2f11e4e332cb7`.
+
+The sole run uses unchanged worker `4010b86e`, pinned payload/config and all
+30 intended cases. It reaches readiness in 76.062 seconds, then the first
+1,792-token prefill crosses the hard available-memory floor. Exact fatal
+available memory is `68,421,844,992` bytes, below the 64 GiB floor
+`68,719,476,736`; minimum through drain is `68,270,899,200`. There are 269 valid
+process samples. Peak RSS is `36,751,753,216`, physical footprint
+`37,054,278,344`, and host wired growth `39,822,966,784` bytes. Pageouts,
+Swapins, Swapouts, swap used and compressor growth all remain zero; no foreign
+model worker is detected. An external Cargo process is observed after the stop;
+no cause is assigned to it.
+
+The owned child is cancelled/terminated, reaped and the supervisor joined.
+**Zero cache cases complete.** Receipt:
+`31b0c7bed7a4362e56669a061b56ba097e54675853ac00bb64b37f3b3ebeab92`.
+This is a hard resource rejection, without cache or speed qualification. No
+retry or limit reduction follows. A source-bound prefill/workspace memory review
+is required before another model run; full BF16 MoE and retained ddalcu gates
+remain separately blocked as recorded above.

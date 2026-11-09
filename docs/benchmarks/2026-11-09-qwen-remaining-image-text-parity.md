@@ -200,3 +200,11 @@ case completes and no memory-limit failure is established. The [retained ddalcu
 memory plan](../archive/runs/2026-11-09-ddalcu-default-image-memory-plan.md) is
 source/header-only and its full run remains held. Official BF16 MoE payloads
 are absent; its expert-predictor component test does not qualify full execution.
+
+A separately preregistered functional-only MoE attempt also remains unqualified:
+its first 1,792-token prefill crosses the retained 64 GiB available-memory floor
+before a cache case completes. Sampled RSS/footprint peak at 36.752/37.054 GB;
+Pageouts, swap and compressor growth are zero. All workers close, no retry is
+made, and no timing from that functional policy is performance eligible. See
+receipt `31b0c7bed7a4362e56669a061b56ba097e54675853ac00bb64b37f3b3ebeab92`
+and the continuation record for the complete hard-limit measurements.
