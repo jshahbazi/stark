@@ -247,6 +247,7 @@ opens Beginner, while a library with installed models opens Advanced. The
 choice is saved separately from the **Chat** or **Decision** playground mode.
 Changing this picker in the main menu updates the menu without opening a window.
 Use **Guided setup** or **Manage Models** to open the selected interface.
+The Playground omits the Beginner/Advanced picker; use the main menu to change interfaces.
 Advanced retains the existing Manage Models, Model Catalog, Add from Source,
 Playground, Connections and chat controls.
 

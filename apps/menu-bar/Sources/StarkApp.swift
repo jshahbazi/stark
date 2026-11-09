@@ -3681,13 +3681,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         dismissMenu()
         if promptWindow == nil {
             promptWindow = window(title: "Stark — Playground",
-                                  view: AdvancedPlaygroundHost(engine: engine, interface: interface,
-                                                       selectInterface: { [weak self] in self?.selectInterface($0) },
+                                  view: PlaygroundView(engine: engine,
                                                        connection: { [weak self] in self?.showConnection() },
                                                        manage: { [weak self] in self?.showModels() }), resizable: true)
-            // Include the interface picker above the playground's own minimum.
-            promptWindow?.contentMinSize = NSSize(width: 520, height: 770)
-            promptWindow?.setContentSize(NSSize(width: 560, height: 800))
+            promptWindow?.contentMinSize = NSSize(width: 520, height: 720)
+            promptWindow?.setContentSize(NSSize(width: 560, height: 750))
             promptWindow?.delegate = self
         }
         present(promptWindow, from: origin)

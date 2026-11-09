@@ -307,20 +307,3 @@ struct AdvancedModelsHost: View {
         }
     }
 }
-
-struct AdvancedPlaygroundHost: View {
-    @ObservedObject var engine: EngineController
-    @ObservedObject var interface: StarkInterfacePreferences
-    let selectInterface: (StarkInterfaceMode) -> Void
-    let connection: () -> Void
-    let manage: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack { Spacer(); StarkInterfacePicker(preferences: interface, selected: selectInterface); Spacer() }
-                .padding(.horizontal, 20).padding(.vertical, 12)
-            Divider()
-            PlaygroundView(engine: engine, connection: connection, manage: manage)
-        }
-    }
-}
