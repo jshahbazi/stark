@@ -57,6 +57,29 @@ fn prefill_batch_ranges(
     Ok(ranges)
 }
 
+/// Bound physical command encodings while retaining absolute logical snapshot
+/// boundaries, including a continuation whose initial position is not aligned.
+fn bounded_text_prefill_ranges(
+    length: usize,
+    prefix_length: usize,
+    maximum: usize,
+) -> Result<Vec<std::ops::Range<usize>>, crate::backends::common::InvalidInput> {
+    use crate::backends::common::InvalidInput;
+    let grid = super::PREFILL_CHUNK_TOKENS;
+    if maximum == 0 || maximum > grid || prefix_length.checked_add(length).is_none() {
+        return Err(InvalidInput("invalid bounded text prefill geometry"));
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < length {
+        let remaining_to_grid = grid - (prefix_length + start) % grid;
+        let end = start + maximum.min(remaining_to_grid).min(length - start);
+        ranges.push(start..end);
+        start = end;
+    }
+    Ok(ranges)
+}
+
 enum ForwardPassChaining<B: Backend> {
     Constant {
         token: u64,
@@ -364,6 +387,14 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 .set_rotary_position_delta(multimodal.uses_spatial_positions().then_some(multimodal.position_delta));
         }
 
+        // Scope the new schedule to ordinary routed-Qwen text. Image geometry,
+        // image continuations and generic speculation retain their old path.
+        let prefill_execution_cap = if !multimodal_request && model.speculator.is_none() {
+            model.decoder.ordinary_prefill_execution_cap()
+        } else {
+            None
+        };
+
         let setup = (|| -> Result<_, LanguageModelStreamError<B>> {
             let capture_span = if !model_state.has_multimodal_context()
                 && let Some(capture_manager) = &model.engine.capture_manager
@@ -408,14 +439,15 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             let decoding_state = if !input.is_empty() {
                 model_state.last_output_token.take();
 
-                // NOTE: this is required for attention correctness (hardcoded suffix 1024). This is really bad design, attention should be rewritten to allow on-demand suffix length
-                // Prefix reuse depends on this fixed grid starting at position zero.
-                let max_batch_size = super::PREFILL_CHUNK_TOKENS;
-                let batch_ranges = prefill_batch_ranges(
-                    input.len(),
-                    max_batch_size,
-                    multimodal.and_then(MultimodalPrefill::bidirectional_image_range),
-                )
+                let batch_ranges = if let Some(cap) = prefill_execution_cap {
+                    bounded_text_prefill_ranges(input.len(), model_state.tokens.len(), cap)
+                } else {
+                    prefill_batch_ranges(
+                        input.len(),
+                        super::PREFILL_CHUNK_TOKENS,
+                        multimodal.and_then(MultimodalPrefill::bidirectional_image_range),
+                    )
+                }
                 .map_err(|_| LanguageModelStreamError::InvalidMultimodal)?;
                 let number_of_batches = batch_ranges.len();
                 let last_start = batch_ranges.last().expect("nonempty input").start;
@@ -435,6 +467,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 let mut output_tokens = None;
                 let mut output_norm = None;
                 let mut text_prefix = None;
+                let mut prefill_submissions = 0;
                 let split_logits_row = model.decoder.prefill_requires_separate_logits_row();
                 let hidden_feature_layer_indices =
                     model.speculator.as_ref().map(|speculator| speculator.hidden_feature_layer_indices());
@@ -631,24 +664,47 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                             .ok_or(LanguageModelStreamError::InvalidMultimodal)?;
                         text_prefix = Some((model_state.tokens.len(), snapshot));
                     }
+                    // No constant handle may survive end_encoding. Snapshot
+                    // copies remain private until the complete prefill succeeds.
+                    drop(token_ids);
+                    if prefill_execution_cap.is_some() && !sample_last {
+                        command_buffer
+                            .end_encoding()
+                            .submit()
+                            .wait_until_completed()
+                            .map_err(LanguageModelStreamError::Backend)?;
+                        prefill_submissions += 1;
+                        #[cfg(test)]
+                        if model_state.validation_fail_after_completed_prefill == Some(model_state.tokens.len()) {
+                            return Err(LanguageModelStreamError::InvalidMultimodal);
+                        }
+                        command_buffer = model
+                            .engine
+                            .context
+                            .create_command_buffer(Some("prefill chunk"), Some(allocation_pool.clone()))
+                            .map_err(LanguageModelStreamError::Backend)?;
+                    }
                 }
 
                 if model_state.text_prefix_capture_position.is_some() && text_prefix.is_none() {
                     return Err(LanguageModelStreamError::InvalidMultimodal);
                 }
                 let submission = command_buffer.end_encoding().submit();
-                let pending: Box<[_]> = if let Some(prefix) = text_prefix {
-                    // Copies follow committed prefill writes in this command.
-                    // Publish only after every snapshot payload is complete.
+                prefill_submissions += 1;
+                let pending: Box<[_]> = if text_prefix.is_some() || prefill_execution_cap.is_some() {
+                    // The bounded path drains its final command too. Publish
+                    // snapshots only after all chunks and sampling complete.
                     submission.wait_until_completed().map_err(LanguageModelStreamError::Backend)?;
-                    model_state.text_prefix = Some(prefix);
-                    model_state.text_prefix_capture_position = None;
+                    if let Some(prefix) = text_prefix {
+                        model_state.text_prefix = Some(prefix);
+                        model_state.text_prefix_capture_position = None;
+                    }
                     Box::new([])
                 } else {
                     Box::new([submission])
                 };
 
-                metrics.num_prefill_forward_passes += 1;
+                metrics.num_prefill_forward_passes += prefill_submissions;
                 metrics.num_tokens_prefilled += input.len();
                 metrics.num_tokens_proposed += 1;
                 metrics.num_tokens_accepted += 1;
@@ -689,6 +745,14 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         let (allocation_pool, context_ring, metrics, decoding_state, reuse_decode_pool) = match setup {
             Ok(setup) => setup,
             Err(error) => {
+                if prefill_execution_cap.is_some() {
+                    // Earlier chunks may already be committed. Never allow a
+                    // partially advanced target or snapshot to seed a retry.
+                    model_state.text_prefix = None;
+                    model_state.text_prefix_capture_position = None;
+                    model_state.text_prefix_restored_position = None;
+                    fence_multimodal_state(model_state);
+                }
                 if model_state.text_prefix_capture_position.is_some() {
                     model_state.text_prefix = None;
                     model_state.multimodal_failed = true;
@@ -1454,3 +1518,53 @@ mod image_chunk_tests {
         assert!(prefill_batch_ranges(2300, 0, None).is_err());
     }
 }
+
+#[cfg(test)]
+mod bounded_prefill_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::{bounded_text_prefill_ranges, prefill_chunk_parts};
+
+    #[stark_test]
+    fn physical_chunks_preserve_absolute_snapshot_grid_and_context_continuations() {
+        let ranges = bounded_text_prefill_ranges(1792, 0, 256).unwrap();
+        assert_eq!(ranges, (0..7).map(|index| index * 256..(index + 1) * 256).collect::<Vec<_>>());
+        assert_eq!(bounded_text_prefill_ranges(512, 1808, 256).unwrap(), vec![0..240, 240..496, 496..512]);
+        for prefix in [0usize, 1, 1023, 1024, 1808] {
+            for length in [0usize, 1, 255, 256, 257, 1024, 1025, 1792] {
+                for maximum in [1, 256, 1024] {
+                    let ranges = bounded_text_prefill_ranges(length, prefix, maximum).unwrap();
+                    let mut next = 0;
+                    for range in &ranges {
+                        assert_eq!(range.start, next);
+                        assert!(!range.is_empty() && range.len() <= maximum);
+                        assert_eq!((prefix + range.start) / 1024, (prefix + range.end - 1) / 1024);
+                        next = range.end;
+                    }
+                    assert_eq!(next, length);
+                    for position in prefix + 1..prefix + length {
+                        if position.is_multiple_of(1024) {
+                            assert!(ranges.iter().any(|range| prefix + range.end == position));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(bounded_text_prefill_ranges(1, 0, 0).is_err());
+        assert!(bounded_text_prefill_ranges(1, 0, 1025).is_err());
+        assert!(bounded_text_prefill_ranges(1, usize::MAX, 256).is_err());
+    }
+
+    #[stark_test]
+    fn separate_logits_row_keeps_the_existing_255_plus_one_tail() {
+        let rows = [0u64; 256];
+        let parts = prefill_chunk_parts(&rows, true, true);
+        assert!(matches!(parts, [Some((prompt, false)), Some((sample, true))] if prompt.len()==255 && sample.len()==1));
+        let parts = prefill_chunk_parts(&rows, false, true);
+        assert!(matches!(parts, [Some((prompt, false)), None] if prompt.len()==256));
+    }
+}
+
+#[cfg(all(test, backend = "metal"))]
+#[path = "bounded_prefill_native_tests.rs"]
+mod bounded_prefill_native_tests;

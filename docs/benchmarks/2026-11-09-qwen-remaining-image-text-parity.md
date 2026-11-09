@@ -225,3 +225,29 @@ the 1,024-row output and reuse the completed allocator without further heap
 growth. Reset retains its high-water capacity. This is a tiny operator memory
 measurement, without a speed, full-model peak or new cache qualification claim;
 guarded receipt `4b67c785ed66f8cb2b024bc52b41947be44c772fe64b93d9cd5166501ce72524`.
+
+## Physical256 actual-MoE continuation
+
+New production worker `7f41246a` passes the actual 1,026-token cold/repeat and
+changed-tail/fresh controls, with 1,024-row reuse and exact output agreement.
+Its eight-token cold output also matches frozen worker `4010b86e`. New sampled
+footprint peaks at 25.885 GB across four cases, with zero paging, compression
+and swap growth. The full 1,792-token / 30-case matrix remains pending.
+
+The new source-bound short ABBA comparison uses 16 input tokens, context 2,048,
+64 emitted tokens and six measured requests per arm, with identical output
+hashes and zero observed paging/compression/swap. It records:
+
+| Median | Text-only | Images loaded |
+| --- | --- | --- |
+| Decode tokens/s | 39.2466 | 39.4158 |
+| First token | 129.112 ms | 128.067 ms |
+| Wall | 1.77176 s | 1.76193 s |
+
+Fixed 5% comparisons pass without widening the threshold for the observed 7.17%
+baseline variation. This is a short comparison under the existing functional
+resource supervisor; its performance-ineligible marker is preserved. Receipt:
+`419b331222b50eec9f0e34eb3be965d8b902fbfc292d8e749ca7e9fcdf9ad119`.
+Startup remains material and separate: image-loaded verification takes about
+74 seconds, text-only about two seconds. Earlier timings retain their original
+16-token budget and executable boundary.

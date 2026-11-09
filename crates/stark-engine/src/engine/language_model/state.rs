@@ -45,6 +45,8 @@ pub struct LanguageModelState<B: Backend> {
     pub(crate) vision_prefill_logits_readback: Option<B::GlobalBuffer>,
     #[cfg(test)]
     pub(crate) vision_prefill_layer_readbacks: Option<(usize, Box<[B::GlobalBuffer]>)>,
+    #[cfg(test)]
+    pub(crate) validation_fail_after_completed_prefill: Option<usize>,
 }
 
 impl<B: Backend> LanguageModelState<B> {
@@ -148,6 +150,8 @@ impl<B: Backend> LanguageModel<B> {
             vision_prefill_logits_readback: None,
             #[cfg(test)]
             vision_prefill_layer_readbacks: None,
+            #[cfg(test)]
+            validation_fail_after_completed_prefill: None,
         })
     }
 

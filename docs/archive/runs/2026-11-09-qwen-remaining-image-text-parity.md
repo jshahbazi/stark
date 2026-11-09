@@ -626,7 +626,7 @@ policy, full-model retry or memory-floor change is adopted by this audit.
 ### QNIP tiny affine command-heap attribution: passed
 
 The independently reviewed, ignored test uses synthetic affine4/group64 banks,
-BF16 activations, the actual affine numerical profile, eight selected experts,
+BF16 activations, the `Qwen35AffineBF16` image/reference profile, eight selected experts,
 and model/hidden dimensions 64. Its 55,296-byte weight/quantization payload
 contains no official model weights. It measures the allocator's own internal
 heap bytes separately from constant pages and upstream-reserved scratch pages.
@@ -673,6 +673,11 @@ operator and supports a bounded-execution proposal. Multiplying this curve by
 the complete model's layer/token counts remains an estimate; the failed full
 model's exact allocation attribution is still unmeasured. No full-model retry,
 production execution-cap policy or memory-floor change follows automatically.
+The ordinary fast-text loader uses `Legacy`; this probe does not measure that
+profile's dispatch/rounding choices. The [bounded-prefill memory proposal](2026-11-09-qwen-moe-bounded-prefill-memory-plan.md)
+records this attribution gap. The next actual-model check is the smaller
+1,026-token prefix case under the existing hard guards, after tiny controls and
+a new production build; the larger cache matrix remains pending.
 
 ### QNIP finer head primitives: localized boundaries, full gate still failed
 
@@ -711,3 +716,97 @@ all logit and top-one gates pass. Full aggregate:
 `a95181746225450b3916e70026d6f907d90be0ea0a4efc7654b23a9463bf9cca`;
 gate receipt: `f647ef82dae77f098395b08ecc0daec78b08f8dbba0754751f0ad53e44aaa140`.
 No arithmetic is adopted and no previous timing is reassigned to this binary.
+
+### QNIP source-rounded head candidate: kernel passes, full gate still failed
+
+Commit `d2cdde180b2331eb7e5dd01530d21e8919acdbc5` adds an isolated test-only
+candidate motivated by the pinned MLX sigmoid and SiLU boundaries. Existing
+gate constructors retain their original false policy. Only the combined head
+reference-linear / source-operator selectors enable source BF16 sigmoid
+rounding; a cloned predictor configuration enables its existing SiLU
+materialization. Target norms, target arithmetic and ordinary production
+defaults remain outside that selector. MLX MIT provenance/license is recorded.
+Independent source review finds no confirmed blocker. Immutable patch:
+`658da6f8d4a46bac0e13b2c63a98f7d1c3bc4672530227218fed0348ed292847`.
+
+The combined candidate builds in 91 seconds. Its physical-prefill CPU grid/tail
+controls pass 2/2, receipt
+`5f1bf98d60319dac163dda1ad2b4506ae7209c88d3635cec542fe9bca17fbfa9`.
+Four CPU/Metal sigmoid controls and the 16-case synthetic dense prefill/cache
+control pass under the existing strict guard. Tiny old/new logits differ by at
+most `0.001953125` / `0.002307775` relative RMS; greedy and seed-zero outputs
+match. Bounded fresh/restored tokens and logits are exact, including the split
+readout tail, and an injected failure after committed row 1,024 never publishes
+its snapshot. Control receipt:
+`b7fc65401675f6b20a0bcbe4554a1f7daac5980accc6d7c52c6855b1de9bf505`;
+tiny case aggregate: `1bcc91010a3323e4563f015e6bc252ff8103a5251098b8b219b884f8c9065a6e`.
+
+The new selected head completes its native export and full pinned MLX replay.
+The unchanged full gate still fails stage zero's hidden maximum error:
+`0.09375` exceeds `0.0625`. The two subsequent single-row hidden comparisons
+are exact; all logit, top-one and relative-RMS gates pass. Full aggregate:
+`2d20714e961c43f0ae6af3a6cb66ba6d3064f66579cce32092bd05f89a0d33a2`;
+gate: `e10a3413289d4b50cd1d5a0f3a0d05ccc763ce788ba839a6eb14840e42e9bd2b`.
+The primitive replay process exits successfully but its supervisor rejects an
+exit-time process-telemetry gap; that phase remains excluded, receipt
+`8c6803ff50fa073d226e85d36fa505f30191c67517e015be4d0221ae26a891d0`.
+No guard or numerical tolerance is relaxed, and no head arithmetic is adopted.
+
+### QNIP physical256 production worker: actual prefix and short speed checks
+
+The reviewed ordinary-Qwen-MoE schedule and completion-order fix build with
+Rust 1.98.1 in 64 seconds. Production worker:
+`7f41246a4e265ad2ba4060c64a57888c4d0541a758f19ec4e0c9f80511c5700a`;
+matching template helper:
+`fbfb62ff5744999c263468f6fc610409ab74a1c3bb877b86bb6291a4cfacdf67`.
+All four head diagnostic selectors are absent from the worker, and the helper
+self-test passes. Source/binary seal:
+`db10afcde5d52a04b6844f565c8c0a3766eff5bfe8cb3afd8780e87c59d218b8`.
+
+The actual existing affine MoE image-loaded artifact passes four 1,026-token,
+context-2,048, MTP0 checks: cold, repeat with 1,024 reused tokens, changed tail
+with the same reused prefix, and fresh changed-tail output. Both cached outputs
+match their fresh controls, and the changed tail produces a different output.
+The frozen `4010b86e` worker then produces the exact same eight-token cold
+output on that identical input. These are bounded checks, without a numerical
+precision claim inherited from the earlier small affine reference-profile
+operator.
+
+| Observed run | Cases | Peak RSS bytes | Peak physical-footprint bytes | Minimum available bytes |
+| --- | --- | --- | --- | --- |
+| New physical256 worker | 4 | 25,563,807,744 | 25,884,543,840 | 76,490,129,408 |
+| Frozen old worker, same cold input | 1 | 30,400,135,168 | 30,881,831,136 | 70,440,468,480 |
+
+Both runs have positive samples, zero paging/compression/swap growth and owned
+drain/join. Their histories differ, so this table is not a matched peak-memory
+benchmark. New receipt:
+`c6813324f7eb3fdf598a20faed58f73898a07c5c3188bdda7dce332ba7eb48e2`;
+old reference: `e753f4748357b8004b38a209030c7270a6527b43f8bfd891a6fcd779f2fca999`.
+
+A separate short ABBA comparison uses input 16, context 2,048, greedy seed 42,
+64 emitted tokens and six measured requests per arm. Output hashes match.
+
+| Median | Text-only control | Images loaded |
+| --- | --- | --- |
+| Decode tokens/s | 39.2466 | 39.4158 |
+| First token | 129.112 ms | 128.067 ms |
+| Wall time | 1.77176 s | 1.76193 s |
+
+All three fixed 5% comparisons pass. The observed decode difference is 0.43%,
+with baseline variation 7.17%; no speedup is claimed. Every load has zero
+observed paging, compression and swap growth, clear per-request thermal screens
+and no foreign worker. The existing functional supervisor retains its
+performance-ineligible marker; this is a short observed-zero comparison, not a
+broader qualification claim. Receipt:
+`419b331222b50eec9f0e34eb3be965d8b902fbfc292d8e749ca7e9fcdf9ad119`.
+The first adaptation failed on an optional headless MTP metadata field before
+retaining a timing row; its setup receipt remains excluded:
+`e0d890c4ee3e3cf91f7db864819930913b2427d6e7eaa2358700490690b19525`.
+
+Startup is reported separately: images loaded take 73.829/73.985 seconds,
+including complete payload verification; text-only takes 1.839/1.877 seconds.
+No hash optimization is introduced. The text control payload is rehashed after
+execution and still matches `73d0a1191bbb7427e938172616cf3f6e6c05a618f8314f7e851c2af3cae3ee62`.
+All workers close and the hardware slot is released. The full 1,792-token /
+30-case lifecycle matrix remains pending; old passed artifacts and failed
+attempts retain their original source/binary boundaries.
