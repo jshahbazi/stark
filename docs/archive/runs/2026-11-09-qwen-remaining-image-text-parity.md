@@ -810,3 +810,38 @@ execution and still matches `73d0a1191bbb7427e938172616cf3f6e6c05a618f8314f7e851
 All workers close and the hardware slot is released. The full 1,792-token /
 30-case lifecycle matrix remains pending; old passed artifacts and failed
 attempts retain their original source/binary boundaries.
+
+### QNIP pinned wide projection: test candidate passes the numerical gate
+
+The existing test-only source-operator policy now uses pinned MLX GemvWide's
+float4, unroll-eight, 32-lane reduction for two through five rows. One-row and
+production default reductions remain unchanged. Independent review checks the
+reduction, effective buffer-view alignment, checked dispatch geometry, 64-bit
+address products and restoration of the file's original Metal arithmetic mode.
+MLX source/license provenance is retained. Reviewed patch:
+`e1fc498050dcb3de21226b5f4c151eb7e67e19b962d0adf61a93071ef21e5732`.
+
+The test build completes in 90 seconds, binary
+`76bb6f2c504f83bea816640e65fcc65a0e029b77174884006b0e8ec86a6b65a3`.
+Both decisive native and pinned-reference phases pass their resource guards in
+2.340 seconds, with zero paging/compression/swap growth and owned drain/join.
+The unchanged full head gate passes: target normalization is exact, hidden
+maximum errors are `0/0.03125/0`, logit maxima `0.03125/0.0625/0.00390625`, and
+all six top-one comparisons match. Aggregate:
+`a2113e272ed7f6b18c457e7e41ebac13c2dccb7ec43e5cf79bcb108538974913`;
+gate: `c195ee1b96367eb1bf52ffe2cb99db9a72a7bff109b36bdf2572749c819c6c7c`;
+execution: `977a18d56e4fee208b1fc4cce0199682b26373db14dc14e1efbccb05eb8c35d2`.
+
+The first two repeated sigmoid controls pass. The third test exits successfully
+but its existing supervisor rejects unavailable exit-time process telemetry;
+that control remains unqualified and is not retried. The decisive head phases
+have independent passing guards. No numerical gate is widened and no optional
+primitive replay is added after the full gate passes.
+
+This qualifies the selected test candidate for the exact official 0.8B BF16
+artifact and pinned feature policy. It does not ship a production fix or qualify
+other sizes/layouts. The next change must select this policy only for the
+admitted full-BF16 dense target/head route, preserve MTP0 target dispatch, then
+run the existing actual cache and loading-mode MTP0/3 checks on that production
+build. Mixed-affine 27B, Lily and absent full BF16 MoE payload retain their
+separate boundaries.

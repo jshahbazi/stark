@@ -1,5 +1,7 @@
 //! Internal contiguous BF16 linear for the admitted Qwen3.5 reference profile.
 
+#[cfg(test)]
+use crate::backends::common::kernel::MlxHeadMatmulBF16Kernel;
 use crate::{
     backends::common::{
         Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
@@ -15,6 +17,8 @@ pub(crate) struct ReferenceBF16Matmul<B: Backend> {
     cast: <B::Kernels as Kernels>::VisionCastBF16Kernel,
     round_f32: <B::Kernels as Kernels>::ReferenceRoundBF16F32Kernel,
     gather: <B::Kernels as Kernels>::ReferenceGatherMatmulBF16Kernel,
+    #[cfg(test)]
+    mlx_head: Option<<B::Kernels as Kernels>::MlxHeadMatmulBF16Kernel>,
 }
 
 impl<B: Backend> ReferenceBF16Matmul<B> {
@@ -24,7 +28,18 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
             cast: <B::Kernels as Kernels>::VisionCastBF16Kernel::new(context)?,
             round_f32: <B::Kernels as Kernels>::ReferenceRoundBF16F32Kernel::new(context)?,
             gather: <B::Kernels as Kernels>::ReferenceGatherMatmulBF16Kernel::new(context)?,
+            #[cfg(test)]
+            mlx_head: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_with_mlx_wide(
+        mut self,
+        context: &B::Context,
+    ) -> Result<Self, B::Error> {
+        self.mlx_head = Some(<B::Kernels as Kernels>::MlxHeadMatmulBF16Kernel::new(context)?);
+        Ok(self)
     }
 
     /// A is contiguous [m,k], with a byte offset; B is full row-major [n,k].
@@ -66,11 +81,41 @@ impl<B: Backend> ReferenceBF16Matmul<B> {
         if input_end > input.size() || weights.size() != weight_bytes {
             return Err(invalid().into());
         }
+        #[cfg(test)]
+        let source_wide = self.mlx_head.as_ref().filter(|_| (2..=5).contains(&m) && n > 1);
+        #[cfg(test)]
+        if source_wide.is_some() {
+            // BufferRef can already describe a subview. Check the effective
+            // byte offsets before reinterpreting either operand as bfloat4.
+            let input_start = input.parts().1.start.checked_add(input_offset).ok_or_else(invalid)?;
+            if !input_start.is_multiple_of(8) || !weights.parts().1.start.is_multiple_of(8) {
+                return Err(invalid().into());
+            }
+            elements.checked_mul(32).ok_or_else(invalid)?;
+        }
         let mut accumulated = commands.allocate_scratch_for_shape(&[m, n], DataType::F32)?;
         if !matches!(output_type, DataType::BF16 | DataType::F32) {
             return Err(invalid().into());
         }
         let mut output = commands.allocate_scratch_for_shape(&[m, n], output_type)?;
+        #[cfg(test)]
+        if let Some(source) = source_wide {
+            source.encode(input.subrange(input_offset..input_end), weights, &mut accumulated, m, n, k, commands);
+        } else {
+            self.dot.encode(
+                input.subrange(input_offset..input_end),
+                weights,
+                &mut accumulated,
+                m,
+                n,
+                k,
+                k,
+                1,
+                32,
+                commands,
+            );
+        }
+        #[cfg(not(test))]
         self.dot.encode(
             input.subrange(input_offset..input_end),
             weights,

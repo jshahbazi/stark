@@ -144,7 +144,16 @@ impl<B: Backend> LinearMatmul<B> {
                     "reference BF16 linear requires full BF16 weights/activations without biases".into(),
                 ));
             }
-            Some(ReferenceBF16Matmul::new(context).map_err(LinearMatmulError::BackendError)?)
+            let reference = ReferenceBF16Matmul::new(context).map_err(LinearMatmulError::BackendError)?;
+            #[cfg(test)]
+            let reference = if weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears
+                && std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some()
+            {
+                reference.validation_with_mlx_wide(context).map_err(LinearMatmulError::BackendError)?
+            } else {
+                reference
+            };
+            Some(reference)
         } else {
             None
         };

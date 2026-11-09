@@ -16,9 +16,13 @@
         {
           "path": "mlx/backend/metal/kernels/bf16_math.h",
           "sha256": "1f374f8380f756eb89acf6a847741cb8fecbe642945e159fb6208d804cc06496"
+        },
+        {
+          "path": "mlx/backend/metal/kernels/gemv.h",
+          "sha256": "296ef622ea3c67d7485aa7cdf102bbfcb582e07bd3207793179a9d1e65ee5a65"
         }
       ],
-      "adaptation": "Explicit BF16 sigmoid exponential, denominator, reciprocal, complement and final product boundaries. Only the cfg(test) Qwen head experiment selects the new attention-gate mode; existing production arithmetic policies remain unchanged. No MLX runtime dependency."
+      "adaptation": "Explicit BF16 sigmoid exponential, denominator, reciprocal, complement and final product boundaries. Only the cfg(test) Qwen head experiment selects the new attention-gate mode; existing production arithmetic policies remain unchanged. No MLX runtime dependency. The same test-only head selector uses the GemvWide float4/32-lane reduction for batches of two through five rows; ordinary production and Torch-reference reductions remain unchanged."
     },
     "pytorch-gemma3-uint8-antialias-resize": {
       "license": "BSD-3-Clause",

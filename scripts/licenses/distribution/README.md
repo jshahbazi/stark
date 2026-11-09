@@ -12,7 +12,8 @@ these notices alongside the other owned source files.
 
 `mlx-LICENSE` preserves the Apple MIT terms for the source-bound BF16 sigmoid
 experiment. `mlx-bf16-head-sigmoid-experiment` in the manifest pins the MLX
-unary and BF16 math sources. The experiment selects source rounding boundaries
+unary, BF16 math and wide GEMV sources. The experiment selects source rounding and
+head-projection reduction boundaries
 only in a test head; it does not change the default inference precision policy.
 
 `pytorch-LICENSE` is the exact PyTorch license file from tag `v2.14.1`, resolved
