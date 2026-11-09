@@ -302,6 +302,29 @@ impl Drop for HybridBackend {
 }
 
 impl HybridBackend {
+    fn record_mtp_metadata(
+        &mut self,
+        drafts: u32,
+    ) -> Result<(), &'static str> {
+        self.last_mtp = None;
+        if let Some(capabilities) = self.model.mtp_capabilities() {
+            let stats = if capabilities.sampling == "native-target-draw-match-v1" {
+                serde_json::to_value(self.model.native_decode_stats())
+            } else {
+                serde_json::to_value(self.model.mtp_stats())
+            }
+            .map_err(|_| "native_generation_failed")?;
+            self.last_mtp = Some(serde_json::json!({
+                "enabled":drafts > 0,
+                "drafts":drafts,
+                "sampling":capabilities.sampling,
+                "verification":capabilities.verification,
+                "stats":stats,
+            }));
+        }
+        Ok(())
+    }
+
     pub(crate) fn load(
         path: &Path,
         cancellation: Option<CancelSignal>,
@@ -703,6 +726,9 @@ impl GenerationBackend for HybridBackend {
         let input_tokens = prepared.tokens.len();
         let result =
             self.generate_inner(&prepared.tokens, 0, None, None, Some(prepared.image), options, on_text, on_progress);
+        // MTP remains advertised for text on this loaded instance. Image
+        // replies must still acknowledge zero drafts with current counters.
+        self.record_mtp_metadata(0)?;
         self.model.reset();
         let result = native_result_after_cleanup(result, self.model.is_fenced());
         self.nucleus_sampler.clear();
@@ -821,21 +847,7 @@ impl GenerationBackend for HybridBackend {
                     Some(BoundaryEntry::new(snapshot, scope, options.context_tokens, &input[..boundary]));
             }
         }
-        if let Some(capabilities) = self.model.mtp_capabilities() {
-            let stats = if capabilities.sampling == "native-target-draw-match-v1" {
-                serde_json::to_value(self.model.native_decode_stats())
-            } else {
-                serde_json::to_value(self.model.mtp_stats())
-            }
-            .map_err(|_| "native_generation_failed")?;
-            self.last_mtp = Some(serde_json::json!({
-                "enabled":options.mtp_drafts > 0,
-                "drafts":options.mtp_drafts,
-                "sampling":capabilities.sampling,
-                "verification":capabilities.verification,
-                "stats":stats,
-            }));
-        }
+        self.record_mtp_metadata(options.mtp_drafts)?;
         self.model.reset();
         result = native_result_after_cleanup(result, self.model.is_fenced());
         if result.is_err() {
