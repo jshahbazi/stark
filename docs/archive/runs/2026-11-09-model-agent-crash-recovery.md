@@ -19,7 +19,7 @@ text state. Completion is per artifact, configuration and backend.
 | Qwen BF16 0.8B | Corrected MTP0 dispatch; 48/48 image-loaded and 26/26 text-only lifecycle checks; prior loading-mode MTP0/3 timing passes. Targeted MLX head projection reduction now passes the complete original numerical gate | Passing correction is still test-selected; apply the head-only production policy, then repeat actual cache and quick paired text/MTP checks. Ordinary target/MTP0 graph remains unchanged |
 | Qwen affine 0.8B / 35B MoE | Physical-256 prefill and completion-order fixes built. Actual 35B 1026-token cache 4/4 passes and matches old-worker output; sampled footprint 30.9 to 25.9 GB. Quick text-only/image-loaded comparison 39.25/39.42 tokens/s | Original 1792-token matrix remains stopped, not passed. Short comparison covers this affine artifact only; full BF16 MoE and executable MoE head remain unqualified |
 | Gemma | G4AP05 passes 15/15 assistant steps through 1792. Staged worker 136 unit tests, 37/37 image-loaded and 34/34 text-only short lifecycle checks pass; 31 common non-null hashes agree | The 64-token MTP continuation diverges from ordinary greedy output. Reviewed existing-serial-verifier fix awaits build/replay. Default context/provisioning/enablement remain open |
-| GLM | `b76f560d` builds and accounting controls pass; tiny mapping control passes sixty blits; staged owned-buffer Control/Q5 initialization passes without pressure | Full functional run hit a hard compression limit; neither tiny test reproduces it. Audit actual GGUF mapping/Metal registration geometry before another full load. Full-model image/cache/MTP/performance remain held |
+| GLM | Accounting fix builds and controls pass. Three fresh owned/dedicated/full private mapping arms pass with identical outputs, zero compression/swap and drained owners; result pushed in `32726272` | Contrast identifies no ownership fix. Stop diagnostics here; full 109-GB model's compression pressure remains a concrete blocker. Full-model image/cache/MTP/performance remain unqualified |
 
 The installed app was closed without implicitly reopening it. The coordinator
 verified no competing model/compiler/app processes and zero
@@ -947,3 +947,16 @@ to context 2,048 and draft positions through 1,792. Normal catalog installation
 also does not yet provision the assistant sidecar. These are explicit delivery
 blockers; the feature is not default-enabled. GLM now owns its one frozen small
 mapping contrast while Qwen and Gemma prepare their source fixes.
+
+GLM's fixed three-arm contrast completes 3/3, receipt
+`4654bf3635ffd78b0d25dd2fb26986af823c9f649411e5697f074df71b6fd704`.
+Each fresh process has identical oracle/output hashes and all eleven aggregate
+phases; Metal allocation returns from 24,608,768 to its 458,752-byte library
+baseline, mappings reach zero and unmap failures remain zero. All guardians
+pass, drain and join, with zero compression/pageout/swap growth. Sparse live
+sampling (2/1/1 samples) does not establish physical peaks or causal attribution
+of host-global wired changes. The full mapping arm does not reproduce pressure
+absent from the dedicated arm, so this result justifies no production ownership
+change or full-model retry. Investigation stops here. Branch `32726272` is
+pushed and clean; all GLM processes are closed. Gemma owns the serial-verifier
+build and checks; Qwen prepares its production head correction in source.
