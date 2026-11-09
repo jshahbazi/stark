@@ -18,7 +18,7 @@ text state. Completion is per artifact, configuration and backend.
 | --- | --- | --- |
 | Qwen BF16 0.8B | Corrected MTP0 dispatch; 48/48 image-loaded and 26/26 text-only lifecycle checks; prior loading-mode MTP0/3 timing passes. Targeted MLX head projection reduction now passes the complete original numerical gate | Passing correction is still test-selected; apply the head-only production policy, then repeat actual cache and quick paired text/MTP checks. Ordinary target/MTP0 graph remains unchanged |
 | Qwen affine 0.8B / 35B MoE | Physical-256 prefill and completion-order fixes built. Actual 35B 1026-token cache 4/4 passes and matches old-worker output; sampled footprint 30.9 to 25.9 GB. Quick text-only/image-loaded comparison 39.25/39.42 tokens/s | Original 1792-token matrix remains stopped, not passed. Short comparison covers this affine artifact only; full BF16 MoE and executable MoE head remain unqualified |
-| Gemma | G4AP05 passes 15/15 assistant steps through 1792. Staged worker 136 unit tests, 9/9 smoke checks, 37/37 image-loaded and 34/34 text-only lifecycle checks pass; all 31 common non-null output hashes agree | Quick comparison stopped on the first text MTP3 assertion, before a valid speed result; preserve exact failed aggregate before diagnosing. Default serving MTP remains disabled pending completion |
+| Gemma | G4AP05 passes 15/15 assistant steps through 1792. Staged worker 136 unit tests, 37/37 image-loaded and 34/34 text-only short lifecycle checks pass; 31 common non-null hashes agree | The 64-token MTP continuation diverges from ordinary greedy output. Reviewed existing-serial-verifier fix awaits build/replay. Default context/provisioning/enablement remain open |
 | GLM | `b76f560d` builds and accounting controls pass; tiny mapping control passes sixty blits; staged owned-buffer Control/Q5 initialization passes without pressure | Full functional run hit a hard compression limit; neither tiny test reproduces it. Audit actual GGUF mapping/Metal registration geometry before another full load. Full-model image/cache/MTP/performance remain held |
 
 The installed app was closed without implicitly reopening it. The coordinator
@@ -928,3 +928,22 @@ excluded, with no retry or guardian relaxation. No primitive phase was needed.
 The passing path is test-selected, so production head-only adoption and actual
 worker cache/timing checks remain necessary. Qwen released all processes and
 Gemma owns the next single text diagnostic.
+
+That Gemma diagnostic confirms a real greedy-output mismatch, rather than a
+metadata or request error. Both modes return 64 tokens; MTP3 executes 32 rounds,
+accepts 31/90 drafts and has six full-accept rounds. Output hashes differ.
+Receipt `16724b349f43eac774859630346be5ce920aaae97bc25489c13c109e32c53e48`
+passes its guardian, drains all processes and shows zero paging/compression/swap.
+The minimal correction switches staged serving to its existing serial greedy
+target verifier while retaining the assistant's actual proposals. Root reviewed
+patch `994609722160856c47e0dfdec6b23befc6d0ee5ce63cba58cd8fafc92a8be678`:
+one verifier call, accurate method metadata and comments; ordinary target
+arithmetic, sampling and cache logic are unchanged. Build and the same 64-token
+equality check precede another quick comparison. No speed claim follows from
+the earlier short lifecycle results.
+
+Gemma's normal catalog context can be 131,072, while this staged path is limited
+to context 2,048 and draft positions through 1,792. Normal catalog installation
+also does not yet provision the assistant sidecar. These are explicit delivery
+blockers; the feature is not default-enabled. GLM now owns its one frozen small
+mapping contrast while Qwen and Gemma prepare their source fixes.
