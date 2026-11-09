@@ -119,9 +119,101 @@ def test_bf16_moe_conversion_reorders_each_gate_up_bank_and_preserves_source_ide
         assert graph["mixer_config"]["reference_bf16"] is True
         assert graph["pre_mlp_norm_config"]["upcast_mode"] == "full_layer"
         assert graph["mlp_config"]["num_active_routed_experts"] == 2
+        if graph["mixer_config"]["type"] == "AttentionConfig":
+            assert graph["rope_config"]["type"] == "Qwen35MRoPEConfig"
+            assert graph["rope_config"]["mrope_section"] == contract["position_contract"]["mrope_section"]
+            assert graph["rope_config"]["interleaved"] == contract["position_contract"]["interleaved"]
     assert all(info.dtype == "BF16" for name, info in infos.items() if ".mlp." in name)
     with pytest.raises(UnsupportedConversion, match="image artifact reference policy"):
         build_qwen35_plan(source)
+
+
+def add_bf16_expert_predictor(config, tensors):
+    text = config["text_config"]
+    text["mtp_num_hidden_layers"] = 1
+    dim, hidden, experts = text["hidden_size"], text["moe_intermediate_size"], text["num_experts"]
+    trunk, head = "model.language_model.layers.1", "mtp.layers.0"
+    for name, value in list(tensors.items()):
+        if name.startswith(trunk + ".self_attn.") or name in {
+            trunk + ".input_layernorm.weight",
+            trunk + ".post_attention_layernorm.weight",
+        }:
+            tensors[name.replace(trunk, head)] = value
+    for name in ("pre_fc_norm_embedding", "pre_fc_norm_hidden", "norm"):
+        tensors[f"mtp.{name}.weight"] = tensors["model.language_model.norm.weight"]
+    tensors["mtp.fc.weight"] = "BF16", np.zeros((dim, 2 * dim), dtype="<u2")
+    prefix = trunk + ".mlp"
+    for name, value in list(tensors.items()):
+        if name.startswith(prefix + ".shared_expert.") or name in {
+            prefix + ".gate.weight",
+            prefix + ".shared_expert_gate.weight",
+        }:
+            tensors[name.replace(trunk, head)] = value
+    fused = tensors[prefix + ".experts.gate_up_proj"][1]
+    down = tensors[prefix + ".experts.down_proj"][1]
+    for expert in range(experts):
+        for branch, array in (
+            ("gate", fused[expert, :hidden]),
+            ("up", fused[expert, hidden:]),
+            ("down", down[expert]),
+        ):
+            tensors[f"{head}.mlp.experts.{expert}.{branch}_proj.weight"] = "BF16", array.copy()
+
+
+def test_bf16_moe_predictor_preserves_each_separate_source_expert(bf16_moe_source, tmp_path):
+    source, config, tensors = bf16_moe_source
+    add_bf16_expert_predictor(config, tensors)
+    save_tensors(source / "model.safetensors", tensors)
+    (source / "config.json").write_text(json.dumps(config))
+    plan = build_qwen35_plan(source, include_vision=True)
+    layer = plan.mtp_config["transformer_config"]["layer_configs"][0]
+    assert layer["mlp_config"]["type"] == "MixtureOfExpertsConfig"
+    assert layer["mlp_config"]["num_routed_experts"] == 4
+    output = tmp_path / "expert-head"
+    receipt = cli.convert(source, output, repo=FINE_TUNE, artifact_mode="vision-language", chunk_bytes=4096)
+    converted = json.loads((output / "config.json").read_text())
+    assert receipt["artifact_contract"]["family"] == {"profile": vision_family.BF16_MOE_FAMILY_PROFILE, "version": 5}
+    for graph in converted["decoder_config"]["transformer_config"]["layer_configs"]:
+        if graph["mixer_config"]["type"] == "AttentionConfig":
+            assert graph["rope_config"]["type"] == "Qwen35MRoPEConfig"
+            assert (
+                graph["rope_config"]["mrope_section"]
+                == receipt["artifact_contract"]["position_contract"]["mrope_section"]
+            )
+    predictor = converted["mtp_config"]["transformer_config"]["layer_configs"][0]
+    assert predictor["rope_config"]["type"] == "UnscaledRoPEConfig"
+    assert "mrope_section" not in predictor["rope_config"]
+    assert converted["mtp_config"]["input_norm_config"]["scale_offset"] == 1.0
+    assert receipt["native_qualification"] is None
+    _, infos = read_safetensors_header(output / "model.safetensors")
+    expected = np.concatenate(
+        [
+            tensors[f"mtp.layers.0.mlp.experts.{expert}.{branch}_proj.weight"][1]
+            for expert in range(4)
+            for branch in ("up", "gate")
+        ]
+    )
+    assert (
+        tensor_bytes(infos["mtp.transformer.layers.0.mlp.experts.up_projection.weights.weights"]) == expected.tobytes()
+    )
+    assert len([name for name in infos if name.startswith("mtp.")]) == 16
+    assert all(info.dtype == "BF16" for name, info in infos.items() if name.startswith("mtp.") and ".mlp." in name)
+
+
+@pytest.mark.parametrize("mutation", ["missing_expert", "extra_expert", "missing_fusion"])
+def test_bf16_moe_predictor_rejects_partial_or_ambiguous_payload(bf16_moe_source, mutation):
+    source, config, tensors = bf16_moe_source
+    add_bf16_expert_predictor(config, tensors)
+    if mutation == "missing_expert":
+        del tensors["mtp.layers.0.mlp.experts.3.up_proj.weight"]
+    elif mutation == "extra_expert":
+        tensors["mtp.layers.0.mlp.experts.4.up_proj.weight"] = tensors["mtp.layers.0.mlp.experts.3.up_proj.weight"]
+    else:
+        del tensors["mtp.fc.weight"]
+    save_tensors(source / "model.safetensors", tensors)
+    (source / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ConversionError):
+        build_qwen35_plan(source, include_vision=True)
 
 
 @pytest.mark.parametrize("mutation", ["shape", "mixed_dtype", "unconsumed_alias", "missing", "unnormalized"])

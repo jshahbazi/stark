@@ -355,11 +355,11 @@ impl HybridBackend {
             Model::load_with_native_decode(path, true)
         }
         .map_err(|_| "hybrid_model_load_failed")?;
-        let guided_admission = if images {
-            None
-        } else {
-            stark_engine::engine::hybrid::guided_admission::qualified_plan(path)
-        };
+        // A retained tower does not change the admitted text graph/payload.
+        // Request-time available memory is sampled after tower loading; the
+        // exact plan still keeps its host and paged-working-set reserves.
+        // Image requests use their separate admission path.
+        let guided_admission = stark_engine::engine::hybrid::guided_admission::qualified_plan(path);
         let image_runtime_identity = if images {
             if !model.supports_images() {
                 return Err("images_not_supported");

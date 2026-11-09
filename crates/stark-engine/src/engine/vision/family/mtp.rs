@@ -14,9 +14,12 @@ pub(super) fn extend_contract(
     let Some(head) = config.get("mtp_config").filter(|value| !value.is_null()) else {
         return Ok(());
     };
-    // BF16 and expert predictors require their own numerical and graph
-    // qualification; the existing compatible text head is dense affine.
-    if !matches!(profile, FamilyProfile::AffineV3) {
+    // Only the pinned BF16 expert layout extends the dense contract below.
+    // Affine expert predictors require independent quantized-head admission.
+    if !matches!(
+        profile,
+        FamilyProfile::FixedV1 | FamilyProfile::DynamicV2 | FamilyProfile::AffineV3 | FamilyProfile::Bf16MoeV5
+    ) {
         return Err(invalid());
     }
     let target = &config["decoder_config"]["transformer_config"];
@@ -54,7 +57,7 @@ pub(super) fn extend_contract(
     let qkvg = query.checked_add(kv).and_then(|n| n.checked_mul(2)).ok_or_else(invalid)?;
     let doubled_model = model.checked_mul(2).ok_or_else(invalid)?;
     let doubled_hidden = hidden.checked_mul(2).ok_or_else(invalid)?;
-    for (name, dtype, shape) in [
+    let mut expected = vec![
         ("embedding_norm.scales", "F32", vec![model]),
         ("hidden_norm.scales", "F32", vec![model]),
         ("fusion.weights.weights", "BF16", vec![model, doubled_model]),
@@ -65,9 +68,36 @@ pub(super) fn extend_contract(
         ("transformer.layers.0.mixer.key_norm.scales", "F32", vec![head_dim]),
         ("transformer.layers.0.mixer.qkvg_projection.weights.weights", "BF16", vec![qkvg, model]),
         ("transformer.layers.0.mixer.out_projection.weights.weights", "BF16", vec![model, query]),
-        ("transformer.layers.0.mlp.up_projection.weights.weights", "BF16", vec![doubled_hidden, model]),
-        ("transformer.layers.0.mlp.down_projection.weights.weights", "BF16", vec![model, hidden]),
-    ] {
+    ];
+    if matches!(profile, FamilyProfile::Bf16MoeV5) {
+        let mlp = &attention["mlp_config"];
+        let count = |name| mlp[name].as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(invalid);
+        let experts = count("num_routed_experts")?;
+        let width = count("expert_hidden_dim")?;
+        if !(1..=1024).contains(&experts) || width == 0 || width > 131072 {
+            return Err(invalid());
+        }
+        let up = experts.checked_mul(width).and_then(|n| n.checked_mul(2)).ok_or_else(invalid)?;
+        let down = experts.checked_mul(model).ok_or_else(invalid)?;
+        expected.extend([
+            ("transformer.layers.0.mlp.experts.up_projection.weights.weights", "BF16", vec![up, model]),
+            ("transformer.layers.0.mlp.experts.down_projection.weights.weights", "BF16", vec![down, width]),
+            ("transformer.layers.0.mlp.router.weights.weights", "BF16", vec![experts, model]),
+            ("transformer.layers.0.mlp.shared_gate.weights.weights", "BF16", vec![1, model]),
+            (
+                "transformer.layers.0.mlp.shared_expert.up_projection.weights.weights",
+                "BF16",
+                vec![doubled_hidden, model],
+            ),
+            ("transformer.layers.0.mlp.shared_expert.down_projection.weights.weights", "BF16", vec![model, hidden]),
+        ]);
+    } else {
+        expected.extend([
+            ("transformer.layers.0.mlp.up_projection.weights.weights", "BF16", vec![doubled_hidden, model]),
+            ("transformer.layers.0.mlp.down_projection.weights.weights", "BF16", vec![model, hidden]),
+        ]);
+    }
+    for (name, dtype, shape) in expected {
         shape.iter().try_fold(1u32, |n, width| n.checked_mul(*width)).ok_or_else(invalid)?;
         if tensors.tensors.insert(format!("mtp.{name}"), (dtype, shape)).is_some() {
             return Err(invalid());
@@ -83,6 +113,10 @@ mod tests {
     use super::*;
 
     fn fixture() -> Value {
+        fixture_with_norm(false)
+    }
+
+    fn fixture_with_norm(raw_bf16: bool) -> Value {
         let mut decoder = super::super::decoder_profile();
         fn folded(value: &mut Value) {
             match value {
@@ -98,7 +132,9 @@ mod tests {
                 _ => {},
             }
         }
-        folded(&mut decoder);
+        if !raw_bf16 {
+            folded(&mut decoder);
+        }
         let target = &decoder["transformer_config"];
         let mut predictor = target["layer_configs"][3].clone();
         let rope = &predictor["rope_config"];
@@ -135,11 +171,51 @@ mod tests {
     }
 
     #[stark_test]
+    fn image_bf16_mtp_contract_preserves_raw_norm_offsets_and_full_precision_head() {
+        let config = fixture_with_norm(true);
+        assert_eq!(config["mtp_config"]["input_norm_config"]["scale_offset"], json!(1.0));
+        for profile in [FamilyProfile::FixedV1, FamilyProfile::DynamicV2] {
+            let mut tensors = contract();
+            tensors.affine = false;
+            extend_contract(&config, profile, &mut tensors).unwrap();
+            assert_eq!(tensors.tensors.len(), 12);
+            assert_eq!(tensors.tensors["mtp.transformer.layers.0.mlp.up_projection.weights.weights"].0, "BF16");
+        }
+    }
+
+    #[stark_test]
+    fn image_bf16_expert_mtp_contract_binds_routed_shared_and_gate_payloads() {
+        let mut config = fixture_with_norm(true);
+        let dense = config["decoder_config"]["transformer_config"]["layer_configs"][0]["mlp_config"].clone();
+        let expert = json!({"type":"MixtureOfExpertsConfig","expert_config":dense,"router_config":{},
+            "routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":4,"num_active_routed_experts":2,
+            "router_has_biases":false,"num_shared_experts":1,"expert_hidden_dim":256,"gate_config":{}});
+        for layer in config["decoder_config"]["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+            layer["mlp_config"] = expert.clone();
+        }
+        config["mtp_config"]["transformer_config"]["layer_configs"][0]["mlp_config"] = expert;
+        let mut tensors = contract();
+        tensors.affine = false;
+        extend_contract(&config, FamilyProfile::Bf16MoeV5, &mut tensors).unwrap();
+        assert_eq!(tensors.tensors.len(), 16);
+        assert_eq!(
+            tensors.tensors["mtp.transformer.layers.0.mlp.experts.up_projection.weights.weights"],
+            ("BF16", vec![2048, 1024])
+        );
+        assert_eq!(
+            tensors.tensors["mtp.transformer.layers.0.mlp.experts.down_projection.weights.weights"],
+            ("BF16", vec![4096, 256])
+        );
+        let mut changed = config;
+        changed["mtp_config"]["transformer_config"]["layer_configs"][0]["mlp_config"]["num_active_routed_experts"] =
+            json!(1);
+        assert!(extend_contract(&changed, FamilyProfile::Bf16MoeV5, &mut contract()).is_err());
+    }
+
+    #[stark_test]
     fn image_dense_mtp_contract_rejects_new_operations_and_unsupported_profiles() {
         let config = fixture();
-        for profile in
-            [FamilyProfile::FixedV1, FamilyProfile::DynamicV2, FamilyProfile::MoeV4, FamilyProfile::Bf16MoeV5]
-        {
+        for profile in [FamilyProfile::MoeV4, FamilyProfile::Bf16MoeV5] {
             assert!(extend_contract(&config, profile, &mut contract()).is_err());
         }
         for (pointer, value) in [

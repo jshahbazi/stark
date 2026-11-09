@@ -58,7 +58,9 @@ fn safe_file(
 }
 
 /// Returns a request-plan candidate only when local identity exactly matches
-/// one of the two pinned text artifacts. Images are rejected by the caller.
+/// one of the two pinned text artifacts. A resident image tower does not change
+/// that identity; this plan applies only to text requests, while image requests
+/// retain their separate admission path.
 pub fn qualified_plan(root: &Path) -> Option<AdmissionPlan> {
     let inventory: serde_json::Value = serde_json::from_str(INVENTORY).ok()?;
     qualified_plan_with_inventory(root, &inventory)
@@ -291,6 +293,19 @@ mod tests {
         assert!(plan.applies_to(32768, 2));
         assert!(!plan.applies_to(32769, 0));
         assert!(!plan.applies_to(32768, 3));
+    }
+
+    #[stark_test]
+    fn image_manifest_does_not_change_exact_text_plan_or_relax_payload_checks() {
+        let fixture = Fixture::new();
+        let inventory = fixture.inventory();
+        let text = qualified_plan_with_inventory(&fixture.root, &inventory).unwrap();
+        // Image admission validates this sidecar independently. Its presence
+        // does not change any of the exact text-policy identity inputs.
+        fs::write(fixture.root.join("stark-image-artifact.json"), b"{}").unwrap();
+        assert_eq!(qualified_plan_with_inventory(&fixture.root, &inventory), Some(text));
+        fs::write(fixture.root.join("config.json"), b"changed decoder").unwrap();
+        assert!(qualified_plan_with_inventory(&fixture.root, &inventory).is_none());
     }
 
     #[stark_test]

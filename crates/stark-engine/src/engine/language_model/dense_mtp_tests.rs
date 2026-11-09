@@ -78,6 +78,29 @@ fn collect(
     output
 }
 
+fn collect_ordinary(
+    model: &LanguageModel<Metal>,
+    state: &mut super::state::LanguageModelState<Metal>,
+    input: &[u32],
+    stochastic: bool,
+) -> Vec<u32> {
+    let mut options = model.default_stream_options();
+    options.sampling_method = if stochastic {
+        super::stream::SamplingMethod::Stochastic {
+            temperature: Some(0.8),
+            top_k: Some(32),
+            top_p: Some(0.9),
+            min_p: None,
+            repetition_penalty: None,
+            suffix_repetition_length: None,
+        }
+    } else {
+        super::stream::SamplingMethod::Greedy
+    };
+    let input = input.iter().copied().map(u64::from).collect::<Vec<_>>();
+    model.stream_text(&input, state, options).unwrap().take(16).map(|token| token.unwrap() as u32).collect()
+}
+
 #[stark_test]
 // Requires explicitly generated private dense-MTP toy artifact.
 #[ignore]
@@ -86,6 +109,10 @@ fn dense_mtp_toy_greedy_and_prefix_metal() {
     let engine = Engine::<Metal>::new().unwrap();
     let model = engine.load_language_model(&path).unwrap();
     assert!(model.has_dense_mtp());
+    let ordinary_bytes = model.ordinary_text_generation_memory_bytes(1100, 4096, 16).unwrap();
+    let predictor_bytes = model.generation_memory_bytes(1100, 4096, 16).unwrap();
+    assert!(ordinary_bytes < predictor_bytes, "ordinary requests must not allocate inactive predictor state");
+    assert!(model.generation_memory_bytes_with_text_prefix(1100, 4096, 16).unwrap() > ordinary_bytes);
     let short = (0..32).map(|i| 1 + i % 31).collect::<Vec<u32>>();
     let baseline = collect(&model, &mut model.prefill_dense_mtp(&short, 4096).unwrap(), 0, false);
     // One prefill row also fixes readout GEMV geometry on both routes.
@@ -127,6 +154,18 @@ fn dense_mtp_toy_greedy_and_prefix_metal() {
             let fresh = collect(&model, &mut model.prefill_dense_mtp(&followup, 4096).unwrap(), drafts, stochastic);
             assert!(reused == fresh, "restored and fresh target token hashes differ");
         }
+        // MTP0 now uses the ordinary stream, rather than a zero-draft
+        // predictor session. Exercise multi-token decode and its own snapshot.
+        let mut ordinary = model.create_empty_state(Some(4096), 17).unwrap();
+        model.prepare_text_prefix_capture(&mut ordinary, 1024).unwrap();
+        collect_ordinary(&model, &mut ordinary, &prompt, stochastic);
+        assert_eq!(ordinary.text_prefix_position(), Some(1024));
+        model.restore_text_prefix(&mut ordinary, 1024, Some(4096), 17).unwrap();
+        model.prepare_text_prefix_capture(&mut ordinary, 1024).unwrap();
+        let reused = collect_ordinary(&model, &mut ordinary, &followup[1024..], stochastic);
+        let mut fresh = model.create_empty_state(Some(4096), 17).unwrap();
+        let expected = collect_ordinary(&model, &mut fresh, &followup, stochastic);
+        assert!(reused == expected, "headed ordinary stream fresh/restored output differs");
     }
     let other = engine.load_language_model(&path).unwrap();
     let mut session = model.prefill_dense_mtp(&prompt, 4096).unwrap();

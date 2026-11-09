@@ -70,9 +70,10 @@ or conversion layout. Prefix reuse does not by itself enable MTP. Dense affine
 version-3 conversion retains a complete declared compatible predictor and binds
 its configuration and tensors to the admitted target. Text requests can execute
 that predictor while the tower is resident; image requests retain zero drafts.
-Admitted dense affine artifacts with a complete head retain a separate ordinary
+Admitted dense BF16, dense affine and affine MoE artifacts retain a separate ordinary
 text execution graph using the existing Legacy numerical policy, unscaled text
-RoPE and batched MTP verification. It shares immutable validated matrix buffers
+RoPE and, when an admitted compatible head exists, batched MTP verification.
+It shares immutable validated matrix buffers
 with the reference image graph; graph-specific controls remain independent and
 any signed-code representation change uses private storage. Normal text worker
 requests select this graph, including MTP-off requests. Image requests use the
@@ -81,8 +82,10 @@ retained dense text prefixes additionally key the execution graph, precision and
 draft depth. Cross-graph preflight rejection does not fence a usable model.
 The [27B follow-up](archive/runs/2026-11-09-qwen27-shared-weight-fast-text.md)
 records exact configuration/payload equality and bounded performance and cache
-checks. Other profiles keep their admitted image graph and separate qualification
-gates; no family inherits this artifact's result.
+checks. The [remaining-family comparison](benchmarks/2026-11-09-qwen-remaining-image-text-parity.md)
+records bounded headless dense BF16, affine and affine MoE speed evidence, including
+shared expert banks. These results do not qualify BF16 heads, other artifacts or
+BF16 MoE, which retains its reference text graph pending separate work.
 
 ## Config-derived family profile
 
@@ -116,11 +119,15 @@ covered by geometry fixtures; that evidence alone does not establish runtime
 execution for each size.
 
 Required matrices and convolution weights must be BF16. Explicit norm-scale,
-`a_log` and `dt_bias` control-weight exceptions may originate in FP32. Declared
-auxiliary BF16 and MoE MTP tensors retain the existing omission policy pending
-their separate compatible predictor implementation and qualification. They must
-remain open work items when the selected source actually contains a head; this
-limitation is not evidence that the upstream model lacks MTP.
+`a_log` and `dt_bias` control-weight exceptions may originate in FP32. Complete
+declared raw BF16 dense predictors and the official separate-expert BF16 MoE
+predictor now have conversion and strict tensor-contract implementations. A
+present incomplete head fails conversion; it is never silently stripped. Raw
+norm scales retain the explicit gain offset of one. The pinned 0.8B output uses
+schema 3 when a head is retained; existing headless schema-2 artifacts keep their
+frozen contract. Native BF16-head execution and performance remain unqualified
+in this increment, and the full official BF16 MoE payload is absent locally.
+Quantized MoE heads and dedicated predictor embeddings require separate support.
 
 Weights may differ from the official checkpoint. Metadata must use recognized
 forms:

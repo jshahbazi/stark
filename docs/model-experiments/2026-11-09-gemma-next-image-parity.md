@@ -452,3 +452,10 @@ before changing head arithmetic. Do not loosen tolerances, remove the public
 remains qualified only for its original source, binary, input and one-step scope.
 Normal-worker integration must retain published Qwen commits `48c5aa52` and
 `e4144be5`, including the ordinary headed MTP0 dispatch/cache/memory fix.
+
+The following integration merge retains that complete published Qwen lineage.
+Its only code conflict resolves the shared snapshot-cache rename while keeping
+Gemma3/Gemma4 capture, restore and suffix paths. Both benchmark index entries
+remain. Formatting and whitespace checks pass; a native build and checks on
+this merged source are still required in the next exclusive build slot. Prior
+Gemma/Qwen binaries and artifact results retain their original source scope.

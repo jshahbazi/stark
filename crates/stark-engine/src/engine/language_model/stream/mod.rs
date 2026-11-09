@@ -124,6 +124,22 @@ impl<B: Backend> LanguageModel<B> {
         LanguageModelStream::new(self, input, state, options)
     }
 
+    /// Ordinary text execution with optional exact snapshot restoration.
+    /// Fresh state and a restored non-final chunk have separate admission.
+    pub fn stream_text<'a>(
+        &'a self,
+        input: &[u64],
+        state: &'a mut LanguageModelState<B>,
+        options: LanguageModelStreamOptions,
+    ) -> Result<LanguageModelStream<'a, B>, LanguageModelStreamError<B>> {
+        if state.tokens().is_empty() {
+            self.preflight_plain_text_stream(input, state, &options)?;
+        } else {
+            self.preflight_restored_text_stream(input, state, &options)?;
+        }
+        self.stream(input, state, options)
+    }
+
     /// Internal projected-feature path. Serving remains disabled until the
     /// processor, vision tower and exact artifact are qualified together.
     pub(crate) fn stream_multimodal<'a>(

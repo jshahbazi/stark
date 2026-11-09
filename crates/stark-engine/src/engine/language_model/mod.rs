@@ -332,18 +332,40 @@ impl<B: Backend> LanguageModel<B> {
         estimate.total_bytes()
     }
 
-    pub(crate) fn generation_memory_bytes_with_text_prefix(
+    /// Inventory the ordinary target stream without allocating predictor state.
+    /// Loaded predictor weights remain resident and are not request workspace.
+    pub fn ordinary_text_generation_memory_bytes(
         &self,
         input_tokens: u32,
         context_tokens: u32,
         max_new_tokens: u32,
     ) -> Option<usize> {
-        let bytes = self.generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)?;
+        if self.speculator.is_some() || self.max_context_length().is_some_and(|maximum| context_tokens > maximum) {
+            return None;
+        }
+        let allocated = self.generation_allocation_context_length(input_tokens, context_tokens, max_new_tokens)?;
+        let estimate = self.decoder.memory_estimate(allocated, input_tokens.max(1))?;
+        let reserved = self.decoder.context_cache_buffer_bytes(context_tokens)?;
+        if self.engine.context.max_buffer_length().is_some_and(|limit| estimate.max_buffer_bytes.max(reserved) > limit)
+        {
+            return None;
+        }
+        estimate.total_bytes()
+    }
+
+    /// Include the recurrent-state snapshot retained by an ordinary text stream.
+    pub fn generation_memory_bytes_with_text_prefix(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        let bytes = self.ordinary_text_generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)?;
         if !self.text_prefix_snapshot_supported() {
             return Some(bytes);
         }
         let allocated = self.generation_allocation_context_length(input_tokens, context_tokens, max_new_tokens)?;
-        let snapshot = self.context_memory_estimate(allocated, input_tokens)?.prefix_snapshot_bytes;
+        let snapshot = self.decoder.memory_estimate(allocated, input_tokens.max(1))?.prefix_snapshot_bytes;
         bytes.checked_add(snapshot)
     }
 
