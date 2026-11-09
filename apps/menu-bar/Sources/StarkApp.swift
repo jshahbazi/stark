@@ -260,6 +260,8 @@ struct InstalledModel: Identifiable, Equatable {
     let artifactMode: ModelArtifactMode?
     let removal: InstalledModelRemoval?
 
+    var displayName: String { ModelsInventory.readableName(name, display: display) }
+
     init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil,
          artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil) {
         self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.display = display
@@ -913,7 +915,7 @@ struct ModelsInventory {
     init(models: [InstalledModel], loadedID: String, registry: ModelFamilyRegistry?,
          query: String = "", sort: ModelBrowserSort = .nameAscending) {
         func row(_ model: InstalledModel) -> Model {
-            Model(id: model.id, name: model.name, displayName: Self.readableName(model.name, display: model.display),
+            Model(id: model.id, name: model.name, displayName: model.displayName,
                   isRunning: !loadedID.isEmpty && model.id == loadedID,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
                   sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode,
@@ -2526,7 +2528,7 @@ struct RunningModelLabel: View {
     @ObservedObject var engine: EngineController
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(engine.activeModel?.name ?? engine.startableModel?.name ?? engine.activeName)
+            Text(engine.activeModel?.displayName ?? engine.startableModel?.displayName ?? engine.activeName)
                 .lineLimit(1).truncationMode(.middle)
             if !engine.activeVersionDetails.isEmpty {
                 Text(engine.activeVersionDetails).font(.caption).foregroundStyle(.secondary)
@@ -2566,7 +2568,7 @@ struct MenuView: View {
                 Button(interface.mode == .beginner ? "Guided setup" : "Manage Models", action: manage)
                     .buttonStyle(.borderedProminent)
                 Button("Start model", action: engine.startModel).disabled(!engine.canStartModel)
-                    .help(engine.startableModel.map { "Start " + $0.name } ?? "Choose a model first")
+                    .help(engine.startableModel.map { "Start " + $0.displayName } ?? "Choose a model first")
                 Button("Stop model", action: engine.stop).disabled(!engine.canStopCurrentModel)
             }.controlSize(.small)
             if interface.mode == .advanced && engine.mode == .chat { SpeedView(engine: engine) }
