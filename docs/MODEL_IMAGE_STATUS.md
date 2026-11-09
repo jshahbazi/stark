@@ -7,6 +7,13 @@ inventory into current implementation/qualification tasks, includes the later
 Lily text-MTP evidence on PR #112, and defines the standing requirements for
 future models. The source-bound snapshot below retains its original scope.
 
+Correction verified 2026-11-09: **GLM-5.3 Flash supports images upstream**.
+Stark's native GLM routes currently implement text execution only. The
+[pinned source configuration](https://huggingface.co/zai-org/GLM-5.3-Flash/blob/04c4e9e95c5da8862dced7e5056455116f83a7e0/config.json)
+includes its vision encoder and image tokens. This is missing Stark image
+implementation, tracked as IMGPAR-15 in the worklist, rather than source image
+N/A. The GLM family row below describes the Stark route.
+
 The scope is all 18 generic converter families plus the two additional native families, their distinct image paths, and all 120 pinned repository entries. Live Hugging Face discovery can return more compatible checkpoints; those cannot be exhaustively enumerated and need individual preflight and validation.
 
 **Added** means implementation exists. **Verified** names the actual evidence. **Qualify** means run the missing checks; it does not imply a known numerical defect. **Implement/fix** identifies missing code or metadata. A text-only artifact can come from an image-capable source. Its format and preparation route determine what Stark can load.
@@ -61,7 +68,7 @@ The quick Lily regression in this chat used its existing **text-loaded** worker.
 | LFM2 `lfm2` | Implemented text/conditional Decision | No image route | LFM vision and planned LFM2.5 entries do not inherit support. |
 | LLaMBA `llamba` | Implemented text/conditional Decision | No image route | No image implementation established. |
 | ModernBERT `modernbert` | Classifier conversion | No app chat/Decision/image workflow | Do not advertise as a supported chat model. |
-| GLM-5.3 Flash `glm5_next` | Native pinned GGUF text path; optional EXL3 profiles separate | No image execution | Text support only. Full GLM-5.3 `glm_moe_dsa` is a different, unsupported architecture. |
+| GLM-5.3 Flash `glm5_next` | Native pinned GGUF text path; optional EXL3 profiles separate | Source supports images; Stark image execution missing | Implement vision loading/fusion, then qualify cache, text speed and supported text MTP with images resident (IMGPAR-15). Full GLM-5.3 `glm_moe_dsa` is a different, unsupported architecture. |
 | Flint `flint` | Native pinned INT4 text path | No image execution | Image support would require implementation. Prefix restoration remains separately blocked/unqualified. |
 
 Decision mode additionally requires a compatible direct-answer template, unique single-token labels and checkpoint checks. Family recognition or conversion does not certify Decision accuracy, runtime execution or image support. [Registry][registry] [Native registrations][native-registry]

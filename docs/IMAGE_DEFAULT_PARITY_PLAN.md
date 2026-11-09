@@ -2,10 +2,11 @@
 
 This is the implementation and qualification worklist derived from the
 [model status inventory](MODEL_IMAGE_STATUS.md). Source baseline: main
-`af3e37aa`. [PR #110](https://github.com/jshahbazi/stark/pull/110) and
-[PR #112](https://github.com/jshahbazi/stark/pull/112) are open at this snapshot.
-Their branch results are evidence for their named artifacts, not shipped support.
-This document adds requirements and planned work; no model was run to create it.
+`af3e37aa`, refreshed against main `4a494e34` on 2026-11-09.
+[PR #110](https://github.com/jshahbazi/stark/pull/110) is merged;
+[PR #112](https://github.com/jshahbazi/stark/pull/112) remains open.
+Their results qualify only their named artifacts; merging does not establish
+release or installed-app support. No model was run to create this worklist.
 
 ## Required product behavior
 
@@ -43,8 +44,8 @@ models. A shared fix does not complete every checkpoint/quantization row.
 
 | ID / priority | Family / actual artifact path | Current evidence | Cache work | Text performance with images loaded | Text MTP work | Completion scope |
 | --- | --- | --- | --- | --- | --- | --- |
-| IMGPAR-00 / P0 | Shared catalog, preparation and host defaults | Automatic image selection merged in #109; vision-worker prefix request is in #110 | Ensure the loaded worker advertises and receives supported cache scope; all image operations clear it | Audit every selectable default route; a faster text-only export must not silently replace the image-capable default | Preserve existing MTP preferences and capability; force zero drafts only for image requests | Merge/review #110/#112, then check the normal install/load/host flow, memory admission and capability reporting |
-| IMGPAR-01 / P1 | Qwen3.5 dense BF16, converted vision | #110 has exact cache/lifecycle checks and bounded paired timing on official 0.8B only | Finish delivery of #110; qualify 2B/4B/9B/27B and fine-tunes separately, including transitions through images | Repeat matched loading-mode text checks for each admitted artifact/precision; 0.8B timing does not qualify other sizes | Inventory actual source heads and text support; preserve/implement declared supported heads rather than inferring N/A from an export that omitted them | Exact artifact and supported context/sampling policy; keep the 0.8B result as a reference |
+| IMGPAR-00 / P0 | Shared catalog, preparation and host defaults | Automatic image selection merged in #109; vision-worker prefix request merged in #110 | Ensure the loaded worker advertises and receives supported cache scope; all image operations clear it | Audit every selectable default route; a faster text-only export must not silently replace the image-capable default | Preserve existing MTP preferences and capability; force zero drafts only for image requests | Finish #112 review/delivery, then check the normal install/load/host flow, memory admission and capability reporting |
+| IMGPAR-01 / P1 | Qwen3.5 dense BF16, converted vision | Merged #110 has exact cache/lifecycle checks and bounded paired timing on official 0.8B only | Qualify 2B/4B/9B/27B and fine-tunes separately, including transitions through images | Repeat matched loading-mode text checks for each admitted artifact/precision; 0.8B timing does not qualify other sizes | Inventory actual source heads and text support; preserve/implement declared supported heads rather than inferring N/A from an export that omitted them | Exact artifact and supported context/sampling policy; keep the 0.8B result as a reference |
 | IMGPAR-02 / P1 | Qwen3.5 dense affine 4/8-bit decoder + BF16 tower | Small source-logit/image evidence exists; affine prefix parity is not qualified by the BF16 0.8B run | Qualify the new converted snapshot route for each quantization/layout | Compare the same packed target, precision and kernels with vision off/on; cached follow-ups separately | Converted image artifacts omit heads. Where the corresponding model/text artifact supports MTP, retain config/weights, expose text execution and qualify predictor/cache state | Each actual packed artifact; unsupported quantizers/towers need implementation first |
 | IMGPAR-03 / P1 | Dense Qwen3.8-27B, `Jundot/Qwen3.8-27B-oQ4e-mtp` | Text MTP exists; converted image tower/worker evidence is separate from full decoder parity | Qualify image-loaded target/predictor prefix restoration and required MTP-selection keys | Compare the same 27B mixed-affine target with vision off/on at matching draft depth; check full decoder reference behavior | Implement retention/loading/execution of the existing text head in the vision artifact; image MTP stays off | Full 27B artifact, each admitted head/readout configuration and draft policy; no inheritance from Flash Next |
 | IMGPAR-04 / P1 | Qwen3.8 Flash Next, retained Lily Q4-XL schema 6 | #112 passes bounded greedy/seeded/long-prefix, MTP-switch and image→text controls; short paired MTP2 text speed matches | Existing 4,096-token snapshots plus host enablement; finish delivery and cover remaining error/cancellation/host cases | Bounded MTP2 comparison completed on #112; extend to representative prompt/output lengths, MTP-off and normal context workloads before claiming whole-family parity | Resident head and text capability fixed in #112; merge and preserve zero image drafts/counters | Exact pinned Lily artifact; distinguish completed branch checks, broader qualification, release and installed app |
@@ -58,10 +59,30 @@ models. A shared fix does not complete every checkpoint/quantization row.
 | IMGPAR-12 / P2 | Gemma 4 31B | Tower/projector feature gates; complete 31B generation unqualified | Full execution plus ring-state restoration | Full decoder parity and paired text measurements; bound remaining numerical controls | Inspect source/head support; document N/A only with evidence | Exact pinned full checkpoint; component similarity is insufficient |
 | IMGPAR-13 / P1 route audit | Typed Uzu Lily text export and original PipeNetwork/F32 route | Typed export omits vision/MTP; Pipe route lacks fusion and exact prefix support | Do not select an incomplete route as the completed default for an image-capable model; implement restoration if retaining that route | Qualify the actual chosen default graph; a text-only benchmark does not prove image-loaded parity | Typed format needs head preservation/execution if offered as a full-capability route | Prefer an implemented retained image route where compatible; otherwise implement missing functionality and qualify the distinct format |
 | IMGPAR-14 / P3 | Gemma 3 quantized image exports | No admitted/qualified quantized image route; BF16 evidence does not transfer | Add/admit the quantization first, then qualify ring snapshots on its real state layout | Match the same packed target and precision with image support loaded; do not substitute a BF16 benchmark | Inspect the exact source/head contract; no inferred MTP capability from the BF16 or sibling model | Each intended 4/8-bit artifact, complete native image execution and the full applicable parity matrix |
+| IMGPAR-15 / P2 | GLM-5.3 Flash `glm5_next`, native GGUF and optional EXL3 routes | Upstream source supports images; Stark currently executes text only | Implement the vision bridge, then qualify existing recurrence/convolution/attention snapshots and image invalidation on each actual route | Compare the same quantized target and precision with images resident; include memory admission and full image execution first | Preserve the supported text MTP policy on routes that implement it; the ordinary GGUF route currently does not execute its source head | Exact source, vision payload and backend; missing Stark implementation cannot be marked image N/A |
 
 The P1 route audit is a selection/implementation task, not permission to remove
 working alternative formats or claim incompatible checkpoints use the same path.
 Any remaining route limitation must be explicit in the catalog and support docs.
+
+## Active implementation branches
+
+Work began on 2026-11-09. These assignments describe work in progress, not
+completed implementation or qualification. Builds and model/GPU runs are
+serialized by the coordinating agent; source work proceeds in isolated worktrees.
+
+| Scope | Branch | Ownership |
+| --- | --- | --- |
+| IMGPAR-01/02/03: Qwen3.5 dense BF16/affine and Qwen3.8-27B | [codex/qwen-dense-image-parity](https://github.com/jshahbazi/stark/tree/codex/qwen-dense-image-parity) | Shared Qwen vision conversion and dense text MTP integration; grouped to avoid conflicting changes |
+| IMGPAR-08/09: Qwen3.5 MoE affine/BF16 | [codex/qwen-moe-image-parity](https://github.com/jshahbazi/stark/tree/codex/qwen-moe-image-parity) | MoE artifact admission, actual head inventory and model-bound text/cache checks; coordinate shared APIs with dense work |
+| IMGPAR-07/10/11/12: Gemma 4 | [codex/gemma4-image-parity](https://github.com/jshahbazi/stark/tree/codex/gemma4-image-parity) | Exact attention-ring snapshots, shared-KV/PLE state and small-profile qualification first |
+
+GLM-5.3 Flash is queued in IMGPAR-15; its image implementation has not been
+assigned in this batch. The upstream [model card](https://huggingface.co/zai-org/GLM-5.3-Flash)
+and [configuration at Stark's pinned metadata revision](https://huggingface.co/zai-org/GLM-5.3-Flash/blob/04c4e9e95c5da8862dced7e5056455116f83a7e0/config.json)
+identify `Glm5NextForConditionalGeneration`, a `vision_config`, image token IDs
+and one next-token prediction layer. This establishes source capability,
+not image execution or MTP support in every Stark backend.
 
 ## Families without a current image path
 
@@ -75,7 +96,8 @@ not evidence that the source is text-only.
 | Qwen2 dense, Qwen3 dense, Llama dense, Mistral dense | Existing text cache/performance/MTP checks remain. Inspect source architecture; multimodal siblings require separate image onboarding and the full matrix above. |
 | Gemma 2, Gemma 3 text and compatible derivatives, OLMo 3 | Distinguish a genuinely text-only source from an export/wrapper that removed vision. If capable, enter the relevant image queue; otherwise record image N/A and retain text gates. |
 | Phi-3 dense, Granite dense, SmolLM3 dense, LFM2, LLaMBA | Audit actual selected config/head inventory; no automatic image or MTP claim from brand names. Future vision paths must pass all applicable gates. |
-| Native GLM-5.3 Flash and Flint | Existing text state/performance qualifications still apply. Flint's documented prefix blocker stays open; no image route does not make cache correctness a pass. Any image extension must preserve existing text optimizations. Full GLM-5.3 is a different architecture. |
+| Native GLM-5.3 Flash | Image-capable source with a missing Stark image path: see IMGPAR-15. Existing text state/performance qualifications remain backend-specific. Full GLM-5.3 is a different architecture. |
+| Flint | Inspect exact source capability; its documented prefix blocker stays open. A missing image route does not make cache correctness a pass. Any image extension must preserve existing text optimizations. |
 | ModernBERT classifier | No current app generation/image/MTP workflow. Record the classifier-specific contract; do not advertise chat parity or treat it as a language-model pass. |
 
 This covers all 20 registrations from the status table. Planned/null-adapter
