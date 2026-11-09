@@ -350,4 +350,71 @@ impl<B: Backend> QwenMtp<B> {
         }
         Ok(result)
     }
+
+    #[cfg(test)]
+    pub(crate) fn validation_primitive_stages(
+        &self,
+        captured: &[(&'static str, B::GlobalBuffer)],
+        rows: u32,
+        context: &B::Context,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Vec<(&'static str, B::GlobalBuffer, Vec<usize>)>, QwenMtpError<B>> {
+        use std::any::Any;
+
+        use crate::{
+            backends::common::{Buffer, Context, gpu_types::trie::TrieNode},
+            encodable_block::mixer::attention::{Attention, rope::PrecalculatedRoPE},
+        };
+        if rows == 0 || rows > 16 {
+            return Err(QwenMtpError::Invalid);
+        }
+        let (layer, rope) = self.transformer.validation_first_layer().ok_or(QwenMtpError::Invalid)?;
+        let positions = (0..rows).collect::<Vec<_>>();
+        let rope = rope
+            .map(|config| PrecalculatedRoPE::<B>::precalculate(config, &positions, commands))
+            .transpose()
+            .map_err(QwenMtpError::Backend)?;
+        let nodes = (0..rows)
+            .map(|height| TrieNode {
+                height,
+                trie_start: height,
+                trie_end: rows - 1,
+            })
+            .collect::<Vec<_>>();
+        let topology = BatchTopology::new(&nodes, true);
+        let input = |name: &str,
+                     commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding|
+         -> Result<B::ScratchBuffer, QwenMtpError<B>> {
+            let value = captured.iter().find(|(stage, _)| *stage == name).ok_or(QwenMtpError::Invalid)?;
+            let mut copy = commands.allocate_scratch(value.1.size()).map_err(QwenMtpError::Backend)?;
+            commands.encode_copy(&value.1, &mut copy);
+            Ok(copy)
+        };
+        let attention =
+            (layer.mixer.as_ref() as &dyn Any).downcast_ref::<Attention<B>>().ok_or(QwenMtpError::Invalid)?;
+        let stages = attention
+            .validation_stateless_stages(input("pre_attention", commands)?, rope.as_ref(), &topology, commands)
+            .map_err(QwenMtpError::Backend)?;
+        let mut result = Vec::new();
+        for (name, data, shape) in stages {
+            let mut saved = context.create_buffer(data.size()).map_err(QwenMtpError::Backend)?;
+            commands.encode_copy(&data, &mut saved);
+            result.push((name, saved, shape));
+        }
+        let stages = layer
+            .mlp
+            .validation_trace_dense(input("pre_mlp", commands)?, rows, commands)
+            .map_err(QwenMtpError::Backend)?
+            .ok_or(QwenMtpError::Invalid)?;
+        for (name, data) in stages {
+            if data.size() % (rows as usize * 2) != 0 {
+                return Err(QwenMtpError::Invalid);
+            }
+            let columns = data.size() / (rows as usize * 2);
+            let mut saved = context.create_buffer(data.size()).map_err(QwenMtpError::Backend)?;
+            commands.encode_copy(&data, &mut saved);
+            result.push((name, saved, vec![1, rows as usize, columns]));
+        }
+        Ok(result)
+    }
 }

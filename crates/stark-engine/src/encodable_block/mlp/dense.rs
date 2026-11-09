@@ -29,6 +29,35 @@ impl<B: Backend> DenseMlp<B> {
 }
 
 impl<B: Backend> Mlp<B> for DenseMlp<B> {
+    #[cfg(test)]
+    fn validation_trace_dense(
+        &self,
+        input: B::ScratchBuffer,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<Vec<(&'static str, B::ScratchBuffer)>>, B::Error> {
+        use crate::{backends::common::Buffer, encodable_block::linear::LinearInput};
+        if rows == 0 || rows > 16 {
+            return Err(crate::backends::common::InvalidInput("small dense trace required").into());
+        }
+        let fused_up = self.up.encode(input, rows, commands)?;
+        let activated = self.gate.validation_activation(&fused_up, rows, commands)?;
+        let format = self.down.select_activation_format(rows, commands.context());
+        let product = self.gate.encode_for_linear(commands, &fused_up, rows, format)?;
+        let LinearInput::FullPrecision(product) = product else {
+            return Err(crate::backends::common::InvalidInput("full precision dense trace required").into());
+        };
+        let mut saved_product = commands.allocate_scratch(product.size())?;
+        commands.encode_copy(&product, &mut saved_product);
+        let down = self.down.encode_input(LinearInput::FullPrecision(product), rows, commands)?;
+        Ok(Some(vec![
+            ("mlp_fused_up", fused_up),
+            ("mlp_activation", activated),
+            ("mlp_product", saved_product),
+            ("mlp_down", down),
+        ]))
+    }
+
     fn encode(
         &self,
         input: B::ScratchBuffer,

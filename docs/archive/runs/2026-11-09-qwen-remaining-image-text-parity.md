@@ -622,3 +622,92 @@ physical chunks while preserving the logical 1,024-token prefix grid. It also
 keeps the existing chunked GDN threshold of 256. Changing batch shapes needs
 new numerical, cache and matched-performance controls. No production chunk
 policy, full-model retry or memory-floor change is adopted by this audit.
+
+### QNIP tiny affine command-heap attribution: passed
+
+The independently reviewed, ignored test uses synthetic affine4/group64 banks,
+BF16 activations, the actual affine numerical profile, eight selected experts,
+and model/hidden dimensions 64. Its 55,296-byte weight/quantization payload
+contains no official model weights. It measures the allocator's own internal
+heap bytes separately from constant pages and upstream-reserved scratch pages.
+An absolute-row BF16 base-32 fixture uniquely identifies all 1,024 rows; an
+explicit wrong-offset `+248` negative control prevents a previous periodic
+fixture from concealing row mistakes.
+
+Two setup failures remain separate: the first compile excluded the test through
+an incorrect `cfg` attribute, and the first native attempt rejected the affine
+fixture under the full-BF16-only numerical profile. Neither produced a heap
+curve. Correcting the test to `cfg(backend = "metal")` and the fixture to
+`Qwen35AffineBF16` changes no production arithmetic. Corrected test binary:
+`b778c65a05ed72406645a1e89a77ce32619a0d0d8a7e8e35f4f19545b4ece8c6`;
+compiled/source seal:
+`6aa7c44d3b304eb31046f1682a401d93bfa60153f756f91e1ed54116a0ac9a65`.
+
+| Rows in one routed layer | Minimum route dispatches | Command heap bytes | Constant-page bytes | Scratch-page bytes |
+| --- | --- | --- | --- | --- |
+| 16 | 768 | 3,809,856 | 262,144 | 8,448 |
+| 64 | 3,072 | 13,787,712 | 262,144 | 29,952 |
+| 256 | 12,288 | 53,862,976 | 524,288 | 115,968 |
+| 1,024 | 49,152 | 213,983,808 | 1,310,720 | 460,032 |
+
+Each encoding is submitted and awaited. The test then repeats four 256-row
+encodings using the same completed/reset allocator, waiting boundedly for the
+existing callback's cache publication. The heap remains at its 213,983,808-byte
+high-water capacity without further growth; reset is not claimed to shrink it.
+All split output rows match the 1,024-row operator execution exactly, and the
+wrong-offset negative passes. This is operator evidence, without transformer
+batch-shape, prefix-cache or complete-model peak qualification.
+
+The one corrected test passes under the preregistered 30-second external /
+25-second internal deadline, 2 GiB RSS/footprint/wired ceilings, 64 GiB actual
+available-memory floor, 8 GiB disk floor and zero paging/swap/compressor growth.
+Three valid process samples record peak RSS `246,923,264` and footprint
+`403,850,128` bytes; all counters remain eligible and every owned process closes.
+The operator duration is 0.355 seconds, without a performance claim.
+Curve receipt: `f1d4cb775622feca5e5b65df5959b626c0c89fe30a3a8329085a7a803044fb3c`;
+supervisor receipt: `4b67c785ed66f8cb2b024bc52b41947be44c772fe64b93d9cd5166501ce72524`;
+failed setup receipt: `877818ee09ff7b99e2fa4634e4f6adaf3984dec3816a23c1585d460f25be7dd0`.
+
+The result establishes material command-heap growth in this small routed
+operator and supports a bounded-execution proposal. Multiplying this curve by
+the complete model's layer/token counts remains an estimate; the failed full
+model's exact allocation attribution is still unmeasured. No full-model retry,
+production execution-cap policy or memory-floor change follows automatically.
+
+### QNIP finer head primitives: localized boundaries, full gate still failed
+
+Before editing production prefill source, the same `b778c65a` test binary exports
+a finer FC-only trace from the unchanged headed BF16 text artifact. The native,
+full-reference and primitive-reference phases all complete in 2.647 seconds
+under separate five-second guards, without paging, compression, swap or foreign
+workers. All children drain and supervisors join. Source/config/payload and
+pinned reference hashes are checked before execution. Preregistration:
+`a23b0afc67a71211b8230ad14e36eac88fe8c04971687e252163ace5ae4f9c2e`;
+execution receipt: `484c0a6b7398adec2081df513dca494eb3af3d31a94470abd8ae80de0d1d5bde`.
+
+The duplicated stateless attention/MLP outputs match the original head trace
+exactly, and its final hidden matches the actual stateful path exactly. Every
+local comparison receives captured native operands, preventing upstream drift
+from being assigned to a later operator. Local Q/K normalization, RoPE, prepared
+Q/K/V and SDPA are exact. Five of 20,480 raw packed-projection elements differ
+from the source's separate Q/gate, K and V projections, with maximum `0.00390625`.
+Output projection on the same gated input differs by at most `0.001953125`.
+
+The attention sigmoid differs by `0.00390625` maximum. Comparing the native
+gated result with native core multiplied by either the source sigmoid or the
+captured native BF16 sigmoid gives `0.015625` maximum error. This identifies a
+BF16 sigmoid/product materialization boundary for a subsequent isolated
+experiment; it does not justify changing QK normalization, RoPE or SDPA.
+
+Four of 28,672 fused MLP projection elements differ (`0.001953125` maximum).
+Standalone SiLU differs by `0.03125`, and the complete product by `0.0625`.
+Multiplying captured native activation and up values exactly reproduces the
+native product, so the local product arithmetic is consistent with its native
+activation. Primitive aggregate:
+`05f0f4da8e26dc19c6a6069e62d14da3cf6d92df4232ff2155d1cfca4c1a1541`.
+
+The unchanged complete-head gate still fails all three hidden absolute limits;
+all logit and top-one gates pass. Full aggregate:
+`a95181746225450b3916e70026d6f907d90be0ea0a4efc7654b23a9463bf9cca`;
+gate receipt: `f647ef82dae77f098395b08ecc0daec78b08f8dbba0754751f0ad53e44aaa140`.
+No arithmetic is adopted and no previous timing is reassigned to this binary.

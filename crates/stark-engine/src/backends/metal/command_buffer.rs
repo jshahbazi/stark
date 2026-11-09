@@ -49,7 +49,50 @@ pub struct MetalCommandBufferEncoding {
     pub(super) context: Arc<MetalContext>,
 }
 
+/// Aggregate-only attribution for bounded native tests. A retained allocator
+/// permits observation after completion; it does not reset in-flight commands.
+#[cfg(test)]
+pub(crate) struct MetalCommandHeapProbe {
+    allocator: Retained<ProtocolObject<dyn MTL4CommandAllocator>>,
+    context: Arc<MetalContext>,
+}
+
+#[cfg(test)]
+impl MetalCommandHeapProbe {
+    pub(crate) fn allocated_bytes(&self) -> u64 {
+        self.allocator.allocated_size()
+    }
+
+    pub(crate) fn is_cached_after_completion(&self) -> bool {
+        self.context
+            .command_buffer_cache
+            .lock()
+            .iter()
+            .any(|cached| Retained::as_ptr(&cached.command_allocator) == Retained::as_ptr(&self.allocator))
+    }
+
+    pub(crate) fn same_allocator(
+        &self,
+        other: &Self,
+    ) -> bool {
+        Retained::as_ptr(&self.allocator) == Retained::as_ptr(&other.allocator)
+    }
+}
+
 impl MetalCommandBufferEncoding {
+    #[cfg(test)]
+    pub(crate) fn validation_heap_probe(&self) -> MetalCommandHeapProbe {
+        MetalCommandHeapProbe {
+            allocator: self.command_allocator.clone(),
+            context: self.context.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_payload_reserved_bytes(&self) -> (usize, usize) {
+        (self.constant_allocator.as_ref().unwrap().reserved_bytes(), self.allocation_pool.reserved_bytes())
+    }
+
     pub fn new(
         context: Arc<MetalContext>,
         name: Option<&str>,

@@ -135,6 +135,7 @@ fn dense_mtp_export_normalized_head_stages() {
     let mut input = first;
     let mut stages = Vec::new();
     let mut input_stages = BTreeMap::new();
+    let mut primitive_stages = BTreeMap::new();
     for (stage, ids) in [&[17u32, 23, 31, 43][..], &[53u32][..], &[61u32][..]].into_iter().enumerate() {
         let rows = ids.len();
         let input_record =
@@ -151,6 +152,16 @@ fn dense_mtp_export_normalized_head_stages() {
                 .unwrap()
                 .validation_fusion_stages(&embedding, &input, rows as u32, context.as_ref(), &mut command)
                 .unwrap();
+            let primitives = if std::env::var_os("STARK_TEST_HEAD_PRIMITIVE_TRACE").is_some() {
+                model
+                    .dense_mtp
+                    .as_ref()
+                    .unwrap()
+                    .validation_primitive_stages(&captured, rows as u32, context.as_ref(), &mut command)
+                    .unwrap()
+            } else {
+                Vec::new()
+            };
             drop(tokens);
             command.end_encoding().submit().wait_until_completed().unwrap();
             input_stages.insert(
@@ -161,6 +172,12 @@ fn dense_mtp_export_normalized_head_stages() {
                 input_stages.insert(
                     name,
                     write_stage(&root, &format!("head-{name}.bf16"), &buffer.copyout::<u8>(), &[1, rows, dim], "bf16"),
+                );
+            }
+            for (name, buffer, shape) in primitives {
+                primitive_stages.insert(
+                    name,
+                    write_stage(&root, &format!("primitive-{name}.bf16"), &buffer.copyout::<u8>(), &shape, "bf16"),
                 );
             }
         }
@@ -184,6 +201,6 @@ fn dense_mtp_export_normalized_head_stages() {
         stages
             .push(json!({"stage":stage,"input":input_record,"normalized_hidden":hidden_record,"logits":logits_record}));
     }
-    let report = json!({"schema":"private-dense-qwen-normalized-head-stages-v1","model_dim":dim,"vocab":vocab,"target_head_policy":"trunk_output_norm","chain_head_policy":"predictor_output_norm","arrays":manifest,"stages":stages,"input_stages":input_stages,"test_only_reference_fusion":reference_fusion,"test_only_reference_linears":reference_linears});
+    let report = json!({"schema":"private-dense-qwen-normalized-head-stages-v1","model_dim":dim,"vocab":vocab,"target_head_policy":"trunk_output_norm","chain_head_policy":"predictor_output_norm","arrays":manifest,"stages":stages,"input_stages":input_stages,"primitive_stages":primitive_stages,"test_only_reference_fusion":reference_fusion,"test_only_reference_linears":reference_linears});
     std::fs::write(root.join("manifest.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
 }

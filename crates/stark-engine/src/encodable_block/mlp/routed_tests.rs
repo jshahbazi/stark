@@ -12,7 +12,15 @@ use crate::{
 };
 
 fn banks(packed: bool) -> std::fs::File {
-    let (experts, model, hidden) = (4usize, 64usize, 64usize);
+    banks_with_experts(packed, 4)
+}
+
+fn banks_with_experts(
+    packed: bool,
+    experts: usize,
+) -> std::fs::File {
+    assert!((1..=8).contains(&experts));
+    let (model, hidden) = (64usize, 64usize);
     let mut header = serde_json::Map::new();
     let mut metadata = serde_json::Map::new();
     let mut payload = Vec::new();
@@ -196,4 +204,152 @@ fn bf16_reference_banks<B: Backend>() {
 #[stark_test]
 fn full_bf16_expert_banks_apply_reference_routes_products_and_partial_sums() {
     for_each_backend!(|B| bf16_reference_banks::<B>());
+}
+
+/// Synthetic affine4/group64 operator attribution, not a full-model memory or
+/// transformer parity proof. Run under the external 30-second resource guard.
+#[cfg(backend = "metal")]
+#[ignore]
+#[stark_test]
+fn routed_affine_command_heap_curve_and_completed_allocator_reuse() {
+    use crate::{backends::metal::Metal, parameters::NumericalProfile};
+
+    let started = std::time::Instant::now();
+    let context = <Metal as Backend>::Context::new().unwrap();
+    let file = banks_with_experts(true, 8);
+    let loader =
+        ParameterLoader::new(&file, &*context).unwrap().with_numerical_profile(NumericalProfile::Qwen35AffineBF16);
+    let config = DenseMLPConfig::unclipped(
+        serde_json::from_value(json!({})).unwrap(),
+        serde_json::from_value(json!({"type":"SiLU","alpha":1.0})).unwrap(),
+        false,
+        false,
+    );
+    let experts = RoutedExperts::<Metal>::new(
+        &context,
+        64,
+        64,
+        8,
+        8,
+        &config,
+        &loader.tree(),
+        true,
+        RoutingPrecision {
+            round_logits_bf16: true,
+            round_weights_bf16: true,
+            round_products_bf16: true,
+            sort_expert_ids: true,
+            round_accumulator_bf16: true,
+        },
+    )
+    .unwrap();
+    let mut curve: Vec<Value> = Vec::new();
+    let mut previous_probe = None;
+    let mut baseline_256 = None;
+    let mut baseline_1024 = None;
+    let mut split_1024 = Vec::new();
+    // The four final chunks test exact operator row splitting as well as
+    // bounded reuse of the largest previously allocated command heap.
+    for (index, rows) in [16usize, 64, 256, 1024, 256, 256, 256, 256].into_iter().enumerate() {
+        assert!(started.elapsed().as_secs() < 25, "command heap probe exceeded internal deadline");
+        let row_start = index.saturating_sub(4) * 256;
+        let input = create_buffer_with_data::<Metal, bf16>(
+            &context,
+            &(row_start..row_start + rows)
+                .flat_map(|row| {
+                    (0..64).map(move |channel| {
+                        // Two exact BF16 base-32 digits identify every absolute
+                        // row through 1023, independently of router periodicity.
+                        let digit = match channel {
+                            0 => row % 32,
+                            1 => row / 32,
+                            _ => (row * (channel * 2 + 1) + channel) % 32,
+                        };
+                        bf16::from_f32(1.0 + digit as f32 / 32.0)
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+        let logits = create_buffer_with_data::<Metal, f32>(
+            &context,
+            &(row_start..row_start + rows)
+                .flat_map(|row| (0..8).map(move |expert| ((expert + row) % 8) as f32 * 0.25))
+                .collect::<Vec<_>>(),
+        );
+        let mut commands = context.create_command_buffer(None, None).unwrap();
+        let probe = commands.validation_heap_probe();
+        let reused = previous_probe.as_ref().map(|previous| probe.same_allocator(previous));
+        if index > 0 {
+            assert_eq!(reused, Some(true), "completed allocator was not reused");
+        }
+        let heap_before = probe.allocated_bytes();
+        let output = experts.encode(&input, &logits, rows as u32, &mut commands).unwrap();
+        let mut readback = context.create_buffer(rows * 64 * 2).unwrap();
+        commands.encode_copy(&output, &mut readback);
+        let (constant_bytes, scratch_bytes) = commands.validation_payload_reserved_bytes();
+        let heap_encoded = probe.allocated_bytes();
+        // Constants and route scratch are no longer CPU-live at end_encoding.
+        drop(output);
+        commands.end_encoding().submit().wait_until_completed().unwrap();
+        // The completion callback sends feedback before publishing its cache
+        // entry. Wait for that publication before asking new() to reset/reuse.
+        while !probe.is_cached_after_completion() {
+            assert!(started.elapsed().as_secs() < 25, "allocator completion cache publication timed out");
+            std::thread::yield_now();
+        }
+        let heap_completed = probe.allocated_bytes();
+        let actual = buffer_to_vec::<Metal, bf16>(&readback);
+        assert!(actual.iter().all(|value| value.to_f32().is_finite()));
+        if index == 2 {
+            baseline_256 = Some(actual.clone());
+        } else if index == 3 {
+            baseline_1024 = Some(actual.clone());
+        } else if index >= 4 {
+            if index == 4 {
+                assert!(actual == *baseline_256.as_ref().unwrap(), "operator result changed after allocator reset");
+            }
+            assert!(
+                actual == baseline_1024.as_ref().unwrap()[row_start * 64..(row_start + rows) * 64],
+                "operator row offsets changed under split execution"
+            );
+            split_1024.extend_from_slice(&actual);
+            assert!(
+                heap_encoded <= curve[3]["heap_encoded_bytes"].as_u64().unwrap(),
+                "command heap grew on equal smaller work"
+            );
+        }
+        curve.push(json!({
+            "rows":rows,"minimum_route_dispatches":rows*8*6,
+            "heap_before_bytes":heap_before,"heap_encoded_bytes":heap_encoded,
+            "heap_completed_bytes":heap_completed,"constant_reserved_bytes":constant_bytes,
+            "scratch_reserved_bytes":scratch_bytes,"reused_completed_allocator":reused,
+        }));
+        previous_probe = Some(probe);
+    }
+    assert!(split_1024 == *baseline_1024.as_ref().unwrap(), "split affine expert rows differ");
+    // An earlier periodic fixture could hide this wrong absolute-row offset.
+    assert!(
+        split_1024[..64] != baseline_1024.as_ref().unwrap()[248 * 64..249 * 64],
+        "wrong-row-offset negative control did not distinguish outputs"
+    );
+    let output = std::env::var_os("STARK_TEST_COMMAND_HEAP_RECEIPT").expect("set private aggregate receipt path");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    serde_json::to_writer_pretty(
+        options.open(output).unwrap(),
+        &json!({
+            "schema":1,"completed":true,"performance_eligible":false,
+            "synthetic":true,"model_dim":64,"hidden_dim":64,"experts":8,"active":8,
+            "weights":"affine4-group64","activation":"BF16","accumulator":"BF16-reference-routed",
+            "operator_split_exact":true,"wrong_row_offset_negative":true,"allocator_reset_reuse":true,
+            "reset_shrink_claim":false,"full_model_memory_claim":false,
+            "elapsed_seconds":started.elapsed().as_secs_f64(),"curve":curve,
+        }),
+    )
+    .unwrap();
 }

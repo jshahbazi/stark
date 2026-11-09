@@ -217,3 +217,11 @@ Frozen-worker source audit rules out ordinary per-token full recurrent-state
 histories. Command-heap attribution is pending a tiny operator diagnostic;
 dispatch counts alone do not establish the memory stop's cause. The MoE cache
 matrix remains open with zero completed cases and no further retry granted.
+
+A later synthetic affine routed-operator diagnostic passes: command allocator
+heaps grow to 53,862,976 bytes at 256 rows and 213,983,808 at 1,024 rows, compared
+with 115,968/460,032 scratch bytes. Four 256-row submissions exactly reproduce
+the 1,024-row output and reuse the completed allocator without further heap
+growth. Reset retains its high-water capacity. This is a tiny operator memory
+measurement, without a speed, full-model peak or new cache qualification claim;
+guarded receipt `4b67c785ed66f8cb2b024bc52b41947be44c772fe64b93d9cd5166501ce72524`.
