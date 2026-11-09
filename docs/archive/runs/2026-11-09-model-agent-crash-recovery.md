@@ -19,7 +19,7 @@ text state. Completion is per artifact, configuration and backend.
 | Qwen BF16 0.8B | Corrected MTP0 dispatch; 34/34 image-loaded and 28/28 text-only lifecycle checks; headed/headless and text-only/image-loaded MTP0/3 short timing passes | Independent head hidden-feature numerical tolerance failed; trace the first divergence before any precision edit |
 | Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Corrected full MoE lifecycle matrix was stopped by a foreign worker before case zero; repeat in an exclusive slot |
 | Gemma | E2B G4AP-02 unchanged short oracle passes exactly; G4AP-03 compiles and six tiny CPU/Metal committed-row controls pass | Long chained oracle failed at the first 512-token case; batch/cache controls did not execute. Diagnose attention/readout before worker integration |
-| GLM | Fresh worker/helper and native engine builds pass at `b76f560d`; arithmetic and live supervisor cleanup controls pass | First short run stopped on host pageouts before text completion. One retry granted after a stable quiet interval, with identical source and limits; image/cache/performance/MTP remain open |
+| GLM | Fresh worker/helper and native engine builds pass at `b76f560d`; arithmetic and live supervisor cleanup controls pass | Both short attempts stopped on global pageouts before text completion; prepare a separately registered functional-only screen after kernel-counter review. Image/cache/performance/MTP remain open |
 
 The installed app was closed without implicitly reopening it. The coordinator
 verified no competing model/compiler/app processes, 95% free memory and zero
@@ -379,3 +379,42 @@ Use actual available-byte measurements for peak admission. The earlier
 `memory_pressure -Q` percentage is not interchangeable with psutil's available
 bytes and must not be multiplied by physical RAM to infer a budget. Full-resident
 GLM and ddalcu remain held pending their complete plans and measured headroom.
+
+The quiet retry also stopped before text completion. Minimum available memory
+was 94,429,216,768 bytes, peak RSS 772,243,456, footprint 722,671,136 and host
+wired growth 3,682,631,680. Compressor growth and swap remained zero. All owned
+processes were cancelled/terminated and reaped; no image stage ran. Receipt:
+`e4ebed01ad400f1fc756eeec2eb2dbfc5d2ad883d287d6a05ac6ad6077c47a36`.
+The first attempt's sampled interval had seven global pageouts; the retry's
+interval had 102. Exact first-breach deltas were not captured, and their cause
+has not been attributed. New supervision must record exact timestamped counters.
+
+Independent review of Apple's public XNU source distinguishes global pageouts
+from compressor swapouts. The [UPL commit path](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/vm/vm_upl.c)
+counts cleaned pageout pages; the [vnode pager](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/vm/vnode_pager.c)
+also services real-file pageouts. This public source is in the host's XNU 12377
+family, not its exact private build. It establishes counter semantics, not the
+cause or harmlessness of the observed activity.
+
+A separately registered functional-only candidate may record global pageouts
+without treating that counter alone as exhaustion, while retaining all existing
+available/RSS/footprint/wired/compression/swap/foreign-worker limits and unchanged
+production admission. Any pageout growth remains ineligible for performance
+claims. The two earlier stopped runs stay stopped/incomplete; no result is
+retroactively promoted. Source review and a new recipe seal precede execution.
+
+The full-resident GLM refresh requires 127.91 GB for image-loaded text, 127.94 GB
+for an image request, or 130.72 GB including the retained source-head payload,
+with the declared host margin. The measured available sample was 110.15 GB;
+none fits. Receipt `1b78195c3a316432176501d0e0c3e7eb301ae82cccce1af164cea4fc3d59cbc0`.
+Bounded-mode parity cannot by itself qualify the previous resident text path's
+speed, and must not silently replace it as a completed fast default.
+
+The ddalcu source/header inventory separately finds 75,303,264,888 bytes of
+resident allocations, including 67,947,724,800 expert bytes, 1,511,927,296 head
+bytes and 897,862,112 tower bytes. Only the 32,000,153,976-byte ngram mapping is
+paged; resident experts must not be described as paged. Initial state capacity is
+16,384 even for shorter requests. The worst-case ngram/request/driver/host plan
+leaves insufficient reviewed margin against actual available bytes. Full loading
+stays held. Source-plan receipt:
+`dcd593dab1b589a4cf013506324aedb3d042a8b2e79891c1080de11e9e1a1716`.
