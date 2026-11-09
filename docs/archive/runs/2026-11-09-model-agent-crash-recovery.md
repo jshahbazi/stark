@@ -16,10 +16,10 @@ text state. Completion is per artifact, configuration and backend.
 
 | Family | Completed resumed gates | Open gate / next action |
 | --- | --- | --- |
-| Qwen BF16 0.8B | Corrected MTP0 dispatch; expanded 48/48 image-loaded and 26/26 text-only lifecycle checks, plus prior matrices; headed/headless and loading-mode MTP0/3 short timing passes | Reference FC eliminates fusion drift, but full hidden-feature gates still fail. A guarded test-only all-head-linear experiment is compiling; no production head precision change |
-| Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Corrected full MoE lifecycle matrix was stopped by a foreign worker before case zero; repeat in an exclusive slot |
-| Gemma | E2B short oracle passes; G4AP-04 source GELU fixes isolated activation/product/output differences, while ordinary target remains unchanged | Full long gate still fails; next divergence is one fused-up projection element. Test-only reference projection comparison prepared; worker/cache/performance still open |
-| GLM | `b76f560d` builds and accounting controls pass; tiny 64-MiB mapping control passes sixty blits and owner cleanup without pressure | Full functional run hit a hard compression limit. Tiny control did not reproduce it; full-model image/cache/MTP/performance remain held pending a defensible physical plan |
+| Qwen BF16 0.8B | Corrected MTP0 dispatch; expanded 48/48 image-loaded and 26/26 text-only lifecycle checks, plus prior matrices; headed/headless and loading-mode MTP0/3 short timing passes | Reference FC, all-head reference linears and head-only materialized SiLU do not satisfy full hidden-feature limits. No production head precision change; isolate attention boundaries next |
+| Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Functional-only MoE04 stopped before case zero at its 64-GiB available-memory floor, without swap/compression growth. Audit per-token prefill histories before another run |
+| Gemma | G4AP05 passes all three assistant steps, transactional controls and actual 3/3 draft acceptance at 512/513/1024/1026; 1026 boundary-cache handoff passes | At 1792 the raw oracle differs only in exact cutoff ties; actual-mask diagnostic and canonical readout pass. Independently review a versioned tie-aware oracle, then qualify long batch/cache. Serving MTP and performance remain open |
+| GLM | `b76f560d` builds and accounting controls pass; tiny 64-MiB mapping control passes sixty blits and owner cleanup without pressure | Full functional run hit a hard compression limit. Tiny control did not reproduce it; prepare a tiny staged first-use Control/Q5 shader test. Full-model image/cache/MTP/performance remain held |
 
 The installed app was closed without implicitly reopening it. The coordinator
 verified no competing model/compiler/app processes, 95% free memory and zero
@@ -36,11 +36,13 @@ chat's pending validation batch; Qwen may compile its next diagnostic, while
 all agents hold model/Metal runs until the next explicit handoff. No PR is
 authorized here.
 
-The separate chat subsequently completed its validation batch and began PR
-preparation. The coordinator explicitly reserved the GPU/native-test window
+The separate chat subsequently completed its validation batch and opened its
+own PR #117. The coordinator explicitly reserved the GPU/native-test window
 again. Qwen's causal diagnostics, Gemma's further trace and GLM's tiny control
-completed; Gemma's GELU fix was tested and the next Qwen linear experiment is
-building. The reservation remains explicit, with other native tests held.
+completed. Gemma's versioned long-oracle replay is next after independent review;
+Qwen and GLM prepare source changes. The reservation remains explicit, with
+other native tests held. Full GLM execution and a MoE retry are not authorized
+by this queue entry.
 
 ## Ownership and source checkpoints
 
@@ -569,3 +571,81 @@ but is not integrated into a backend. Whole-bank uncached uploads would read
 99,033,808,896 bytes per target token; that route is reference-only and cannot
 be promoted as recovery of normal text performance. Further full-model execution
 requires a viable ownership/residency plan and appropriate performance evidence.
+
+### Further source isolation and exclusive-run results
+
+Qwen's test-only all-head reference linears remain rejected: hidden maxima
+0.1875/0.25/0.15625 exceed the unchanged limit and step two changes top-1.
+Aggregate `d57901432eac1712f820a03f24d644688327c5cf5ea36a9836eebb4190e56e3c`.
+A separate metadata derivative materializes only the head's BF16 SiLU sigmoid,
+with the existing reference-FC test engine. Local MLP error improves from
+0.015625 to 0.00390625, but full hidden maxima 0.25/0.125/0.1875 still fail.
+Logit and top-1 gates pass; this does not establish full head qualification.
+Aggregate `317613dde312b9da733aa65980a724ac43ea325ace5f6714207fe8688b9c592d`.
+Both experiments leave production precision unchanged.
+
+MoE04 uses a separately reviewed functional-only monitor; global pageouts are
+diagnostic and performance eligibility is always false. It stops during the
+first 1792-token prefill, before any lifecycle case completes, when available
+memory reaches 68,421,844,992 bytes below the registered 68,719,476,736-byte
+floor. Final minimum is 68,270,899,200, peak RSS 36,751,753,216 and peak task
+footprint 37,054,278,344 bytes. There is zero pageout, swap, compression or
+foreign-model growth; all owned processes drain and exit. Receipt:
+`31b0c7bed7a4362e56669a061b56ba097e54675853ac00bb64b37f3b3ebeab92`.
+No retry or relaxed floor is granted. The next source audit examines flat
+prefill's per-token recurrent-state histories while preserving FP32 recurrence,
+1024-token snapshot boundaries and speculative rollback.
+
+Gemma G4AP05 (`21f29608`, engine
+`75e5eff55ebcdf9cdbc0a22d1dcae7220e181fa74358c07d58215c4e3431a320`)
+uses assistant-only reference up/down projections and source GELU. All three
+oracle steps and transactional acceptance/rejection/cancellation controls pass
+at 512, 513, 1024 and 1026 tokens, including actual 3/3 accepted drafts for
+each input. The 1026-token prefix boundary and changed-tail handoff pass.
+Receipt `0c944464ea413ba0e3005375b6b0a8f9fe179c01ef4cec24e98f69ad52f4ebf1`.
+At 1792, step one still fails the original raw masked-logit comparison, with
+exact feedback and centroids; later batch/cache controls do not execute.
+
+The subsequent diagnostic derives actual native support from the observed
+mask, validates whole clusters, sentinel separation and the token permutation,
+and compares a canonical readout. At 1792 it finds 29 strictly greater scores
+and four exactly tied cutoff scores for three remaining slots. All changed
+clusters are cutoff ties, native support matches the independent canonical
+selection, and canonical readout error is exactly zero. All fifteen steps
+have valid top-k selections and canonical maximum error at most 0.125.
+Receipt `b05242f3a2f35ba552a9db6469ad5b944418ac4eeff001110d5ed3f1517be69d`.
+This diagnostic deliberately preserves the old raw failure. A new qualifying
+oracle must prove actual reference-mask support too, reject non-tied changes,
+retain unchanged numerical limits, pass meaningful negative controls and receive
+independent review before execution. Serving MTP and the >512 guard remain
+unchanged pending qualification and integration.
+
+GLM's corrected first-use audit identifies layer-zero `attn_q` as kind-13 Q5_K,
+not Q8 merely because Q8 tensors occur elsewhere. `Control::pre` also triggers
+the GLM libraries and eager graph pipeline creation before that packed
+projection. Audit receipt:
+`17f02cba7e625973f8d346b173c1213e0ed76e75a8054c5ddb567467cd396989`.
+A proposed tiny staged Control-to-Q5 test measures these phases independently
+of full-model mapping and captures compiler-service peaks through cleanup.
+It is a source proposal; neither a cause nor a pressure fix is established.
+
+### Pinned external implementation research
+
+The user authorized consulting other open source engines. These sources guide
+bounded experiments; their reported performance is not Stark evidence:
+
+- [MLX-LM gated DeltaNet, revision 56230fa0](https://github.com/ml-explore/mlx-lm/blob/56230fa02b8ff8330daf26dc95c28480423ed5fe/mlx_lm/models/gated_delta.py)
+  retains FP32 recurrence and emits the final state separately from token outputs.
+- [oMLX routing, revision 2165e75](https://github.com/jundot/omlx/blob/2165e75726ba83d9651dbaced61c97728da77bba/omlx/patches/qwen35_gdn_chunked.py)
+  uses optimized prefill only for supported layouts and falls back when
+  speculative cache/state steps are requested. Its
+  [Metal kernels](https://github.com/jundot/omlx/blob/2165e75726ba83d9651dbaced61c97728da77bba/omlx/custom_kernels/attention/gated_delta.py)
+  keep FP32 recurrent state. This supports separating ordinary final-state-only
+  execution from rewind-capable execution; it does not prove a Stark patch.
+- [PyTorch top-k documentation](https://docs.pytorch.org/docs/stable/generated/torch.topk.html)
+  explicitly leaves tied indices unstable. Mathematical cutoff-tie validity
+  needs direct mask evidence, independently of any particular heap ordering.
+
+Family agents retain additional pinned MLX-VLM, Transformers, MLX and llama.cpp
+source/license records. No borrowed implementation is qualified merely by
+matching its design; new validation remains bound to Stark source and artifact.
