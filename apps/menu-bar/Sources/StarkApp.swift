@@ -3396,9 +3396,9 @@ struct ChatContentView: View {
             if ["length", "context"].contains(engine.finishReason) {
                 Text(engine.finishReason == "length" && engine.options.maxNewTokens > 0
                      ? "Reply reached your output limit. Increase it or choose Auto in Advanced Options."
-                     : (engine.contextCapacityKnown
-                        ? "Reply used the remaining conversation context. Start a new chat for more room."
-                        : "Reply reached the available execution budget."))
+                     : (engine.finishReason == "context"
+                        ? "Reply reached the current context limit. Review Advanced Options or start a new chat for more room."
+                        : "Reply reached the available context or execution budget."))
                     .font(.caption).foregroundStyle(.orange)
             }
             if engine.supportsImages {
