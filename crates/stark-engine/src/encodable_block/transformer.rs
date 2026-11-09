@@ -274,6 +274,18 @@ pub struct Transformer<B: Backend> {
 }
 
 impl<B: Backend> Transformer<B> {
+    #[cfg(test)]
+    pub(crate) fn validation_first_layer(
+        &self
+    ) -> Option<(&crate::encodable_block::transformer_layer::TransformerLayer<B>, Option<&AnyRoPEConfig>)> {
+        let (layer, rope) = self.layers.first()?;
+        Some((layer, rope.map(|index| &self.ropes[index])))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_output_norm(&self) -> &Normalization<B> {
+        &self.output_norm
+    }
     pub fn new(
         context: &B::Context,
         output_norm_hadamard_factors: Option<B::GlobalBuffer>,

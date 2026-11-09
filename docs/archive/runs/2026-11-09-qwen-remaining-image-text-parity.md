@@ -436,3 +436,16 @@ records peak sampled RSS `20,722,958,336` bytes, minimum available memory
 `84,208,844,800` bytes and zero paging. It is a foreign-process deferral with
 zero cache cases, not a model or memory-limit failure. The owned worker is
 closed and the hardware slot is released to the next coordinated family.
+
+The test-only causal FC candidate now compiles as engine
+`12aad35cbc39159499bccb4c6725f459d3644e8961d6fdd18e029407da27942f`.
+Its seal is `b0bb102a57fc177404e29f7fb0d1fc113b635538c65fbd59a8aa64654891a8e3`.
+It replaces only the predictor fusion projection when the private test selector
+is set; target arithmetic, input norms and the downstream transformer are
+unchanged. The alternate full BF16 FC has a 4 MiB loading overlap on this exact
+small artifact; it is not a production memory or performance result. No extra
+FC copy is created without the selector. The first candidate compile fails on
+a scratch-buffer borrow in the test adapter; the corrected second compile
+passes. Both attempts and the unchanged numerical preregistration are retained.
+Independent source review finds no blocker for this bounded experiment. Native
+and MLX execution of the candidate remain pending the coordinated model slot.

@@ -40,6 +40,27 @@ pub struct QwenMtp<B: Backend> {
     hidden_norm: Normalization<B>,
     fusion: Box<dyn Linear<B>>,
     transformer: Transformer<B>,
+    #[cfg(test)]
+    validation_reference_fusion: Option<Box<dyn Linear<B>>>,
+}
+
+#[cfg(test)]
+struct ValidationReferenceFusion<B: Backend> {
+    kernel: crate::encodable_block::linear::ReferenceBF16Matmul<B>,
+    weights: std::sync::Arc<B::GlobalBuffer>,
+    model_dim: u32,
+}
+
+#[cfg(test)]
+impl<B: Backend> Linear<B> for ValidationReferenceFusion<B> {
+    fn encode(
+        &self,
+        input: B::ScratchBuffer,
+        batch_dim: u32,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        self.kernel.encode(&input, 0, self.weights.as_ref(), batch_dim, self.model_dim, 2 * self.model_dim, command)
+    }
 }
 
 pub struct QwenMtpOutput<B: Backend> {
@@ -99,6 +120,29 @@ impl<B: Backend> QwenMtp<B> {
                 context,
             )
         };
+        #[cfg(test)]
+        let validation_reference_fusion = {
+            use crate::config::weight_matrix::AnyWeightMatrixSpec;
+            let weights = tree.subtree("fusion").subtree("weights");
+            let spec = weights.metadata::<AnyWeightMatrixSpec>("spec").map_err(LinearBlockError::from)?;
+            if matches!(spec, AnyWeightMatrixSpec::FullPrecisionSpec(_))
+                && std::env::var_os("STARK_TEST_HEAD_REFERENCE_FUSION").is_some()
+            {
+                let weights = weights
+                    .leaf("weights")
+                    .and_then(|leaf| leaf.validate(&[config.model_dim, 2 * config.model_dim], DataType::BF16))
+                    .and_then(|leaf| leaf.read_shared_weight())
+                    .map_err(LinearBlockError::from)?;
+                Some(Box::new(ValidationReferenceFusion {
+                    kernel: crate::encodable_block::linear::ReferenceBF16Matmul::new(context)
+                        .map_err(QwenMtpError::Backend)?,
+                    weights,
+                    model_dim: config.model_dim,
+                }) as Box<dyn Linear<B>>)
+            } else {
+                None
+            }
+        };
         Ok(Self {
             target_layer: config.target_layer,
             model_dim: config.model_dim,
@@ -119,7 +163,15 @@ impl<B: Backend> QwenMtp<B> {
                 &config.transformer_config,
                 &tree.subtree("transformer"),
             )?,
+            #[cfg(test)]
+            validation_reference_fusion,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_use_reference_fusion(&mut self) -> Result<(), QwenMtpError<B>> {
+        self.fusion = self.validation_reference_fusion.take().ok_or(QwenMtpError::Invalid)?;
+        Ok(())
     }
 
     pub fn create_state(
@@ -206,5 +258,83 @@ impl<B: Backend> QwenMtp<B> {
             );
         }
         self.fusion.encode(joined, count, command).map_err(QwenMtpError::Backend)
+    }
+
+    /// Private first-divergence diagnostic. No tensor is printed or published.
+    #[cfg(test)]
+    pub(crate) fn validation_fusion_stages(
+        &self,
+        embedding: impl BufferRef<Backend = B>,
+        hidden: impl BufferRef<Backend = B>,
+        count: u32,
+        context: &B::Context,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Vec<(&'static str, B::GlobalBuffer)>, QwenMtpError<B>> {
+        use crate::backends::common::{Buffer, Context};
+        let row_bytes = self.model_dim as usize * DataType::BF16.size_in_bytes();
+        let e = self
+            .embedding_norm
+            .encode(embedding, 0, count, None::<&mut B::ScratchBuffer>, command)
+            .map_err(QwenMtpError::Backend)?;
+        let h = self
+            .hidden_norm
+            .encode(hidden, 0, count, None::<&mut B::ScratchBuffer>, command)
+            .map_err(QwenMtpError::Backend)?;
+        let fused = self.fuse_inputs(embedding, hidden, count, row_bytes, command)?;
+        let mut result = Vec::new();
+        let copy = |value: &B::ScratchBuffer,
+                    command: &mut <B::CommandBuffer as CommandBuffer>::Encoding|
+         -> Result<B::GlobalBuffer, QwenMtpError<B>> {
+            let mut saved = context.create_buffer(value.size()).map_err(QwenMtpError::Backend)?;
+            command.encode_copy(value, &mut saved);
+            Ok(saved)
+        };
+        result.push(("embedding_norm", copy(&e, command)?));
+        result.push(("hidden_norm", copy(&h, command)?));
+        result.push(("fusion", copy(&fused, command)?));
+        if let Some((layer, rope)) = self.transformer.validation_first_layer() {
+            use crate::{
+                backends::common::gpu_types::trie::TrieNode, encodable_block::mixer::attention::rope::PrecalculatedRoPE,
+            };
+            let nodes = (0..count)
+                .map(|height| TrieNode {
+                    height,
+                    trie_start: height,
+                    trie_end: count - 1,
+                })
+                .collect::<Vec<_>>();
+            let topology = BatchTopology::new(&nodes, true);
+            let positions = (0..count).collect::<Vec<_>>();
+            let rope = rope
+                .map(|config| PrecalculatedRoPE::<B>::precalculate(config, &positions, command))
+                .transpose()
+                .map_err(QwenMtpError::Backend)?;
+            let mut shortcut = command.allocate_scratch(fused.size()).map_err(QwenMtpError::Backend)?;
+            let pre = layer
+                .pre_mixer_norm
+                .as_ref()
+                .ok_or(QwenMtpError::Invalid)?
+                .encode(&fused, 0, count, Some(&mut shortcut), command)
+                .map_err(QwenMtpError::Backend)?;
+            result.push(("pre_attention", copy(&pre, command)?));
+            let attention =
+                layer.mixer.encode(pre, rope.as_ref(), &topology, None, command).map_err(QwenMtpError::Backend)?;
+            result.push(("attention_output", copy(&attention, command)?));
+            let pre_mlp = layer
+                .pre_mlp_norm
+                .encode(&attention, 0, count, Some(&mut shortcut), command)
+                .map_err(QwenMtpError::Backend)?;
+            result.push(("attention_residual", copy(&shortcut, command)?));
+            result.push(("pre_mlp", copy(&pre_mlp, command)?));
+            let mlp = layer.mlp.encode(pre_mlp, count, command).map_err(QwenMtpError::Backend)?;
+            result.push(("mlp_output", copy(&mlp, command)?));
+            let final_hidden = self
+                .transformer
+                .validation_output_norm()
+                .encode(&mlp, 0, count, Some(&mut shortcut), command)
+                .map_err(QwenMtpError::Backend)?;
+            result.push(("final_hidden", copy(&final_hidden, command)?));
+        }
+        Ok(result)
     }
 }
