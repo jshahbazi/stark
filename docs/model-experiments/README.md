@@ -13,6 +13,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261109-GLMVIS-06: actual native GLM image generation](../archive/runs/2026-11-09-glm-native-image-generation.md) | Registered after external capacity recovery; fresh matching helper/native build, complete GGUF image execution and loaded-image text/cache/performance gates pending the serialized resource slot |
 | [20261109-GLMVIS-05: complete GLM image worker integration](../archive/runs/2026-11-09-glm-image-worker-integration.md) | Pinned preparation/native dispatch source wired; 6,830 converter tests pass and independent admission fixes applied; actual GGUF predictor inventory confirms 29 retained head tensors; native compilation/full image/default/cache/performance/MTP gates remain open |
 | [20261109-GLMVIS-04: actual GLM vision sidecar on Metal](../archive/runs/2026-11-09-glm-actual-vision-components.md) | Complete actual BF16/F32 sidecar tower matches a private F32 reference; native PNG/tower and synthetic decoder fusion pass; full GLM image requests/default dispatch/cache/performance/MTP remain unfinished |
 | [20261109-GLMVIS-02: native GLM vision components](../archive/runs/2026-11-09-glm-native-vision-components.md) | GLM processor/tower/sidecar contract and embedding fusion; CPU/attention/synthetic causal controls pass; actual sidecar, Metal, default image dispatch and cache/performance/MTP qualification remain unfinished |
