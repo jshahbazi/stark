@@ -37,6 +37,32 @@ impl<B: Backend> LinearProjection<B> {
 }
 
 impl<B: Backend> Attention<B> {
+    #[cfg(test)]
+    pub(crate) fn assistant_query_trace(
+        &self,
+        hidden: B::ScratchBuffer,
+        rope: &PrecalculatedRoPE<B>,
+        target: &super::CommittedAttentionKV<'_, B>,
+        reference: &super::reference::ReferenceBF16Attention<B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Vec<(String, B::ScratchBuffer)>, B::Error> {
+        let mut projected = self.projection.lin.encode(hidden, 1, command)?;
+        let mut raw = command.allocate_scratch(projected.size())?;
+        command.encode_copy(&projected, &mut raw);
+        if let Some(norm) = &self.projection.norm {
+            norm.encode(&mut projected, 1, command)?;
+        }
+        let mut normalized = command.allocate_scratch(projected.size())?;
+        command.encode_copy(&projected, &mut normalized);
+        let queries = self.prepare_queries(&projected, Some(rope), 1, command)?;
+        let (keys, values) = target.validation_copy(command)?;
+        let mut stages = reference.trace_single_query(&queries, &keys, &values, target.retained_rows(), command)?;
+        stages.insert(0, ("q_projection".into(), raw));
+        stages.insert(1, ("q_norm".into(), normalized));
+        stages.insert(2, ("q_rope".into(), queries));
+        Ok(stages)
+    }
+
     /// One external-assistant query reads exactly the committed target rows.
     /// This does not update target KV or admit partial ring speculation.
     /// The caller binds model identity and builds RoPE at `target.position()`.

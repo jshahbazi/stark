@@ -593,7 +593,7 @@ where
         head: &Gemma4Assistant<B>,
         root: u32,
     ) -> Result<serde_json::Value, Gemma4AssistantSessionError<B>> {
-        self.assistant_validation_payload_inner(frame, head, root, None)
+        self.assistant_validation_payload_inner(frame, head, root, None, false)
     }
 
     #[cfg(test)]
@@ -601,12 +601,33 @@ where
         &self,
         frame: &Gemma4AssistantTargetFrame<B>,
         head: &Gemma4Assistant<B>,
+        root: u32,
+    ) -> Result<serde_json::Value, Gemma4AssistantSessionError<B>> {
+        self.assistant_validation_round_payload_inner(frame, head, root, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assistant_validation_trace_payload(
+        &self,
+        frame: &Gemma4AssistantTargetFrame<B>,
+        head: &Gemma4Assistant<B>,
+        root: u32,
+    ) -> Result<serde_json::Value, Gemma4AssistantSessionError<B>> {
+        self.assistant_validation_round_payload_inner(frame, head, root, true)
+    }
+
+    #[cfg(test)]
+    fn assistant_validation_round_payload_inner(
+        &self,
+        frame: &Gemma4AssistantTargetFrame<B>,
+        head: &Gemma4Assistant<B>,
         mut root: u32,
+        trace: bool,
     ) -> Result<serde_json::Value, Gemma4AssistantSessionError<B>> {
         let mut feedback: Option<Vec<bf16>> = None;
         let mut steps = Vec::new();
         for _ in 0..3 {
-            let payload = self.assistant_validation_payload_inner(frame, head, root, feedback.as_deref())?;
+            let payload = self.assistant_validation_payload_inner(frame, head, root, feedback.as_deref(), trace)?;
             let logits = payload["logits"].as_array().ok_or(Gemma4AssistantSessionError::Invalid)?;
             root = logits
                 .iter()
@@ -634,6 +655,7 @@ where
         head: &Gemma4Assistant<B>,
         root: u32,
         feedback: Option<&[bf16]>,
+        trace: bool,
     ) -> Result<serde_json::Value, Gemma4AssistantSessionError<B>> {
         if !Arc::ptr_eq(&self.model_identity, &frame.identity) || !head.matches_target(&self.model_identity) {
             return Err(Gemma4AssistantSessionError::Invalid);
@@ -666,15 +688,33 @@ where
         let mut embedding_copy = commands.allocate_scratch(embedding.size()).map_err(backend)?;
         commands.encode_copy(&embedding, &mut embedding_copy);
         let step = head.encode_step(&embedding, &hidden, &local, &global, &mut commands)?;
+        let traced = if trace {
+            Some(head.encode_step_traced(&embedding, &hidden, &local, &global, &mut commands)?)
+        } else {
+            None
+        };
         commands.end_encoding().submit().wait_until_completed().map_err(backend)?;
         let copy = |value: &B::ScratchBuffer| value.copyout::<bf16>().into_iter().map(f32::from).collect::<Vec<_>>();
         let centroids = step.centroids.copyout::<bf16>();
         let logits = head.mask_logits(&centroids, &step.logits.copyout::<bf16>())?;
-        Ok(serde_json::json!({"position":frame.position(),"root":root,
+        let mut payload = serde_json::json!({"position":frame.position(),"root":root,
             "local_rows":local.retained_rows(),"global_rows":global.retained_rows(),
             "local_owner":local.owner_layer(),"global_owner":global.owner_layer(),
             "local_keys":copy(&lk),"local_values":copy(&lv),"global_keys":copy(&gk),"global_values":copy(&gv),
             "embedding":copy(&embedding_copy),"hidden":copy(&hidden),"feedback":copy(&step.feedback),
-            "centroids":copy(&step.centroids),"logits":logits}))
+            "centroids":copy(&step.centroids),"logits":logits});
+        if let Some((traced_step, stages)) = traced {
+            let equal = step.feedback.copyout::<bf16>() == traced_step.feedback.copyout::<bf16>()
+                && step.centroids.copyout::<bf16>() == traced_step.centroids.copyout::<bf16>()
+                && step.logits.copyout::<bf16>() == traced_step.logits.copyout::<bf16>();
+            let trace = stages
+                .iter()
+                .map(|(name, buffer)| (name.clone(), serde_json::json!(copy(buffer))))
+                .collect::<serde_json::Map<_, _>>();
+            payload["trace"] = serde_json::Value::Object(trace);
+            payload["unmasked_logits"] = serde_json::json!(copy(&step.logits));
+            payload["instrumented_output_equal"] = serde_json::json!(equal);
+        }
+        Ok(payload)
     }
 }

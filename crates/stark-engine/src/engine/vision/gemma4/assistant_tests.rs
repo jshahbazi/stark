@@ -438,3 +438,51 @@ fn private_e2b_assistant_wrapped_handoff_and_transactional_batch() {
         receipt.flush().unwrap();
     }
 }
+
+#[stark_test]
+#[ignore]
+fn private_e2b_assistant_first_divergence_trace() {
+    let target = std::env::var("STARK_GEMMA_ASSISTANT_TARGET").expect("private target required");
+    let companion = std::env::var("STARK_GEMMA_ASSISTANT_COMPANION").expect("private companion required");
+    let output = std::env::var("STARK_GEMMA_ASSISTANT_RECEIPT").expect("private aggregate receipt required");
+    let engine = Engine::<Metal>::new().unwrap();
+    let model = engine.load_gemma4_vision_language_model(Path::new(&target)).unwrap();
+    let head = model.load_assistant_component(Path::new(&companion)).unwrap();
+    let public_text = (0..600)
+        .map(|index| format!("Step {index}: verify the distinct state and then continue. "))
+        .collect::<String>();
+    let source_input = model.tokenizer().encode(public_text, false).unwrap().get_ids().to_vec();
+    let input = &source_input[..512];
+    let frame = model
+        .language_model
+        .prefill_gemma4_assistant_target(input, 2048, Gemma4AssistantProfile::E2B, &mut || false)
+        .unwrap();
+    let first =
+        frame.logits().iter().enumerate().max_by(|(a, x), (b, y)| x.total_cmp(y).then_with(|| b.cmp(a))).unwrap().0
+            as u32;
+    let payload = model.language_model.assistant_validation_trace_payload(&frame, &head, first).unwrap();
+    let mut child = Command::new(std::env::var("STARK_GEMMA_ASSISTANT_ORACLE_PYTHON").unwrap())
+        .arg(std::env::var("STARK_GEMMA_ASSISTANT_ORACLE_SCRIPT").unwrap())
+        .arg(std::env::var("STARK_GEMMA_ASSISTANT_SOURCE").unwrap())
+        .arg(Path::new(&target).join("model.safetensors"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&serde_json::to_vec(&payload).unwrap()).unwrap();
+    drop(payload);
+    let result = child.wait_with_output().unwrap();
+    let reference = if result.status.success() {
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap()
+    } else {
+        serde_json::json!({"diagnostic_complete":false,"reference_process_succeeded":false,"returncode":result.status.code()})
+    };
+    let record = serde_json::json!({"attempt":"20261109-G4AP-03-diagnostic-01","diagnostic_only":true,
+        "target_config_sha256":model.artifact_identity().config_sha256,
+        "target_weights_sha256":model.artifact_identity().artifact_sha256,"input_tokens":input.len(),
+        "production_arithmetic_changed":false,"serving_mtp_enabled":false,"reference":reference});
+    let mut receipt = std::fs::OpenOptions::new().write(true).create_new(true).open(output).unwrap();
+    receipt.write_all(serde_json::to_string_pretty(&record).unwrap().as_bytes()).unwrap();
+    assert!(record["reference"]["diagnostic_complete"] == true, "diagnostic failed; aggregate receipt retained");
+}

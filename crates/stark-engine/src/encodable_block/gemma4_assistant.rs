@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{
-        Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding,
+        Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding,
         kernel::{Kernels, MaterializedBF16AddScaleKernel},
     },
     config::{
@@ -362,4 +362,102 @@ impl<B: Backend> Gemma4Assistant<B> {
         }
         Ok(output)
     }
+
+    /// Diagnostic duplicate of the ordinary step, with ephemeral stage copies.
+    /// Tests must require the returned final planes to match ordinary encoding.
+    #[cfg(test)]
+    pub(crate) fn encode_step_traced(
+        &self,
+        embedding: impl BufferRef<Backend = B>,
+        hidden: impl BufferRef<Backend = B>,
+        local: &CommittedAttentionKV<'_, B>,
+        global: &CommittedAttentionKV<'_, B>,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(Gemma4AssistantStep<B>, Vec<(String, B::ScratchBuffer)>), Gemma4AssistantError<B>> {
+        let backend = Gemma4AssistantError::Backend;
+        let mut stages = Vec::new();
+        let row_bytes = self.profile.backbone_dim() as usize * 2;
+        if embedding.size() != row_bytes || hidden.size() != row_bytes || local.position() != global.position() {
+            return Err(Gemma4AssistantError::Invalid);
+        }
+        let mut joined = commands.allocate_scratch(2 * row_bytes).map_err(backend)?;
+        commands.encode_copy(embedding, joined.subrange_mut(..row_bytes));
+        commands.encode_copy(hidden, joined.subrange_mut(row_bytes..));
+        let mut value = self.pre_projection.encode(joined, 1, commands).map_err(backend)?;
+        trace_stage::<B>("pre_projection".into(), &value, &mut stages, commands).map_err(backend)?;
+        for (index, layer) in self.layers.iter().enumerate() {
+            let target = if index == 3 {
+                global
+            } else {
+                local
+            };
+            let rope =
+                PrecalculatedRoPE::<B>::precalculate(&layer.rope, &[target.position()], commands).map_err(backend)?;
+            let norm =
+                layer.pre_attention.encode(&value, 0, 1, None::<&mut B::ScratchBuffer>, commands).map_err(backend)?;
+            trace_stage::<B>(format!("layer{index}.pre_attention"), &norm, &mut stages, commands).map_err(backend)?;
+            let mut query_input = commands.allocate_scratch(norm.size()).map_err(backend)?;
+            commands.encode_copy(&norm, &mut query_input);
+            let query_stages = layer
+                .attention
+                .assistant_query_trace(query_input, &rope, target, &layer.eager, commands)
+                .map_err(backend)?;
+            stages.extend(query_stages.into_iter().map(|(name, buffer)| (format!("layer{index}.{name}"), buffer)));
+            let attention = layer
+                .attention
+                .attend_committed_target_eager(norm, Some(&rope), target, &layer.eager, commands)
+                .map_err(backend)?;
+            trace_stage::<B>(format!("layer{index}.attention_out"), &attention, &mut stages, commands)
+                .map_err(backend)?;
+            let attention = layer
+                .post_attention
+                .encode(&attention, 0, 1, None::<&mut B::ScratchBuffer>, commands)
+                .map_err(backend)?;
+            trace_stage::<B>(format!("layer{index}.post_attention"), &attention, &mut stages, commands)
+                .map_err(backend)?;
+            let mut residual = commands.allocate_scratch(DIM as usize * 2).map_err(backend)?;
+            self.add.encode(Some(&attention), &value, &mut residual, DIM, DIM, 1.0, commands);
+            trace_stage::<B>(format!("layer{index}.residual"), &residual, &mut stages, commands).map_err(backend)?;
+            let mlp =
+                layer.pre_mlp.encode(&residual, 0, 1, None::<&mut B::ScratchBuffer>, commands).map_err(backend)?;
+            trace_stage::<B>(format!("layer{index}.pre_mlp"), &mlp, &mut stages, commands).map_err(backend)?;
+            let mlp = layer.mlp.encode(mlp, 1, commands).map_err(backend)?;
+            trace_stage::<B>(format!("layer{index}.mlp"), &mlp, &mut stages, commands).map_err(backend)?;
+            let mlp = layer.post_mlp.encode(&mlp, 0, 1, None::<&mut B::ScratchBuffer>, commands).map_err(backend)?;
+            trace_stage::<B>(format!("layer{index}.post_mlp"), &mlp, &mut stages, commands).map_err(backend)?;
+            value = commands.allocate_scratch(DIM as usize * 2).map_err(backend)?;
+            self.add.encode(Some(&mlp), &residual, &mut value, DIM, DIM, layer.scalar, commands);
+            trace_stage::<B>(format!("layer{index}.output"), &value, &mut stages, commands).map_err(backend)?;
+        }
+        let value = self.output_norm.encode(&value, 0, 1, None::<&mut B::ScratchBuffer>, commands).map_err(backend)?;
+        trace_stage::<B>("output_norm".into(), &value, &mut stages, commands).map_err(backend)?;
+        let mut copy = commands.allocate_scratch(DIM as usize * 2).map_err(backend)?;
+        commands.encode_copy(&value, &mut copy);
+        let feedback = self.post_projection.encode(copy, 1, commands).map_err(backend)?;
+        let mut copy = commands.allocate_scratch(DIM as usize * 2).map_err(backend)?;
+        commands.encode_copy(&value, &mut copy);
+        let centroids = self.centroids.encode(copy, 1, commands).map_err(backend)?;
+        let logits = self.readout.encode(value, 1, commands).map_err(backend)?;
+        Ok((
+            Gemma4AssistantStep {
+                feedback,
+                centroids,
+                logits,
+            },
+            stages,
+        ))
+    }
+}
+
+#[cfg(test)]
+fn trace_stage<B: Backend>(
+    name: String,
+    value: &B::ScratchBuffer,
+    stages: &mut Vec<(String, B::ScratchBuffer)>,
+    commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+) -> Result<(), B::Error> {
+    let mut copy = commands.allocate_scratch(value.size())?;
+    commands.encode_copy(value, &mut copy);
+    stages.push((name, copy));
+    Ok(())
 }

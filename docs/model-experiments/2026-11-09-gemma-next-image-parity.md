@@ -459,3 +459,27 @@ Gemma3/Gemma4 capture, restore and suffix paths. Both benchmark index entries
 remain. Formatting and whitespace checks pass; a native build and checks on
 this merged source are still required in the next exclusive build slot. Prior
 Gemma/Qwen binaries and artifact results retain their original source scope.
+
+### G4AP-03 diagnostic control: first divergence
+
+Before changing arithmetic, add test-only staged capture for the same failing
+512-token three-step input. Compare pre-projection, per-layer normalized input,
+raw/normalized/rotated queries, BF16 attention scores/probabilities/weighted
+values, attention output, residual/MLP boundaries, final normalization and full
+readout against pinned independent reference stages. Capture tensors only in
+ephemeral subprocess stdin; retain first-divergence names, counts and error
+aggregates. Require instrumented and ordinary native outputs to match exactly.
+Report common-selected readout error, centroid support/tie counts and chained
+feedback error separately. This diagnostic supplies no tolerance change,
+production arithmetic change, serving capability or performance claim.
+
+The staged diagnostic source passes package formatting, Python syntax and
+whitespace checks; compilation/execution are queued after GLM and Qwen.
+Immutable native diagnostic patch SHA-256
+`4767179faa7ce66b4cef27e0e04f0287cb0c4e3d086f5320e7d38e89d4673625`;
+diagnostic oracle SHA-256
+`7a9b831e64cf8ca4c51b778e2f779694518e8c303d1075837e6978b88d308d7c`.
+The latter additionally compares native stable centroid ties against Torch
+top-k on the same native scores using support-difference counts only. The
+preceding diagnostic tool revision is retained separately. No new head
+arithmetic or runtime result is implied by this source checkpoint.
