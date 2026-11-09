@@ -46,6 +46,12 @@ struct AssistantSourceGeluMlp<B: Backend> {
     down: Box<dyn Linear<B>>,
     gelu: <B::Kernels as Kernels>::VisionGeluBF16Kernel,
     multiply: GatedActMul<B>,
+    #[cfg(test)]
+    reference: crate::encodable_block::linear::ReferenceBF16Matmul<B>,
+    #[cfg(test)]
+    up_weights: Arc<B::GlobalBuffer>,
+    #[cfg(test)]
+    down_weights: Arc<B::GlobalBuffer>,
 }
 
 impl<B: Backend> AssistantSourceGeluMlp<B> {
@@ -101,7 +107,11 @@ impl<B: Backend> Mlp<B> for AssistantSourceGeluMlp<B> {
         rows: u32,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<Option<Vec<(String, B::ScratchBuffer)>>, B::Error> {
+        // These candidates only expose the existing PyTorch-provenance
+        // reduction on identical native inputs; they never feed the head.
+        let reference_up = self.reference.encode(&input, 0, &*self.up_weights, rows, 4096, DIM, commands)?;
         let (fused, activated, product) = self.project_and_gate(input, rows, commands)?;
+        let reference_down = self.reference.encode(&product, 0, &*self.down_weights, rows, DIM, 2048, commands)?;
         let mut act_copy = commands.allocate_scratch(activated.size())?;
         let mut product_copy = commands.allocate_scratch(product.size())?;
         let mut product_candidate = commands.allocate_scratch(product.size())?;
@@ -119,6 +129,8 @@ impl<B: Backend> Mlp<B> for AssistantSourceGeluMlp<B> {
             ("mlp.reference_activation_candidate".into(), act_copy),
             ("mlp.reference_product_candidate".into(), product_candidate),
             ("mlp.reference_down_candidate".into(), down_copy),
+            ("mlp.reference_up_linear_candidate".into(), reference_up),
+            ("mlp.reference_down_linear_candidate".into(), reference_down),
         ]))
     }
 }
@@ -331,6 +343,23 @@ impl<B: Backend> Gemma4Assistant<B> {
                     GatedActMulSettings::default(),
                 )
                 .map_err(Gemma4AssistantError::Backend)?,
+                #[cfg(test)]
+                reference: crate::encodable_block::linear::ReferenceBF16Matmul::new(context)
+                    .map_err(Gemma4AssistantError::Backend)?,
+                #[cfg(test)]
+                up_weights: tree
+                    .subtree(&base)
+                    .subtree("mlp.up_projection.weights")
+                    .leaf("weights")?
+                    .validate(&[4096, DIM], DataType::BF16)?
+                    .read_shared_weight()?,
+                #[cfg(test)]
+                down_weights: tree
+                    .subtree(&base)
+                    .subtree("mlp.down_projection.weights")
+                    .leaf("weights")?
+                    .validate(&[DIM, 2048], DataType::BF16)?
+                    .read_shared_weight()?,
             });
             let scalar =
                 tree.subtree(&base).leaf("post_layer_scalar")?.validate(&[1], DataType::BF16)?.read_slice::<bf16>()?[0]

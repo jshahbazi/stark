@@ -627,3 +627,41 @@ worker; peak observed RSS is 10,744,102,912 and 10,913,726,464 bytes.
 All owned workers, reference children and compilers close before the explicit
 slot release. The next source-only step isolates the remaining linear
 rounding using the same native inputs before any further math change.
+
+### Next test-only linear isolation
+
+Before the next build, register two additional planes in the existing finer
+MLP trace: `ReferenceBF16Matmul` fused-up projection on the identical native
+MLP input, and reference down projection on the identical native BF16 product.
+These use the existing PyTorch-provenance eight four-lane F32 accumulator
+schedule and the same admitted full-BF16 weights. Both are test-only and do
+not feed ordinary head output, feedback or the target. A separate private
+oracle extends the previous finer oracle with these two aggregate comparisons;
+the long oracle and all acceptance limits remain unchanged.
+
+The test-only projection build passes in 1 minute 41 seconds, and its single
+512-token three-step trace completes. Both reference projections are exact on
+the same native operands in every layer and step: 49,152 up-projection and
+3,072 down-projection BF16 output values have zero difference from the pinned
+source operators. Instrumented outputs remain identical to ordinary outputs.
+The diagnostic does not feed the reference candidates into the head, so the
+failed full numerical gate and unexecuted batch/cache controls remain open.
+The companion loader has no shared-weight cache: diagnostic fields add
+12,582,912 bytes of duplicate MLP weight storage in this test build. These
+fields are excluded from production builds.
+
+The standard immutable unified review artifact is
+`e6b4f63c6fd6b8ee0eb9bc9a5f5169725b92766fe4bdda792822e68f9b7c09ba`;
+earlier rendered review text is preserved separately. Executable
+`bc7bcfb14ca8d9b1995c7efcc51aa5a740570caefeef74b829dab41c66923980`,
+source graph `3c5ce9dd73e2dbb7ed49a953b7e1560fa476dc79319ad672d8e0f14bcfa79f81`,
+source/binary seal
+`431013303fb29ea1083d0b0da064ae46c4e769a4815b4ea36508f688f5593d4d`,
+and separately versioned oracle
+`0bd8ab8fd3ca851fde0f7b8615fc3573f6a7bca64ea8142828a57a86f745c6f2`
+bind this experiment. Aggregate receipt
+`29e187a0c188148c850b1bb2188fdd010c03a1118be6738ce9685d25c6503884`
+and guard receipt
+`6557478e33b4e5bc1d07460307d09c269fd382b826306470cd62f5f25cb8432b`
+record zero paging growth, no foreign worker and observed peak RSS
+10,898,489,344 bytes. All owned processes close before the slot release.
