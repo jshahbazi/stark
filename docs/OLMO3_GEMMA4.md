@@ -115,6 +115,9 @@ convert or execute these assistants. This is missing implementation, not source
 MTP N/A; no Gemma MTP capability is advertised. See Google's
 [MTP architecture](https://ai.google.dev/gemma/docs/mtp/overview) and
 [assistant usage](https://ai.google.dev/gemma/docs/mtp/mtp).
+The [assistant implementation plan](GEMMA4_ASSISTANT_PLAN.md) pins E2B/E4B
+assistant configs and tensor-header inventories, and stages the missing
+conversion, target-activation/external-KV, verification and cache interfaces.
 
 ## Larger dense Gemma 4 image path
 

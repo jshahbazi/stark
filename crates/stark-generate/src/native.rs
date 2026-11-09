@@ -953,7 +953,7 @@ impl NativeBackend {
                 model.stream(&input[reused..], &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma4Vision(model), None) => {
-                model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
+                model.stream(&input[reused..], &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma3Vision(model), None) => {
                 model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
@@ -1053,6 +1053,13 @@ impl NativeBackend {
             },
             (NativeModel::Text(_), Some(_)) => return Err("images_not_supported"),
         };
+        // Native readiness/counters must agree with the engine's actual work.
+        // A restored state must receive only its unprocessed suffix; replaying
+        // the full prompt can otherwise hide behind repetitive test inputs.
+        if text_request && input_tokens.checked_sub(reused) != Some(stream.metrics().num_tokens_prefilled) {
+            drop(stream);
+            return Err("native_generation_failed");
+        }
         let tokens = stream.map(|token| token.map_err(|_| "native_generation_failed"));
         let mut decoder = tokenizer.decode_stream(false);
         let mut filter = StopFilter::new(options.stop.clone());

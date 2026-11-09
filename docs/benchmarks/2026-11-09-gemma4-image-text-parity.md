@@ -1,11 +1,15 @@
 # Gemma 4 E2B/E4B: text with image support loaded
 
 Date: 2026-11-09. Attempt: `20261109-G4IP-01`. Apple M5 Max, 40 GPU cores.
-The retained E2B and E4B artifacts pass exact text prefix/lifecycle checks on
-this branch. Their short text inference measurements with the image tower
-resident fall within the predeclared 5% bound. Larger workloads, cached-request
-performance and Gemma assistant MTP remain open qualification/implementation
-work. This record makes no release or installed-app claim.
+The short text inference measurements with the image tower resident fall within
+the predeclared 5% bound on the named build. **The original cached-worker
+qualification is superseded.** Follow-up inspection found that its Gemma worker
+restored 1,024 rows but then streamed the entire input again. Periodic synthetic
+inputs concealed this mistake in output comparisons. A nonperiodic near-capacity
+request reproduces failure on the original binary. The [warmed cache follow-up](2026-11-09-gemma4-warmed-cache.md)
+records the suffix-dispatch fix and stronger controls. The short unscoped loading
+measurements below remain valid for their original build. No release or
+installed-app claim is made.
 
 ## Matched controls and identities
 
@@ -74,24 +78,29 @@ These are bounded quick observations; broader performance qualification remains.
 
 ## Cache correctness and remaining timing work
 
-Each artifact passes 149 aggregate checks. Fresh old/candidate text outputs
-match image-loaded restored greedy and seeded output hashes at 1,792 input
-tokens, plus a changed 1,824-token tail. The previous 1,024-token boundary is
-restored after the complete 512-row local ring has been overwritten. E2B has
+Each artifact originally passed 149 aggregate checks. Fresh old/candidate text
+outputs matched image-loaded output hashes at 1,792 input tokens plus a changed
+1,824-token tail. **These checks did not prove correct worker prefix reuse:**
+the worker replayed the complete prompt after restoring the 1,024-token boundary.
+The periodic inputs allowed matching outputs despite the duplicated context.
+Engine-level owned-ring snapshot controls remain valid component evidence.
+E2B has
 20 shared-KV consumers, E4B 18; each consumes its owner's restored state.
 The saved ring payload is 6MiB and 20MiB respectively, counted by request
 admission. PLE tables remain immutable.
 
-A real synthetic PNG request produces one token with zero text reuse and zero
-drafts. Following text first reuses zero rows, matches fresh output, then reuses
-1,024 rows on repetition. Scope/context changes, reset, invalid-context errors
+A real synthetic PNG request produced one token with zero text reuse and zero
+drafts. Following text first reported zero reuse and matched fresh output, then
+reported 1,024 rows on repetition. Scope/context changes, reset, invalid-context errors
 and text cancellation clear the retained entry and preserve fresh text recovery.
 Cancellation is requested on the initial streaming progress frame; this run
 does not establish cancellation during every GPU stage. Image answer quality,
 new image numerical calibration and injected device failures were not tested.
 
-The long checks establish exact state restoration. Their single first-token
-observations do **not** establish cached speedup. For example, post-image fresh
+The original long worker checks establish matching output-hash observations;
+their worker cache qualification is withdrawn because of full-prompt replay.
+Their single first-token observations also did not establish cached speedup.
+For example, post-image fresh
 versus repeated cached E2B is 86.301ms versus 91.831ms, and E4B is 228.533ms versus
 237.639ms, despite 1,024 correctly reused rows. Kernel warmup and trace ordering
 were not controlled for a paired cached timing gate. Preserve these observations

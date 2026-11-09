@@ -12,12 +12,14 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
-**Gemma 4 default-image text controls (2026-11-09).** Retained E2B/E4B pass
-their own exact ring/shared-KV cache and lifecycle checks. A short matched
-28-input/64-output text comparison with images resident observes useful decode
-changes of -0.287%/+0.024%, within the fixed 5% bound. Cached-request timing
-needs further investigation, and separate Gemma MTP assistants remain
-unimplemented. See the [artifact identities, medians and limits](2026-11-09-gemma4-image-text-parity.md).
+**Gemma 4 warmed cache correction (2026-11-09).** Alternating controls expose
+full-prompt replay after restoration in the original worker. The suffix fix
+passes nonperiodic near-capacity/image controls and improves measured hit
+first-token latency by 43.2–50.2% on the named retained E2B/E4B workloads.
+See the [corrected source-bound controls](2026-11-09-gemma4-warmed-cache.md).
+The [earlier short image-loading measurements](2026-11-09-gemma4-image-text-parity.md)
+retain their own scope; their original worker cache qualification is withdrawn.
+Separate Gemma MTP assistants remain unimplemented.
 
 **Qwen vision artifact text prefix reuse (2026-11-08).** On the official
 Qwen3.5-0.8B BF16 artifact, 32 exactness cases pass and cached follow-ups reuse

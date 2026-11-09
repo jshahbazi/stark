@@ -2,9 +2,11 @@
 
 ## 20261109-G4IP-01: exact attention-ring prefix snapshots
 
-Status: implemented on branch; bounded E2B/E4B cache correctness and short
-image-loaded text speed controls pass. Cached-request performance and Gemma
-assistant MTP remain open. Source baseline `5f702450` includes merged vision
+Status: ring snapshot implementation is on branch. **The original G4IP-01
+worker cache qualification is superseded by G4IP-02:** the worker streamed a
+full prompt after restoration, which periodic synthetic inputs failed to expose.
+The short unscoped loading-speed measurements remain valid for their named
+build. Gemma assistant MTP remains open. Source baseline `5f702450` includes merged vision
 text-prefix infrastructure from PR #110. This attempt addresses IMGPAR-07
 first. IMGPAR-10/11/12 remain separate larger checkpoint qualifications.
 
@@ -108,12 +110,15 @@ image-loaded short outputs and baseline long fresh outputs. Preserve receipt
 Correct the private recipe's scope length, keep the error code in aggregate
 failed receipts, and rerun as a separate receipt.
 
-## Completed bounded result and remaining work
+## Original bounded observations and corrected disposition
 
-The corrected E2B and E4B actual-worker recipes each pass 149 aggregate checks.
-They match fresh old/candidate text outputs with restored image-loaded greedy
-and seeded trajectories after full ring overwrite. Real image→fresh text→cached
-text transitions and scope/context/reset/error/cancellation invalidation pass.
+The corrected-scope E2B and E4B actual-worker recipes each passed 149 aggregate
+checks. Their output comparisons were insufficient for worker cache
+qualification: G4IP-02 finds full-prompt replay after restoration. Preserve these
+receipts and their raw matching hashes, while withdrawing the cached-worker
+qualification. Engine snapshot-copy tests and short unscoped loading measurements
+retain their own independent scope. Image→text and scope/context/reset/error/
+cancellation checks retain observed outcomes, without proving correct suffix dispatch.
 Cancellation is requested at the initial progress frame. Mid-GPU cancellation
 and injected device failures remain outside this actual-model run.
 
@@ -123,6 +128,8 @@ zero failed. Worker SHA-256:
 An independent read-only review found the ring payload/scalar restoration,
 owning-layer accounting and guarded wrapper/worker plumbing consistent. The
 shared-KV fixture's positional mismatch was corrected without weakening admission.
+That review missed full-prompt replay in the worker stream call; G4IP-02 adds a
+near-capacity negative control and an actual-work invariant to catch this class.
 
 The [matched benchmark](../benchmarks/2026-11-09-gemma4-image-text-parity.md)
 records per-artifact identities, byte-identical decoder controls, all arm
@@ -134,8 +141,75 @@ observations include slower cached first-token times after warm fresh requests;
 they require a separate warmed, alternating timing investigation. No cached
 speedup or full IMGPAR-07 performance completion is claimed.
 
-Disposition: adopt the exact ring snapshot implementation on this branch, with
-bounded retained E2B/E4B correctness and short loading-mode performance evidence.
-Keep cached-workload timing and Gemma assistant conversion/execution open.
+Original promotion decision is superseded: retain the ring snapshot component
+evidence and short loading-mode measurements, and require G4IP-02's corrected
+worker controls before adopting prefix reuse. Keep Gemma assistant conversion/execution open.
 Larger 12B/26B/31B full generation, resource and parity gates remain unqualified.
 The implementation has not been merged, released or installed by this attempt.
+
+## 20261109-G4IP-02: warmed alternating cache timing
+
+Planned before execution: compare cache-disabled fresh requests with actual
+1,024-row cache hits in the same warmed, image-loaded worker on the existing
+E2B/E4B artifacts. Use worker `71280ab5…`, context 4,096, greedy, seed 47,
+MTP off and eight-token output budget. Reuse the prior 1,792-token and changed
+1,824-token synthetic inputs so source identities/output checks remain fixed.
+
+For each workload, run two warmup cycles, then six measured cycles. Alternate
+fresh→prime→hit and prime→hit→fresh order. Reset before each cycle; priming must
+reuse zero rows, and the following hit must reuse exactly 1,024. Keep priming
+timing separately, including snapshot allocation/copy/synchronization. Compare
+exact output hashes for every request. The fixed regression bound is 5% for
+median first-token and end-to-end time; preserve every observation and any
+failure. A useful cache benefit needs a lower measured latency, rather than
+positive reuse counts alone.
+
+Measured blocks require zero additional pageouts/swapins/swapouts and no more
+than 200% aggregate CPU from other processes at block boundaries. Record
+thermal/performance warning status; full temperature telemetry remains absent.
+GPU/build ownership is exclusive through the coordinator. Loading, hashing and
+warmup occur outside the measured block. Keep an 8GiB disk reserve. A failed
+host guard makes timing inconclusive; retry at most once with the same recipe.
+No new model export or large download is authorized for this increment.
+
+### Demonstrated defect and correction
+
+On the original `81b85f88` worker, warmed cache hits are 7.03%/7.24% slower at
+E2B's 1,792/1,824-token first-token metric; E4B is 2.52%/5.89% slower. All four
+blocks have zero additional pageouts/swapins/swapouts. Source inspection finds
+the Gemma worker's text arm passes the full input to a restored state, unlike
+the existing Qwen/Text arms which pass `input[reused..]`. This is duplicated
+context and repeated work, beyond copy/synchronization overhead.
+
+The original worker concretely reproduces failure on a nonperiodic 1,792-token
+input with context 2,048: priming succeeds, the following reported cache hit
+returns `native_generation_failed` because the saved 1,024 rows plus full replay
+exceed capacity. The source/payload restoration implementation itself remains
+covered by its independent component controls.
+
+Fix the Gemma stream arm to receive only its unprocessed suffix. Add a text-only
+native invariant that the engine's actual prefilled count equals total input
+minus reported reuse, using checked subtraction. Drain the stream and fail the
+request if the invariant is violated. This guards against a future dispatch
+mistake hidden by repetitive inputs. Image metric contracts remain unchanged.
+
+Both fixed artifacts pass nonperiodic near-capacity greedy and seeded fresh/
+prime/hit controls, changed tails, and a real image→fresh text→cache transition.
+Six warmed alternating cycles per workload show first-token improvements of
+43.2–46.6% for E2B and 46.6–50.2% for E4B, with eligible zero-paging host blocks.
+The [follow-up benchmark](../benchmarks/2026-11-09-gemma4-warmed-cache.md) binds
+exact binaries, receipts and all medians. The earlier worker cache claim remains
+explicitly withdrawn. Assistant work is staged in the
+[Gemma 4 assistant implementation plan](../GEMMA4_ASSISTANT_PLAN.md).
+
+Final review scopes the actual-prefill invariant to text requests and uses
+checked subtraction, preserving unrelated image metric contracts. The final
+Rust 1.98.1 release worker builds and passes **134 worker tests, two ignored,
+zero failed**, with SHA-256
+`567898a851702f0dfc944ddee884f5050a387fb0b1822240a58e9d6555c59bb9`.
+Timing/actual-model receipts name the prior suffix-fix executable `ddb28007…`;
+the final guard scoping changes no tested text-state or numerical operation.
+No additional GPU run was performed for that review-only guard adjustment.
+Repository policy, formatting and whitespace checks pass. This bounded cache
+fix is ready on its branch; assistant stages, larger profiles and release/
+installation qualification remain open.
