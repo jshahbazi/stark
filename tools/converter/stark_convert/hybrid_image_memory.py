@@ -20,24 +20,30 @@ _LILY_IDENTITY = {
 }
 _LILY_TOTAL = 106_905_155_192
 # Header-only source inventory. Includes the BF16 tower. The adapter selects
-# NgramStorage::Paged and disables MTP before loading image-enabled models.
+# NgramStorage::Paged. Vision-loaded models also retain the text MTP head;
+# image execution disables its use without unloading the resident weights.
 _LILY_RESIDENT = 73_062_399_712
 _LILY_PAGED = 32_000_153_600
 _LILY_MTP = 1_842_067_616
 
 # Frozen adapter/vendor allocation recipe for a 2048-token image check:
 # - startup KV capacity is 16384, despite the smaller requested context;
-# - 12 attention KV/indexer stores +36 GDN states total 394,616,832 bytes;
+# - target KV/indexer/GDN states total 394,616,832 bytes, plus 23,089,152
+#   bytes of MTP state; both fit the 512 MiB initial-state reserve;
 # - prefill is bounded to 2048 rows and vision to 4096 patches;
 # - page-touch allowance covers two contexts' 16 hashed rows/token, three
 #   independently faulted planes/row and 4096-byte pages (768 MiB).
-# Decoder dequant staging peaks at 62,914,560 bytes. Rounded buckets cover
+# Loaded-head SpecScratch adds 346,788,072 bytes even with image MTP off;
+# preserve the old decoder allowance and round their sum up to 768 MiB.
+# Two extra BF16 prefill owners add 83,886,080 bytes at 2048 rows, covered
+# by an additional 128 MiB. Decoder dequant staging peaks at 62,914,560 bytes.
+# Rounded buckets cover
 # those typed tensors plus CPU patches, staging and temporary copies. The
 # additional 8 GiB covers compiler/driver/allocator and available-memory drift.
 _LILY_RESERVES = {
     "initial_state": 512 * _MIB,
-    "decoder_scratch": 256 * _MIB,
-    "prefill_scratch": 2 * _GIB,
+    "decoder_scratch": 768 * _MIB,
+    "prefill_scratch": 2 * _GIB + 128 * _MIB,
     "vision_cpu_and_gpu": 512 * _MIB,
     "paged_working_set": _GIB,
     "driver_allocator_and_host_margin": 8 * _GIB,
@@ -65,4 +71,4 @@ def retained_check_memory(identity: dict) -> int:
     )
     if not exact or len(files) != 55 or total != _LILY_TOTAL:
         return total + 2 * _GIB
-    return _LILY_RESIDENT + sum(_LILY_RESERVES.values())
+    return _LILY_RESIDENT + _LILY_MTP + sum(_LILY_RESERVES.values())
