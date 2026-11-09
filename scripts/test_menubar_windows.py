@@ -25,7 +25,99 @@ final class ForbiddenWindowCredentialStorage: APICredentialStorage {
     func replace(_ data: Data) -> OSStatus { fatalError("unexpected_credential_access") }
 }
 
+struct CatalogPickerBoundsProbe: NSViewRepresentable {
+    let view: NSView
+    func makeNSView(context: Context) -> NSView { view }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+@MainActor
+func exerciseCatalogPickerLayouts() -> Bool {
+    _ = NSApplication.shared
+    let compact: [CatalogQuantizationFilter] = [.all, .quantization("4-bit"), .quantization("8-bit"), .quantization("BF16")]
+    let long: [CatalogQuantizationFilter] = [.all,
+        .quantization("Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)"),
+        .quantization("MLX mixed 4/8-bit"), .quantization("MLX-Serve mixed 4/8-bit")]
+    for choices in [[.all], compact, long] {
+        for selection in choices {
+            for width: CGFloat in [320, 592] {
+                let probe = NSView()
+                let picker = CatalogQuantizationPicker(choices: choices, selection: .constant(selection))
+                    .overlay(CatalogPickerBoundsProbe(view: probe))
+                    .frame(width: width, height: 40)
+                let host = NSHostingView(rootView: picker)
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 40),
+                                      styleMask: [.titled], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = host
+                defer { window.close() }
+                host.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+                host.layoutSubtreeIfNeeded()
+                let bounds = probe.convert(probe.bounds, to: host)
+                guard bounds.width > 0, bounds.minX >= -1, bounds.maxX <= width + 1,
+                      bounds.minY >= -1, bounds.maxY <= host.bounds.height + 1 else { return false }
+            }
+        }
+    }
+    return true
+}
+
+extension ModelsView {
+    static func catalogWindowFixture(engine: EngineController, navigation: ModelManagementState,
+                                     selection: CatalogQuantizationFilter) -> Self {
+        var result = Self(engine: engine, navigation: navigation, onDone: {}, onRun: { _ in })
+        result._selectedFamily = State(initialValue: ModelsInventory.Family(id: "qwen3_8", name: "Qwen3.8 Flash Next"))
+        result._catalogQuantization = State(initialValue: selection)
+        return result
+    }
+}
+
+@MainActor
+func exerciseCatalogFamilyLayout() -> Bool {
+    _ = NSApplication.shared
+    let suite = "stark.catalog-window-test." + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let credentials = APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage())
+    let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults)
+    let labels = ["Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)", "MLX mixed 4/8-bit", "MLX-Serve mixed 4/8-bit"]
+    let items: [[String: Any]] = labels.enumerated().map { index, label in
+        ["id": "fixture-\(index)", "repo": "fixture/Qwen3.8-Flash-Next-\(index)",
+         "revision": String(repeating: "a", count: 40), "name": "Qwen3.8-Flash-Next-\(index)",
+         "quantization": label, "artifact_modes": ["text", "vision-language"], "default_artifact_mode": "text",
+         "weight_bytes": Int64(106_910_000_000), "downloadable": true, "installed_ids": [String]()]
+    }
+    let report: [String: Any] = ["schema_version": 1, "family_id": "qwen3_8", "status": "ready",
+        "message": "", "items": items, "has_more": true, "offset": 0, "next_offset": 3]
+    let navigation = ModelManagementState()
+    navigation.tab = .download
+    for selection in [.all] + labels.map(CatalogQuantizationFilter.quantization) {
+        engine.configureCatalogWindowFixture(report)
+        guard engine.catalog?.items.count == 3 else { return false }
+        let content = ModelsView.catalogWindowFixture(engine: engine, navigation: navigation, selection: selection)
+        let host = NSHostingView(rootView: content)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        host.layoutSubtreeIfNeeded()
+        let probe = content.windowFixtureBoundsProbe
+        let bounds = probe.convert(probe.bounds, to: host)
+        guard bounds.width > 0, bounds.minX >= 23, bounds.maxX <= 617,
+              bounds.minY >= 23, bounds.maxY <= 557 else { return false }
+    }
+    return true
+}
+
 extension EngineController {
+    func configureCatalogWindowFixture(_ report: [String: Any]) {
+        catalog = FamilyModelCatalog(report)
+    }
+
     func exerciseBackgroundWindowUpdates() {
         loadedID = "window-fixture"
         loadedMode = .chat
@@ -273,6 +365,8 @@ struct WindowChecks {
         case "beginner-queued-scan": exit(BeginnerOpenWorkStatus.queuedScanFixture() ? 0 : 1)
         case "application-scan-threading": exit(AppDelegate.exerciseApplicationScanThreading() ? 0 : 1)
         case "advanced-options": exit(AppDelegate.exerciseAdvancedOptionsLayouts() ? 0 : 1)
+        case "catalog-picker": exit(exerciseCatalogPickerLayouts() ? 0 : 1)
+        case "catalog-family": exit(exerciseCatalogFamilyLayout() ? 0 : 1)
         default: exit(2)
         }
     }
@@ -377,6 +471,16 @@ class WindowLifecycleTests(unittest.TestCase):
         if source.count(BOUNDARY) != 1:
             raise RuntimeError("window_source_boundary_invalid")
         main = directory / "WindowChecks.swift"
+        # Preserve the selected family in this disposable copy and measure the
+        # inner stack, whose minimum width originally pushed controls offscreen.
+        family_reset = ".onAppear { selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all }"
+        models_frame = "}.padding(24).frame(width: 640, height: 580)"
+        models_declaration = "struct ModelsView: View {"
+        if any(source.count(boundary) != 1 for boundary in [family_reset, models_frame, models_declaration]):
+            raise RuntimeError("catalog_fixture_source_boundary_invalid")
+        source = source.replace(family_reset, ".onAppear { artifactChoices = [:] }").replace(
+            models_declaration, models_declaration + "\n    let windowFixtureBoundsProbe = NSView()"
+        ).replace(models_frame, "}.background(CatalogPickerBoundsProbe(view: windowFixtureBoundsProbe)).padding(24).frame(width: 640, height: 580)")
         main.write_text(source.split(BOUNDARY, 1)[0] + DRIVER)
 
         # Bind the existing disclosure only in this disposable source copy, so
@@ -468,6 +572,12 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_advanced_options_fit_with_and_without_mtp_support(self):
         self.run_check("advanced-options")
+
+    def test_catalog_filters_fit_with_long_labels_and_each_selected_value(self):
+        self.run_check("catalog-picker")
+
+    def test_qwen_family_content_stays_inside_manage_models_padding(self):
+        self.run_check("catalog-family")
 
 
 if __name__ == "__main__":

@@ -2570,6 +2570,27 @@ struct InstallStageView: View {
     }
 }
 
+struct CatalogQuantizationPicker: View {
+    let choices: [CatalogQuantizationFilter]
+    @Binding var selection: CatalogQuantizationFilter
+
+    private var picker: some View {
+        Picker("Quantization", selection: $selection) {
+            ForEach(choices, id: \.self) { choice in Text(choice.title).tag(choice) }
+        }.labelsHidden().accessibilityLabel("Model quantization")
+    }
+
+    var body: some View {
+        // A segmented control's minimum width includes every full label. Keep
+        // that intrinsic width from expanding the fixed-size Manage Models view.
+        ViewThatFits(in: .horizontal) {
+            picker.pickerStyle(.segmented).fixedSize(horizontal: true, vertical: false)
+            picker.pickerStyle(.menu).frame(minWidth: 0, maxWidth: .infinity)
+                .help(selection.title)
+        }
+    }
+}
+
 struct ModelsView: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var navigation: ModelManagementState
@@ -2661,9 +2682,7 @@ struct ModelsView: View {
                             visionConversion: $navigation.visionConversion)
             } else {
                 if selectedFamily != nil {
-                    Picker("Quantization", selection: quantizationBinding) {
-                        ForEach(quantizationTabs, id: \.self) { choice in Text(choice.title).tag(choice) }
-                    }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("Model quantization")
+                    CatalogQuantizationPicker(choices: quantizationTabs, selection: quantizationBinding)
                 }
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
