@@ -31,7 +31,7 @@ use crate::{
         mlp::{Mlp, MlpBlockError},
         normalization::{Normalization, NormalizationNewError, PostLayerScalar, ShortcutMode},
     },
-    parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
+    parameters::{NumericalProfile, ParameterLoaderError, ParameterStorageStatistics, ParameterTree},
 };
 
 const DIM: u32 = 256;
@@ -195,6 +195,8 @@ pub struct Gemma4Assistant<B: Backend> {
     readout: Box<dyn Linear<B>>,
     ordering: Box<[u32]>,
     add: <B::Kernels as Kernels>::MaterializedBF16AddScaleKernel,
+    resident_storage_bytes: usize,
+    peak_loading_bytes: usize,
 }
 
 /// Device-owned outputs, with no Debug or serialization of activations/logits.
@@ -212,11 +214,22 @@ impl<B: Backend> Gemma4Assistant<B> {
     pub fn backbone_dim(&self) -> u32 {
         self.profile.backbone_dim()
     }
+    pub fn resident_storage_bytes(&self) -> usize {
+        self.resident_storage_bytes
+    }
+    pub fn peak_loading_bytes(&self) -> usize {
+        self.peak_loading_bytes
+    }
     pub(crate) fn bind_target(
         mut self,
         identity: Arc<()>,
+        storage: ParameterStorageStatistics,
     ) -> Self {
         self.target_identity = Some(identity);
+        // Raw i64 ordering and the permutation witness are temporary; the
+        // admitted head retains its independent host u32 ordering allocation.
+        self.resident_storage_bytes = storage.resident_bytes + self.ordering.len() * size_of::<u32>();
+        self.peak_loading_bytes = storage.peak_loading_bytes + self.ordering.len() * (8 + 4 + 1);
         self
     }
     pub(crate) fn matches_target(
@@ -376,6 +389,8 @@ impl<B: Backend> Gemma4Assistant<B> {
             ordering,
             add: <B::Kernels as Kernels>::MaterializedBF16AddScaleKernel::new(context, false)
                 .map_err(Gemma4AssistantError::Backend)?,
+            resident_storage_bytes: 0,
+            peak_loading_bytes: 0,
         })
     }
 

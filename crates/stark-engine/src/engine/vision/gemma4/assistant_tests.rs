@@ -182,8 +182,8 @@ fn private_e2b_assistant_real_drafts_with_image_tower_resident() {
             && recovered.frame.position() == initial_position + 4
     );
     drop(recovered);
-    // The target keeps its ordinary context support. Assistant drafting alone
-    // fences the still-unqualified 513-row source handoff.
+    // Public drafting now admits the separately qualified 513-row handoff;
+    // the staged context/position upper bounds remain explicit.
     let boundary_input = (0..513).map(|i| input[i % input.len()]).collect::<Vec<_>>();
     let boundary = model
         .language_model
@@ -198,10 +198,8 @@ fn private_e2b_assistant_real_drafts_with_image_tower_resident() {
         .language_model
         .prefill_gemma4_assistant_target(&boundary_input, 520, Gemma4AssistantProfile::E2B, &mut || false)
         .unwrap();
-    assert!(matches!(
-        model.language_model.draft_gemma4_assistant_greedy(&beyond, &head, first, 1),
-        Err(crate::engine::language_model::gemma4_assistant::Gemma4AssistantSessionError::Invalid)
-    ));
+    assert!(beyond.assistant_drafting_supported());
+    assert!(model.language_model.draft_gemma4_assistant_greedy(&beyond, &head, first, 1).is_ok());
     let continued = model.language_model.verify_gemma4_assistant_greedy_serial(beyond, &[], &mut || false).unwrap();
     assert!(continued.frame.position() == 514 && continued.committed_tokens.len() == 1);
     drop(continued);
@@ -209,7 +207,7 @@ fn private_e2b_assistant_real_drafts_with_image_tower_resident() {
     for token in &drafts {
         hash.update(token.to_le_bytes());
     }
-    let aggregate = serde_json::json!({"attempt":"20261109-G4AP-05","scope":"assistant source MLP, committed-query and serial verification; no serving or speed qualification",
+    let aggregate = serde_json::json!({"attempt":"20261109-G4AP-06","scope":"assistant source MLP, committed-query and serial verification; no serving or speed qualification",
         "assistant_numerical_policy":head.numerical_policy(),
         "target_config_sha256":identity.config_sha256,"target_weights_sha256":identity.artifact_sha256,
         "companion_sha256":before,"input_tokens":input.len(),"drafts":drafts.len(),"draft_sha256":format!("{:x}",hash.finalize()),
@@ -219,8 +217,8 @@ fn private_e2b_assistant_real_drafts_with_image_tower_resident() {
         "serial_verification":{"actual_proposals_accepted":accepted,"fresh_output_equal":true,"all_accept_three":true,
             "deliberate_reject":true,"partial_accept_then_reject":true,"zero_drafts":true,
             "drained_cancel_then_fresh":true,"performance_qualified":false},
-        "context_guard":{"draft_position_512_admitted":true,"draft_position_513_rejected":true,
-            "ordinary_target_continues_beyond_guard":true,"boundary_numerical_parity_qualified":false},
+        "context_guard":{"draft_position_512_admitted":true,"draft_position_513_admitted":true,
+            "ordinary_target_continues":true,"qualified_context_max":2048,"qualified_draft_position_max":1792},
         "reference_numerical_parity":oracle});
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(output).unwrap();
     file.write_all(serde_json::to_string_pretty(&aggregate).unwrap().as_bytes()).unwrap();
@@ -295,7 +293,7 @@ fn private_e2b_assistant_wrapped_handoff_and_transactional_batch() {
         let result = child.wait_with_output().unwrap();
         assert!(result.status.success(), "private chained reference process failed");
         let oracle: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-        let numeric_record = serde_json::json!({"attempt":"20261109-G4AP-05","gate":"three-step-source-oracle",
+        let numeric_record = serde_json::json!({"attempt":"20261109-G4AP-06","gate":"three-step-source-oracle",
             "assistant_numerical_policy":head.numerical_policy(),
             "input_tokens":length,"target_config_sha256":model.artifact_identity().config_sha256,
             "target_weights_sha256":model.artifact_identity().artifact_sha256,"image_tower_resident":true,
@@ -306,6 +304,11 @@ fn private_e2b_assistant_wrapped_handoff_and_transactional_batch() {
             numeric_record["reference"]["passed"] == true,
             "chained source numerical gate failed; aggregate receipt retained"
         );
+        let public_drafts = model
+            .language_model
+            .draft_gemma4_assistant_greedy_controlled(&frame, &head, first, 3, &mut || false)
+            .unwrap();
+        assert!(public_drafts == drafts, "public drafting differs from the private qualified head payload");
         if length >= 1026 {
             let captured = model
                 .language_model
@@ -429,7 +432,7 @@ fn private_e2b_assistant_wrapped_handoff_and_transactional_batch() {
             .unwrap();
         assert!(recovered.committed_tokens == ordinary_tokens[..4] && recovered.next_token == ordinary_tokens[4]);
         drop(recovered);
-        let control_record = serde_json::json!({"attempt":"20261109-G4AP-05","gate":"transactional-target-controls",
+        let control_record = serde_json::json!({"attempt":"20261109-G4AP-06","gate":"transactional-target-controls",
             "assistant_numerical_policy":head.numerical_policy(),
             "input_tokens":length,"actual_drafts":drafts.len(),"actual_accepted":actual_accepted,
             "ordinary_output_equal":true,"supplied_all_accept":true,"supplied_partial_accept":true,
@@ -481,7 +484,7 @@ fn private_e2b_assistant_first_divergence_trace() {
     } else {
         serde_json::json!({"diagnostic_complete":false,"reference_process_succeeded":false,"returncode":result.status.code()})
     };
-    let record = serde_json::json!({"attempt":"20261109-G4AP-05-diagnostic","diagnostic_only":true,
+    let record = serde_json::json!({"attempt":"20261109-G4AP-06-diagnostic","diagnostic_only":true,
         "target_config_sha256":model.artifact_identity().config_sha256,
         "target_weights_sha256":model.artifact_identity().artifact_sha256,"input_tokens":input.len(),
         "ordinary_target_arithmetic_changed":false,"assistant_numerical_policy":head.numerical_policy(),

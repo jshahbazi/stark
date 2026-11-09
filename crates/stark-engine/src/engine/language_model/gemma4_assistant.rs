@@ -1,6 +1,6 @@
-//! Source-bound single-position draft component, without serving capability.
-//! Target verification, accepted-prefix rollback, head-aware prefix reuse and
-//! end-to-end performance qualification must precede native worker integration.
+//! Source-bound single-position drafting over committed target KV.
+//! Greedy transactional batches and caller-owned exact serial sampling share
+//! typed prompt-prefix retention. Worker serving remains staged for validation.
 use std::sync::Arc;
 
 use derive_more::Debug;
@@ -20,7 +20,7 @@ use crate::{
         mixer::attention::AssistantAttentionHandoff,
         transformer::{TransformerPrefix, TransformerState},
     },
-    engine::language_model::LanguageModel,
+    engine::{hybrid::MtpSampler, language_model::LanguageModel},
 };
 
 fn flat(length: usize) -> Box<[GpuTrieNode]> {
@@ -47,6 +47,8 @@ pub enum Gemma4AssistantSessionError<B: Backend> {
     Embedding(#[from] EmbeddingError<B>),
     #[error("Gemma assistant draft step failed")]
     Assistant(#[from] Gemma4AssistantError<B>),
+    #[error("Gemma assistant sampling failed")]
+    Sampling(#[from] crate::engine::hybrid::Error),
 }
 
 /// Request-owned text target state; no Debug, serialization or persistence.
@@ -61,7 +63,32 @@ pub struct Gemma4AssistantTargetFrame<B: Backend> {
     profile: Gemma4AssistantProfile,
     prefix: Option<TransformerPrefix<B>>,
 }
+
+/// Only a restored prompt boundary may escape a finished request. No current
+/// activation, logits, assistant handoff or unprocessed draw is retained.
+pub struct Gemma4AssistantRetainedPrefix<B: Backend> {
+    identity: Arc<()>,
+    state: TransformerState<B>,
+    prefix: TransformerPrefix<B>,
+    model_dim: u32,
+    capacity: u32,
+    profile: Gemma4AssistantProfile,
+}
+
+impl<B: Backend> Gemma4AssistantRetainedPrefix<B> {
+    pub fn position(&self) -> usize {
+        self.prefix.position() as usize
+    }
+    pub fn payload_bytes(&self) -> usize {
+        self.prefix.payload_bytes()
+    }
+}
 impl<B: Backend> Gemma4AssistantTargetFrame<B> {
+    /// The current artifact/policy proof covers E2B, context 2048 and drafting
+    /// positions through 1792. Higher positions remain separately qualified.
+    pub fn assistant_drafting_supported(&self) -> bool {
+        matches!(self.profile, Gemma4AssistantProfile::E2B) && self.capacity <= 2048 && self.position() <= 1792
+    }
     pub fn position(&self) -> u32 {
         self.state.context_length()
     }
@@ -150,9 +177,64 @@ where
         capture_position: usize,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<Gemma4AssistantTargetFrame<B>, Gemma4AssistantSessionError<B>> {
-        let capacity = frame.capacity;
-        let profile = frame.profile;
-        self.prefill_gemma4_assistant_target_impl(suffix, capacity, profile, capture_position, Some(frame), cancelled)
+        let prefix = self
+            .retain_gemma4_assistant_prompt_prefix(frame, cancelled)?
+            .ok_or(Gemma4AssistantSessionError::Invalid)?;
+        self.prefill_gemma4_assistant_from_retained_prefix(prefix, suffix, capture_position, cancelled)
+    }
+
+    pub fn prefill_gemma4_assistant_from_retained_prefix(
+        &self,
+        prefix: Gemma4AssistantRetainedPrefix<B>,
+        suffix: &[u32],
+        capture_position: usize,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Gemma4AssistantTargetFrame<B>, Gemma4AssistantSessionError<B>> {
+        let capacity = prefix.capacity;
+        let profile = prefix.profile;
+        self.prefill_gemma4_assistant_target_impl(suffix, capacity, profile, capture_position, Some(prefix), cancelled)
+    }
+
+    /// Restore physical KV before publication, including when a caller stopped
+    /// emitting in the middle of an already verified block.
+    pub fn retain_gemma4_assistant_prompt_prefix(
+        &self,
+        mut frame: Gemma4AssistantTargetFrame<B>,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<Gemma4AssistantRetainedPrefix<B>>, Gemma4AssistantSessionError<B>> {
+        if !Arc::ptr_eq(&self.model_identity, &frame.identity) {
+            return Err(Gemma4AssistantSessionError::Invalid);
+        }
+        if cancelled() {
+            return Err(Gemma4AssistantSessionError::Cancelled);
+        }
+        let Some(prefix) = frame.prefix.take() else {
+            return Ok(None);
+        };
+        let backend = Gemma4AssistantSessionError::Backend;
+        let mut command = self
+            .engine
+            .context
+            .create_command_buffer(Some("Gemma assistant completed prompt boundary"), None)
+            .map_err(backend)?;
+        if !frame.state.restore_prefix(&prefix, &mut command) {
+            return Err(Gemma4AssistantSessionError::Invalid);
+        }
+        command.end_encoding().submit().wait_until_completed().map_err(backend)?;
+        if cancelled() {
+            return Err(Gemma4AssistantSessionError::Cancelled);
+        }
+        if frame.state.context_length() != prefix.position() {
+            return Err(Gemma4AssistantSessionError::Invalid);
+        }
+        Ok(Some(Gemma4AssistantRetainedPrefix {
+            identity: frame.identity,
+            state: frame.state,
+            prefix,
+            model_dim: frame.model_dim,
+            capacity: frame.capacity,
+            profile: frame.profile,
+        }))
     }
 
     fn prefill_gemma4_assistant_target_impl(
@@ -161,11 +243,11 @@ where
         capacity: u32,
         profile: Gemma4AssistantProfile,
         capture_position: usize,
-        restored: Option<Gemma4AssistantTargetFrame<B>>,
+        restored: Option<Gemma4AssistantRetainedPrefix<B>>,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<Gemma4AssistantTargetFrame<B>, Gemma4AssistantSessionError<B>> {
         let invalid = Gemma4AssistantSessionError::Invalid;
-        let start = restored.as_ref().and_then(Gemma4AssistantTargetFrame::prefix_position).unwrap_or(0);
+        let start = restored.as_ref().map_or(0, Gemma4AssistantRetainedPrefix::position);
         if !self.decoder.gemma4_multimodal_supported()
             || self.speculator.is_some()
             || self.decoder.embedding().model_dim() != profile.backbone_dim()
@@ -182,27 +264,15 @@ where
         if cancelled() {
             return Err(Gemma4AssistantSessionError::Cancelled);
         }
-        let (mut state, mut saved_prefix) = if let Some(mut frame) = restored {
-            if !Arc::ptr_eq(&self.model_identity, &frame.identity)
-                || frame.capacity != capacity
-                || frame.model_dim != profile.backbone_dim()
+        let (mut state, mut saved_prefix) = if let Some(saved) = restored {
+            if !Arc::ptr_eq(&self.model_identity, &saved.identity)
+                || saved.capacity != capacity
+                || saved.model_dim != profile.backbone_dim()
+                || saved.state.context_length() != saved.prefix.position()
             {
                 return Err(Gemma4AssistantSessionError::Invalid);
             }
-            let saved = frame.prefix.take().ok_or(Gemma4AssistantSessionError::Invalid)?;
-            let mut command = self
-                .engine
-                .context
-                .create_command_buffer(Some("Gemma assistant prefix restoration"), None)
-                .map_err(backend)?;
-            if !frame.state.restore_prefix(&saved, &mut command) {
-                return Err(Gemma4AssistantSessionError::Invalid);
-            }
-            command.end_encoding().submit().wait_until_completed().map_err(backend)?;
-            if cancelled() {
-                return Err(Gemma4AssistantSessionError::Cancelled);
-            }
-            (frame.state, Some(saved))
+            (saved.state, Some(saved.prefix))
         } else {
             (self.decoder.create_empty_state(Some(capacity), &self.engine.context).map_err(backend)?, None)
         };
@@ -287,7 +357,7 @@ where
 
     /// Real greedy proposals only; this does not verify or commit target rows.
     /// Keeping the immutable frame borrowed fixes KV and RoPE through the round.
-    /// Positions beyond 512 require the unimplemented source 513-row handoff.
+    /// Uses the separately qualified inclusive local handoff for admitted E2B.
     pub fn draft_gemma4_assistant_greedy(
         &self,
         frame: &Gemma4AssistantTargetFrame<B>,
@@ -306,15 +376,55 @@ where
         count: usize,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<Vec<u32>, Gemma4AssistantSessionError<B>> {
+        self.draft_gemma4_assistant_controlled(frame, head, first, count, cancelled, &mut |logits| {
+            logits
+                .iter()
+                .enumerate()
+                .max_by(|(a, x), (b, y)| x.total_cmp(y).then_with(|| b.cmp(a)))
+                .map(|(index, _)| index as u32)
+                .ok_or(Gemma4AssistantSessionError::Invalid)
+        })
+    }
+
+    /// The caller starts one sampler round before recording these complete-
+    /// vocabulary proposal distributions and then verifies them in order.
+    pub fn draft_gemma4_assistant_sampled_controlled(
+        &self,
+        frame: &Gemma4AssistantTargetFrame<B>,
+        head: &Gemma4Assistant<B>,
+        first: u32,
+        count: usize,
+        sampler: &mut dyn MtpSampler,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Vec<u32>, Gemma4AssistantSessionError<B>> {
+        self.draft_gemma4_assistant_controlled(frame, head, first, count, cancelled, &mut |logits| {
+            sampler.draft(logits).map_err(Gemma4AssistantSessionError::Sampling)
+        })
+    }
+
+    fn draft_gemma4_assistant_controlled(
+        &self,
+        frame: &Gemma4AssistantTargetFrame<B>,
+        head: &Gemma4Assistant<B>,
+        first: u32,
+        count: usize,
+        cancelled: &mut dyn FnMut() -> bool,
+        draw: &mut dyn FnMut(&[f32]) -> Result<u32, Gemma4AssistantSessionError<B>>,
+    ) -> Result<Vec<u32>, Gemma4AssistantSessionError<B>> {
         if !Arc::ptr_eq(&self.model_identity, &frame.identity)
             || !head.matches_target(&self.model_identity)
-            || frame.position() > 512
+            || !matches!(frame.profile, Gemma4AssistantProfile::E2B)
+            || frame.capacity > 2048
+            || (count > 0 && !frame.assistant_drafting_supported())
             || head.backbone_dim() != frame.model_dim
             || count > 3
             || first >= self.decoder.embedding().vocab_size()
             || frame.position().checked_add(count as u32 + 1).is_none_or(|n| n > frame.capacity)
         {
             return Err(Gemma4AssistantSessionError::Invalid);
+        }
+        if count == 0 {
+            return Ok(Vec::new());
         }
         let local = frame
             .state
@@ -352,12 +462,10 @@ where
                 return Err(Gemma4AssistantSessionError::Cancelled);
             }
             let logits = head.mask_logits(&step.centroids.copyout::<bf16>(), &step.logits.copyout::<bf16>())?;
-            root = logits
-                .iter()
-                .enumerate()
-                .max_by(|(a, x), (b, y)| x.total_cmp(y).then_with(|| b.cmp(a)))
-                .map(|(i, _)| i as u32)
-                .ok_or(Gemma4AssistantSessionError::Invalid)?;
+            root = draw(&logits)?;
+            if root >= self.decoder.embedding().vocab_size() {
+                return Err(Gemma4AssistantSessionError::Invalid);
+            }
             tokens.push(root);
             feedback = Some(next);
         }
@@ -402,6 +510,51 @@ where
         Ok(Gemma4AssistantVerifiedRound {
             frame,
             committed_tokens: emitted,
+            next_token,
+            accepted_drafts: accepted,
+            verified_rows: accepted + 1,
+            repaired_rows: 0,
+        })
+    }
+
+    /// Exact caller-owned sampling uses ordinary serial target verification.
+    /// `first` is the already sampled, unprocessed target carry. The sampler
+    /// consumes proposal distributions only after each ordinary target row.
+    pub fn verify_gemma4_assistant_sampled_serial(
+        &self,
+        mut frame: Gemma4AssistantTargetFrame<B>,
+        first: u32,
+        drafts: &[u32],
+        sampler: &mut dyn MtpSampler,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Gemma4AssistantVerifiedRound<B>, Gemma4AssistantSessionError<B>> {
+        if !Arc::ptr_eq(&self.model_identity, &frame.identity)
+            || first >= self.decoder.embedding().vocab_size()
+            || drafts.len() > 3
+            || drafts.iter().any(|&token| token >= self.decoder.embedding().vocab_size())
+            || frame.position().checked_add(drafts.len() as u32 + 1).is_none_or(|n| n > frame.capacity)
+        {
+            return Err(Gemma4AssistantSessionError::Invalid);
+        }
+        let mut committed = vec![first];
+        let mut accepted = 0;
+        for index in 0..=drafts.len() {
+            self.advance_gemma4_assistant_frame(&mut frame, *committed.last().unwrap(), cancelled)?;
+            let proposal = drafts.get(index).copied();
+            let next = sampler.target(&frame.logits, proposal)?;
+            if next >= self.decoder.embedding().vocab_size() {
+                return Err(Gemma4AssistantSessionError::Invalid);
+            }
+            committed.push(next);
+            if proposal.is_none_or(|token| token != next) {
+                break;
+            }
+            accepted += 1;
+        }
+        let next_token = committed.pop().ok_or(Gemma4AssistantSessionError::Invalid)?;
+        Ok(Gemma4AssistantVerifiedRound {
+            frame,
+            committed_tokens: committed,
             next_token,
             accepted_drafts: accepted,
             verified_rows: accepted + 1,

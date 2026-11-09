@@ -810,6 +810,34 @@ reviewed exact tool bytes and fourteen CPU controls are preserved in
 including the original raw oracle. GLM and parent independently review the
 new policy/source; no model data or private payload is tracked.
 
+Parent independently reruns the tracked fourteen CPU controls on the pinned
+Torch wheel in 0.418 seconds with no model/Metal operation. Its separate
+private receipt has SHA-256
+`7e2a8e3009907edb30bf0d35e956fc586d4db4f044131e13633cbab5b2940a79`,
+identical aggregate bytes to the existing control receipt. This is an
+independent execution, not an inherited assertion.
+
+## 20261109-G4AP-06: staged native worker integration
+
+Registered before source changes. Preserve the qualified greedy transactional
+batch path; add caller-owned exact-rejection sampling with serial ordinary
+target verification for stochastic requests. Publish only a typed restored
+prompt-prefix state after output completion, dropping current normalized
+activation/logits/local handoff and any unprocessed draw. Fence failed backend
+work and drain only owned commands; cancellation clears cache state. Scope
+draft admission to the exact qualified E2B pair and tested 2,048-token context
+and 1,792-token drafting-position bounds. Higher bounds remain an explicit
+qualification task before final default support.
+
+The staging worker must preserve Qwen's MTP0 ordinary dispatch, load an exact
+optional assistant sidecar with the image artifact, bill actual resident head
+and host ordering memory plus scratch, and key prefix reuse by model instance,
+context, scope, mode and execution policy. Images clear text state and run
+zero drafts. A temporary build feature is only for testing the ordinary
+worker protocol before qualification; it is not a final default-disabled or
+image-less workaround. Normal-worker lifecycle and matched MTP0/MTP3 speed
+remain required before enabling default supported admission.
+
 ### Focused upstream implementation comparison
 
 The source-only comparison pins MLX-VLM commit
@@ -836,3 +864,125 @@ proposal distribution. The upstream
 [mask helper](https://github.com/Blaizzy/mlx-vlm/blob/763e6379a94d054b8d695d6f3f3ad675d3d366df/mlx_vlm/speculative/drafters/gemma4_assistant/masks.py)
 uses strict sliding-distance comparisons; its boundary behavior is not
 adopted over the pinned Transformers oracle and actual Stark handoff evidence.
+
+### Worker build and pre-model controls
+
+The first worker compilation fails only on the private assistant type import;
+the public type re-export/import correction is separately reviewed. The
+corrected Rust 1.98.1 worker and matching template helper compile successfully
+with the temporary staging feature. Sealed worker SHA-256 is
+`a356edf19c1652536a2d2feb12c096e57458105bf6500846779f5ca295997358`,
+helper `77e45824cb995adc0322f27a466f9cd4cf13f1bda9edb1e8cf2e107b457ea799`,
+and source/binary seal
+`5e99a297af787c07a78dd13e26b4c54d4c6e676c549004433485d9c1a0a686c4`.
+Worker CPU tests pass 136 cases with two ignored. The new unloaded-vision
+subtree CPU control also passes. No model or Metal execution is involved in
+these checks; source review and compilation do not qualify serving behavior.
+
+The initial private worker fixture (`60600e1e`) remains unexecuted. Independent
+review finds that its inherited guardian can stop monitoring on telemetry
+errors and that its final acceptance omits positive drain/join evidence.
+The earlier component receipts remain source-bound historical records; they
+do not inherit the replacement guardian's controls.
+
+The replacement reuses the reviewed owned-process guardian, with the small
+model limits registered separately: 12 GiB RSS and footprint ceilings,
+64 GiB entry availability, 32 GiB running availability, 8 GiB disk reserve,
+180-second deadline, and zero compressor, paging or swap growth. Seven focused
+CPU controls pass, including actual child cleanup, telemetry failure,
+final-sample failure and descriptor reuse. Guard source SHA-256 is
+`c36da9bb19a77703b58e2bcaccd583760728b3b8b2ec327266ee925a43e048d9`;
+control receipt is
+`e5c2cd34e30f507e3e2503df211177ff93fc05b11e4be098a67f6be31113d8b6`.
+Fixture v2 adds sealed path checks, final guard acceptance and explicit
+stop/cap/image assertions, SHA-256
+`af10ec477485fecf4f824e8b2d8ab594a8f774ba3477d8e5aedda74ba5883852`.
+The next gate is the normal images-resident worker smoke after independent
+fixture review and exclusive model-slot handoff, using the unchanged sealed
+worker/helper and exact cloned E2B artifact. Full lifecycle, matching-arm
+performance, broader default context and catalog sidecar provisioning remain
+open.
+
+The prepared next command, from this checkout after slot handoff, is:
+
+```sh
+HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false uv run --project tools/converter --locked --python 3.13.13 python runtime/gemma_g4ap06_worker_lifecycle_v2.py --worker runtime/gemma-g4ap06-sealed-bin/stark-generate --helper runtime/gemma-g4ap06-sealed-bin/stark-template --model runtime/gemma-g4ap06-e2b-worker-artifact --output runtime/gemma-g4ap06-worker-smoke-images-01.json --arm images --phase smoke
+```
+
+Independent final guard/fixture review finds no confirmed blocker for this
+short smoke; it does not rerun the controls or imply model qualification.
+Frozen preregistration v2 SHA-256 is
+`5b4019a2a4be19bf4766513c028e06cfb36e88d4fdc423da7781db6fc458ee9a`.
+A fresh comparison verifies all 1,186 source files in the compiled seal are
+unchanged before the model-slot handoff.
+
+### First normal-worker smoke: protocol rejection
+
+The first actual images-resident worker smoke reaches Ready with the exact
+target and companion identities. It reports 337,089,408 logical vision bytes,
+9,563,347,968 resident model parameter bytes and 9,723,920,384 current Metal
+allocated bytes. The ordinary MTP0 request emits twelve tokens and passes.
+The next MTP3 request returns `invalid_generation_output`; all subsequent
+lifecycle cases remain unexecuted. This is a failed smoke, with no throughput
+qualification. Receipt SHA-256:
+`81c62529d87226c4cb21712e4aad33b3f3f0437990a696b3d7b244a2ef7eee3d`.
+
+The final guardian passes with 118 positive samples, joined supervisor and
+drained worker; RSS peaks at 10,359,734,272 bytes and footprint at
+10,575,454,392 bytes. Paging, swap and compressor growth are zero. All owned
+workers close before resource handoff.
+
+Source diagnosis finds a concrete protocol conflict: the generic worker
+requires per-request `mtp.verification` to equal its advertised stable
+verification policy, while the Gemma result writes its changing execution
+method into that field. The corrective source uses one shared policy constant
+for Ready and per-request metadata and a separate `verification_method` for
+greedy batch versus sampled serial execution. A focused generic-worker unit
+covers preservation of the stable policy with either execution method. No
+assistant numerical, sampler or cache behavior changes. The immutable
+corrective patch has SHA-256
+`e8e1e7243705b3fb9a592e8b2e20b7b325114cbdbcae02bf1812f1e272d5ac47`;
+the new 1,186-file source graph is
+`2af648125cd9b9a46717bdd119e29c8c822a006a6e432c4decdde7e8ba25b30d`.
+It requires a new worker build and fresh smoke receipt. The old failed
+receipt remains unchanged.
+Independent review verifies the exact corrective patch and finds no blocker;
+the actual corrected worker replay remains pending exclusive resource handoff.
+
+### Corrected normal-worker smoke
+
+The corrected worker compiles in 39.87 seconds with all source hashes
+unchanged; the focused metadata regression passes, and package formatting
+and repository policy checks pass. New worker SHA-256 is
+`a8775bb8fe43e0bdcabc3e3433de869e705089baa2f35bb4fc9ecf963aafff14`;
+the matching template helper remains `77e45824`. Source/binary seal is
+`d65133e7a8b99c5efb4df173c5d86e71ce67c1cd2d0d8dfc11cdba2244a04722`.
+Build receipt is
+`db1cc7f4dc5626a01c6f4f921ee8029d57fa46730cfec1d025d5cffc0acffb66`,
+focused CPU receipt
+`bbee29bc5aa07f87d72eefe3095e50445687ba88a9aa824acb867d7f79fb7590`,
+fixture v3
+`b235f8c9d23e4df4829fc5ac964d64485a63fee0b58f1ae46b2362c3c6338e35`,
+and frozen preregistration v3
+`9abab6326f4b8f57acdf98463fb9c16a634271cdb9f718372b56720e726cd283`.
+
+The new images-resident normal-worker smoke passes all nine cases on a
+1,075-token nonperiodic input. Greedy MTP0 and MTP3 produce identical twelve
+token hashes. MTP3 actually accepts five of fourteen proposals, including
+partial acceptance and rejection repair, then repeats identically with a
+1,024-token restored prefix. Seeded exact-rejection sampling actually accepts
+six of eleven proposals, including a three-draft accepted round, and repeats
+identically with prefix reuse. Early cancellation clears reuse and recovers
+fresh. An actual image request reports disabled MTP, zero drafts/rounds and
+zero reuse, followed by exact fresh text recovery.
+
+Smoke receipt SHA-256 is
+`a6b5e59cd12b2f9cdc1dcc09df7d2861cec7db1ff321b9b7fba4beeb9b75ce62`.
+The guardian passes 127 positive samples, final host telemetry and joined,
+drained worker predicates. Peak RSS is 10,378,674,176 bytes and footprint
+10,686,587,112 bytes; paging, swap and compressor growth are zero. All owned
+workers and compilers close before handoff. The original failed smoke remains
+failed. This qualifies the short staging smoke only: full mode/scope/context,
+changed-tail, mid-generation cancellation, stop/cap and error lifecycle,
+matching-arm performance, broader default context, catalog provisioning and
+default enablement remain open. No speed claim follows from acceptance counts.
