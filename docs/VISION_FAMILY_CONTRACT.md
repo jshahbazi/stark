@@ -63,8 +63,23 @@ primitive alone does not qualify its complete image worker. See the
 [Gemma 4 attempt](model-experiments/2026-11-09-gemma4-image-text-parity.md)
 for exact-artifact checks and remaining scope.
 No artifact inherits numerical qualification from another checkpoint, precision
-or conversion layout. Prefix reuse does not enable MTP; image conversion omits
-its predictor weights pending separate qualification.
+or conversion layout. Prefix reuse does not by itself enable MTP. Dense affine
+version-3 conversion retains a complete declared compatible predictor and binds
+its configuration and tensors to the admitted target. Text requests can execute
+that predictor while the tower is resident; image requests retain zero drafts.
+Admitted dense affine artifacts with a complete head retain a separate ordinary
+text execution graph using the existing Legacy numerical policy, unscaled text
+RoPE and batched MTP verification. It shares immutable validated matrix buffers
+with the reference image graph; graph-specific controls remain independent and
+any signed-code representation change uses private storage. Normal text worker
+requests select this graph, including MTP-off requests. Image requests use the
+reference graph and zero drafts. Their states have distinct model identities;
+retained dense text prefixes additionally key the execution graph, precision and
+draft depth. Cross-graph preflight rejection does not fence a usable model.
+The [27B follow-up](archive/runs/2026-11-09-qwen27-shared-weight-fast-text.md)
+records exact configuration/payload equality and bounded performance and cache
+checks. Other profiles keep their admitted image graph and separate qualification
+gates; no family inherits this artifact's result.
 
 ## Config-derived family profile
 
@@ -99,7 +114,10 @@ execution for each size.
 
 Required matrices and convolution weights must be BF16. Explicit norm-scale,
 `a_log` and `dt_bias` control-weight exceptions may originate in FP32. Declared
-auxiliary MTP tensors are omitted as in the existing text adapter.
+auxiliary BF16 and MoE MTP tensors retain the existing omission policy pending
+their separate compatible predictor implementation and qualification. They must
+remain open work items when the selected source actually contains a head; this
+limitation is not evidence that the upstream model lacks MTP.
 
 Weights may differ from the official checkpoint. Metadata must use recognized
 forms:

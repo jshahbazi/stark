@@ -3,9 +3,13 @@ use std::os::unix::fs::FileExt;
 #[cfg(target_family = "wasm")]
 use std::os::wasi::fs::FileExt;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     fs::File,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use super::{
@@ -24,6 +28,16 @@ struct ParameterMetadata {
     data_type: DataType,
     offset: usize,
     size: usize,
+}
+
+/// Parameter storage only, excluding request state, scratch and allocator slack.
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub struct ParameterStorageStatistics {
+    pub resident_bytes: usize,
+    pub peak_loading_bytes: usize,
+    pub shared_matrix_bytes: usize,
+    pub representation_copy_bytes: usize,
+    pub unshared_parameter_bytes: usize,
 }
 
 /// An internal arithmetic policy selected by an admitting loader, never by
@@ -50,6 +64,9 @@ pub struct ParameterLoader<'a, B: Backend> {
     validated_tensors: RefCell<HashSet<String>>,
     file: &'a File,
     numerical_profile: NumericalProfile,
+    shared_weights: Option<RefCell<HashMap<String, Arc<B::GlobalBuffer>>>>,
+    representation_copy_bytes: Arc<AtomicUsize>,
+    allocated_buffer_bytes: Cell<usize>,
 }
 
 impl<'a, B: Backend> ParameterLoader<'a, B> {
@@ -97,6 +114,9 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
             validated_tensors: RefCell::new(HashSet::new()),
             file,
             numerical_profile: NumericalProfile::Legacy,
+            shared_weights: None,
+            representation_copy_bytes: Arc::new(AtomicUsize::new(0)),
+            allocated_buffer_bytes: Cell::new(0),
         })
     }
 
@@ -106,6 +126,61 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
     ) -> Self {
         self.numerical_profile = numerical_profile;
         self
+    }
+
+    pub(crate) fn enable_weight_sharing(&mut self) {
+        self.shared_weights = Some(RefCell::new(HashMap::new()));
+    }
+
+    pub(crate) fn set_numerical_profile(
+        &mut self,
+        profile: NumericalProfile,
+    ) {
+        self.numerical_profile = profile;
+    }
+
+    /// Upper bound for a second Qwen graph: immutable matrices share storage;
+    /// signed A8 codes may require a different representation, and small F32
+    /// controls are independently constructed. Keep kernel/allocator margin.
+    pub(crate) fn qwen_text_graph_extra_bytes(&self) -> Option<usize> {
+        let mut codes = 0usize;
+        let mut controls = 0usize;
+        for (name, tensor) in &self.index {
+            if !name.starts_with("decoder.") && !name.starts_with("mtp.") {
+                continue;
+            }
+            if tensor.data_type == DataType::U8 && name.ends_with(".weights") {
+                codes = codes.checked_add(tensor.size)?;
+            } else if tensor.data_type == DataType::F32 {
+                controls = controls.checked_add(tensor.size)?;
+            }
+        }
+        codes.checked_add(controls.checked_mul(4)?)?.checked_add(256 * 1024 * 1024)
+    }
+
+    pub(crate) fn storage_statistics(&self) -> ParameterStorageStatistics {
+        let mut cache_only = 0usize;
+        let mut shared = 0usize;
+        if let Some(cache) = &self.shared_weights {
+            for buffer in cache.borrow().values() {
+                use crate::backends::common::Buffer;
+                let bytes = buffer.size();
+                match Arc::strong_count(buffer) {
+                    1 => cache_only += bytes,
+                    2 => {},
+                    _ => shared += bytes,
+                }
+            }
+        }
+        let copies = self.representation_copy_bytes.load(Ordering::Relaxed);
+        let allocated = self.allocated_buffer_bytes.get();
+        ParameterStorageStatistics {
+            resident_bytes: allocated + copies - cache_only,
+            peak_loading_bytes: allocated + copies,
+            shared_matrix_bytes: shared,
+            representation_copy_bytes: copies,
+            unshared_parameter_bytes: allocated - cache_only - shared,
+        }
     }
 
     pub fn tree(&self) -> ParameterTree<'_, B> {
@@ -169,7 +244,23 @@ impl<'a, 'leaf, B: Backend> ParameterLeaf<'a, 'leaf, B, true> {
         let mut buffer =
             self.loader.context.create_buffer(self.metadata.size).map_err(ParameterLoaderError::BackendError)?;
         self.loader.file.read_exact_at(buffer.as_slice_mut::<u8>(), self.metadata.offset as u64)?;
+        self.loader.allocated_buffer_bytes.set(self.loader.allocated_buffer_bytes.get() + self.metadata.size);
         Ok(buffer)
+    }
+
+    /// Only raw validated parameter bytes enter this cache. Callers receive
+    /// immutable ownership; representation changes must allocate private bytes.
+    pub(crate) fn read_shared_weight(&self) -> Result<Arc<B::GlobalBuffer>, ParameterLoaderError<B>> {
+        if let Some(cache) = &self.loader.shared_weights {
+            if let Some(buffer) = cache.borrow().get(self.key) {
+                return Ok(buffer.clone());
+            }
+            let buffer = Arc::new(self.read_buffer()?);
+            cache.borrow_mut().insert(self.key.into(), buffer.clone());
+            Ok(buffer)
+        } else {
+            Ok(Arc::new(self.read_buffer()?))
+        }
     }
 }
 
@@ -179,6 +270,9 @@ pub struct ParameterTree<'loader, B: Backend> {
 }
 
 impl<'loader, B: Backend> ParameterTree<'loader, B> {
+    pub(crate) fn representation_copy_counter(&self) -> Arc<AtomicUsize> {
+        self.loader.representation_copy_bytes.clone()
+    }
     pub(crate) fn numerical_profile(&self) -> NumericalProfile {
         self.loader.numerical_profile
     }
@@ -322,5 +416,24 @@ mod payload_tests {
             loader.tree().subtree("decoder").subtree("mixer").numerical_profile(),
             NumericalProfile::Qwen35ReferenceBF16
         );
+    }
+
+    #[stark_test]
+    fn shared_raw_parameter_survives_profile_change_without_duplicate_allocation() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(3, &[4, 5, 6]);
+        let mut loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+        loader.enable_weight_sharing();
+        let first =
+            loader.tree().leaf("weight").unwrap().validate(&[3], DataType::U8).unwrap().read_shared_weight().unwrap();
+        loader.set_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+        let second =
+            loader.tree().leaf("weight").unwrap().validate(&[3], DataType::U8).unwrap().read_shared_weight().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(first.as_ref().copyout::<u8>(), [4, 5, 6]);
+        let stats = loader.storage_statistics();
+        assert_eq!(stats.resident_bytes, 3);
+        assert_eq!(stats.shared_matrix_bytes, 3);
+        assert_eq!(stats.representation_copy_bytes, 0);
     }
 }

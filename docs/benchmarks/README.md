@@ -21,6 +21,23 @@ The [earlier short image-loading measurements](2026-11-09-gemma4-image-text-pari
 retain their own scope; their original worker cache qualification is withdrawn.
 Separate Gemma MTP assistants remain unimplemented.
 
+**Qwen dense image-default parity (2026-11-09).** The complete 27B image artifact
+now preserves its ordinary optimized text graph and batched MTP while the image
+tower stays loaded. The [QDIP-07 comparison](2026-11-09-qwen-dense-image-text-parity.md)
+measures 48.309 versus 48.315 decode tok/s at MTP3 on a matched 64-token workload;
+MTP0 also shows no observed regression. Output hashes and all 14 nonperiodic
+near-capacity cache/lifecycle controls pass. The earlier 94.44% regression is
+preserved as a failed predecessor. This is bounded Jundot artifact evidence;
+startup, broader workloads, other models and installed-release behavior remain
+separate qualifications.
+
+**Retained Lily vision-loaded text MTP (2026-11-08).** A
+[short paired check](2026-11-08-lily-vision-text-mtp.md) observes 104.71 tok/s
+on the previous text-only worker and 105.49 tok/s with vision and text MTP
+loaded, identical outputs, zero image drafts and correct post-image text/cache
+recovery. Two warm observations per arm; no host/thermal screening. This does
+not supersede the longer Lily studies below.
+
 **Qwen vision artifact text prefix reuse (2026-11-08).** On the official
 Qwen3.5-0.8B BF16 artifact, 32 exactness cases pass and cached follow-ups reuse
 1,024 tokens. Four observations per timing arm show follow-up first-token

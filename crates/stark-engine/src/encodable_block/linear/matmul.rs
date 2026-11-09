@@ -193,11 +193,16 @@ impl<B: Backend> LinearMatmul<B> {
     pub(super) fn prepare_a8(
         &mut self,
         context: &B::Context,
-    ) -> Option<ActivationQuantization> {
+    ) -> Result<Option<ActivationQuantization>, LinearMatmulError<B>> {
         let mut candidate = self.matmul_shape(1, false);
-        candidate.signed_codes = self.matrix.a8_signed_codes()?;
-        let quantization = self.kernel.lock().select_activation_quantization(&candidate, context)?;
-        self.matrix.try_prepare_a8_storage().then_some(quantization)
+        let Some(signed_codes) = self.matrix.a8_signed_codes() else {
+            return Ok(None);
+        };
+        candidate.signed_codes = signed_codes;
+        let Some(quantization) = self.kernel.lock().select_activation_quantization(&candidate, context) else {
+            return Ok(None);
+        };
+        Ok(self.matrix.try_prepare_a8_storage(context)?.then_some(quantization))
     }
 
     pub(crate) fn encode_with_a(

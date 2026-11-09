@@ -28,6 +28,7 @@ def plan_qwen35_mtp(
     row_range,
     include_vision,
     quantization,
+    moe=False,
 ):
     candidates = [
         stem for stem in ("mtp", "language_model.mtp", "model.language_model.mtp") if stem + ".fc.weight" in tensors
@@ -49,11 +50,8 @@ def plan_qwen35_mtp(
         # Preserve the existing raw text-only conversion contract. Its declared
         # auxiliary weights remain omitted and cannot grant MTP capability.
         return None
-    if include_vision:
-        # Image artifacts deliberately omit the separately declared predictor.
-        # Image generation uses the target graph until multimodal MTP is
-        # qualified; auxiliary weights cannot enable that capability.
-        return None
+    if moe:
+        raise UnsupportedConversion("Qwen3.5 MoE MTP requires an expert predictor implementation")
     source = candidates[0]
     attention = next((layer for layer in layer_configs if layer["mixer_config"]["type"] == "AttentionConfig"), None)
     if attention is None or attention["mixer_config"]["has_qkvg_biases"]:

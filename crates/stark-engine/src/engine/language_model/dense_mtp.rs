@@ -74,6 +74,9 @@ impl<B: Backend> DenseMtpSession<B> {
     pub fn prefix_position(&self) -> Option<usize> {
         self.prefix.as_ref().map(|p| p.position)
     }
+    pub fn is_fenced(&self) -> bool {
+        self.failed
+    }
     pub fn prefix_payload_bytes(&self) -> usize {
         self.prefix.as_ref().map_or(0, |p| {
             p.target.payload_bytes()
@@ -129,7 +132,10 @@ fn chain(
 
 impl<B: Backend> LanguageModel<B> {
     pub fn has_dense_mtp(&self) -> bool {
-        self.dense_mtp.is_some() && self.decoder.speculation_supported()
+        // A validated dense head can also verify text serially on an image
+        // decoder. Multimodal positions and reference recurrent kernels never
+        // enter the non-flat, partially accepted speculative target path.
+        self.dense_mtp.is_some() && self.decoder.prefix_snapshot_supported()
     }
 }
 
@@ -581,11 +587,113 @@ where
         {
             return Err(DenseMtpError::Invalid);
         }
-        let result = self.dense_mtp_round_inner(session, first, drafts, sampler);
+        let result = if self.decoder.speculation_supported() {
+            self.dense_mtp_round_inner(session, first, drafts, sampler)
+        } else {
+            self.dense_mtp_serial_text_round(session, first, drafts, sampler)
+        };
         if result.is_err() {
             session.failed = true;
         }
         result
+    }
+
+    fn dense_mtp_serial_text_round(
+        &self,
+        session: &mut DenseMtpSession<B>,
+        first: u32,
+        drafts: usize,
+        sampler: &mut dyn MtpSampler,
+    ) -> Result<DenseMtpRound, DenseMtpError<B>> {
+        let started = Instant::now();
+        let prefix = session.predictor.context_length();
+        let mut inputs = vec![first];
+        let mut hidden = None;
+        sampler.begin_round();
+        for _ in 0..drafts {
+            let pass = self.dense_predictor_pass(
+                &[*inputs.last().unwrap()],
+                hidden.as_ref().unwrap_or(&session.last_hidden),
+                &mut session.predictor,
+                true,
+            )?;
+            let proposal = sampler.draft(&pass.logits).map_err(|_| DenseMtpError::Sampling)?;
+            if proposal >= self.decoder.embedding().vocab_size() {
+                return Err(DenseMtpError::Invalid);
+            }
+            inputs.push(proposal);
+            hidden = pass.hidden;
+        }
+        let draft_seconds = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        let mut accepted = 0;
+        let mut passes = Vec::new();
+        let next = loop {
+            // Always a single, fully accepted text row. Reference DeltaNet and
+            // MRoPE retain their ordinary serial semantics; no image positions
+            // or speculative suffix state are introduced.
+            let pass = self.dense_target_pass(&[inputs[accepted]], &mut session.target, true)?;
+            let proposal = inputs.get(accepted + 1).copied();
+            let sampled = sampler.target(&pass.logits, proposal).map_err(|_| DenseMtpError::Sampling)?;
+            if sampled >= self.decoder.embedding().vocab_size() {
+                return Err(DenseMtpError::Invalid);
+            }
+            passes.push(pass);
+            if proposal == Some(sampled) {
+                accepted += 1;
+            } else {
+                break sampled;
+            }
+        };
+        let verify_seconds = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        let repair_start = usize::from(drafts > 0);
+        if !session.predictor.rewind(prefix.checked_add(repair_start as u32).ok_or(DenseMtpError::Invalid)?) {
+            return Err(DenseMtpError::Invalid);
+        }
+        let pool = self.engine.context.create_allocation_pool();
+        let mut command = self
+            .engine
+            .context
+            .create_command_buffer(Some("dense text predictor repair"), Some(pool))
+            .map_err(DenseMtpError::Backend)?;
+        for index in repair_start..passes.len() {
+            let previous = if index == 0 {
+                &session.last_hidden
+            } else {
+                &passes[index - 1].hidden
+            };
+            self.encode_dense_predictor_cache_only(
+                &inputs[index..index + 1],
+                previous,
+                &mut session.predictor,
+                &mut command,
+            )?;
+        }
+        let complete = command.end_encoding().submit().wait_until_completed().map_err(DenseMtpError::Backend)?;
+        drop(complete);
+        let (mut encode, mut gpu, mut readout) = (0.0, 0.0, 0.0);
+        for pass in &passes {
+            encode += pass.encode_seconds;
+            gpu += pass.gpu_seconds;
+            readout += pass.readout_seconds;
+        }
+        let final_pass = passes.pop().ok_or(DenseMtpError::Invalid)?;
+        session.last_hidden = final_pass.hidden;
+        session.logits = final_pass.logits;
+        Ok(DenseMtpRound {
+            accepted_drafts: inputs[1..accepted + 1].to_vec(),
+            next_token: next,
+            proposed: drafts,
+            accepted,
+            verified_rows: accepted + 1,
+            draft_seconds,
+            verify_seconds,
+            rollback_seconds: started.elapsed().as_secs_f64(),
+            target_encode_seconds: encode,
+            target_gpu_seconds: gpu,
+            target_readout_seconds: readout,
+        })
     }
 
     fn dense_mtp_round_inner(
