@@ -663,6 +663,21 @@ reports zero paging/foreign workers and peak 12.534 GB below the unchanged
 comparison remains false and retained. This is component qualification, not
 normal-worker loading, serving enablement or a performance measurement.
 
+The coordinator independently reruns the tracked fourteen CPU controls against
+the pinned Torch build: all pass in 0.418 seconds, with the same deterministic
+receipt hash `7e2a8e3009907edb30bf0d35e956fc586d4db4f044131e13633cbab5b2940a79`.
+The reproducible helper, original raw oracle, wrapper and controls are committed
+on the Gemma branch at `3c2791ec` under `tools/validation/gemma4_assistant/`.
+Normal-worker integration remains source work pending independent review.
+
+A proposed matched-arm control that loads and drops the image tower is rejected
+before benchmarking: Metal global-buffer drop retires storage into an allocator
+cache and therefore would retain backing allocations. The staged validation-only
+text arm must skip tower allocation for the exact admitted artifact, retain the
+same decoder/head/policy and report actual Metal allocations at readiness.
+The normal loading path retains default image support. No speed claim follows
+from the rejected drop-only control or unfinished worker source.
+
 GLM's corrected first-use audit identifies layer-zero `attn_q` as kind-13 Q5_K,
 not Q8 merely because Q8 tensors occur elsewhere. `Control::pre` also triggers
 the GLM libraries and eager graph pipeline creation before that packed
