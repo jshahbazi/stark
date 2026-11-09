@@ -126,6 +126,9 @@ established. A prior attempt to refresh the hidden menu failed in the computer
 use capture service; reopening the menu restored observation. Source review
 found no intentional idle/lock/sleep unload timer. The initial Ready observation
 and short request checks therefore do not establish indefinite idle retention.
+The user subsequently confirmed manually restarting during verification,
+consistent with that stopped snapshot. A spontaneous idle exit was not
+reproduced.
 
 The rollback archive contains 110,437,094 bytes, SHA-256
 `5d75f7ff3995c23e81b9148cffa12afd267a066008e17aa9b3d2255523c738f4`.
