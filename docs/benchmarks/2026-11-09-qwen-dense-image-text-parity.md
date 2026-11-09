@@ -6,7 +6,45 @@ fixed in its private driver before launch; its public entry was updated after
 launch. It is a bounded control study for the
 [dense implementation attempt](../archive/runs/2026-11-09-qwen-dense-image-default-parity.md),
 not a family-wide performance qualification. The corrected 27B control fails
-the bounded text speed gate; functional MTP is restored, performance is unfinished.
+the bounded text speed gate; functional MTP alone did not complete performance
+parity. The subsequent [QDIP-07 shared-weight fast-text fix](../archive/runs/2026-11-09-qwen27-shared-weight-fast-text.md)
+passes the bounded 27B comparison below. The failed reference-graph result is
+preserved separately.
+
+## QDIP-07: ordinary text graph with images resident
+
+On the same pinned 27B checkpoint, the image-loaded instance now retains an
+ordinary Legacy text graph with batched MTP verification alongside its unchanged
+reference image graph. Validated raw matrix buffers are shared; graph controls
+and state identities stay separate. Typed target/head configurations and all
+1,306 target/head tensor payloads exactly match the ordinary text control.
+
+ABBA, 16 input / 64 output tokens, context 2,048, greedy seed 42, one excluded
+warmup plus three measured requests per policy/load; six measured requests per
+arm/policy:
+
+| Drafts | Text-only decode | Image-loaded decode | First-token text / image |
+| --- | --- | --- | --- |
+| 0 | 25.156 tok/s | 26.457 tok/s | 0.08123 / 0.07962 s |
+| 3 | 48.309 tok/s | 48.315 tok/s | 0.08206 / 0.08316 s |
+
+All 32 outputs including warmups match across arms and draft depths. Every
+MTP3 request actually proposes 59 drafts and accepts 43. All measured paging
+deltas are zero and thermal-warning guards pass. Decode, first-token and
+whole-request medians pass a strict five-percent loss bound. Observed baseline
+variance produces wider registered bounds; these quick results do not establish
+five-percent measurement precision or an MTP0 speedup. A sealed prior-worker
+64-token text control also matches output hashes and measures 26.554/45.870
+tok/s at depths 0/3. Loading remains separate: about 63 seconds with image
+admission versus 1.6 seconds for text-only loading.
+
+All 14 nonperiodic near-capacity cache/lifecycle controls pass, including actual
+prefill-position checks, 1,024-token restores, seeded fresh/cache equality,
+depth switches, real image zero-MTP/reuse, and cancellation recovery. The
+[dated attempt](../archive/runs/2026-11-09-qwen27-shared-weight-fast-text.md)
+contains full timing ranges, parameter inventory, identities, failed preliminary
+setup and private receipt hashes. This qualifies this bounded exact artifact;
+the eight-token QDIP-06 rates below are a different output workload.
 
 ## Two separate comparisons
 

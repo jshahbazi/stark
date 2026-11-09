@@ -41,7 +41,7 @@ const _: () = assert!(prefix_cache::PREFILL_CHUNK_TOKENS == PREFILL_CHUNK_TOKENS
 
 type RetainedState = PrefixEntry<LanguageModelState<Metal>>;
 type VisionRetainedState = prefix_cache::BoundaryEntry<LanguageModelState<Metal>>;
-type DenseRetainedState = prefix_cache::BoundaryEntry<(DenseMtpSession<Metal>, u32)>;
+type DenseRetainedState = prefix_cache::BoundaryEntry<(DenseMtpSession<Metal>, u32, &'static str)>;
 
 fn admit_generation_memory(
     model: &LanguageModel<Metal>,
@@ -109,6 +109,13 @@ macro_rules! dense_model_call {
 }
 
 impl NativeModel {
+    fn text_execution_graph(&self) -> &'static str {
+        match self {
+            Self::Vision(model) => model.text_execution_graph(),
+            Self::Text(_) => "ordinary-text-v1",
+            _ => "other-image-family-v1",
+        }
+    }
     fn has_dense_mtp(&self) -> bool {
         match self {
             Self::Text(model) => model.has_dense_mtp(),
@@ -125,7 +132,7 @@ impl NativeModel {
     ) -> Option<usize> {
         match self {
             Self::Text(model) => model.generation_memory_bytes(input, context, output),
-            Self::Vision(model) => model.decoder_generation_memory_bytes(input, context, output),
+            Self::Vision(model) => model.text_generation_memory_bytes(input, context, output),
             _ => None,
         }
     }
@@ -251,7 +258,13 @@ impl NativeBackend {
                     engine.load_gemma4_vision_language_model(path).map_err(|_| "model_load_failed")?,
                 ))
             } else {
-                NativeModel::Vision(Box::new(engine.load_vision_language_model(path).map_err(|_| "model_load_failed")?))
+                let budget =
+                    stark_resource_budget::available_memory_bytes().unwrap_or(0).saturating_sub(256 * 1024 * 1024);
+                NativeModel::Vision(Box::new(
+                    engine
+                        .load_vision_language_model_with_parameter_budget(path, budget)
+                        .map_err(|_| "model_load_failed")?,
+                ))
             }
         } else {
             NativeModel::Text(Box::new(engine.load_language_model(path).map_err(|_| "model_load_failed")?))
@@ -567,7 +580,7 @@ impl GenerationBackend for NativeBackend {
 
     fn prefix_cache_key(&self) -> &'static str {
         if self.model.has_dense_mtp() {
-            "model-instance+context-tokens+cache-scope+mtp-selection"
+            "model-instance+context-tokens+cache-scope+mtp-selection+execution-graph+precision"
         } else {
             prefix_cache::KEY
         }
@@ -579,7 +592,7 @@ impl GenerationBackend for NativeBackend {
         options: &GenerationOptions,
     ) -> usize {
         if let Some(entry) = &self.dense_prefix_cache {
-            return if entry.state.1 == options.mtp_drafts {
+            return if entry.state.1 == options.mtp_drafts && entry.state.2 == self.model.text_execution_graph() {
                 entry.reusable(input, options.context_tokens, options.cache_scope.as_ref())
             } else {
                 0
@@ -692,6 +705,11 @@ impl NativeBackend {
         };
         if cancelled()? {
             return Err("generation_cancelled");
+        }
+        // A reused prefix must prefill precisely the remaining suffix. Check
+        // actual engine position before accepting reported cache reuse.
+        if session.position() != input.len() {
+            return Err("native_generation_failed");
         }
         let mut rng = options.seed;
         let mut mapper = crate::hybrid::ProbabilityMapper::default();
@@ -836,7 +854,7 @@ impl NativeBackend {
             && position > 0
         {
             self.dense_pending_prefix = Some(prefix_cache::BoundaryEntry::new(
-                (session, options.mtp_drafts),
+                (session, options.mtp_drafts, model.text_execution_graph()),
                 scope,
                 options.context_tokens,
                 &input[..position],
@@ -925,6 +943,12 @@ impl NativeBackend {
                         options.context_tokens,
                         options.max_new_tokens,
                     )
+                } else if text_request {
+                    model.text_generation_memory_bytes(
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                    )
                 } else {
                     model.decoder_generation_memory_bytes(
                         admission_input_tokens,
@@ -940,9 +964,12 @@ impl NativeBackend {
                         .map_err(|_| "native_generation_failed")?;
                     state
                 } else {
-                    model
-                        .create_empty_state(Some(options.context_tokens), options.seed)
-                        .map_err(|_| "native_generation_failed")?
+                    let created = if text_request {
+                        model.create_text_state(Some(options.context_tokens), options.seed)
+                    } else {
+                        model.create_empty_state(Some(options.context_tokens), options.seed)
+                    };
+                    created.map_err(|_| "native_generation_failed")?
                 }
             },
             (NativeModel::Gemma4Vision(model), retained) => {
@@ -1006,9 +1033,9 @@ impl NativeBackend {
             (NativeModel::Text(model), None) => {
                 model.stream(&input[reused..], &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
-            (NativeModel::Vision(model), None) => {
-                model.stream(&input[reused..], &mut state, stream_options).map_err(|_| "native_generation_failed")?
-            },
+            (NativeModel::Vision(model), None) => model
+                .stream_text(&input[reused..], &mut state, stream_options)
+                .map_err(|_| "native_generation_failed")?,
             (NativeModel::Gemma4Vision(model), None) => {
                 model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },

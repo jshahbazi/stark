@@ -54,6 +54,14 @@ pub enum LanguageModelStreamError<B: Backend> {
 }
 
 impl<B: Backend> LanguageModel<B> {
+    pub(crate) fn preflight_plain_text_stream(
+        &self,
+        input: &[u64],
+        state: &LanguageModelState<B>,
+        options: &LanguageModelStreamOptions,
+    ) -> Result<(), LanguageModelStreamError<B>> {
+        self.preflight_fresh_stream(input, state, options, false)
+    }
     /// Check request ownership and cheap bounds before image decoding or tower
     /// allocation. The projected-feature stream repeats these checks at entry.
     pub(crate) fn preflight_multimodal_stream(
@@ -62,10 +70,20 @@ impl<B: Backend> LanguageModel<B> {
         state: &LanguageModelState<B>,
         options: &LanguageModelStreamOptions,
     ) -> Result<(), LanguageModelStreamError<B>> {
+        self.preflight_fresh_stream(input, state, options, true)
+    }
+
+    fn preflight_fresh_stream(
+        &self,
+        input: &[u64],
+        state: &LanguageModelState<B>,
+        options: &LanguageModelStreamOptions,
+        image: bool,
+    ) -> Result<(), LanguageModelStreamError<B>> {
         if !std::sync::Arc::ptr_eq(&self.model_identity, &state.model_identity) {
             return Err(LanguageModelStreamError::ForeignState);
         }
-        if !self.decoder.multimodal_supported()
+        if (image && !self.decoder.multimodal_supported())
             || self.speculator.is_some()
             || state.multimodal_failed
             || !state.tokens.is_empty()

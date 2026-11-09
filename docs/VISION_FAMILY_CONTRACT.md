@@ -62,11 +62,19 @@ or conversion layout. Prefix reuse does not by itself enable MTP. Dense affine
 version-3 conversion retains a complete declared compatible predictor and binds
 its configuration and tensors to the admitted target. Text requests can execute
 that predictor while the tower is resident; image requests retain zero drafts.
-The reference image decoder verifies target text rows serially because its
-M-RoPE and reference DeltaNet path do not admit batched speculative verification.
-This restores functional text MTP and does not establish the earlier optimized
-text path's performance. The [dense parity attempt](archive/runs/2026-11-09-qwen-dense-image-default-parity.md)
-tracks the exact artifact checks and the remaining speed requirement.
+Admitted dense affine artifacts with a complete head retain a separate ordinary
+text execution graph using the existing Legacy numerical policy, unscaled text
+RoPE and batched MTP verification. It shares immutable validated matrix buffers
+with the reference image graph; graph-specific controls remain independent and
+any signed-code representation change uses private storage. Normal text worker
+requests select this graph, including MTP-off requests. Image requests use the
+reference graph and zero drafts. Their states have distinct model identities;
+retained dense text prefixes additionally key the execution graph, precision and
+draft depth. Cross-graph preflight rejection does not fence a usable model.
+The [27B follow-up](archive/runs/2026-11-09-qwen27-shared-weight-fast-text.md)
+records exact configuration/payload equality and bounded performance and cache
+checks. Other profiles keep their admitted image graph and separate qualification
+gates; no family inherits this artifact's result.
 
 ## Config-derived family profile
 

@@ -45,6 +45,7 @@ use crate::{
 };
 
 mod family;
+mod fast_text;
 pub mod gemma3;
 pub mod gemma4;
 
@@ -303,6 +304,8 @@ fn expand_image_placeholder(
 pub struct VisionLanguageModel<B: Backend> {
     engine: Arc<Engine<B>>,
     language_model: LanguageModel<B>,
+    text_language_model: Option<LanguageModel<B>>,
+    parameter_storage: crate::parameters::ParameterStorageStatistics,
     tower: Option<VisionTower<B>>,
     limits: PreprocessLimits,
     failed: bool,
@@ -378,24 +381,36 @@ impl<B: Backend> Engine<B> {
         self: &Arc<Self>,
         model_path: &Path,
     ) -> Result<VisionLanguageModel<B>, NativeVisionError<B>> {
-        self.load_vision_language_model_inner(model_path, true)
+        self.load_vision_language_model_inner(model_path, true, None)
+    }
+
+    /// Product worker admission including both resident execution graphs.
+    #[doc(hidden)]
+    pub fn load_vision_language_model_with_parameter_budget(
+        self: &Arc<Self>,
+        model_path: &Path,
+        parameter_budget: usize,
+    ) -> Result<VisionLanguageModel<B>, NativeVisionError<B>> {
+        self.load_vision_language_model_inner(model_path, true, Some(parameter_budget))
     }
 
     /// Validation-only tower residency control. The complete image artifact is
-    /// admitted and rehashed identically, and its decoder uses the same numeric
-    /// profile and predictor graph. Product loading always retains the tower.
+    /// admitted and rehashed identically. This preserves the reference image
+    /// decoder, so it is a matched residency control only for profiles without
+    /// a separate optimized text graph. Product loading always retains the tower.
     #[doc(hidden)]
     pub fn load_vision_text_validation_model(
         self: &Arc<Self>,
         model_path: &Path,
     ) -> Result<LanguageModel<B>, NativeVisionError<B>> {
-        Ok(self.load_vision_language_model_inner(model_path, false)?.language_model)
+        Ok(self.load_vision_language_model_inner(model_path, false, None)?.language_model)
     }
 
     fn load_vision_language_model_inner(
         self: &Arc<Self>,
         model_path: &Path,
         load_tower: bool,
+        parameter_budget: Option<usize>,
     ) -> Result<VisionLanguageModel<B>, NativeVisionError<B>> {
         if self.capture_manager.is_some() || model_path.join("speculator").exists() {
             return Err(InvalidInput("native vision requires capture-free non-speculative loading").into());
@@ -550,17 +565,54 @@ impl<B: Backend> Engine<B> {
             } else {
                 NumericalProfile::Qwen35ReferenceBF16
             };
-        let loader = ParameterLoader::new(weights, &*self.context)?.with_numerical_profile(numerical_profile);
+        let mut loader = ParameterLoader::new(weights, &*self.context)?.with_numerical_profile(numerical_profile);
+        // This first fast graph is bounded to admitted dense affine artifacts
+        // with a complete compatible head. Other family profiles retain their
+        // qualified image graph until separately validated.
+        let fast_text = load_tower
+            && matches!(admission.profile, family::FamilyProfile::AffineV3)
+            && language_config.mtp_config.is_some();
+        let extra = if fast_text {
+            loader.qwen_text_graph_extra_bytes()
+        } else {
+            Some(0)
+        };
+        if let Some(budget) = parameter_budget {
+            let required = usize::try_from(weights.metadata()?.len()).ok().and_then(|bytes| bytes.checked_add(extra?));
+            if required.is_none_or(|required| required > budget) {
+                return Err(InvalidInput("native vision resident parameter budget exceeded").into());
+            }
+        }
+        let text_config = fast_text.then(|| fast_text::config(&language_config)).transpose()?;
+        if fast_text {
+            loader.enable_weight_sharing();
+        }
         let tower = load_tower
             .then(|| VisionTower::new(&*self.context, &admission.tower, &loader.tree().subtree("vision")))
             .transpose()?;
+        let mut image_config = language_config;
+        if fast_text {
+            image_config.mtp_config = None;
+        }
         let language_model = self.language_model_from_config(
             model_path,
-            language_config,
+            image_config,
             &loader,
-            Some(tokenizer),
+            Some(tokenizer.clone()),
             SpeculatorPolicy::Disabled,
         )?;
+        let text_language_model = if let Some(config) = text_config {
+            loader.set_numerical_profile(NumericalProfile::Legacy);
+            Some(self.language_model_from_config(
+                model_path,
+                config,
+                &loader,
+                Some(tokenizer),
+                SpeculatorPolicy::Disabled,
+            )?)
+        } else {
+            None
+        };
         if load_tower {
             loader.tree().assert_all_tensors_validated()?;
         } else {
@@ -569,6 +621,7 @@ impl<B: Backend> Engine<B> {
             loader.tree().subtree("decoder").assert_all_tensors_validated()?;
             loader.tree().subtree("mtp").assert_all_tensors_validated()?;
         }
+        let parameter_storage = loader.storage_statistics();
         drop(loader);
         // Recheck the same selected objects before publishing loaded buffers.
         // Ordinary concurrent in-place artifact changes cannot silently acquire
@@ -584,6 +637,8 @@ impl<B: Backend> Engine<B> {
         Ok(VisionLanguageModel {
             engine: self.clone(),
             language_model,
+            text_language_model,
+            parameter_storage,
             tower,
             limits: PreprocessLimits::default(),
             failed: false,
@@ -607,6 +662,21 @@ impl<B: Backend> Engine<B> {
 }
 
 impl<B: Backend> VisionLanguageModel<B> {
+    fn text_model(&self) -> &LanguageModel<B> {
+        self.text_language_model.as_ref().unwrap_or(&self.language_model)
+    }
+
+    pub fn text_execution_graph(&self) -> &'static str {
+        if self.text_language_model.is_some() {
+            "qwen-affine-legacy-text-v1"
+        } else {
+            "qwen-reference-bf16-text-v1"
+        }
+    }
+
+    pub fn parameter_storage_statistics(&self) -> crate::parameters::ParameterStorageStatistics {
+        self.parameter_storage
+    }
     pub fn artifact_identity(&self) -> &VisionArtifactIdentity {
         &self.identity
     }
@@ -638,7 +708,7 @@ impl<B: Backend> VisionLanguageModel<B> {
     /// Text speculation remains available with the image tower resident.
     /// Image execution never enters these predictor methods.
     pub fn has_dense_mtp(&self) -> bool {
-        !self.failed && self.language_model.has_dense_mtp()
+        !self.failed && self.text_model().has_dense_mtp()
     }
 
     pub fn max_context_length(&self) -> Option<u32> {
@@ -656,6 +726,15 @@ impl<B: Backend> VisionLanguageModel<B> {
         self.language_model.generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)
     }
 
+    pub fn text_generation_memory_bytes(
+        &self,
+        input: u32,
+        context: u32,
+        output: u32,
+    ) -> Option<usize> {
+        self.text_model().generation_memory_bytes(input, context, output)
+    }
+
     /// Decoder admission when a scoped text request also retains one
     /// recurrent-state snapshot. Image and unscoped requests do not allocate it.
     pub fn decoder_text_prefix_memory_bytes(
@@ -664,7 +743,7 @@ impl<B: Backend> VisionLanguageModel<B> {
         context_tokens: u32,
         max_new_tokens: u32,
     ) -> Option<usize> {
-        self.language_model.generation_memory_bytes_with_text_prefix(input_tokens, context_tokens, max_new_tokens)
+        self.text_model().generation_memory_bytes_with_text_prefix(input_tokens, context_tokens, max_new_tokens)
     }
 
     pub fn recommended_context_length(&self) -> Option<u32> {
@@ -682,7 +761,7 @@ impl<B: Backend> VisionLanguageModel<B> {
     /// Whether text-only requests on this loaded image artifact can restore a
     /// retained decoder prefix. Image-prefilled states are never reusable.
     pub fn prefix_reuse_supported(&self) -> bool {
-        !self.failed && self.language_model.text_prefix_snapshot_supported()
+        !self.failed && self.text_model().text_prefix_snapshot_supported()
     }
 
     /// Retain the last non-final text prefill boundary for the next request.
@@ -695,7 +774,7 @@ impl<B: Backend> VisionLanguageModel<B> {
         if self.failed {
             return Err(InvalidInput("invalid text prefix capture state").into());
         }
-        self.language_model.prepare_text_prefix_capture(state, position)?;
+        self.text_model().prepare_text_prefix_capture(state, position)?;
         Ok(())
     }
 
@@ -712,10 +791,28 @@ impl<B: Backend> VisionLanguageModel<B> {
         if self.failed {
             return Err(InvalidInput("native vision model is fenced").into());
         }
-        finish_text_prefix_restore(
-            self.language_model.restore_text_prefix(state, prefix_length, max_context_length, sampling_seed),
-            &mut self.failed,
-        )
+        let result = self.text_model().restore_text_prefix(state, prefix_length, max_context_length, sampling_seed);
+        finish_text_prefix_restore(result, &mut self.failed)
+    }
+
+    /// Ordinary text state has a distinct model identity from image state.
+    pub fn create_text_state(
+        &mut self,
+        capacity: Option<u32>,
+        seed: u64,
+    ) -> Result<LanguageModelState<B>, NativeVisionError<B>> {
+        if self.failed {
+            return Err(InvalidInput("native vision model is fenced").into());
+        }
+        match self.text_model().create_empty_state(capacity, seed) {
+            Ok(state) => Ok(state),
+            Err(error) => {
+                if matches!(&error, LanguageModelCreateEmptyStateError::Backend(_)) {
+                    self.failed = true;
+                }
+                Err(error.into())
+            },
+        }
     }
 
     pub fn create_empty_state(
@@ -1012,8 +1109,8 @@ impl<B: Backend> VisionLanguageModel<B> {
         }
     }
 
-    /// Text execution from fresh state or a guarded, restored text-only prefix.
-    /// The underlying language model is not exposed as a mutable escape hatch.
+    /// Reference image-decoder text execution for numerical validation. Product
+    /// text requests use `create_text_state` and `stream_text`.
     pub fn stream<'a>(
         &'a mut self,
         tokens: &[u64],
@@ -1036,6 +1133,31 @@ impl<B: Backend> VisionLanguageModel<B> {
             },
         }
     }
+
+    /// Ordinary optimized text execution while the image tower remains loaded.
+    pub fn stream_text<'a>(
+        &'a mut self,
+        tokens: &[u64],
+        state: &'a mut LanguageModelState<B>,
+        options: LanguageModelStreamOptions,
+    ) -> Result<LanguageModelStream<'a, B>, NativeVisionError<B>> {
+        if self.failed {
+            return Err(InvalidInput("native vision model is fenced").into());
+        }
+        let model = self.text_language_model.as_ref().unwrap_or(&self.language_model);
+        if state.tokens().is_empty() {
+            model.preflight_plain_text_stream(tokens, state, &options)?;
+        } else {
+            model.preflight_restored_text_stream(tokens, state, &options)?;
+        }
+        match model.stream(tokens, state, options) {
+            Ok(stream) => Ok(stream.with_failure_fence(&mut self.failed)),
+            Err(error) => {
+                self.failed = true;
+                Err(error.into())
+            },
+        }
+    }
 }
 
 impl<B: Backend> VisionLanguageModel<B>
@@ -1049,7 +1171,7 @@ where
         if self.failed || !self.has_dense_mtp() {
             return Err(DenseMtpError::Invalid);
         }
-        let result = operation(&self.language_model);
+        let result = operation(self.text_model());
         // Drained cancellation discards its request-owned session. Invalid
         // errors are resolved using the session's mutation fence below; other
         // native failures fence the loaded instance immediately.
