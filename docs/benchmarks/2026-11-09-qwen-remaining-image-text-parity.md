@@ -160,11 +160,21 @@ and real image zero-MTP execution followed by fresh/repeated text. A native tiny
 hybrid test additionally exercises multi-token ordinary-stream greedy/seeded
 snapshot restoration. These are bounded cases, not all contexts or workloads.
 
+Additional controls on the same worker pass **48/48 image-loaded** and
+**26/26 text-only** cases: MTP0/MTP3 shrinking/growing/divergent prefixes,
+1,024/1,025/1,026-token suffix guards, and primed text prefixes followed by
+failed/cancelled/successful images. Each following text request is fresh and
+can cache again. Paging remains zero; these are correctness cases without a
+new timing claim.
+
 The independent pinned MLX common-input head replay **fails** its unchanged
 normalized-hidden maximum-absolute-error limit: 0.25/0.125/0.140625 exceed
 0.0625, despite sub-one-percent relative RMS, passing logit limits and all
-top-one matches. First-divergence diagnosis remains open. Cache/speed passes
-do not close that numerical gate or imply original-training equivalence.
+top-one matches. A test-only reference FC makes fusion exact, while full head
+errors `0.25/0.1875/0.1875` still fail. Common-input local norms and residuals
+are exact; attention/MLP arithmetic remains under diagnosis. No candidate
+arithmetic is adopted. Cache/speed passes do not close that numerical gate or
+imply original-training equivalence.
 
 | Continuation aggregate receipt | SHA-256 |
 | --- | --- |
@@ -174,9 +184,14 @@ do not close that numerical gate or imply original-training equivalence.
 | Text-only lifecycle | `3c36e91dc62ec388f492a8ac877f357c1b85fb7541733e785ae52aa97f1af963` |
 | Ordinary hybrid toy | `6412ef65e68fb418b406be8decb88723ab93f52004096b24b9db300bbb36431f` |
 | Failed independent numerical gates | `3626be445f0ec47d288fb127fc707fabcb25da62daac34beabc13511c8810dc2` |
+| Additional image cache/image recovery, 48 cases | `aeb8a3034c56bc34ffdcf172be105906e9f8951d87fd50100c2e5fdd06c72012` |
+| Additional text cache geometry, 26 cases | `cadb6fe0a8f910c5ab674f9cce943644431bb092d1efd38ecdc7c969dc24225f` |
+| Failed test-only causal FC numerical gates | `e2acf10016bb868fbd674456bf2a9e44399ad8e4f4ecd10c6b76a39e5cb705b9` |
 
 The corrected affine MoE lifecycle continuation was resource-deferred when an
-external installed worker reloaded; no case completed. The [retained ddalcu
+external installed worker reloaded. A later quiet attempt reaches readiness
+but stops on one global Pageout with zero swap and no foreign worker; no cache
+case completes and no memory-limit failure is established. The [retained ddalcu
 memory plan](../archive/runs/2026-11-09-ddalcu-default-image-memory-plan.md) is
 source/header-only and its full run remains held. Official BF16 MoE payloads
 are absent; its expert-predictor component test does not qualify full execution.

@@ -449,3 +449,61 @@ a scratch-buffer borrow in the test adapter; the corrected second compile
 passes. Both attempts and the unchanged numerical preregistration are retained.
 Independent source review finds no blocker for this bounded experiment. Native
 and MLX execution of the candidate remain pending the coordinated model slot.
+
+### QNIP causal FC result: local correction, full head still fails
+
+After the coordinated hardware handoff, engine `12aad35c` passes both the
+unchanged baseline and test-only reference-FC exports. All 21 baseline tensor
+records are bit-exact with the prior normal-path trace. The independent pinned
+replay makes the candidate's FC fusion bit-exact with MLX, confirming a local
+arithmetic difference rather than different input norms or weights. Fusion
+receipt: `5d22cbfc685c413bff7f959e7dbabf34af0f9e9258d1a822a8154fce7b13f119`.
+
+The unchanged full-head gate still fails: hidden maximum absolute errors are
+`0.25`, `0.1875`, `0.1875` over its three stages. All original finite, relative
+RMS, logit-error and top-1 checks pass. Gate receipt:
+`e2acf10016bb868fbd674456bf2a9e44399ad8e4f4ecd10c6b76a39e5cb705b9`;
+full aggregate replay:
+`a623312e224ff374b7ee7a43e3f551d27da654e5865f69765a4369671dad8ba3`.
+There is no production arithmetic adoption or tolerance change.
+
+Local comparisons on identical captured native operands report exact
+pre-attention, pre-MLP and final norms, as well as exact residual addition.
+Remaining attention output error is `0.00390625` maximum absolute /
+`0.00508196` relative RMS; MLP output is `0.015625` /
+`0.00547159`. Local receipt:
+`10c43978f98c145c5931bffa30a533e1103241d6816e25966970037eaf237d85`.
+Every native/reference process closes with zero paging and no foreign worker.
+The next source-only causal candidate selects reference accumulation for head
+linears while retaining target/readout, norms, attention and MLP activation
+policies. It remains a test-only experiment pending compilation and execution.
+
+### QNIP additional headed cache coverage and quiet MoE stop
+
+The same production worker `1e592b48` passes an additional **48/48 image-loaded**
+and **26/26 text-only** controls, independently of the head numerical failure.
+Both MTP0 ordinary state and MTP3 predictor state cover shrinking, growing,
+divergent prefixes and the 1,024/1,025/1,026-token suffix-position boundaries.
+Image controls explicitly prime a retained text prefix, then exercise failed,
+cancelled and successful real images before checking fresh/repeated text in
+both modes. Images propose zero drafts. Sampled peak RSS is `2,147,172,352`
+bytes for images and `1,915,420,672` for text; paging/foreign-worker counts are
+zero. These supplement the original 34/28 lifecycle cases and are not new speed
+measurements. Payloads are rehashed against their prior exact identities after
+the run; binding receipt:
+`84cd1243f5f63e7f96bc1134b2a3a9f1cf27cd0c619f049be47484758928d11b`.
+
+| Additional cache scope | Aggregate receipt SHA-256 |
+| --- | --- |
+| Image-loaded 48 cases | `aeb8a3034c56bc34ffdcf172be105906e9f8951d87fd50100c2e5fdd06c72012` |
+| Text-only 26 cases | `cadb6fe0a8f910c5ab674f9cce943644431bb092d1efd38ecdc7c969dc24225f` |
+
+The third affine MoE continuation reaches readiness in 70.155 seconds but stops
+before completing its first 1,792-token cache case when the global Pageouts
+counter increases by one page (16 KiB). There is no foreign worker or swap
+growth; sampled RSS reaches `31,748,620,288` bytes and minimum available memory
+is `74,006,904,832`, above the unchanged 64 GiB floor. This is an unqualified
+resource stop, without attribution to the model or a memory-limit failure.
+Receipt: `adceb2e976070e6abb9417542888a22a606acc0c15d06c6a28abab247fbc688d`.
+All owned workers close. The corrected affine MoE cache matrix remains open;
+no guard is relaxed and no incomplete case is counted as a pass.
