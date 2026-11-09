@@ -115,7 +115,56 @@ eight-token text recovery with the original output hash. Use
 `STARK_GLM53_BOUNDED_GRAPH=1` and `STARK_GLM53_BANK_GROUP_LAYERS=1`; all other
 GLM selectors remain unset. The generic divisor-four request guard is intact.
 
-There is no new model result. The full resident recipe remains held by its
-complete memory calculation. Image/cache/MTP qualification and matched quiet
-performance controls remain open. Bounded functional parity would not qualify
-normal-text speed against the earlier fast resident recipe.
+## One functional attempt: hard compressor rejection
+
+After the queued resource slot was released, the exact source, binary, driver
+and supervisor seals matched. A fresh screen found 105,860,775,936 available
+bytes, zero swap, no foreign model/app and no actual compiler frontend. Ten
+persistent launchd-owned Apple compiler XPC services were idle over a separate
+two-second CPU-counter sample. Their presence was recorded; it was not a model
+or active shader-build result. The first, overbroad extra preflight that counted
+those idle services remains retained separately; no model ran in that screen.
+
+The single authorized functional attempt reached text-only readiness, then
+stopped its first request on the unchanged compressor-growth ceiling. There
+was no completion, image stage or retry. Receipt:
+`d4b5fbd295d346ae6c37833345da4e97f70f43b5d54983e9e823cacc33188a35`.
+
+| Observation | Bytes / count |
+| --- | ---: |
+| Baseline available | 105,863,839,744 |
+| Baseline compressor | 2,429,599,744 |
+| Available at exact fatal sample | 62,759,632,896 |
+| Compressor at exact fatal sample | 3,829,153,792 |
+| Worker RSS / footprint at fatal sample | 762,822,656 / 748,508,824 |
+| Minimum available through final drain sample | 57,463,390,208 |
+| Peak compressor growth through final drain sample | 13,427,277,824 |
+| Peak worker RSS / footprint | 782,499,840 / 749,295,232 |
+| Peak host wired growth | 4,094,705,664 |
+| Pageouts growth / Swapouts / swap used | 359 / 0 / 0 |
+| Process samples | 55 |
+
+The first Pageouts increase was diagnostic only. The exact hard breach sample
+and final post-drain sample are both retained with timestamps. Compressor
+growth continued between the breach and the final sample, approximately 1.50
+seconds later. These are host-global observations; they do not attribute the
+growth to one allocation, mapping or service. The worker's small RSS and
+physical footprint do not establish a bound on the host impact.
+
+The supervisor requested cancellation, terminated only its owned worker,
+reaped it and joined. No kill escalation was needed. All owned workers and
+compilers were closed and the exclusive slot released. The next family must
+fresh-screen host recovery. No further GLM model retry or limit relaxation is
+authorized. Disposition: resource-deferred on a valid hard memory screen.
+
+The active-resource source inventory did not prove the complete physical
+residency ceiling. Source investigation must distinguish full-file read-only
+`MAP_PRIVATE` mappings, bounded Metal no-copy wrapper ownership, file/VM pager
+residency, shader compilation and driver retention. Releasing one wrapper and
+its registered-byte counter does not prove that all corresponding physical
+pages have been reclaimed. No particular cause is established by this run.
+
+The full resident recipe remains held by its complete memory calculation.
+Image/cache/MTP qualification and matched quiet performance controls remain
+open. Bounded functional parity would not qualify normal-text speed against
+the earlier fast resident recipe.
