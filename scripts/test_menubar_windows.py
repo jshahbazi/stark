@@ -473,12 +473,12 @@ class WindowLifecycleTests(unittest.TestCase):
         main = directory / "WindowChecks.swift"
         # Preserve the selected family in this disposable copy and measure the
         # inner stack, whose minimum width originally pushed controls offscreen.
-        family_reset = ".onAppear { selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all }"
+        family_reset = ".onAppear { selectedFamily = nil; catalogQuantization = .all }"
         models_frame = "}.padding(24).frame(width: 640, height: 580)"
         models_declaration = "struct ModelsView: View {"
         if any(source.count(boundary) != 1 for boundary in [family_reset, models_frame, models_declaration]):
             raise RuntimeError("catalog_fixture_source_boundary_invalid")
-        source = source.replace(family_reset, ".onAppear { artifactChoices = [:] }").replace(
+        source = source.replace(family_reset, ".onAppear { }").replace(
             models_declaration, models_declaration + "\n    let windowFixtureBoundsProbe = NSView()"
         ).replace(models_frame, "}.background(CatalogPickerBoundsProbe(view: windowFixtureBoundsProbe)).padding(24).frame(width: 640, height: 580)")
         main.write_text(source.split(BOUNDARY, 1)[0] + DRIVER)
