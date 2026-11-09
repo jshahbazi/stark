@@ -66,6 +66,16 @@ impl<B: Backend> Gemma4AssistantTargetFrame<B> {
     }
 }
 
+/// No Debug or serialization: token data remains request-owned.
+/// Only `committed_tokens` have been fed to the returned target frame.
+/// `next_token` is the next target draw and must be processed by the next round.
+pub struct Gemma4AssistantVerifiedRound<B: Backend> {
+    pub frame: Gemma4AssistantTargetFrame<B>,
+    pub committed_tokens: Vec<u32>,
+    pub next_token: u32,
+    pub accepted_drafts: usize,
+}
+
 impl<B: Backend> LanguageModel<B>
 where
     B::ScratchBuffer: BufferCpuAccessible,
@@ -159,6 +169,7 @@ where
 
     /// Real greedy proposals only; this does not verify or commit target rows.
     /// Keeping the immutable frame borrowed fixes KV and RoPE through the round.
+    /// Positions beyond 512 require the unimplemented source 513-row handoff.
     pub fn draft_gemma4_assistant_greedy(
         &self,
         frame: &Gemma4AssistantTargetFrame<B>,
@@ -178,6 +189,8 @@ where
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<Vec<u32>, Gemma4AssistantSessionError<B>> {
         if !Arc::ptr_eq(&self.model_identity, &frame.identity)
+            || !head.matches_target(&self.model_identity)
+            || frame.position() > 512
             || head.backbone_dim() != frame.model_dim
             || count > 3
             || first >= self.decoder.embedding().vocab_size()
@@ -228,6 +241,96 @@ where
         }
         Ok(tokens)
     }
+    /// Correctness component only: verifies each row before feeding it back.
+    /// Consuming the frame makes every error/cancellation discard advanced KV.
+    /// This performs no partially accepted ring batch and establishes no speedup.
+    pub fn verify_gemma4_assistant_greedy_serial(
+        &self,
+        mut frame: Gemma4AssistantTargetFrame<B>,
+        drafts: &[u32],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Gemma4AssistantVerifiedRound<B>, Gemma4AssistantSessionError<B>> {
+        if !Arc::ptr_eq(&self.model_identity, &frame.identity)
+            || drafts.len() > 3
+            || drafts.iter().any(|&t| t >= self.decoder.embedding().vocab_size())
+            || frame.position().checked_add(drafts.len() as u32 + 1).is_none_or(|n| n > frame.capacity)
+        {
+            return Err(Gemma4AssistantSessionError::Invalid);
+        }
+        let draw = |logits: &[f32]| {
+            logits
+                .iter()
+                .enumerate()
+                .max_by(|(a, x), (b, y)| x.total_cmp(y).then_with(|| b.cmp(a)))
+                .map(|(i, _)| i as u32)
+                .ok_or(Gemma4AssistantSessionError::Invalid)
+        };
+        let mut emitted = vec![draw(&frame.logits)?];
+        let mut accepted = 0;
+        for index in 0..=drafts.len() {
+            self.advance_gemma4_assistant_frame(&mut frame, *emitted.last().unwrap(), cancelled)?;
+            let next = draw(&frame.logits)?;
+            emitted.push(next);
+            if drafts.get(index).is_none_or(|&proposal| proposal != next) {
+                break;
+            }
+            accepted += 1;
+        }
+        let next_token = emitted.pop().ok_or(Gemma4AssistantSessionError::Invalid)?;
+        Ok(Gemma4AssistantVerifiedRound {
+            frame,
+            committed_tokens: emitted,
+            next_token,
+            accepted_drafts: accepted,
+        })
+    }
+
+    fn advance_gemma4_assistant_frame(
+        &self,
+        frame: &mut Gemma4AssistantTargetFrame<B>,
+        token: u32,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), Gemma4AssistantSessionError<B>> {
+        let backend = Gemma4AssistantSessionError::Backend;
+        if cancelled() {
+            return Err(Gemma4AssistantSessionError::Cancelled);
+        }
+        if frame.position() >= frame.capacity || token >= self.decoder.embedding().vocab_size() {
+            return Err(Gemma4AssistantSessionError::Invalid);
+        }
+        frame.state.prepare(frame.position(), 1).map_err(backend)?;
+        let mut command = self
+            .engine
+            .context
+            .create_command_buffer(Some("Gemma assistant serial target verification"), None)
+            .map_err(backend)?;
+        let ids = command.allocate_constant_from_slice(&[token]).map_err(backend)?;
+        let nodes = flat(1);
+        let batch = BatchTopology::new(&nodes, true);
+        let output =
+            self.decoder.encode(&ids, &batch, Some((0..1).into()), Some(&[]), &mut frame.state, &mut command)?;
+        drop(ids);
+        let hidden = output.final_hidden.ok_or(Gemma4AssistantSessionError::Invalid)?;
+        let logits = output.logits.ok_or(Gemma4AssistantSessionError::Invalid)?;
+        if hidden.size() != frame.model_dim as usize * 2 {
+            return Err(Gemma4AssistantSessionError::Invalid);
+        }
+        let mut normalized = self.engine.context.create_buffer(hidden.size()).map_err(backend)?;
+        command.encode_copy(&hidden, &mut normalized);
+        frame.state.encode_accept(&[0], &mut command).map_err(backend)?;
+        command.end_encoding().submit().wait_until_completed().map_err(backend)?;
+        if cancelled() {
+            return Err(Gemma4AssistantSessionError::Cancelled);
+        }
+        let logits = logits.copyout::<bf16>().into_iter().map(f32::from).collect::<Vec<_>>();
+        if logits.iter().any(|n| !n.is_finite()) {
+            return Err(Gemma4AssistantSessionError::Invalid);
+        }
+        frame.normalized = normalized;
+        frame.logits = logits;
+        Ok(())
+    }
+
     /// Ephemeral test-only tensors passed directly to a local reference process.
     /// Callers must never persist or print this value.
     #[cfg(test)]
@@ -237,6 +340,9 @@ where
         head: &Gemma4Assistant<B>,
         root: u32,
     ) -> Result<serde_json::Value, Gemma4AssistantSessionError<B>> {
+        if !Arc::ptr_eq(&self.model_identity, &frame.identity) || !head.matches_target(&self.model_identity) {
+            return Err(Gemma4AssistantSessionError::Invalid);
+        }
         let backend = Gemma4AssistantSessionError::Backend;
         let local = frame.state.last_committed_attention_kv(true).ok_or(Gemma4AssistantSessionError::Invalid)?;
         let global = frame.state.last_committed_attention_kv(false).ok_or(Gemma4AssistantSessionError::Invalid)?;

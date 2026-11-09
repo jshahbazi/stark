@@ -262,3 +262,88 @@ fn committed_external_kv_excludes_phantom_suffix_cpu() {
 fn committed_external_kv_excludes_phantom_suffix_metal() {
     committed_external_view::<crate::backends::metal::Metal>();
 }
+
+fn committed_bf16_eager_view<B: Backend>() {
+    use half::bf16;
+
+    use crate::{
+        config::token_mixer::attention::AttentionConfig,
+        encodable_block::mixer::attention::{CommittedAttentionKV, reference::ReferenceBF16Attention},
+    };
+    let context = B::Context::new().unwrap();
+    for ring in [false, true] {
+        let capacity = 4 + ATTENTION_SUFFIX_CAPACITY;
+        let mut live = AttentionState::<B> {
+            element_dim: 64,
+            data_type: DataType::BF16,
+            cache: if ring {
+                KVCacheState::ring(4)
+            } else {
+                KVCacheState::full()
+            },
+            capacity_elements: capacity,
+            is_sparse: false,
+            keys: Box::new(context.create_buffer(capacity as usize * 128).unwrap()),
+            values: Box::new(context.create_buffer(capacity as usize * 128).unwrap()),
+            kv_cache_update: <B::Kernels as Kernels>::KVCacheUpdateKernel::new(&context, DataType::BF16).unwrap(),
+        };
+        if ring {
+            live.cache.accept(&(0..13).collect::<Vec<_>>());
+            live.cache.accept(&[0]);
+            live.cache.accept(&[0]);
+        } else {
+            live.cache.accept(&[0, 1, 2]);
+        }
+        let count = live.view().prefix_len();
+        buffer_mut(&mut live.keys).copyin(&vec![bf16::ZERO; capacity as usize * 64]);
+        buffer_mut(&mut live.values).copyin(&vec![bf16::from_f32(1000.0); capacity as usize * 64]);
+        let actual =
+            (0..count).flat_map(|i| std::iter::repeat_n(bf16::from_f32((i + 1) as f32), 64)).collect::<Vec<_>>();
+        buffer_mut(&mut live.values).subrange_mut(..count as usize * 128).copyin(&actual);
+        let view = CommittedAttentionKV::new(
+            &live,
+            7,
+            if ring {
+                15
+            } else {
+                3
+            },
+        )
+        .unwrap();
+        let config: AttentionConfig = serde_json::from_value(serde_json::json!({
+            "type":"AttentionConfig","qkvg_projection_config":{},"out_projection_config":{},
+            "query_norm_config":null,"key_norm_config":null,"num_heads":1,"num_groups":1,"head_dim":64,
+            "is_causal":true,"scale":1.0,"sliding_window_size":if ring {Some(513)} else {None},
+            "logit_soft_cap":null,"has_sinks":false,"has_qkvg_biases":false,"has_out_biases":false,
+            "has_gate":false,"normalize_values":false,"is_kv_sharing":true}))
+        .unwrap();
+        // Ordinary reference admission must continue to reject shared/ring state.
+        assert!(ReferenceBF16Attention::<B>::new(&context, &config).is_err());
+        let eager = ReferenceBF16Attention::<B>::for_committed_target(&context, &config).unwrap();
+        assert!(eager.matches_geometry(1, 1, 64));
+        assert!(!eager.matches_geometry(2, 1, 64));
+        let mut command = context.create_command_buffer(None, None).unwrap();
+        let mut query = context.create_buffer(128).unwrap();
+        query.copyin(&[bf16::ZERO; 64]);
+        let (keys, values) = view.validation_copy(&mut command).unwrap();
+        let output = eager.encode(&query, &keys, &values, 1, count - 1, &mut command).unwrap();
+        let mut result = context.create_buffer(128).unwrap();
+        command.encode_copy(&output, &mut result);
+        command.end_encoding().submit().wait_until_completed().unwrap();
+        let probability = bf16::from_f32(1.0 / count as f32).to_f32();
+        let expected = bf16::from_f32(probability * (count * (count + 1) / 2) as f32);
+        assert!(result.as_slice::<bf16>().iter().all(|&v| v == expected));
+        assert_eq!(live.view().prefix_len(), count);
+    }
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn committed_bf16_eager_excludes_phantom_suffix_cpu() {
+    committed_bf16_eager_view::<crate::backends::cpu::Cpu>();
+}
+#[cfg(backend = "metal")]
+#[stark_test]
+fn committed_bf16_eager_excludes_phantom_suffix_metal() {
+    committed_bf16_eager_view::<crate::backends::metal::Metal>();
+}

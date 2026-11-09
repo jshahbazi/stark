@@ -47,6 +47,33 @@ impl<B: Backend> Attention<B> {
         target: &super::CommittedAttentionKV<'_, B>,
         command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
+        self.attend_committed_target_inner(hidden, precalculated_rope, target, None, command)
+    }
+
+    pub(crate) fn attend_committed_target_eager(
+        &self,
+        hidden: B::ScratchBuffer,
+        precalculated_rope: Option<&PrecalculatedRoPE<B>>,
+        target: &super::CommittedAttentionKV<'_, B>,
+        reference: &super::reference::ReferenceBF16Attention<B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        if self.data_type != crate::data_type::DataType::BF16
+            || !reference.matches_geometry(self.num_q_heads, self.num_groups, self.head_dim)
+        {
+            return Err(crate::backends::common::InvalidInput("committed BF16 reference geometry mismatch").into());
+        }
+        self.attend_committed_target_inner(hidden, precalculated_rope, target, Some(reference), command)
+    }
+
+    fn attend_committed_target_inner(
+        &self,
+        hidden: B::ScratchBuffer,
+        precalculated_rope: Option<&PrecalculatedRoPE<B>>,
+        target: &super::CommittedAttentionKV<'_, B>,
+        reference: Option<&super::reference::ReferenceBF16Attention<B>>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
         let invalid = || crate::backends::common::InvalidInput("invalid committed target KV query");
         let required = self.num_groups.checked_mul(self.head_dim).ok_or_else(invalid)?;
         if self.num_kv_heads.is_some()
@@ -67,35 +94,50 @@ impl<B: Backend> Attention<B> {
         let cache = target.query_cache_view();
         let temporal = target.view.ring_params().is_some().then(|| target.linearize_ring(command)).transpose()?;
         let output = if let Some((keys, values)) = &temporal {
-            // The assistant's current position is fixed. Copy at most one
-            // local window to temporal order; full target context stays shared.
-            self.encode_core(
-                AttentionArguments {
-                    queries: &queries,
-                    keys,
-                    values,
-                    suffix_length: 1,
-                    trie: None::<&B::ConstantBuffer>,
-                    sinks: None,
-                    cache,
-                    image_span: None,
-                },
-                command,
-            )?
+            if let Some(reference) = reference {
+                reference.encode(&queries, keys, values, 1, target.retained_rows() - 1, command)?
+            } else {
+                // The assistant's current position is fixed. Copy at most one
+                // local window to temporal order; full target context stays shared.
+                self.encode_core(
+                    AttentionArguments {
+                        queries: &queries,
+                        keys,
+                        values,
+                        suffix_length: 1,
+                        trie: None::<&B::ConstantBuffer>,
+                        sinks: None,
+                        cache,
+                        image_span: None,
+                    },
+                    command,
+                )?
+            }
         } else {
-            self.encode_core(
-                AttentionArguments {
-                    queries: &queries,
-                    keys: target.state.keys.as_ref(),
-                    values: target.state.values.as_ref(),
-                    suffix_length: 1,
-                    trie: None::<&B::ConstantBuffer>,
-                    sinks: None,
-                    cache,
-                    image_span: None,
-                },
-                command,
-            )?
+            if let Some(reference) = reference {
+                reference.encode(
+                    &queries,
+                    target.state.keys.as_ref(),
+                    target.state.values.as_ref(),
+                    1,
+                    target.retained_rows() - 1,
+                    command,
+                )?
+            } else {
+                self.encode_core(
+                    AttentionArguments {
+                        queries: &queries,
+                        keys: target.state.keys.as_ref(),
+                        values: target.state.values.as_ref(),
+                        suffix_length: 1,
+                        trie: None::<&B::ConstantBuffer>,
+                        sinks: None,
+                        cache,
+                        image_span: None,
+                    },
+                    command,
+                )?
+            }
         };
         self.out_projection.encode(output, 1, command)
     }

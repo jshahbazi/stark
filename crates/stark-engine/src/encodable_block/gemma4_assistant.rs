@@ -3,6 +3,8 @@
 //! 2026 HuggingFace Team), SHA-256
 //! a77e67673ce7d2248294e361c3c074c29d8d6a092655d7b27b95fc9777a2d0d1.
 //! This component does not advertise MTP or implement target verification.
+use std::sync::Arc;
+
 use derive_more::Debug;
 use half::bf16;
 use thiserror::Error;
@@ -22,7 +24,10 @@ use crate::{
     data_type::DataType,
     encodable_block::{
         linear::{Linear, LinearBlockError},
-        mixer::attention::{Attention, AttentionNewError, CommittedAttentionKV, rope::PrecalculatedRoPE},
+        mixer::attention::{
+            Attention, AttentionNewError, CommittedAttentionKV, reference::ReferenceBF16Attention,
+            rope::PrecalculatedRoPE,
+        },
         mlp::{Mlp, MlpBlockError},
         normalization::{Normalization, NormalizationNewError, PostLayerScalar, ShortcutMode},
     },
@@ -77,6 +82,7 @@ pub enum Gemma4AssistantError<B: Backend> {
 struct AssistantLayer<B: Backend> {
     pre_attention: Normalization<B>,
     attention: Attention<B>,
+    eager: ReferenceBF16Attention<B>,
     post_attention: Normalization<B>,
     pre_mlp: Normalization<B>,
     mlp: Box<dyn Mlp<B>>,
@@ -87,6 +93,7 @@ struct AssistantLayer<B: Backend> {
 
 pub struct Gemma4Assistant<B: Backend> {
     profile: Gemma4AssistantProfile,
+    target_identity: Option<Arc<()>>,
     pre_projection: Box<dyn Linear<B>>,
     post_projection: Box<dyn Linear<B>>,
     layers: Box<[AssistantLayer<B>]>,
@@ -107,6 +114,19 @@ pub struct Gemma4AssistantStep<B: Backend> {
 impl<B: Backend> Gemma4Assistant<B> {
     pub fn backbone_dim(&self) -> u32 {
         self.profile.backbone_dim()
+    }
+    pub(crate) fn bind_target(
+        mut self,
+        identity: Arc<()>,
+    ) -> Self {
+        self.target_identity = Some(identity);
+        self
+    }
+    pub(crate) fn matches_target(
+        &self,
+        identity: &Arc<()>,
+    ) -> bool {
+        self.target_identity.as_ref().is_some_and(|bound| Arc::ptr_eq(bound, identity))
     }
     /// The engine must first admit the complete companion and bind it to the
     /// actual selected target descriptor pair. This low-level constructor cannot
@@ -182,6 +202,8 @@ impl<B: Backend> Gemma4Assistant<B> {
                 "logit_soft_cap":null,"has_sinks":false,"has_qkvg_biases":false,"has_out_biases":false,
                 "has_gate":false,"normalize_values":true,"is_kv_sharing":true,"materialize_rope_bf16":true
             }))?;
+            let eager = ReferenceBF16Attention::for_committed_target(context, &attention)
+                .map_err(Gemma4AssistantError::Backend)?;
             let (attention, factors) = Attention::new(
                 DIM,
                 DataType::BF16,
@@ -213,6 +235,7 @@ impl<B: Backend> Gemma4Assistant<B> {
             layers.push(AssistantLayer {
                 pre_attention: norm(&format!("{base}.pre_mixer_norm"), DIM)?,
                 attention,
+                eager,
                 post_attention: norm(&format!("{base}.post_mixer_norm"), DIM)?,
                 pre_mlp: norm(&format!("{base}.pre_mlp_norm"), DIM)?,
                 mlp,
@@ -236,6 +259,7 @@ impl<B: Backend> Gemma4Assistant<B> {
             .into_boxed_slice();
         Ok(Self {
             profile,
+            target_identity: None,
             pre_projection: linear("pre_projection", 2 * profile.backbone_dim(), DIM)?,
             post_projection: linear("post_projection", DIM, profile.backbone_dim())?,
             layers: layers.into_boxed_slice(),
@@ -281,8 +305,10 @@ impl<B: Backend> Gemma4Assistant<B> {
                 PrecalculatedRoPE::<B>::precalculate(&layer.rope, &[target.position()], commands).map_err(backend)?;
             let norm =
                 layer.pre_attention.encode(&value, 0, 1, None::<&mut B::ScratchBuffer>, commands).map_err(backend)?;
-            let attention =
-                layer.attention.attend_committed_target(norm, Some(&rope), target, commands).map_err(backend)?;
+            let attention = layer
+                .attention
+                .attend_committed_target_eager(norm, Some(&rope), target, &layer.eager, commands)
+                .map_err(backend)?;
             let attention = layer
                 .post_attention
                 .encode(&attention, 0, 1, None::<&mut B::ScratchBuffer>, commands)

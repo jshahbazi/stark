@@ -14,8 +14,9 @@ and the [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md).
 
 The official model APIs, configuration files and 5,520-byte safetensors headers
 were read on 2026-11-09. HTTP range responses were required before reading the
-headers; no weight payload was downloaded. These are metadata identities and
-operator inventories, with execution qualification still required.
+headers; no weight payload was downloaded during that metadata intake. The
+continuation subsequently fetched and converted the exact E2B payload. E4B
+remains metadata-only; numerical and serving qualification remain separate.
 
 | Assistant | Revision | Config SHA-256 | Safetensors header SHA-256 |
 | --- | --- | --- | --- |
@@ -44,8 +45,9 @@ The actual header inventories include:
 API dtype inventories are 77,731,332 BF16 plus 262,144 I64 values for E2B, and
 78,517,764 BF16 plus 262,144 I64 values for E4B. Their declared tensor payloads
 are 157,559,816 and 159,132,680 bytes respectively, before headers/alignment.
-Full payload hashes and exact target/assistant pairing still require intake.
-Metadata compatibility alone does not qualify a pair. Initial target revisions
+Full E2B payload hashes and exact target/assistant pairing are recorded in the
+continuation; E4B still requires payload intake. Metadata compatibility alone
+does not qualify a pair. Initial target revisions
 are the independently recorded E2B `3e22461f…` and E4B `4ecc2ba6…` artifacts;
 retain their exact precision/materialization policies throughout each comparison.
 
@@ -75,10 +77,11 @@ target execution and qualification; small-profile evidence will not transfer.
 | E: cache, images and default loading | Load target+tower+assistant by the ordinary image-default route. Inventory resident weights, target/ring snapshots, activation handoffs, assistant state and verification/scratch peaks. Integrate complete head-aware prefix reuse and host capability reporting. | Text MTP/cache→real image with zero drafts/proposals/reuse→fresh text MTP→cached text MTP; failures/cancellation/restart and MTP selection switches. Match text-only versus image-loaded speed with MTP off/on. Head stripping or a text-only fallback cannot close this stage. |
 | F: E4B and later artifacts | Repeat complete qualification for E4B, then larger targets and each intended precision/format. | Each exact pair has its own artifact/binary/reference hashes, numerical, memory, cache/lifecycle and performance evidence. Release/install status remains separate. |
 
-Stages A–F remain open. The [continuation](model-experiments/2026-11-09-gemma-next-image-parity.md)
-adds exact source/target binding and complete companion tensor/permutation
-admission. No assistant payload conversion, draft execution or MTP speed result
-has passed yet. The pinned Transformers 5.15.1 candidate generator and assistant
+The [continuation](model-experiments/2026-11-09-gemma-next-image-parity.md)
+records exact E2B payload conversion, source/target binding and complete
+companion tensor/permutation admission. Three real drafts execute, while the
+source numerical gate and subsequent qualification stages remain open. No MTP
+speed result has passed. The pinned Transformers 5.15.1 candidate generator and assistant
 confirm that all four layers borrow target KV without maintaining predictor KV,
 and all proposals within a round use the same absolute rotary position. The
 target's final normalized activation and embedding feed the first proposal;
@@ -89,7 +92,12 @@ These compile and execute three real E2B proposals with the image tower resident
 The first source oracle passes root-embedding equality, first-proposal equality,
 feedback and centroid bounds, but fails the masked-logit bound; no tolerance
 was relaxed. See the [continuation attempt](model-experiments/2026-11-09-gemma-next-image-parity.md)
-for separate passed and failed controls. Target verification/rollback, head-aware caching,
+for separate passed and failed controls. The source BF16 committed-query
+follow-up and consuming serial target-verification component compile, and the
+dedicated committed-query CPU controls pass. The new Metal, target-verification
+and source-oracle execution controls remain held. Drafting positions above 512
+are rejected pending a separately qualified extra-row handoff; ordinary target
+context support is unchanged. Batched verification/rollback, head-aware caching,
 worker/default loading and useful MTP speed remain open. The current
 [cache follow-up](benchmarks/2026-11-09-gemma4-warmed-cache.md) addresses normal
 text prefix execution while this assistant work remains outstanding.

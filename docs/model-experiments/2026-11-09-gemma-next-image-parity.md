@@ -229,3 +229,118 @@ actual E2B aggregate receipt
 `2c2ce563229ceaf49de9b395d0ef977168b08c07b42aba732fc80ec8a7fd2b47`.
 All tensors sent to the reference subprocess remained in ephemeral stdin;
 receipts contain counts, hashes and numerical aggregates only.
+
+## 20261109-G4AP-02: source BF16 committed-query arithmetic
+
+Registered before the follow-up edit or execution. The first source oracle
+failed without changing its declared limits. Source review shows that the
+assistant eager reference materializes BF16 attention scores and probabilities,
+while the initial native head used fused F32 online softmax. Implement that
+source arithmetic only for the dedicated immutable committed-KV query, reusing
+the bounded temporal ring copy and existing materialized kernels. Preserve
+ordinary attention dispatch, source position and partial-ring guards. Rebuild
+and repeat the same exact E2B artifact/input/oracle gate when the serialized
+resource queue grants the slot after GLM and Qwen. No result or tolerance
+transfers from the failed first arithmetic policy.
+
+### Target verification component to add before the next build
+
+Add a consuming, serial greedy verification control: accept only already
+verified target input rows, compare each draft to the actual next target draw,
+and return a new frame plus accepted outputs. Cancellation or failure consumes
+and discards the private frame; no partially advanced state escapes. Test
+outputs against ordinary target generation, including deliberate wrong drafts
+and cancellation followed by fresh prefill. This establishes functional
+verification without entering unsupported partial ring acceptance. It is not
+a batched verification implementation or useful-performance result; serving
+integration and transactional batched ring acceptance remain open.
+
+The serial component returns committed tokens and the next unprocessed draw
+in separate typed fields. Its controls require `new_position = old_position +
+1 + accepted_drafts` and `committed_tokens.len() = accepted_drafts + 1`, so a
+future caller cannot mistake the carry draw for already committed KV. The
+independent source review confirmed the underlying boundary arithmetic before
+this result type made the distinction explicit. These follow-up controls remain
+unbuilt until the next resource slot.
+
+The follow-up oracle adds aggregate diagnostics for centroid-boundary ties,
+selected-token support differences and numerical error on common selected
+rows. It retains the original full masked-logit acceptance limits unchanged.
+No centroid scores, token IDs or tensors are logged; only support/tie counts
+and numerical error aggregates leave the ephemeral reference process.
+
+Before the same build, add explicit source-bound E2B companion admission:
+exact file size/hash and selected-descriptor construction, tied to the loaded
+target config/weights and opaque model-instance identity. Reject unbound or
+foreign heads at the language-model draft entry. This component loader does
+not enable serving/default loading or infer support for E4B/larger profiles.
+
+### Crash recovery checkpoint
+
+The 2026-11-09 machine restart interrupted the unbuilt follow-up. Recovery found
+the saved `dccb8ed0` head and all nine changed paths intact. The recovered unified
+patch exactly matches the pre-restart unbuilt patch (SHA-256
+`0fc9202a4d36370073dd2142919fa8a859a3c268c098a6a98eb50a85157867ea`).
+Separate private recovery receipts preserve the full source files, patch and
+artifact hashes. No native worker or KV state survived the restart, and no
+new numerical result is inferred from the retained prior binary.
+
+Fresh full-file reads confirm the unchanged exact target config/weights,
+157,565,344-byte source companion, 157,581,400-byte native companion and pinned
+Transformers 5.15.1 assistant/candidate/masking sources. The support-diagnostic
+oracle revision is sealed separately. Package formatting and repository policy
+checks pass. Added serial controls cover one accepted proposal followed by a
+rejection and zero proposals. These controls and G4AP-02 remain unbuilt pending
+the explicit serialized resource handoff. The crash cause is undetermined.
+
+### Post-restart native build and held execution
+
+A fresh distinct ignored target compiled with pinned nightly-2026-10-01,
+locked dependencies, two build jobs, release debug zero and incremental off.
+The first build found two test-only `tempfile` calls without a library dev
+dependency. Reusing the existing private test-directory helper fixed that
+blocker without changing dependencies. The second build passed. A subsequent
+test rebuild was interrupted to apply formatting; the final fourth build
+passes. Original failed/interrupted logs remain private.
+
+Final test executable SHA-256
+`4d43d120a350dab9167ca27242865f494e5403068e1c7480110235fb43ede993`;
+1,185-file source graph digest
+`ae5abe4196b0d8512841035a29bb823ab23013405f6970e83b6f797f3089b3cb`;
+source-seal file SHA-256
+`a0c5ab9bf1dcbcad3eb5ed2e70762c424f974092b329142f539d3b1313908527`;
+build/receipt seal SHA-256
+`88ef83ce24e62eb17dd437504ada488ff1d7d05f5c43023d0bc585306667d8ed`.
+The final executable passes both exact committed-query CPU controls, including
+BF16 phantom-suffix exclusion and ring scratch ownership. Formatting,
+repository policy and whitespace checks pass. An independent read-only review
+of patch `fb9cc8fb` found no additional defect in serial commit/carry arithmetic,
+cancellation draining or the committed eager attention geometry/lifetimes.
+That source review supplies no numerical or performance qualification.
+
+The earlier broader prefix filter passed 22 tests with six ignored. Skipping
+test names ending in `_metal` did not exclude generic tests that invoke
+Metal internally. This was a mixed CPU/Metal diagnostic run, with no model
+load; its log is retained separately. Its earlier executable hash was not
+retained before the final test rebuild. It is not labeled CPU-only or used to
+close the new source-bound Metal/oracle gates.
+
+The assistant component now rejects draft positions above 512 until the source
+513-row handoff is implemented and qualified. Ordinary target context support
+is unchanged. Added model-bound controls admit a draft at position 512, reject
+position 513 and continue ordinary serial target state to 514; these controls,
+all serial acceptance/cancellation cases and the unchanged numerical oracle
+remain unexecuted in this follow-up.
+
+The next exact local command is `zsh runtime/gemma-recovery-next-command.sh`,
+whose SHA-256 is
+`dad3231a47870d65f89ee30c8397e8240f43e06094ae84445245ed307dd99e04`.
+It selects exactly two dedicated Metal controls and then the same pinned E2B
+artifact/input/oracle with a new, create-only aggregate receipt. The script
+references the sealed final test executable and artifact/reference paths;
+`zsh -n` passes. Before running it, the coordinator must clear the externally
+loaded user-owned Stark worker and explicitly grant the serialized resource
+slot. Recovery did not kill or unload that worker. No Gemma model was loaded
+after restart. The masked-logit limits remain maximum absolute error 0.5 and
+relative L2 error 0.02. The prior failed oracle, old-text benchmark ineligibility,
+E4B/wide-handoff gaps and disabled serving MTP remain unchanged.

@@ -1,4 +1,4 @@
-//! BF16 eager boundaries used only by the exact Qwen3.5 vision artifact.
+//! BF16 eager boundaries for source-bound owned or committed-query paths.
 
 use crate::{
     backends::common::{
@@ -37,6 +37,31 @@ impl<B: Backend> ReferenceBF16Attention<B> {
         {
             return Err(InvalidInput("reference BF16 attention requires owned full causal cache").into());
         }
+        Self::kernels(context, config)
+    }
+
+    /// A single query over already committed, temporally ordered rows. The
+    /// caller validates the window and row count before entering this path.
+    /// This grants no mutable shared-cache or partial-ring acceptance support.
+    pub(crate) fn for_committed_target(
+        context: &B::Context,
+        config: &AttentionConfig,
+    ) -> Result<Self, B::Error> {
+        if !config.is_causal
+            || !config.is_kv_sharing
+            || config.has_sinks
+            || config.logit_soft_cap.is_some()
+            || config.sliding_window_size.is_some_and(|window| window != 513)
+        {
+            return Err(InvalidInput("invalid committed BF16 assistant attention profile").into());
+        }
+        Self::kernels(context, config)
+    }
+
+    fn kernels(
+        context: &B::Context,
+        config: &AttentionConfig,
+    ) -> Result<Self, B::Error> {
         crate::config::validation::validate_heads(config.num_heads, config.num_groups, config.head_dim)?;
         Ok(Self {
             dot: <B::Kernels as Kernels>::VisionMatmulBF16Kernel::new(context)?,
@@ -49,6 +74,15 @@ impl<B: Backend> ReferenceBF16Attention<B> {
             head_dim: config.head_dim,
             scale: config.scale.unwrap_or(1.0 / (config.head_dim as f32).sqrt()),
         })
+    }
+
+    pub(crate) fn matches_geometry(
+        &self,
+        heads: u32,
+        groups: u32,
+        head_dim: u32,
+    ) -> bool {
+        self.heads == heads && self.groups == groups && self.head_dim == head_dim
     }
 
     pub(crate) fn encode(

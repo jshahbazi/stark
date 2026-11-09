@@ -30,8 +30,10 @@ use crate::{
     parameters::ParameterLoader,
 };
 
+mod assistant;
 #[cfg(all(test, backend = "metal"))]
 mod assistant_tests;
+pub use assistant::Gemma4AssistantAdmissionError;
 mod decoder_contract;
 mod flash;
 #[cfg(test)]
