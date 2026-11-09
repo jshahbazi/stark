@@ -982,6 +982,19 @@ pub struct Scratch {
 }
 
 impl Scratch {
+    /// Context capacity represented by decode scratch's QSA score buffer.
+    pub fn resident_context_capacity(&self, compress_ratio: usize) -> usize {
+        self.qsa.scores.shape()[1].saturating_mul(compress_ratio)
+    }
+
+    /// Actual persistent prefill allocation geometry, independent of whether
+    /// its most recent construction or use completed successfully.
+    pub fn resident_prefill_geometry(&self, compress_ratio: usize) -> (usize, usize) {
+        self.prefill.as_ref().map_or((0, 0), |prefill| {
+            (prefill.m, prefill.qsa.scores.shape()[1].saturating_mul(compress_ratio))
+        })
+    }
+
     /// The arrival probe event (`LILY_PROBE_ARRIVAL`), for benchmarks.
     pub fn arrival_probe(&self) -> Option<&SharedEvent> {
         self.sync.arrival.as_ref()
@@ -2037,8 +2050,13 @@ impl Qwen4ExpModel {
     /// while allowing cancellation between completed prefill command buffers.
     #[allow(clippy::too_many_arguments)]
     pub fn prefill_with_vision_until(
-        &self, ctx: &MetalContext, state: &mut DecodeState, s: &mut Scratch,
-        tokens: &[u32], draw: Option<Draw<'_>>, vision: Option<&VisionInput<'_>>,
+        &self,
+        ctx: &MetalContext,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        tokens: &[u32],
+        draw: Option<Draw<'_>>,
+        vision: Option<&VisionInput<'_>>,
         stop: &dyn Fn() -> bool,
     ) -> Result<usize> {
         self.prefill_chunks(ctx, state, s, tokens, draw, vision, Some(stop))

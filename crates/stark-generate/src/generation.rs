@@ -18,10 +18,24 @@ use crate::{
 const TEST_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EXTRA_STOPS: usize = 256;
 
-fn automatic_memory_budget(available: usize) -> usize {
-    // Use three quarters of the quarter-RAM envelope, keeping serialization
-    // and memory-pressure headroom before the native allocation recheck.
-    available.saturating_sub(256 * 1024 * 1024) / 16 * 3
+pub(crate) fn generation_memory_budget(available: usize) -> usize {
+    // Available memory already excludes the resident model and native state.
+    // Leave 256 MiB for transient request serialization and host bookkeeping;
+    // admit the estimated additional allocation against the remaining bytes.
+    // Model loading retains its separately qualified residency policies.
+    available.saturating_sub(256 * 1024 * 1024)
+}
+
+#[cfg(any(feature = "metal", test))]
+pub(crate) fn admit_request_memory(
+    request_bytes: Option<usize>,
+    available: usize,
+) -> Result<(), &'static str> {
+    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+    if request_bytes > generation_memory_budget(available) {
+        return Err("resource_budget_exceeded");
+    }
+    Ok(())
 }
 
 /// Protocol policy independent of the optional native/Metal dependency.
@@ -984,9 +998,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     return Err("invalid_generation_request");
                 }
                 let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-                // Keep 25% inside the host's quarter-RAM admission envelope
-                // for request serialization and available-memory jitter.
-                let memory_budget = automatic_memory_budget(available);
+                // Use the same remaining-memory contract as execution's
+                // allocation recheck, including its transient host reserve.
+                let memory_budget = generation_memory_budget(available);
                 let capacity = self
                     .backend
                     .automatic_context_length(input_tokens, maximum, memory_budget)
@@ -3287,12 +3301,21 @@ mod tests {
     }
 
     #[test]
-    fn automatic_budget_reserves_ram_and_leaves_planning_headroom() {
+    fn planning_and_execution_share_available_memory_after_host_reserve() {
         const MIB: usize = 1024 * 1024;
-        assert_eq!(automatic_memory_budget(0), 0);
-        assert_eq!(automatic_memory_budget(256 * MIB), 0);
-        assert_eq!(automatic_memory_budget(1024 * MIB), 144 * MIB);
-        assert!(automatic_memory_budget(usize::MAX) < usize::MAX / 4);
+        let available = 1024 * MIB;
+        let planned = generation_memory_budget(available);
+        assert_eq!(planned, 768 * MIB);
+        // A valid allocation above the former quarter-RAM threshold fits.
+        assert_eq!(admit_request_memory(Some(512 * MIB), available), Ok(()));
+        assert_eq!(admit_request_memory(Some(planned), available), Ok(()));
+        assert_eq!(admit_request_memory(Some(planned + 1), available), Err("resource_budget_exceeded"));
+        assert_eq!(generation_memory_budget(0), 0);
+        assert_eq!(generation_memory_budget(256 * MIB), 0);
+        assert_eq!(admit_request_memory(Some(1), 256 * MIB), Err("resource_budget_exceeded"));
+        assert_eq!(admit_request_memory(None, available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_request_memory(Some(usize::MAX), usize::MAX), Err("resource_budget_exceeded"));
+        assert_eq!(generation_memory_budget(usize::MAX), usize::MAX - 256 * MIB);
     }
 
     #[test]

@@ -34,28 +34,29 @@ Image-capable generation workers keep the same framing budget. They pass image d
 
 Normal app use requires no budget configuration. At process startup, the host
 reads available RAM and selects `floor(available_bytes / (128 × 1 MiB))` MiB,
-clamped to 16 through 64 MiB. If memory telemetry is unavailable, it uses the
-16 MiB floor. The host pins that snapshot for its child workers and template
+with a 16 MiB floor and no fixed content ceiling. If memory telemetry is unavailable,
+it uses the 16 MiB floor. The host pins that snapshot for its child workers and template
 helpers so a request uses one consistent policy. Native standalone workers
 apply the same automatic policy at startup.
 
 For development or controlled runtime testing, `STARK_REQUEST_BUDGET_MIB`
-overrides the budget with an integer from 1 through 64. Invalid values fail
+overrides the budget with a positive decimal integer in MiB. Derived byte allowances
+must fit the platform's allocation address space; invalid or overflowing values fail
 startup. The override is read at process startup; restart the owning app and
 workers to apply a change, and give standalone host tools and native helpers
 the same override. There is no budget setting in the app interface.
 
 For a selected logical budget `B` bytes, the policy is:
 
-| Resource | Budget | Automatic range |
+| Resource | Budget | Automatic minimum |
 | --- | --- | --- |
-| Logical input and output content, including rendered templates | `B` | 16–64 MiB |
-| Encoded worker and template request, including framing | `6B + 2 MiB` | 98–386 MiB |
-| Text HTTP body | `6B + 2 MiB` | 98–386 MiB |
-| Image HTTP body | Text body budget plus 6 MiB | 104–392 MiB |
-| Aggregate pending HTTP bodies | Two image body budgets | 208–784 MiB |
-| Template live Rust allocation requests and sampled RSS | `128 MiB + 8B` | 256–640 MiB |
-| Template cumulative Rust allocation requests | `32 MiB + 32B` | 544–2,080 MiB |
+| Logical input and output content, including rendered templates | `B` | 16 MiB |
+| Encoded worker and template request, including framing | `6B + 2 MiB` | 98 MiB |
+| Text HTTP body | `6B + 2 MiB` | 98 MiB |
+| Image HTTP body | Text body budget plus 6 MiB | 104 MiB |
+| Aggregate pending HTTP bodies | Two image body budgets | 208 MiB |
+| Template live Rust allocation requests and sampled RSS | `128 MiB + 8B` | 256 MiB |
+| Template cumulative Rust allocation requests | `32 MiB + 32B` | 544 MiB |
 
 Transport headroom accommodates JSON escaping and protocol fields. Token vectors
 are also resource bounded using their four-byte-per-ID storage. Native readiness
@@ -107,11 +108,14 @@ report an undeclared HTTP model capacity.
 
 The native planner performs checked, allocation-free estimates using the loaded
 attention cache dimensions and precision, ring bounds, recurrent state and
-conservative scratch-pool requirements. It admits a context against one quarter
-of currently available RAM after a 256 MiB reserve, also bounded by token-storage
-and caller limits. Planning leaves another quarter of that allowance unused for
-serialization and ordinary memory-pressure fluctuations before allocation is
-rechecked. This is conservative admission evidence; it is not a memory
+conservative scratch-pool requirements. Planning and generation admit the
+estimated state and workspace requirements against currently available RAM after a 256 MiB
+reserve for transient serialization and host bookkeeping, also bounded by
+token-storage and caller limits. Resident model and state allocations already
+reduce available RAM. Lily discounts resident cache and scratch buffers and counts
+replacement peaks when capacity grows. Other backends may conservatively include
+retained allocations in their estimates. The worker rechecks admission immediately before execution.
+This is allocation evidence; it is not a memory
 reservation or a hard process RSS ceiling. Cancellation, output byte limits and
 deadlines remain active. Insufficient memory rejects the request cleanly.
 
@@ -120,7 +124,7 @@ requests. A finite context using sparse Metal buffers is charged for the actual
 input plus requested output span; unused reserved address capacity is not mapped
 cache memory. Dense buffers and undeclared contexts are charged for their full
 selected context. Finite retained states are checked before additional generation
-and may be rejected conservatively under memory pressure. Exact reuse of an
+and may be rejected under memory pressure. Exact reuse of an
 undeclared-context state keeps its previously admitted whole-context allocation.
 
 The separate GLM, Qwen and Flint execution paths inventory their loaded cache

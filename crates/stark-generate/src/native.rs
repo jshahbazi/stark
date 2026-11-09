@@ -30,7 +30,8 @@ use crate::{
     cancel::CancelSignal,
     generation::{
         GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity, PreparedImageMetadata,
-        ProgressCallback, Sampling, TextCallback, collect_tokens_controlled, native_result_after_cleanup,
+        ProgressCallback, Sampling, TextCallback, admit_request_memory, collect_tokens_controlled,
+        native_result_after_cleanup,
     },
     prefix_cache::{self, PrefixEntry},
     text_stop::StopFilter,
@@ -53,13 +54,8 @@ fn admit_generation_memory(
 }
 
 fn admit_memory_bytes(request_bytes: Option<usize>) -> Result<(), &'static str> {
-    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
     let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-    let memory_budget = available.saturating_sub(256 * 1024 * 1024) / 4;
-    if request_bytes > memory_budget {
-        return Err("resource_budget_exceeded");
-    }
-    Ok(())
+    admit_request_memory(request_bytes, available)
 }
 
 fn record_accepted_prefix_round(

@@ -66,14 +66,14 @@ The evaluator limits template source to 256 KiB, source tokens to 16,384,
 VM fuel to 1,000,000 and runtime recursion to 128. Input collections, value
 depth and node counts are also bounded. Request and output sizes use the
 [automatic shared resource budget](WORKER_PROTOCOLS.md#resource-budget), selected
-from available RAM at startup with a 16–64 MiB logical content envelope. With
+from available RAM at startup with a 16 MiB floor and no fixed content ceiling. With
 logical budget `B`, the encoded request is limited to `6B + 2 MiB`, and rendered
-output to `B`: automatically 98–386 MiB and 16–64 MiB respectively. Hosts pin
+output to `B`. Hosts pin
 the selected budget for child helpers; `STARK_REQUEST_BUDGET_MIB` is a
 developer/operator override, with no app setting required.
 
 A process-wide allocator bounds live requests at `128 MiB + 8B` and cumulative
-requests at `32 MiB + 32B`: automatically 256–640 MiB and 544–2,080 MiB.
+requests at `32 MiB + 32B`.
 Accounting includes
 JSON parsing, compilation, intermediate values, captures, slices and output.
 Reallocation charges the full replacement size. This counts actual Rust

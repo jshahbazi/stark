@@ -1226,7 +1226,9 @@ final class EngineController: ObservableObject {
     private var input: FileHandle?
     private var output: FileHandle?
     private var pending = Data()
-    private let maxSafeWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
+    // Older backends omit budget metadata. Current backends supply their
+    // memory-derived allowance before accepting content commands.
+    private let legacyWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
     private var maxWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
     private let workerWireLimitLock = NSLock()
     private let reader = DispatchQueue(label: "stark.desktop.reader")
@@ -1956,20 +1958,21 @@ final class EngineController: ObservableObject {
 
     private func applyResourceBudget(_ event: [String: Any]) -> Bool {
         guard let budget = event["resource_budget"] as? [String: Any] else {
-            setWorkerWireLimit(maxSafeWorkerWireBytes)
+            setWorkerWireLimit(legacyWorkerWireBytes)
             return true
         }
         guard let requestMiBValue = SupportMetadata.integer(budget["request_budget_mib"]),
-              requestMiBValue <= 64,
               let requestMiB = Int(exactly: requestMiBValue),
-              (1...64).contains(requestMiB),
+              requestMiB >= 1,
+              // Match the shared budget's largest derived allocation. This
+              // bound prevents integer overflow without capping host capacity.
+              requestMiB <= (Int.max - 32 * 1024 * 1024) / (32 * 1024 * 1024),
               let inputBytesValue = SupportMetadata.integer(budget["input_bytes"]),
               let inputBytes = Int(exactly: inputBytesValue),
               inputBytes == requestMiB * 1024 * 1024,
               let maxRequestBytesValue = SupportMetadata.integer(budget["max_request_bytes"]),
               let maxRequestBytes = Int(exactly: maxRequestBytesValue),
-              maxRequestBytes == 6 * inputBytes + 2 * 1024 * 1024,
-              maxRequestBytes <= maxSafeWorkerWireBytes else { return false }
+              maxRequestBytes == 6 * inputBytes + 2 * 1024 * 1024 else { return false }
         setWorkerWireLimit(maxRequestBytes)
         return true
     }
