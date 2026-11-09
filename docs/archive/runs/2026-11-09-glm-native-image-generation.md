@@ -53,3 +53,27 @@ text MTP require separate implementation and validation. Neither is N/A.
 Registered; native build and actual-model execution pending the resource slot.
 The earlier 6,830 converter tests and numerical component results remain bound
 to their own sources and binaries. They are not this attempt's full-model proof.
+
+### Fresh native build and controls
+
+The Rust 1.98.1 worker/helper build succeeded. The first nightly engine-test
+build found the new controls used ordinary `#[test]` attributes instead of
+Stark's custom harness attributes; its failed build record is retained. The
+controls now use `#[stark_test]`, and the existing Lily default wrapper remains
+the public default entry's delegate. The corrected native test build succeeds.
+
+The test executable is
+`bbdb68c18ee6f742b3625ae1a166f8252efbce19b33083168f484d867d2c81ea`.
+Ten GLM admission/preprocessor/operator controls pass. Six separately selected
+mapped-descriptor, convolution, fixed attention reference, actual PNG/tower
+cancellation, exact causal fusion/snapshot fencing and complete causal-reference
+controls pass; their private receipt is
+`157c61e83d453a3569b66571f6f666e85f820d838a7bf5592e3d4ba2631d4558`.
+The separately run actual full tower again matches the fixed F32 reference:
+maximum absolute error `2.8312206268310547e-6`, relative RMS
+`1.90591745194979e-5`, under the unchanged `1e-3` gates. These are 17 focused
+native controls, not the complete engine suite or a full decoder image request.
+The matching newly built helper also passes 187 focused host/converter controls,
+including the larger-than-one-MiB request boundary. All source/build identities
+remain private and separately bound; the final worker is rebuilt/resealed after
+the harness/wrapper correction before full-model execution.

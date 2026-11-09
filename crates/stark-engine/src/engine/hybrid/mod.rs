@@ -553,6 +553,10 @@ impl Model {
         tokens: &[u32],
         image: PreparedHybridImage,
     ) -> Result<Vec<f32>> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.prefill_image(tokens, image);
+        }
         self.prefill_image_controlled(tokens, image, || false)
     }
 

@@ -263,16 +263,18 @@ impl Artifact {
 
 #[cfg(test)]
 mod tests {
+    use stark_engine_macros::stark_test;
+
     use super::*;
 
-    #[test]
+    #[stark_test]
     fn source_geometry_is_not_inferred_from_model_name() {
         assert!(config_profile(&json!({"model_type":"glm5_next"})).is_err());
         assert_eq!(SHARDS[..4].iter().map(|(_, n, _)| n).sum::<u64>(), 108_720_071_552);
         assert_eq!(SHARDS.iter().filter(|(name, _, _)| name.contains('/')).count(), 1);
     }
 
-    #[test]
+    #[stark_test]
     fn parser_owns_exact_hashed_metadata_across_parent_replacement() {
         let root = std::env::temp_dir().join(format!(
             "stark-glm-bound-metadata-{}-{}",
@@ -301,7 +303,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    #[test]
+    #[stark_test]
     fn pinned_profile_rejects_rebound_geometry_head_and_streaming_routes() {
         let config = json!({"model_type":"glm5_next","architectures":["Glm5NextForConditionalGeneration"],
             "text_config":{"model_type":"glm5_next_text","hidden_size":4096,"vocab_size":154880,"num_nextn_predict_layers":1},
@@ -325,7 +327,7 @@ mod tests {
         assert!(config_profile(&streaming).is_err());
     }
 
-    #[test]
+    #[stark_test]
     fn manifest_requires_exact_schema_precision_payloads_and_source() {
         let mut records = serde_json::Map::new();
         for (name, size, digest) in SHARDS {

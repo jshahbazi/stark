@@ -107,9 +107,11 @@ fn reject_video(tokens: &[u32]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use stark_engine_macros::stark_test;
+
     use super::*;
 
-    #[test]
+    #[stark_test]
     fn still_image_contract_rejects_every_video_control() {
         for token in [154832, 154833, 154855] {
             assert!(reject_video(&[154830, 154854, 154831, token]).is_err());
