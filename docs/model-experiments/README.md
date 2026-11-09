@@ -172,6 +172,14 @@ All rows below link to the [complete findings and per-model matrix](../archive/r
 | 20261108-MEM-01 | Exact Lily Q4-XL and MLX-Serve mixed text artifacts on M5 Max 128 GiB; reconcile Beginner and native memory admission | Final trials passed 9/9 requests per artifact through near-32K, MTP on/off and reuse/fresh-scope hash agreement. Physical footprint stayed below 74 GiB, without additional swap. Earlier admission, compile, test, telemetry and staging failures are retained. | Adopted on branch; signed build installed; Coding + Balanced recommendation and actual Lily startup verified. |
 | 20261108-MEM-02 | [Fresh-install recipe-bound planning](../archive/runs/2026-11-08-fresh-guided-memory.md), independent of an installed copy | Corrected empty-registry planning; 73 focused tests and full converter suite (6,791 passed, 96 skipped) cover hardware/resource boundaries and source/artifact drift. No model run. | Adopted on PR #104; signed build installed and opened without loading a model. |
 
+## 2026-11-09 request resource ceilings and installation
+
+| ID | Scope and attempt | Recorded outcome | Disposition |
+| --- | --- | --- | --- |
+| 20261109-ADM-01 | [Initial Playground correction](2026-11-09-resource-admission.md): remove fixed content/generation fractions and correct Lily resident accounting | Model-free checks and short Qwen native controls passed; original private request was not replayed. | Adopted at `b9e904fe`; installation was pending. |
+| 20261109-ADM-02 | [Follow-up ceiling audit](2026-11-09-resource-admission.md): Decision fraction, stale Auto allowance and progress cutoff | Native boundary, Auto growth and late-progress controls passed; Python startup diagnostic pending. | Adopted on branch; packaging pending. |
+| 20261109-ADM-03 | [Signed installation and actual Flash Next control](2026-11-09-resource-admission.md) | Planned; no runtime or installation result yet. | Pending. |
+
 ## Public record boundary
 
 Publish aggregate results and hashes only. Keep prompts, completions, token vectors, probabilities, credentials, exception dumps, model files and private evaluation/runtime artifacts out of the ledger. An evidence link can point to an ignored private receipt by a stable identifier/hash without publishing its contents. Preserve upstream licenses and distinguish unmodified source revisions from local patches.

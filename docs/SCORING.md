@@ -64,7 +64,9 @@ stark-score --score-model-path PATH [--consecutive-cache]
 The worker applies the loaded model's configured context capacity. It has no separate fixed token ceiling. The [automatic shared resource budget](WORKER_PROTOCOLS.md#resource-budget) applies to request content, four-byte-per-ID token storage and encoded lines. Available RAM at startup selects a logical budget with a 16 MiB floor and no fixed content ceiling; encoded request lines allow six times that content budget plus 2 MiB for JSON escaping and framing. `STARK_REQUEST_BUDGET_MIB` is a developer/operator override accepting positive integers whose derived byte allowances fit the platform's allocation address space. Resource admission does not guarantee every encoding of a full token window or establish full-context accuracy or performance.
 
 Before a fresh native score, the worker also admits the loaded model's state and
-workspace estimate against one quarter of available RAM after a 256 MiB reserve.
+workspace estimate against current available RAM after a 256 MiB reserve for
+transient request serialization and host bookkeeping. Scoring and generation
+share this admission policy.
 Generic scoring retains independent scratch pools for every 1,024-token prompt
 chunk until completion, so its peak estimate counts all those pools. Sparse
 finite state counts the actual input span; dense and undeclared state count the

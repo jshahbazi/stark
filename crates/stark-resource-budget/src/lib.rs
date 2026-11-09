@@ -9,6 +9,26 @@ const MIB: usize = 1024 * 1024;
 pub const MAX_MIB: usize = (isize::MAX as usize - 32 * MIB) / (32 * MIB);
 pub const ENVIRONMENT_VARIABLE: &str = "STARK_REQUEST_BUDGET_MIB";
 
+/// Memory available to an inference request after transient serialization and
+/// host bookkeeping. Model loading applies its own residency checks. Callers
+/// inventory additional allocations, or conservatively inventory their whole
+/// request, against this same current-headroom policy.
+pub fn inference_memory_budget(available: usize) -> usize {
+    available.saturating_sub(256 * MIB)
+}
+
+/// Reject unavailable or overflowing estimates without exposing request data.
+pub fn admit_inference_memory(
+    request_bytes: Option<usize>,
+    available: usize,
+) -> Result<(), &'static str> {
+    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+    if request_bytes > inference_memory_budget(available) {
+        return Err("resource_budget_exceeded");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Budget {
     pub mib: usize,
@@ -195,6 +215,21 @@ pub fn available_memory_bytes() -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inference_admission_uses_current_headroom_after_transient_reserve() {
+        let available = 1024 * MIB;
+        let budget = inference_memory_budget(available);
+        assert_eq!(budget, 768 * MIB);
+        assert_eq!(admit_inference_memory(Some(512 * MIB), available), Ok(()));
+        assert_eq!(admit_inference_memory(Some(budget), available), Ok(()));
+        assert_eq!(admit_inference_memory(Some(budget + 1), available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_inference_memory(None, available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_inference_memory(Some(1), 0), Err("resource_budget_exceeded"));
+        assert_eq!(admit_inference_memory(Some(1), 256 * MIB), Err("resource_budget_exceeded"));
+        assert_eq!(admit_inference_memory(Some(usize::MAX), usize::MAX), Err("resource_budget_exceeded"));
+        assert_eq!(inference_memory_budget(usize::MAX), usize::MAX - 256 * MIB);
+    }
 
     #[test]
     fn policy_has_escaping_and_allocation_headroom() {

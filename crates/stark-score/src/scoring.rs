@@ -191,11 +191,7 @@ fn admit_scoring_memory(
     request_bytes: Option<usize>,
     available: usize,
 ) -> Result<(), &'static str> {
-    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
-    if request_bytes > available.saturating_sub(256 * 1024 * 1024) / 4 {
-        return Err("resource_budget_exceeded");
-    }
-    Ok(())
+    stark_resource_budget::admit_inference_memory(request_bytes, available)
 }
 
 trait ScoringBackend {
@@ -1193,10 +1189,15 @@ mod tests {
 
     #[test]
     fn memory_admission_reports_recoverable_resource_errors() {
-        let available = 1024 * 1024 * 1024;
+        const MIB: usize = 1024 * 1024;
+        let available = 1024 * MIB;
+        let budget = stark_resource_budget::inference_memory_budget(available);
         assert_eq!(admit_scoring_memory(None, available), Err("resource_budget_exceeded"));
-        assert_eq!(admit_scoring_memory(Some(256 * 1024 * 1024), available), Err("resource_budget_exceeded"));
-        assert_eq!(admit_scoring_memory(Some(128 * 1024 * 1024), available), Ok(()));
+        assert_eq!(admit_scoring_memory(Some(512 * MIB), available), Ok(()));
+        assert_eq!(admit_scoring_memory(Some(budget), available), Ok(()));
+        assert_eq!(admit_scoring_memory(Some(budget + 1), available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(1), 0), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(usize::MAX), usize::MAX), Err("resource_budget_exceeded"));
     }
 
     #[test]

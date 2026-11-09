@@ -119,6 +119,10 @@ This is allocation evidence; it is not a memory
 reservation or a hard process RSS ceiling. Cancellation, output byte limits and
 deadlines remain active. Insufficient memory rejects the request cleanly.
 
+Each Auto request uses the allowance admitted by the current estimate. A smaller
+allowance from a previous request does not restrict a later request when memory
+headroom or the caller's context budget increases.
+
 Native text generation also checks allocation admission for explicit output
 requests. A finite context using sparse Metal buffers is charged for the actual
 input plus requested output span; unused reserved address capacity is not mapped
