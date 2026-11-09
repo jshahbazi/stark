@@ -82,3 +82,97 @@ def test_glm_source_plan_does_not_accept_another_revision():
         glm_vision.plan_image_source(
             json.dumps(config()).encode(), metadata_repo=glm_vision.METADATA_REPO, metadata_revision="f" * 40
         )
+
+
+@pytest.fixture
+def local_glm_source(tmp_path, monkeypatch):
+    from stark_convert import hybrid_prepare
+
+    directory = tmp_path / "model"
+    directory.mkdir()
+    records = {}
+    for index, name in enumerate(glm_vision.DECODER_FILES):
+        payload = bytes([index + 1])
+        (directory / name).write_bytes(payload)
+        records[name] = {"size": 1, "sha256": hashlib.sha256(payload).hexdigest()}
+    monkeypatch.setattr(glm_vision, "DECODER_FILES", records)
+    monkeypatch.setitem(hybrid_prepare.SOURCES, "glm53-q2", {**hybrid_prepare.SOURCES["glm53-q2"], "weight_bytes": 4})
+    value = config()
+    value["text_config"]["eos_token_id"] = 154820
+    (directory / "config.json").write_text(json.dumps(value))
+    (directory / "tokenizer.json").write_text("{}")
+    (directory / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages[0]['content'] }}"}))
+    hybrid_prepare.finish_metadata(directory, "glm53-q2")
+    sidecar = tmp_path / "mmproj-BF16.gguf"
+    sidecar.write_bytes(b"tower")
+    monkeypatch.setattr(
+        glm_vision, "SIDECAR", {**glm_vision.SIDECAR, "size": 5, "sha256": hashlib.sha256(b"tower").hexdigest()}
+    )
+    return directory, sidecar
+
+
+def test_glm_image_upgrade_preserves_decoder_and_shares_sidecar_outside_split_set(local_glm_source):
+    directory, sidecar = local_glm_source
+    before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in directory.iterdir() if path.is_file()}
+    value = glm_vision.prepare_image_artifact(directory, sidecar)
+    assert value["schema_version"] == 7
+    assert glm_vision.prepared_image_identity(directory) == value
+    assert (directory / glm_vision.SIDECAR_PATH).stat().st_ino == sidecar.stat().st_ino
+    assert len(list(directory.glob("*.gguf"))) == 4
+    assert len(value["weight_files"]) == 5
+    for name, expected in before.items():
+        path = directory / name
+        assert (path.stat().st_ino, path.read_bytes()) == expected
+    assert glm_vision.prepare_image_artifact(directory, sidecar) == value
+
+
+@pytest.mark.parametrize("mutation", ["decoder", "sidecar", "processor", "template", "symlink"])
+def test_glm_image_upgrade_rejects_payload_or_metadata_changes(local_glm_source, mutation):
+    directory, sidecar = local_glm_source
+    glm_vision.prepare_image_artifact(directory, sidecar)
+    if mutation == "decoder":
+        (directory / next(iter(glm_vision.DECODER_FILES))).write_bytes(b"x")
+    elif mutation == "sidecar":
+        sidecar.write_bytes(b"wrong")
+    elif mutation == "processor":
+        (directory / "preprocessor_config.json").write_text("{}")
+    elif mutation == "template":
+        (directory / "chat_template.jinja").write_text("changed")
+    else:
+        (directory / "vision").rename(directory / "saved-vision")
+        (directory / "vision").symlink_to(directory / "saved-vision", target_is_directory=True)
+    with pytest.raises((ValueError, OSError)):
+        glm_vision.prepare_image_artifact(directory, sidecar)
+    if mutation not in {"decoder", "sidecar"}:
+        assert glm_vision.prepared_image_identity(directory) is None
+
+
+@pytest.mark.parametrize("mutation", ["unknown_key", "schema_bool", "weight_size_float", "weight_path"])
+def test_glm_manifest_inspection_rejects_ambiguous_contracts(local_glm_source, mutation):
+    directory, sidecar = local_glm_source
+    value = glm_vision.prepare_image_artifact(directory, sidecar)
+    if mutation == "unknown_key":
+        value["execute_python"] = True
+    elif mutation == "schema_bool":
+        value["schema_version"] = True
+    elif mutation == "weight_size_float":
+        value["weight_files"][next(iter(glm_vision.DECODER_FILES))]["size"] = 1.0
+    else:
+        value["weight_files"]["vision/../mmproj-BF16.gguf"] = value["weight_files"].pop(glm_vision.SIDECAR_PATH)
+    (directory / glm_vision.MANIFEST).write_text(json.dumps(value))
+    assert glm_vision.prepared_image_identity(directory) is None
+
+
+def test_glm_image_upgrade_keeps_native_image_config_checks_after_hash_rebinding(local_glm_source):
+    directory, sidecar = local_glm_source
+    glm_vision.prepare_image_artifact(directory, sidecar)
+    value = json.loads((directory / "config.json").read_bytes())
+    value["vision_config"]["patch_size"] = 16
+    encoded = json.dumps(value).encode()
+    (directory / "config.json").write_bytes(encoded)
+    source = json.loads((directory / "native-source.json").read_bytes())
+    source["config_sha256"] = hashlib.sha256(encoded).hexdigest()
+    (directory / "native-source.json").write_text(json.dumps(source))
+    with pytest.raises(ValueError, match="vision profile"):
+        glm_vision.prepare_image_artifact(directory, sidecar)
+    assert glm_vision.prepared_image_identity(directory) is None
