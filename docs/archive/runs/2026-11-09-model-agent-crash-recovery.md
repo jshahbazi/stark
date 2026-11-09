@@ -199,3 +199,26 @@ exclusive hardware slot to Qwen, continuing Gemma integration in source.
 The oracle/serial receipt SHA-256 is
 `770a6bc0ba68b628a445d27956c027dfdcc0d21f910e95cbf647eff3de6b61a1`;
 execution seal `c2a53fd8b6cc97747f8ec4cefd2326521fff9340ed2680c69cfd526d334c2ae4`.
+
+### Resumed Qwen cache gate and resource handoff
+
+The corrected headed BF16 worker `1e592b48` passed its expanded ordinary-stream
+lifecycle matrices: 34/34 image-loaded and 28/28 text-only, including seeded MTP0
+and switches among depths 0/1/2/3. Both runs had zero paging and no watchdog stop;
+peak RSS was 2,156,576,768 and 1,916,878,848 bytes respectively.
+
+| Private receipt | SHA-256 |
+| --- | --- |
+| `runtime/bf16-08b-head-cache-mtp0-image-01.json` | `4a0ca99e3a1f1954278b6dcd546ba43da9f001aed874e9b3c12961a68063163b` |
+| `runtime/bf16-08b-head-cache-mtp0-text-01.json` | `3c36e91dc62ec388f492a8ac877f357c1b85fb7541733e785ae52aa97f1af963` |
+| `runtime/qwen-final-toy-01.json` | `6412ef65e68fb418b406be8decb88723ab93f52004096b24b9db300bbb36431f` |
+
+The extended synthetic ordinary/predictor restoration control passed on engine
+`daf7b79d7614a61ac990d3d6b71683ddfde5bf5c0bfe2cf87da5acf0ae9b3119`.
+It complements the actual-model matrices; it does not replace numerical head
+qualification or speed measurements.
+
+A second external worker from the separate resource-budget app briefly paused
+timings. After the user reported that task finished, the coordinator verified
+no model/compiler processes, 94% memory free and zero swap, and resumed Qwen's
+exclusive hardware slot. No external process was killed by these agents.
