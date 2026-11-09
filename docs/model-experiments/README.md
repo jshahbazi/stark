@@ -13,6 +13,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261109-GLMMEM-11: nonmodel mapping lifecycle](../archive/runs/2026-11-09-glm-mapping-lifecycle-diagnostic.md) | Source-only small mapping/copy comparison preregistered after actual compression failure; 45 CPU geometry cases pass; native compilation/review/tiny GPU slot pending; no cause attribution, production change or full-model retry |
 | [20261109-GLMVIS-10: functional-only GLM VM screen](../archive/runs/2026-11-09-glm-functional-pageout-screen.md) | Pinned source distinguishes global Pageouts from Swapouts; separate supervisor/source and child controls pass; one reviewed short run stops on hard compressor growth before first completion/image, owner drained and slot released; no retry, cache/MTP/performance/default promotion |
 | [20261109-GLMVIS-09: bounded GLM image/text execution](../archive/runs/2026-11-09-glm-bounded-image-execution.md) | Fresh builds/native accounting/supervisor controls pass; initial and single quiet-host short attempts resource-deferred by strict global pageout growth before completion, owned workers drained; resident plan does not fit sampled bytes; image/cache/MTP/timing open |
 | [20261109-GLMVIS-08: pinned artifact hash backend](../archive/runs/2026-11-09-glm-hash-backend.md) | macOS/aarch64 SHA-256 feature only; four saved vectors and fresh complete metadata/sidecar digests match accelerated, force-soft and independent references; full decoder replay/startup/model gates remain open |
