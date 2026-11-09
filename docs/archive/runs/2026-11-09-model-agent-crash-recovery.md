@@ -16,9 +16,9 @@ text state. Completion is per artifact, configuration and backend.
 
 | Family | Completed resumed gates | Open gate / next action |
 | --- | --- | --- |
-| Qwen BF16 0.8B | Corrected MTP0 dispatch; 48/48 image-loaded and 26/26 text-only lifecycle checks; prior loading-mode MTP0/3 timing passes. Targeted MLX head projection reduction now passes the complete original numerical gate | Passing correction is still test-selected; apply the head-only production policy, then repeat actual cache and quick paired text/MTP checks. Ordinary target/MTP0 graph remains unchanged |
+| Qwen BF16 0.8B | Production head policy pushed in `55e8a183`; unchanged numerical gate passes without test selectors, plus 28 text/34 image-loaded cache cases and quick MTP0/3 loading-mode parity | MTP3 is 49% slower than ordinary decoding; user selected MTP off by default for this exact route. Preserve explicit opt-in; other layouts/sizes remain unqualified |
 | Qwen affine 0.8B / 35B MoE | Physical-256 prefill and completion-order fixes built. Actual 35B 1026-token cache 4/4 passes and matches old-worker output; sampled footprint 30.9 to 25.9 GB. Quick text-only/image-loaded comparison 39.25/39.42 tokens/s | Original 1792-token matrix remains stopped, not passed. Short comparison covers this affine artifact only; full BF16 MoE and executable MoE head remain unqualified |
-| Gemma | Serial target-verifier correction restores exact MTP0/3 output on fourteen 64-token text requests and passes 37/37 image-loaded lifecycle checks, with actual drafts and zero image drafts | Paired timing remains pending: first corrected text run has background CPU contamination and an intentional-close telemetry race. Fix the close race prospectively, then collect one comparison. Default context/provisioning/enablement remain open |
+| Gemma | Serial correction pushed in `1eb47bd1`; corrected image lifecycle 37/37 and all 28 final paired 64-token requests agree. Final resource guardians pass in both loading modes | Observed timings are provisional due desktop CPU activity. MTP is slower in both modes; user selected off by default. Normal assistant provisioning/qualified opt-in contexts remain staged |
 | GLM | Accounting fix builds and controls pass. Three fresh owned/dedicated/full private mapping arms pass with identical outputs, zero compression/swap and drained owners; result pushed in `32726272` | Contrast identifies no ownership fix. Stop diagnostics here; full 109-GB model's compression pressure remains a concrete blocker. Full-model image/cache/MTP/performance remain unqualified |
 
 The installed app was closed without implicitly reopening it. The coordinator
@@ -987,3 +987,46 @@ F32 scratch is charged by each allocator size class. Qwen owns the current
 production engine/worker build, followed by the numerical gate without test
 selectors and existing actual cache/quick timing checks. Gemma holds model
 execution while preparing its small close-race correction.
+
+### Completed worker fixes and requested MTP defaults
+
+Qwen production head correction is pushed at
+`55e8a183bb3a6c919bc94a9222ff6476cf60a968`, clean. Worker
+`e97b3302cc8c133def0a599071d46889e62c75463a9eca0512074a44b1d64962`
+passes the unchanged head gate without selectors and actual 1026-token cache
+matrices, 28/28 text and 34/34 image-loaded. Clean quick comparison receipt
+`6bc0e36c5b570b084967928bef47757448edcc7c8470c95a879232c185b94d1c`
+has three measured requests per loading mode/depth, budget 64 and actual 62
+tokens ending at EOS. Text-only/image-loaded medians are 270.3723/269.3605
+tokens/s at MTP0 and 137.8075/137.7101 at MTP3; fixed 5% decode/first-token/wall
+checks pass with identical output hashes and zero paging/compression/swap.
+The first timing attempt overlaps an accidental coordinator Python environment
+provision and is retained but excluded. Only timing was repeated; the
+unnecessary generated environment was removed. MTP3 is approximately 49% slower
+than MTP0 on this small model; this is not an acceleration result.
+
+Gemma's final single paired comparison, receipt
+`16cc1fe76d3a9a509888aeac4e5c6e39eceb1a577b059dd7f0f0feb634a18de5`,
+passes all 28 identical 64-token output/count checks, with both guardians
+passing, drained and joined, and zero paging/compression/swap. Observed
+text-only/image-loaded rates are MTP0 93.89/95.26 and MTP3 62.44/65.76 tokens/s.
+The six measured text requests per depth exceed the fixed background CPU
+screen, so rates remain provisional and formal pass flags are null. No bound
+was widened and no further timing retries are planned. Actual MTP3 draft
+acceptance is 204/510 per six measured requests in each loading mode; it is
+slower than MTP0 in both. Root independently reran all eleven prospective
+close-guard controls successfully, receipt
+`c68bc84271a0192a88fb00c641b8e26f70b3e1ec2d686267817b97aa1de57e94`.
+
+The user then explicitly requested MTP off by default for Gemma and the measured
+Qwen3.5-0.8B BF16 route. Preserve explicit opt-in and image-on defaults; other
+Qwen defaults remain unchanged. Gemma's owner handles both families' shared
+default-preference plumbing, with Qwen providing read-only route identification.
+Native/CLI default drafts are already zero; the desktop's missing-preference
+fallback is the actual automatic opt-in under review. Recommended positive
+draft counts remain separate for explicit opt-in. No new framework is needed.
+
+All current workers and compilers are closed. The coordinator explicitly
+released the GPU reservation back to the separate resource-budget chat. Any
+further native/model work requires a new coordinated window; current defaults
+work is source/Python-only. GLM remains stopped at its recorded resource blocker.
