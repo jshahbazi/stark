@@ -17,6 +17,7 @@ use crate::backends::common::InvalidInput;
 
 mod affine;
 mod dynamic;
+mod mtp;
 
 pub(super) const PROFILE: &str = "qwen35-dense-bf16-merged-v1";
 pub(super) const VERSION: u32 = 1;
@@ -296,7 +297,7 @@ pub(super) fn admit(
     {
         return Err(invalid());
     }
-    let (tower, vocab, tensors) = match profile {
+    let (tower, vocab, mut tensors) = match profile {
         FamilyProfile::FixedV1 => {
             if config["decoder_config"] != decoder_profile() || !vision_semantics(&contract["vision_config"]) {
                 return Err(invalid());
@@ -327,6 +328,7 @@ pub(super) fn admit(
             (geometry.tower, geometry.vocab, geometry.tensors)
         },
     };
+    mtp::extend_contract(config, profile, &mut tensors)?;
     for name in COMPONENTS {
         let digest = contract["component_hashes"][name].as_str().ok_or_else(invalid)?;
         if !valid_hash(digest) || hashes.get(name).map(String::as_str) != Some(digest) {

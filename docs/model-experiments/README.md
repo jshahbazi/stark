@@ -13,6 +13,8 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261109-QDIP-01: dense default-image text parity](../archive/runs/2026-11-09-qwen-dense-image-default-parity.md) | Preserve the supported affine dense text MTP head with the image tower resident; source-bound cache, conversion and performance qualification is tracked separately |
+| [20261109-QDIP-02/05/06: dense image-loaded text controls](../benchmarks/2026-11-09-qwen-dense-image-text-parity.md) | Separates tower residency from changed target arithmetic; corrected short 27B comparison fails text speed parity despite exact output hashes and restored MTP |
 | [Image-support retrospective](2026-11-08-image-support-retrospective.md) | Conversation-wide findings, model coverage, validation mistakes, review, delivery and remaining work |
 | [Qwen image attempts](2026-11-08-qwen-images.md) | BF16 and affine dense Qwen, affine and BF16-source MoE, retained Flash-Next/Lily numerical repairs and resource controls |
 | [Gemma image attempts](2026-11-08-gemma-images.md) | Gemma 3 processor/convolution fixes; Gemma 4 efficient, unified, MoE and larger-tower attempts; decoder admission and retained compatibility |

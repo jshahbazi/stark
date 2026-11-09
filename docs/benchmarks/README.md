@@ -12,6 +12,13 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Qwen dense image-default parity (2026-11-09).** The complete 27B image artifact
+now runs text MTP and restores exact 1,024-token target/predictor prefixes. The
+short [text-path comparison](2026-11-09-qwen-dense-image-text-parity.md) finds a
+large remaining regression: 61.091 versus 3.394 decode tok/s at matching MTP3
+settings and output hashes. This is a failed bounded parity observation, not a
+shipped speed fix; the earlier qualified text benchmarks remain unchanged.
+
 **Qwen vision artifact text prefix reuse (2026-11-08).** On the official
 Qwen3.5-0.8B BF16 artifact, 32 exactness cases pass and cached follow-ups reuse
 1,024 tokens. Four observations per timing arm show follow-up first-token

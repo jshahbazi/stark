@@ -58,8 +58,15 @@ image-dependent M-RoPE positions and multimodal state are excluded from text
 snapshot capture and restoration. Gemma 3/4 sliding KV rings remain unsupported
 for reuse because overwritten ring rows have no snapshot/restore implementation.
 No artifact inherits numerical qualification from another checkpoint, precision
-or conversion layout. Prefix reuse does not enable MTP; image conversion omits
-its predictor weights pending separate qualification.
+or conversion layout. Prefix reuse does not by itself enable MTP. Dense affine
+version-3 conversion retains a complete declared compatible predictor and binds
+its configuration and tensors to the admitted target. Text requests can execute
+that predictor while the tower is resident; image requests retain zero drafts.
+The reference image decoder verifies target text rows serially because its
+M-RoPE and reference DeltaNet path do not admit batched speculative verification.
+This restores functional text MTP and does not establish the earlier optimized
+text path's performance. The [dense parity attempt](archive/runs/2026-11-09-qwen-dense-image-default-parity.md)
+tracks the exact artifact checks and the remaining speed requirement.
 
 ## Config-derived family profile
 
@@ -94,7 +101,10 @@ execution for each size.
 
 Required matrices and convolution weights must be BF16. Explicit norm-scale,
 `a_log` and `dt_bias` control-weight exceptions may originate in FP32. Declared
-auxiliary MTP tensors are omitted as in the existing text adapter.
+auxiliary BF16 and MoE MTP tensors retain the existing omission policy pending
+their separate compatible predictor implementation and qualification. They must
+remain open work items when the selected source actually contains a head; this
+limitation is not evidence that the upstream model lacks MTP.
 
 Weights may differ from the official checkpoint. Metadata must use recognized
 forms:

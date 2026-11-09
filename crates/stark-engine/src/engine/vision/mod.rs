@@ -19,7 +19,8 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{
-        Backend, BufferRef, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context, InvalidInput,
+        Backend, BufferCpuAccessible, BufferRef, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending,
+        Context, InvalidInput,
     },
     config::{
         decoder::DecoderConfig,
@@ -31,6 +32,7 @@ use crate::{
         Engine,
         language_model::{
             EngineLoadLanguageModelError, LanguageModel, SpeculatorPolicy,
+            dense_mtp::{DenseMtpError, DenseMtpRound, DenseMtpSession},
             multimodal::{ImageGrid, ImageTokenIds, MultimodalPrefill, ProjectedImage},
             state::{
                 LanguageModelCreateEmptyStateError, LanguageModelRewindStateError, LanguageModelState,
@@ -57,6 +59,8 @@ pub(crate) mod preprocess;
 mod reference_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, backend = "metal"))]
+mod text_parity_tests;
 pub(crate) mod tower;
 
 use preprocess::{PreparedImage, PreprocessLimits, RgbImage, decode_image, prepare_image as prepare_patches};
@@ -92,6 +96,8 @@ struct ArtifactConfig {
     decoder_config: DecoderConfig,
     token_codec_config: AnyTokenCodecConfig,
     generation_config: GenerationConfig,
+    #[serde(default)]
+    mtp_config: Option<crate::config::qwen_mtp::QwenMtpConfig>,
     artifact_contract: serde_json::Value,
 }
 
@@ -297,7 +303,7 @@ fn expand_image_placeholder(
 pub struct VisionLanguageModel<B: Backend> {
     engine: Arc<Engine<B>>,
     language_model: LanguageModel<B>,
-    tower: VisionTower<B>,
+    tower: Option<VisionTower<B>>,
     limits: PreprocessLimits,
     failed: bool,
     identity: VisionArtifactIdentity,
@@ -371,6 +377,25 @@ impl<B: Backend> Engine<B> {
     pub fn load_vision_language_model(
         self: &Arc<Self>,
         model_path: &Path,
+    ) -> Result<VisionLanguageModel<B>, NativeVisionError<B>> {
+        self.load_vision_language_model_inner(model_path, true)
+    }
+
+    /// Validation-only tower residency control. The complete image artifact is
+    /// admitted and rehashed identically, and its decoder uses the same numeric
+    /// profile and predictor graph. Product loading always retains the tower.
+    #[doc(hidden)]
+    pub fn load_vision_text_validation_model(
+        self: &Arc<Self>,
+        model_path: &Path,
+    ) -> Result<LanguageModel<B>, NativeVisionError<B>> {
+        Ok(self.load_vision_language_model_inner(model_path, false)?.language_model)
+    }
+
+    fn load_vision_language_model_inner(
+        self: &Arc<Self>,
+        model_path: &Path,
+        load_tower: bool,
     ) -> Result<VisionLanguageModel<B>, NativeVisionError<B>> {
         if self.capture_manager.is_some() || model_path.join("speculator").exists() {
             return Err(InvalidInput("native vision requires capture-free non-speculative loading").into());
@@ -514,6 +539,7 @@ impl<B: Backend> Engine<B> {
         let language_config: LanguageModelConfig = serde_json::from_value(serde_json::json!({
             "type": "LanguageModelConfig", "decoder_config": config.decoder_config,
             "token_codec_config": config.token_codec_config, "generation_config": config.generation_config,
+            "mtp_config": config.mtp_config,
         }))?;
         let model_dim = language_config.decoder_config.transformer_config.model_dim;
         let vocab_size = language_config.decoder_config.vocab_size;
@@ -525,7 +551,9 @@ impl<B: Backend> Engine<B> {
                 NumericalProfile::Qwen35ReferenceBF16
             };
         let loader = ParameterLoader::new(weights, &*self.context)?.with_numerical_profile(numerical_profile);
-        let tower = VisionTower::new(&*self.context, &admission.tower, &loader.tree().subtree("vision"))?;
+        let tower = load_tower
+            .then(|| VisionTower::new(&*self.context, &admission.tower, &loader.tree().subtree("vision")))
+            .transpose()?;
         let language_model = self.language_model_from_config(
             model_path,
             language_config,
@@ -533,7 +561,14 @@ impl<B: Backend> Engine<B> {
             Some(tokenizer),
             SpeculatorPolicy::Disabled,
         )?;
-        loader.tree().assert_all_tensors_validated()?;
+        if load_tower {
+            loader.tree().assert_all_tensors_validated()?;
+        } else {
+            // Full header admission above includes the omitted tower. Every
+            // allocated decoder/predictor parameter must still be consumed.
+            loader.tree().subtree("decoder").assert_all_tensors_validated()?;
+            loader.tree().subtree("mtp").assert_all_tensors_validated()?;
+        }
         drop(loader);
         // Recheck the same selected objects before publishing loaded buffers.
         // Ordinary concurrent in-place artifact changes cannot silently acquire
@@ -598,6 +633,12 @@ impl<B: Backend> VisionLanguageModel<B> {
 
     pub fn generation_config(&self) -> &GenerationConfig {
         self.language_model.generation_config()
+    }
+
+    /// Text speculation remains available with the image tower resident.
+    /// Image execution never enters these predictor methods.
+    pub fn has_dense_mtp(&self) -> bool {
+        !self.failed && self.language_model.has_dense_mtp()
     }
 
     pub fn max_context_length(&self) -> Option<u32> {
@@ -872,7 +913,8 @@ impl<B: Backend> VisionLanguageModel<B> {
         self.failed = true;
         let context = &self.engine.context;
         let mut commands = context.create_command_buffer(Some("vision"), None).map_err(NativeVisionError::backend)?;
-        let output = self.tower.encode(&prepared.patches, prepared.grid, &mut commands)?;
+        let tower = self.tower.as_ref().ok_or(InvalidInput("native vision tower is unavailable"))?;
+        let output = tower.encode(&prepared.patches, prepared.grid, &mut commands)?;
         let bytes = count.checked_mul(size_of::<bf16>()).ok_or(InvalidInput("native vision readback size overflow"))?;
         if (&output).size() != bytes {
             return Err(InvalidInput("native vision output shape mismatch").into());
@@ -993,5 +1035,86 @@ impl<B: Backend> VisionLanguageModel<B> {
                 Err(error.into())
             },
         }
+    }
+}
+
+impl<B: Backend> VisionLanguageModel<B>
+where
+    B::ScratchBuffer: BufferCpuAccessible,
+{
+    fn dense_text_operation<T>(
+        &mut self,
+        operation: impl FnOnce(&LanguageModel<B>) -> Result<T, DenseMtpError<B>>,
+    ) -> Result<T, DenseMtpError<B>> {
+        if self.failed || !self.has_dense_mtp() {
+            return Err(DenseMtpError::Invalid);
+        }
+        let result = operation(&self.language_model);
+        // Drained cancellation discards its request-owned session. Invalid
+        // errors are resolved using the session's mutation fence below; other
+        // native failures fence the loaded instance immediately.
+        if result.as_ref().is_err_and(|error| !matches!(error, DenseMtpError::Invalid | DenseMtpError::Cancelled)) {
+            self.failed = true;
+        }
+        result
+    }
+
+    pub fn prefill_dense_mtp_controlled(
+        &mut self,
+        input: &[u32],
+        capacity: u32,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<DenseMtpSession<B>, DenseMtpError<B>> {
+        if !self.has_dense_mtp()
+            || input.is_empty()
+            || capacity == 0
+            || input.len() >= capacity as usize
+            || self.max_context_length().is_some_and(|n| capacity > n)
+            || input.iter().any(|&token| token >= self.vocab_size)
+        {
+            return Err(DenseMtpError::Invalid);
+        }
+        let result = self.dense_text_operation(|model| model.prefill_dense_mtp_controlled(input, capacity, cancelled));
+        self.failed |= result.as_ref().is_err_and(|error| !matches!(error, DenseMtpError::Cancelled));
+        result
+    }
+
+    pub fn restore_dense_mtp_prefix(
+        &mut self,
+        session: &mut DenseMtpSession<B>,
+        position: usize,
+    ) -> Result<(), DenseMtpError<B>> {
+        let was_fenced = session.is_fenced();
+        let result = self.dense_text_operation(|model| model.restore_dense_mtp_prefix(session, position));
+        self.failed |= !was_fenced && session.is_fenced() && !matches!(&result, Err(DenseMtpError::Cancelled));
+        result
+    }
+
+    pub fn continue_prefill_dense_mtp_controlled(
+        &mut self,
+        session: &mut DenseMtpSession<B>,
+        input: &[u32],
+        capture_position: usize,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), DenseMtpError<B>> {
+        let was_fenced = session.is_fenced();
+        let result = self.dense_text_operation(|model| {
+            model.continue_prefill_dense_mtp_controlled(session, input, capture_position, cancelled)
+        });
+        self.failed |= !was_fenced && session.is_fenced() && !matches!(&result, Err(DenseMtpError::Cancelled));
+        result
+    }
+
+    pub fn dense_mtp_round(
+        &mut self,
+        session: &mut DenseMtpSession<B>,
+        first: u32,
+        drafts: usize,
+        sampler: &mut dyn crate::engine::hybrid::MtpSampler,
+    ) -> Result<DenseMtpRound, DenseMtpError<B>> {
+        let was_fenced = session.is_fenced();
+        let result = self.dense_text_operation(|model| model.dense_mtp_round(session, first, drafts, sampler));
+        self.failed |= !was_fenced && session.is_fenced() && !matches!(&result, Err(DenseMtpError::Cancelled));
+        result
     }
 }
