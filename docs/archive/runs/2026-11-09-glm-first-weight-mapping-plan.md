@@ -127,3 +127,51 @@ Formatting, repository policy and diff checks pass. Build and Metal execution
 require a separate grant. If this bounded contrast cannot choose a minimal
 per-view ownership fix, stop with the concrete pressure blocker. It does not
 clear the original 49.3 GB backing object or full model by itself.
+
+## Completed bounded comparison
+
+The separately granted build reused this checkout's existing target and archived
+the prior `8e7abaee…` test binary with an APFS clone. A private build-driver path
+correction selected that existing binary as the archive source; the original
+driver and frozen native registration remain preserved. The build passed in
+95.87 seconds, all 1,272 source hashes remained unchanged, and minimum free disk
+was 20,105,019,392 bytes against the 8 GiB reserve. The 22 injected supervisor
+controls passed again. Build seal:
+`101aff79bf048a5165e67f0aefdfa4cd96e87c4d9873b20fdc2945e9e122292b`;
+binary:
+`0067192c9ee0f7594c191d792786de0b338550b82b08859780fd2debc572cbc1`.
+
+All three fresh children passed all 11 phases and the independent projection
+oracle, with identical output hashes. The original GGUF was never mapped by a
+child. Each guard reported positive live samples, four post-drain samples, no
+violation, successful drain and supervisor join. Pageout, swap and compressor
+growth were zero in every arm.
+
+| Arm | Live samples | Sampled peak RSS, bytes | Sampled peak footprint, bytes | Sampled host wired growth, bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Owned | 2 | 19,677,184 | 8,913,496 | 13,074,432 |
+| Dedicated range plus full CPU owner | 1 | 8,847,360 | 3,031,400 | 785,268,736 |
+| Full region | 1 | 8,863,744 | 3,047,784 | 0 |
+
+These sparse live samples do not bound brief GPU or process peaks. In every
+arm, phase-attested Metal allocation peaked at 24,608,768 bytes and returned
+to 458,752 bytes after test owners drained, matching the library-ready phase.
+This remaining allocation and the owner counters do not prove physical
+reclamation. CPU mapping counters returned from two in the dedicated arm and
+one in the full arm to zero, with zero unmap failures. Sampled positive
+compiler-service RSS growth was 59,162,624 bytes in the owned arm and zero in
+the other arms. Service RSS and host-global wired growth are distinct metrics;
+the dedicated arm's host-global increase has no established attribution.
+
+Private aggregate receipt:
+`4654bf3635ffd78b0d25dd2fb26986af823c9f649411e5697f074df71b6fd704`.
+Backing and shader cache warmth remain unknown, and this is not a performance
+comparison.
+
+The contrast did not reproduce the full-model pressure or distinguish a
+production ownership fix. Investigation stops at this agreed boundary. No
+mapping default, backend, upload policy, admission limit or production
+arithmetic changed. The concrete blocker remains the real full-model first
+request's compression growth, with its cause unresolved. The original 49.3 GB
+backing object and full 109 GB model remain held; image generation, default
+promotion, cache, GGUF MTP and matched performance qualification remain open.
