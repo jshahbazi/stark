@@ -22,7 +22,7 @@ text state. Completion is per artifact, configuration and backend.
 | GLM | `b76f560d` builds and accounting controls pass; tiny 64-MiB mapping control passes sixty blits and owner cleanup without pressure | Full functional run hit a hard compression limit. Tiny control did not reproduce it; prepare a tiny staged first-use Control/Q5 shader test. Full-model image/cache/MTP/performance remain held |
 
 The installed app was closed without implicitly reopening it. The coordinator
-verified no competing model/compiler/app processes, 95% free memory and zero
+verified no competing model/compiler/app processes and zero
 swap before Gemma's actual E2B gate. Gemma released its processes after the failed
 long gate, and GLM completed its builds and two stopped short attempts. Qwen now
 owns the next diagnostic build/model window, Gemma's trace is queued afterward,
@@ -595,6 +595,16 @@ foreign-model growth; all owned processes drain and exit. Receipt:
 No retry or relaxed floor is granted. The next source audit examines flat
 prefill's per-token recurrent-state histories while preserving FP32 recurrence,
 1024-token snapshot boundaries and speculative rollback.
+
+That initial history-allocation hypothesis is subsequently disproved for the
+actual frozen worker too. Its source seal binds `4010b86e` to `0d7aea46` plus
+listed overrides; DeltaNet, stream, pool and MoE files have no such override
+and match the audited source. Ordinary flat prefill already retains only final
+FP32 state, while speculative verification retains rank updates for acceptance.
+The DeltaNet source hash is
+`e95530abf21e5498812a004092df290940dee6c280c2cd14d30407fadd261174`.
+A duplicate final-state backend is unwarranted. Scratch/router/pool lifetime
+attribution is the next investigation; the stopped run remains inconclusive.
 
 Gemma G4AP05 (`21f29608`, engine
 `75e5eff55ebcdf9cdbc0a22d1dcae7220e181fa74358c07d58215c4e3431a320`)
