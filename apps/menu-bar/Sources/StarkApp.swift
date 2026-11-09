@@ -2911,7 +2911,7 @@ struct ModelsView: View {
                 if engine.catalogLoading {
                     HStack(spacing: 10) {
                         ProgressView().controlSize(.small)
-                        Text("Finding remaining models… \(catalog.items.count) available so far").foregroundStyle(.secondary)
+                        Text("Checking HuggingFace... \(catalog.items.count) available so far").foregroundStyle(.secondary)
                     }
                 } else if let message = engine.catalogError {
                     Text(message).font(.callout).foregroundStyle(.secondary)
@@ -2931,7 +2931,7 @@ struct ModelsView: View {
                 }
             }
         } else if engine.catalogLoading {
-            VStack(spacing: 10) { ProgressView(); Text("Finding models…").foregroundStyle(.secondary) }
+            VStack(spacing: 10) { ProgressView(); Text("Checking HuggingFace...").foregroundStyle(.secondary) }
                 .frame(maxWidth: .infinity, minHeight: 220)
         } else {
             VStack(spacing: 10) {
