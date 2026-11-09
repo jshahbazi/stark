@@ -147,9 +147,10 @@ First establish that a reference solution passes the installed grading path:
 uv run --locked scripts/run_maxxbench.py --upstream runtime/maxxbench-upstream --output runtime/maxxbench-oracle --oracle --task tomlkit-toml-table-converters
 ```
 
-Before reporting a full score, run the oracle for every selected task on the
-same Docker platform. A passing oracle for one task qualifies only that task's
-reference execution. Omitting `--task` from the oracle command checks all 89.
+Reference oracles diagnose task environments and graders independently; they
+do not gate model attempts. A passing oracle qualifies only its selected
+reference execution. Infrastructure failures remain unscored and must be
+reported separately. Omitting `--task` from the oracle command checks all 89.
 
 Then run the same task for every configured artifact:
 
@@ -241,32 +242,31 @@ force-build/no-cache policy and independent per-attempt image IDs remain in
 effect. Validate a bounded oracle's cleanup receipt and actual disk recovery
 before a long campaign; model-free checks do not measure reclaimed storage.
 
-## Scoped source platforms
+## Task container platform
 
-The pinned `cliffy-config-file-parsing` source recipe downloads and executes
-an x86-64 Deno binary. The pinned `eicrud-keyset-pagination-cursor` recipe
-installs MongoDB 7 on Debian Bookworm; MongoDB publishes that Debian package
-for x86-64. Only these two exact task IDs and their respective Dockerfile
-SHA-256 values select `linux/amd64` through a copied Trial environment config.
-This setting reaches only that attempt's source and separate verifier
-environments. Original caller config, task files and global Docker settings
-remain unchanged. A changed recipe/task ID or a conflicting explicit platform
-fails admission.
+All benchmark source and separate verifier containers select `linux/amd64`
+through copied per-Trial environment and persistent-env settings. This matches
+the tasks' x86-only binaries and package availability. Conflicting explicit
+host selectors fail admission. Task files and global Docker settings stay
+unchanged. Native model inference continues on Metal with each artifact's full
+configured context; this container setting does not select a model backend.
 
-Each aggregate result and progress record includes `source_platform` with
-`selected`, `observed` and `dockerfile_sha256`. A selected task's actual image platform
-must match the selected platform before agent execution. Image inspection
-shares the existing five-second capture budget and retains no config or labels.
-The other 87 tasks keep their original config and null source-policy fields.
+`task_platform` is bound into campaign identity, aggregate results and progress.
+The earlier exact Cliffy/Eicrud guards remain compatible and additionally
+capture their observed source platform in `source_platform`; other tasks have
+null legacy source-policy fields. Existing independent image identities and
+verifier handoff checks remain in effect.
 
-The [controlled Cliffy oracle](../archive/runs/2026-11-08-cliffy-source-platform.md)
-passed all 38 feature and 451 regression checks. Its original default-platform
-failure remains unscored. The [controlled Eicrud oracle](../archive/runs/2026-11-08-eicrud-source-platform.md)
-passed all 25 feature and 164 regression checks after three default-platform
-setup failures. The original Eicrud source image never became available, so
-its default platform was not directly observed. Runner/helper changes require
-fresh oracle receipts; earlier source-bound passes remain historical controls
-rather than entries in the new cohort.
+Historical [Cliffy](../archive/runs/2026-11-08-cliffy-source-platform.md) and
+[Eicrud](../archive/runs/2026-11-08-eicrud-source-platform.md) controls remain
+source-bound. A separate copied-AMD64 FD control on caller
+`16df23efb8eeca7dc84bdd44af226580627f9e6e` passed 50 feature and 109 regression
+checks, observing both images as AMD64. Its observer SHA-256 is
+`a199666fb73e3e23d230bc81e0459d86e577a58442b8f4f9fa94999b94bd6105`;
+private aggregate SHA-256 is
+`3098a8917b0cb03edf09ffeb85a8271f3d41189e266d66d21762e7a6e1911457`.
+The preceding 26 passing controls and failed FD attempt remain unchanged.
+Model attempts proceed directly without another full-oracle prerequisite.
 
 ## Separate verifier image compatibility
 

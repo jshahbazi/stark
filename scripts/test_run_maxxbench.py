@@ -391,6 +391,16 @@ def test_model_bridge_discovers_replacement_worker_before_parent_exits(tmp_path,
 
 def test_trial_run_aggregates_do_not_serialize_rollout_or_arbitrary_metadata(tmp_path, monkeypatch):
     config_module(monkeypatch)
+    monkeypatch.delenv("DOCKER_DEFAULT_PLATFORM", raising=False)
+    original_platform_config = runner._platform_config
+    configurations = []
+
+    def copied_platform_config(config, *args):
+        copied = original_platform_config(config, *args)
+        configurations.append((config, copied))
+        return copied
+
+    monkeypatch.setattr(runner, "_platform_config", copied_platform_config)
     result = SimpleNamespace(
         verifier_result=SimpleNamespace(rewards={"reward": 1}), exception_info=None,
         agent_result=SimpleNamespace(
@@ -416,8 +426,23 @@ def test_trial_run_aggregates_do_not_serialize_rollout_or_arbitrary_metadata(tmp
         receipt = asyncio.run(runner.trial_run(Trial, tmp_path, "sample-task", tmp_path / "trials"))
     assert output.getvalue() == ""
     assert receipt["passed"] is True
+    original, copied = configurations[0]
+    assert original is not copied and original.environment is not copied.environment
+    assert original.environment.env == {} and original.environment.kwargs["persistent_env"] == {}
+    assert copied.environment.env == {"DOCKER_DEFAULT_PLATFORM": "linux/amd64"}
+    assert copied.environment.kwargs["persistent_env"] == {"DOCKER_DEFAULT_PLATFORM": "linux/amd64"}
+    assert "DOCKER_DEFAULT_PLATFORM" not in runner.os.environ
+    assert receipt["task_platform"] == "linux/amd64"
+    assert json.loads((tmp_path / "trials/sample-task/progress.json").read_text())["task_platform"] == "linux/amd64"
     assert "private-marker" not in json.dumps(receipt)
     assert "rollout_details" not in json.dumps(receipt)
+
+
+def test_task_platform_rejects_conflicting_host_selector_before_trial_creation(tmp_path, monkeypatch):
+    config_module(monkeypatch)
+    monkeypatch.setenv("DOCKER_DEFAULT_PLATFORM", "linux/arm64")
+    with pytest.raises(image_compat.SourcePlatformError, match="^task_platform_conflict$"):
+        asyncio.run(runner.trial_run(None, tmp_path, "sample-task", tmp_path / "trials"))
 
 
 def test_repeated_format_error_status_is_preserved_as_model_budget_outcome():

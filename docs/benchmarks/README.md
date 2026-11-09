@@ -18,14 +18,15 @@ The [runtime/API qualification follow-up (2026-11-08)](2026-11-08-maxxbench-runt
 records bounded Flint prefix agreement and successful native API transport on
 the new build, including a 2.3 MB Qwen request and a short GLM request at its
 configured million-token context. Filled maximum windows and coding-agent
-quality remain unqualified. A fresh 89-task oracle cohort and 623 model/task
-attempts are still pending.
+quality remain unqualified. The full model campaign contains 623 model/task
+attempts; reference oracles are independent environment diagnostics.
 
 The [Eicrud source-platform qualification (2026-11-08)](../archive/runs/2026-11-08-eicrud-source-platform.md)
 records three source-setup failures and a passing 25-feature/164-regression
 AMD64 stock oracle. Its exact recipe joins Cliffy's existing scoped platform
-policy. The preceding cohort's 21 passes remain historical controls; a fresh
-89-task cohort and all 623 model/task attempts are pending on the new helper.
+policy. The preceding 21- and 26-pass cohorts remain historical controls.
+The model campaign now selects AMD64 task containers throughout, with native
+Metal inference and each artifact's full context window, without an oracle gate.
 
 ## Current result
 

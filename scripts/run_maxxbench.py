@@ -39,6 +39,7 @@ from maxxbench_resources import (
 from maxxbench_verifier_compat import (
     TRIAL_IMAGE_ATTRIBUTE,
     SourcePlatformError,
+    _platform_config,
     capture_environment_image,
     patch_source_image_platform,
     patch_verifier_image_compat,
@@ -46,6 +47,7 @@ from maxxbench_verifier_compat import (
 )
 
 UPSTREAM_COMMIT = "1a0df5e9c5d4bccbae131b01830d478088fea947"
+TASK_PLATFORM = "linux/amd64"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -508,7 +510,9 @@ async def trial_run(Trial, upstream, task, directory, profile=None, *, ownership
                 "step_limit": profile.get("step_limit", 250)},
     )
     config = TrialConfig(task=TaskConfig(path=upstream / "tasks" / task), trials_dir=directory,
-                         trial_name=task, agent=agent, environment=EnvironmentConfig(force_build=True))
+                         trial_name=task, agent=agent,
+                         environment=EnvironmentConfig(force_build=True, env={}, kwargs={"persistent_env": {}}))
+    config = _platform_config(config, {}, TASK_PLATFORM, SourcePlatformError, "task_platform_conflict")
     progress_path = Path(directory) / task / "progress.json"
     started = time.monotonic()
     trial = None
@@ -577,6 +581,7 @@ async def trial_run(Trial, upstream, task, directory, profile=None, *, ownership
             "task": task, "state": state, "phase": phase, "active": active,
             "elapsed_seconds": round(time.monotonic() - started, 3),
             "environment_image_id": image_id,
+            "task_platform": TASK_PLATFORM,
             "source_platform": source_platform_metadata(trial),
             "environment_image_capture": "captured" if image_id else ("unavailable" if image_checked else "pending"),
             "updated_at": datetime.now(UTC).isoformat(), **delta,
@@ -664,6 +669,7 @@ async def trial_run(Trial, upstream, task, directory, profile=None, *, ownership
         "agent_completed": False if timed_out or request_timed_out else None,
         "agent_metrics": agent_metrics,
         "environment_image_id": image_id,
+        "task_platform": TASK_PLATFORM,
         "source_platform": source_platform_metadata(trial),
         "started_at": result.started_at.isoformat() if result.started_at else None,
         "finished_at": result.finished_at.isoformat() if result.finished_at else None,
@@ -694,6 +700,7 @@ def main(argv=None):
                 "runner_sha256": digest(__file__),
                 "verifier_compat_sha256": digest(ROOT / "scripts/maxxbench_verifier_compat.py"),
                 "resource_cleanup_sha256": digest(ROOT / "scripts/maxxbench_resources.py"),
+                "task_platform": TASK_PLATFORM,
                 "selected_tasks": tasks, "release_tasks": 89,
                 "created_at": datetime.now(UTC).isoformat(), "logging": "aggregate_only"}
     args.output.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -811,6 +818,7 @@ if __name__ == "__main__":
             "campaign_identity_mismatch",
             "source_platform_recipe_changed", "source_platform_task_changed", "source_platform_conflict",
             "source_platform_policy_invalid", "source_platform_unavailable", "source_platform_changed",
+            "task_platform_conflict",
             "artifact_changed", "artifact_empty",
             "benchmark_protocol_capacity_unavailable", "tokenizer_byte_bound_unsupported",
             "invalid_benchmark_byte_policy", "invalid_api_byte_limits",
