@@ -986,3 +986,73 @@ failed. This qualifies the short staging smoke only: full mode/scope/context,
 changed-tail, mid-generation cancellation, stop/cap and error lifecycle,
 matching-arm performance, broader default context, catalog provisioning and
 default enablement remain open. No speed claim follows from acceptance counts.
+
+### Full images-resident lifecycle and text-arm launcher stop
+
+The independently reviewed full fixture v4 (`2188123d`) passes all 37
+images-resident cases on the same `a8775bb8` worker. In addition to the short
+smoke, it covers draft depths zero through three, scope/context changes,
+changed tails, unscoped/reset/error recovery, explicit unsupported-context
+rejection, image MTP rejection, and seeded full-vocabulary rejection. The
+hot seeded request accepts seven of 32 proposals and repeats exactly from
+the restored prefix. Mid-generation cancellation occurs after two sampled
+tokens and recovers fresh. A stop sequence truncates output at three tokens
+after six verified rows; the two-token cap matches the ordinary output prefix.
+Post-stop and post-cap prefix reuse remain exact.
+
+Full image receipt SHA-256 is
+`5fc7f363e8aaf9cdba8badc550245a2b48fedebbd5cb3c8c39b632c24af48d7b`.
+The guardian passes 145 positive samples and final drain/join predicates,
+with peak RSS 10,368,303,104 bytes and footprint 10,655,850,800 bytes and zero
+paging, swap or compressor growth.
+
+The matching tower-disabled arm stops before Ready with
+`owned_process_identity_changed`: the validation shell launcher starts as
+`zsh` and then executes the worker, changing the executable UUID observed by
+the guardian. Its peak RSS is only 32,768 bytes; no model readiness or text-arm
+lifecycle claim follows. Failed receipt SHA-256 is
+`db9e70a1341628ddbfe4fa96904c369e1600d9c29d644dee7afeef9209eb71b8`.
+The guardian remains unchanged. The narrow harness correction appends the
+validation flag to the native worker argument vector before the original
+`Popen`, avoiding the shell launcher. A focused actual tiny-child control
+passes with a stable identity, two positive samples and final drain/join;
+receipt `842e135c20b2f744b36cf9bea3702aaf2f2a1091bdcef97e8e34fbab55a04072`.
+The correction patch is
+`7d0418550ee41d3f31b3557bba4cf4cf8f4ce1df9663bf72f58a2db055a658dd`,
+full fixture v5
+`ad4711e6fb1af13e418a78887d2f1d0cd30088b0b7b77084a86c4c347813b3e6`.
+The exact private base-driver bytes and guardian ownership type are retained.
+
+The direct-spawn text retry passes all 34 applicable full cases, receipt
+`96c0bf84619f91294c48a91c1b8a6d1e15b01061ae2850b45eb3be47f18faa77`.
+All 31 non-null output hashes shared by the two full matrices match; the other
+three shared cases are cancellation or static rejection checks. The text
+guardian passes 138 positive samples and final drain/join predicates, with
+peak RSS 10,080,567,296 bytes, footprint 10,288,619,560 bytes and zero paging,
+swap or compressor growth. The same target/config/head identities load with
+the tower absent: actual current Metal allocation is 9,416,556,544 bytes
+against 9,723,920,384 bytes with the tower. Logical vision parameter bytes
+remain separately reported as 337,089,408; logical bytes are not a substitute
+for the observed allocation difference.
+
+The subsequent quick comparison stops on the first text-only MTP3 warmup,
+after a successful ordinary 64-token warmup on a 25-token prompt. It has no
+matched image-loading or MTP speed result. Receipt
+`f46eeff9f461d9c2fc699a28d2245e8285e73dc9cb8ffc5c5e42b2f40774a42b`
+records one warm row and an assertion failure. Its guardian passes 118 samples
+and final drain/join, with zero paging, swap and compressor growth. The
+original benchmark asserts before retaining the failing reply aggregates, so
+it cannot identify whether the failure is static error, output length,
+acceptance metadata or output hash equality. The smallest next diagnostic
+retains all these aggregate predicates before asserting, on one same text-only
+worker and the same MTP0/MTP3 64-token requests. No target/head arithmetic is
+changed on an unproven diagnosis; full performance remains open.
+
+Delivery also remains explicitly blocked by the staging feature, unqualified
+normal context and provisioning. The exact target declares 131,072 positions;
+CLI chat defaults to the worker maximum and the app uses the engine context
+limit. The current 2,048-context/1,792-draft-position restriction therefore
+cannot be removed or treated as default-context support without evidence.
+The strict companion conversion plan exists and is CPU-tested, but has no
+catalog/CLI installation caller supplying the sidecar. No default enablement
+or family completion is claimed from the staged lifecycle results.

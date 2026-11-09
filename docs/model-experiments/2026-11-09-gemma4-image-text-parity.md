@@ -72,12 +72,19 @@ head declaration. Google's [official MTP documentation](https://ai.google.dev/ge
 and [usage guide](https://ai.google.dev/gemma/docs/mtp/mtp) identify separate
 `google/gemma-4-{size}-it-assistant` checkpoints for all five Gemma 4 target sizes.
 They use shared target embeddings/last-layer activations and target K/V access;
-E2B/E4B use clustered vocabulary readout. The current converter accepts Gemma
-target configs, and the native worker has no Gemma assistant loader or execution
-path. These compatible assistants require dedicated conversion, exact target
+E2B/E4B use clustered vocabulary readout. At this ring-cache increment's source
+inventory, the converter accepted Gemma target configs and the native worker
+had no Gemma assistant loader or execution path. These compatible assistants
+require dedicated conversion, exact target
 pairing, scratch/state admission, verification/rollback and prefix snapshots.
 Therefore source MTP is **not N/A**. No Gemma MTP support or performance is
 claimed by this ring-cache increment; assistant implementation remains open.
+
+The later [next-image-parity record](2026-11-09-gemma-next-image-parity.md#20261109-g4ap-06-staged-native-worker-integration)
+tracks the staged E2B assistant loader, verification and normal-worker lifecycle
+results. Its short-prompt/64-token diagnostic, default-context admission and
+sidecar provisioning remain separate delivery gates. This historical ring-cache
+inventory does not describe that newer staged implementation.
 
 Initial disposition: awaiting implementation validation and exact-artifact
 qualification. The completed bounded disposition is recorded below.
