@@ -135,7 +135,7 @@ fn text_snapshot_matches_fresh<B: Backend>(hybrid: bool) {
     let fixture = if hybrid {
         hybrid_fixture()
     } else {
-        TinyModel::with_rope_mix(128, true)
+        TinyModel::new(128)
     };
     let engine = Engine::<B>::new().unwrap();
     let model = engine.load_language_model(&fixture.directory).unwrap();
@@ -205,7 +205,7 @@ fn text_snapshot_matches_fresh<B: Backend>(hybrid: bool) {
 }
 
 fn text_snapshot_guards<B: Backend>() {
-    let fixture = TinyModel::with_rope_mix(128, true);
+    let fixture = TinyModel::new(128);
     let engine = Engine::<B>::new().unwrap();
     let model = engine.load_language_model(&fixture.directory).unwrap();
     let mut empty = model.create_empty_state(Some(CAPACITY), 0).unwrap();
