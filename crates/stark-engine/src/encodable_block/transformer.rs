@@ -48,6 +48,10 @@ pub(crate) struct TransformerPrefix<B: Backend> {
 }
 
 impl<B: Backend> TransformerPrefix<B> {
+    pub(crate) fn position(&self) -> u32 {
+        self.position
+    }
+
     pub(crate) fn payload_bytes(&self) -> usize {
         self.layers.iter().flatten().map(|state| state.payload_bytes()).sum()
     }
@@ -83,6 +87,33 @@ fn scoring_cache_only_requested(
 }
 
 impl<B: Backend> TransformerState<B> {
+    pub(crate) fn capture_assistant_local_handoff(
+        &self,
+        suffix_rows: u32,
+        context: &B::Context,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<crate::encodable_block::mixer::attention::AssistantAttentionHandoff<B>>, B::Error> {
+        if self.rotary_position_delta.is_some() {
+            return Ok(None);
+        }
+        let position =
+            self.context_length.checked_add(suffix_rows).ok_or(InvalidInput("assistant position overflow"))?;
+        for (index, state) in self.layer_states.iter().enumerate().rev() {
+            let TransformerLayerStateType::Owned(state) = state else {
+                continue;
+            };
+            let Some(attention) = (state.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<crate::encodable_block::mixer::attention::AttentionState<B>>()
+            else {
+                continue;
+            };
+            if attention.view().ring_params().is_some() {
+                return attention.capture_assistant_handoff(index as u32, position, suffix_rows, context, command);
+            }
+        }
+        Ok(None)
+    }
+
     /// The source Gemma assistant consumes the last owning KV of each kind.
     pub fn last_committed_attention_kv(
         &self,

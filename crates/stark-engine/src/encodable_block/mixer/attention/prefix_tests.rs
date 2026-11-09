@@ -347,3 +347,79 @@ fn committed_bf16_eager_excludes_phantom_suffix_cpu() {
 fn committed_bf16_eager_excludes_phantom_suffix_metal() {
     committed_bf16_eager_view::<crate::backends::metal::Metal>();
 }
+
+fn assistant_preaccept_handoff<B: Backend>() {
+    use half::bf16;
+    let context = B::Context::new().unwrap();
+    for prior in [0u32, 3, 511, 512, 513, 1023, 1024, 1791] {
+        for suffix in [1u32, 4] {
+            let capacity = 512 + ATTENTION_SUFFIX_CAPACITY;
+            let mut state = AttentionState::<B> {
+                element_dim: 64,
+                data_type: DataType::BF16,
+                cache: KVCacheState::ring(512),
+                capacity_elements: capacity,
+                is_sparse: false,
+                keys: Box::new(context.create_buffer(capacity as usize * 128).unwrap()),
+                values: Box::new(context.create_buffer(capacity as usize * 128).unwrap()),
+                kv_cache_update: <B::Kernels as Kernels>::KVCacheUpdateKernel::new(&context, DataType::BF16).unwrap(),
+            };
+            state.cache.accept(&(0..prior).collect::<Vec<_>>());
+            let prefix = state.view().prefix_len();
+            let offset = state.view().ring_params().unwrap().ring_offset;
+            let mut physical = vec![bf16::from_f32(-1000.0); capacity as usize * 64];
+            for logical in 0..prefix + suffix {
+                let slot = if logical < prefix {
+                    (offset + logical) % prefix
+                } else {
+                    logical
+                };
+                let value = bf16::from_f32((prior - prefix + logical + 1) as f32);
+                physical[slot as usize * 64..(slot as usize + 1) * 64].fill(value);
+            }
+            buffer_mut(&mut state.keys).copyin(&physical);
+            buffer_mut(&mut state.values).copyin(&physical);
+            let position = prior + suffix;
+            let mut commands = context.create_command_buffer(None, None).unwrap();
+            let handoff =
+                state.capture_assistant_handoff(7, position, suffix, &context, &mut commands).unwrap().unwrap();
+            state.encode_accept(&(0..suffix).collect::<Vec<_>>(), &mut commands).unwrap();
+            let view = super::super::CommittedAttentionKV::new(&state, 7, position)
+                .unwrap()
+                .with_assistant_handoff(&handoff)
+                .unwrap();
+            let rows = position.min(513);
+            assert_eq!(view.retained_rows(), rows);
+            assert_eq!(handoff.payload_bytes(), rows as usize * 256);
+            assert!(
+                super::super::CommittedAttentionKV::new(&state, 8, position)
+                    .unwrap()
+                    .with_assistant_handoff(&handoff)
+                    .is_none()
+            );
+            let (keys, values) = view.validation_copy(&mut commands).unwrap();
+            let mut result_keys = context.create_buffer(rows as usize * 128).unwrap();
+            let mut result_values = context.create_buffer(rows as usize * 128).unwrap();
+            commands.encode_copy(&keys, &mut result_keys);
+            commands.encode_copy(&values, &mut result_values);
+            commands.end_encoding().submit().wait_until_completed().unwrap();
+            let expected = (position - rows..position)
+                .flat_map(|index| std::iter::repeat_n(bf16::from_f32((index + 1) as f32), 64))
+                .collect::<Vec<_>>();
+            assert!(result_keys.as_slice::<bf16>() == expected && result_values.as_slice::<bf16>() == expected);
+            assert_eq!(state.view().prefix_len(), position.min(512));
+        }
+    }
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn assistant_preaccept_preserves_inclusive_local_rows_cpu() {
+    assistant_preaccept_handoff::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn assistant_preaccept_preserves_inclusive_local_rows_metal() {
+    assistant_preaccept_handoff::<crate::backends::metal::Metal>();
+}

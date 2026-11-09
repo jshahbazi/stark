@@ -228,3 +228,213 @@ fn private_e2b_assistant_real_drafts_with_image_tower_resident() {
         "assistant numerical reference gate failed; see aggregate receipt"
     );
 }
+
+#[stark_test]
+#[ignore]
+fn private_e2b_assistant_wrapped_handoff_and_transactional_batch() {
+    let target = std::env::var("STARK_GEMMA_ASSISTANT_TARGET").expect("private target required");
+    let companion = std::env::var("STARK_GEMMA_ASSISTANT_COMPANION").expect("private companion required");
+    let output = std::env::var("STARK_GEMMA_ASSISTANT_RECEIPT").expect("private aggregate receipt required");
+    let engine = Engine::<Metal>::new().unwrap();
+    let model = engine.load_gemma4_vision_language_model(Path::new(&target)).unwrap();
+    let head = model.load_assistant_component(Path::new(&companion)).unwrap();
+    let mut receipt = std::fs::OpenOptions::new().write(true).create_new(true).open(output).unwrap();
+    let public_text = (0..600)
+        .map(|index| format!("Step {index}: verify the distinct state and then continue. "))
+        .collect::<String>();
+    let source_input = model.tokenizer().encode(public_text, false).unwrap().get_ids().to_vec();
+    assert!(source_input.len() >= 1792);
+    for length in [512usize, 513, 1024, 1026, 1792] {
+        let input = &source_input[..length];
+        let fresh = || {
+            model
+                .language_model
+                .prefill_gemma4_assistant_target(input, 2048, Gemma4AssistantProfile::E2B, &mut || false)
+                .unwrap()
+        };
+        let frame = fresh();
+        let mut ordinary = model.language_model.create_empty_state(Some(2048), 42).unwrap();
+        let mut options = model.language_model.default_stream_options();
+        options.sampling_method = crate::engine::language_model::stream::SamplingMethod::Greedy;
+        let ordinary_input = input.iter().map(|&token| u64::from(token)).collect::<Vec<_>>();
+        let mut stream = model.language_model.stream(&ordinary_input, &mut ordinary, options).unwrap();
+        let ordinary_tokens = (0..5).map(|_| stream.next().unwrap().unwrap() as u32).collect::<Vec<_>>();
+        drop(stream);
+        let first =
+            frame.logits().iter().enumerate().max_by(|(a, x), (b, y)| x.total_cmp(y).then_with(|| b.cmp(a))).unwrap().0
+                as u32;
+        assert!(first == ordinary_tokens[0]);
+        let payload = model.language_model.assistant_validation_round_payload(&frame, &head, first).unwrap();
+        let drafts = payload["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| {
+                step["logits"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .max_by(|(a, x), (b, y)| x.as_f64().unwrap().total_cmp(&y.as_f64().unwrap()).then_with(|| b.cmp(a)))
+                    .unwrap()
+                    .0 as u32
+            })
+            .collect::<Vec<_>>();
+        let mut child = Command::new(std::env::var("STARK_GEMMA_ASSISTANT_ORACLE_PYTHON").unwrap())
+            .arg(std::env::var("STARK_GEMMA_ASSISTANT_ORACLE_SCRIPT").unwrap())
+            .arg(std::env::var("STARK_GEMMA_ASSISTANT_SOURCE").unwrap())
+            .arg(Path::new(&target).join("model.safetensors"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&serde_json::to_vec(&payload).unwrap()).unwrap();
+        drop(payload);
+        let result = child.wait_with_output().unwrap();
+        assert!(result.status.success(), "private chained reference process failed");
+        let oracle: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let numeric_record = serde_json::json!({"attempt":"20261109-G4AP-03","gate":"three-step-source-oracle",
+            "input_tokens":length,"target_config_sha256":model.artifact_identity().config_sha256,
+            "target_weights_sha256":model.artifact_identity().artifact_sha256,"image_tower_resident":true,
+            "reference":oracle});
+        writeln!(receipt, "{}", serde_json::to_string(&numeric_record).unwrap()).unwrap();
+        receipt.flush().unwrap();
+        assert!(
+            numeric_record["reference"]["passed"] == true,
+            "chained source numerical gate failed; aggregate receipt retained"
+        );
+        if length >= 1026 {
+            let captured = model
+                .language_model
+                .prefill_gemma4_assistant_target_with_prefix(
+                    input,
+                    2048,
+                    Gemma4AssistantProfile::E2B,
+                    1024,
+                    &mut || false,
+                )
+                .unwrap();
+            assert!(captured.prefix_position() == Some(1024) && captured.prefix_payload_bytes() > 0);
+            let advanced = model
+                .language_model
+                .verify_gemma4_assistant_greedy_serial(captured, &ordinary_tokens[1..4], &mut || false)
+                .unwrap();
+            let restored = model
+                .language_model
+                .restore_and_prefill_gemma4_assistant_target(advanced.frame, &input[1024..], 1024, &mut || false)
+                .unwrap();
+            assert!(restored.position() == length as u32 && restored.logits() == frame.logits());
+            let fresh_payload = model.language_model.assistant_validation_payload(&frame, &head, first).unwrap();
+            let restored_payload = model.language_model.assistant_validation_payload(&restored, &head, first).unwrap();
+            assert!(fresh_payload == restored_payload, "prefix restoration changed private target handoff");
+            drop(fresh_payload);
+            drop(restored_payload);
+            let restored_round = model
+                .language_model
+                .verify_gemma4_assistant_greedy_serial(restored, &ordinary_tokens[1..4], &mut || false)
+                .unwrap();
+            assert!(
+                restored_round.committed_tokens == ordinary_tokens[..4]
+                    && restored_round.next_token == ordinary_tokens[4]
+            );
+            let mut changed = input.to_vec();
+            changed[length - 1] = (changed[length - 1] + 1) % 262144;
+            let changed_fresh = model
+                .language_model
+                .prefill_gemma4_assistant_target(&changed, 2048, Gemma4AssistantProfile::E2B, &mut || false)
+                .unwrap();
+            let changed_restored = model
+                .language_model
+                .restore_and_prefill_gemma4_assistant_target(restored_round.frame, &changed[1024..], 1024, &mut || {
+                    false
+                })
+                .unwrap();
+            assert!(
+                changed_fresh.logits() == changed_restored.logits() && changed_restored.position() == length as u32
+            );
+            drop(changed_fresh);
+            drop(changed_restored);
+        }
+        let actual = model.language_model.verify_gemma4_assistant_greedy_batch(frame, &drafts, &mut || false).unwrap();
+        let committed = actual.committed_tokens.len();
+        assert!(
+            actual.committed_tokens == ordinary_tokens[..committed] && actual.next_token == ordinary_tokens[committed]
+        );
+        assert!(actual.frame.position() == length as u32 + committed as u32 && committed == actual.accepted_drafts + 1);
+        let actual_accepted = actual.accepted_drafts;
+        drop(actual);
+        let all = model
+            .language_model
+            .verify_gemma4_assistant_greedy_batch(fresh(), &ordinary_tokens[1..4], &mut || false)
+            .unwrap();
+        assert!(
+            all.committed_tokens == ordinary_tokens[..4]
+                && all.next_token == ordinary_tokens[4]
+                && all.accepted_drafts == 3
+                && all.frame.position() == length as u32 + 4
+                && all.repaired_rows == 0
+        );
+        drop(all);
+        let wrong = (ordinary_tokens[1] + 1) % 262144;
+        let reject =
+            model.language_model.verify_gemma4_assistant_greedy_batch(fresh(), &[wrong], &mut || false).unwrap();
+        assert!(
+            reject.committed_tokens == ordinary_tokens[..1]
+                && reject.next_token == ordinary_tokens[1]
+                && reject.accepted_drafts == 0
+                && reject.repaired_rows == 1
+                && reject.frame.position() == length as u32 + 1
+        );
+        drop(reject);
+        let partial = model
+            .language_model
+            .verify_gemma4_assistant_greedy_batch(
+                fresh(),
+                &[ordinary_tokens[1], (ordinary_tokens[2] + 1) % 262144],
+                &mut || false,
+            )
+            .unwrap();
+        assert!(
+            partial.committed_tokens == ordinary_tokens[..2]
+                && partial.next_token == ordinary_tokens[2]
+                && partial.accepted_drafts == 1
+                && partial.repaired_rows == 2
+                && partial.frame.position() == length as u32 + 2
+        );
+        drop(partial);
+        let zero = model.language_model.verify_gemma4_assistant_greedy_batch(fresh(), &[], &mut || false).unwrap();
+        assert!(
+            zero.committed_tokens == ordinary_tokens[..1]
+                && zero.next_token == ordinary_tokens[1]
+                && zero.accepted_drafts == 0
+                && zero.frame.position() == length as u32 + 1
+        );
+        drop(zero);
+        for stop_at in [2usize, 3] {
+            let mut checks = 0;
+            assert!(matches!(
+                model.language_model.verify_gemma4_assistant_greedy_batch(fresh(), &[wrong], &mut || {
+                    checks += 1;
+                    checks == stop_at
+                }),
+                Err(crate::engine::language_model::gemma4_assistant::Gemma4AssistantSessionError::Cancelled)
+            ));
+        }
+        let recovered = model
+            .language_model
+            .verify_gemma4_assistant_greedy_batch(fresh(), &ordinary_tokens[1..4], &mut || false)
+            .unwrap();
+        assert!(recovered.committed_tokens == ordinary_tokens[..4] && recovered.next_token == ordinary_tokens[4]);
+        drop(recovered);
+        let control_record = serde_json::json!({"attempt":"20261109-G4AP-03","gate":"transactional-target-controls",
+            "input_tokens":length,"actual_drafts":drafts.len(),"actual_accepted":actual_accepted,
+            "ordinary_output_equal":true,"supplied_all_accept":true,"supplied_partial_accept":true,
+            "deliberate_rejection":true,"zero_drafts":true,"post_batch_and_post_restore_cancel":true,
+            "fresh_recovery":true,"prefix_reuse":{"tested":length>=1026,"boundary":if length>=1026 {1024}else{0},
+                "suffix_rows":if length>=1026 {length-1024}else{0},"fresh_handoff_equal":length>=1026,
+                "changed_tail_equal":length>=1026},"serving_mtp_enabled":false,"performance_qualified":false});
+        writeln!(receipt, "{}", serde_json::to_string(&control_record).unwrap()).unwrap();
+        receipt.flush().unwrap();
+    }
+}

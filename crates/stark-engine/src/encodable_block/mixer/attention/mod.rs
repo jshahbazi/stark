@@ -36,6 +36,7 @@ mod qkv_norm;
 pub(crate) mod reference;
 mod state;
 
+pub(crate) use committed::AssistantAttentionHandoff;
 pub use committed::CommittedAttentionKV;
 pub use state::{ATTENTION_SUFFIX_CAPACITY, AttentionState, KVCacheView};
 

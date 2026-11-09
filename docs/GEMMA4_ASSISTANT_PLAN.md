@@ -6,7 +6,9 @@ branch. Three real proposals, fixed target position, ordinary target-root
 agreement and drained cancellation/retry pass. The first numerical gate failed;
 the assistant-only eager-BF16 follow-up now matches the unchanged short-input
 oracle exactly. Serial verification controls pass, while actual acceptance is
-zero of three drafts on that input. Worker MTP remains unimplemented. Gemma 4 has upstream
+zero of three drafts on that input. The separate 512-token, three-step follow-up
+fails its unchanged numerical gate; batch/cache execution remains blocked by
+that result. Worker MTP remains unimplemented. Gemma 4 has upstream
 MTP assistants, and remains
 an open Stark implementation task. Image loading must preserve future text MTP;
 image requests keep zero drafts. Follow [model onboarding](MODEL_ONBOARDING.md)
@@ -105,3 +107,12 @@ context support is unchanged. Batched verification/rollback, head-aware caching,
 worker/default loading and useful MTP speed remain open. The current
 [cache follow-up](benchmarks/2026-11-09-gemma4-warmed-cache.md) addresses normal
 text prefix execution while this assistant work remains outstanding.
+
+The G4AP-03 continuation adds a separately retained preaccept 513-row local
+handoff and full-accept transactional target batches with physical snapshot
+restoration and serial repair. Six synthetic CPU/Metal controls pass. The first
+512-token three-step oracle fails masked logits and chained feedback without
+relaxing its limits, so actual batch/cache and later long-input controls have
+not executed. The public 512-position draft guard remains in force while the
+first divergent intermediate is diagnosed. These additions grant no serving
+capability or performance qualification.

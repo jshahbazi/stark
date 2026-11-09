@@ -380,3 +380,75 @@ All owned model/reference processes closed before the explicit Qwen handoff.
 Serving MTP remains disabled. Normal-worker integration, head-aware prefix
 reuse, multi-round/lifecycle controls, wide source handoff, useful real
 acceptance and matched text-only/image-loaded MTP performance remain open.
+
+## 20261109-G4AP-03: source handoff and normal-worker qualification
+
+Registered before new execution. Preserve the passed G4AP-02 source/binary and
+exact short-input oracle. Add a separate immutable local-KV handoff captured
+before ordinary target acceptance, retaining the source-visible inclusive
+513 rows while the ordinary target ring remains 512. Qualify wrapped/near-cap
+handoffs and chained proposals against the same pinned oracle before removing
+the short-context draft guard.
+
+For a useful target verification attempt, submit a flat full-accept batch of
+the root plus actual drafts. Capture physical target snapshots before that
+batch. On rejection, restore the complete snapshot and repair only the verified
+prefix through the already-qualified serial route; never bypass ordinary
+partial-ring guards. Require fresh ordinary target equivalence for real,
+all/zero/partial/rejected proposals, cancellation and context boundaries.
+
+Then integrate a separately disabled-by-default worker feature for exact E2B
+companion admission, greedy text speculation, complete head/mode-bound prefix
+reuse and image exclusion. Qualification must use the normal worker protocol,
+real images and actual proposals/acceptance. MTP0 keeps the existing ordinary
+text path. Do not advertise serving support or qualify speed from components.
+Before changing the production default, require complete lifecycle correctness
+and matched text-only/image-loaded MTP0/MTP-on performance with frozen
+artifacts, builds and quiet-host guards. Failed speed or acceptance attempts
+remain recorded and cannot be relabeled as acceleration.
+
+### G4AP-03 first long-input gate: failed, preserved
+
+The fresh distinct engine target first failed compilation because the new
+handoff module lacked the `Buffer` trait import. After that import, the second
+locked nightly release build passes. Test executable SHA-256
+`e225f41a1cd02dd1812c41dc72413b65e35c58d38daea28e5a4090963f11af81`;
+source graph digest
+`8aa840984a76fd25d9a564d25dd9025a573e394e04cdc6894ac819571d78d397`;
+source-seal SHA-256
+`674be333ec8a9b4d1fc6970b23f715bdf85d1867f52164c6d3247cf4757e30b2`.
+All six dedicated CPU/Metal controls pass, including exact preaccept temporal
+row retention at short, 512/513, wrapped and near-cap synthetic positions.
+The independent immutable source review found no confirmed physical rollback
+or scratch-lifetime defect; execution still has to establish those gates.
+
+The separate three-step oracle is SHA-256
+`be71c7475d16adaba90c8a0842ebad2ed0653944b2ff53df71a6cf3bd63fe3dd`;
+its imported pinned Transformers Gemma4 text implementation is
+`4f874549f79deda4bb9ce7fb7d7b8e7349122be1711f733f7a4157e46ed10cc3`.
+It chains reference feedback independently and keeps the original maximum
+absolute 0.5 / relative L2 0.02 limits. The original short oracle is unchanged.
+
+The first 512-token case fails before target batch/cache controls execute.
+Step 1 feedback 0.375 / 0.00821 and centroids 0.25 / 0.00654 pass, while masked
+logits fail at 55.125 / 0.01727 with 256 selected-token support differences.
+Step 2 passes all planes. Step 3 feedback fails maximum absolute error at
+0.625 / 0.01417. Root embeddings and all three greedy proposals match; that
+does not establish numerical parity. Cases 513/1024/1026/1792 and all actual
+transactional batch, rollback and cache controls remain unexecuted.
+
+The reused unchanged Qwen resource watchdog reports no foreign worker, no
+paging growth and no resource/deadline stop; maximum observed test RSS is
+10,741,563,392 bytes. Aggregate oracle receipt SHA-256
+`145a3048826a2752e1e98fc99cd02db2561e5871541ce32b72b4f0d0624a9183`;
+process receipt `b012759ba2133ab40156dad04d32678096cab5f9c92887b66a2ede150f019f61`;
+failed-gate seal
+`9f3cd5141d088789c9086cf0d8145fdcb29e1e7cce3aae0e2435c1b637129b13`.
+All owned model/reference processes closed before the direct GLM handoff.
+
+Next diagnose the first divergent intermediate and centroid cutoff support
+before changing head arithmetic. Do not loosen tolerances, remove the public
+512-position guard or enable worker serving. The exact G4AP-02 short result
+remains qualified only for its original source, binary, input and one-step scope.
+Normal-worker integration must retain published Qwen commits `48c5aa52` and
+`e4144be5`, including the ordinary headed MTP0 dispatch/cache/memory fix.
