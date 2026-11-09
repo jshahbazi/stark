@@ -331,6 +331,21 @@ impl<B: Backend> LanguageModel<B> {
         estimate.total_bytes()
     }
 
+    pub(crate) fn generation_memory_bytes_with_text_prefix(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        let bytes = self.generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)?;
+        if !self.text_prefix_snapshot_supported() {
+            return Some(bytes);
+        }
+        let allocated = self.generation_allocation_context_length(input_tokens, context_tokens, max_new_tokens)?;
+        let snapshot = self.context_memory_estimate(allocated, input_tokens)?.prefix_snapshot_bytes;
+        bytes.checked_add(snapshot)
+    }
+
     /// Admit exact scoring's fresh state and all independently retained prompt
     /// chunk pools. Scoring reads the final prompt position without reserving
     /// an output token, so input may exactly fill the selected context.

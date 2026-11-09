@@ -2,11 +2,12 @@
 
 import importlib.util
 import json
+import stat
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 _spec = importlib.util.spec_from_file_location(
     "prefix_qualification",
@@ -17,6 +18,80 @@ _spec.loader.exec_module(harness)
 
 
 class PrefixQualificationTests(unittest.TestCase):
+    def test_vision_worker_staging_is_private_empty_and_removed_on_close(self):
+        process = MagicMock()
+        with (patch.object(harness.subprocess, "Popen", return_value=process) as spawn,
+              patch.object(harness.Worker, "read", return_value={"ready": True})):
+            with harness.Worker("worker", "model", prefix_cache=True, vision=True) as worker:
+                root = worker.staging_root
+                self.assertTrue(root.is_absolute())
+                self.assertEqual(root, root.resolve())
+                self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+                self.assertEqual(list(root.iterdir()), [])
+                self.assertEqual(spawn.call_args.args[0], ["worker", "--model-path", "model", "--prefix-cache",
+                                                          "--vision-staging-root", str(root)])
+            self.assertFalse(root.exists())
+
+    def test_vision_staging_is_removed_when_spawn_or_readiness_fails(self):
+        for startup_failure in (True, False):
+            roots = []
+
+            def spawn(command, roots=roots, startup_failure=startup_failure, **_kwargs):
+                roots.append(Path(command[command.index("--vision-staging-root") + 1]))
+                if startup_failure:
+                    raise OSError("synthetic spawn failure")
+                return MagicMock()
+
+            with (self.subTest(spawn_failure=startup_failure),
+                  patch.object(harness.subprocess, "Popen", side_effect=spawn),
+                  patch.object(harness.Worker, "read", return_value={"ready": False, "error": "synthetic"}),
+                  self.assertRaises((OSError, SystemExit))):
+                harness.Worker("worker", "model", vision=True)
+            self.assertEqual(len(roots), 1)
+            self.assertFalse(roots[0].exists())
+
+    def test_vision_image_invalidation_completes_private_prepare_and_generation(self):
+        process = MagicMock()
+        prepared_id = "b" * 32
+        requests = []
+        template = MagicMock()
+        template.render.return_value = "private synthetic image prompt"
+
+        def request(payload):
+            requests.append(payload)
+            if payload["operation"] == "prepare_image":
+                path = worker.staging_root / payload["image"]["id"]
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(path.read_bytes(), harness.synthetic_png())
+                self.assertEqual(path.stat().st_size, payload["image"]["byte_length"])
+                return {"prepared_id": prepared_id}
+            self.assertEqual(payload["operation"], "generate_image")
+            self.assertEqual(payload["prepared_id"], prepared_id)
+            return {"output_tokens": 1}
+
+        with (patch.object(harness.subprocess, "Popen", return_value=process),
+              patch.object(harness.Worker, "read", return_value={"ready": True}),
+              patch.object(harness, "load_template", return_value=({}, template)),
+              harness.Worker("worker", "model", vision=True) as worker,
+              patch.object(worker, "request", side_effect=request)):
+            result, keeps = harness.act(worker, "image_operation", [1, 2], 4096, "scope")
+            self.assertEqual(result, {"output_tokens": 1})
+            self.assertFalse(keeps)
+            self.assertEqual(list(worker.staging_root.iterdir()), [])
+            self.assertEqual([row["context_tokens"] for row in requests], [4096, 4096])
+
+    def test_failed_image_preparation_does_not_generate_and_cleans_fixture(self):
+        template = MagicMock()
+        template.render.return_value = "private prompt"
+        with (patch.object(harness.subprocess, "Popen", return_value=MagicMock()),
+              patch.object(harness.Worker, "read", return_value={"ready": True}),
+              patch.object(harness, "load_template", return_value=({}, template)),
+              harness.Worker("worker", "model", vision=True) as worker,
+              patch.object(worker, "request", return_value={"error": "invalid_image_request"}) as request):
+            self.assertEqual(worker.image_transaction(4096), {"error": "invalid_image_request"})
+            request.assert_called_once()
+            self.assertEqual(list(worker.staging_root.iterdir()), [])
+
     def test_exact_draft_selection_and_seeded_mtp_are_qualified(self):
         dense = SimpleNamespace(ready={"prefix_cache": {"key": "model-instance+mtp-selection"}})
         hybrid = SimpleNamespace(ready={"prefix_cache": {"key": "model-instance+mtp-enabled"}})

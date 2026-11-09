@@ -293,6 +293,14 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         if model_state.multimodal_failed {
             return Err(LanguageModelStreamError::InvalidMultimodal);
         }
+        if let Some(position) = model_state.text_prefix_capture_position
+            && (multimodal.is_some()
+                || model_state.has_multimodal_context()
+                || position <= model_state.tokens.len()
+                || position >= model_state.tokens.len().saturating_add(input.len()))
+        {
+            return Err(LanguageModelStreamError::InvalidMultimodal);
+        }
         if let Some(multimodal) = multimodal {
             model.preflight_multimodal_stream(input, model_state, &options)?;
             if !model.decoder.multimodal_supported()
@@ -343,10 +351,13 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         // After this point failures fence this per-request state. A fresh state
         // is required rather than reusing partially encoded image/cache rows.
         let multimodal_request = multimodal.is_some() || model_state.has_multimodal_context();
+        model_state.text_prefix_restored_position = None;
         if multimodal_request {
             model_state.multimodal_failed = true;
         }
         if let Some(multimodal) = multimodal {
+            model_state.text_prefix = None;
+            model_state.text_prefix_capture_position = None;
             model_state.multimodal_prefilled = true;
             model_state
                 .transformer_state
@@ -423,6 +434,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
 
                 let mut output_tokens = None;
                 let mut output_norm = None;
+                let mut text_prefix = None;
                 let split_logits_row = model.decoder.prefill_requires_separate_logits_row();
                 let hidden_feature_layer_indices =
                     model.speculator.as_ref().map(|speculator| speculator.hidden_feature_layer_indices());
@@ -611,9 +623,30 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                     }
 
                     model_state.tokens.extend(input_chunk);
+                    if model_state.text_prefix_capture_position == Some(model_state.tokens.len()) {
+                        let snapshot = model_state
+                            .transformer_state
+                            .capture_prefix(&*model.engine.context, &mut command_buffer)
+                            .map_err(LanguageModelStreamError::Backend)?
+                            .ok_or(LanguageModelStreamError::InvalidMultimodal)?;
+                        text_prefix = Some((model_state.tokens.len(), snapshot));
+                    }
                 }
 
-                let pending = Box::new([command_buffer.end_encoding().submit()]);
+                if model_state.text_prefix_capture_position.is_some() && text_prefix.is_none() {
+                    return Err(LanguageModelStreamError::InvalidMultimodal);
+                }
+                let submission = command_buffer.end_encoding().submit();
+                let pending: Box<[_]> = if let Some(prefix) = text_prefix {
+                    // Copies follow committed prefill writes in this command.
+                    // Publish only after every snapshot payload is complete.
+                    submission.wait_until_completed().map_err(LanguageModelStreamError::Backend)?;
+                    model_state.text_prefix = Some(prefix);
+                    model_state.text_prefix_capture_position = None;
+                    Box::new([])
+                } else {
+                    Box::new([submission])
+                };
 
                 metrics.num_prefill_forward_passes += 1;
                 metrics.num_tokens_prefilled += input.len();
@@ -656,6 +689,10 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         let (allocation_pool, context_ring, metrics, decoding_state, reuse_decode_pool) = match setup {
             Ok(setup) => setup,
             Err(error) => {
+                if model_state.text_prefix_capture_position.is_some() {
+                    model_state.text_prefix = None;
+                    model_state.multimodal_failed = true;
+                }
                 if multimodal_request {
                     fence_multimodal_state(model_state);
                 }

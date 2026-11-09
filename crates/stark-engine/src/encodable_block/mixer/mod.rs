@@ -138,6 +138,13 @@ pub trait Mixer<B: Backend>: Any + Send + Sync {
         false
     }
 
+    /// Whether accepted state can be captured and restored at a prefill
+    /// boundary. Full attention retains its KV prefix; recurrent mixers must
+    /// implement an explicit snapshot of every state buffer.
+    fn prefix_snapshot_supported(&self) -> bool {
+        self.prefix_reuse_supported()
+    }
+
     fn create_empty_state(
         &self,
         max_context_length: Option<u32>,

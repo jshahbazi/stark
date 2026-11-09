@@ -331,9 +331,9 @@ class Worker:
                 raise ChatError(str(error)) from None
             self.media = PrivateMediaStore()
             command.extend(["--vision-staging-root", str(self.media.root)])
-        else:
-            # The worker enables reuse only for models whose state can rewind.
-            command.append("--prefix-cache")
+        # Readiness enables reuse only when the loaded decoder can restore an
+        # exact text prefix, including text requests on image-capable models.
+        command.append("--prefix-cache")
         read_fd, self.cancel_fd = os.pipe()
         os.set_blocking(self.cancel_fd, False)
         telemetry_fd = None

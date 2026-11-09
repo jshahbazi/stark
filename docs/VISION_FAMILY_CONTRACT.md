@@ -44,15 +44,22 @@ reference parity or a working 35B installation. The official full BF16 artifact
 was not downloaded or converted in this implementation. See the
 [source-bound record](archive/runs/2026-11-07-qwen35-bf16-moe-images.md).
 
-Image artifacts, including version 5, keep prefix reuse disabled and use fresh
-decoder state for each request. State requiring restoration includes attention
-KV rows and positions, DeltaNet F32 recurrence, convolution ring/history state,
-and image-dependent M-RoPE positions. The image backend has no retained boundary
-snapshot/restoration contract for that complete state. Overwritten ring/history
-rows cannot be recovered by rewinding a token count. Exact boundary snapshots,
-image-position identity and artifact-bound equivalence checks are required
-before enabling reuse. The existing worker capability remains false for image
-models, including their text requests.
+Ordinary text on a Qwen vision artifact can reuse its preceding text request's
+decoder state when every owned mixer supports exact boundary restoration.
+The worker retains a snapshot of DeltaNet F32 recurrence and convolution history
+at a complete non-final 1,024-token prefill boundary, alongside the retained
+attention KV rows and positions. Only the entire saved boundary can be reused;
+scope, context and loaded model identity must match. Sampling is reseeded for
+each request. The [generation contract](GENERATION.md#prefix-reuse) defines
+publication, invalidation and artifact-specific qualification requirements.
+
+Image requests still use fresh state and clear retained text prefixes. Their
+image-dependent M-RoPE positions and multimodal state are excluded from text
+snapshot capture and restoration. Gemma 3/4 sliding KV rings remain unsupported
+for reuse because overwritten ring rows have no snapshot/restore implementation.
+No artifact inherits numerical qualification from another checkpoint, precision
+or conversion layout. Prefix reuse does not enable MTP; image conversion omits
+its predictor weights pending separate qualification.
 
 ## Config-derived family profile
 

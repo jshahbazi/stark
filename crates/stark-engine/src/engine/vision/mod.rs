@@ -32,7 +32,10 @@ use crate::{
         language_model::{
             EngineLoadLanguageModelError, LanguageModel, SpeculatorPolicy,
             multimodal::{ImageGrid, ImageTokenIds, MultimodalPrefill, ProjectedImage},
-            state::{LanguageModelCreateEmptyStateError, LanguageModelState},
+            state::{
+                LanguageModelCreateEmptyStateError, LanguageModelRewindStateError, LanguageModelState,
+                TextPrefixRestoreError,
+            },
             stream::{LanguageModelStream, LanguageModelStreamError, LanguageModelStreamOptions},
         },
     },
@@ -114,6 +117,8 @@ enum NativeVisionFailure<B: Backend> {
     Stream(#[from] LanguageModelStreamError<B>),
     #[error("Native vision state creation failed")]
     State(#[from] LanguageModelCreateEmptyStateError<B>),
+    #[error("Native vision prefix state is unsupported")]
+    Rewind(LanguageModelRewindStateError),
 }
 
 /// Content-free error category. Instance fencing is reported by the loaded
@@ -144,7 +149,7 @@ impl<B: Backend> NativeVisionError<B> {
             | NativeVisionFailure::Parameters(_) => NativeVisionErrorKind::Artifact,
             NativeVisionFailure::Tower(_) | NativeVisionFailure::Backend(_) => NativeVisionErrorKind::Backend,
             NativeVisionFailure::Stream(_) => NativeVisionErrorKind::Stream,
-            NativeVisionFailure::State(_) => NativeVisionErrorKind::State,
+            NativeVisionFailure::State(_) | NativeVisionFailure::Rewind(_) => NativeVisionErrorKind::State,
         }
     }
 
@@ -202,6 +207,19 @@ native_vision_error_from!(Parameters, ParameterLoaderError<B>);
 native_vision_error_from!(Tower, VisionTowerError<B>);
 native_vision_error_from!(Stream, LanguageModelStreamError<B>);
 native_vision_error_from!(State, LanguageModelCreateEmptyStateError<B>);
+native_vision_error_from!(Rewind, LanguageModelRewindStateError);
+
+fn finish_text_prefix_restore<B: Backend>(
+    result: Result<(), TextPrefixRestoreError>,
+    failed: &mut bool,
+) -> Result<(), NativeVisionError<B>> {
+    result.map_err(|error| {
+        if matches!(error, TextPrefixRestoreError::RestoreFailed) {
+            *failed = true;
+        }
+        LanguageModelRewindStateError.into()
+    })
+}
 
 /// Request-owned CPU patches, produced once by the admitted model's processor.
 /// This object has no serialization, cloning, Debug, or embedding accessors.
@@ -597,6 +615,17 @@ impl<B: Backend> VisionLanguageModel<B> {
         self.language_model.generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)
     }
 
+    /// Decoder admission when a scoped text request also retains one
+    /// recurrent-state snapshot. Image and unscoped requests do not allocate it.
+    pub fn decoder_text_prefix_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        self.language_model.generation_memory_bytes_with_text_prefix(input_tokens, context_tokens, max_new_tokens)
+    }
+
     pub fn recommended_context_length(&self) -> Option<u32> {
         self.language_model.recommended_context_length()
     }
@@ -607,6 +636,45 @@ impl<B: Backend> VisionLanguageModel<B> {
 
     pub fn default_stream_options(&self) -> LanguageModelStreamOptions {
         self.language_model.default_stream_options()
+    }
+
+    /// Whether text-only requests on this loaded image artifact can restore a
+    /// retained decoder prefix. Image-prefilled states are never reusable.
+    pub fn prefix_reuse_supported(&self) -> bool {
+        !self.failed && self.language_model.text_prefix_snapshot_supported()
+    }
+
+    /// Retain the last non-final text prefill boundary for the next request.
+    /// A zero position disables capture for prompts shorter than one chunk.
+    pub fn prepare_text_prefix_capture(
+        &mut self,
+        state: &mut LanguageModelState<B>,
+        position: usize,
+    ) -> Result<(), NativeVisionError<B>> {
+        if self.failed {
+            return Err(InvalidInput("invalid text prefix capture state").into());
+        }
+        self.language_model.prepare_text_prefix_capture(state, position)?;
+        Ok(())
+    }
+
+    /// Rewind a completed text-only request state through the guarded wrapper.
+    /// The decoder performs loaded-instance, cache-layout, context and chunk
+    /// boundary checks; this wrapper additionally rejects image-prefilled state.
+    pub fn rewind_state(
+        &mut self,
+        state: &mut LanguageModelState<B>,
+        prefix_length: usize,
+        max_context_length: Option<u32>,
+        sampling_seed: u64,
+    ) -> Result<(), NativeVisionError<B>> {
+        if self.failed {
+            return Err(InvalidInput("native vision model is fenced").into());
+        }
+        finish_text_prefix_restore(
+            self.language_model.restore_text_prefix(state, prefix_length, max_context_length, sampling_seed),
+            &mut self.failed,
+        )
     }
 
     pub fn create_empty_state(
@@ -902,7 +970,7 @@ impl<B: Backend> VisionLanguageModel<B> {
         }
     }
 
-    /// Fresh-request text execution using the same exact loaded artifact.
+    /// Text execution from fresh state or a guarded, restored text-only prefix.
     /// The underlying language model is not exposed as a mutable escape hatch.
     pub fn stream<'a>(
         &'a mut self,
@@ -913,7 +981,11 @@ impl<B: Backend> VisionLanguageModel<B> {
         if self.failed {
             return Err(InvalidInput("native vision model is fenced").into());
         }
-        self.language_model.preflight_multimodal_stream(tokens, state, &options)?;
+        if state.tokens().is_empty() {
+            self.language_model.preflight_multimodal_stream(tokens, state, &options)?;
+        } else {
+            self.language_model.preflight_restored_text_stream(tokens, state, &options)?;
+        }
         match self.language_model.stream(tokens, state, options) {
             Ok(stream) => Ok(stream.with_failure_fence(&mut self.failed)),
             Err(error) => {
