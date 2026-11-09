@@ -18,7 +18,7 @@ text state. Completion is per artifact, configuration and backend.
 | --- | --- | --- |
 | Qwen BF16 0.8B | Corrected MTP0 dispatch; 48/48 image-loaded and 26/26 text-only lifecycle checks; headed/headless and loading-mode MTP0/3 short timing passes. Source sigmoid/SiLU candidate passes stages 1/2 exactly | Stage 0 hidden maximum remains 0.09375 against unchanged 0.0625 limit. Targeted test-head projection reduction fix is under review; no production arithmetic change |
 | Qwen affine 0.8B / 35B MoE | Physical-256 prefill and completion-order fixes built. Actual 35B 1026-token cache 4/4 passes and matches old-worker output; sampled footprint 30.9 to 25.9 GB. Quick text-only/image-loaded comparison 39.25/39.42 tokens/s | Original 1792-token matrix remains stopped, not passed. Short comparison covers this affine artifact only; full BF16 MoE and executable MoE head remain unqualified |
-| Gemma | G4AP05 passes 15/15 assistant steps through 1792. Staged worker 136 unit tests, 9/9 smoke checks and 37/37 normal image-loaded lifecycle checks pass with actual draft acceptance/rejection, cancellation, stop and image invalidation | Matching text-only lifecycle retry and quick comparison pending. A shell-to-native identity transition stopped the first text-only launch before model load; direct native spawn fixes the adapter. Default serving MTP remains disabled pending completion |
+| Gemma | G4AP05 passes 15/15 assistant steps through 1792. Staged worker 136 unit tests, 9/9 smoke checks, 37/37 image-loaded and 34/34 text-only lifecycle checks pass; all 34 common outputs agree | Quick comparison stopped on the first text MTP3 assertion, before a valid speed result; preserve exact failed aggregate before diagnosing. Default serving MTP remains disabled pending completion |
 | GLM | `b76f560d` builds and accounting controls pass; tiny mapping control passes sixty blits; staged owned-buffer Control/Q5 initialization passes without pressure | Full functional run hit a hard compression limit; neither tiny test reproduces it. Audit actual GGUF mapping/Metal registration geometry before another full load. Full-model image/cache/MTP/performance remain held |
 
 The installed app was closed without implicitly reopening it. The coordinator
@@ -899,3 +899,15 @@ GLM's small mapping contrast remains unbuilt and held. Sparse fixtures were
 replaced by fully materialized high-entropy private files before freezing the
 minimal owned/dedicated/full contrast. No full model retry or further variants
 are authorized by this checkpoint.
+
+Gemma's corrected text-only lifecycle passes 34/34 with all common output hashes
+matching the image-loaded run, receipt
+`96c0bf84619f91294c48a91c1b8a6d1e15b01061ae2850b45eb3be47f18faa77`.
+The quick 64-token comparison then stops on its first text-only MTP3 assertion;
+receipt `f46eeff9f461d9c2fc699a28d2245e8285e73dc9cb8ffc5c5e42b2f40774a42b`.
+Its guardian passes and all workers close, with zero paging/compression/swap.
+Because the harness asserted before saving the failed row, the precise failing
+predicate is not established. Retain the failed receipt, save aggregate
+predicates before assertion, and diagnose one short text pair. No performance
+comparison is claimed. Qwen owns the next bounded head check; Gemma and GLM hold
+native execution until that window closes.
