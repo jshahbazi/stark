@@ -18,7 +18,7 @@ text state. Completion is per artifact, configuration and backend.
 | --- | --- | --- |
 | Qwen BF16 0.8B | Corrected MTP0 dispatch; 48/48 image-loaded and 26/26 text-only lifecycle checks; prior loading-mode MTP0/3 timing passes. Targeted MLX head projection reduction now passes the complete original numerical gate | Passing correction is still test-selected; apply the head-only production policy, then repeat actual cache and quick paired text/MTP checks. Ordinary target/MTP0 graph remains unchanged |
 | Qwen affine 0.8B / 35B MoE | Physical-256 prefill and completion-order fixes built. Actual 35B 1026-token cache 4/4 passes and matches old-worker output; sampled footprint 30.9 to 25.9 GB. Quick text-only/image-loaded comparison 39.25/39.42 tokens/s | Original 1792-token matrix remains stopped, not passed. Short comparison covers this affine artifact only; full BF16 MoE and executable MoE head remain unqualified |
-| Gemma | G4AP05 passes 15/15 assistant steps through 1792. Staged worker 136 unit tests, 37/37 image-loaded and 34/34 text-only short lifecycle checks pass; 31 common non-null hashes agree | The 64-token MTP continuation diverges from ordinary greedy output. Reviewed existing-serial-verifier fix awaits build/replay. Default context/provisioning/enablement remain open |
+| Gemma | Serial target-verifier correction restores exact MTP0/3 output on fourteen 64-token text requests and passes 37/37 image-loaded lifecycle checks, with actual drafts and zero image drafts | Paired timing remains pending: first corrected text run has background CPU contamination and an intentional-close telemetry race. Fix the close race prospectively, then collect one comparison. Default context/provisioning/enablement remain open |
 | GLM | Accounting fix builds and controls pass. Three fresh owned/dedicated/full private mapping arms pass with identical outputs, zero compression/swap and drained owners; result pushed in `32726272` | Contrast identifies no ownership fix. Stop diagnostics here; full 109-GB model's compression pressure remains a concrete blocker. Full-model image/cache/MTP/performance remain unqualified |
 
 The installed app was closed without implicitly reopening it. The coordinator
@@ -960,3 +960,30 @@ absent from the dedicated arm, so this result justifies no production ownership
 change or full-model retry. Investigation stops here. Branch `32726272` is
 pushed and clean; all GLM processes are closed. Gemma owns the serial-verifier
 build and checks; Qwen prepares its production head correction in source.
+
+Gemma's reviewed serial correction builds into worker
+`e45092162cf3a14c799a99fdd0ee80f8d8c939b24008a9c88c6e8fb2a92a97ea`.
+All fourteen warm/measured 64-token text requests now agree exactly across MTP0
+and MTP3; drafts remain active (34/85 accepted). The text timing attempt is
+invalid, receipt
+`384446c957b390ca2ab2d8eeb4f92ec4af00f534d310df5a099708389f026dee`:
+background CPU crosses the fixed 200% screen and the watcher races intentional
+worker shutdown after 157 positive samples. Preserve that failure. Its
+independent image-loaded lifecycle replay passes 37/37, receipt
+`08bbfe482109ee1fc245dc599d56c2b706b9176abf710a1d20c43fe03a5c3463`,
+with final guardian/drain/join passing and zero paging/compression/swap. This
+includes actual drafts, mid-generation cancellation, seeded rejection and hot
+cache, stopping/cap recovery and image invalidation. A prospective close-only
+watcher correction must retain fatal missing telemetry during active requests;
+one paired timing collection follows, with any CPU contamination reported.
+
+Qwen's production head policy patch is frozen at
+`30d911b6315c9b53a8de70f979520e879a837d38decc4637070d8f07e430d68c`
+in `runtime/qwen-production-head-source-03.patch` in its implementation worktree.
+Root review restricts selection to the qualified full-BF16 dense geometry,
+target and head storage, and incoming Legacy numerical policy. Other incoming
+policies, mixed-affine targets and Lily remain on their existing path. Head
+F32 scratch is charged by each allocator size class. Qwen owns the current
+production engine/worker build, followed by the numerical gate without test
+selectors and existing actual cache/quick timing checks. Gemma holds model
+execution while preparing its small close-race correction.
