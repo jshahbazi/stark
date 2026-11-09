@@ -258,3 +258,41 @@ The receipt `runtime/bf16-08b-head-bench-mtp0-02.json` SHA-256 is
 `a5154274e9e9d4f9830de4c4693460424b667d8f8a194bd99308c52c8f7d9d7c`.
 Independent numerical head replay and the complete affine MoE cache matrix
 remain open at this checkpoint.
+
+### Independent head numerical replay remains open
+
+The pinned MLX replay exposed a real failed gate after the speed/cache checks.
+Target normalization is bit-exact, all six compared rows agree on the top choice
+and logit maximum error is at most 0.15625 with relative RMS below 1%. However,
+normalized hidden-feature maximum errors 0.25/0.125/0.140625 exceed the registered
+0.0625 limit. The tolerance is unchanged; this is not a numerical parity pass.
+The agent is investigating BF16 norm-gain folding and eager operation boundaries.
+Normal MTP0 cache/speed evidence remains bound to the tested binary, while any
+head precision fix requires new source/artifact-bound numerical controls.
+Private receipt `runtime/qwen-final-head-gates-01.json` SHA-256:
+`3626be445f0ec47d288fb127fc707fabcb25da62daac34beabc13511c8810dc2`.
+
+### Continued resource coordination and GLM preparation
+
+The first corrected affine MoE matrix attempt was stopped before case zero by
+the continuous foreign-worker screen when installed Stark loaded Lily again.
+Only the owned 20.72 GB MoE worker was terminated, with zero paging. This is
+resource-deferred, not a MoE pass or model failure. Receipt SHA-256:
+`65f9afac8e10ea71619f3bb7c31bf4c7074bd2e7bc3efd19bbc04f03f97b204d`.
+The coordinator invoked the app's normal Quit control and observed its exit.
+A new idle app process subsequently appeared; relaunch ownership is under
+read-only investigation. Source/CPU work continues without hardware timing.
+
+GLM's bounded accounting fix was pushed as `b76f560d`. Eight source-extracted
+Rust CPU arithmetic controls pass; full native compilation remains required.
+The reviewed owner-only watchdog now enforces 32 GiB available/RSS/footprint and
+wired-growth limits, less than 1 GiB compressor growth and no pageout/swap growth.
+Five actual tiny child-process cleanup controls passed and reaped every child,
+including cancellation, termination and constructor/base-close failure. Smoke
+receipt SHA-256:
+`050a41d9b8cf7b52d6de5a0aed060b60d81ede465c8ebfdeda4a3bb63353527a`.
+This prepares safe bounded execution; it is not a full-model execution result.
+
+Qwen explicitly released its model/build slot to continue CPU-only numerical
+diagnosis. Gemma owns the next exclusive native build slot for its longer-context
+and transactional batched-verification candidate. GLM's native build follows.
