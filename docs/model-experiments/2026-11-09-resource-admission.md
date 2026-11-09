@@ -184,3 +184,8 @@ paths retain the source-review limitations documented above.
 - 2026-11-09: independent follow-up audit completed. The native-prefix and
   non-Lily conservative inventory findings remain source-review limitations;
   the three confirmed policy ceilings are being corrected before packaging.
+- 2026-11-09: [ADM-04](2026-11-09-non-lily-admission.md) subsequently corrected
+  generic and non-Lily resident-allocation overestimates and recorded final
+  review, full Metal tests and bounded artifact controls. Its source result is
+  separate from ADM-03's installed build; remaining conservative workspace and
+  unqualified artifact paths are listed in that follow-up.
