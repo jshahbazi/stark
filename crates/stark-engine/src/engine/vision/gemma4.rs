@@ -30,6 +30,8 @@ use crate::{
     parameters::ParameterLoader,
 };
 
+#[cfg(all(test, backend = "metal"))]
+mod assistant_tests;
 mod decoder_contract;
 mod flash;
 #[cfg(test)]

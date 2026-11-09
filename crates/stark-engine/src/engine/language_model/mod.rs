@@ -29,6 +29,7 @@ use crate::{
 pub mod dense_mtp;
 #[cfg(all(test, backend = "metal"))]
 mod dense_mtp_tests;
+pub mod gemma4_assistant;
 pub(crate) mod multimodal;
 #[cfg(test)]
 mod multimodal_tests;

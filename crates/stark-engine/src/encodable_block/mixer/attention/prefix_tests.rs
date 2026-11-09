@@ -105,3 +105,160 @@ fn ring_prefix_owned_payload_metal() {
     round_trip::<crate::backends::metal::Metal>(false);
     round_trip::<crate::backends::metal::Metal>(true);
 }
+
+fn committed_external_view<B: Backend>() {
+    use crate::{
+        backends::common::kernel::{AttentionArguments, AttentionKernel, AttentionKernelConfig},
+        encodable_block::mixer::attention::CommittedAttentionKV,
+    };
+    let context = B::Context::new().unwrap();
+    for ring in [false, true] {
+        let rows = 4 + ATTENTION_SUFFIX_CAPACITY;
+        let mut live = AttentionState::<B> {
+            element_dim: 64,
+            data_type: DataType::F32,
+            cache: if ring {
+                KVCacheState::ring(4)
+            } else {
+                KVCacheState::full()
+            },
+            capacity_elements: rows,
+            is_sparse: false,
+            keys: Box::new(context.create_buffer(rows as usize * 256).unwrap()),
+            values: Box::new(context.create_buffer(rows as usize * 256).unwrap()),
+            kv_cache_update: <B::Kernels as Kernels>::KVCacheUpdateKernel::new(&context, DataType::F32).unwrap(),
+        };
+        let position = if ring {
+            15
+        } else {
+            3
+        };
+        if ring {
+            live.cache.accept(&(0..13).collect::<Vec<_>>());
+            live.cache.accept(&[0]);
+            live.cache.accept(&[0]);
+        } else {
+            live.cache.accept(&[0, 1, 2]);
+        }
+        let retained = live.view().prefix_len() as usize;
+        buffer_mut(&mut live.keys).copyin(&vec![0.0f32; rows as usize * 64]);
+        // A phantom suffix read would ingest 1000 instead of the final real
+        // committed row. Distinct rows also expose incorrect ring traversal.
+        buffer_mut(&mut live.values).copyin(&vec![1000.0f32; rows as usize * 64]);
+        let actual: Vec<f32> = (0..retained).flat_map(|i| std::iter::repeat_n((i + 1) as f32, 64)).collect();
+        buffer_mut(&mut live.values).subrange_mut(..retained * 256).copyin(&actual);
+        let view = CommittedAttentionKV::new(&live, 7, position).unwrap();
+        assert_eq!(view.owner_layer(), 7);
+        assert_eq!(view.position(), position);
+        assert_eq!(view.retained_rows(), retained as u32);
+        assert_eq!(view.query_cache_view().prefix_len(), retained as u32 - 1);
+        assert_eq!(
+            view.scratch_bytes(),
+            Some(if ring {
+                retained * 512
+            } else {
+                0
+            })
+        );
+        assert!(CommittedAttentionKV::new(&live, 7, 0).is_none());
+        if !ring {
+            assert!(CommittedAttentionKV::new(&live, 7, position + 1).is_none());
+        }
+        let mut command = context.create_command_buffer(None, None).unwrap();
+        let mut queries = context.create_buffer(256).unwrap();
+        queries.copyin(&[0.0f32; 64]);
+        let kernel = <B::Kernels as Kernels>::AttentionKernel::new(
+            &context,
+            AttentionKernelConfig {
+                head_dim: 64,
+                num_groups: 1,
+                num_q_heads: 1,
+                has_sinks: false,
+                is_kv_cache_ring: ring,
+                is_causal: true,
+                sliding_window_size: ring.then_some(4),
+                scale: Some(1.0),
+                data_type: DataType::F32,
+                materialize_prefill_scores: false,
+                source_bf16_prefill: false,
+            },
+        )
+        .unwrap();
+        // Scratch owners must remain live through the submission using them.
+        // A second command must not borrow scratch from a dropped first pool.
+        let temporal = if ring {
+            Some(view.linearize_ring(&mut command).unwrap())
+        } else {
+            None
+        };
+        let mut values_readback = if ring {
+            Some(context.create_buffer(retained * 256).unwrap())
+        } else {
+            None
+        };
+        let output = if let Some((keys, values)) = &temporal {
+            command.encode_copy(values, values_readback.as_mut().unwrap());
+            kernel
+                .encode(
+                    AttentionArguments {
+                        queries: &queries,
+                        keys,
+                        values,
+                        suffix_length: 1,
+                        trie: None::<&B::ConstantBuffer>,
+                        sinks: None,
+                        cache: view.query_cache_view(),
+                        image_span: None,
+                    },
+                    &mut command,
+                )
+                .unwrap()
+        } else {
+            kernel
+                .encode(
+                    AttentionArguments {
+                        queries: &queries,
+                        keys: live.keys.as_ref(),
+                        values: live.values.as_ref(),
+                        suffix_length: 1,
+                        trie: None::<&B::ConstantBuffer>,
+                        sinks: None,
+                        cache: view.query_cache_view(),
+                        image_span: None,
+                    },
+                    &mut command,
+                )
+                .unwrap()
+        };
+        let mut result = context.create_buffer(256).unwrap();
+        command.encode_copy(&output, &mut result);
+        command.end_encoding().submit().wait_until_completed().unwrap();
+        if let Some(values_readback) = values_readback {
+            let offset = view.view.ring_params().unwrap().ring_offset as usize;
+            let expected: Vec<f32> =
+                (0..retained).flat_map(|i| std::iter::repeat_n(((i + offset) % retained + 1) as f32, 64)).collect();
+            assert!(values_readback.as_slice::<f32>() == expected);
+        }
+        let expected_mean = (retained + 1) as f32 / 2.0;
+        let observed = result.as_slice::<f32>();
+        let error = observed.iter().map(|&v| (v - expected_mean).abs()).fold(0.0f32, f32::max);
+        assert!(
+            observed.iter().all(|v| v.is_finite()) && error < 1e-5,
+            "committed query ring={ring}, expected={expected_mean}, max_error={error}, first={}",
+            observed[0]
+        );
+        assert_eq!(live.view().prefix_len(), retained as u32);
+    }
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn committed_external_kv_excludes_phantom_suffix_cpu() {
+    committed_external_view::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn committed_external_kv_excludes_phantom_suffix_metal() {
+    committed_external_view::<crate::backends::metal::Metal>();
+}

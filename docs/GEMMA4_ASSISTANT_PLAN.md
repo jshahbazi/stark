@@ -1,8 +1,11 @@
 # Gemma 4 assistant conversion and native text MTP plan
 
 Status: source metadata and native interface gaps inspected; strict companion
-conversion is implemented on the continuation branch and awaits execution.
-Assistant execution is unimplemented. Gemma 4 has upstream MTP assistants, and remains
+conversion and actual E2B draft execution are implemented on the continuation
+branch. Three real proposals, fixed target position, ordinary target-root
+agreement and drained cancellation/retry pass. The independent masked-logit
+numerical gate fails and remains open. Worker MTP remains unimplemented. Gemma 4 has upstream
+MTP assistants, and remains
 an open Stark implementation task. Image loading must preserve future text MTP;
 image requests keep zero drafts. Follow [model onboarding](MODEL_ONBOARDING.md)
 and the [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md).
@@ -79,6 +82,14 @@ has passed yet. The pinned Transformers 5.15.1 candidate generator and assistant
 confirm that all four layers borrow target KV without maintaining predictor KV,
 and all proposals within a round use the same absolute rotary position. The
 target's final normalized activation and embedding feed the first proposal;
-later proposals chain the assistant's post-projected activation. The current
+later proposals chain the assistant's post-projected activation. The continuation
+contains native four-layer/pre/post-projection and centroid-mask components,
+plus a target frame that captures only the final normalized prefill activation.
+These compile and execute three real E2B proposals with the image tower resident.
+The first source oracle passes root-embedding equality, first-proposal equality,
+feedback and centroid bounds, but fails the masked-logit bound; no tolerance
+was relaxed. See the [continuation attempt](model-experiments/2026-11-09-gemma-next-image-parity.md)
+for separate passed and failed controls. Target verification/rollback, head-aware caching,
+worker/default loading and useful MTP speed remain open. The current
 [cache follow-up](benchmarks/2026-11-09-gemma4-warmed-cache.md) addresses normal
 text prefix execution while this assistant work remains outstanding.

@@ -2,7 +2,7 @@
 use crate::backends::common::kernel::AttentionPrepareKVOnlyKernel;
 use crate::{
     backends::common::{
-        Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding,
+        Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding,
         kernel::{AttentionArguments, AttentionKernel, AttentionPrepareKernel, SigmoidGateKernel},
     },
     encodable_block::{
@@ -37,6 +37,69 @@ impl<B: Backend> LinearProjection<B> {
 }
 
 impl<B: Backend> Attention<B> {
+    /// One external-assistant query reads exactly the committed target rows.
+    /// This does not update target KV or admit partial ring speculation.
+    /// The caller binds model identity and builds RoPE at `target.position()`.
+    pub fn attend_committed_target(
+        &self,
+        hidden: B::ScratchBuffer,
+        precalculated_rope: Option<&PrecalculatedRoPE<B>>,
+        target: &super::CommittedAttentionKV<'_, B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        let invalid = || crate::backends::common::InvalidInput("invalid committed target KV query");
+        let required = self.num_groups.checked_mul(self.head_dim).ok_or_else(invalid)?;
+        if self.num_kv_heads.is_some()
+            || self.gate_kernel.is_some()
+            || self.sinks.is_some()
+            || target.state.element_dim != required
+            || target.state.data_type != self.data_type
+            || hidden.size() != self.input_dim as usize * self.data_type.size_in_bytes()
+            || self.max_rope_length.is_some() != precalculated_rope.is_some()
+            || self.max_rope_length.is_some_and(|maximum| target.position() >= maximum)
+            || self.ring_capacity.is_some() != target.view.ring_params().is_some()
+            || self.ring_capacity.is_some_and(|window| target.retained_rows() > window)
+        {
+            return Err(invalid().into());
+        }
+        let projected = self.projection.project(hidden, 1, command)?;
+        let queries = self.prepare_queries(&projected, precalculated_rope, 1, command)?;
+        let cache = target.query_cache_view();
+        let temporal = target.view.ring_params().is_some().then(|| target.linearize_ring(command)).transpose()?;
+        let output = if let Some((keys, values)) = &temporal {
+            // The assistant's current position is fixed. Copy at most one
+            // local window to temporal order; full target context stays shared.
+            self.encode_core(
+                AttentionArguments {
+                    queries: &queries,
+                    keys,
+                    values,
+                    suffix_length: 1,
+                    trie: None::<&B::ConstantBuffer>,
+                    sinks: None,
+                    cache,
+                    image_span: None,
+                },
+                command,
+            )?
+        } else {
+            self.encode_core(
+                AttentionArguments {
+                    queries: &queries,
+                    keys: target.state.keys.as_ref(),
+                    values: target.state.values.as_ref(),
+                    suffix_length: 1,
+                    trie: None::<&B::ConstantBuffer>,
+                    sinks: None,
+                    cache,
+                    image_span: None,
+                },
+                command,
+            )?
+        };
+        self.out_projection.encode(output, 1, command)
+    }
+
     pub(crate) fn supports_cache_only(&self) -> bool {
         self.num_kv_heads.is_some() && self.ring_capacity.is_none()
     }

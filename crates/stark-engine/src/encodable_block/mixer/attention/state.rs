@@ -299,6 +299,14 @@ impl<B: Backend> MixerStateSnapshot<B> for AttentionRingPrefix<B> {
 }
 
 impl<B: Backend> AttentionState<B> {
+    pub(super) fn committed_view(
+        &self,
+        context_length: u32,
+    ) -> Option<KVCacheView> {
+        let view = self.view();
+        (context_length > 0 && view.prefix_len() == self.cache.required_prefix_len(context_length)).then_some(view)
+    }
+
     pub fn view(&self) -> KVCacheView {
         self.cache.view()
     }

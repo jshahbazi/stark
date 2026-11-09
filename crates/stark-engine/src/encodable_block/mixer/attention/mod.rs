@@ -30,19 +30,23 @@ use crate::{
     utils::maybe_mut::MaybeMut,
 };
 
+mod committed;
 mod mode;
 mod qkv_norm;
 pub(crate) mod reference;
 mod state;
 
+pub use committed::CommittedAttentionKV;
 pub use state::{ATTENTION_SUFFIX_CAPACITY, AttentionState, KVCacheView};
 
 pub mod rope;
 
 pub struct Attention<B: Backend> {
     image_attention_policy: ImageAttentionPolicy,
+    input_dim: u32,
     head_dim: u32,
     num_q_heads: u32,
+    num_groups: u32,
     num_kv_heads: Option<u32>,
     ring_capacity: Option<u32>,
     max_rope_length: Option<u32>,
@@ -266,9 +270,11 @@ impl<B: Backend> Attention<B> {
         Ok((
             Self {
                 image_attention_policy: config.image_attention_policy,
+                input_dim: hidden_dim,
                 head_dim,
                 num_q_heads,
                 num_kv_heads,
+                num_groups,
                 ring_capacity,
                 max_rope_length,
                 data_type,

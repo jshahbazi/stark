@@ -58,8 +58,11 @@ image-dependent M-RoPE positions and multimodal state are excluded from text
 snapshot capture and restoration. The Gemma 4 image worker separately restores
 owned sliding-ring K/V payload and its offset, length and traversal origin at
 the same 1,024-token text boundary. Shared-KV layers reuse their owning layer's
-snapshot. Gemma 3 worker integration remains unsupported; the shared ring
-primitive alone does not qualify its complete image worker. See the
+snapshot. Gemma 3 now uses the same model-bound worker capture/restore contract,
+including suffix-only prefill and an actual-prefill-count invariant. Its exact
+4B artifact is awaiting execution in the
+[continuation attempt](model-experiments/2026-11-09-gemma-next-image-parity.md);
+the shared ring primitive alone does not qualify its complete image worker. See the
 [Gemma 4 attempt](model-experiments/2026-11-09-gemma4-image-text-parity.md)
 for exact-artifact checks and remaining scope.
 No artifact inherits numerical qualification from another checkpoint, precision
