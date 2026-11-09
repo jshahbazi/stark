@@ -2,6 +2,24 @@
   "apache_2_0_reference_url": "https://raw.githubusercontent.com/madsmtm/objc2/ee9a7ada2131f5944b8750428e265c15632f2a19/LICENSE-APACHE.txt",
   "historical_overview_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
   "source_adaptations": {
+    "mlx-bf16-head-sigmoid-experiment": {
+      "license": "MIT",
+      "license_file": "mlx-LICENSE",
+      "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
+      "repository": "https://github.com/ml-explore/mlx",
+      "source_revision": "36969c094354086e15d2a327a9c50feb20b9cf11",
+      "source_files": [
+        {
+          "path": "mlx/backend/metal/kernels/unary_ops.h",
+          "sha256": "af710925f066b029f67289a0bbe4edd0ba6c5e7f51c9df609abb111216fa963f"
+        },
+        {
+          "path": "mlx/backend/metal/kernels/bf16_math.h",
+          "sha256": "1f374f8380f756eb89acf6a847741cb8fecbe642945e159fb6208d804cc06496"
+        }
+      ],
+      "adaptation": "Explicit BF16 sigmoid exponential, denominator, reciprocal, complement and final product boundaries. Only the cfg(test) Qwen head experiment selects the new attention-gate mode; existing production arithmetic policies remain unchanged. No MLX runtime dependency."
+    },
     "pytorch-gemma3-uint8-antialias-resize": {
       "license": "BSD-3-Clause",
       "license_file": "pytorch-LICENSE",

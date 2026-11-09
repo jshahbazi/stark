@@ -109,6 +109,36 @@ impl<B: Backend> QwenMtp<B> {
             return Err(QwenMtpError::Invalid);
         }
         #[cfg(test)]
+        let validation_transformer_config = if std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some() {
+            // This causal experiment combines reference head linears with the
+            // source's BF16 sigmoid/SiLU boundaries. Never alter target policy,
+            // normalization, attention or artifact metadata to repair a gate.
+            if std::env::var_os("STARK_TEST_HEAD_REFERENCE_LINEARS").is_none()
+                || std::env::var_os("STARK_TEST_HEAD_REFERENCE_FUSION").is_some()
+                || tree.numerical_profile() != crate::parameters::NumericalProfile::Legacy
+            {
+                return Err(QwenMtpError::Invalid);
+            }
+            let mut transformer = config.transformer_config.clone();
+            let crate::config::mlp::AnyMLPConfig::DenseMLPConfig(mlp) = &mut transformer.layer_configs[0].mlp_config
+            else {
+                return Err(QwenMtpError::Invalid);
+            };
+            let crate::config::activation::AnyActivation::SiLU(silu) = &mut mlp.activation else {
+                return Err(QwenMtpError::Invalid);
+            };
+            if silu.alpha != 1.0 {
+                return Err(QwenMtpError::Invalid);
+            }
+            silu.materialize_sigmoid = true;
+            Some(transformer)
+        } else {
+            None
+        };
+        let transformer_config = &config.transformer_config;
+        #[cfg(test)]
+        let transformer_config = validation_transformer_config.as_ref().unwrap_or(transformer_config);
+        #[cfg(test)]
         let validation_tree = if std::env::var_os("STARK_TEST_HEAD_REFERENCE_LINEARS").is_some() {
             if std::env::var_os("STARK_TEST_HEAD_REFERENCE_FUSION").is_some()
                 || tree.numerical_profile() != crate::parameters::NumericalProfile::Legacy
@@ -173,7 +203,7 @@ impl<B: Backend> QwenMtp<B> {
                 context,
                 None,
                 DataType::BF16,
-                &config.transformer_config,
+                transformer_config,
                 &tree.subtree("transformer"),
             )?,
             #[cfg(test)]

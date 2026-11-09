@@ -248,9 +248,25 @@ impl<B: Backend> Attention<B> {
         )
         .map_err(AttentionNewError::Backend)?;
 
+        #[cfg(test)]
+        let source_bf16_gate = parameter_tree.numerical_profile()
+            == crate::parameters::NumericalProfile::QwenMtpReferenceLinears
+            && std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some();
+        #[cfg(not(test))]
+        let source_bf16_gate = false;
+        if source_bf16_gate && (data_type != DataType::BF16 || config.reference_bf16) {
+            return Err(crate::backends::common::InvalidInput("conflicting head gate experiment policies").into());
+        }
         let gate_kernel = config
             .has_gate
-            .then(|| <B::Kernels as Kernels>::SigmoidGateKernel::new(context, data_type, config.reference_bf16))
+            .then(|| {
+                <B::Kernels as Kernels>::SigmoidGateKernel::new(
+                    context,
+                    data_type,
+                    config.reference_bf16,
+                    source_bf16_gate,
+                )
+            })
             .transpose()
             .map_err(AttentionNewError::Backend)?;
 

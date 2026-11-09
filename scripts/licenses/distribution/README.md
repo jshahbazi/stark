@@ -10,6 +10,11 @@ are collected explicitly because the Cargo registry inventory excludes path
 dependencies. The distribution source manifest hashes the vendored core and
 these notices alongside the other owned source files.
 
+`mlx-LICENSE` preserves the Apple MIT terms for the source-bound BF16 sigmoid
+experiment. `mlx-bf16-head-sigmoid-experiment` in the manifest pins the MLX
+unary and BF16 math sources. The experiment selects source rounding boundaries
+only in a test head; it does not change the default inference precision policy.
+
 `pytorch-LICENSE` is the exact PyTorch license file from tag `v2.14.1`, resolved
 to commit `5c4886908584029761b579af026dcfb627c84070`. It is included because the
 vision-only BF16 LayerNorm variance implementation adapts the logical Welford
