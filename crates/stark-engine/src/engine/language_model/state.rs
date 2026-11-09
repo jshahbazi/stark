@@ -77,6 +77,14 @@ impl<B: Backend> LanguageModelState<B> {
 #[error("State cannot be rewound to this prefix")]
 pub struct LanguageModelRewindStateError;
 
+/// Guard rejection leaves the loaded instance usable. A failure after entering
+/// restoration also fences the public vision wrapper's loaded instance.
+#[derive(Debug)]
+pub(crate) enum TextPrefixRestoreError {
+    Invalid,
+    RestoreFailed,
+}
+
 #[derive(Debug, Error)]
 pub enum LanguageModelCreateEmptyStateError<B: Backend> {
     #[error("Invalid model state context")]
@@ -231,7 +239,7 @@ impl<B: Backend> LanguageModel<B> {
         position: usize,
         capacity: Option<u32>,
         seed: u64,
-    ) -> Result<(), LanguageModelRewindStateError> {
+    ) -> Result<(), TextPrefixRestoreError> {
         if !Arc::ptr_eq(&self.model_identity, &state.model_identity)
             || !self.text_prefix_snapshot_supported()
             || state.speculator_state.is_some()
@@ -242,24 +250,28 @@ impl<B: Backend> LanguageModel<B> {
             || !position.is_multiple_of(super::stream::PREFILL_CHUNK_TOKENS)
             || position > state.tokens.len()
         {
-            return Err(LanguageModelRewindStateError);
+            return Err(TextPrefixRestoreError::Invalid);
         }
         let Some((saved_position, prefix)) = state.text_prefix.as_ref() else {
-            return Err(LanguageModelRewindStateError);
+            return Err(TextPrefixRestoreError::Invalid);
         };
         if *saved_position != position || !state.transformer_state.can_restore_prefix(prefix) {
-            return Err(LanguageModelRewindStateError);
+            return Err(TextPrefixRestoreError::Invalid);
         }
         let restored = (|| {
             let mut command = self
                 .engine
                 .context
                 .create_command_buffer(Some("text prefix restore"), None)
-                .map_err(|_| LanguageModelRewindStateError)?;
+                .map_err(|_| TextPrefixRestoreError::RestoreFailed)?;
             if !state.transformer_state.restore_prefix(prefix, &mut command) {
-                return Err(LanguageModelRewindStateError);
+                return Err(TextPrefixRestoreError::RestoreFailed);
             }
-            command.end_encoding().submit().wait_until_completed().map_err(|_| LanguageModelRewindStateError)?;
+            command
+                .end_encoding()
+                .submit()
+                .wait_until_completed()
+                .map_err(|_| TextPrefixRestoreError::RestoreFailed)?;
             Ok(())
         })();
         if restored.is_err() {

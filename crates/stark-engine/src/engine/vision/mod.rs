@@ -32,7 +32,10 @@ use crate::{
         language_model::{
             EngineLoadLanguageModelError, LanguageModel, SpeculatorPolicy,
             multimodal::{ImageGrid, ImageTokenIds, MultimodalPrefill, ProjectedImage},
-            state::{LanguageModelCreateEmptyStateError, LanguageModelRewindStateError, LanguageModelState},
+            state::{
+                LanguageModelCreateEmptyStateError, LanguageModelRewindStateError, LanguageModelState,
+                TextPrefixRestoreError,
+            },
             stream::{LanguageModelStream, LanguageModelStreamError, LanguageModelStreamOptions},
         },
     },
@@ -205,6 +208,18 @@ native_vision_error_from!(Tower, VisionTowerError<B>);
 native_vision_error_from!(Stream, LanguageModelStreamError<B>);
 native_vision_error_from!(State, LanguageModelCreateEmptyStateError<B>);
 native_vision_error_from!(Rewind, LanguageModelRewindStateError);
+
+fn finish_text_prefix_restore<B: Backend>(
+    result: Result<(), TextPrefixRestoreError>,
+    failed: &mut bool,
+) -> Result<(), NativeVisionError<B>> {
+    result.map_err(|error| {
+        if matches!(error, TextPrefixRestoreError::RestoreFailed) {
+            *failed = true;
+        }
+        LanguageModelRewindStateError.into()
+    })
+}
 
 /// Request-owned CPU patches, produced once by the admitted model's processor.
 /// This object has no serialization, cloning, Debug, or embedding accessors.
@@ -656,8 +671,10 @@ impl<B: Backend> VisionLanguageModel<B> {
         if self.failed {
             return Err(InvalidInput("native vision model is fenced").into());
         }
-        self.language_model.restore_text_prefix(state, prefix_length, max_context_length, sampling_seed)?;
-        Ok(())
+        finish_text_prefix_restore(
+            self.language_model.restore_text_prefix(state, prefix_length, max_context_length, sampling_seed),
+            &mut self.failed,
+        )
     }
 
     pub fn create_empty_state(

@@ -187,3 +187,16 @@ VTP-03 completed with the fixed functional timing gate passing. The
 contains the four-observation medians/ranges, worker and receipt hashes, and
 host-screening limits. Implementation is adopted on the branch within this
 artifact qualification scope; other artifacts remain unqualified by these runs.
+
+## Follow-up 20261108-VTP-04: restore failure fencing
+
+Registered during the final review before PR creation. Worker execution already
+exits after a native restoration failure; direct public vision API callers also
+need the loaded instance fenced after a restoration operation fails. Guard
+rejections must remain recoverable. This follow-up separates these error
+dispositions without changing the successful restore arithmetic or public method
+signature. Preserve the prior worker, receipts and timing source identities.
+
+Validation planned: focused error-disposition and CPU/Metal state tests, stable
+release build and the existing 32-case official artifact exactness workload with
+the VTP-02 recipe. Existing timings remain bound to their original executable.

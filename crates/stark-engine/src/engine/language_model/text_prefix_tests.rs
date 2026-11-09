@@ -155,10 +155,19 @@ fn text_snapshot_matches_fresh<B: Backend>(hybrid: bool) {
     assert_eq!(cached.text_prefix_position(), Some(1024));
 
     // Mismatched guards must leave a valid saved prefix usable afterwards.
-    assert!(model.restore_text_prefix(&mut cached, 1024, Some(CAPACITY - 1), 71).is_err());
-    assert!(model.restore_text_prefix(&mut cached, 1023, Some(CAPACITY), 71).is_err());
+    assert!(matches!(
+        model.restore_text_prefix(&mut cached, 1024, Some(CAPACITY - 1), 71),
+        Err(crate::engine::language_model::state::TextPrefixRestoreError::Invalid)
+    ));
+    assert!(matches!(
+        model.restore_text_prefix(&mut cached, 1023, Some(CAPACITY), 71),
+        Err(crate::engine::language_model::state::TextPrefixRestoreError::Invalid)
+    ));
     let foreign = engine.load_language_model(&fixture.directory).unwrap();
-    assert!(foreign.restore_text_prefix(&mut cached, 1024, Some(CAPACITY), 71).is_err());
+    assert!(matches!(
+        foreign.restore_text_prefix(&mut cached, 1024, Some(CAPACITY), 71),
+        Err(crate::engine::language_model::state::TextPrefixRestoreError::Invalid)
+    ));
     assert_eq!(cached.text_prefix_position(), Some(1024));
     model.restore_text_prefix(&mut cached, 1024, Some(CAPACITY), 71).unwrap();
     model.prepare_text_prefix_capture(&mut cached, 1024).unwrap();
