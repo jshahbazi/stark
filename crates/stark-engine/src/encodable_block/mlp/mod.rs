@@ -18,6 +18,16 @@ use crate::{
 };
 
 pub trait Mlp<B: Backend>: Send + Sync {
+    #[cfg(test)]
+    fn trace_dense(
+        &self,
+        _input: B::ScratchBuffer,
+        _batch_dim: u32,
+        _command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<Vec<(String, B::ScratchBuffer)>>, B::Error> {
+        Ok(None)
+    }
+
     fn requires_residual_input(&self) -> bool {
         false
     }

@@ -24,6 +24,64 @@ pub struct MlpGateActMulEncodable<B: Backend> {
 }
 
 impl<B: Backend> MlpGateActMulEncodable<B> {
+    #[cfg(test)]
+    pub(super) fn trace_gelu(
+        &self,
+        fused: impl BufferRef<Backend = B>,
+        batch: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Vec<(String, B::ScratchBuffer)>, B::Error> {
+        use crate::backends::common::kernel::{ActivationKernel, VisionGeluBF16Kernel};
+        if self.data_type != DataType::BF16
+            || self.activation.act_type() != ActivationType::GELUApprox
+            || batch != 1
+            || self.hadamard_factors.is_some()
+            || self.reference.is_some()
+        {
+            return Err(InvalidInput("unsupported diagnostic GELU profile").into());
+        }
+        let bytes = self.hidden_dim as usize * 2;
+        let mut activated = commands.allocate_scratch(bytes)?;
+        let mut reference = commands.allocate_scratch(bytes)?;
+        commands.encode_copy(fused.subrange(bytes..2 * bytes), &mut activated);
+        commands.encode_copy(fused.subrange(bytes..2 * bytes), &mut reference);
+        let ordinary = <B::Kernels as Kernels>::ActivationKernel::new(commands.context(), DataType::BF16, true)?;
+        ordinary.encode(
+            None::<&B::ScratchBuffer>,
+            &mut activated,
+            self.hidden_dim,
+            self.activation.act_type(),
+            commands,
+        );
+        let source = <B::Kernels as Kernels>::VisionGeluBF16Kernel::new(commands.context())?;
+        source.encode(&mut reference, self.hidden_dim, 1, commands);
+        let multiply = GatedActMul::<B>::full_precision(
+            commands.context(),
+            DataType::BF16,
+            false,
+            false,
+            GatedActMulSettings::default(),
+        )?;
+        let mut product = commands.allocate_scratch(bytes)?;
+        multiply.encode_fp(
+            &reference,
+            Some(fused),
+            &mut product,
+            None::<&B::ScratchBuffer>,
+            self.hidden_dim,
+            1,
+            0,
+            self.hidden_dim * 2,
+            ActivationType::IDENTITY,
+            commands,
+        );
+        Ok(vec![
+            ("mlp.activation".into(), activated),
+            ("mlp.reference_activation_candidate".into(), reference),
+            ("mlp.reference_product_candidate".into(), product),
+        ])
+    }
+
     pub fn new(
         context: &B::Context,
         data_type: DataType,

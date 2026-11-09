@@ -483,3 +483,56 @@ The latter additionally compares native stable centroid ties against Torch
 top-k on the same native scores using support-difference counts only. The
 preceding diagnostic tool revision is retained separately. No new head
 arithmetic or runtime result is implied by this source checkpoint.
+
+### First-divergence execution: MLP boundary isolated
+
+The merged diagnostic source `d2dc5ce5` compiles in a new distinct target.
+Executable SHA-256
+`b636b695c59181c45398abf51ec1d99eeccb975221316a493973c8b1fe2713a9`;
+source graph digest
+`c59e840336ea38f456385f6b522d9f9ccf7bcd25513b60b47bd0372e61325f46`;
+source-seal SHA-256
+`7cddc98448075ae33a54fd9dbf497890873259cfc462b81992e7a259881f90e5`.
+The guarded single 512-token diagnostic completes, and instrumented final
+feedback, centroids and full readout exactly equal ordinary native encoding
+on all three chained steps. This validates the instrumentation, not parity.
+
+On step 1, the first independent-reference difference is **layer 1 MLP output**:
+one of 256 values differs, maximum absolute 0.015625 / relative L2 0.000374.
+The operator-isolated comparison fed native inputs identifies the same boundary.
+Every preceding pre-projection, normalization, query projection/rotation,
+attention score/probability/value and layer-0 MLP boundary is exact. Additional
+isolated errors later are small: one layer-2 MLP value at 0.00000191, one global
+query projection value at 0.0000305 and one feedback readout value at 0.0000305.
+The initial MLP difference propagates through independent feedback, producing
+step maximum feedback errors 0.375, 0.25 and 0.625. Later-step pre-projection
+differences already receive different feedback; they are not the first cause.
+
+Step 1 swaps one selected centroid cluster: symmetric support differences are
+two clusters / 256 vocabulary positions. Native stable selection and Torch
+top-k on the same native centroid scores agree. The native cutoff is unique;
+the independent reference cutoff has two tied clusters. On the 3,968 common
+selected tokens, maximum logit error 0.5 / relative L2 0.00371 passes, while
+full masked-logit maximum 55.125 fails through changed support. This separates
+the support discontinuity from the smaller underlying arithmetic error.
+
+Diagnostic aggregate SHA-256
+`3cc8f86b810c1236edc2e2e67e69b29479e6646853bf8e4bec198caad3a78704`;
+process receipt `1eccc0a804f21d40a96966d80240b5055ac384b0c8f3e1c438cc2d45ca7b853d`;
+execution seal
+`bfb1b82679ea03541646092ff286cbe314746294ca42897d004cbc3522eb529f`.
+The continuous guard records no foreign worker, no paging growth and peak
+observed RSS 10,892,689,408 bytes. All owned processes close before the GLM
+handoff. No head arithmetic, tolerance, public guard or serving setting changed.
+Next split the MLP into fused up/gate projection, GELU, BF16 product and down
+projection to identify the exact primitive before changing its policy.
+
+The next staged diagnostic exposes fused up/gate projection, standalone legacy
+GELU, actual BF16 product and down projection, with independent and native-input
+operator comparisons. It also measures the existing pinned-source
+`VisionGeluBF16` kernel and its separate BF16 product/down path as diagnostic
+candidates; those candidates do not feed normal native output or feedback.
+All additions are test-only, and production arithmetic remains unchanged.
+The previous `b636b695` executable is preserved as an independently hashed APFS
+clone before reusing this same checkout's distinct diagnostic target for the
+next build. Every new candidate still needs its own source/binary/tool seals.

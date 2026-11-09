@@ -421,6 +421,14 @@ impl<B: Backend> Gemma4Assistant<B> {
             let mlp =
                 layer.pre_mlp.encode(&residual, 0, 1, None::<&mut B::ScratchBuffer>, commands).map_err(backend)?;
             trace_stage::<B>(format!("layer{index}.pre_mlp"), &mlp, &mut stages, commands).map_err(backend)?;
+            let mut mlp_trace_input = commands.allocate_scratch(mlp.size()).map_err(backend)?;
+            commands.encode_copy(&mlp, &mut mlp_trace_input);
+            let mlp_stages = layer
+                .mlp
+                .trace_dense(mlp_trace_input, 1, commands)
+                .map_err(backend)?
+                .ok_or(Gemma4AssistantError::Invalid)?;
+            stages.extend(mlp_stages.into_iter().map(|(name, buffer)| (format!("layer{index}.{name}"), buffer)));
             let mlp = layer.mlp.encode(mlp, 1, commands).map_err(backend)?;
             trace_stage::<B>(format!("layer{index}.mlp"), &mlp, &mut stages, commands).map_err(backend)?;
             let mlp = layer.post_mlp.encode(&mlp, 0, 1, None::<&mut B::ScratchBuffer>, commands).map_err(backend)?;
