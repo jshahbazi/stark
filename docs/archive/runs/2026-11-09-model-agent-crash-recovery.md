@@ -16,9 +16,9 @@ text state. Completion is per artifact, configuration and backend.
 
 | Family | Completed resumed gates | Open gate / next action |
 | --- | --- | --- |
-| Qwen BF16 0.8B | Corrected MTP0 dispatch; expanded 48/48 image-loaded and 26/26 text-only lifecycle checks, plus prior matrices; headed/headless and loading-mode MTP0/3 short timing passes | Reference FC, all-head reference linears and head-only materialized SiLU do not satisfy full hidden-feature limits. No production head precision change; isolate attention boundaries next |
-| Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Functional-only MoE04 stopped before case zero at its 64-GiB available-memory floor, without swap/compression growth. Final-state histories are ruled out; measure command-allocator overhead before another run |
-| Gemma | G4AP05 passes 15/15 assistant steps under independently reviewed mathematical top-k tie policy, actual 3/3 acceptance at all five lengths through 1792, transactional controls and 1024-boundary cache handoff | Integrate qualified E2B assistant into normal worker and qualify full lifecycle/performance. Original raw tied-index mismatch remains recorded; serving MTP is still disabled |
+| Qwen BF16 0.8B | Corrected MTP0 dispatch; expanded 48/48 image-loaded and 26/26 text-only lifecycle checks, plus prior matrices; headed/headless and loading-mode MTP0/3 short timing passes. Finer trace proves same-operand Q/K norm, RoPE and SDPA exact | Full hidden-feature limit still fails. Independently reviewed test-only source sigmoid/SiLU plus reference-linear candidate is committed but unbuilt; no production arithmetic change |
+| Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved; tiny routed operator measures command-heap growth and exact row splitting/reset reuse | Actual full matrix still stopped before case zero at its 64-GiB floor. Independently reviewed Qwen-only physical-256 prefill and completion-order fixes await compilation and actual-model qualification |
+| Gemma | G4AP05 passes 15/15 assistant steps, actual 3/3 acceptance through 1792 and boundary-cache controls. Staged normal worker/helper build and 136 worker unit tests pass | New normal-worker lifecycle/performance remain pending. Review rejects the inherited fail-open monitor before execution; replace it and strengthen stop/cap proof. Original raw tied-index mismatch remains recorded; default serving MTP is still disabled |
 | GLM | `b76f560d` builds and accounting controls pass; tiny mapping control passes sixty blits; staged owned-buffer Control/Q5 initialization passes without pressure | Full functional run hit a hard compression limit; neither tiny test reproduces it. Audit actual GGUF mapping/Metal registration geometry before another full load. Full-model image/cache/MTP/performance remain held |
 
 The installed app was closed without implicitly reopening it. The coordinator
@@ -758,3 +758,95 @@ exposes internal command-heap bytes separately from scratch payloads. Its
 requires completion of all dependent command buffers first. This provides a
 direct diagnostic for the command-overhead hypothesis; no cause or fix is
 claimed from dispatch count alone.
+
+### Measured MoE command memory and new Qwen source candidates
+
+Two tiny diagnostic setup failures remain excluded: one build used the wrong
+backend cfg spelling and omitted the test; the next run selected a full-BF16
+profile incompatible with affine weights. Exact-one listing and the corrected
+affine profile precede the successful run. Failed run receipt:
+`877818ee09ff7b99e2fa4634e4f6adaf3984dec3816a23c1585d460f25be7dd0`.
+
+The corrected one-layer affine4/group64, eight-active-expert operator passes.
+At 16/64/256/1024 rows, measured Metal command-allocator bytes are respectively
+3,809,856 / 13,787,712 / 53,862,976 / 213,983,808. At 1024, scratch payload is
+460,032 bytes and constant pages 1,310,720. Four subsequent 256-row submissions
+reuse the same completed/reset allocator at its existing high-water size,
+without shrink or further growth. Split outputs are exact, including absolute
+row digits and a wrong-offset-248 negative control. Curve receipt:
+`f1d4cb775622feca5e5b65df5959b626c0c89fe30a3a8329085a7a803044fb3c`.
+Guarded receipt `4b67c785ed66f8cb2b024bc52b41947be44c772fe64b93d9cd5166501ce72524`
+reports zero paging/compression/swap/foreign workers and drained/joined owners.
+This measures a small operator, not the full model's command bytes or peak.
+
+Two separately reviewed source changes await compilation: publish the completed
+allocator cache entry before waking a waiter (`83d5ef1b` patch prefix), and cap
+ordinary typed-Qwen-MoE text submissions at 256 (`78cf769f` patch prefix).
+Images, image continuations, dense targets and generic speculation keep their
+previous schedule. Logical 1024 boundaries remain fixed; all submissions finish
+before prefix publication, and partial failures fence state. A synthetic dense
+state fixture and CPU partition controls are planned; actual GDN/full-model
+numerics, cache lifecycle and timing remain required. A context may retain more
+than one large allocator across decode/request cycles, so a full-model estimate
+must include multiple cached high-water heaps rather than assuming one heap.
+
+The finer BF16 head diagnostic completes all three guarded execution phases in
+2.647 seconds, while the unchanged full hidden-feature gate still fails.
+Aggregate `a95181746225450b3916e70026d6f907d90be0ea0a4efc7654b23a9463bf9cca`;
+primitive receipt
+`05f0f4da8e26dc19c6a6069e62d14da3cf6d92df4232ff2155d1cfca4c1a1541`.
+Duplicate attention/MLP and manual/actual hidden outputs are exact. On native
+operands, Q/K norm, rotary Q/K/V and SDPA match exactly. Differences remain in
+the sigmoid/product boundary, SiLU activation and a few projection elements.
+No inference from aggregate attention drift is used to rewrite SDPA.
+
+The coordinator's independently reviewed `d2cdde18` adds an isolated test head
+experiment: reference linears plus source BF16 sigmoid and materialized SiLU.
+The selector requires a Legacy incoming head, all-reference-head mode and no
+FC-only conflict; only a cloned head transformer config changes. Production
+selectors remain false. Eight source files, public rounding/stride controls and
+pinned MLX MIT/source notices are bound by patch
+`658da6f8d4a46bac0e13b2c63a98f7d1c3bc4672530227218fed0348ed292847`.
+Formatting and policy checks pass; compilation and actual unchanged-gate replay
+remain pending. This is a test candidate, not an adopted precision policy.
+
+### Gemma staged worker compilation and rejected lifecycle supervisor
+
+The independently reviewed normal-worker candidate builds with Rust 1.98.1.
+An initial private-type import error is fixed by a public assistant re-export;
+the failed build remains recorded. Staged worker
+`a356edf19c1652536a2d2feb12c096e57458105bf6500846779f5ca295997358`
+and matching helper
+`77e45824cb995adc0322f27a466f9cd4cf13f1bda9edb1e8cf2e107b457ea799`
+are bound by seal
+`5e99a297af787c07a78dd13e26b4c54d4c6e676c549004433485d9c1a0a686c4`.
+Worker unit results are 136 passed, two ignored; no model/Metal execution is
+claimed from them. The loader's skipped-subtree CPU control is next.
+
+Before any normal-worker model run, independent GLM and coordinator review
+reject the inherited supervisor in fixture `60600e1e`: telemetry exceptions can
+silently end monitoring, and its final result ignores guard stop/join/sample
+status. This is an unexecuted validation-source defect. A separately versioned
+fail-closed supervisor must monitor the owned worker before readiness, pin its
+dependencies, preflight fresh receipts and require positive/final samples,
+drain/join and all hard limits. Stop, two-token-cap and image-zero controls also
+need explicit finish/count assertions. No lifecycle or performance pass is
+claimed from the rejected fixture.
+
+### GLM bounded real-format mapping proposal
+
+Header/source audit `328d8d183893344185c8ee66eaecb05d4f6fa9e1d89cc31f17227e3aef64a30d`
+finds the first Q5 tensor's original shard is 49,294,975,936 bytes. Its logical
+payload is 23,068,672 and registered span 23,085,056 bytes, with in-page offset
+9408. A dedicated range into that original file still shares the large backing
+object; a 23-MB logical window is not a proven physical ceiling. Original-shard
+GPU views remain held.
+
+Permitted CPU preparation reads exactly the 23-MB payload with `F_NOCACHE` and
+unchanged descriptor identity, then creates private capped 64/256/512-MiB sparse
+fixtures with identical tensor bytes/registered geometry. Four pre-I/O invalid
+range checks and an actual wrong-offset hash negative pass. Receipt:
+`5e112a4b7ab2325a86a3496fef09a804136e1c1359ae76d8f20f6f5fb7a686e3`.
+No mapping or Metal execution occurs in that preparation. The bounded contrast
+will use fresh child processes per arm to avoid retained-footprint confounding;
+native source, build and execution still require review. Full GLM remains held.
