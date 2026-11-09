@@ -826,9 +826,47 @@ final class ModelManagementState: ObservableObject {
 }
 
 struct ModelsInventory {
+    static func readableName(_ savedName: String, display: InstalledModelDisplay?) -> String {
+        let generatedSuffix = "-[0-9a-f]{8,40}$"
+        let generated = savedName.range(of: generatedSuffix, options: .regularExpression) != nil
+        let savedBase = savedName.replacingOccurrences(of: generatedSuffix, with: "", options: .regularExpression)
+        func sourceKey(_ name: String) -> String {
+            name.replacingOccurrences(of: "(?i)-MLX(?:-Serve)?(?=-|$)", with: "", options: .regularExpression)
+                .lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+        var title = savedName
+        if let display, display.repositoryURL != nil, sourceKey(savedBase) == sourceKey(display.groupName) {
+            title = display.groupName
+        } else if generated, savedBase.range(of: "^qwen38-flash-next-(?:mixed-4-8bit|lily-q4-xl)$",
+                                            options: .regularExpression) != nil {
+            // Legacy native installs used these preparation names plus a revision.
+            title = savedBase
+        }
+        // Packaging and precision already have their own metadata columns.
+        if display?.quantization != nil {
+            title = title.replacingOccurrences(
+                of: "(?i)-(?:MLX(?:-Serve)?-)?(?:mixed-[48][_-][48]bit|lily-q4-xl|[48]-?bit|bf16|fp16|gguf)$",
+                with: "", options: .regularExpression)
+        }
+        title = title.replacingOccurrences(of: "(?i)-MLX(?:-Serve)?(?=-|$)", with: "", options: .regularExpression)
+        title = title.replacingOccurrences(of: "(?i)^qwen38(?=-|$)", with: "Qwen3.8", options: .regularExpression)
+        title = title.replacingOccurrences(of: "(?i)^qwen(?=[0-9])", with: "Qwen", options: .regularExpression)
+        title = title.replacingOccurrences(of: "(?i)^glm(?=-|[0-9])", with: "GLM", options: .regularExpression)
+        let words = title.replacingOccurrences(of: "_", with: "-").split(separator: "-")
+        let readable = words.map { word in
+            if word.range(of: "^(?:[0-9]+(?:\\.[0-9]+)?[bB]|[qQ][0-9]+)$", options: .regularExpression) != nil {
+                return word.uppercased()
+            }
+            return word.prefix(1).uppercased() + word.dropFirst()
+        }.joined(separator: " ")
+        return readable.isEmpty ? savedName : readable.replacingOccurrences(
+            of: "(?i)Mixed 4 8bit$", with: "(Mixed 4/8-bit)", options: .regularExpression)
+    }
+
     struct Model: Identifiable {
         let id: String
         let name: String
+        let displayName: String
         let isRunning: Bool
         let quantization: String?
         let weightBytes: Int64?
@@ -871,13 +909,14 @@ struct ModelsInventory {
     init(models: [InstalledModel], loadedID: String, registry: ModelFamilyRegistry?,
          query: String = "", sort: ModelBrowserSort = .nameAscending) {
         func row(_ model: InstalledModel) -> Model {
-            Model(id: model.id, name: model.name, isRunning: !loadedID.isEmpty && model.id == loadedID,
+            Model(id: model.id, name: model.name, displayName: Self.readableName(model.name, display: model.display),
+                  isRunning: !loadedID.isEmpty && model.id == loadedID,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
                   sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode,
                   sourceName: model.display?.groupID ?? model.apiID, repositoryURL: model.display?.repositoryURL,
                   toolSupport: model.display?.toolSupport ?? .unchecked)
         }
-        let allModels = models.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }.map(row)
+        let allModels = models.map(row).sorted { Self.ordered($0.displayName, $1.displayName, $0.id, $1.id) }
         let candidates = Dictionary(grouping: models) { model in model.display.map { "source:" + $0.groupID } ?? "model:" + model.id }
         let allGroups = candidates.flatMap { key, entries -> [Group] in
             let first = entries[0]
@@ -890,8 +929,8 @@ struct ModelsInventory {
                           family: first.display?.familyID.flatMap(ModelFamily.displayName(for:)), models: rows)]
         }
         func groupOrder(_ first: Group, _ second: Group) -> Bool {
-            let firstName = first.models.count == 1 ? first.models[0].name : first.name
-            let secondName = second.models.count == 1 ? second.models[0].name : second.name
+            let firstName = first.models.count == 1 ? first.models[0].displayName : first.name
+            let secondName = second.models.count == 1 ? second.models[0].displayName : second.name
             return sort.precedes(firstName, id: first.id, size: first.totalBytes,
                                  secondName, id: second.id, size: second.totalBytes)
         }
@@ -899,14 +938,14 @@ struct ModelsInventory {
         groups = allGroups.compactMap { group in
             var visible = group.models.filter { model in
                 !hasSearchQuery ||
-                ModelBrowserSearch.matches(query, fields: [group.name, group.family ?? "", model.name, model.sourceName,
+                ModelBrowserSearch.matches(query, fields: [group.name, group.family ?? "", model.name, model.displayName, model.sourceName,
                                                            model.sourceRevision ?? "", model.artifactMode?.title ?? "",
                                                            model.isRunning ? "Running" : ""] + model.detailLabels)
             }
             if sort == .sizeAscending || sort == .sizeDescending {
                 visible.sort { first, second in
-                    sort.precedes(first.name, id: first.id, size: first.weightBytes.map(Double.init),
-                                  second.name, id: second.id, size: second.weightBytes.map(Double.init))
+                    sort.precedes(first.displayName, id: first.id, size: first.weightBytes.map(Double.init),
+                                  second.displayName, id: second.id, size: second.weightBytes.map(Double.init))
                 }
             }
             return visible.isEmpty ? nil : Group(id: group.id, name: group.name, family: group.family, models: visible)
@@ -2828,7 +2867,7 @@ struct ModelsView: View {
 
     private func savedModelRow(_ model: ModelsInventory.Model, family: String?) -> some View {
         HStack(spacing: 10) {
-            Text(model.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+            Text(model.displayName).font(.callout.weight(.medium)).lineLimit(2).truncationMode(.tail)
                 .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
             Text(model.quantization ?? "—").font(.caption).foregroundStyle(.secondary)
                 .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
@@ -2849,7 +2888,7 @@ struct ModelsView: View {
             removalButton(model).frame(width: 22)
         }.frame(minHeight: 32)
             .help(savedModelHelp(model, family: family))
-            .accessibilityElement(children: .contain).accessibilityLabel(model.name)
+            .accessibilityElement(children: .contain).accessibilityLabel(model.displayName)
     }
 
     private func savedModelHelp(_ model: ModelsInventory.Model, family: String?) -> String {

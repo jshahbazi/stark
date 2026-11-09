@@ -1272,6 +1272,33 @@ extension EngineController {
             return !inventory.groups[0].models[0].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models[1].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models.filter(\.isRunning).map(\.id) == ["text"]
+        case "models-readable-names":
+            var lily = modelDisplay("repo:owner/Qwen3.8-Flash-Next-lily-q4-xl", name: "Qwen3.8-Flash-Next-lily-q4-xl")
+            lily["quantization"] = "Lily q4-xl (Q4_K)"
+            var compact = modelDisplay("repo:owner/Qwen3-4B-4bit", name: "Qwen3-4B-4bit")
+            compact["quantization"] = "4-bit"
+            let saved = "qwen38-flash-next-lily-q4-xl-0f94842e"
+            let dense = modelDisplay("repo:owner/Qwen3-0.6B", name: "Qwen3-0.6B")
+            let fixtures = [variant("lily", name: saved, display: lily),
+                            variant("mixed", name: "qwen38-flash-next-mixed-4-8bit-788c07a8", display: nil),
+                            variant("small", name: "qwen3-4b-4bit", display: compact),
+                            variant("dense", name: "qwen3-dense", display: dense),
+                            variant("custom", name: "JevK5", display: nil)]
+            let inventory = ModelsInventory(models: fixtures, loadedID: "lily", registry: nil)
+            let rows = Dictionary(uniqueKeysWithValues: inventory.models.map { ($0.id, $0) })
+            guard rows["lily"]?.displayName == "Qwen3.8 Flash Next", rows["lily"]?.name == saved,
+                  rows["lily"]?.quantization == "Lily q4-xl (Q4_K)",
+                  rows["mixed"]?.displayName == "Qwen3.8 Flash Next (Mixed 4/8-bit)",
+                  rows["small"]?.displayName == "Qwen3 4B", rows["custom"]?.displayName == "JevK5",
+                  rows["dense"]?.displayName == "Qwen3 Dense",
+                  inventory.runningGroup?.models.first?.id == "lily" else { return false }
+            for query in [saved, "0f94842e", "Qwen3.8 Flash Next"] {
+                guard ModelsInventory(models: fixtures, loadedID: "", registry: nil, query: query).models.contains(where: { $0.id == "lily" }) else { return false }
+            }
+            return ModelsInventory.readableName("My preferred model", display: InstalledModelDisplay(lily)) == "My preferred model"
+                && ModelsInventory.readableName("my-favorite-model", display: InstalledModelDisplay(lily)) == "My Favorite Model"
+                && ModelsInventory.readableName("experiment-deadbeef", display: nil) == "Experiment Deadbeef"
+                && ModelsInventory.readableName("---", display: nil) == "---"
         case "models-visible-row-name-sort":
             let aliases = [
                 variant("zeta", name: "Zeta", display: modelDisplay("owner/first", name: "Alpha")),
@@ -2669,6 +2696,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_grouped_text_and_image_variants_have_distinct_stored_mode_label(self):
         self.exercise("models-artifact-mode-label")
+
+    def test_readable_model_names_preserve_saved_identity_precision_and_search(self):
+        self.exercise("models-readable-names")
 
     def test_catalog_family_changes_and_close_fence_late_results(self):
         self.exercise("image-catalog-stale-family")

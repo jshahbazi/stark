@@ -125,8 +125,13 @@ not fetch from Hugging Face again while you type. Search text stays within the
 current browsing session. Sort choices are remembered between app launches.
 The family overview uses compact, full-width rows in a single column.
 
-**Installed** shows compact rows with the saved name, quantization, file size,
-repo link, **Run** or **Stop**, and removal button on one line. **Run** selects
+**Installed** shows compact rows with a readable model name, quantization, file size,
+repo link, **Run** or **Stop**, and removal button. Names may use two lines.
+Recognized generated revision suffixes and packaging labels are omitted from the displayed
+name; known precision remains in its own column. Verified source names are used
+when they match the saved name after removing packaging and revision suffixes.
+Custom aliases retain their words. Hover a row for the full saved name;
+search accepts both the readable and saved names. **Run** selects
 that exact saved version and loads it in the current Chat or Decision mode while
 keeping management open. The active model's button becomes **Stop**; starting a
 different model moves Stop to that row. Loading and stopping progress appears
