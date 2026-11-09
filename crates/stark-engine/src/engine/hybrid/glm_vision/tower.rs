@@ -565,6 +565,41 @@ mod tests {
 
     #[stark_test]
     #[ignore]
+    fn glm_actual_tower_matches_private_torch_f32_reference() {
+        let reference = std::env::var_os("STARK_GLM_VISION_TOWER_REFERENCE").expect("GLM tower reference required");
+        let reference = Path::new(&reference);
+        assert!(std::fs::metadata(reference).unwrap().len() <= 8 * 1024 * 1024);
+        let value: Value = serde_json::from_slice(&std::fs::read(reference).unwrap()).unwrap();
+        assert_eq!(value["source_revision"].as_str(), Some("b6401d6605d16620e0f95b54fb2906f92de7e33f"));
+        assert_eq!(value["sidecar_sha256"].as_str(), Some(SIDECAR_SHA256));
+        let values = |name: &str| -> Vec<f32> {
+            value[name].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect()
+        };
+        let grid: Vec<u32> = value["grid"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+        assert_eq!(grid, [1, 4, 4]);
+        let patches = Patches {
+            data: values("patches").into_boxed_slice(),
+            grid: [1, 4, 4],
+            dimensions: [56, 56],
+        };
+        let path = std::env::var_os("STARK_GLM_VISION_SIDECAR").expect("pinned GLM sidecar path required");
+        let tower = VisionTower::load(Path::new(&path)).unwrap();
+        let output = tower.forward(&patches, &mut || false).unwrap();
+        let expected = values("output");
+        assert_eq!(output.len(), expected.len());
+        let maximum = output.iter().zip(&expected).map(|(&a, &b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let relative = (output.iter().zip(&expected).map(|(&a, &b)| (a - b) * (a - b)).sum::<f32>()
+            / expected.iter().map(|v| v * v).sum::<f32>())
+        .sqrt();
+        println!(
+            "{}",
+            serde_json::json!({"glm_actual_tower_f32_reference":true,"input_rows":16,"output_values":output.len(),"maximum_absolute_error":maximum,"relative_rms_error":relative})
+        );
+        assert!(maximum <= 1e-3 && relative <= 1e-3, "GLM actual F32 tower reference gate failed");
+    }
+
+    #[stark_test]
+    #[ignore]
     fn glm_pinned_actual_tower_has_finite_decoder_width_features() {
         let path = std::env::var_os("STARK_GLM_VISION_SIDECAR").expect("pinned GLM sidecar path required");
         let tower = VisionTower::load(Path::new(&path)).unwrap();
