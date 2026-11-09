@@ -21,7 +21,7 @@ pub(crate) mod mtp;
 mod nucleus;
 
 /// Recurrent snapshots also depend on whether the draft head ran in prefill.
-const PREFIX_CACHE_KEY: &str = "model-instance+context-tokens+cache-scope+mtp-selection";
+const PREFIX_CACHE_KEY: &str = "model-instance+context-tokens+cache-scope+mtp-enabled";
 
 fn admit_request_memory(
     request_bytes: Option<usize>,
@@ -327,7 +327,7 @@ impl HybridBackend {
         let profile_path = qwen_profile_path.or(native_profile_path);
         let profile_output = profile_path.map(|path| ProfileOutput::open(Path::new(&path))).transpose()?;
         let mut model = if images {
-            Model::load_with_image_support(path, false)
+            Model::load_with_image_support(path, true)
         } else {
             Model::load_with_native_decode(path, true)
         }
@@ -877,9 +877,6 @@ impl GenerationBackend for HybridBackend {
         Some(serde_json::json!({"backend":"stark_native_hybrid_metal","execution":"autoregressive"}))
     }
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
-        if self.image_runtime_identity.is_some() {
-            return None;
-        }
         self.model.mtp_capabilities().map(|capabilities| MtpCapabilities {
             max_drafts: capabilities.max_drafts,
             recommended_drafts: capabilities.recommended_drafts,
@@ -891,9 +888,6 @@ impl GenerationBackend for HybridBackend {
         self.last_mtp.clone()
     }
     fn default_mtp_drafts(&self) -> u32 {
-        if self.image_runtime_identity.is_some() {
-            return 0;
-        }
         self.model.default_mtp_drafts()
     }
     fn effective_mtp_drafts(
