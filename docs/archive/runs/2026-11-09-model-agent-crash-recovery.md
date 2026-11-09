@@ -17,9 +17,9 @@ text state. Completion is per artifact, configuration and backend.
 | Family | Completed resumed gates | Open gate / next action |
 | --- | --- | --- |
 | Qwen BF16 0.8B | Corrected MTP0 dispatch; expanded 48/48 image-loaded and 26/26 text-only lifecycle checks, plus prior matrices; headed/headless and loading-mode MTP0/3 short timing passes | Reference FC, all-head reference linears and head-only materialized SiLU do not satisfy full hidden-feature limits. No production head precision change; isolate attention boundaries next |
-| Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Functional-only MoE04 stopped before case zero at its 64-GiB available-memory floor, without swap/compression growth. Audit per-token prefill histories before another run |
+| Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Functional-only MoE04 stopped before case zero at its 64-GiB available-memory floor, without swap/compression growth. Final-state histories are ruled out; measure command-allocator overhead before another run |
 | Gemma | G4AP05 passes 15/15 assistant steps under independently reviewed mathematical top-k tie policy, actual 3/3 acceptance at all five lengths through 1792, transactional controls and 1024-boundary cache handoff | Integrate qualified E2B assistant into normal worker and qualify full lifecycle/performance. Original raw tied-index mismatch remains recorded; serving MTP is still disabled |
-| GLM | `b76f560d` builds and accounting controls pass; tiny 64-MiB mapping control passes sixty blits and owner cleanup without pressure | Full functional run hit a hard compression limit. Tiny control did not reproduce it; prepare a tiny staged first-use Control/Q5 shader test. Full-model image/cache/MTP/performance remain held |
+| GLM | `b76f560d` builds and accounting controls pass; tiny mapping control passes sixty blits; staged owned-buffer Control/Q5 initialization passes without pressure | Full functional run hit a hard compression limit; neither tiny test reproduces it. Audit actual GGUF mapping/Metal registration geometry before another full load. Full-model image/cache/MTP/performance remain held |
 
 The installed app was closed without implicitly reopening it. The coordinator
 verified no competing model/compiler/app processes and zero
@@ -606,6 +606,18 @@ The DeltaNet source hash is
 A duplicate final-state backend is unwarranted. Scratch/router/pool lifetime
 attribution is the next investigation; the stopped run remains inconclusive.
 
+The routed MoE path emits at least six dispatches per active expert and input
+row, giving at least 1,966,080 expert dispatches for a 1024-row, forty-layer
+chunk. The current stream keeps the 1024+768 prompt chunks in one encoding,
+at least 3,440,640 such dispatches for the stopped prompt. Pool scratch handles
+return to their size bins as route-local values drop; command encoding memory
+remains a distinct hypothesis. A proposed one-layer allocator measurement
+precedes a fixed 256-token physical execution cap with submit/wait/reuse.
+Logical 1024-token prefix snapshot boundaries must remain unchanged. The
+256-row choice preserves the existing chunked GDN route; changed batch shapes
+still need new numerical, cache and timing evidence. No implementation or
+full-model admission is claimed yet.
+
 Gemma G4AP05 (`21f29608`, engine
 `75e5eff55ebcdf9cdbc0a22d1dcae7220e181fa74358c07d58215c4e3431a320`)
 uses assistant-only reference up/down projections and source GELU. All three
@@ -676,6 +688,32 @@ An exclusive build-only slot is granted, reusing only this checkout's test targe
 after archiving/hashing its old binary. Native execution requires the new
 source/binary seal and host screen; full GLM remains held. Persistent shader-cache
 state is unknown, so the result cannot establish cold-cache behavior or speed.
+
+The build passes in 89.36 seconds, producing binary
+`8e7abaeeca0f052d56ae0e0e9afee04099379cb4b6ec29c00662fc4d65653afa`.
+Build seal `2157e54902b5b07cb2f39257510f81bed7936eaf970cef3fcfe6ceb89552abf2`
+retains the original source binding. The first runner attempt selects zero tests
+because its exact filter omits the `stark_engine::` crate prefix. Its zero-phase
+receipt `44cd32a2708f1492f242bd2be1e0be34d60035fa6b789210fc9467a72c7ca0ca`
+remains invalid. The corrected execution driver is separately registered as
+`5ea8d20344939292848433f516c06ec666a2ee9e22b180a52a25a86ceb93343e`,
+with an exact-one list-only preflight and all 1267 original source files verified
+unchanged. No new build or relaxed limit is involved.
+
+The corrected run passes all eleven phases and independent Q5 projection checks.
+First graph completion is 0.653 seconds after test start; test buffers drain at
+0.654 seconds. Metal allocations peak at 1,867,776 bytes and finish at 720,896
+with process-owned library/pipeline singletons remaining. Sampled compiler-service
+positive RSS growth peaks at 59,310,080 bytes; own RSS/footprint peak at
+19,677,184/8,946,216 bytes, host wired growth 475,136. Swap, compression and
+pageout growth are zero. Receipt:
+`f9706505aec9701d27555ff0dfc7856b809b323a496e669b73acf54633b8b058`.
+The supervisor drains/joins and the owned child exits; two live samples and four
+post-drain samples cannot rule out brief unsampled compiler peaks. Shader-cache
+state and cfg(test) source differences also limit inference. This owned-buffer,
+no-model result does not reproduce the full failure or prove a full-model fix.
+Next audit the actual GGUF VM-map, logical-tensor and Metal-registered spans
+before proposing a bounded real-file contrast. Full GLM remains held.
 
 ### Pinned external implementation research
 
