@@ -291,12 +291,9 @@ fn routed_affine_command_heap_curve_and_completed_allocator_reuse() {
         // Constants and route scratch are no longer CPU-live at end_encoding.
         drop(output);
         commands.end_encoding().submit().wait_until_completed().unwrap();
-        // The completion callback sends feedback before publishing its cache
-        // entry. Wait for that publication before asking new() to reset/reuse.
-        while !probe.is_cached_after_completion() {
-            assert!(started.elapsed().as_secs() < 25, "allocator completion cache publication timed out");
-            std::thread::yield_now();
-        }
+        // Waiting must establish cache publication, without an extra CPU spin
+        // that could conceal a completion/allocator-reuse ordering regression.
+        assert!(probe.is_cached_after_completion(), "completed allocator was not published before feedback");
         let heap_completed = probe.allocated_bytes();
         let actual = buffer_to_vec::<Metal, bf16>(&readback);
         assert!(actual.iter().all(|value| value.to_f32().is_finite()));

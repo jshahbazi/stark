@@ -308,11 +308,14 @@ impl CommandBufferExecutable for MetalCommandBufferExecutable {
             } else {
                 Ok(Duration::from_secs_f64(feedback.gpu_end_time() - feedback.gpu_start_time()))
             };
-            let _ = sender.send(message);
             context_clone.command_buffer_cache.lock().push(MetalCommandBufferCache {
                 command_allocator: command_allocator.clone(),
                 command_buffer: command_buffer.clone(),
             });
+            // Feedback means the GPU has completed this command. Publish the
+            // reusable allocator before waking waiters, so a sequential
+            // submit/wait/new cycle cannot race into another command heap.
+            let _ = sender.send(message);
             let _keep_alive = (&constant_allocator, &allocation_pool);
         };
 
