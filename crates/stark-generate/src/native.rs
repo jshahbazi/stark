@@ -40,6 +40,7 @@ use crate::{
 const _: () = assert!(prefix_cache::PREFILL_CHUNK_TOKENS == PREFILL_CHUNK_TOKENS);
 
 type RetainedState = PrefixEntry<LanguageModelState<Metal>>;
+type VisionRetainedState = prefix_cache::BoundaryEntry<LanguageModelState<Metal>>;
 type DenseRetainedState = prefix_cache::BoundaryEntry<(DenseMtpSession<Metal>, u32)>;
 
 fn admit_generation_memory(
@@ -86,6 +87,8 @@ pub(crate) struct NativeBackend {
     last_mtp: Option<Value>,
     dense_prefix_cache: Option<DenseRetainedState>,
     dense_pending_prefix: Option<DenseRetainedState>,
+    vision_prefix_cache: Option<VisionRetainedState>,
+    vision_pending_prefix: Option<VisionRetainedState>,
 }
 
 enum NativeModel {
@@ -225,6 +228,8 @@ impl NativeBackend {
             last_mtp: None,
             dense_prefix_cache: None,
             dense_pending_prefix: None,
+            vision_prefix_cache: None,
+            vision_pending_prefix: None,
         })
     }
 }
@@ -475,7 +480,11 @@ impl GenerationBackend for NativeBackend {
     }
 
     fn prefix_cache_supported(&self) -> bool {
-        matches!(&self.model, NativeModel::Text(model) if model.has_dense_mtp() || model.prefix_reuse_supported())
+        match &self.model {
+            NativeModel::Text(model) => model.has_dense_mtp() || model.prefix_reuse_supported(),
+            NativeModel::Vision(model) => model.prefix_reuse_supported(),
+            NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => false,
+        }
     }
 
     fn prefix_cache_key(&self) -> &'static str {
@@ -498,12 +507,18 @@ impl GenerationBackend for NativeBackend {
                 0
             };
         }
+        if let Some(entry) = &self.vision_prefix_cache {
+            return entry.reusable(input, options.context_tokens, options.cache_scope.as_ref());
+        }
         self.prefix_cache
             .as_ref()
             .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()))
     }
 
     fn publish_prefix_cache(&mut self) {
+        if let Some(entry) = self.vision_pending_prefix.take() {
+            self.vision_prefix_cache = Some(entry);
+        }
         if let Some(entry) = self.dense_pending_prefix.take() {
             self.dense_prefix_cache = Some(entry);
         }
@@ -517,6 +532,8 @@ impl GenerationBackend for NativeBackend {
         self.pending_prefix = None;
         self.dense_prefix_cache = None;
         self.dense_pending_prefix = None;
+        self.vision_prefix_cache = None;
+        self.vision_pending_prefix = None;
     }
 
     fn prefix_cache_retained(&self) -> bool {
@@ -524,6 +541,8 @@ impl GenerationBackend for NativeBackend {
             || self.pending_prefix.is_some()
             || self.dense_prefix_cache.is_some()
             || self.dense_pending_prefix.is_some()
+            || self.vision_prefix_cache.is_some()
+            || self.vision_pending_prefix.is_some()
     }
 }
 
@@ -764,14 +783,21 @@ impl NativeBackend {
             NativeModel::Gemma4Vision(model) => model.tokenizer().clone(),
             NativeModel::Gemma3Vision(model) => model.tokenizer().clone(),
         };
+        let text_request = image.is_none();
         // Take the retained entry. A request that cannot reuse it drops it
         // before allocating, so two request states never coexist.
-        let reused = match (&self.prefix_cache, &image) {
-            (Some(entry), None) => entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()),
+        let reused = match (&self.prefix_cache, &self.vision_prefix_cache, &image) {
+            (Some(entry), _, None) => entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()),
+            (_, Some(entry), None) => entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()),
             _ => 0,
         };
         let retained = self.prefix_cache.take();
+        let vision_retained = self.vision_prefix_cache.take();
         self.pending_prefix = None;
+        self.vision_pending_prefix = None;
+        // Only one model variant is loaded. Drop an unusable boundary before
+        // allocating a fresh state, including on image transactions.
+        let vision_retained = vision_retained.filter(|_| reused > 0 && text_request);
         // Prepared tokens include the expanded image placeholder. Image
         // generation enters with an empty ordinary input slice.
         let admission_input_tokens = u32::try_from(image.as_ref().map_or(input.len(), |image| image.tokens.len()))
@@ -801,14 +827,35 @@ impl NativeBackend {
             },
             (NativeModel::Vision(model), retained) => {
                 drop(retained);
-                admit_memory_bytes(model.decoder_generation_memory_bytes(
-                    admission_input_tokens,
-                    options.context_tokens,
-                    options.max_new_tokens,
-                ))?;
-                model
-                    .create_empty_state(Some(options.context_tokens), options.seed)
-                    .map_err(|_| "native_generation_failed")?
+                let memory_bytes = if text_request
+                    && options.cache_scope.is_some()
+                    && prefix_cache::reusable_prefill_rows(input.len()) > 0
+                    && model.prefix_reuse_supported()
+                {
+                    model.decoder_text_prefix_memory_bytes(
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                    )
+                } else {
+                    model.decoder_generation_memory_bytes(
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                    )
+                };
+                admit_memory_bytes(memory_bytes)?;
+                if let Some(entry) = vision_retained {
+                    let mut state = entry.state;
+                    model
+                        .rewind_state(&mut state, reused, Some(options.context_tokens), options.seed)
+                        .map_err(|_| "native_generation_failed")?;
+                    state
+                } else {
+                    model
+                        .create_empty_state(Some(options.context_tokens), options.seed)
+                        .map_err(|_| "native_generation_failed")?
+                }
             },
             (NativeModel::Gemma4Vision(model), retained) => {
                 drop(retained);
@@ -833,6 +880,15 @@ impl NativeBackend {
                     .map_err(|_| "native_generation_failed")?
             },
         };
+        if text_request
+            && options.cache_scope.is_some()
+            && let NativeModel::Vision(model) = &mut self.model
+            && model.prefix_reuse_supported()
+        {
+            model
+                .prepare_text_prefix_capture(&mut state, prefix_cache::reusable_prefill_rows(input.len()))
+                .map_err(|_| "native_generation_failed")?;
+        }
         let prompt_ids = input;
         let input: Vec<u64> = input.iter().map(|id| u64::from(*id)).collect();
         let input_tokens = image.as_ref().map_or(input.len(), |image| image.tokens.len());
@@ -863,7 +919,7 @@ impl NativeBackend {
                 model.stream(&input[reused..], &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Vision(model), None) => {
-                model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
+                model.stream(&input[reused..], &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma4Vision(model), None) => {
                 model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
@@ -1013,9 +1069,27 @@ impl NativeBackend {
             }
             result.text = Some(filter.text().to_owned());
         }
-        // Retain only a completed text generation that has a host scope.
-        if let (NativeModel::Text(_), Some(scope)) = (&self.model, options.cache_scope) {
-            self.pending_prefix = Some(PrefixEntry::new(state, scope, options.context_tokens, prompt_ids));
+        // Image transactions must never publish image-dependent decoder state.
+        // Ordinary text on a vision artifact uses the same bounded prefix entry.
+        if text_request && let Some(scope) = options.cache_scope {
+            match &self.model {
+                NativeModel::Text(_) => {
+                    self.pending_prefix = Some(PrefixEntry::new(state, scope, options.context_tokens, prompt_ids));
+                },
+                NativeModel::Vision(_) => {
+                    if let Some(position) = state.text_prefix_position()
+                        && position > 0
+                    {
+                        self.vision_pending_prefix = Some(prefix_cache::BoundaryEntry::new(
+                            state,
+                            scope,
+                            options.context_tokens,
+                            &prompt_ids[..position],
+                        ));
+                    }
+                },
+                NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => {},
+            }
         }
         Ok(result)
     }

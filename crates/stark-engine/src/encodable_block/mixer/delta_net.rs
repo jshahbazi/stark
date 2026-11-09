@@ -751,6 +751,12 @@ impl<B: Backend> DeltaNet<B> {
 }
 
 impl<B: Backend> Mixer<B> for DeltaNet<B> {
+    fn prefix_snapshot_supported(&self) -> bool {
+        // DeltaNetPrefix preserves both convolution history and recurrent
+        // state after encode_accept has committed the complete flat chunk.
+        true
+    }
+
     fn speculation_supported(&self) -> bool {
         self.tree_verify.is_some()
     }

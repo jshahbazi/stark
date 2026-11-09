@@ -1,6 +1,9 @@
 //! Decoder integration fixtures are generated locally and removed when each test ends.
 //! The feature oracle is an independent embedding-table lookup of control tokens.
 
+#[path = "text_prefix_tests.rs"]
+mod text_prefix_tests;
+
 use std::{
     collections::BTreeMap,
     fs,

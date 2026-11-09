@@ -16,6 +16,9 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 | [Image-support retrospective](2026-11-08-image-support-retrospective.md) | Conversation-wide findings, model coverage, validation mistakes, review, delivery and remaining work |
 | [Qwen image attempts](2026-11-08-qwen-images.md) | BF16 and affine dense Qwen, affine and BF16-source MoE, retained Flash-Next/Lily numerical repairs and resource controls |
 | [Gemma image attempts](2026-11-08-gemma-images.md) | Gemma 3 processor/convolution fixes; Gemma 4 efficient, unified, MoE and larger-tower attempts; decoder admission and retained compatibility |
+| [20261108-VTP-01/02/04: vision artifact text prefix reuse](../archive/runs/2026-11-08-vision-text-prefix-reuse.md) | First recipe missed reuse coverage with exact outputs; stable-prefix and final restore-fence workers passed all 32 numerical/lifecycle cases on official Qwen3.5-0.8B BF16 |
+| [20261108-VTP-03: paired vision text prefix timing](../benchmarks/2026-11-08-qwen35-vision-text-prefix.md) | Four observations per arm; bounded first-token benefit, cache-cold cost and snapshot payload; other artifacts and host-screened performance remain unqualified |
+| [20261108-VTP-05: quick Lily text sanity check](../archive/runs/2026-11-08-vision-text-prefix-reuse.md) | Retrospective short unscreened text comparison; identical outputs and no apparent regression; separate from vision qualification |
 
 The `IMG-20261108-QI-*`, `IMG-20261108-GI-*` and `IMG-20261108-XI-*` IDs register
 historical attempts on 2026-11-08. The registration date is not a claim about

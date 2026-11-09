@@ -135,6 +135,28 @@ fn native_vision_prompt_expands_one_placeholder_and_reserves_output_room() {
 
 #[cfg(backend = "cpu")]
 #[stark_test]
+fn native_vision_text_prefix_restore_failure_fences_instance_but_guard_rejection_does_not() {
+    use crate::backends::cpu::Cpu;
+
+    let mut failed = false;
+    let rejected = finish_text_prefix_restore::<Cpu>(Err(TextPrefixRestoreError::Invalid), &mut failed);
+    assert!(rejected.is_err_and(|error| error.kind() == NativeVisionErrorKind::State));
+    assert!(!failed);
+    assert!(finish_text_prefix_restore::<Cpu>(Ok(()), &mut failed).is_ok());
+    assert!(!failed);
+
+    let restore_failed = finish_text_prefix_restore::<Cpu>(Err(TextPrefixRestoreError::RestoreFailed), &mut failed);
+    assert!(restore_failed.is_err_and(|error| error.kind() == NativeVisionErrorKind::State));
+    assert!(failed);
+    // No later success or guard rejection can clear an instance fence.
+    assert!(finish_text_prefix_restore::<Cpu>(Ok(()), &mut failed).is_ok());
+    assert!(failed);
+    assert!(finish_text_prefix_restore::<Cpu>(Err(TextPrefixRestoreError::Invalid), &mut failed).is_err());
+    assert!(failed);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
 fn native_vision_public_error_hides_private_source_exceptions() {
     use crate::backends::cpu::Cpu;
 
