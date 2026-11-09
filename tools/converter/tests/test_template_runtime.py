@@ -87,7 +87,9 @@ def test_compile_time_constant_expansion_is_guarded(source):
         "{% set ns.x=[ns.x, ns.x] %}{% endfor %}{{ ns.x | striptags }}",
     ],
 )
-def test_unbounded_primitives_fail_with_fixed_errors_and_leave_control_healthy(source):
+def test_unbounded_primitives_fail_with_fixed_errors_and_leave_control_healthy(source, monkeypatch):
+    # Exercise a defined allocation boundary independently of host RAM.
+    monkeypatch.setattr(template_runtime, "REQUEST_BUDGET_MIB", 1)
     template = IsolatedTemplate(source)
     with pytest.raises(TemplateRuntimeError) as error:
         template.render(messages=["x" * 8193])

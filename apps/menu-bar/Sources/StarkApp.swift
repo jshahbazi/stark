@@ -260,6 +260,8 @@ struct InstalledModel: Identifiable, Equatable {
     let artifactMode: ModelArtifactMode?
     let removal: InstalledModelRemoval?
 
+    var displayName: String { ModelsInventory.readableName(name, display: display) }
+
     init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil,
          artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil) {
         self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.display = display
@@ -913,7 +915,7 @@ struct ModelsInventory {
     init(models: [InstalledModel], loadedID: String, registry: ModelFamilyRegistry?,
          query: String = "", sort: ModelBrowserSort = .nameAscending) {
         func row(_ model: InstalledModel) -> Model {
-            Model(id: model.id, name: model.name, displayName: Self.readableName(model.name, display: model.display),
+            Model(id: model.id, name: model.name, displayName: model.displayName,
                   isRunning: !loadedID.isEmpty && model.id == loadedID,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
                   sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode,
@@ -1224,7 +1226,9 @@ final class EngineController: ObservableObject {
     private var input: FileHandle?
     private var output: FileHandle?
     private var pending = Data()
-    private let maxSafeWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
+    // Older backends omit budget metadata. Current backends supply their
+    // memory-derived allowance before accepting content commands.
+    private let legacyWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
     private var maxWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
     private let workerWireLimitLock = NSLock()
     private let reader = DispatchQueue(label: "stark.desktop.reader")
@@ -1954,20 +1958,21 @@ final class EngineController: ObservableObject {
 
     private func applyResourceBudget(_ event: [String: Any]) -> Bool {
         guard let budget = event["resource_budget"] as? [String: Any] else {
-            setWorkerWireLimit(maxSafeWorkerWireBytes)
+            setWorkerWireLimit(legacyWorkerWireBytes)
             return true
         }
         guard let requestMiBValue = SupportMetadata.integer(budget["request_budget_mib"]),
-              requestMiBValue <= 64,
               let requestMiB = Int(exactly: requestMiBValue),
-              (1...64).contains(requestMiB),
+              requestMiB >= 1,
+              // Match the shared budget's largest derived allocation. This
+              // bound prevents integer overflow without capping host capacity.
+              requestMiB <= (Int.max - 32 * 1024 * 1024) / (32 * 1024 * 1024),
               let inputBytesValue = SupportMetadata.integer(budget["input_bytes"]),
               let inputBytes = Int(exactly: inputBytesValue),
               inputBytes == requestMiB * 1024 * 1024,
               let maxRequestBytesValue = SupportMetadata.integer(budget["max_request_bytes"]),
               let maxRequestBytes = Int(exactly: maxRequestBytesValue),
-              maxRequestBytes == 6 * inputBytes + 2 * 1024 * 1024,
-              maxRequestBytes <= maxSafeWorkerWireBytes else { return false }
+              maxRequestBytes == 6 * inputBytes + 2 * 1024 * 1024 else { return false }
         setWorkerWireLimit(maxRequestBytes)
         return true
     }
@@ -2525,15 +2530,9 @@ struct SpeedView: View {
 struct RunningModelLabel: View {
     @ObservedObject var engine: EngineController
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(engine.activeModel?.name ?? engine.startableModel?.name ?? engine.activeName)
-                .lineLimit(1).truncationMode(.middle)
-            if !engine.activeVersionDetails.isEmpty {
-                Text(engine.activeVersionDetails).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
-                    .layoutPriority(1)
-            }
-        }.accessibilityElement(children: .combine)
+        Text(engine.activeModel?.displayName ?? engine.startableModel?.displayName ?? engine.activeName)
+            .lineLimit(1).truncationMode(.middle)
+            .help(engine.activeVersionDetails)
     }
 }
 
@@ -2565,8 +2564,9 @@ struct MenuView: View {
             HStack(spacing: 8) {
                 Button(interface.mode == .beginner ? "Guided setup" : "Manage Models", action: manage)
                     .buttonStyle(.borderedProminent)
+                Spacer(minLength: 0)
                 Button("Start model", action: engine.startModel).disabled(!engine.canStartModel)
-                    .help(engine.startableModel.map { "Start " + $0.name } ?? "Choose a model first")
+                    .help(engine.startableModel.map { "Start " + $0.displayName } ?? "Choose a model first")
                 Button("Stop model", action: engine.stop).disabled(!engine.canStopCurrentModel)
             }.controlSize(.small)
             if interface.mode == .advanced && engine.mode == .chat { SpeedView(engine: engine) }

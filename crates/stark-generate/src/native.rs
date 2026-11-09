@@ -29,8 +29,9 @@ use stark_engine::{
 use crate::{
     cancel::CancelSignal,
     generation::{
-        GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity, PreparedImageMetadata,
-        ProgressCallback, Sampling, TextCallback, collect_tokens_controlled, native_result_after_cleanup,
+        ContextPlanningRequest, GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity,
+        PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, admit_request_memory,
+        collect_tokens_controlled, native_result_after_cleanup,
     },
     prefix_cache::{self, PrefixEntry},
     text_stop::StopFilter,
@@ -49,17 +50,37 @@ fn admit_generation_memory(
     options: &GenerationOptions,
 ) -> Result<(), &'static str> {
     let input_tokens = u32::try_from(input_tokens).map_err(|_| "context_overflow")?;
-    admit_memory_bytes(model.generation_memory_bytes(input_tokens, options.context_tokens, options.max_new_tokens))
+    admit_memory_bytes_with_reclaim(
+        model.generation_memory_bytes_for_request(
+            input_tokens,
+            options.context_tokens,
+            options.max_new_tokens,
+            options.mtp_drafts > 0,
+        ),
+        || model.reclaim_cached_memory().map_err(|_| "native_generation_failed"),
+    )
+}
+
+fn admit_memory_bytes_with_reclaim(
+    request_bytes: Option<usize>,
+    reclaim: impl FnOnce() -> Result<usize, &'static str>,
+) -> Result<(), &'static str> {
+    let bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+    if admit_memory_bytes(Some(bytes)).is_ok() {
+        return Ok(());
+    }
+    reclaim()?;
+    // Only the observed headroom after owners have actually retired is used.
+    admit_memory_bytes(Some(bytes))
 }
 
 fn admit_memory_bytes(request_bytes: Option<usize>) -> Result<(), &'static str> {
-    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
     let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-    let memory_budget = available.saturating_sub(256 * 1024 * 1024) / 4;
-    if request_bytes > memory_budget {
-        return Err("resource_budget_exceeded");
-    }
-    Ok(())
+    admit_request_memory(request_bytes, available)
+}
+
+fn current_memory_budget() -> usize {
+    stark_resource_budget::inference_memory_budget(stark_resource_budget::available_memory_bytes().unwrap_or(0))
 }
 
 fn record_accepted_prefix_round(
@@ -147,6 +168,35 @@ impl NativeModel {
         }
     }
 
+    fn generation_memory_bytes_reusing_dense_mtp(
+        &self,
+        session: &DenseMtpSession<Metal>,
+        input: u32,
+        context: u32,
+        output: u32,
+        reused: u32,
+    ) -> Option<usize> {
+        match self {
+            Self::Text(model) => {
+                model.generation_memory_bytes_reusing_dense_mtp(session, input, context, output, reused)
+            },
+            Self::Vision(model) => {
+                model.generation_memory_bytes_reusing_dense_mtp(session, input, context, output, reused)
+            },
+            _ => None,
+        }
+    }
+
+    fn reclaim_cached_memory(&self) -> Result<usize, &'static str> {
+        match self {
+            Self::Text(model) => model.reclaim_cached_memory(),
+            Self::Vision(model) => model.reclaim_decoder_cached_memory(),
+            Self::Gemma3Vision(model) => model.reclaim_decoder_cached_memory(),
+            Self::Gemma4Vision(model) => model.reclaim_decoder_cached_memory(),
+        }
+        .map_err(|_| "native_generation_failed")
+    }
+
     fn prefill_dense_mtp_controlled(
         &mut self,
         input: &[u32],
@@ -198,6 +248,99 @@ pub(crate) struct NativePreparedImage {
 }
 
 impl NativeBackend {
+    fn reclaim_text_cache(&self) -> Result<(), &'static str> {
+        let NativeModel::Text(model) = &self.model else {
+            return Ok(());
+        };
+        model.reclaim_cached_memory().map_err(|_| "native_generation_failed")?;
+        Ok(())
+    }
+
+    fn retained_payload_bytes(&self) -> Option<usize> {
+        let mut bytes = 0usize;
+        for entry in [&self.prefix_cache, &self.pending_prefix].into_iter().flatten() {
+            bytes = bytes.checked_add(entry.state.resident_payload_bytes()?)?;
+        }
+        for entry in [&self.dense_prefix_cache, &self.dense_pending_prefix].into_iter().flatten() {
+            bytes = bytes.checked_add(entry.state.0.resident_payload_bytes()?)?;
+        }
+        for entry in [&self.text_snapshot_prefix_cache, &self.text_snapshot_pending_prefix].into_iter().flatten() {
+            bytes = bytes.checked_add(entry.state.0.resident_payload_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
+    fn warm_planning_candidate(
+        &self,
+        request: &ContextPlanningRequest<'_>,
+    ) -> Option<(u32, usize)> {
+        let input = request.input_token_ids?;
+        let context = if request.options.mtp_drafts > 0 {
+            self.dense_prefix_cache.as_ref()?.context_tokens()
+        } else if let Some(entry) = &self.text_snapshot_prefix_cache {
+            entry.context_tokens()
+        } else {
+            self.prefix_cache.as_ref()?.context_tokens()
+        };
+        if context <= request.input_tokens || context > request.maximum {
+            return None;
+        }
+        let options = GenerationOptions {
+            context_tokens: context,
+            max_new_tokens: context - request.input_tokens,
+            ..request.options.clone()
+        };
+        let reused = self.prefix_cache_plan(input, &options);
+        (reused > 0).then_some((context, reused))
+    }
+
+    fn choose_context_plan(
+        &self,
+        request: &ContextPlanningRequest<'_>,
+        budget: usize,
+    ) -> Option<u32> {
+        let NativeModel::Text(model) = &self.model else {
+            return None;
+        };
+        let cold = model.automatic_context_length_for_request(
+            request.input_tokens,
+            request.maximum,
+            budget,
+            request.options.mtp_drafts > 0,
+        );
+        let warm = self.warm_planning_candidate(request).and_then(|(context, reused)| {
+            let maximum = context - request.input_tokens;
+            let bytes = if request.options.mtp_drafts > 0 {
+                model.generation_memory_bytes_reusing_dense_mtp(
+                    &self.dense_prefix_cache.as_ref()?.state.0,
+                    request.input_tokens,
+                    context,
+                    maximum,
+                    reused as u32,
+                )
+            } else if let Some(entry) = &self.text_snapshot_prefix_cache {
+                model.generation_memory_bytes_reusing_text_prefix(
+                    &entry.state.0,
+                    request.input_tokens,
+                    context,
+                    maximum,
+                    request.options.cache_scope.is_some(),
+                    reused as u32,
+                )
+            } else {
+                model.generation_memory_bytes_reusing_state(
+                    &self.prefix_cache.as_ref()?.state,
+                    request.input_tokens,
+                    context,
+                    maximum,
+                    reused as u32,
+                )
+            }?;
+            (bytes <= budget).then_some(context)
+        });
+        cold.max(warm)
+    }
+
     pub(crate) fn load(
         path: &Path,
         cancellation: Option<CancelSignal>,
@@ -380,6 +523,56 @@ impl GenerationBackend for NativeBackend {
             // accounting; this text-only planner does not model its encoder.
             NativeModel::Vision(_) | NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => None,
         }
+    }
+
+    fn plan_context_length(
+        &mut self,
+        request: &ContextPlanningRequest<'_>,
+        memory_budget_bytes: usize,
+    ) -> Result<Option<u32>, &'static str> {
+        if !matches!(self.model, NativeModel::Text(_)) {
+            return Ok(None);
+        }
+        let mut budget = memory_budget_bytes;
+        let warm = self.warm_planning_candidate(request);
+        // A cache is only creditable after checking the actual IDs, scope,
+        // context and selected MTP path. An inapplicable owner is released
+        // before a fresh plan measures its available headroom.
+        if self.prefix_cache_retained() && warm.is_none() {
+            self.clear_prefix_cache();
+            self.reclaim_text_cache()?;
+            budget = current_memory_budget();
+        }
+        let mut best = self.choose_context_plan(request, budget);
+        // Below the caller's maximum, reclaim free scratch pages (including
+        // owners whose GPU retirement callback is still pending) before
+        // deciding physical headroom is the limiting resource. A complete
+        // warm allowance never flushes useful allocator cache pages.
+        if best.is_none_or(|capacity| capacity < request.maximum) {
+            self.reclaim_text_cache()?;
+            budget = current_memory_budget();
+            best = self.choose_context_plan(request, budget);
+        }
+        // Warm capacities are isolated points: a matching retained state may
+        // fit where a smaller cold allocation does not. Compare that candidate
+        // explicitly, rather than breaking the cold planner's monotonic search.
+        let releaseable = self.retained_payload_bytes().unwrap_or(0);
+        let NativeModel::Text(model) = &self.model else {
+            unreachable!()
+        };
+        let preview = model.automatic_context_length_for_request(
+            request.input_tokens,
+            request.maximum,
+            budget.saturating_add(releaseable),
+            request.options.mtp_drafts > 0,
+        );
+        if releaseable > 0 && preview > best {
+            self.clear_prefix_cache();
+            self.reclaim_text_cache()?;
+            // Speculative release bytes are never used for final admission.
+            best = self.choose_context_plan(request, current_memory_budget());
+        }
+        Ok(best)
     }
     fn supports_automatic_context_planning(&self) -> bool {
         match &self.model {
@@ -618,6 +811,9 @@ impl GenerationBackend for NativeBackend {
                 0
             };
         }
+        if options.mtp_drafts > 0 {
+            return 0;
+        }
         self.prefix_cache
             .as_ref()
             .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()))
@@ -699,11 +895,16 @@ impl NativeBackend {
             // A reused sparse cache can grow well beyond its previous mapped
             // rows when this request asks for more output. Undeclared contexts
             // were already admitted for their entire unchanged capacity.
-            admit_memory_bytes(model.dense_generation_memory_bytes(
-                u32::try_from(input.len()).map_err(|_| "context_overflow")?,
-                options.context_tokens,
-                options.max_new_tokens,
-            ))?;
+            admit_memory_bytes_with_reclaim(
+                model.generation_memory_bytes_reusing_dense_mtp(
+                    &entry.state.0,
+                    input.len() as u32,
+                    options.context_tokens,
+                    options.max_new_tokens,
+                    reused as u32,
+                ),
+                || model.reclaim_cached_memory(),
+            )?;
             let mut session = entry.state.0;
             model.restore_dense_mtp_prefix(&mut session, reused).map_err(|_| "native_generation_failed")?;
             model
@@ -711,11 +912,14 @@ impl NativeBackend {
                 .map_err(|_| control_error.unwrap_or("native_generation_failed"))?;
             session
         } else {
-            admit_memory_bytes(model.dense_generation_memory_bytes(
-                u32::try_from(input.len()).map_err(|_| "context_overflow")?,
-                options.context_tokens,
-                options.max_new_tokens,
-            ))?;
+            admit_memory_bytes_with_reclaim(
+                model.dense_generation_memory_bytes(
+                    u32::try_from(input.len()).map_err(|_| "context_overflow")?,
+                    options.context_tokens,
+                    options.max_new_tokens,
+                ),
+                || model.reclaim_cached_memory(),
+            )?;
             model
                 .prefill_dense_mtp_controlled(input, options.context_tokens, &mut control)
                 .map_err(|_| control_error.unwrap_or("native_generation_failed"))?
@@ -930,7 +1134,18 @@ impl NativeBackend {
         let mut state = match (&mut self.model, retained) {
             (NativeModel::Text(model), retained) if model.has_dense_mtp() => {
                 drop(retained);
-                let memory = if options.cache_scope.is_some() && prefix_cache::reusable_prefill_rows(input.len()) > 0 {
+                let capture_prefix =
+                    options.cache_scope.is_some() && prefix_cache::reusable_prefill_rows(input.len()) > 0;
+                let memory = if let Some(entry) = snapshot_retained.as_ref() {
+                    model.generation_memory_bytes_reusing_text_prefix(
+                        &entry.state.0,
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                        capture_prefix,
+                        reused as u32,
+                    )
+                } else if capture_prefix {
                     model.generation_memory_bytes_with_text_prefix(
                         admission_input_tokens,
                         options.context_tokens,
@@ -943,7 +1158,9 @@ impl NativeBackend {
                         options.max_new_tokens,
                     )
                 };
-                admit_memory_bytes(memory)?;
+                admit_memory_bytes_with_reclaim(memory, || {
+                    model.reclaim_cached_memory().map_err(|_| "native_generation_failed")
+                })?;
                 if let Some(entry) = snapshot_retained {
                     let mut state = entry.state.0;
                     model
@@ -960,9 +1177,16 @@ impl NativeBackend {
                 // Finite sparse admission may previously have covered only a
                 // short request; an unchanged undeclared capacity was charged
                 // in full when its retained state was created.
-                if model.max_context_length().is_some() {
-                    admit_generation_memory(model, input.len(), options)?;
-                }
+                admit_memory_bytes_with_reclaim(
+                    model.generation_memory_bytes_reusing_state(
+                        &entry.state,
+                        input.len() as u32,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                        reused as u32,
+                    ),
+                    || model.reclaim_cached_memory().map_err(|_| "native_generation_failed"),
+                )?;
                 let mut state = entry.state;
                 model
                     .rewind_state(&mut state, reused, Some(options.context_tokens), options.seed)
@@ -980,18 +1204,27 @@ impl NativeBackend {
             },
             (NativeModel::Vision(model), retained) => {
                 drop(retained);
-                let memory_bytes = if text_request
+                let capture_prefix = text_request
                     && options.cache_scope.is_some()
                     && prefix_cache::reusable_prefill_rows(input.len()) > 0
-                    && model.prefix_reuse_supported()
-                {
+                    && model.prefix_reuse_supported();
+                let memory_bytes = if let Some(entry) = snapshot_retained.as_ref() {
+                    model.decoder_reused_text_memory_bytes(
+                        &entry.state.0,
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                        capture_prefix,
+                        reused as u32,
+                    )
+                } else if capture_prefix {
                     model.decoder_text_prefix_memory_bytes(
                         admission_input_tokens,
                         options.context_tokens,
                         options.max_new_tokens,
                     )
                 } else if text_request {
-                    model.ordinary_text_generation_memory_bytes(
+                    model.decoder_text_generation_memory_bytes(
                         admission_input_tokens,
                         options.context_tokens,
                         options.max_new_tokens,
@@ -1003,7 +1236,9 @@ impl NativeBackend {
                         options.max_new_tokens,
                     )
                 };
-                admit_memory_bytes(memory_bytes)?;
+                admit_memory_bytes_with_reclaim(memory_bytes, || {
+                    model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed")
+                })?;
                 if let Some(entry) = snapshot_retained {
                     let mut state = entry.state.0;
                     model
@@ -1021,22 +1256,44 @@ impl NativeBackend {
             },
             (NativeModel::Gemma4Vision(model), retained) => {
                 drop(retained);
-                admit_memory_bytes(model.decoder_generation_memory_bytes(
-                    admission_input_tokens,
-                    options.context_tokens,
-                    options.max_new_tokens,
-                ))?;
+                let memory_bytes = if text_request {
+                    model.decoder_text_generation_memory_bytes(
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                    )
+                } else {
+                    model.decoder_generation_memory_bytes(
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                    )
+                };
+                admit_memory_bytes_with_reclaim(memory_bytes, || {
+                    model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed")
+                })?;
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma3Vision(model), retained) => {
                 drop(retained);
-                admit_memory_bytes(model.decoder_generation_memory_bytes(
-                    admission_input_tokens,
-                    options.context_tokens,
-                    options.max_new_tokens,
-                ))?;
+                let memory_bytes = if text_request {
+                    model.decoder_text_generation_memory_bytes(
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                    )
+                } else {
+                    model.decoder_generation_memory_bytes(
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                    )
+                };
+                admit_memory_bytes_with_reclaim(memory_bytes, || {
+                    model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed")
+                })?;
                 model
                     .create_empty_state(Some(options.context_tokens), options.seed)
                     .map_err(|_| "native_generation_failed")?
@@ -1282,6 +1539,96 @@ impl NativeBackend {
 
 #[cfg(test)]
 mod dense_mtp_stats_tests {
+    use super::*;
+
+    #[test]
+    fn reclamation_failure_is_fatal_and_invalid_inventory_never_reclaims() {
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            admit_memory_bytes_with_reclaim(None, || {
+                calls.set(calls.get() + 1);
+                Ok(0)
+            }),
+            Err("resource_budget_exceeded")
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            admit_memory_bytes_with_reclaim(Some(0), || {
+                calls.set(calls.get() + 1);
+                Ok(0)
+            }),
+            Ok(())
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            admit_memory_bytes_with_reclaim(Some(usize::MAX), || Err("native_generation_failed")),
+            Err("native_generation_failed")
+        );
+        assert_eq!(
+            admit_memory_bytes_with_reclaim(Some(usize::MAX), || {
+                calls.set(calls.get() + 1);
+                Ok(0)
+            }),
+            Err("resource_budget_exceeded")
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires an existing private converted full-attention model"]
+    fn retained_native_plan_admits_warm_capacity_when_cold_minimum_does_not_fit() {
+        let path = std::path::PathBuf::from(std::env::var_os("STARK_TEST_MODEL_PATH").expect("set private model path"));
+        let mut backend = NativeBackend::load(&path, None).unwrap();
+        let input = vec![2; 1025];
+        let options = GenerationOptions {
+            context_tokens: 4096,
+            max_new_tokens: 1,
+            seed: 42,
+            sampling: Sampling::Greedy {},
+            mtp_drafts: 0,
+            eos_token_ids: backend.eos_token_ids.clone(),
+            extra_stop_token_ids: Vec::new(),
+            stop: Vec::new(),
+            request_id: 1,
+            cache_scope: Some([9; 16]),
+        };
+        backend.generate(&input, &options, None, None).unwrap();
+        backend.publish_prefix_cache();
+        let mut next = input.clone();
+        next.push(2);
+        let NativeModel::Text(model) = &backend.model else {
+            panic!("expected text model")
+        };
+        let warm = model
+            .generation_memory_bytes_reusing_state(
+                &backend.prefix_cache.as_ref().unwrap().state,
+                next.len() as u32,
+                4096,
+                4096 - next.len() as u32,
+                1024,
+            )
+            .unwrap();
+        assert!(model.automatic_context_length_for_request(next.len() as u32, 4096, warm, false).is_none());
+        let request = ContextPlanningRequest {
+            input_tokens: next.len() as u32,
+            maximum: 4096,
+            input_token_ids: Some(&next),
+            options: &options,
+        };
+        assert_eq!(backend.plan_context_length(&request, warm).unwrap(), Some(4096));
+        assert!(backend.prefix_cache_retained());
+        let mismatch = GenerationOptions {
+            cache_scope: Some([8; 16]),
+            ..options.clone()
+        };
+        let request = ContextPlanningRequest {
+            options: &mismatch,
+            ..request
+        };
+        assert!(backend.plan_context_length(&request, current_memory_budget()).unwrap().is_some());
+        assert!(!backend.prefix_cache_retained());
+    }
+
     #[test]
     fn accepted_prefix_histogram_counts_rounds_by_exact_prefix_length() {
         let accepted_per_round = [0usize, 2, 1, 3, 2, 0];

@@ -213,6 +213,24 @@ extension EngineController {
         }
         let apiFirst = String(repeating: "a", count: 32), apiSecond = String(repeating: "b", count: 32)
         switch scenario {
+        case "resource-budget-memory-derived":
+            for mib in [16, 64, 65, 256, 1024] {
+                let input = mib * 1024 * 1024
+                let wire = 6 * input + 2 * 1024 * 1024
+                guard engine.applyResourceBudget(["resource_budget": [
+                    "request_budget_mib": mib, "input_bytes": input, "max_request_bytes": wire
+                ]]), engine.workerWireLimit() == wire else { return false }
+            }
+            let prior = engine.workerWireLimit()
+            for invalid: [String: Any] in [
+                ["request_budget_mib": Int.max, "input_bytes": Int.max, "max_request_bytes": Int.max],
+                ["request_budget_mib": 0, "input_bytes": 0, "max_request_bytes": 2 * 1024 * 1024],
+                ["request_budget_mib": 256, "input_bytes": 1, "max_request_bytes": 1]
+            ] {
+                guard !engine.applyResourceBudget(["resource_budget": invalid]),
+                      engine.workerWireLimit() == prior else { return false }
+            }
+            return true
         case "backend-short-replies":
             let backend = Pipe()
             engine.observeBackendOutput(backend.fileHandleForReading)
@@ -2633,7 +2651,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_installed_model_display_accepts_olmo3_and_gemma4_families(self):
         self.exercise("models-display-native-families")
 
-    def test_tool_labels_distinguish_protocol_support_and_never_grant_live_capabilities(self):
+    def test_tool_labels_distinguish_protocol_support_and_never_grant_live_capabilities(
+        self,
+    ):
         self.exercise("models-tool-support-labels")
 
     def test_malformed_display_keeps_exact_model_name_without_guessed_badges(self):
@@ -2706,7 +2726,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_restart_controls_stop_exact_model_and_restart_in_stopped_mode(self):
         self.exercise("restart-controls-stop-and-start")
 
-    def test_explicit_failed_start_retries_selected_model_without_clearing_on_busy_run(self):
+    def test_explicit_failed_start_retries_selected_model_without_clearing_on_busy_run(
+        self,
+    ):
         self.exercise("restart-controls-explicit-target-after-failed-start")
 
     def test_restart_controls_reject_running_busy_and_deleted_targets(self):
@@ -2733,8 +2755,12 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_catalog_pagination_failure_retry_preserves_loaded_rows(self):
         self.exercise("catalog-pagination-failure-retry-preserves-rows")
 
-    def test_catalog_pagination_single_click_drains_pages_and_ignores_duplicate_clicks(self):
-        self.exercise("catalog-pagination-auto-drains-positive-empty-and-duplicate-pages")
+    def test_catalog_pagination_single_click_drains_pages_and_ignores_duplicate_clicks(
+        self,
+    ):
+        self.exercise(
+            "catalog-pagination-auto-drains-positive-empty-and-duplicate-pages"
+        )
 
     def test_catalog_schema_and_item_bounds_are_enforced(self):
         self.exercise("catalog-schema-bounds")
@@ -2846,6 +2872,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_source_or_install_reset_clears_only_previous_install_error(self):
         self.exercise("install-error-reset")
+
+    def test_resource_budget_follows_runtime_memory_and_rejects_overflow(self):
+        self.exercise("resource-budget-memory-derived")
 
     def test_install_reset_preserves_later_runtime_or_attachment_errors(self):
         self.exercise("install-error-runtime-retained")

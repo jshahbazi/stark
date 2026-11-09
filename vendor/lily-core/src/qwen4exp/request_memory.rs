@@ -189,6 +189,32 @@ fn scratch(
     .into_iter()
     .max()?;
     s.add(&[largest_projection], 2, 1)?;
+    if mtp {
+        let gdn = c
+            .layer_types
+            .iter()
+            .filter(|t| matches!(t, LayerType::LinearAttention))
+            .count() as u128;
+        s.add(
+            &[
+                MAX_DRAFTS as u128,
+                c.linear_num_value_heads as u128,
+                GDN_HEAD_DIM as u128,
+                GDN_HEAD_DIM as u128,
+            ],
+            4,
+            gdn,
+        )?;
+        let conv = (2 * c.linear_num_key_heads as u128 * c.linear_key_head_dim as u128)
+            + c.linear_num_value_heads as u128 * c.linear_value_head_dim as u128;
+        s.add(&[(MAX_DRAFTS + 1) as u128, conv], 2, gdn)?;
+        s.add(&[(MAX_DRAFTS + 1) as u128, c.hc_width() as u128], 2, 1)?;
+        s.add(&[(MAX_DRAFTS + 1) as u128, c.vocab_size as u128], 4, 1)?;
+        s.add(&[4 * 1024 * 1024], 1, 1)?;
+    }
+    if rows == 0 {
+        return Some(s);
+    }
     let m = rows as u128;
     hc(&mut s, c, m)?;
     ple(&mut s, c, m)?;
@@ -220,23 +246,6 @@ fn scratch(
     if format != KvFormat::Bf16 {
         s.add(&[nkv, c.indexer.dense_limit() as u128, hd], 2, 2)?;
     }
-    if mtp {
-        let gdn = c
-            .layer_types
-            .iter()
-            .filter(|t| matches!(t, LayerType::LinearAttention))
-            .count() as u128;
-        s.add(
-            &[MAX_DRAFTS as u128, heads, GDN_HEAD_DIM as u128, GDN_HEAD_DIM as u128],
-            4,
-            gdn,
-        )?;
-        s.add(&[(MAX_DRAFTS + 1) as u128, conv], 2, gdn)?;
-        s.add(&[(MAX_DRAFTS + 1) as u128, wide], 2, 1)?;
-        s.add(&[(MAX_DRAFTS + 1) as u128, c.vocab_size as u128], 4, 1)?;
-        // Draft distributions and fixed verifier control arrays.
-        s.add(&[4 * 1024 * 1024], 1, 1)?;
-    }
     Some(s)
 }
 
@@ -259,6 +268,165 @@ impl Qwen4ExpModel {
         )?;
         (max_buffer <= context.device().maxBufferLength()).then_some(bytes)
     }
+
+    /// Additional bytes a text request may need beyond allocations already
+    /// resident in this loaded session. Context and prefill growth are charged
+    /// at their replacement peak; retained state is not charged again.
+    pub fn additional_request_memory_bytes(
+        &self,
+        context: &MetalContext,
+        capacity: usize,
+        input_tokens: usize,
+        scratch: &Scratch,
+    ) -> Option<usize> {
+        let target_capacity = round_capacity(capacity).ok()?;
+        let input_tokens = u32::try_from(input_tokens).ok()?;
+        if input_tokens == 0 || target_capacity < input_tokens as usize {
+            return None;
+        }
+        let mtp = self.weights.mtp.is_some();
+        let format = self.kv_format;
+        let (current_rows, resident_prefill_capacity) =
+            scratch.resident_prefill_geometry(self.config.indexer.compress_ratio);
+        let resident_capacity = round_capacity(
+            scratch.resident_context_capacity(self.config.indexer.compress_ratio),
+        )
+        .ok()?;
+        let bytes = additional_request_memory(
+            &self.config,
+            format,
+            mtp,
+            self.prefill_chunk,
+            target_capacity,
+            input_tokens as usize,
+            ResidentAllocations {
+                context_capacity: resident_capacity,
+                prefill_rows: current_rows,
+                prefill_capacity: resident_prefill_capacity,
+            },
+        )?;
+        let (_, target_max_buffer) = request_inventory(
+            &self.config,
+            format,
+            mtp,
+            self.prefill_chunk,
+            target_capacity,
+            input_tokens as usize,
+        )?;
+        if target_max_buffer as u64 > context.device().maxBufferLength() as u64 {
+            return None;
+        }
+        Some(bytes)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ResidentAllocations {
+    context_capacity: usize,
+    prefill_rows: usize,
+    prefill_capacity: usize,
+}
+
+fn additional_request_memory(
+    c: &Qwen4ExpConfig,
+    format: KvFormat,
+    mtp: bool,
+    prefill_chunk: usize,
+    capacity: usize,
+    input_tokens: usize,
+    resident: ResidentAllocations,
+) -> Option<usize> {
+    let capacity = round_capacity(capacity).ok()?;
+    let resident_capacity = round_capacity(resident.context_capacity).ok()?;
+    let rows = input_tokens
+        .max(if mtp { MAX_DRAFTS + 1 } else { 1 })
+        .min(prefill_chunk)
+        .checked_next_power_of_two()?
+        .min(prefill_chunk);
+    let old_rows = resident.prefill_rows.min(prefill_chunk);
+    let old_prefill_capacity = resident.prefill_capacity.max(resident_capacity);
+    let target_prefill_capacity = capacity.max(old_prefill_capacity);
+    let target_rows =
+        if capacity > resident_capacity { rows } else { rows.max(old_rows) };
+    let target_scratch = scratch(c, format, target_prefill_capacity, target_rows, mtp)?;
+    let scratch_bytes = if capacity > resident_capacity {
+        // Decode scratch is rebuilt before state growth. The old owner remains
+        // live while the complete replacement is constructed.
+        target_scratch.bytes
+    } else {
+        let old_scratch = scratch(c, format, resident_capacity, old_rows, mtp)?;
+        target_scratch.bytes.checked_sub(old_scratch.bytes)?
+    };
+    let caches = if capacity > resident_capacity {
+        cache_bytes(c, format, mtp, capacity)? as u128
+    } else {
+        0
+    };
+    let snapshots = (snapshot_bytes(c, mtp)? as u128).checked_mul(2)?;
+    let workspace = (input_tokens as u128)
+        .checked_mul(16)?
+        .checked_add((target_prefill_capacity as u128).checked_mul(16)?)?
+        .checked_add((c.vocab_size as u128).checked_mul(64)?)?
+        .checked_add(8 * 1024 * 1024)?;
+    usize::try_from(
+        caches
+            .checked_add(scratch_bytes)?
+            .checked_add(snapshots)?
+            .checked_add(workspace)?,
+    )
+    .ok()
+}
+
+fn cache_bytes(
+    c: &Qwen4ExpConfig,
+    format: KvFormat,
+    mtp: bool,
+    capacity: usize,
+) -> Option<usize> {
+    let capacity = round_capacity(capacity).ok()? as u128;
+    let attention =
+        c.layer_types.iter().filter(|t| matches!(t, LayerType::FullAttention)).count()
+            as u128
+            + u128::from(mtp);
+    let heads = c.num_key_value_heads as u128;
+    let dim = c.head_dim as u128;
+    heads.checked_mul(capacity)?.checked_mul(dim).filter(|&n| n <= u32::MAX as u128)?;
+    let per_token = 2u128
+        .checked_mul(heads)?
+        .checked_mul(kv_row_bytes(format, dim)?)?
+        .checked_add(INDEXER_D as u128 * 2)?;
+    let blocks = (block_key_rows(capacity as usize, c.indexer.compress_ratio) as u128)
+        .checked_mul(INDEXER_D as u128)?
+        .checked_mul(2)?;
+    let bytes = (attention.checked_mul(capacity)?.checked_mul(per_token)?)
+        .checked_add(attention.checked_mul(blocks)?)?;
+    usize::try_from(bytes).ok()
+}
+
+fn snapshot_bytes(c: &Qwen4ExpConfig, mtp: bool) -> Option<usize> {
+    let state = (c.linear_num_value_heads as u128)
+        .checked_mul(GDN_HEAD_DIM as u128)?
+        .checked_mul(GDN_HEAD_DIM as u128)?
+        .checked_mul(4)?;
+    let conv = (c.gdn_conv_channels() as u128)
+        .checked_mul(c.linear_conv_kernel_dim.checked_sub(1)? as u128)?
+        .checked_mul(2)?;
+    let ple = c.ple.as_ref().map_or(Some(0), |p| {
+        (c.hc_width() as u128).checked_mul(p.conv_state_len() as u128)?.checked_mul(2)
+    })?;
+    let hidden = if mtp { (c.hc_width() as u128).checked_mul(2)? } else { 0 };
+    let gdn_layers = c
+        .layer_types
+        .iter()
+        .filter(|t| matches!(t, LayerType::LinearAttention))
+        .count() as u128;
+    usize::try_from(
+        gdn_layers
+            .checked_mul(state.checked_add(conv)?)?
+            .checked_add(ple)?
+            .checked_add(hidden)?,
+    )
+    .ok()
 }
 
 fn request_inventory(
@@ -449,5 +617,81 @@ mod tests {
             request_inventory(&cfg, KvFormat::Q8, false, 4096, MAX_SEQ + 1, 4)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn incremental_request_admission_does_not_recharge_retained_state() {
+        let cfg = geometry();
+        let retained = additional_request_memory(
+            &cfg,
+            KvFormat::Q8,
+            false,
+            4096,
+            16384,
+            4,
+            ResidentAllocations {
+                context_capacity: 16384,
+                prefill_rows: 2048,
+                prefill_capacity: 16384,
+            },
+        )
+        .unwrap();
+        let cold =
+            request_inventory(&cfg, KvFormat::Q8, false, 4096, 16384, 4).unwrap().0;
+        assert!(retained < cold);
+
+        // A tiny turn after a large prefill keeps the resident row allocation;
+        // it must not add the already allocated cache or prefill buffers again.
+        let tiny_after_large = additional_request_memory(
+            &cfg,
+            KvFormat::Q8,
+            false,
+            4096,
+            16384,
+            1,
+            ResidentAllocations {
+                context_capacity: 16384,
+                prefill_rows: 2048,
+                prefill_capacity: 16384,
+            },
+        )
+        .unwrap();
+        assert!(tiny_after_large < cold);
+        assert!(tiny_after_large <= retained);
+    }
+
+    #[test]
+    fn incremental_request_admission_charges_context_growth_overlap() {
+        let cfg = geometry();
+        let retained = additional_request_memory(
+            &cfg,
+            KvFormat::Q8,
+            false,
+            4096,
+            16384,
+            4,
+            ResidentAllocations {
+                context_capacity: 16384,
+                prefill_rows: 1024,
+                prefill_capacity: 16384,
+            },
+        )
+        .unwrap();
+        let growth = additional_request_memory(
+            &cfg,
+            KvFormat::Q8,
+            false,
+            4096,
+            32768,
+            4,
+            ResidentAllocations {
+                context_capacity: 16384,
+                prefill_rows: 1024,
+                prefill_capacity: 16384,
+            },
+        )
+        .unwrap();
+        assert!(growth > retained);
+        assert!(growth >= cache_bytes(&cfg, KvFormat::Q8, false, 32768).unwrap());
     }
 }

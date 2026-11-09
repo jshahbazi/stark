@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::backends::common::kernel::AttentionPrepareKVOnlyKernel;
 use crate::{
     backends::common::{
-        Backend, CommandBuffer, CommandBufferEncoding, Kernels,
+        Backend, CommandBuffer, CommandBufferEncoding, Context, DeviceCapabilities, Kernels,
         kernel::{AttentionKernel, AttentionKernelConfig, AttentionPrepareKernel, SigmoidGateKernel},
     },
     config::{
@@ -40,6 +40,7 @@ pub use state::{ATTENTION_SUFFIX_CAPACITY, AttentionState, KVCacheView};
 pub mod rope;
 
 pub struct Attention<B: Backend> {
+    sparse_page_bytes: Option<usize>,
     image_attention_policy: ImageAttentionPolicy,
     head_dim: u32,
     num_q_heads: u32,
@@ -281,6 +282,11 @@ impl<B: Backend> Attention<B> {
 
         Ok((
             Self {
+                sparse_page_bytes: context
+                    .device_capabilities()
+                    .contains(DeviceCapabilities::SPARSE_BUFFERS)
+                    .then(|| context.sparse_page_size())
+                    .flatten(),
                 image_attention_policy: config.image_attention_policy,
                 head_dim,
                 num_q_heads,
@@ -324,12 +330,23 @@ impl<B: Backend> Mixer<B> for Attention<B> {
         context_tokens: u32,
         input_tokens: u32,
     ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        self.memory_estimate_with_prefix(context_tokens, input_tokens, input_tokens, false)
+    }
+
+    fn memory_estimate_with_prefix(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        sequence_tokens: u32,
+        irregular_prefill: bool,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
         if self.max_rope_length.is_some_and(|maximum| context_tokens > maximum) {
             return None;
         }
-        crate::encodable_block::memory::attention_estimate(
+        let mut estimate = crate::encodable_block::memory::attention_estimate_with_prefix(
             context_tokens,
             input_tokens,
+            sequence_tokens,
             self.head_dim,
             self.num_q_heads,
             self.num_kv_heads,
@@ -337,7 +354,22 @@ impl<B: Backend> Mixer<B> for Attention<B> {
             self.projection_dim,
             self.data_type.size_in_bytes(),
             self.reference.is_some(),
-        )
+        )?;
+        if let Some(page_bytes) = self.sparse_page_bytes {
+            let physical = crate::encodable_block::memory::attention_physical_state_bytes(
+                context_tokens,
+                input_tokens,
+                sequence_tokens,
+                irregular_prefill,
+                self.head_dim,
+                self.num_kv_heads,
+                self.ring_capacity,
+                self.data_type.size_in_bytes(),
+                page_bytes,
+            )?;
+            estimate.set_state_buffers(physical, physical / 2);
+        }
+        Some(estimate)
     }
 
     fn context_cache_buffer_bytes(

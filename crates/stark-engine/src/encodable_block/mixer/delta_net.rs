@@ -104,6 +104,10 @@ impl<B: Backend> MixerStateSnapshot<B> for DeltaNetPrefix<B> {
 }
 
 impl<B: Backend> MixerState<B> for DeltaNetState<B> {
+    fn resident_payload_bytes(&self) -> Option<usize> {
+        self.conv_state.size().checked_add(self.ssm_state.size())
+    }
+
     fn capture_prefix(
         &self,
         _position: u32,

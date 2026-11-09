@@ -81,7 +81,22 @@ impl<B: Backend> QwenMtp<B> {
         context_tokens: u32,
         input_tokens: u32,
     ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
-        let mut estimate = self.transformer.memory_estimate(context_tokens, input_tokens.max(4))?;
+        self.memory_estimate_with_prefix(context_tokens, input_tokens, input_tokens, false)
+    }
+
+    pub(crate) fn memory_estimate_with_prefix(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        sequence_tokens: u32,
+        irregular_prefill: bool,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        let mut estimate = self.transformer.memory_estimate_with_prefix(
+            context_tokens,
+            input_tokens.max(4),
+            sequence_tokens.max(4),
+            irregular_prefill,
+        )?;
         for rows in [input_tokens.clamp(4, 1024), 1] {
             // Embedding/hidden norms, fused projection output and the [e,h]
             // concatenation use BF16, matching fuse_inputs and predictor pass.
@@ -96,6 +111,19 @@ impl<B: Backend> QwenMtp<B> {
             }
         }
         Some(estimate)
+    }
+
+    pub(crate) fn persistent_state_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        sequence_tokens: u32,
+    ) -> Option<usize> {
+        Some(
+            self.transformer
+                .memory_estimate_with_prefix(context_tokens, input_tokens.max(4), sequence_tokens.max(4), false)?
+                .state_bytes,
+        )
     }
 
     pub fn new(
