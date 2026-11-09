@@ -1,6 +1,6 @@
 # 20261109-GLMMEM-12: owned packed-weight upload source candidate
 
-State: source/CPU prototype proposal only. No production integration, Metal
+State: bounded private CPU prototype controls pass. No production integration, Metal
 execution, model run or memory-policy change is authorized by this record.
 Predecessor: [GLMMEM-11](2026-11-09-glm-mapping-lifecycle-diagnostic.md).
 
@@ -38,11 +38,18 @@ The bounded private Rust source is prepared and formatted, SHA256
 `6ef774e2293c0ccd91ccf6d62aed2de47c24843fb6cd9d77d3dc80825f11c7ad`.
 Its source registration is
 `1d9f4d1f622d99fd4fcf453428c049113b68549d148b6a27b43f86fc1a57f155`.
-Four prepared CPU controls cover exact bytes/alignment/live-budget release,
+Four CPU controls cover exact bytes/alignment/live-budget release,
 invalid ranges, descriptor mutation/fencing and symlink rejection, using at
-most a 128 KiB synthetic file per control. They have not been compiled or run.
+most a 128 KiB synthetic file per control. A fresh zero-dependency Rust 1.98.1
+compile and all four controls pass; source identity remained unchanged and
+no fixture residue remains. CPU receipt:
+`0ede57b7df6b04d84b0e9d51694f5210d28101de9529adde94a4d889ba48915c`.
 Darwin FFI constants were checked against the installed SDK. No new package,
 engine source change, Metal object or model process is involved.
+
+This bounded prototype gate is complete. It is not being expanded into a
+whole-bank backend; primary diagnosis returns to the actual first-use
+library/native-kernel pressure path.
 
 Any later integration must be independently reviewed as a separate opt-in
 candidate, cap retained statics and nonoverlapping expert groups, include all
