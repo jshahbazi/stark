@@ -97,3 +97,56 @@ The private recovery receipt is
 `706c3cd31fb93e637d3f4ac940cff7ae2fbb3493fbe5e5105f91fc3eea4ad799`.
 The hash-only feature and its bounded digest evidence are recorded separately
 before any new worker admission or startup measurement.
+
+## Post-recovery memory review and execution hold
+
+Header-only inspection of the unchanged source inventories the complete
+decoder without decoding tensors or loading a model:
+
+| Inventory | Tensor count | Payload bytes | Summed page-rounded Metal spans |
+| --- | ---: | ---: | ---: |
+| Target expert banks | 126 | 99,033,808,896 | 99,035,873,280 |
+| Other target tensors | 1,257 | 6,888,746,232 | 6,909,345,792 |
+| Retained predictor | 29 | 2,787,995,776 | 2,788,474,880 |
+
+These span sums can double-count shared pages; actual driver allocations may
+also exceed individual spans. They establish an inventory, not measured RSS
+or a residency guarantee. The private header/source receipt is
+`32b04f2f1bb57fa905ba31a7ea4e1c8e941986cb4f041f97707b37e923e64003`.
+
+The resident recipe budgets all target expert spans, an 8 GiB static reserve
+and its encoder-state allowance. At the 4,096-token context cap their source
+subtotal is 108,692,065,600 bytes, before the separately loaded image inventory,
+host workspace and omitted prefix copies. This already exceeds the earlier
+108,584,796,160-byte available-memory baseline. It does not support a safe retry.
+The full resident model load remains held; admission policy is unchanged.
+
+One KDA snapshot copies 34 layers of convolution history and recurrent state
+into host F32 vectors: 152,633,344 bytes. Two overlapping snapshots require
+305,266,688 bytes beyond the live state. Full remaining static growth, attention
+copies, tower/scratch and an explicit host margin must also be covered.
+Implementing the retained predictor adds its own 2.788 GB payload and request
+state; inactive source-head weights do not qualify MTP execution.
+
+### Separate bounded-command investigation
+
+Existing `STARK_GLM53_BOUNDED_GRAPH` execution has a distinct ownership policy
+from encoder-bank residency. Each admitted group constructs its own bounded
+bank wrappers, completes its graph, drops those wrappers and drains its nested
+autorelease pool before the next group. `STARK_GLM53_BANK_GROUP_LAYERS` can
+further bound group size using the existing source option. Whole-model encoder
+residency must be absent for that candidate; merely limiting encoder groups
+while retaining the resident whitelist still budgets the complete model.
+
+This source route is a candidate for a separate memory investigation. Its
+default group budget is derived from the recommended device working set and
+an 8 GiB static reserve, which alone does not establish current host headroom.
+It still requires a complete static/state/image/snapshot/host plan, bounded
+driver and paging observations, cancellation cleanup and the existing guards.
+No flags, budgets or source policy were changed, and no model was run.
+
+The current optimized chunked prefill requires a single encoder-bank group;
+the bounded-command recipe does not inherit that prefill implementation or its
+performance qualification. Any future comparison needs all text/image arms
+matched to the selected recipe, with fresh cache, arithmetic and lifecycle
+checks. The resident recipe's earlier timing cannot be transferred to it.
