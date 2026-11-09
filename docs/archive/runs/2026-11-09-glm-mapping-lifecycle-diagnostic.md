@@ -1,7 +1,8 @@
 # 20261109-GLMMEM-11: nonmodel mapping lifecycle diagnostic
 
-State: preregistered source, CPU geometry controls and tiny native CPU build
-pass. Metal execution has not run. A later explicit resource-slot grant is required.
+State: preregistered source/CPU controls and the one independently reviewed
+tiny Metal lifecycle run pass. The full-model compression failure is not
+reproduced or explained; full-model execution remains held.
 Predecessor: [GLMVIS-10](2026-11-09-glm-functional-pageout-screen.md).
 
 ## Problem and hypothesis
@@ -106,6 +107,46 @@ fixture or child creation and adds received wall/monotonic timestamps to the
 native aggregate events. These CPU controls do not qualify Metal execution.
 
 Independent review of the revised sealed recipe and an explicit small GPU slot
-remain required. The full GLM model remains held;
-no production mapping/admission change, retry, cache/MTP or default promotion
-is authorized by this proposal.
+were completed before execution. The pre-execution checkpoint is
+`001d6d46ea583aafb91c7ff00b54558470a12d6d1e63a989ebea641858685d89`.
+
+## Actual small lifecycle result
+
+The one granted run passes all four cases, sixty matching completed blits and
+the actual wrong-offset CPU rejection. It records 306 aggregate phase events,
+45 no-copy deallocator calls and zero unmap failures. The fixture was removed;
+the child drained, supervisor joined and wall timer joined. The exclusive slot
+was released directly to Qwen. Full private receipt:
+`9c9daec77cbc6ef58845fd54ca1ea1c590b5fc1550222f6a72d2fbc2604c9994`.
+
+The supervisor has three process samples, no violation and zero Pageouts,
+Swapouts, swap-used or compressor growth. Minimum available bytes were
+106,728,243,200; peak host wired growth was 368,001,024 bytes. These observations
+do not constitute a performance result.
+
+| Case | Peak Metal allocated bytes | Peak native task footprint bytes | Maximum mapped resident pages |
+| --- | ---: | ---: | ---: |
+| Full private no-copy | 8,863,744 | 135,430,744 | 4,096 |
+| Dedicated private no-copy | 8,863,744 | 135,561,816 | 257 |
+| Full shared no-copy | 8,863,744 | 135,692,888 | 4,096 |
+| Explicit copy | 8,847,360 | 144,196,184 | 257 |
+
+At 16 KiB per page, those mapping observations represent 64 MiB and 4,210,688
+bytes of resident backing respectively. The fixture is warm, and those file
+pages must not be added to footprint as if they were unique committed copies.
+The no-copy views report both length and allocated size as 4,210,688 bytes;
+the explicit copy reports 4,194,304. Metal allocated bytes return to 4,653,056
+after every case.
+
+The first private view changes Metal allocated bytes from 4,653,056 to
+8,863,744 while task footprint stays near 8.57 MB. After the first completed
+blit, task footprint is 135,266,904 bytes. Pool drain returns its wrapper
+count/bytes to zero and Metal allocated bytes to 4,653,056, while task footprint
+remains 135,266,904. This directly distinguishes wrapper deallocation from
+complete task-footprint reclamation. It does not identify the retained
+footprint's implementation category or attribute the full-model failure.
+
+No compression failure was reproduced. The result does not select private,
+shared, dedicated or copied storage as a production fix. The full GLM model
+remains held. No production mapping/admission change, retry, cache/MTP,
+performance or default promotion is authorized by this result.
