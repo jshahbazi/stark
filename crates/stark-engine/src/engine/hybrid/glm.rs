@@ -503,21 +503,87 @@ impl GlmModel {
         #[cfg(feature = "metal")]
         {
             if self.decode_graph_enabled {
-                self.step_inner_metal(token, readout)
+                self.step_inner_metal(token, readout, None)
             } else {
-                self.step_inner_reference(token, readout)
+                self.step_inner_reference(token, readout, None)
             }
         }
         #[cfg(not(feature = "metal"))]
         {
-            self.step_inner_reference(token, readout)
+            self.step_inner_reference(token, readout, None)
         }
+    }
+
+    /// Consume one complete image prompt from fresh state. Only the admitted
+    /// tower may provide features through this crate-private bridge. The image
+    /// run never captures a text prefix; following text must reset normally.
+    pub(super) fn prefill_image_embeddings(
+        &mut self,
+        tokens: &[u32],
+        image_start: usize,
+        features: &[f32],
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<Vec<f32>> {
+        let hidden = self.config.hidden;
+        if tokens.is_empty()
+            || tokens.len() > self.config.max_context
+            || features.is_empty()
+            || !features.len().is_multiple_of(hidden)
+            || features.len() / hidden > 256
+            || image_start.checked_add(features.len() / hidden).is_none_or(|end| end > tokens.len())
+            || features.iter().any(|v| !v.is_finite())
+            || tokens.iter().any(|&token| token as usize >= self.config.vocab)
+        {
+            self.reset();
+            return Err(Error::Invalid("GLM image fusion bounds"));
+        }
+        self.reset();
+        #[cfg(feature = "metal")]
+        if self.cleanup_failed {
+            return Err(Error::Invalid("GLM image requires a healthy model"));
+        }
+        let mut result = Vec::new();
+        let transaction = (|| -> Result<()> {
+            for (position, &token) in tokens.iter().enumerate() {
+                if should_cancel() {
+                    return Err(Error::Cancelled);
+                }
+                let embedding = position
+                    .checked_sub(image_start)
+                    .filter(|&index| index < features.len() / hidden)
+                    .map(|index| &features[index * hidden..(index + 1) * hidden]);
+                let readout = position + 1 == tokens.len();
+                #[cfg(feature = "metal")]
+                let output = objc2::rc::autoreleasepool(|_| {
+                    if self.decode_graph_enabled {
+                        self.step_inner_metal(token, readout, embedding)
+                    } else {
+                        self.step_inner_reference(token, readout, embedding)
+                    }
+                })?;
+                #[cfg(not(feature = "metal"))]
+                let output = self.step_inner_reference(token, readout, embedding)?;
+                if readout {
+                    result = output;
+                }
+            }
+            if should_cancel() {
+                return Err(Error::Cancelled);
+            }
+            Ok(())
+        })();
+        if let Err(error) = transaction {
+            self.reset();
+            return Err(error);
+        }
+        Ok(result)
     }
 
     fn step_inner_reference(
         &mut self,
         token: u32,
         readout: bool,
+        image_embedding: Option<&[f32]>,
     ) -> Result<Vec<f32>> {
         #[cfg(test)]
         self.layer_trace.clear();
@@ -527,9 +593,12 @@ impl GlmModel {
         }
         let embedding = {
             let _scope = super::profile::Scope::new("glm.embedding");
-            self.weights.row("token_embd.weight", token as usize)?
+            match image_embedding {
+                Some(embedding) => embedding.to_vec(),
+                None => self.weights.row("token_embd.weight", token as usize)?,
+            }
         };
-        if embedding.len() != c.hidden {
+        if embedding.len() != c.hidden || (image_embedding.is_some() && embedding.iter().any(|v| !v.is_finite())) {
             return Err(Error::Invalid("glm_embedding_shape"));
         }
         let mut streams = embedding.repeat(c.hc);
@@ -600,6 +669,7 @@ impl GlmModel {
         &mut self,
         token: u32,
         readout: bool,
+        image_embedding: Option<&[f32]>,
     ) -> Result<Vec<f32>> {
         use super::weight_metal::{DecodeGraph, DeviceVector};
         #[cfg(test)]
@@ -618,8 +688,11 @@ impl GlmModel {
             }
         }
         let decode = self.decode.as_mut().ok_or(Error::Invalid("glm_decode_state"))?;
-        let embedding = self.weights.row("token_embd.weight", token as usize)?;
-        if embedding.len() != c.hidden {
+        let embedding = match image_embedding {
+            Some(embedding) => embedding.to_vec(),
+            None => self.weights.row("token_embd.weight", token as usize)?,
+        };
+        if embedding.len() != c.hidden || (image_embedding.is_some() && embedding.iter().any(|v| !v.is_finite())) {
             return Err(Error::Invalid("glm_embedding_shape"));
         }
         let mut streams = DecodeGraph::upload(&embedding.repeat(c.hc))?;
@@ -2879,6 +2952,44 @@ mod tests {
 
     /// This checks only production source headers and admission. Sparse stub
     /// payloads may be supplied; this test never performs a forward operation.
+    #[stark_test]
+    #[ignore]
+    fn glm_image_embedding_fusion_matches_identical_text_rows_and_resets_on_cancel() {
+        let path = std::env::var_os("STARK_GLM_FUSION_FIXTURE").expect("GLM fusion fixture required");
+        let path = std::path::Path::new(&path);
+        let config: Value = serde_json::from_slice(&std::fs::read(path.join("config.json")).unwrap()).unwrap();
+        let mut model = GlmModel::new(Weights::open(path).unwrap(), &config).unwrap();
+        let tokens = [1, 2, 3, 4];
+        let mut baseline = Vec::new();
+        for (index, &token) in tokens.iter().enumerate() {
+            if index + 1 == tokens.len() {
+                baseline = model.step(token).unwrap();
+            } else {
+                model.ingest(token).unwrap();
+            }
+        }
+        let continuation = model.step(5).unwrap();
+        let features = model.weights.row("token_embd.weight", 2).unwrap();
+        let actual = model.prefill_image_embeddings(&tokens, 1, &features, &mut || false).unwrap();
+        assert!(actual == baseline, "GLM identical embedding fusion changed logits");
+        assert!(model.captured.is_none() && model.capture_at.is_none());
+        assert!(model.step(5).unwrap() == continuation, "GLM image continuation changed state");
+        let mut checks = 0;
+        assert!(matches!(
+            model.prefill_image_embeddings(&tokens, 1, &features, &mut || {
+                checks += 1;
+                checks > 2
+            }),
+            Err(Error::Cancelled)
+        ));
+        assert_eq!(model.position, 0);
+        assert!(model.captured.is_none() && model.capture_at.is_none());
+        let mut invalid = features.clone();
+        invalid[0] = f32::NAN;
+        assert!(model.prefill_image_embeddings(&tokens, 1, &invalid, &mut || false).is_err());
+        assert_eq!(model.position, 0);
+    }
+
     #[stark_test]
     #[ignore]
     fn glm_production_header_admission_only() {

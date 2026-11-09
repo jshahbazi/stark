@@ -7,6 +7,7 @@ pub mod activity;
 pub mod finite_guard;
 pub mod flint;
 pub mod glm;
+mod glm_vision;
 pub mod guided_admission;
 mod image;
 pub use image::PreparedHybridImage;

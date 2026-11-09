@@ -427,7 +427,7 @@ pub(crate) fn decode_image(
 
 /// Match PIL's RGB conversion for processors that discard alpha channels.
 /// Codec and allocation bounds are shared with the white-compositing profile.
-pub(super) fn decode_image_discard_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
+pub(crate) fn decode_image_discard_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
     data: &[u8],
     limits: &PreprocessLimits,
     validate_processed: F,
@@ -619,7 +619,7 @@ fn resize_weights(
     ))
 }
 
-pub(super) fn resize_rgb(
+pub(crate) fn resize_rgb(
     image: &RgbImage,
     width: u32,
     height: u32,

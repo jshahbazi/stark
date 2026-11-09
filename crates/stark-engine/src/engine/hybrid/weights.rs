@@ -17,7 +17,10 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File},
     io::{BufReader, Read, Seek},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::Arc,
@@ -937,6 +940,25 @@ impl Weights {
     pub fn metadata(&self) -> &BTreeMap<String, Value> {
         &self.metadata
     }
+
+    /// Bind a sidecar's verified descriptor to the file actually mapped by
+    /// this loader. Rechecking a pathname cannot establish that identity when
+    /// the name is replaced and restored around an independent open.
+    pub(super) fn single_file_signature(&self) -> Result<[u64; 7]> {
+        if self.files.len() != 1 {
+            return Err(Error::Invalid("single mapped sidecar required"));
+        }
+        let m = self.files[0]._file.metadata()?;
+        Ok([
+            m.dev(),
+            m.ino(),
+            m.len(),
+            m.mtime() as u64,
+            m.mtime_nsec() as u64,
+            m.ctime() as u64,
+            m.ctime_nsec() as u64,
+        ])
+    }
     pub fn has(
         &self,
         name: &str,
@@ -961,6 +983,39 @@ impl Weights {
         name: &str,
     ) -> Result<&[usize]> {
         Ok(&self.tensor(name)?.shape)
+    }
+
+    /// Original floating storage for admitted native vision tensors. This does
+    /// not decode payloads or reinterpret packed/affine matrices as floats.
+    pub(super) fn floating_tensor_kind(
+        &self,
+        name: &str,
+    ) -> Result<u32> {
+        let tensor = self.tensor(name)?;
+        if tensor.affine.is_some() || !matches!(tensor.kind, 0 | 1 | 30) {
+            return Err(Error::Invalid("floating vision tensor required"));
+        }
+        Ok(tensor.kind)
+    }
+
+    /// Convolutions whose stride equals their kernel consume one complete
+    /// flattened channel/kernel patch per output. Keep the original bytes;
+    /// only the admitted tensor view is flattened for the existing matvec.
+    pub(super) fn floating_patch_matvec(
+        &self,
+        name: &str,
+        input: &[f32],
+    ) -> Result<Vec<f32>> {
+        self.floating_tensor_kind(name)?;
+        let tensor = self.tensor(name)?;
+        if !(2..=5).contains(&tensor.shape.len()) {
+            return Err(Error::Invalid("floating patch projection rank"));
+        }
+        let columns = product(&tensor.shape[1..])?;
+        if columns > MAX_VECTOR {
+            return Err(Error::Invalid("floating patch projection width"));
+        }
+        self.matrix_slice(tensor, 0, tensor.shape[0], columns, input)
     }
 
     fn raw(
@@ -3722,6 +3777,55 @@ mod tests {
         assert!(matches!(Weights::open(&fixture.0), Err(Error::Invalid("tensor size overflow"))));
         safetensors(&path, &[("empty_dimension", "BF16", vec![2, 0, 2, 2, 2], vec![])]);
         assert!(Weights::open(&fixture.0).is_err());
+    }
+
+    #[stark_test]
+    fn native_sidecar_signature_identifies_mapped_descriptor_after_path_replacement() {
+        let fixture = Fixture::new();
+        let a = fixture.0.join("a");
+        let b = fixture.0.join("b");
+        for directory in [&a, &b] {
+            fs::create_dir(directory).unwrap();
+            fs::write(directory.join("config.json"), b"{}").unwrap();
+        }
+        safetensors(&a.join("model.safetensors"), &[("matrix", "F32", vec![1, 1], 1.0f32.to_le_bytes().to_vec())]);
+        safetensors(&b.join("model.safetensors"), &[("matrix", "F32", vec![1, 1], 2.0f32.to_le_bytes().to_vec())]);
+        let original = Weights::open(&a.join("model.safetensors")).unwrap();
+        let original_signature = original.single_file_signature().unwrap();
+        let saved = fixture.0.join("saved");
+        fs::rename(&a, &saved).unwrap();
+        fs::rename(&b, &a).unwrap();
+        let substituted = Weights::open(&a.join("model.safetensors")).unwrap();
+        fs::rename(&a, &b).unwrap();
+        fs::rename(&saved, &a).unwrap();
+        let named = Weights::open(&a.join("model.safetensors")).unwrap();
+        // The pathname observes A again while the intervening mapped loader
+        // owns B. Identity must be taken from Mapping::_file, not that name.
+        assert_eq!(original_signature, named.single_file_signature().unwrap());
+        assert_ne!(original_signature, substituted.single_file_signature().unwrap());
+        assert_eq!(substituted.matvec("matrix", &[1.0]).unwrap(), [2.0]);
+    }
+
+    #[stark_test]
+    fn floating_vision_convolution_projection_preserves_channel_kernel_order() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let values: Vec<f32> = (1..=16).map(|value| value as f32).collect();
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[
+                ("conv", "F32", vec![2, 2, 2, 2], values.iter().flat_map(|v| v.to_le_bytes()).collect()),
+                ("rank_one", "F32", vec![2], vec![0; 8]),
+                ("integers", "I32", vec![2, 2], vec![0; 16]),
+            ],
+        );
+        let weights = Weights::open(&fixture.0).unwrap();
+        let input = [1.0, -2.0, 3.0, 0.5, -1.0, 2.0, 0.0, 4.0];
+        let output = weights.floating_patch_matvec("conv", &input).unwrap();
+        assert_eq!(output, [47.0, 107.0]);
+        assert!(weights.floating_patch_matvec("conv", &input[..7]).is_err());
+        assert!(weights.floating_patch_matvec("rank_one", &[1.0, 2.0]).is_err());
+        assert!(weights.floating_patch_matvec("integers", &[1.0, 2.0]).is_err());
     }
 
     #[stark_test]

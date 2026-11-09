@@ -13,6 +13,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261109-GLMVIS-02: native GLM vision components](../archive/runs/2026-11-09-glm-native-vision-components.md) | GLM processor/tower/sidecar contract and embedding fusion; CPU/attention/synthetic causal controls pass; actual sidecar, Metal, default image dispatch and cache/performance/MTP qualification remain unfinished |
 | [20261109-GLMVIS-01: GLM image source planning](../archive/runs/2026-11-09-glm-image-parity.md) | Pinned vision-sidecar identity/header, bounded source planning and backend-specific implementation sequence; image execution/cache/performance/MTP remain unqualified |
 | [Image-support retrospective](2026-11-08-image-support-retrospective.md) | Conversation-wide findings, model coverage, validation mistakes, review, delivery and remaining work |
 | [Qwen image attempts](2026-11-08-qwen-images.md) | BF16 and affine dense Qwen, affine and BF16-source MoE, retained Flash-Next/Lily numerical repairs and resource controls |
