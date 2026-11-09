@@ -122,6 +122,11 @@ metal = { workspace = true, optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 stark_lily_core = { path = "../../vendor/lily-core", optional = true }
 
+# RustCrypto 0.10.9 requires this feature to select CPU-detected SHA-256 on
+# aarch64. Preserve full artifact hashes without a software-only startup cost.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+sha2 = { version = "=0.10.9", features = ["asm-aarch64"] }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 xgrammar = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }

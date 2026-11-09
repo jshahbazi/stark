@@ -13,6 +13,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261109-GLMVIS-08: pinned artifact hash backend](../archive/runs/2026-11-09-glm-hash-backend.md) | macOS/aarch64 SHA-256 feature only; four saved vectors and fresh complete metadata/sidecar digests match accelerated, force-soft and independent references; full decoder replay/startup/model gates remain open |
 | [20261109-GLMVIS-07: default-image admission](../archive/runs/2026-11-09-glm-image-admission.md) | Text and PNG preparation pass; image generation hits admission. Memory draft rejected for missing lazy/expert growth; conservative policy restored and Qwen handed the slot. Hash-backend change remains separate; image/default/cache/performance/MTP gates remain open |
 | [20261109-GLMVIS-06: actual native GLM image generation](../archive/runs/2026-11-09-glm-native-image-generation.md) | Registered after external capacity recovery; fresh matching helper/native build, complete GGUF image execution and loaded-image text/cache/performance gates pending the serialized resource slot |
 | [20261109-GLMVIS-05: complete GLM image worker integration](../archive/runs/2026-11-09-glm-image-worker-integration.md) | Pinned preparation/native dispatch source wired; 6,830 converter tests pass and independent admission fixes applied; actual GGUF predictor inventory confirms 29 retained head tensors; native compilation/full image/default/cache/performance/MTP gates remain open |
