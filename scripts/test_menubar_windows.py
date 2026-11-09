@@ -25,6 +25,44 @@ final class ForbiddenWindowCredentialStorage: APICredentialStorage {
     func replace(_ data: Data) -> OSStatus { fatalError("unexpected_credential_access") }
 }
 
+struct CatalogPickerBoundsProbe: NSViewRepresentable {
+    let view: NSView
+    func makeNSView(context: Context) -> NSView { view }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+@MainActor
+func exerciseCatalogPickerLayouts() -> Bool {
+    _ = NSApplication.shared
+    let compact: [CatalogQuantizationFilter] = [.all, .quantization("4-bit"), .quantization("8-bit"), .quantization("BF16")]
+    let long: [CatalogQuantizationFilter] = [.all,
+        .quantization("Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)"),
+        .quantization("MLX mixed 4/8-bit"), .quantization("MLX-Serve mixed 4/8-bit")]
+    for choices in [[.all], compact, long] {
+        for selection in choices {
+            for width: CGFloat in [320, 592] {
+                let probe = NSView()
+                let picker = CatalogQuantizationPicker(choices: choices, selection: .constant(selection))
+                    .overlay(CatalogPickerBoundsProbe(view: probe))
+                    .frame(width: width, height: 40)
+                let host = NSHostingView(rootView: picker)
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 40),
+                                      styleMask: [.titled], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = host
+                defer { window.close() }
+                host.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+                host.layoutSubtreeIfNeeded()
+                let bounds = probe.convert(probe.bounds, to: host)
+                guard bounds.width > 0, bounds.minX >= -1, bounds.maxX <= width + 1,
+                      bounds.minY >= -1, bounds.maxY <= host.bounds.height + 1 else { return false }
+            }
+        }
+    }
+    return true
+}
+
 extension EngineController {
     func exerciseBackgroundWindowUpdates() {
         loadedID = "window-fixture"
@@ -273,6 +311,7 @@ struct WindowChecks {
         case "beginner-queued-scan": exit(BeginnerOpenWorkStatus.queuedScanFixture() ? 0 : 1)
         case "application-scan-threading": exit(AppDelegate.exerciseApplicationScanThreading() ? 0 : 1)
         case "advanced-options": exit(AppDelegate.exerciseAdvancedOptionsLayouts() ? 0 : 1)
+        case "catalog-picker": exit(exerciseCatalogPickerLayouts() ? 0 : 1)
         default: exit(2)
         }
     }
@@ -468,6 +507,9 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_advanced_options_fit_with_and_without_mtp_support(self):
         self.run_check("advanced-options")
+
+    def test_catalog_filters_fit_with_long_labels_and_each_selected_value(self):
+        self.run_check("catalog-picker")
 
 
 if __name__ == "__main__":

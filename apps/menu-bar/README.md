@@ -155,6 +155,7 @@ preparation. The mixed source preserves its original quantized storage and uses
 the same preparation and source-identity checks as the native GLM download.
 Inside a family, the tabs at the top switch between **All models** and each
 available quantization or precision, such as **4-bit**, **8-bit** and **BF16**.
+When the labels exceed the available width, a dropdown offers the same filters.
 Floating-point badges describe the app's output weight precision: supported
 FP16 and FP32 source checkpoints appear as **BF16** because the app converts
 their weights to BF16. Qwen3.8 Flash Next currently offers the implemented
