@@ -66,3 +66,37 @@ weights, preserve exact target verification and request/cache state, and add
 head state/payload/snapshots to this plan before execution. A serial verified
 head route would establish supported execution only; it would not establish
 acceleration. Existing EXL3 text MTP/default-three policy remains separate.
+
+## Source accounting and bounded CPU controls
+
+The request-accounting change is implemented on the branch. Ordinary GLM text
+now charges live/previous/replacement host attention copies and two complete
+KDA snapshot copies. Image admission drops the retained text prefix first and
+uses its own inventory with one live host attention copy and bounded vision
+scratch. Both loaded-image modes retain the complete sidecar-weight charge.
+The worker's generic divisor four and 256 MiB reserve are unchanged.
+
+Independent source review found no blocker in that accounting split or the
+existing bounded groups' completion/drop/autorelease ordering. It did not run
+an engine or establish actual footprint. The immutable reviewed patch is
+`be590f0a037162abd39d3193517a0bddf498e4e0a54fede83ca4c86b2f6345a8`.
+
+Eight CPU controls passed using the actual source-extracted accounting
+functions, compiled directly with Rust 1.98.1 without an engine/dependency
+build. They check pinned text/image totals, snapshot difference, context/input
+growth, minimum rounding and overflow. Their private receipt is
+`890e864b26d22a15c64dd0754ab1cc43627588fef88939c21dbcf7bc0ee056da`.
+This is bounded CPU arithmetic evidence; the engine test target and model path
+are not yet built or executed for this change. Formatting, whitespace and
+repository policy pass.
+
+A private owner-only watchdog is prepared with a 64 GiB entry screen, 32 GiB
+available-memory/RSS/physical-footprint limits, 32 GiB host wired-growth ceiling,
+less than 1 GiB compressor growth and zero pageout/swap growth. It attaches
+before readiness, closes only its worker's cancellation pipe on breach and
+then terminates/waits only for that owned process if cancellation does not
+finish. Nine injected screen controls pass without a worker/model. Live
+supervisor cleanup, source compilation and actual memory qualification remain
+pending the serialized slot and independent watchdog review. A 32 GiB RSS
+rejection remains a recorded resource failure even if reclaimable file pages
+explain it; the limit is not raised automatically.

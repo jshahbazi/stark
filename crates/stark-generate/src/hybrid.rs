@@ -707,9 +707,14 @@ impl GenerationBackend for HybridBackend {
         }
         // Prepared image tokens contribute to the same growing text caches.
         // The separately bounded encoder is not an automatic-context planner.
-        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-        admit_request_memory(self.model.request_memory_bytes(end, input_tokens), available, 4, 256 * 1024 * 1024)?;
         self.clear_prefix_cache();
+        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+        admit_request_memory(
+            self.model.image_request_memory_bytes(end, input_tokens),
+            available,
+            4,
+            256 * 1024 * 1024,
+        )?;
         self.last_mtp = None;
         self.nucleus_sampler.clear();
         if options.mtp_drafts != 0 {

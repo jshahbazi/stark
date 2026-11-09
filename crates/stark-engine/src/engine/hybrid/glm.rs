@@ -318,6 +318,23 @@ impl GlmModel {
         context_tokens: u32,
         input_tokens: u32,
     ) -> Option<usize> {
+        self.request_memory_plan(context_tokens, input_tokens, true)
+    }
+
+    pub(super) fn image_request_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        self.request_memory_plan(context_tokens, input_tokens, false)
+    }
+
+    fn request_memory_plan(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        text_prefix: bool,
+    ) -> Option<usize> {
         #[cfg(feature = "metal")]
         {
             let c = &self.config;
@@ -326,7 +343,7 @@ impl GlmModel {
             super::memory::gpu_buffer_fits(&[capacity.div_ceil(c.index_pool), c.index_dim], 4)?;
             super::memory::gpu_buffer_fits(&[capacity, c.heads], 4)?;
         }
-        request_memory_bytes(&self.config, context_tokens, input_tokens)
+        request_memory_plan(&self.config, context_tokens, input_tokens, text_prefix)
     }
 
     pub fn new(
@@ -1158,10 +1175,20 @@ impl BoundedPlan {
     }
 }
 
+#[cfg(test)]
 fn request_memory_bytes(
     config: &Config,
     context_tokens: u32,
     input_tokens: u32,
+) -> Option<usize> {
+    request_memory_plan(config, context_tokens, input_tokens, true)
+}
+
+fn request_memory_plan(
+    config: &Config,
+    context_tokens: u32,
+    input_tokens: u32,
+    text_prefix: bool,
 ) -> Option<usize> {
     let capacity = super::memory::growth_capacity(context_tokens, config.max_context, 64)?;
     let device = encoder_state_allowance_for_context(config, capacity).ok()?;
@@ -1172,10 +1199,32 @@ fn request_memory_bytes(
         super::memory::bytes(&[config.kv_rank], 4)?,
         super::memory::bytes(&[3], size_of::<Vec<f32>>())?,
     ])?;
-    let host = super::memory::bytes(&[attention_layers, capacity, host_row], 2)?.checked_add(super::memory::bytes(
-        &[attention_layers, capacity.div_ceil(config.index_pool), config.index_dim],
-        8,
-    )?)?;
+    let index_row = super::memory::bytes(&[config.index_dim], 4)?.checked_add(size_of::<Vec<f32>>())?;
+    let host_one = super::memory::sum(&[
+        super::memory::bytes(&[attention_layers, capacity], host_row)?,
+        super::memory::bytes(&[attention_layers, 2, config.index_pool], index_row)?,
+        super::memory::bytes(&[attention_layers, capacity.div_ceil(config.index_pool)], index_row)?,
+    ])?;
+    // A retained previous boundary and its replacement can coexist with the
+    // live scalar attention rows. Image entry drops text snapshots first.
+    let host = host_one.checked_mul(if text_prefix {
+        3
+    } else {
+        1
+    })?;
+    let snapshots = if text_prefix {
+        let kda_layers = config.layer_types.len().checked_sub(attention_layers)?;
+        super::memory::sum(&[
+            super::memory::bytes(
+                &[kda_layers, 3, config.kda_heads, config.kda_dim, config.conv_kernel.checked_sub(1)?],
+                4,
+            )?,
+            super::memory::bytes(&[kda_layers, config.kda_heads, config.kda_dim, config.kda_dim], 4)?,
+        ])?
+        .checked_mul(2)?
+    } else {
+        0
+    };
     // Large MLA score planes are allocated outside the 512 MiB graph scratch
     // cap. Ordinary prefill owners contain at most eight rows; wider owners
     // enforce their own combined scratch/external bound before dispatch.
@@ -1188,7 +1237,7 @@ fn request_memory_bytes(
         &[graphs, attention_layers, input_tokens.clamp(1, 8) as usize, config.heads, capacity],
         4,
     )?;
-    super::memory::sum(&[device, host, external])
+    super::memory::sum(&[device, host, snapshots, external])
 }
 
 #[cfg(any(feature = "metal", test))]
@@ -2329,6 +2378,19 @@ mod tests {
         assert!(request_memory_bytes(&config, 65, 1).unwrap() > at_64);
         assert!(request_memory_bytes(&config, 65, 8).unwrap() > request_memory_bytes(&config, 65, 1).unwrap());
         assert!(request_memory_bytes(&config, 4097, 1).is_none());
+        // Independently inventoried pinned geometry: live host attention is
+        // 101,603,392 bytes and a snapshot of all 34 KDA layers is 152,633,344 bytes.
+        // Text can retain old/replacement copies; images retain only live state.
+        let pinned = Config {
+            heads: 64,
+            kda_heads: 64,
+            ..config.clone()
+        };
+        let text = request_memory_plan(&pinned, 4096, 8, true).unwrap();
+        let image = request_memory_plan(&pinned, 4096, 8, false).unwrap();
+        assert_eq!(text - image, 2 * 101_603_392 + 2 * 152_633_344);
+        assert_eq!(text, 1_768_609_280);
+        assert_eq!(image, 1_260_135_808);
         assert_eq!(
             crate::encodable_block::memory::automatic_context(1, 4096, at_64, |context| {
                 request_memory_bytes(&config, context, 1).map(crate::encodable_block::memory::MemoryEstimate::state)

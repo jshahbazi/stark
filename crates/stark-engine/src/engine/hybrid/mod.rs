@@ -699,12 +699,37 @@ impl Model {
         context_tokens: u32,
         input_tokens: u32,
     ) -> Option<usize> {
+        self.request_memory_plan(context_tokens, input_tokens, false)
+    }
+
+    /// Image transactions clear text snapshots before admission and execute
+    /// the loaded tower. Ordinary text does not allocate its vision scratch.
+    pub fn image_request_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        self.request_memory_plan(context_tokens, input_tokens, true)
+    }
+
+    fn request_memory_plan(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        image: bool,
+    ) -> Option<usize> {
         if input_tokens == 0 || context_tokens < input_tokens || context_tokens > self.max_context {
             return None;
         }
         let state = match &self.forward {
             Forward::Flint(model) => model.request_memory_bytes(context_tokens)?,
-            Forward::Glm(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
+            Forward::Glm(model) => {
+                if image {
+                    model.image_request_memory_bytes(context_tokens, input_tokens)
+                } else {
+                    model.request_memory_bytes(context_tokens, input_tokens)
+                }?
+            },
             Forward::Qwen(model) => model.request_memory_bytes(context_tokens)?,
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
             // The bridge's loader bills all device phases at its installed
@@ -713,10 +738,14 @@ impl Model {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Forward::Lily(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
         };
-        // Charge mapped vision weights and bounded projector/attention scratch
-        // for the loaded instance even when the current request is text-only.
+        // Retain the full mapped vision-weight charge on ordinary text, but
+        // only image transactions allocate the bounded tower workspace.
         let images = if self.glm_images.is_some() {
-            1_164_010_176usize.checked_add(512 * 1024 * 1024)?
+            1_164_010_176usize.checked_add(if image {
+                512 * 1024 * 1024
+            } else {
+                0
+            })?
         } else {
             0
         };

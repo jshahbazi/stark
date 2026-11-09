@@ -588,6 +588,13 @@ memory still apply. The upstream advertised maximum context is not a Stark
 memory qualification. A weight set fitting within 128 GiB does not establish
 available memory for every context or concurrent application.
 
+Native GLM request planning includes the live state and the previous/replacement
+text-prefix snapshots, including recurrent and host attention copies. A loaded
+GLM tower retains its full weight charge on ordinary text; its bounded vision
+scratch is charged only for image execution. Image entry drops retained text
+prefixes before admission and allocates no text-prefix replacement. These
+inventories do not reserve memory or relax the worker's generic admission rule.
+
 Generation uses fresh state for every request unless the worker is started
 with `--prefix-cache`. Native GLM-5.3 then captures recurrence and convolution
 history plus the incomplete MLA/indexer pool on a 1,024-token reuse grid.
