@@ -1,7 +1,7 @@
 # 20261109-GLMMEM-11: nonmodel mapping lifecycle diagnostic
 
-State: preregistered source and CPU geometry controls. Native compilation and
-Metal execution have not run. A later explicit resource-slot grant is required.
+State: preregistered source, CPU geometry controls and tiny native CPU build
+pass. Metal execution has not run. A later explicit resource-slot grant is required.
 Predecessor: [GLMVIS-10](2026-11-09-glm-functional-pageout-screen.md).
 
 ## Problem and hypothesis
@@ -31,7 +31,12 @@ the lifecycle; they do not establish what happened in the failed GLM run.
 ## Fixed small control
 
 Use one owned 64 MiB synthetic file, opened read-only without following a
-symlink. Its deterministic byte pattern and SHA256 are private receipt inputs.
+symlink. Each 64-byte record starts with its absolute little-endian 64-bit
+record index and ends with 56 deterministic bytes. Its SHA256 is a private
+receipt input. The original prepared pattern repeated every 256 bytes;
+independent review found that wrong 4 MiB-spaced ranges could pass its checksum.
+That prepared source never ran on Metal and its registrations are retained.
+The revised pattern distinguishes those absolute ranges.
 Each case copies fifteen sequential 4 MiB logical ranges through completed
 Metal blit commands. A 128-byte non-page-aligned offset exercises the rounded
 mapping span while preserving blit alignment. No model weights, inference,
@@ -59,6 +64,12 @@ source/destination copy must match an independent synthetic checksum. Require
 zero old wrappers before the next group, zero dedicated mappings after drain
 and no unmap failures. These controls still cannot prove a full-model peak.
 
+Before any Metal work, a CPU negative control reads the next actual fixture
+range. It must reject the first range's expected hash and match its own
+absolute-position hash. This adds no GPU blit. A separate native
+`--cpu-control` compares the distinct absolute-position expected hashes and
+exits before device creation.
+
 ## Owner-only safety and evidence
 
 The retained functional supervisor is unchanged, SHA256
@@ -77,16 +88,24 @@ including a partially written fixture. Failed controls remain retained and
 do not authorize larger inputs or relaxed limits.
 
 Native source SHA256:
-`02b8be84049fa94c328cfc05ac27de4ec2cc6a33af9def112efb38d91365523d`.
+`902bf4d53c3d911343fc2544fef12d022979242ca53584722a4c909f45035460`.
 Driver SHA256:
-`779d86f523d5d74fcc186d98315eb414e8944543c3dd48ba7e741dc62e977935`.
+`3647d5e023bf9a7ecdc7e4f7636e9f0acce85d2e38ff3dc73c6d61f63f60bbfd`.
 Private source registration:
-`78e62a736bf345c54956b41619861a3cfbead88daeda7fca584e8d5ff61d9bad`.
+`39f7d634c2bbf05ba7a7db85d727f04221c19145849082ad8a74f1a0498dc19a`.
 It seals the exact future compile/run commands and records 45 passing CPU
 geometry/pattern cases across 4, 16 and 64 KiB pages plus Python AST validation.
-Those controls do not constitute native syntax, compilation or GPU results.
+The tiny native build separately passed with `-O2 -Wall -Wextra -Werror`, zero
+warnings/errors, and its CPU wrong-offset expected-hash control passed without
+creating a Metal device. Native binary SHA256:
+`303664cc6171d01112b127aa5899f2a20d4393cdcaa4609d0dc8df9b3c0ebb0d`;
+build/CPU receipt:
+`df478fe230ff6f12152be6a077897e05e3df6ce99bf666c6fbc5dbd65f5bcac7`.
+The driver checks those exact source/binary/build-receipt identities before
+fixture or child creation and adds received wall/monotonic timestamps to the
+native aggregate events. These CPU controls do not qualify Metal execution.
 
-Independent source review, a compiler gap, successful native compilation and
-an explicit small GPU slot remain required. The full GLM model remains held;
+Independent review of the revised sealed recipe and an explicit small GPU slot
+remain required. The full GLM model remains held;
 no production mapping/admission change, retry, cache/MTP or default promotion
 is authorized by this proposal.
