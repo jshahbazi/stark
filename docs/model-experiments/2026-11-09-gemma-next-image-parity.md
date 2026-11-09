@@ -765,6 +765,51 @@ CPU receipt `986f66e4afd2364edf4ec6d7f1c73be2da7238eeb99d496a941ad34da5e2425b`
 uses the pinned Torch wheel and loads no model or Metal backend. No qualifying
 replay or serving claim is made by these CPU controls.
 
+Independent review requires actual reference-mask support as well. Before any
+qualifying replay, the strengthened immutable module
+`d47525f9d46bb0a5051f3982cf88e3fb697751c141ff009bd994a351f1a2f597`
+and wrapper
+`3fd623cc257a5e188d9a107163cf1a7377f48bc478d7162436a0631a3ae587f8`
+replace no previous artifact. Both actual masks are observed through strict
+sentinel/block/permutation proofs; actual reference clusters determine support
+differences, while recomputed top-k values supply only mathematical value
+checks. Fourteen CPU controls pass, including an invalid actual reference
+mask rejected even with a forced raw-pass flag, and an alternate valid actual
+reference tie choice accepted. CPU receipt
+`7e2a8e3009907edb30bf0d35e956fc586d4db4f044131e13633cbab5b2940a79`
+is separate from the earlier twelve-control result. The same `75e5eff5`
+executable and unchanged resource/numerical limits will be used after final
+independent review. This registration makes no new qualification claim.
+
+The reviewed frozen two-actual-mask policy now completes its actual replay
+on the same `75e5eff5` executable. All 15 chained steps pass the new
+`mathematical-topk-canonical-tie-v1` contract. The raw original flag remains
+false for the 1,792-token first step and true for the other steps; its original
+failed receipts remain unchanged. No native selection or numerical threshold
+changes are made for this replay.
+
+All five input sizes pass actual three-of-three acceptance and ordinary-output
+equality, supplied full/partial acceptance, rejection/serial repair, zero
+drafts, cancellation and fresh recovery. The previously unexecuted 1,792-token
+cache controls now pass: a 1,024-token boundary restores with 768 actual suffix
+rows, exact complete fresh/restored handoff and changed-tail equality. The
+1,026-token two-row suffix case also passes. This qualifies the tested E2B
+component and transaction/cache geometry under the declared policy; normal
+worker sampling, emission/lifecycle, supported context admission and matched
+performance remain separate gates. Serving is still disabled.
+
+Aggregate `15a0a1b79b62948bd1dde63bff1b2a64b309e40850b787e2f7611ad32a482ac3`,
+guard `ab79d846a4b5182eb09f69354cbb70266519fde0c0128c0f169f8f15065d08c8`,
+and execution seal
+`203092dca15f9e27f989296b190ff2643f94595f7893e26afb329994d090de04`
+bind the new tool policy to the same source/binary and exact artifacts. The
+continuous guard observes no paging growth or foreign worker and peak RSS
+12,534,349,824 bytes. All owned processes close before slot release. The
+reviewed exact tool bytes and fourteen CPU controls are preserved in
+[tracked validation tooling](../../tools/validation/gemma4_assistant/README.md),
+including the original raw oracle. GLM and parent independently review the
+new policy/source; no model data or private payload is tracked.
+
 ### Focused upstream implementation comparison
 
 The source-only comparison pins MLX-VLM commit

@@ -9,9 +9,11 @@ oracle exactly. Serial verification controls pass, while actual acceptance is
 zero of three drafts on that input. Source-matched assistant MLP reductions
 subsequently pass chained oracle and transactional controls at 512, 513, 1,024
 and 1,026 tokens, with actual three-of-three acceptance for those fixtures.
-Exact prefix restoration passes at 1,026. The 1,792-token masked selection
-still fails despite exact centroids and feedback; its batch/cache controls
-have not executed. Worker MTP remains unimplemented. Gemma 4 has upstream
+Exact prefix restoration passes at 1,026. The raw 1,792-token masked selection
+fails on an exact cutoff tie. A separately reviewed mathematical-top-k and
+canonical-readout policy passes all 15 chained steps and all five input-size
+transaction controls, including exact 1,792-token prefix/suffix restoration.
+Original raw failures remain preserved. Worker MTP remains unimplemented. Gemma 4 has upstream
 MTP assistants, and remains
 an open Stark implementation task. Image loading must preserve future text MTP;
 image requests keep zero drafts. Follow [model onboarding](MODEL_ONBOARDING.md)
@@ -125,9 +127,14 @@ reductions are implemented and independently reviewed. Per-projection reference
 candidates match all four layers across three steps on identical native inputs.
 The corrected head passes the unchanged chained oracle and transactional
 controls at 512/513/1,024/1,026 tokens. Exact 1,024-boundary restoration and
-changed-tail checks pass at 1,026. The 1,792-token case still fails masked
-selection despite exact centroids and feedback; tied-centroid cutoff selection
-is the next diagnosis. Other assistant linears and ordinary target math retain
-their existing policy. Normal-worker MTP, supported sampling, full lifecycle
-and matched performance qualification remain open. Serving remains disabled,
-and the public position guard remains in force.
+changed-tail checks pass at 1,026. An actual-mask proof confirms a valid exact
+cutoff tie at 1,792; the raw masked-vector comparison remains failed. The
+separately versioned and independently reviewed mathematical-top-k/canonical
+readout policy passes all chained steps at the unchanged numerical limits.
+The 1,792-token batch, rollback, cancellation and 1,024-boundary/768-row-suffix
+cache controls now pass. Reproducible source and negative CPU controls live in
+[validation tooling](../tools/validation/gemma4_assistant/README.md). Other
+assistant linears and ordinary target math retain their existing policy.
+Normal-worker MTP, supported sampling, full lifecycle and matched performance
+qualification remain open. Serving remains disabled, and the public position
+guard remains in force pending bounded worker integration.
