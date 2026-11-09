@@ -101,6 +101,16 @@ enum Request {
     PlanGeneration {
         input_tokens: u32,
         context_tokens: u32,
+        #[serde(default, deserialize_with = "present_value")]
+        input_token_ids: Option<Vec<u32>>,
+        #[serde(default, deserialize_with = "present_value")]
+        cache_scope: Option<String>,
+        #[serde(default, deserialize_with = "present_value")]
+        mtp: Option<bool>,
+        #[serde(default, deserialize_with = "present_value")]
+        mtp_drafts: Option<u32>,
+        #[serde(default)]
+        sampling: Sampling,
     },
     Generate {
         #[serde(default)]
@@ -300,6 +310,15 @@ pub(crate) struct GenerationOptions {
     pub request_id: u64,
     /// Present only when prefix reuse is enabled and the host supplied a scope.
     pub cache_scope: Option<CacheScope>,
+}
+
+/// Actual request identity needed to inventory retained state safely. Legacy
+/// count-only plans cannot establish a reusable token prefix.
+pub(crate) struct ContextPlanningRequest<'a> {
+    pub input_tokens: u32,
+    pub maximum: u32,
+    pub input_token_ids: Option<&'a [u32]>,
+    pub options: &'a GenerationOptions,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -502,6 +521,13 @@ pub(crate) trait GenerationBackend {
         let capacity = self.max_context_length()?.min(maximum);
         (capacity >= minimum).then_some(capacity)
     }
+    fn plan_context_length(
+        &mut self,
+        request: &ContextPlanningRequest<'_>,
+        memory_budget_bytes: usize,
+    ) -> Result<Option<u32>, &'static str> {
+        Ok(self.automatic_context_length(request.input_tokens, request.maximum, memory_budget_bytes))
+    }
     fn supports_automatic_context_planning(&self) -> bool {
         false
     }
@@ -697,6 +723,19 @@ impl<B: GenerationBackend> GenerationWorker<B> {
 
     fn prefix_cache_enabled(&self) -> bool {
         self.prefix_cache == Some(true)
+    }
+
+    fn resolve_cache_scope(
+        &self,
+        scope: Option<String>,
+    ) -> Result<Option<CacheScope>, &'static str> {
+        match scope {
+            None => Ok(None),
+            Some(scope) if self.prefix_cache_enabled() => {
+                prefix_cache::parse_scope(&scope).map(Some).ok_or("invalid_generation_request")
+            },
+            Some(_) => Err("invalid_generation_request"),
+        }
     }
 
     fn resolve_mtp(
@@ -962,22 +1001,62 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             Request::PlanGeneration {
                 input_tokens,
                 context_tokens,
+                input_token_ids,
+                cache_scope,
+                mtp,
+                mtp_drafts,
+                sampling,
             } => {
                 if !self.backend.supports_automatic_context_planning() {
                     return Err("context_planning_unavailable");
                 }
                 let token_limit = (self.budget.input_bytes / std::mem::size_of::<u32>()).min(u32::MAX as usize) as u32;
-                let maximum = input_tokens.saturating_add(token_limit).min(context_tokens);
-                if input_tokens == 0 || input_tokens > token_limit || context_tokens <= input_tokens {
+                let maximum = input_tokens
+                    .saturating_add(token_limit)
+                    .min(context_tokens)
+                    .min(self.backend.max_context_length().unwrap_or(u32::MAX));
+                if input_tokens == 0 || input_tokens > token_limit || maximum <= input_tokens {
                     return Err("invalid_generation_request");
                 }
+                if input_token_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.len() != input_tokens as usize || !valid_ids(ids, self.backend.vocab_size()))
+                {
+                    return Err("invalid_generation_request");
+                }
+                let mut options = GenerationOptions {
+                    context_tokens: maximum,
+                    max_new_tokens: maximum - input_tokens,
+                    seed: 0,
+                    sampling,
+                    mtp_drafts: self.resolve_mtp(mtp, mtp_drafts)?,
+                    eos_token_ids: self.backend.eos_token_ids().to_vec(),
+                    extra_stop_token_ids: Vec::new(),
+                    stop: Vec::new(),
+                    request_id: 0,
+                    cache_scope: self.resolve_cache_scope(cache_scope)?,
+                };
+                self.validate_options(&options)?;
+                let effective = self.backend.effective_mtp_drafts(&options)?;
+                if effective > options.mtp_drafts || (effective != 0 && effective != options.mtp_drafts) {
+                    return Err("invalid_generation_output");
+                }
+                options.mtp_drafts = effective;
                 let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
                 // Use the same remaining-memory contract as execution's
                 // allocation recheck, including its transient host reserve.
                 let memory_budget = inference_memory_budget(available);
                 let capacity = self
                     .backend
-                    .automatic_context_length(input_tokens, maximum, memory_budget)
+                    .plan_context_length(
+                        &ContextPlanningRequest {
+                            input_tokens,
+                            maximum,
+                            input_token_ids: input_token_ids.as_deref(),
+                            options: &options,
+                        },
+                        memory_budget,
+                    )?
                     .ok_or("resource_budget_exceeded")?;
                 if capacity <= input_tokens || capacity > maximum {
                     return Err("resource_budget_exceeded");
@@ -1002,13 +1081,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 request_id,
                 cache_scope,
             } => {
-                let cache_scope = match cache_scope {
-                    None => None,
-                    Some(scope) if self.prefix_cache_enabled() => {
-                        Some(prefix_cache::parse_scope(&scope).ok_or("invalid_generation_request")?)
-                    },
-                    Some(_) => return Err("invalid_generation_request"),
-                };
+                let cache_scope = self.resolve_cache_scope(cache_scope)?;
                 let options = GenerationOptions {
                     context_tokens,
                     max_new_tokens,
@@ -1346,6 +1419,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         };
         readiness["operations"] = operations;
         readiness["generation_budget"] = json!("memory-context-v1");
+        readiness["generation_budget_inputs"] = json!("token-ids-v1");
     }
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
@@ -1460,6 +1534,16 @@ mod tests {
         }
     }
 
+    #[derive(Debug, PartialEq)]
+    struct RecordedPlan {
+        input_tokens: u32,
+        maximum: u32,
+        input_len: Option<usize>,
+        cache_scope: Option<CacheScope>,
+        mtp_drafts: u32,
+        stochastic: bool,
+    }
+
     struct FakeBackend {
         idle_interval: Option<Duration>,
         idle_calls: usize,
@@ -1496,6 +1580,8 @@ mod tests {
         state_allocations: usize,
         prefix_chunk: usize,
         prefix_reuse_override: Option<usize>,
+        plans: Vec<RecordedPlan>,
+        planning_allowed: bool,
     }
 
     struct FakePreparedImage {
@@ -1534,6 +1620,9 @@ mod tests {
             maximum: u32,
             _memory_budget_bytes: usize,
         ) -> Option<u32> {
+            if !self.planning_allowed {
+                return None;
+            }
             if self.max_context.is_some() {
                 let minimum = input_tokens.checked_add(1)?;
                 let capacity = self.max_context?.min(maximum);
@@ -1543,6 +1632,21 @@ mod tests {
         }
         fn supports_automatic_context_planning(&self) -> bool {
             self.max_context.is_none() || self.max_context == Some(0)
+        }
+        fn plan_context_length(
+            &mut self,
+            request: &ContextPlanningRequest<'_>,
+            memory_budget_bytes: usize,
+        ) -> Result<Option<u32>, &'static str> {
+            self.plans.push(RecordedPlan {
+                input_tokens: request.input_tokens,
+                maximum: request.maximum,
+                input_len: request.input_token_ids.map(<[u32]>::len),
+                cache_scope: request.options.cache_scope,
+                mtp_drafts: request.options.mtp_drafts,
+                stochastic: matches!(request.options.sampling, Sampling::Stochastic { .. }),
+            });
+            Ok(self.automatic_context_length(request.input_tokens, request.maximum, memory_budget_bytes))
         }
         fn eos_token_ids(&self) -> &[u32] {
             &self.eos
@@ -1835,6 +1939,8 @@ mod tests {
             state_allocations: 0,
             prefix_chunk: prefix_cache::PREFILL_CHUNK_TOKENS,
             prefix_reuse_override: None,
+            plans: Vec::new(),
+            planning_allowed: true,
         })
         .unwrap()
     }
@@ -3320,21 +3426,19 @@ mod tests {
     }
 
     #[test]
-    fn unknown_context_planning_is_bounded_recoverable_and_preserves_prefix_cache() {
+    fn count_only_context_planning_remains_bounded_and_compatible() {
         let mut worker = prefix_worker(true);
         worker.backend.max_context = None;
-        worker.backend.prefix_entry =
-            Some(prefix_cache::PrefixEntry::new(7, prefix_cache::parse_scope(SCOPE).unwrap(), 64, &vec![2; 1025]));
         let reply = post(&mut worker, json!({"operation":"plan_generation","input_tokens":8,"context_tokens":128}));
         assert_eq!(reply["context_tokens"], 128);
         assert_eq!(reply["max_new_tokens"], 120);
         assert_eq!(reply["context_capacity_known"], false);
         assert_eq!(reply["budget_kind"], "memory");
-        assert!(worker.backend.prefix_entry.is_some());
+        assert_eq!(worker.backend.plans[0].input_len, None);
 
         let invalid = post(&mut worker, json!({"operation":"plan_generation","input_tokens":0,"context_tokens":128}));
         assert_eq!(invalid["error"], "invalid_generation_request");
-        assert!(worker.backend.prefix_entry.is_none());
+        assert_eq!(worker.backend.plans.len(), 1);
     }
 
     #[test]
@@ -3346,9 +3450,65 @@ mod tests {
             json!({"operation":"plan_generation","input_tokens":4294967295u64,"context_tokens":4294967295u64}),
         );
         assert_eq!(overflow["error"], "invalid_generation_request");
-        worker.backend.max_context = Some(0);
+        worker.backend.planning_allowed = false;
         let reply = post(&mut worker, json!({"operation":"plan_generation","input_tokens":1,"context_tokens":16}));
         assert_eq!(reply["error"], "resource_budget_exceeded");
+    }
+
+    #[test]
+    fn planning_receives_validated_prefix_identity_and_effective_mtp_selection() {
+        let mut worker = prefix_worker(true);
+        worker.backend.max_context = None;
+        worker.backend.mtp = Some(capabilities(3, 2));
+        worker.mtp = worker.backend.mtp;
+        let request = json!({"operation":"plan_generation","input_tokens":2,"context_tokens":128,
+            "input_token_ids":[2,3],"cache_scope":SCOPE,"mtp_drafts":2,
+            "sampling":{"mode":"stochastic","temperature":0.7,"top_p":0.9}});
+        assert_eq!(post(&mut worker, request.clone())["context_tokens"], 128);
+        assert_eq!(
+            worker.backend.plans,
+            vec![RecordedPlan {
+                input_tokens: 2,
+                maximum: 128,
+                input_len: Some(2),
+                cache_scope: prefix_cache::parse_scope(SCOPE),
+                mtp_drafts: 2,
+                stochastic: true,
+            }]
+        );
+        worker.backend.mtp_effective_override = Some(0);
+        assert_eq!(post(&mut worker, request)["context_tokens"], 128);
+        assert_eq!(worker.backend.plans[1].mtp_drafts, 0);
+        let advertised = readiness(&mut worker);
+        assert_eq!(advertised["generation_budget_inputs"], "token-ids-v1");
+    }
+
+    #[test]
+    fn malformed_planning_identity_is_rejected_before_backend_inventory() {
+        for extra in [
+            json!({"input_token_ids":[2]}),
+            json!({"input_token_ids":[2,8]}),
+            json!({"input_token_ids":null}),
+            json!({"cache_scope":"invalid"}),
+            json!({"mtp":false,"mtp_drafts":0}),
+            json!({"sampling":{"mode":"stochastic","temperature":0.0}}),
+        ] {
+            let mut worker = prefix_worker(true);
+            worker.backend.max_context = None;
+            let mut request = json!({"operation":"plan_generation","input_tokens":2,"context_tokens":128});
+            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(post(&mut worker, request).get("error").is_some());
+            assert!(worker.backend.plans.is_empty());
+        }
+        let mut worker = worker();
+        worker.backend.max_context = None;
+        let reply = post(
+            &mut worker,
+            json!({"operation":"plan_generation","input_tokens":2,
+            "context_tokens":128,"input_token_ids":[2,3],"cache_scope":SCOPE}),
+        );
+        assert_eq!(reply["error"], "invalid_generation_request");
+        assert!(worker.backend.plans.is_empty());
     }
 
     #[test]

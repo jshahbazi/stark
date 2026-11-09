@@ -1104,6 +1104,12 @@ pub(super) struct AttentionSnapshot {
 }
 
 impl Attention {
+    /// Capacity is published only after both replacement owners exist. Failed
+    /// growth therefore cannot grant speculative allocation credit.
+    pub(super) fn resident_capacity(&self) -> usize {
+        self.capacity
+    }
+
     #[cfg(test)]
     pub(super) fn test_pool_keys(&self) -> DeviceVector {
         self.pool_keys.clone()

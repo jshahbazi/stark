@@ -48,6 +48,10 @@ pub struct LanguageModelState<B: Backend> {
 }
 
 impl<B: Backend> LanguageModelState<B> {
+    pub fn resident_payload_bytes(&self) -> Option<usize> {
+        self.transformer_state.resident_payload_bytes()
+    }
+
     pub(super) fn has_multimodal_context(&self) -> bool {
         self.multimodal_prefilled || self.transformer_state.rotary_position_delta().is_some()
     }

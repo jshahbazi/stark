@@ -612,7 +612,20 @@ impl<B: Backend> VisionLanguageModel<B> {
         context_tokens: u32,
         max_new_tokens: u32,
     ) -> Option<usize> {
-        self.language_model.generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)
+        self.language_model.generation_memory_bytes_for_image(input_tokens, context_tokens, max_new_tokens)
+    }
+
+    pub fn decoder_text_generation_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        self.language_model.generation_memory_bytes_for_request(input_tokens, context_tokens, max_new_tokens, false)
+    }
+
+    pub fn reclaim_decoder_cached_memory(&self) -> Result<usize, B::Error> {
+        self.language_model.reclaim_cached_memory()
     }
 
     /// Decoder admission when a scoped text request also retains one
@@ -624,6 +637,25 @@ impl<B: Backend> VisionLanguageModel<B> {
         max_new_tokens: u32,
     ) -> Option<usize> {
         self.language_model.generation_memory_bytes_with_text_prefix(input_tokens, context_tokens, max_new_tokens)
+    }
+
+    pub fn decoder_reused_text_memory_bytes(
+        &self,
+        state: &LanguageModelState<B>,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+        capture_prefix: bool,
+        reused_input_tokens: u32,
+    ) -> Option<usize> {
+        self.language_model.generation_memory_bytes_reusing_text_prefix(
+            state,
+            input_tokens,
+            context_tokens,
+            max_new_tokens,
+            capture_prefix,
+            reused_input_tokens,
+        )
     }
 
     pub fn recommended_context_length(&self) -> Option<u32> {

@@ -106,15 +106,37 @@ input, `context_capacity_known` and `budget_kind: "memory"`. Generation then use
 those explicit finite values. A model without a declared capacity continues to
 report an undeclared HTTP model capacity.
 
+Workers additionally advertising `generation_budget_inputs: "token-ids-v1"`
+accept optional `input_token_ids`, `cache_scope`, `mtp`/`mtp_drafts` and
+`sampling` on `plan_generation`. Token IDs must match `input_tokens` exactly;
+scope and MTP validation follows generation. The host sends the same prefix
+identity, selected draft depth and sampling policy that it will use for the
+actual request. This permits an inventory of compatible retained state and the
+selected MTP path. Older workers receive the original count-only request.
+Count-only clients remain supported, but cannot establish prefix identity and
+therefore receive no unproven retained-prefix credit.
+
+Planning can release incompatible retained state and reclaim fully retired
+allocator cache pages when more headroom is needed. Reclamation waits for the
+owning queue's retirements; live or aliased buffers are excluded. Available
+memory is sampled again after release before admitting a fresh allocation.
+
 The native planner performs checked, allocation-free estimates using the loaded
 attention cache dimensions and precision, ring bounds, recurrent state and
 conservative scratch-pool requirements. Planning and generation admit the
 estimated state and workspace requirements against currently available RAM after a 256 MiB
 reserve for transient serialization and host bookkeeping, also bounded by
 token-storage and caller limits. Resident model and state allocations already
-reduce available RAM. Lily discounts resident cache and scratch buffers and counts
-replacement peaks when capacity grows. Other backends may conservatively include
-retained allocations in their estimates. The worker rechecks admission immediately before execution.
+reduce available RAM. Compatible generic retained states receive credit for
+actual owned buffers, capped to the corresponding persistent-state cost class.
+Shared views, virtual sparse capacity, fresh scratch and new snapshots do not
+become persistent-state credit. Dense MTP is inventoried only when selected.
+Lily and the other hybrid families inspect persistent owners and count new
+allocations or replacement peaks. Workspace bounds can remain conservative.
+Greedy hybrid requests with MTP disabled omit full-vocabulary stochastic
+sampling arrays; legacy count-only plans and stochastic/MTP requests keep their
+conservative sampler inventory.
+The worker rechecks admission immediately before execution.
 This is allocation evidence; it is not a memory
 reservation or a hard process RSS ceiling. Cancellation, output byte limits and
 deadlines remain active. Insufficient memory rejects the request cleanly.

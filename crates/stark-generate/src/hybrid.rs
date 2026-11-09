@@ -8,8 +8,8 @@ use stark_engine::engine::hybrid::{Model, NativeSampling, PrefixSnapshot, Prepar
 use crate::{
     cancel::CancelSignal,
     generation::{
-        GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity, MtpCapabilities,
-        PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, admit_request_memory,
+        ContextPlanningRequest, GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity,
+        MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, admit_request_memory,
         collect_tokens_controlled, native_result_after_cleanup,
     },
     prefix_cache::{self, BoundaryEntry},
@@ -22,6 +22,13 @@ mod nucleus;
 
 /// Recurrent snapshots also depend on whether the draft head ran in prefill.
 const PREFIX_CACHE_KEY: &str = "model-instance+context-tokens+cache-scope+mtp-enabled";
+
+fn greedy_host_workspace(
+    sampling: &Sampling,
+    mtp_drafts: u32,
+) -> bool {
+    mtp_drafts == 0 && matches!(sampling, Sampling::Greedy {})
+}
 
 fn native_sampling(options: &GenerationOptions) -> Option<NativeSampling> {
     let sampling = match options.sampling {
@@ -685,7 +692,15 @@ impl GenerationBackend for HybridBackend {
         // Prepared image tokens contribute to the same growing text caches.
         // The separately bounded encoder is not an automatic-context planner.
         let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-        admit_request_memory(self.model.request_memory_bytes(end, input_tokens), available)?;
+        admit_request_memory(
+            self.model.generation_memory_bytes_for_request(
+                end,
+                input_tokens,
+                false,
+                greedy_host_workspace(&options.sampling, options.mtp_drafts),
+            ),
+            available,
+        )?;
         self.clear_prefix_cache();
         self.last_mtp = None;
         self.nucleus_sampler.clear();
@@ -746,6 +761,54 @@ impl GenerationBackend for HybridBackend {
     fn supports_automatic_context_planning(&self) -> bool {
         self.model.supports_automatic_context_planning()
     }
+    fn plan_context_length(
+        &mut self,
+        request: &ContextPlanningRequest<'_>,
+        memory_budget_bytes: usize,
+    ) -> Result<Option<u32>, &'static str> {
+        if self.model.is_fenced() {
+            return Err("native_generation_failed");
+        }
+        let released = self.model.prepare_request_memory().map_err(|_| "native_generation_failed")?;
+        let memory_budget_bytes = if released {
+            stark_resource_budget::inference_memory_budget(stark_resource_budget::available_memory_bytes().unwrap_or(0))
+        } else {
+            memory_budget_bytes
+        };
+        let Some(input) = request.input_token_ids else {
+            return Ok(self.model.automatic_context_length(request.input_tokens, request.maximum, memory_budget_bytes));
+        };
+        let capture = self.prefix_boundary(input, request.options).is_some();
+        let greedy = greedy_host_workspace(&request.options.sampling, request.options.mtp_drafts);
+        let ordinary = self.model.automatic_context_length_for_request(
+            request.input_tokens,
+            request.maximum,
+            memory_budget_bytes,
+            capture,
+            greedy,
+        );
+        // A matching retained boundary may avoid allocating a new snapshot at
+        // exactly its old context. That isolated cheaper point is not monotonic
+        // and must be checked outside the ordinary binary search.
+        let retained = self
+            .prefix_cache
+            .as_ref()
+            .map(BoundaryEntry::context_tokens)
+            .filter(|&context| context > request.input_tokens && context <= request.maximum)
+            .filter(|&context| {
+                let mut options = request.options.clone();
+                options.context_tokens = context;
+                options.max_new_tokens = context - request.input_tokens;
+                let reused = self.prefix_cache_plan(input, &options);
+                reused > 0
+                    && self.prefix_boundary(input, &options).is_some_and(|boundary| boundary <= reused)
+                    && self
+                        .model
+                        .generation_memory_bytes_for_request(context, request.input_tokens, false, greedy)
+                        .is_some_and(|bytes| bytes <= memory_budget_bytes)
+            });
+        Ok(ordinary.into_iter().chain(retained).max())
+    }
     fn eos_token_ids(&self) -> &[u32] {
         self.model.eos_token_ids()
     }
@@ -779,10 +842,20 @@ impl GenerationBackend for HybridBackend {
         if end > options.context_tokens {
             return Err("context_overflow");
         }
+        self.model.prepare_request_memory().map_err(|_| "native_generation_failed")?;
         let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-        admit_request_memory(self.model.request_memory_bytes(end, input_tokens), available)?;
-        self.nucleus_sampler.clear();
         let reused = self.prefix_cache_plan(input, options);
+        let capture = self.prefix_boundary(input, options).is_some_and(|boundary| boundary > reused);
+        admit_request_memory(
+            self.model.generation_memory_bytes_for_request(
+                end,
+                input_tokens,
+                capture,
+                greedy_host_workspace(&options.sampling, options.mtp_drafts),
+            ),
+            available,
+        )?;
+        self.nucleus_sampler.clear();
         // A miss drops the snapshot; the next prefill overwrites the rows.
         let retained = self.prefix_cache.take().map(|entry| entry.state);
         self.pending_prefix = None;
@@ -1165,6 +1238,21 @@ mod tests {
     use stark_engine::engine::hybrid::math;
 
     use super::*;
+
+    #[test]
+    fn greedy_memory_mode_requires_greedy_sampling_and_disabled_mtp() {
+        assert!(greedy_host_workspace(&Sampling::Greedy {}, 0));
+        assert!(!greedy_host_workspace(&Sampling::Greedy {}, 1));
+        assert!(!greedy_host_workspace(
+            &Sampling::Stochastic {
+                temperature: 1.0,
+                top_k: None,
+                top_p: Some(0.9),
+                min_p: None,
+            },
+            0
+        ));
+    }
 
     struct ProfileDirectory(std::path::PathBuf);
 

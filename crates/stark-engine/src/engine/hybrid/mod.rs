@@ -584,12 +584,33 @@ impl Model {
         maximum: u32,
         memory_budget_bytes: usize,
     ) -> Option<u32> {
+        self.automatic_context_length_with_prefix(input_tokens, maximum, memory_budget_bytes, true)
+    }
+
+    pub fn automatic_context_length_with_prefix(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+        capture_prefix: bool,
+    ) -> Option<u32> {
+        self.automatic_context_length_for_request(input_tokens, maximum, memory_budget_bytes, capture_prefix, false)
+    }
+
+    pub fn automatic_context_length_for_request(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+        capture_prefix: bool,
+        greedy_without_mtp: bool,
+    ) -> Option<u32> {
         crate::encodable_block::memory::automatic_context(
             input_tokens,
             maximum.min(self.max_context),
             memory_budget_bytes,
             |context| {
-                self.request_memory_bytes(context, input_tokens)
+                self.generation_memory_bytes_for_request(context, input_tokens, capture_prefix, greedy_without_mtp)
                     .map(crate::encodable_block::memory::MemoryEstimate::state)
             },
         )
@@ -599,19 +620,80 @@ impl Model {
         self.request_memory_bytes(2.min(self.max_context), 1).is_some()
     }
 
-    /// Conservative peak inventory. Existing cached allocations are charged
-    /// again, so low headroom can reject reuse without changing model state.
+    /// Release only per-request owners which cannot participate in prefix
+    /// reuse, before the caller samples current OS headroom. Persistent native
+    /// recurrent/cache owners and retained prefix snapshots are preserved.
+    pub fn prepare_request_memory(&mut self) -> Result<bool> {
+        match &mut self.forward {
+            Forward::Qwen(model) => model.prepare_request_memory(),
+            _ => Ok(false),
+        }
+    }
+
+    /// Additional state and transient workspace for generation. Persistent
+    /// family owners are charged only when they need allocation or growth.
     pub fn request_memory_bytes(
         &self,
         context_tokens: u32,
         input_tokens: u32,
+    ) -> Option<usize> {
+        self.generation_memory_bytes(context_tokens, input_tokens, true)
+    }
+
+    /// Exact scoring does not capture a generation prefix or reserve output.
+    pub fn scoring_memory_bytes(
+        &self,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        let additional_device_readout = match &self.forward {
+            Forward::Flint(_) => cfg!(feature = "metal"),
+            Forward::Glm(model) => model.additional_scoring_device_readout(),
+            Forward::Qwen(model) => model.additional_scoring_device_readout(),
+            // These backends retain/prepay their device readout buffers.
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(_) => false,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(_) => false,
+        };
+        self.request_state_memory_bytes(input_tokens, input_tokens, false)?
+            .checked_add(memory::scoring_host_workspace(self.vocab_size, additional_device_readout)?)
+    }
+
+    pub fn generation_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        capture_prefix: bool,
+    ) -> Option<usize> {
+        self.generation_memory_bytes_for_request(context_tokens, input_tokens, capture_prefix, false)
+    }
+
+    /// Only greedy requests with MTP disabled omit stochastic sampler arrays.
+    /// Count-only/legacy callers must retain the conservative default above.
+    pub fn generation_memory_bytes_for_request(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        capture_prefix: bool,
+        greedy_without_mtp: bool,
+    ) -> Option<usize> {
+        self.request_state_memory_bytes(context_tokens, input_tokens, capture_prefix)?.checked_add(
+            memory::host_workspace_for_request(context_tokens, input_tokens, self.vocab_size, greedy_without_mtp)?,
+        )
+    }
+
+    fn request_state_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        capture_prefix: bool,
     ) -> Option<usize> {
         if input_tokens == 0 || context_tokens < input_tokens || context_tokens > self.max_context {
             return None;
         }
         let state = match &self.forward {
             Forward::Flint(model) => model.request_memory_bytes(context_tokens)?,
-            Forward::Glm(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
+            Forward::Glm(model) => model.request_memory_bytes(context_tokens, input_tokens, capture_prefix)?,
             Forward::Qwen(model) => model.request_memory_bytes(context_tokens)?,
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
             // The bridge's loader bills all device phases at its installed
@@ -620,7 +702,7 @@ impl Model {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Forward::Lily(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
         };
-        memory::sum(&[state, memory::host_workspace(context_tokens, input_tokens, self.vocab_size)?])
+        Some(state)
     }
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos

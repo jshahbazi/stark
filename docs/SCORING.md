@@ -66,11 +66,18 @@ The worker applies the loaded model's configured context capacity. It has no sep
 Before a fresh native score, the worker also admits the loaded model's state and
 workspace estimate against current available RAM after a 256 MiB reserve for
 transient request serialization and host bookkeeping. Scoring and generation
-share this admission policy.
+share this admission policy. A generic decoder under pressure can wait for
+resource retirement, release fully free allocator pages and recheck actual
+headroom before retrying admission. It never adds a hypothetical freed-byte
+allowance to the final check. A matching logits-cache hit bypasses native
+allocation admission entirely.
 Generic scoring retains independent scratch pools for every 1,024-token prompt
 chunk until completion, so its peak estimate counts all those pools. Sparse
 finite state counts the actual input span; dense and undeclared state count the
-selected allocation. Hybrid families use their loaded cache/workspace profiles.
+selected allocation. Scoring does not reserve generation token history or the
+generation sampler workspace. Hybrid families inspect persistent owners and
+use a scoring-specific readback/workspace allowance without generation prefix
+snapshots.
 The prompt may exactly fill the context because scoring reserves no output token.
 An insufficient-memory rejection clears cached logits and leaves the worker
 available for a smaller retry. Admission is an estimate, not a memory reservation
