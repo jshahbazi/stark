@@ -122,3 +122,13 @@ recipe; the paired MTP2 comparison above directly tests restored text behavior.
 Private receipt: `runtime/lily-vision-text-mtp-2026-11-08-v1.json`. No prompts,
 responses, token vectors or probabilities are published. Added/qualified on the
 branch for this artifact and these controls; not installed or released.
+
+## Final PR review
+
+Independent review found no blockers in capability exposure, zero-draft image
+execution, reset/prefix recovery or memory accounting. Current worker binaries,
+manifest and private receipt hashes match the recorded evidence. The release
+worker unit suite passed 135 tests with two existing ignored tests; all 46
+image-host/memory Python checks passed again. Repository policy, Rust formatting,
+converter Ruff and patch whitespace checks passed. No inference code changed
+after the recorded paired benchmark. The PR is stacked on #110.
