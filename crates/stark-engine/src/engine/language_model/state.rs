@@ -80,7 +80,7 @@ pub struct LanguageModelRewindStateError;
 /// Guard rejection leaves the loaded instance usable. A failure after entering
 /// restoration also fences the public vision wrapper's loaded instance.
 #[derive(Debug)]
-pub(crate) enum TextPrefixRestoreError {
+pub enum TextPrefixRestoreError {
     Invalid,
     RestoreFailed,
 }
@@ -162,7 +162,7 @@ impl<B: Backend> LanguageModel<B> {
 
     /// Arm one non-final prefill chunk. The stream checks that the requested
     /// boundary is reached before sampling and publishes only completed copies.
-    pub(crate) fn prepare_text_prefix_capture(
+    pub fn prepare_text_prefix_capture(
         &self,
         state: &mut LanguageModelState<B>,
         position: usize,
@@ -233,7 +233,9 @@ impl<B: Backend> LanguageModel<B> {
         Ok(())
     }
 
-    pub(crate) fn restore_text_prefix(
+    /// Restore this loaded model's completed, chunk-aligned text snapshot.
+    /// A failed backend restoration invalidates the state; callers must drop it.
+    pub fn restore_text_prefix(
         &self,
         state: &mut LanguageModelState<B>,
         position: usize,

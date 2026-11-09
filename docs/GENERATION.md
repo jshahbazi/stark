@@ -309,12 +309,13 @@ to its captured residual, then supplies that hidden state and the next token
 embedding to the predictor. Chained drafts use the predictor's normalized
 output, matching the pinned oMLX post-normalization proposal variant. Accepted rows commit target
 recurrent and attention state; the predictor rewinds and rebuilds from the
-committed target residuals after every round. A zero-draft request still
-maintains predictor state, so its timing includes that cost.
+committed target residuals after every round. A zero-draft request uses the
+ordinary target stream with the head resident, allocating no predictor session.
+It retains an exact target-only chunk snapshot when prefix caching is enabled.
 The round repair preserves the predictor's already-valid root KV and replays
 only accepted proposal rows using the preceding target hidden rows; root-only
-acceptance needs no replay. Zero-draft rounds prime the root through the same
-cache-only route. That route keeps embedding, hidden normalization, fusion,
+acceptance needs no replay. An internal zero-draft verification round primes
+the root through the same cache-only route. That route keeps embedding, hidden normalization, fusion,
 pre-attention normalization, Q/K/V projection, key normalization, RoPE and KV
 writes, while skipping unused attention output, FFN and final normalization.
 Target commit, repair and last-hidden ownership share one command completion:
@@ -411,7 +412,7 @@ Agent clients resend the same instructions, tool definitions and history on ever
 Eligibility and key:
 
 - Converted text models whose owned layers are all full, non-ring attention caches (for example Qwen3 dense models) rewind their attention cache.
-- Converted dense `qwen3_5` models with an admitted MTP head restore a snapshot on a 1,024-token grid. It holds each DeltaNet layer's F32 recurrence and convolution history, the BF16 normalized target hidden state, F32 next-token logits and the predictor's committed position. Full-attention prefix rows in the target and predictor remain in the retained session. The exact selected draft count is part of the reuse key; draft-readout width is immutable loaded-model configuration. The packed 27B artifact and its separately configured three/four-bit draft-head variants passed artifact-bound prefix checks on the build named in the [follow-up report](benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
+- Converted dense `qwen3_5` models with an admitted MTP head restore a snapshot on a 1,024-token grid. With drafts enabled it holds each DeltaNet layer's F32 recurrence and convolution history, the BF16 normalized target hidden state, F32 next-token logits and the predictor's committed position. Full-attention prefix rows in the target and predictor remain in the retained session. MTP0 instead retains the ordinary stream's target-only recurrence/convolution snapshot and attention prefix rows. Switching between ordinary and predictor sessions misses; the exact selected draft count and text graph are part of the reuse key. Draft-readout width is immutable loaded-model configuration. The packed 27B artifact and its separately configured three/four-bit draft-head variants passed artifact-bound prefix checks on the older build named in the [follow-up report](benchmarks/2026-11-06-qwen38-27b-packed-followup.md); that evidence does not qualify a changed driver.
 - Native GGUF GLM-5.3 resumes from a snapshot on a 1,024-token grid. The snapshot includes KDA recurrence and convolution history, plus the MLA/indexer position and incomplete pooling tail. Completed attention and indexer prefix rows remain in the loaded model's own state.
 - The ordinary [EXL3/FP8 GLM backend](validation/GLM_EXL3_BACKEND.md) resumes on a 16,384-token grid with MTP off and its head unloaded. A private native MTP candidate, enabled through a separately prepared capability stage and explicit `STARK_GLM_EXL3_VALIDATE_NATIVE=1`, snapshots the draft-head state with the native prefix state. Its native greedy, sampled and prefix mechanism/invalidation checks pass; full Rust-worker and quality validation remain pending, so production MTP is unqualified. The state-hash diagnostic build setting is separate. See the [native mechanism record](archive/runs/2026-11-04-glm-exl3-native-mtp-prefix.md) and [comparison record](benchmarks/2026-11-04-glm-mlx-stream-comparison.md).
 - The native mixed-precision Qwen3.8 backend (Lily-format, external mixed-affine and Uzu-converted Qwen3.8 artifacts) resumes from a recurrent-state snapshot on a 4,096-token grid. This includes the admitted `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` layout. Its attention, indexer and draft-head caches below the snapshot stay in the loaded model's own state.

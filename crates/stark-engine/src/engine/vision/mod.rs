@@ -733,7 +733,7 @@ impl<B: Backend> VisionLanguageModel<B> {
         context_tokens: u32,
         max_new_tokens: u32,
     ) -> Option<usize> {
-        self.language_model.generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)
+        self.language_model.ordinary_text_generation_memory_bytes(input_tokens, context_tokens, max_new_tokens)
     }
 
     pub fn text_generation_memory_bytes(
@@ -743,6 +743,16 @@ impl<B: Backend> VisionLanguageModel<B> {
         output: u32,
     ) -> Option<usize> {
         self.text_model().generation_memory_bytes(input, context, output)
+    }
+
+    /// Ordinary text keeps the loaded head but allocates no predictor session.
+    pub fn ordinary_text_generation_memory_bytes(
+        &self,
+        input: u32,
+        context: u32,
+        output: u32,
+    ) -> Option<usize> {
+        self.text_model().ordinary_text_generation_memory_bytes(input, context, output)
     }
 
     /// Decoder admission when a scoped text request also retains one

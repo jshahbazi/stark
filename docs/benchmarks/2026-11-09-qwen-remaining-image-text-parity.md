@@ -3,8 +3,9 @@
 Attempts [QNIP-01/02/03](../archive/runs/2026-11-09-qwen-remaining-image-text-parity.md)
 extend the shared-weight fast text path beyond the qualified Jundot 27B head.
 Three exact **headless converted artifacts** pass the registered short text-speed
-comparison. Their full cache/lifecycle rerun and BF16 predictor qualification are
-still open. These measurements do not establish support for every model size,
+comparison. Recovered complete receipts qualify the BF16 and dense affine 0.8B
+headless lifecycle matrices; the MoE lifecycle rerun and complete BF16 predictor
+qualification remain open. These measurements do not establish support for every model size,
 quantization or source head.
 
 ## Matched short comparison
@@ -67,7 +68,14 @@ tests pass on sealed engine executable
 `433b81169a9268d21f29636c503a12c02667347e81949c7b131e26e09282169e`.
 BF16's initial cache matrix passes eleven cases, then an invalid test expectation
 requests reuse across a changed scope. The worker correctly reports a miss.
-That recipe is preserved and its corrected full rerun remains pending.
+That recipe is preserved; its corrected full rerun was pending at that stage.
+
+Subsequent recovered version-four receipts pass 30/30 cases for each exact
+headless 0.8B artifact on the same frozen worker, including real-image
+transitions and the two-suffix-token boundary guard. The affine MoE matrix has
+no completed version-four receipt. See the [recovery record](../archive/runs/2026-11-09-qwen-remaining-image-text-parity.md#crash-recovery-and-bounded-continuation)
+for receipt hashes and separate actual BF16-head results. Those later results
+do not change the binary, workload or measurements in the table above.
 
 The official BF16 source contains 15 predictor tensors, so the older headless
 export is **not** proof of MTP absence. BF16 predictor retention, raw norm-gain

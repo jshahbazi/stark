@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use half::bf16;
 use serde_json::{Value, json};
@@ -6,7 +6,7 @@ use stark_engine_macros::stark_test;
 
 use super::*;
 use crate::{
-    backends::common::{CommandBufferExecutable, CommandBufferPending, Context},
+    backends::common::{BufferRef, CommandBufferExecutable, CommandBufferPending, Context},
     parameters::{NumericalProfile, ParameterLoader},
     tests::helpers::{buffer_to_vec, create_buffer_with_data, for_each_backend},
 };
@@ -152,6 +152,212 @@ fn full_qwen_reference<B: Backend>() {
 #[stark_test]
 fn qwen_bf16_moe_reference_profile_executes_router_selected_banks_and_shared_gate() {
     for_each_backend!(|B| full_qwen_reference::<B>());
+}
+
+/// A small native expert-head integration fixture. This uses the same routed /
+/// shared bank layout as the converter contract, not official model weights.
+fn predictor_fixture(zero_mlp: bool) -> std::fs::File {
+    let mut mlp = fixture();
+    mlp.seek(SeekFrom::Start(0)).unwrap();
+    let mut bytes = Vec::new();
+    mlp.read_to_end(&mut bytes).unwrap();
+    let length = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let original: Value = serde_json::from_slice(&bytes[8..8 + length]).unwrap();
+    let mut payload = bytes[8 + length..].to_vec();
+    if zero_mlp {
+        payload.fill(0);
+    }
+    let mut header = serde_json::Map::new();
+    let mut metadata = serde_json::Map::new();
+    for (name, record) in original.as_object().unwrap() {
+        if name == "__metadata__" {
+            for (name, spec) in record.as_object().unwrap() {
+                metadata.insert(format!("mtp.transformer.layers.0.mlp.{name}"), spec.clone());
+            }
+        } else {
+            header.insert(format!("mtp.transformer.layers.0.mlp.{name}"), record.clone());
+        }
+    }
+    for (name, width) in [
+        ("embedding_norm", 64),
+        ("hidden_norm", 64),
+        ("transformer.output_norm", 64),
+        ("transformer.layers.0.pre_mixer_norm", 64),
+        ("transformer.layers.0.pre_mlp_norm", 64),
+        ("transformer.layers.0.mixer.query_norm", 128),
+        ("transformer.layers.0.mixer.key_norm", 128),
+    ] {
+        let begin = payload.len();
+        payload.resize(begin + width * 4, 0);
+        header.insert(
+            format!("mtp.{name}.scales"),
+            json!({"dtype":"F32","shape":[width],"data_offsets":[begin,payload.len()]}),
+        );
+    }
+    for (name, rows, columns) in [
+        ("fusion.weights", 64usize, 128usize),
+        ("transformer.layers.0.mixer.qkvg_projection.weights", 512, 64),
+        ("transformer.layers.0.mixer.out_projection.weights", 64, 128),
+    ] {
+        let mut weights = vec![bf16::ZERO; rows * columns];
+        if name == "fusion.weights" {
+            for row in 0..64 {
+                weights[row * 128 + row] = bf16::from_f32(0.5);
+                weights[row * 128 + 64 + row] = bf16::from_f32(0.25);
+            }
+        } else if name.ends_with("qkvg_projection.weights") {
+            // Nonzero Q/K/V make cache-only priming depend on the actual
+            // preceding rows; zero gate logits retain the ordinary sigmoid.
+            for channel in 0..64 {
+                weights[channel * 64 + channel] = bf16::from_f32(0.25);
+                weights[(128 + channel) * 64 + channel] = bf16::from_f32(0.25);
+                weights[(256 + channel) * 64 + channel] = bf16::from_f32(0.5);
+            }
+        } else {
+            for channel in 0..64 {
+                weights[channel * 128 + channel] = bf16::from_f32(0.125);
+            }
+        }
+        let begin = payload.len();
+        payload.extend(weights.iter().flat_map(|value| value.to_le_bytes()));
+        header.insert(
+            format!("mtp.{name}.weights"),
+            json!({"dtype":"BF16","shape":[rows,columns],"data_offsets":[begin,payload.len()]}),
+        );
+        metadata.insert(
+            format!("mtp.{name}.spec"),
+            json!(json!({"type":"FullPrecisionSpec","layout":"output_input"}).to_string()),
+        );
+    }
+    header.insert("__metadata__".into(), Value::Object(metadata));
+    let mut encoded = serde_json::to_vec(&header).unwrap();
+    encoded.resize(encoded.len().next_multiple_of(8), b' ');
+    let path = std::env::temp_dir().join(format!(
+        "stark-qwen-bf16-expert-predictor-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    file.write_all(&(encoded.len() as u64).to_le_bytes()).unwrap();
+    file.write_all(&encoded).unwrap();
+    file.write_all(&payload).unwrap();
+    file
+}
+
+fn expert_predictor_component<B: Backend>() -> Vec<f32> {
+    use crate::{
+        backends::common::gpu_types::trie::TrieNode,
+        config::qwen_mtp::QwenMtpConfig,
+        encodable_block::{batch_topology::BatchTopology, qwen_mtp::QwenMtp},
+    };
+
+    let context = B::Context::new().unwrap();
+    let norm = json!({"epsilon":1e-6,"scale_offset":1.0,"upcast_mode":"full_layer", "subtract_mean":false,
+        "has_scale":true,"has_biases":false});
+    let config: QwenMtpConfig = serde_json::from_value(json!({"model_dim":64,"target_layer":1,
+        "input_norm_config":norm,"transformer_config":{"model_dim":64,"hidden_dim":64,"output_norm_config":norm,
+        "layer_configs":[{"pre_mixer_norm_config":norm,"pre_mlp_norm_config":norm,"has_post_layer_scalar":false,
+            "mixer_conv_config":null,"post_mixer_norm_config":null,"mlp_conv_config":null,"post_mlp_norm_config":null,
+            "hidden_dim":null,"ple_config":null,"kv_source_layer_index":null,"rope_config":null,
+            "mixer_config":{"type":"AttentionConfig","qkvg_projection_config":{},"out_projection_config":{},
+                "num_heads":1,"num_groups":1,"head_dim":128,"is_causal":true,"has_sinks":false,"has_qkvg_biases":false,
+                "has_out_biases":false,"has_gate":true,"normalize_values":false,"is_kv_sharing":false,
+                "query_norm_config":norm,"key_norm_config":norm,"scale":null,"sliding_window_size":null,
+                "logit_soft_cap":null,"reference_bf16":true},"mlp_config":reference_config()}]}}))
+    .unwrap();
+    let embedding = (0..256).map(|i| bf16::from_f32(((i * 7 % 17) as f32 - 8.0) * 0.125)).collect::<Vec<_>>();
+    let hidden = (0..256).map(|i| bf16::from_f32(((i * 11 % 19) as f32 - 9.0) * 0.0625)).collect::<Vec<_>>();
+    let mut outputs = Vec::new();
+    for zero_mlp in [false, true] {
+        let file = predictor_fixture(zero_mlp);
+        let loader = ParameterLoader::new(&file, context.as_ref())
+            .unwrap()
+            .with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+        let model = QwenMtp::<B>::new(&config, 2, &loader.tree().subtree("mtp"), &context).unwrap();
+        loader.tree().assert_all_tensors_validated().unwrap();
+        let mut state = model.create_state(16, &context).unwrap();
+        let chain = |length| {
+            (0..length)
+                .map(|height| TrieNode {
+                    height,
+                    trie_start: height,
+                    trie_end: length - 1,
+                })
+                .collect::<Vec<_>>()
+        };
+        let nodes = chain(4);
+        let prefix_nodes = chain(3);
+        let single_node = chain(1);
+        state.prepare(0, 4).unwrap();
+        let e = create_buffer_with_data::<B, bf16>(&context, &embedding);
+        let h = create_buffer_with_data::<B, bf16>(&context, &hidden);
+        let mut command = context.create_command_buffer(None, None).unwrap();
+        let full = model.encode(&e, &h, &BatchTopology::new(&nodes, true), &mut state, &mut command).unwrap();
+        let mut result = context.create_buffer(256 * 2).unwrap();
+        command.encode_copy(&full.normalized, &mut result);
+        state.encode_accept(&[0, 1, 2, 3], &mut command).unwrap();
+        command.end_encoding().submit().wait_until_completed().unwrap();
+        let actual = buffer_to_vec::<B, bf16>(&result).into_iter().map(f32::from).collect::<Vec<_>>();
+        assert!(actual.iter().all(|value| value.is_finite()));
+        assert_eq!(state.context_length(), 4);
+        if !zero_mlp {
+            let mut primed = model.create_state(16, &context).unwrap();
+            primed.prepare(0, 3).unwrap();
+            let mut command = context.create_command_buffer(None, None).unwrap();
+            model
+                .encode_cache_only(
+                    e.subrange(..3 * 64 * 2),
+                    h.subrange(..3 * 64 * 2),
+                    &BatchTopology::new(&prefix_nodes, true),
+                    &mut primed,
+                    &mut command,
+                )
+                .unwrap();
+            primed.encode_accept(&[0, 1, 2], &mut command).unwrap();
+            command.end_encoding().submit().wait_until_completed().unwrap();
+            primed.prepare(3, 1).unwrap();
+            let mut command = context.create_command_buffer(None, None).unwrap();
+            let last = model
+                .encode(
+                    e.subrange(3 * 64 * 2..),
+                    h.subrange(3 * 64 * 2..),
+                    &BatchTopology::new(&single_node, true),
+                    &mut primed,
+                    &mut command,
+                )
+                .unwrap();
+            let mut last_result = context.create_buffer(64 * 2).unwrap();
+            command.encode_copy(&last.normalized, &mut last_result);
+            primed.encode_accept(&[0], &mut command).unwrap();
+            command.end_encoding().submit().wait_until_completed().unwrap();
+            assert_eq!(primed.context_length(), 4);
+            assert!(
+                buffer_to_vec::<B, bf16>(&last_result)
+                    .iter()
+                    .zip(&actual[3 * 64..])
+                    .all(|(a, b)| (a.to_f32() - b).abs() <= 0.015625),
+                "expert predictor cache-only priming differs"
+            );
+        }
+        outputs.push(actual);
+    }
+    assert!(outputs[0].iter().zip(&outputs[1]).any(|(a, b)| (a - b).abs() > 0.01), "expert head MLP did not run");
+    outputs.remove(0)
+}
+
+#[stark_test]
+fn qwen_bf16_expert_predictor_executes_and_cache_only_priming_preserves_output() {
+    let expected = expert_predictor_component::<crate::backends::cpu::Cpu>();
+    assert_eq!(expected.len(), 256);
+    #[cfg(backend = "metal")]
+    {
+        let output = expert_predictor_component::<crate::backends::metal::Metal>();
+        assert!(
+            output.iter().zip(&expected).all(|(a, b)| (a - b).abs() <= 0.03125),
+            "CPU/Metal synthetic expert predictor differs"
+        );
+    }
 }
 
 #[cfg(backend = "cpu")]
