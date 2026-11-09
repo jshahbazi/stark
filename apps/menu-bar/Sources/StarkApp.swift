@@ -2530,15 +2530,9 @@ struct SpeedView: View {
 struct RunningModelLabel: View {
     @ObservedObject var engine: EngineController
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(engine.activeModel?.displayName ?? engine.startableModel?.displayName ?? engine.activeName)
-                .lineLimit(1).truncationMode(.middle)
-            if !engine.activeVersionDetails.isEmpty {
-                Text(engine.activeVersionDetails).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
-                    .layoutPriority(1)
-            }
-        }.accessibilityElement(children: .combine)
+        Text(engine.activeModel?.displayName ?? engine.startableModel?.displayName ?? engine.activeName)
+            .lineLimit(1).truncationMode(.middle)
+            .help(engine.activeVersionDetails)
     }
 }
 
