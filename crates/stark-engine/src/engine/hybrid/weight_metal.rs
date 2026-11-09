@@ -41,6 +41,10 @@ mod q4_grouped_tests;
 #[path = "weight_metal_kquant_mma_tests.rs"]
 mod kquant_mma_tests;
 
+#[cfg(test)]
+#[path = "glm_first_use_pressure_tests.rs"]
+mod first_use_pressure_tests;
+
 struct Executor {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
