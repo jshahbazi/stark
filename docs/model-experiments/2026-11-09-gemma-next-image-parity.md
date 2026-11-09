@@ -711,3 +711,83 @@ addition to the 4 KiB source activation; these fit within the existing 32 MiB
 assistant dynamic allowance. This is not a complete serving peak inventory.
 All owned workers, reference children and compilers close before direct
 handoff to the queued Qwen functional run.
+
+### Actual cutoff-tie diagnosis, with the raw failure retained
+
+The separately versioned diagnostic oracle
+`f93a434deb7c35693fd4b7337afa506ed807fb3543cf2078d90d67b2a5768a6a`
+replays the existing sealed `75e5eff5` executable. Its original raw gate is
+unchanged and remains false at 1,792 tokens. Observed support is derived from
+actual masked logits, with a strict BF16 sentinel gap, correct selected-minimum
+minus-one sentinel, 4,096 non-sentinel tokens, whole 128-token cluster blocks,
+finite values and a full ordering permutation. All 15 steps have valid actual
+top-k selections and canonical reference readout maximum absolute error at
+most 0.125.
+
+The failing 1,792-token first step has 29 strictly greater clusters and four
+clusters tied exactly for the last three places. Its two changed selected
+clusters are both at that exact cutoff. Centroids and feedback are exact;
+actual support equals the independent descending-score/ascending-index
+canonical reference, whose separately recomputed readout matches exactly.
+There is no signed-zero cutoff ambiguity. The raw maximum error 53.375 is
+preserved. Its batch/cache controls remain unexecuted in this diagnostic run.
+
+Aggregate `b05242f3a2f35ba552a9db6469ad5b944418ac4eeff001110d5ed3f1517be69d`,
+guard `ad36d6e3cacba2f9f200f59a1edf7e3f1472cb58549944fc5492a5801989c7db`,
+and execution seal
+`c41493c9e103d7abb95adab9936a124b7db6af5bda0aad3c53e5eecaf1002740`
+record the new diagnostic separately. No paging growth or foreign worker is
+observed; peak RSS is 12,532,793,344 bytes. All owned workers and reference
+children close before direct Qwen handoff.
+
+The [PyTorch 2.14 top-k contract](https://docs.pytorch.org/docs/2.14/generated/torch.topk.html)
+does not promise stable tied indices. The wheel's pinned
+[TopKImpl source](https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/aten/src/ATen/native/TopKImpl.h)
+uses score-only partial sorting for 32 of 2,048. No native heap-order change is
+made. A new `mathematical-topk-canonical-tie-v1` oracle is registered separately:
+it retains raw metrics and requires observed-mask validity, canonical support
+and independent readout at the unchanged 0.5 absolute/2% relative limits.
+Every observed non-tied support mismatch is fatal even if a raw numeric flag
+would pass. A tie-only branch additionally requires exact full centroids and
+reference top-k score multiset equality; signed-zero ambiguity is fatal.
+Original root, greedy, fixed-position, feedback and centroid gates remain.
+
+The private selection module
+`079edcd5c5795e6952bacc35de5163c6a50019ddc054e3691769d5a18ad0caf3`
+and importing oracle
+`0373bd8ecf94a4035c9f6b71c2858a49b7e8856a1de3ee20c24b54261aa9ce73`
+are frozen for independent review before a qualifying replay. Twelve bounded
+public synthetic CPU controls pass, including an actual different tied Torch
+heap choice and rejection of non-tied selection, missing strict-greater
+clusters, partial masks, readout errors, collapsed BF16 sentinel, signed-zero
+ambiguity, invalid ordering, non-exact cutoff scores and non-finite values.
+CPU receipt `986f66e4afd2364edf4ec6d7f1c73be2da7238eeb99d496a941ad34da5e2425b`
+uses the pinned Torch wheel and loads no model or Metal backend. No qualifying
+replay or serving claim is made by these CPU controls.
+
+### Focused upstream implementation comparison
+
+The source-only comparison pins MLX-VLM commit
+`763e6379a94d054b8d695d6f3f3ad675d3d366df` (MIT) and MLX-LM commit
+`56230fa02b8ff8330daf26dc95c28480423ed5fe` (MIT). No source code is borrowed
+and no numerical or performance proof is inherited.
+
+MLX-VLM's
+[assistant](https://github.com/Blaizzy/mlx-vlm/blob/763e6379a94d054b8d695d6f3f3ad675d3d366df/mlx_vlm/speculative/drafters/gemma4_assistant/gemma4_assistant.py)
+has no private KV cache, holds the draft query position constant, combines the
+target embedding with feedback, and releases shared KV between rounds. Its
+[MTP loop](https://github.com/Blaizzy/mlx-vlm/blob/763e6379a94d054b8d695d6f3f3ad675d3d366df/mlx_vlm/speculative/mtp.py)
+rebuilds committed shared views after acceptance. Its
+[cache transactions](https://github.com/Blaizzy/mlx-vlm/blob/763e6379a94d054b8d695d6f3f3ad675d3d366df/mlx_vlm/speculative/cache_state.py)
+restore rotating physical state and replay accepted rows rather than only
+decrementing a cursor. These support the existing Stark lifetime/rollback
+design and do not replace its lifecycle tests.
+
+The [MLX sparse readout](https://github.com/Blaizzy/mlx-vlm/blob/763e6379a94d054b8d695d6f3f3ad675d3d366df/mlx_vlm/speculative/drafters/gemma4_assistant/masked_embedder.py)
+uses partition-based centroid selection and has a separate greedy argmax
+shortcut. Its finite selected-minimum-minus-one tail is not zero probability:
+Stark's supported stochastic sampler must retain the complete-vocabulary
+proposal distribution. The upstream
+[mask helper](https://github.com/Blaizzy/mlx-vlm/blob/763e6379a94d054b8d695d6f3f3ad675d3d366df/mlx_vlm/speculative/drafters/gemma4_assistant/masks.py)
+uses strict sliding-distance comparisons; its boundary behavior is not
+adopted over the pinned Transformers oracle and actual Stark handoff evidence.
