@@ -191,11 +191,22 @@ fn admit_scoring_memory(
     request_bytes: Option<usize>,
     available: usize,
 ) -> Result<(), &'static str> {
+    stark_resource_budget::admit_inference_memory(request_bytes, available)
+}
+
+fn admit_scoring_memory_with_reclaim(
+    request_bytes: Option<usize>,
+    mut available: impl FnMut() -> usize,
+    reclaim: impl FnOnce() -> Result<usize, &'static str>,
+) -> Result<(), &'static str> {
     let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
-    if request_bytes > available.saturating_sub(256 * 1024 * 1024) / 4 {
-        return Err("resource_budget_exceeded");
+    if admit_scoring_memory(Some(request_bytes), available()).is_ok() {
+        return Ok(());
     }
-    Ok(())
+    reclaim()?;
+    // Released allocator pages are not a reservation. Check the actual host
+    // headroom again rather than adding a hypothetical freed-byte allowance.
+    admit_scoring_memory(Some(request_bytes), available())
 }
 
 trait ScoringBackend {
@@ -409,14 +420,26 @@ impl ScoringBackend for NativeBackend {
         context: u32,
     ) -> Result<NativeScores, &'static str> {
         let input_tokens = u32::try_from(input.len()).map_err(|_| "context_overflow")?;
+        if let NativeModel::Hybrid(model) = &mut self.model {
+            model.prepare_request_memory().map_err(|_| "native_scoring_failed")?;
+        }
         let request_bytes = match &self.model {
             NativeModel::Dense(model) => model.scoring_memory_bytes(input_tokens, context),
             // Hybrid caches grow with committed prompt rows; unused selected
             // capacity does not allocate additional cache storage here.
-            NativeModel::Hybrid(model) => model.request_memory_bytes(input_tokens, input_tokens),
+            NativeModel::Hybrid(model) => model.scoring_memory_bytes(input_tokens),
         };
-        let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-        admit_scoring_memory(request_bytes, available)?;
+        match &self.model {
+            NativeModel::Dense(model) => admit_scoring_memory_with_reclaim(
+                request_bytes,
+                || stark_resource_budget::available_memory_bytes().unwrap_or(0),
+                || model.reclaim_cached_memory().map_err(|_| "native_scoring_failed"),
+            )?,
+            NativeModel::Hybrid(_) => {
+                let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
+                admit_scoring_memory(request_bytes, available)?;
+            },
+        }
         let NativeModel::Dense(model) = &self.model else {
             let NativeModel::Hybrid(model) = &mut self.model else {
                 unreachable!()
@@ -1193,10 +1216,15 @@ mod tests {
 
     #[test]
     fn memory_admission_reports_recoverable_resource_errors() {
-        let available = 1024 * 1024 * 1024;
+        const MIB: usize = 1024 * 1024;
+        let available = 1024 * MIB;
+        let budget = stark_resource_budget::inference_memory_budget(available);
         assert_eq!(admit_scoring_memory(None, available), Err("resource_budget_exceeded"));
-        assert_eq!(admit_scoring_memory(Some(256 * 1024 * 1024), available), Err("resource_budget_exceeded"));
-        assert_eq!(admit_scoring_memory(Some(128 * 1024 * 1024), available), Ok(()));
+        assert_eq!(admit_scoring_memory(Some(512 * MIB), available), Ok(()));
+        assert_eq!(admit_scoring_memory(Some(budget), available), Ok(()));
+        assert_eq!(admit_scoring_memory(Some(budget + 1), available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(1), 0), Err("resource_budget_exceeded"));
+        assert_eq!(admit_scoring_memory(Some(usize::MAX), usize::MAX), Err("resource_budget_exceeded"));
     }
 
     #[test]
@@ -1214,6 +1242,58 @@ mod tests {
         assert_eq!(retry["cache_hit"], false);
         assert_eq!(post(&mut worker, full_context)["cache_hit"], true);
         assert_eq!(worker.backend.calls, 3);
+    }
+
+    #[test]
+    fn cached_score_does_not_require_memory_for_a_new_native_state() {
+        let mut worker = worker(true, false);
+        let fresh = post(&mut worker, standard());
+        worker.backend.fail_resource = true;
+        let cached = post(&mut worker, standard());
+        assert_eq!(cached["cache_hit"], true);
+        assert_eq!(worker.backend.calls, 1);
+        assert_eq!(cached["logits"], fresh["logits"]);
+        // A changed input still needs a fresh native allocation and must fail.
+        let changed = request(&[2, 1], &[2, 3], 8192, 1.0);
+        assert_eq!(post(&mut worker, changed)["error"], "resource_budget_exceeded");
+        assert_eq!(worker.backend.calls, 2);
+    }
+
+    #[test]
+    fn scoring_reclaims_only_on_pressure_and_rechecks_observed_headroom() {
+        use std::cell::Cell;
+
+        const MIB: usize = 1024 * 1024;
+        let reclaimed = Cell::new(false);
+        assert_eq!(
+            admit_scoring_memory_with_reclaim(
+                Some(512 * MIB),
+                || if reclaimed.get() {
+                    1024 * MIB
+                } else {
+                    512 * MIB
+                },
+                || {
+                    reclaimed.set(true);
+                    Ok(512 * MIB)
+                },
+            ),
+            Ok(())
+        );
+        assert!(reclaimed.get());
+        assert_eq!(
+            admit_scoring_memory_with_reclaim(Some(512 * MIB), || 512 * MIB, || Ok(usize::MAX),),
+            Err("resource_budget_exceeded")
+        );
+        assert_eq!(admit_scoring_memory_with_reclaim(Some(1), || 1024 * MIB, || panic!("no pressure"),), Ok(()));
+        assert_eq!(
+            admit_scoring_memory_with_reclaim(None, || panic!("invalid estimate"), || panic!("invalid estimate"),),
+            Err("resource_budget_exceeded")
+        );
+        assert_eq!(
+            admit_scoring_memory_with_reclaim(Some(512 * MIB), || 512 * MIB, || Err("native_scoring_failed"),),
+            Err("native_scoring_failed")
+        );
     }
 
     #[test]

@@ -212,6 +212,48 @@ def test_automatic_budget_requires_exact_capacity_contract(known, reported):
             automatic_generation_budget(worker, 20, 8192, context_capacity_known=known)
 
 
+@pytest.mark.parametrize("request_metadata_supported", [False, True])
+def test_automatic_budget_negotiates_request_identity_without_breaking_older_workers(request_metadata_supported):
+    from types import SimpleNamespace
+
+    from stark_convert.chat import automatic_generation_budget
+
+    requests = []
+    response = {
+        "context_tokens": 128,
+        "max_new_tokens": 126,
+        "context_capacity_known": True,
+        "budget_kind": "memory",
+    }
+
+    def request(payload, **kwargs):
+        requests.append((payload, kwargs))
+        return response
+
+    worker = SimpleNamespace(
+        generation_budget=True,
+        generation_budget_inputs=request_metadata_supported,
+        max_new_tokens=128,
+        request=request,
+    )
+    scope = "0123456789abcdef0123456789abcdef"
+    sampling = {"mode": "stochastic", "temperature": 0.7, "top_p": 0.9}
+    assert automatic_generation_budget(
+        worker,
+        2,
+        128,
+        context_capacity_known=True,
+        input_token_ids=[1, 2],
+        cache_scope=scope,
+        mtp_drafts=0,
+        sampling=sampling,
+    ) == (128, 126)
+    expected = {"operation": "plan_generation", "input_tokens": 2, "context_tokens": 128}
+    if request_metadata_supported:
+        expected.update(input_token_ids=[1, 2], cache_scope=scope, mtp_drafts=0, sampling=sampling)
+    assert requests == [(expected, {})]
+
+
 def test_history_reset_and_eof(model):
     worker = FakeWorker()
     with patch("sys.stdin", io.StringIO("first\nsecond\n/reset\nthird\n")):

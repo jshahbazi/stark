@@ -313,20 +313,74 @@ pub struct GlmModel {
 }
 
 impl GlmModel {
+    pub(super) fn additional_scoring_device_readout(&self) -> bool {
+        #[cfg(feature = "metal")]
+        return !self.decode_graph_enabled;
+        #[cfg(not(feature = "metal"))]
+        false
+    }
+
     pub(super) fn request_memory_bytes(
         &self,
         context_tokens: u32,
         input_tokens: u32,
+        capture_prefix: bool,
     ) -> Option<usize> {
         #[cfg(feature = "metal")]
-        {
+        if self.decode_graph_enabled {
             let c = &self.config;
             let capacity = super::memory::growth_capacity(context_tokens, c.max_context, 64)?;
             super::memory::gpu_buffer_fits(&[capacity, c.kv_rank], 4)?;
             super::memory::gpu_buffer_fits(&[capacity.div_ceil(c.index_pool), c.index_dim], 4)?;
             super::memory::gpu_buffer_fits(&[capacity, c.heads], 4)?;
         }
-        request_memory_bytes(&self.config, context_tokens, input_tokens)
+        let c = &self.config;
+        let attention_layers = c.layer_types.iter().filter(|&&kda| !kda).count();
+        #[cfg(feature = "metal")]
+        let resident = RequestResident {
+            metal: true,
+            graph: self.decode_graph_enabled,
+            decode: self.decode.is_some(),
+            attention_capacity: self.decode.as_ref().map_or_else(
+                || vec![0; attention_layers],
+                |decode| decode.attention.iter().flatten().map(|state| state.resident_capacity()).collect(),
+            ),
+            missing_kda: self
+                .states
+                .iter()
+                .filter(|state| matches!(state, LayerState::Kda(state) if state.metal.is_none()))
+                .count(),
+            scratch_heap: self.decode.as_ref().is_some_and(|decode| decode.scratch_heap.is_some()),
+            heap_enabled: self.decode.as_ref().map_or_else(
+                || {
+                    if self.decode_graph_enabled {
+                        scratch_heap_enabled().ok()
+                    } else {
+                        Some(false)
+                    }
+                },
+                |decode| Some(decode.scratch_heap.is_some()),
+            )?,
+            graph_count: if std::env::var_os("STARK_GLM53_GREEDY_OVERLAP").is_some_and(|value| value == "1") {
+                2
+            } else {
+                1
+            },
+            control_chunks: control_projection_chunks(c)?,
+        };
+        #[cfg(not(feature = "metal"))]
+        let resident = RequestResident {
+            metal: false,
+            graph: false,
+            decode: false,
+            attention_capacity: vec![0; attention_layers],
+            missing_kda: 0,
+            scratch_heap: false,
+            heap_enabled: false,
+            graph_count: 1,
+            control_chunks: 1,
+        };
+        incremental_request_memory_bytes(c, context_tokens, input_tokens, capture_prefix, &resident)
     }
 
     pub fn new(
@@ -1063,6 +1117,7 @@ impl BoundedPlan {
     }
 }
 
+#[cfg(test)]
 fn request_memory_bytes(
     config: &Config,
     context_tokens: u32,
@@ -1096,11 +1151,312 @@ fn request_memory_bytes(
     super::memory::sum(&[device, host, external])
 }
 
+struct RequestResident {
+    metal: bool,
+    graph: bool,
+    decode: bool,
+    attention_capacity: Vec<usize>,
+    missing_kda: usize,
+    scratch_heap: bool,
+    heap_enabled: bool,
+    graph_count: usize,
+    control_chunks: usize,
+}
+
+#[cfg(feature = "metal")]
+fn control_projection_chunks(c: &Config) -> Option<usize> {
+    if c.hc.checked_mul(c.hc)? <= 32 && std::env::var_os("STARK_GLM53_CONTROL_SPLIT").is_some_and(|value| value == "1")
+    {
+        match std::env::var_os("STARK_GLM53_CONTROL_CHUNKS").as_deref().and_then(|value| value.to_str()) {
+            Some("16") => Some(16),
+            Some("32") => Some(32),
+            Some("8") | None => Some(8),
+            _ => None,
+        }
+    } else {
+        Some(1)
+    }
+}
+
+fn attention_cache_bytes(
+    c: &Config,
+    capacity: usize,
+) -> Option<usize> {
+    super::memory::sum(&[
+        super::memory::bytes(&[capacity, c.kv_rank], 4)?,
+        super::memory::bytes(&[capacity.div_ceil(c.index_pool), c.index_dim], 4)?,
+    ])
+}
+
+fn host_attention_bytes(
+    c: &Config,
+    rows: usize,
+    growing: bool,
+) -> Option<usize> {
+    if rows == 0 {
+        return Some(0);
+    }
+    let pools = rows / c.index_pool;
+    let tail = if growing {
+        rows.min(c.index_pool)
+    } else {
+        rows % c.index_pool
+    };
+    let descriptors = |count: usize| {
+        if count == 0 {
+            return Some(0);
+        }
+        if growing {
+            let capacity = count.checked_next_power_of_two()?.max(4);
+            super::memory::growing_owner_bytes(0, capacity, 4, |n| super::memory::bytes(&[n], size_of::<Vec<f32>>()))
+        } else {
+            super::memory::bytes(&[count], size_of::<Vec<f32>>())
+        }
+    };
+    super::memory::sum(&[
+        super::memory::bytes(&[rows, c.kv_rank], 4)?,
+        super::memory::bytes(&[pools, c.index_dim], 4)?,
+        super::memory::bytes(&[2, tail, c.index_dim], 4)?,
+        descriptors(rows)?,
+        descriptors(pools)?,
+        descriptors(tail)?.checked_mul(2)?,
+    ])
+}
+
+// Shared with wide prefill admission: source-enumerated operator payloads,
+// alignment padding and arena slab fragmentation, independent of scheduling.
+fn layer_workspace_bytes(
+    c: &Config,
+    layer: usize,
+    tokens: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    let (h, s, t) = (c.hidden as u128, c.hc as u128, tokens as u128);
+    let inner = c.kda_heads as u128 * c.kda_dim as u128;
+    // Two controls, both fallback row scratch and the fully batched controls.
+    let controls = 4 * h * s + 6 * h + 80 * s * (s + 2);
+    let attention = if c.layer_types[layer] {
+        // Projection concatenation and its T8 temporary results, optional
+        // register-prefill prep/finish and the recurrent output projection.
+        18 * inner + 4 * h + 8 * c.kda_dim as u128 + 8 * c.kda_heads as u128
+    } else {
+        4 * c.q_rank as u128
+            + 4 * c.kv_rank as u128
+            + 8 * c.index_dim as u128
+            + 4 * c.heads as u128 * (c.qk_dim + c.kv_rank + c.value_dim) as u128
+            + 4 * c.index_heads as u128 * c.index_dim as u128
+            + 4 * c.index_heads as u128
+            + 2 * h
+            + c.heads as u128 * end as u128
+            + 4 * end.div_ceil(c.index_pool).checked_next_power_of_two()? as u128
+    };
+    let ffn = if layer < c.dense_layers {
+        5 * c.intermediate as u128 + 2 * h
+    } else {
+        5 * c.shared_experts as u128 * c.expert_intermediate as u128
+            + c.active_experts as u128 * (3 * c.expert_intermediate as u128 + h)
+            + 4 * h
+            + 5 * c.experts as u128
+            + 4 * c.active_experts as u128
+            // Optional grouping lists, jobs, flat route copies, indirect
+            // arguments and input-bound flags. Charge every schedule.
+            + c.experts as u128 * c.active_experts as u128
+            + 8 * c.active_experts as u128
+            + c.experts as u128
+            + 16
+    };
+    // Fewer than 128 graph scratch allocations per token in every schedule,
+    // including T8 projection concatenation and legacy one-row controls.
+    let payload = t * (controls + attention + ffn) * 4 + t * 128 * 256;
+    let scratch = 2 * payload + 1024 * 1024;
+    let external = if c.layer_types[layer] {
+        0
+    } else {
+        // Scores are charged here even when they fit in graph scratch. This
+        // bounds the >8M-element separately allocated attention score path.
+        t * 4
+            * (c.heads as u128 * end as u128
+                + end.div_ceil(c.index_pool) as u128
+                + c.q_rank as u128
+                + c.kv_rank as u128
+                + 2 * c.index_dim as u128)
+    };
+    Some((usize::try_from(scratch).ok()?, usize::try_from(external).ok()?))
+}
+
+fn ordinary_graph_workspace_bytes(
+    c: &Config,
+    input_tokens: u32,
+    capacity: usize,
+) -> Option<usize> {
+    const GRAPH_LIMIT: usize = 512 * 1024 * 1024;
+    // Wide tiles admit independent scratch/carry owners with their own group
+    // limits. Keep the actual command ceiling for that experimental schedule.
+    if std::env::var_os("STARK_GLM53_PREFILL_WIDE").is_some() {
+        return Some(GRAPH_LIMIT);
+    }
+    let rows = if std::env::var_os("STARK_GLM53_PREFILL_MMA").is_some_and(|value| value == "1") {
+        input_tokens.clamp(1, 8) as usize
+    } else {
+        1
+    };
+    let mut scratch = 0usize;
+    for layer in 0..c.layer_types.len() {
+        scratch = scratch.checked_add(layer_workspace_bytes(c, layer, rows, capacity)?.0)?;
+    }
+    // stream_mean, RMS output/optional partials and the final vocabulary
+    // projection. mapped() allocates its output only; finite scans add no
+    // device scratch. Use the same padding/fragmentation bound as each layer.
+    let readout = super::memory::bytes(
+        &[c.hidden.checked_mul(2)?.checked_add(c.hidden.div_ceil(1024))?.checked_add(c.vocab)?],
+        4,
+    )?
+    .checked_add(4 * 256)?;
+    scratch = scratch.checked_add(readout.checked_mul(2)?.checked_add(1024 * 1024)?)?;
+    Some(scratch.min(GRAPH_LIMIT))
+}
+
+fn incremental_request_memory_bytes(
+    c: &Config,
+    context_tokens: u32,
+    input_tokens: u32,
+    capture_prefix: bool,
+    resident: &RequestResident,
+) -> Option<usize> {
+    let capacity = super::memory::growth_capacity(context_tokens, c.max_context, 64)?;
+    if input_tokens == 0 || input_tokens > context_tokens || resident.graph_count == 0 {
+        return None;
+    }
+    let attention_layers = c.layer_types.iter().filter(|&&kda| !kda).count();
+    if resident.attention_capacity.len() != attention_layers {
+        return None;
+    }
+    let inner = c.kda_heads.checked_mul(c.kda_dim)?;
+    let state_values =
+        inner.checked_mul(3)?.checked_mul(c.conv_kernel.checked_sub(1)?)?.checked_add(inner.checked_mul(c.kda_dim)?)?;
+    let mut bytes = 0usize;
+    if resident.metal {
+        let weights = inner
+            .checked_mul(3)?
+            .checked_mul(c.conv_kernel)?
+            .checked_add(inner)?
+            .checked_add(c.kda_dim)?
+            .checked_add(c.kda_heads)?;
+        // Complete KDA constructors publish Some only after every buffer exists.
+        let kda = super::memory::sum(&[state_values, weights, inner.checked_mul(6)?, c.kda_heads, 1])?;
+        bytes = bytes.checked_add(super::memory::bytes(&[resident.missing_kda, kda], 4)?)?;
+        if resident.missing_kda > 0 {
+            // One constructor at a time owns decoded source vectors and their
+            // concatenation alongside the newly uploaded persistent weights.
+            bytes = bytes.checked_add(super::memory::bytes(&[weights], 8)?)?;
+        }
+    }
+    if resident.graph {
+        if !resident.decode {
+            let streams = c.hc;
+            let columns = c.hidden.checked_mul(streams)?;
+            let rows = streams.checked_add(2)?.checked_mul(streams)?;
+            let control = super::memory::sum(&[
+                rows.checked_mul(columns)?,
+                columns,
+                c.hidden.checked_mul(2)?,
+                rows.checked_mul(resident.control_chunks.checked_add(2)?)?,
+                3,
+            ])?;
+            let routed = c.layer_types.len().checked_sub(c.dense_layers)?;
+            let bounded = std::env::var_os("STARK_GLM53_BOUNDED_GRAPH").is_some_and(|value| value == "1")
+                || std::env::var_os("STARK_GLM53_ENCODER_BANKS").is_some_and(|value| value == "1");
+            let fixed = super::memory::sum(&[
+                super::memory::bytes(&[c.layer_types.len(), 2, control], 4)?,
+                super::memory::bytes(&[attention_layers, 3, c.index_pool, c.index_dim], 4)?,
+                super::memory::bytes(
+                    &[
+                        routed,
+                        c.experts,
+                        if bounded {
+                            2
+                        } else {
+                            1
+                        },
+                    ],
+                    4,
+                )?,
+                super::memory::bytes(&[c.hidden], 8)?,
+                // One constructor's norm and coefficient temporaries.
+                super::memory::bytes(&[c.hidden.checked_add(rows)?.checked_add(3)?], 4)?,
+            ])?;
+            bytes = bytes.checked_add(fixed)?;
+        }
+        for &current in &resident.attention_capacity {
+            bytes = bytes.checked_add(super::memory::growing_owner_bytes(current, capacity, 64, |rows| {
+                attention_cache_bytes(c, rows)
+            })?)?;
+        }
+        let scratch = if resident.heap_enabled {
+            if resident.scratch_heap {
+                0
+            } else {
+                2 * 512 * 1024 * 1024
+            }
+        } else {
+            resident.graph_count.checked_mul(ordinary_graph_workspace_bytes(c, input_tokens, capacity)?)?
+        };
+        bytes = bytes.checked_add(scratch)?;
+        let rows = input_tokens.clamp(1, 8) as usize;
+        // Small score planes are already in the graph arena. Only the explicit
+        // external path adds a score owner outside that scratch inventory.
+        if c.heads.checked_mul(capacity)? > 8_000_000 {
+            bytes = bytes.checked_add(super::memory::bytes(
+                &[resident.graph_count, attention_layers, rows, c.heads, capacity],
+                4,
+            )?)?;
+        }
+        let norms = c.q_rank.checked_add(c.kv_rank)?.checked_add(c.index_dim.checked_mul(2)?)?;
+        bytes = bytes.checked_add(super::memory::sum(&[
+            // MLA masks and per-row immutable norm/bias uploads are external.
+            super::memory::bytes(
+                &[resident.graph_count, attention_layers, rows, capacity.div_ceil(c.index_pool).checked_add(norms)?],
+                4,
+            )?,
+            // Host embedding/repeat and its uploaded device owner coexist.
+            super::memory::bytes(
+                &[resident.graph_count, rows, c.hidden.checked_mul(c.hc)?.checked_mul(2)?.checked_add(c.hidden)?],
+                4,
+            )?,
+            // One host norm upload and each graph status owner.
+            super::memory::bytes(&[norms.max(c.hidden)], 4)?,
+            super::memory::bytes(&[resident.graph_count], 4)?,
+        ])?)?;
+    } else {
+        bytes = bytes
+            .checked_add(host_attention_bytes(c, context_tokens as usize, true)?.checked_mul(attention_layers)?)?;
+        // Scalar execution has no DecodeGraph arena. Preserve its existing
+        // geometry-derived activation/copy bound without the former 512 MiB
+        // graph allowance, whose backing is never allocated on this path.
+        let width = c
+            .hidden
+            .checked_mul(c.hc)?
+            .max(c.intermediate)
+            .max(c.expert_intermediate.checked_mul(c.active_experts)?)
+            .max(c.hidden.checked_mul(c.active_experts)?)
+            .max(c.heads.checked_mul(c.kv_rank)?);
+        bytes = bytes.checked_add(super::memory::bytes(&[width], 256)?)?;
+    }
+    if capture_prefix {
+        let boundary = (input_tokens as usize - 1) / 1024 * 1024;
+        if boundary > 0 {
+            bytes = bytes.checked_add(prefix::snapshot_memory_bytes(c, boundary, resident.metal, resident.graph)?)?;
+        }
+    }
+    Some(bytes)
+}
+
 #[cfg(any(feature = "metal", test))]
 fn encoder_state_allowance(c: &Config) -> Result<usize> {
     encoder_state_allowance_for_context(c, c.max_context)
 }
 
+#[cfg(any(feature = "metal", test))]
 fn encoder_state_allowance_for_context(
     c: &Config,
     context_tokens: usize,
@@ -2194,9 +2550,8 @@ mod tests {
         assert!(actual.iter().zip(expected).all(|(&a, &b)| (a - b).abs() < tolerance));
     }
 
-    #[stark_test]
-    fn encoder_state_allowance_includes_context_growth_and_persistent_state() {
-        let mut config = Config {
+    fn memory_config() -> Config {
+        Config {
             hidden: 4096,
             heads: 32,
             kda_heads: 48,
@@ -2226,7 +2581,12 @@ mod tests {
             routed_scale: 2.5,
             vocab: 154_880,
             max_context: 4096,
-        };
+        }
+    }
+
+    #[stark_test]
+    fn encoder_state_allowance_includes_context_growth_and_persistent_state() {
+        let mut config = memory_config();
         let bounded = encoder_state_allowance(&config).unwrap();
         assert!(bounded > 512 * 1024 * 1024 && bounded < 2 * 1024 * 1024 * 1024);
         let at_64 = request_memory_bytes(&config, 64, 1).unwrap();
@@ -2242,6 +2602,70 @@ mod tests {
         );
         config.max_context = 1_048_576;
         assert!(encoder_state_allowance(&config).unwrap() > 8 * 1024 * 1024 * 1024);
+    }
+
+    #[stark_test]
+    fn incremental_glm_inventory_credits_only_completed_retained_owners() {
+        let c = memory_config();
+        let attention = c.layer_types.iter().filter(|&&kda| !kda).count();
+        let mut resident = RequestResident {
+            metal: true,
+            graph: true,
+            decode: false,
+            attention_capacity: vec![0; attention],
+            missing_kda: c.layer_types.len() - attention,
+            scratch_heap: false,
+            heap_enabled: false,
+            graph_count: 1,
+            control_chunks: 1,
+        };
+        let cold = incremental_request_memory_bytes(&c, 64, 1, false, &resident).unwrap();
+        resident.decode = true;
+        resident.attention_capacity.fill(64);
+        resident.missing_kda = 0;
+        let warm = incremental_request_memory_bytes(&c, 64, 1, false, &resident).unwrap();
+        assert!(warm < cold);
+        // Larger existing cache owners must not be rebilled for a tiny request.
+        resident.attention_capacity.fill(4096);
+        assert_eq!(incremental_request_memory_bytes(&c, 64, 1, false, &resident), Some(warm));
+        resident.attention_capacity.fill(64);
+        let growth = incremental_request_memory_bytes(&c, 65, 1, false, &resident).unwrap();
+        assert!(growth >= warm + attention * attention_cache_bytes(&c, 128).unwrap());
+        // A failed/unpublished KDA constructor remains missing, so it gets no credit.
+        resident.missing_kda = 1;
+        assert!(incremental_request_memory_bytes(&c, 64, 1, false, &resident).unwrap() > warm);
+        resident.missing_kda = 0;
+        let ordinary = incremental_request_memory_bytes(&c, 2048, 1025, false, &resident).unwrap();
+        let capture = incremental_request_memory_bytes(&c, 2048, 1025, true, &resident).unwrap();
+        assert!(capture > ordinary);
+        assert_eq!(capture - ordinary, prefix::snapshot_memory_bytes(&c, 1024, true, true).unwrap());
+        assert_eq!(incremental_request_memory_bytes(&c, 64, 1, true, &resident), Some(warm));
+        resident.heap_enabled = true;
+        let new_heap = incremental_request_memory_bytes(&c, 64, 1, false, &resident).unwrap();
+        resident.scratch_heap = true;
+        let existing_heap = incremental_request_memory_bytes(&c, 64, 1, false, &resident).unwrap();
+        assert_eq!(new_heap - existing_heap, 1024 * 1024 * 1024);
+        assert!(incremental_request_memory_bytes(&c, 4097, 1, false, &resident).is_none());
+    }
+
+    #[stark_test]
+    fn ordinary_glm_workspace_uses_operator_inventory_without_a_fixed_arena_charge() {
+        let c = memory_config();
+        let ordinary = ordinary_graph_workspace_bytes(&c, 1, 64).unwrap();
+        assert!(ordinary > 1024 * 1024 && ordinary < 512 * 1024 * 1024);
+        assert!(ordinary_graph_workspace_bytes(&c, 1, 4096).unwrap() >= ordinary);
+        let resident = RequestResident {
+            metal: true,
+            graph: false,
+            decode: false,
+            attention_capacity: vec![0; c.layer_types.iter().filter(|&&kda| !kda).count()],
+            missing_kda: 0,
+            scratch_heap: false,
+            heap_enabled: false,
+            graph_count: 1,
+            control_chunks: 1,
+        };
+        assert!(incremental_request_memory_bytes(&c, 64, 1, false, &resident).unwrap() < 512 * 1024 * 1024);
     }
 
     #[stark_test]

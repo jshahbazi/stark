@@ -104,12 +104,32 @@ class ChatBudgetUnavailable(ChatError):
     """An older worker cannot yet plan automatic memory-bounded execution."""
 
 
-def automatic_generation_budget(worker, input_tokens, context_tokens, *, context_capacity_known=False, cancelled=None):
+def automatic_generation_budget(
+    worker,
+    input_tokens,
+    context_tokens,
+    *,
+    context_capacity_known=False,
+    cancelled=None,
+    input_token_ids=None,
+    cache_scope=None,
+    mtp_drafts=None,
+    sampling=None,
+):
     """Ask the loaded backend to admit execution after tokenization."""
     if not getattr(worker, "generation_budget", False):
         raise ChatBudgetUnavailable("Update Stark's worker to enable automatic output for this model.")
+    request = {"operation": "plan_generation", "input_tokens": input_tokens, "context_tokens": context_tokens}
+    if getattr(worker, "generation_budget_inputs", False) is True:
+        if input_token_ids is not None:
+            request["input_token_ids"] = input_token_ids
+        if cache_scope is not None:
+            request["cache_scope"] = cache_scope
+        if mtp_drafts is not None:
+            request["mtp_drafts"] = mtp_drafts
+        request["sampling"] = sampling or {"mode": "greedy"}
     reply = worker.request(
-        {"operation": "plan_generation", "input_tokens": input_tokens, "context_tokens": context_tokens},
+        request,
         **({"cancelled": cancelled} if cancelled is not None else {}),
     )
     if reply.get("error") == "context_planning_unavailable":
@@ -315,6 +335,7 @@ class Worker:
         self.media = None
         self.prefix_cache = False
         self.prefix_chunk_tokens = None
+        self.generation_budget_inputs = False
         command = [str(executable), "--model-path", str(model)]
         try:
             config = read_model_config(Path(model))
@@ -507,6 +528,7 @@ class Worker:
                 if type(maximum_output) is int and maximum_output > 0:
                     self.max_new_tokens = maximum_output
                 self.generation_budget = reply.get("generation_budget") == "memory-context-v1"
+                self.generation_budget_inputs = reply.get("generation_budget_inputs") == "token-ids-v1"
                 self.mtp = mtp_capabilities(reply)
                 self.prefix_cache = prefix_cache_enabled(reply)
                 self.prefix_chunk_tokens = reply["prefix_cache"]["chunk_tokens"] if self.prefix_cache else None
@@ -1009,7 +1031,13 @@ def run_chat(args, worker):
                         maximum = min(ready["max_new_tokens"], context - count)
                     else:
                         request_context, maximum = automatic_generation_budget(
-                            worker, count, context, context_capacity_known=context_capacity_known
+                            worker,
+                            count,
+                            context,
+                            context_capacity_known=context_capacity_known,
+                            input_token_ids=tokens.get("token_ids"),
+                            cache_scope=cache_scope if getattr(worker, "prefix_cache", False) else None,
+                            mtp_drafts=drafts,
                         )
                 if maximum < 1 or count + maximum > context:
                     print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")

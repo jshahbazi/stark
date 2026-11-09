@@ -22,7 +22,10 @@ use crate::backends::{
     },
     metal::{
         Metal,
-        buffer::{dense::MetalDenseBuffer, global::MetalGlobalBuffer, sparse::MetalSparseBuffer},
+        buffer::{
+            dense::MetalDenseBuffer, global::MetalGlobalBuffer, retirement::RetirementTracker,
+            sparse::MetalSparseBuffer,
+        },
         command_buffer::{MetalCommandBufferCache, MetalCommandBufferEncoding},
         decompression,
         error::MetalError,
@@ -43,6 +46,7 @@ pub struct MetalContext {
     pub(super) residency_set: Arc<Mutex<Retained<ProtocolObject<dyn MTLResidencySet>>>>,
     pub command_queue: Retained<ProtocolObject<dyn MTL4CommandQueue>>,
     pub(super) block_allocator: Arc<BlockAllocator<MetalDenseBuffer>>,
+    pub(super) retirements: Arc<RetirementTracker>,
     pub(super) heaps: Arc<MetalHeaps>,
     pub(super) peak_memory_usage: Arc<AtomicUsize>,
     pub(super) command_buffer_cache: Mutex<Vec<MetalCommandBufferCache>>,
@@ -154,6 +158,7 @@ impl Context for MetalContext {
             residency_set: Arc::new(Mutex::new(residency_set)),
             command_queue,
             block_allocator,
+            retirements: Arc::new(RetirementTracker::default()),
             heaps,
             peak_memory_usage,
             command_buffer_cache: Mutex::new(Vec::with_capacity(32)),
@@ -182,7 +187,7 @@ impl Context for MetalContext {
     ) -> Result<<Metal as Backend>::GlobalBuffer, MetalError> {
         self.block_allocator
             .allocate(size, |size| MetalDenseBuffer::new(&self.weak_self.upgrade().unwrap(), size))
-            .map(|allocation| MetalGlobalBuffer::new(allocation, self.command_queue.clone()))
+            .map(|allocation| MetalGlobalBuffer::new(allocation, self.command_queue.clone(), self.retirements.clone()))
     }
 
     fn create_sparse_buffer(
@@ -202,6 +207,25 @@ impl Context for MetalContext {
 
     fn max_buffer_length(&self) -> Option<usize> {
         Some(self.device.max_buffer_length())
+    }
+
+    fn sparse_page_size(&self) -> Option<usize> {
+        use crate::backends::metal::metal_extensions::SparsePageSizeExt;
+        Some(self.heaps.page_size().in_bytes())
+    }
+
+    fn cached_memory_bytes(&self) -> Option<usize> {
+        self.block_allocator.cached_bytes()
+    }
+
+    fn reclaim_cached_memory(&self) -> Result<usize, MetalError> {
+        // Match the existing queue-maintenance deadline. Live/aliased buffers
+        // are absent from the free cache, and pending GPU owners must retire
+        // before any cached page can be released to the system.
+        if !self.retirements.wait(std::time::Duration::from_secs(5)) {
+            return Err(MetalError::CannotReclaimRetiredResources);
+        }
+        self.block_allocator.trim_cached().ok_or(MetalError::CannotReclaimRetiredResources)
     }
 
     fn enable_capture() {

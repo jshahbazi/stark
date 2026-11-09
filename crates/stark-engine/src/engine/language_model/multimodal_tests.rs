@@ -41,6 +41,96 @@ const SPECIAL_IDS: ImageTokenIds = ImageTokenIds {
     video: 4,
 };
 
+fn retained_generation_admission_uses_actual_owners<B: Backend>() {
+    let fixture = TinyModel::new(384);
+    let path = fixture.directory.join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["decoder_config"]["transformer_config"]["layer_configs"][0]["rope_config"] = json!({
+        "type": "UnscaledRoPEConfig", "base": 100.0, "head_dim": 4, "max_sequence_length": CAPACITY,
+    });
+    fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let engine = Engine::<B>::new().unwrap();
+    let model = engine.load_language_model(&fixture.directory).unwrap();
+    let foreign = engine.load_language_model(&fixture.directory).unwrap();
+    let mut state = model.create_empty_state(Some(CAPACITY), 0).unwrap();
+    // Allocation-only committed prefix: prepare actual cache backing and
+    // accept an identity range without printing or evaluating token contents.
+    state.transformer_state.prepare(0, 1024).unwrap();
+    let mut command = engine.context.create_command_buffer(None, None).unwrap();
+    state.transformer_state.encode_accept(&(0..1024).collect::<Vec<_>>(), &mut command).unwrap();
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    state.tokens = vec![5; 1024];
+    let input = 1025;
+    let maximum = 16;
+    let warm = model.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1024).unwrap();
+    let cold = model.generation_memory_bytes_for_request(input, CAPACITY, maximum, false).unwrap();
+    assert!(warm < cold);
+    let allocated = model.generation_allocation_context_length(input, CAPACITY, maximum).unwrap();
+    let estimate = model.generation_memory_estimate_for_prefill(input, CAPACITY, maximum, false, 1, false).unwrap();
+    let persistent = model.decoder.persistent_state_bytes(allocated, 1, input, false).unwrap();
+    let credit = state.resident_payload_bytes().unwrap().min(persistent);
+    let cold_history =
+        crate::encodable_block::memory::token_vector_growth_bytes::<u64>(0, 0, input as usize, maximum as usize, 1024)
+            .unwrap();
+    let warm_history = crate::encodable_block::memory::token_vector_growth_bytes::<u64>(
+        state.tokens.capacity(),
+        1024,
+        1,
+        maximum as usize,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(warm, estimate.state_bytes - cold_history + warm_history - credit + estimate.scratch_bytes);
+    // Large resident buffers cannot erase fresh host/scratch allocations.
+    assert!(warm >= estimate.scratch_bytes + 12);
+    assert!(foreign.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1024).is_none());
+    assert!(model.generation_memory_bytes_reusing_state(&state, input, CAPACITY / 2, maximum, 1024).is_none());
+    assert!(model.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1).is_none());
+    state.tokens.reserve(1024);
+    let no_growth = model.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1024).unwrap();
+    assert_eq!(warm - no_growth, warm_history);
+    // A previous request can retain backing beyond its reusable logical
+    // prefix. A 1025-row suffix prepares 3072 rows after that 1024-row prefix.
+    state.transformer_state.prepare(2048, 1024).unwrap();
+    let full_input = 2049;
+    let allocated = model.generation_allocation_context_length(full_input, CAPACITY, 1).unwrap();
+    let persistent = model.decoder.persistent_state_bytes(allocated, 1025, full_input, false).unwrap();
+    let suffix_only = model.decoder.persistent_state_bytes(allocated, 1025, 1025, false).unwrap();
+    if engine.context.sparse_page_size().is_some() {
+        assert!(persistent > suffix_only);
+    }
+    let base = model.generation_memory_estimate_for_prefill(full_input, CAPACITY, 1, false, 1025, false).unwrap();
+    let cold_history = crate::encodable_block::memory::token_vector_growth_bytes::<u64>(0, 0, 2049, 1, 1024).unwrap();
+    let retained_history =
+        crate::encodable_block::memory::token_vector_growth_bytes::<u64>(state.tokens.capacity(), 1024, 1025, 1, 1024)
+            .unwrap();
+    let credit = state.resident_payload_bytes().unwrap().min(persistent);
+    assert_eq!(
+        model.generation_memory_bytes_reusing_state(&state, full_input, CAPACITY, 1, 1024).unwrap(),
+        base.state_bytes - cold_history + retained_history - credit + base.scratch_bytes,
+    );
+    state.multimodal_failed = true;
+    assert!(model.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1024).is_none());
+
+    let short = model.decoder.scoring_memory_estimate(128, 16).unwrap();
+    let longer = model.decoder.scoring_memory_estimate(256, 16).unwrap();
+    let short_state = model.decoder.persistent_state_bytes(128, 16, 16, false).unwrap();
+    let long_state = model.decoder.persistent_state_bytes(256, 16, 16, false).unwrap();
+    assert_eq!(longer.state_bytes - short.state_bytes, long_state - short_state);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn retained_generation_admission_uses_actual_owners_cpu() {
+    retained_generation_admission_uses_actual_owners::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn retained_generation_admission_uses_actual_owners_metal() {
+    retained_generation_admission_uses_actual_owners::<crate::backends::metal::Metal>();
+}
+
 #[stark_test]
 fn separate_prefill_last_token_aligns_stream_and_scoring_cpu() {
     use crate::backends::cpu::Cpu;

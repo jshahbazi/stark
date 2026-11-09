@@ -144,3 +144,37 @@ fn dense_mtp_toy_greedy_and_prefix_metal() {
     assert!(model.continue_prefill_dense_mtp_controlled(&mut session, &short, 0, &mut || true).is_err());
     assert!(model.restore_dense_mtp_prefix(&mut session, 1024).is_err());
 }
+
+#[stark_test]
+#[ignore]
+fn dense_mtp_toy_admission_selects_active_path_and_credits_retained_owners() {
+    let path = std::path::PathBuf::from(std::env::var_os("STARK_DENSE_MTP_TOY").expect("set private toy path"));
+    let engine = Engine::<Metal>::new().unwrap();
+    let model = engine.load_language_model(&path).unwrap();
+    assert!(model.has_dense_mtp());
+    let plain = model.generation_memory_bytes_for_request(1101, 4096, 16, false).unwrap();
+    let enabled = model.generation_memory_bytes_for_request(1101, 4096, 16, true).unwrap();
+    assert!(plain < enabled);
+    let target_limit = model.decoder.persistent_state_bytes(2050, 1025, 2049, false).unwrap();
+    assert_eq!(target_limit, model.decoder.memory_estimate_with_prefix(2050, 1025, 2049, false).unwrap().state_bytes);
+    let head = model.dense_mtp.as_ref().unwrap();
+    assert_eq!(
+        head.persistent_state_bytes(2050, 1025, 2049).unwrap(),
+        head.memory_estimate_with_prefix(2050, 1025, 2049, false).unwrap().state_bytes
+    );
+    assert_eq!(
+        head.persistent_state_bytes(2050, 1, 2049).unwrap(),
+        head.memory_estimate_with_prefix(2050, 1, 2049, false).unwrap().state_bytes
+    );
+    let prompt = vec![5; 1100];
+    let mut retained = model.prefill_dense_mtp(&prompt, 4096).unwrap();
+    assert_eq!(retained.prefix_position(), Some(1024));
+    let warm = model.generation_memory_bytes_reusing_dense_mtp(&retained, 1101, 4096, 16, 1024).unwrap();
+    assert!(warm < enabled);
+    assert!(model.generation_memory_bytes_reusing_dense_mtp(&retained, 1101, 2048, 16, 1024).is_none());
+    let foreign = engine.load_language_model(&path).unwrap();
+    assert!(foreign.generation_memory_bytes_reusing_dense_mtp(&retained, 1101, 4096, 16, 1024).is_none());
+    model.restore_dense_mtp_prefix(&mut retained, 1024).unwrap();
+    assert!(model.continue_prefill_dense_mtp_controlled(&mut retained, &[5, 5], 0, &mut || true).is_err());
+    assert!(model.generation_memory_bytes_reusing_dense_mtp(&retained, 1101, 4096, 16, 1024).is_none());
+}

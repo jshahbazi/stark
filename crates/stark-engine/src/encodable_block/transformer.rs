@@ -83,6 +83,14 @@ fn scoring_cache_only_requested(
 }
 
 impl<B: Backend> TransformerState<B> {
+    pub(crate) fn resident_payload_bytes(&self) -> Option<usize> {
+        self.layer_states.iter().try_fold(0usize, |bytes, state| match state {
+            TransformerLayerStateType::Owned(state) => bytes.checked_add(state.resident_payload_bytes()?),
+            // A shared KV view does not own a second allocation.
+            TransformerLayerStateType::Shared(_) => Some(bytes),
+        })
+    }
+
     pub(crate) fn capture_prefix(
         &self,
         context: &B::Context,
@@ -417,15 +425,23 @@ impl<B: Backend> Transformer<B> {
         })
     }
 
-    pub(crate) fn memory_estimate(
+    pub(crate) fn memory_estimate_with_prefix(
         &self,
         context_tokens: u32,
         input_tokens: u32,
+        sequence_tokens: u32,
+        irregular_prefill: bool,
     ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
         self.layers.iter().try_fold(
             crate::encodable_block::memory::MemoryEstimate::default(),
             |estimate, (layer, _)| {
-                estimate.sequential(layer.memory_estimate(context_tokens, input_tokens, self.model_dim)?)
+                estimate.sequential(layer.memory_estimate_with_prefix(
+                    context_tokens,
+                    input_tokens,
+                    sequence_tokens,
+                    irregular_prefill,
+                    self.model_dim,
+                )?)
             },
         )
     }

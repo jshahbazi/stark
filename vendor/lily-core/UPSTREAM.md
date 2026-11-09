@@ -11,7 +11,10 @@ Stark adds an allocation-only text-request inventory in
 `src/qwen4exp/request_memory.rs`, exposed from the loaded model. It uses the
 selected K/V format, loaded draft-head presence, cache growth alignment,
 decode/prefill scratch geometry and prefix-snapshot payloads for host admission.
-It does not change tensor construction, kernels, precision or cache execution.
+The incremental admission path subtracts resident state and scratch, charges
+new context-cache growth at its overlap peak, replacement decode scratch,
+prefill scratch growth, and up to two request snapshots. It does not change
+tensor construction, kernels, precision or cache execution.
 
 Stark adds an ignored in-module retained-vision source replay in
 `src/qwen4exp/vision_reference_tests.rs`. It uses the existing private tower

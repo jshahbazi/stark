@@ -172,6 +172,15 @@ All rows below link to the [complete findings and per-model matrix](../archive/r
 | 20261108-MEM-01 | Exact Lily Q4-XL and MLX-Serve mixed text artifacts on M5 Max 128 GiB; reconcile Beginner and native memory admission | Final trials passed 9/9 requests per artifact through near-32K, MTP on/off and reuse/fresh-scope hash agreement. Physical footprint stayed below 74 GiB, without additional swap. Earlier admission, compile, test, telemetry and staging failures are retained. | Adopted on branch; signed build installed; Coding + Balanced recommendation and actual Lily startup verified. |
 | 20261108-MEM-02 | [Fresh-install recipe-bound planning](../archive/runs/2026-11-08-fresh-guided-memory.md), independent of an installed copy | Corrected empty-registry planning; 73 focused tests and full converter suite (6,791 passed, 96 skipped) cover hardware/resource boundaries and source/artifact drift. No model run. | Adopted on PR #104; signed build installed and opened without loading a model. |
 
+## 2026-11-09 request resource ceilings and installation
+
+| ID | Scope and attempt | Recorded outcome | Disposition |
+| --- | --- | --- | --- |
+| 20261109-ADM-01 | [Initial Playground correction](2026-11-09-resource-admission.md): remove fixed content/generation fractions and correct Lily resident accounting | Model-free checks and short Qwen native controls passed; original private request was not replayed. | Adopted at `b9e904fe`; installation was pending. |
+| 20261109-ADM-02 | [Follow-up ceiling audit](2026-11-09-resource-admission.md): Decision fraction, stale Auto allowance and progress cutoff | Native boundary, Auto growth and late-progress controls passed. Python startup failures reproduced by the fixture's two-second deadline; six normal isolated repeats passed. | Adopted at `de60be71`; included in installed build. |
+| 20261109-ADM-03 | [Signed installation and actual Flash Next control](2026-11-09-resource-admission.md) | Two short Auto requests admitted the declared 262,144 context; bounded follow-up passed on the same worker. No swap growth/guard trigger; all 459 installed overlay hashes matched. Full-window execution untested. | Signed development build installed and opened; Ready observed. |
+| 20261109-ADM-04 | [Non-Lily resident-memory accounting](2026-11-09-non-lily-admission.md): generic/dense-MTP/vision decoder and GLM/Qwen/Flint state ownership | Final-source review, full Metal suite and bounded Qwen/toy controls passed; full hybrid/vision artifacts unqualified. | Adopted on branch at `08fb0075`; PR authorized; no new installation. |
+
 ## Public record boundary
 
 Publish aggregate results and hashes only. Keep prompts, completions, token vectors, probabilities, credentials, exception dumps, model files and private evaluation/runtime artifacts out of the ledger. An evidence link can point to an ignored private receipt by a stable identifier/hash without publishing its contents. Preserve upstream licenses and distinguish unmodified source revisions from local patches.

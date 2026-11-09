@@ -66,14 +66,14 @@ The evaluator limits template source to 256 KiB, source tokens to 16,384,
 VM fuel to 1,000,000 and runtime recursion to 128. Input collections, value
 depth and node counts are also bounded. Request and output sizes use the
 [automatic shared resource budget](WORKER_PROTOCOLS.md#resource-budget), selected
-from available RAM at startup with a 16–64 MiB logical content envelope. With
+from available RAM at startup with a 16 MiB floor and no fixed content ceiling. With
 logical budget `B`, the encoded request is limited to `6B + 2 MiB`, and rendered
-output to `B`: automatically 98–386 MiB and 16–64 MiB respectively. Hosts pin
+output to `B`. Hosts pin
 the selected budget for child helpers; `STARK_REQUEST_BUDGET_MIB` is a
 developer/operator override, with no app setting required.
 
 A process-wide allocator bounds live requests at `128 MiB + 8B` and cumulative
-requests at `32 MiB + 32B`: automatically 256–640 MiB and 544–2,080 MiB.
+requests at `32 MiB + 32B`.
 Accounting includes
 JSON parsing, compilation, intermediate values, captures, slices and output.
 Reallocation charges the full replacement size. This counts actual Rust
@@ -387,6 +387,9 @@ With `stream: true`, the worker writes progress and delta lines while generating
 ```
 
 Consume every progress event, delta and the terminal reply before sending another request. Progress events contain counts and timings only. With prefix reuse enabled, every progress event also carries the request's `reused_input_tokens`. `output_token_budget` is the smaller of the requested output limit and the remaining context capacity. `sampled_tokens` includes sampled EOS and stop tokens, even when they produce no text delta. `prefill_seconds` becomes available at the first sampled token; `elapsed_seconds` starts before native generation setup, after prompt preparation. Progress is provisional until the terminal reply succeeds. Nonstreaming replies are unchanged.
+
+Progress frames are written as they arrive through the same bounded pipe. There
+is no cumulative progress-byte cutoff that can stop later count/timing updates.
 
 The concatenated deltas equal the terminal `text`. Incremental decoding buffers incomplete multi-byte characters, so a delta never splits a character; a final delta may be emitted after native cleanup to flush such a buffer. Streaming timings include decoding and output back-pressure.
 
