@@ -16,10 +16,10 @@ text state. Completion is per artifact, configuration and backend.
 
 | Family | Completed resumed gates | Open gate / next action |
 | --- | --- | --- |
-| Qwen BF16 0.8B | Corrected MTP0 dispatch; 34/34 image-loaded and 28/28 text-only lifecycle checks; headed/headless and text-only/image-loaded MTP0/3 short timing passes | First drift localized to head FC fusion with exact input norms. A test-only alternate fusion experiment is compiling; unchanged numerical gates remain open |
+| Qwen BF16 0.8B | Corrected MTP0 dispatch; expanded 48/48 image-loaded and 26/26 text-only lifecycle checks, plus prior matrices; headed/headless and loading-mode MTP0/3 short timing passes | Reference FC eliminates fusion drift, but full hidden-feature gates still fail. A guarded test-only all-head-linear experiment is compiling; no production head precision change |
 | Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Corrected full MoE lifecycle matrix was stopped by a foreign worker before case zero; repeat in an exclusive slot |
-| Gemma | E2B G4AP-02 unchanged short oracle passes exactly; G4AP-03 compiles and six tiny CPU/Metal committed-row controls pass | Long gate failed; valid trace localizes first drift to one layer-one MLP element, with preceding attention exact. Split MLP primitives before changing arithmetic; worker/cache/performance still open |
-| GLM | Fresh worker/helper and native engine builds pass at `b76f560d`; arithmetic and live supervisor cleanup controls pass | Functional10 hit a hard compressor-growth limit before text completion. Full-model runs held; investigate physical mapping lifecycle with a tiny nonmodel control |
+| Gemma | E2B short oracle passes; G4AP-04 source GELU fixes isolated activation/product/output differences, while ordinary target remains unchanged | Full long gate still fails; next divergence is one fused-up projection element. Test-only reference projection comparison prepared; worker/cache/performance still open |
+| GLM | `b76f560d` builds and accounting controls pass; tiny 64-MiB mapping control passes sixty blits and owner cleanup without pressure | Full functional run hit a hard compression limit. Tiny control did not reproduce it; full-model image/cache/MTP/performance remain held pending a defensible physical plan |
 
 The installed app was closed without implicitly reopening it. The coordinator
 verified no competing model/compiler/app processes, 95% free memory and zero
@@ -35,6 +35,12 @@ coordinator explicitly handed the GPU/native-test window back for the separate
 chat's pending validation batch; Qwen may compile its next diagnostic, while
 all agents hold model/Metal runs until the next explicit handoff. No PR is
 authorized here.
+
+The separate chat subsequently completed its validation batch and began PR
+preparation. The coordinator explicitly reserved the GPU/native-test window
+again. Qwen's causal diagnostics, Gemma's further trace and GLM's tiny control
+completed; Gemma's GELU fix was tested and the next Qwen linear experiment is
+building. The reservation remains explicit, with other native tests held.
 
 ## Ownership and source checkpoints
 
@@ -495,3 +501,71 @@ pages, approximately 3.19 GB retained). The prior pressure remains recorded.
 Qwen was granted only a CPU diagnostic build while the resource-budget chat
 received the GPU/native-test window back; no model may start merely because a
 momentary process screen is clear.
+
+### Further Qwen cache and numerical evidence
+
+The expanded production-worker matrix passed 48/48 image-loaded and 26/26
+text-only cases on `1e592b48`, with zero paging/foreign workers. It adds shrinking,
+growing and divergent requests, final-position 1024/1025/1026 guards and primed
+failed/cancelled/real-image recovery in MTP0/3. Receipts:
+`aeb8a3034c56bc34ffdcf172be105906e9f8951d87fd50100c2e5fdd06c72012`
+and `cadb6fe0a8f910c5ab674f9cce943644431bb092d1efd38ecdc7c969dc24225f`.
+Prior matrices and timing evidence remain separate source-bound records.
+
+The test-only reference-FC candidate eliminates FC error exactly against MLX,
+but full hidden-feature limits still fail (maxima 0.25/0.1875/0.1875). Local norms
+and residual addition are exact; attention and MLP retain drift. No production
+head precision policy was adopted. Aggregate:
+`a623312e224ff374b7ee7a43e3f551d27da654e5865f69765a4369671dad8ba3`.
+An all-head-linear test-only experiment preserves the incoming Legacy/nonlinear
+policy, rejects incompatible/conflicting selectors, and declares its scratch
+overhead before execution.
+
+Corrected MoE attempt03 stopped on one global pageout (16 KiB), with zero swap
+or foreign workers, before case zero completed. Peak RSS was 31,748,620,288 and
+minimum available bytes 74,006,904,832; neither hard memory limit was hit.
+Receipt `adceb2e976070e6abb9417542888a22a606acc0c15d06c6a28abab247fbc688d`.
+A separately registered functional-cache monitor is under review: keep all hard
+limits and zero swap, add compressor monitoring, record global pageouts without
+performance eligibility. No old stopped case is promoted by a new policy.
+
+### Gemma source GELU isolation and remaining projection drift
+
+The finer trace localized first drift to legacy GELU (18/2048 layer-zero values,
+max error 0.0000153). An existing source-matching VisionGelu kernel gives exact
+activation, BF16 product and down output on matched native inputs across all
+four layers and three steps. Trace receipt:
+`f8ec889d92658ef93b84d58514e911d6354ffedd909da24e5039378f8e222794`.
+
+The independently reviewed assistant-only change was built and tested under the
+unchanged long gate. It fixes those isolated operations, but the full aggregate
+still fails and later batch/cache controls did not execute. Follow-up trace now
+localizes first drift to layer-one fused-up projection: one of 4096 elements,
+maximum 0.0000305176. Corrected layer-zero operations match exactly.
+Full-gate receipt `507d55792f6291ccffb28b0b35165f35580a3d6cb42af28fbd8b1f60f03c1df8`;
+trace `39177cfb4fe99019d6cd060ea83b53606355eef8af142b06d935d64aa07128ea`.
+Checkpoint `772993fe` preserves the partial fix and failed full gate. Next compare
+the existing reference matmul on native up/down inputs in a test-only experiment.
+Ordinary target kernels, the >512 draft guard and serving capability stay unchanged.
+
+### GLM tiny mapping result and performance constraint
+
+The reviewed 64-MiB synthetic fixture uses distinct absolute-position records
+and rejects a wrong-offset CPU read before sixty GPU blits. All copies match;
+45 no-copy deallocators run, no unmaps fail, the fixture is removed, and the
+owned child/timer/supervisor drain. Peak wired growth is 368,001,024 bytes, with
+zero compression/pageout/swap growth. Receipt:
+`9c9daec77cbc6ef58845fd54ca1ea1c590b5fc1550222f6a72d2fbc2604c9994`.
+
+Metal wrapper allocations return to baseline after pool drain, while native task
+footprint remains around 135–144 MB after the first completed blit. Full-file
+mincore counts the warm 64-MiB backing; dedicated-range mincore counts its own
+4,210,688-byte span. These are different measurements, not additive unique
+committed allocations. No compression problem is reproduced and no cause or
+mapping-policy fix is established. Full-model runs remain held.
+
+A private descriptor-bound owned-upload CPU primitive passes four small tests,
+but is not integrated into a backend. Whole-bank uncached uploads would read
+99,033,808,896 bytes per target token; that route is reference-only and cannot
+be promoted as recovery of normal text performance. Further full-model execution
+requires a viable ownership/residency plan and appropriate performance evidence.
