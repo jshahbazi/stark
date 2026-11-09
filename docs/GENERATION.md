@@ -434,6 +434,13 @@ Exactness, native hybrid snapshots:
 
 Restored execution must produce greedy and seeded outputs identical to a fresh-state run. The [validation record](archive/runs/2026-11-01-generation-prefix-reuse.md) checks this on the pinned Qwen3-4B artifact, and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) on the native Lily-format Qwen3.8 checkpoint. The [GLM and external mixed-affine record](archive/runs/2026-11-03-glm-qwen-prefix-reuse.md) records the artifact-specific scope for those paths.
 
+The [vision text-prefix record](archive/runs/2026-11-08-vision-text-prefix-reuse.md)
+qualifies the official Qwen3.5-0.8B BF16 schema-2 vision artifact at context 8,192,
+including seeded text outputs and completed-image invalidation. Other vision
+artifacts do not inherit its numerical qualification. The
+[paired timing](benchmarks/2026-11-08-qwen35-vision-text-prefix.md) reports the
+cache-cold cost and bounded follow-up latency observations separately.
+
 Lifetime:
 
 - There is one entry. It is published only after the terminal reply has been written and flushed.

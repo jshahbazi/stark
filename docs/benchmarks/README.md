@@ -12,6 +12,13 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Qwen vision artifact text prefix reuse (2026-11-08).** On the official
+Qwen3.5-0.8B BF16 artifact, 32 exactness cases pass and cached follow-ups reuse
+1,024 tokens. Four observations per timing arm show follow-up first-token
+medians of 0.93–1.20 seconds against 2.25–2.54 seconds fresh. Cache-cold medians
+are 2.11 and 2.10 seconds. This is a bounded synthetic observation without
+thermal/background-load screening. See the [paired timing and limits](2026-11-08-qwen35-vision-text-prefix.md).
+
 **Cross-backend idle wake follow-up (2026-11-08).** Extends queue maintenance
 to official mixed-affine Flash-Next generation, native Flash-Next scoring and
 converted text generation on Metal4. The
