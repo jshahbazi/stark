@@ -12,10 +12,10 @@ use thiserror::Error;
 use crate::{
     backends::common::{
         Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding,
-        kernel::{Kernels, MaterializedBF16AddScaleKernel},
+        gpu_types::ActivationType,
+        kernel::{GatedActMul, GatedActMulSettings, Kernels, MaterializedBF16AddScaleKernel, VisionGeluBF16Kernel},
     },
     config::{
-        mlp::AnyMLPConfig,
         normalization::NormalizationConfig,
         rope::AnyRoPEConfig,
         token_mixer::attention::AttentionConfig,
@@ -23,7 +23,7 @@ use crate::{
     },
     data_type::DataType,
     encodable_block::{
-        linear::{Linear, LinearBlockError},
+        linear::{Linear, LinearBlockError, LinearInput},
         mixer::attention::{
             Attention, AttentionNewError, CommittedAttentionKV, reference::ReferenceBF16Attention,
             rope::PrecalculatedRoPE,
@@ -38,6 +38,90 @@ const DIM: u32 = 256;
 const VOCAB: u32 = 262144;
 const CENTROIDS: u32 = 2048;
 const TOP_K: usize = 32;
+
+/// Pinned Torch GELU and an explicit BF16 product are confined to the assistant.
+/// Its matrices retain the existing legacy full-BF16 linear implementation.
+struct AssistantSourceGeluMlp<B: Backend> {
+    up: Box<dyn Linear<B>>,
+    down: Box<dyn Linear<B>>,
+    gelu: <B::Kernels as Kernels>::VisionGeluBF16Kernel,
+    multiply: GatedActMul<B>,
+}
+
+impl<B: Backend> AssistantSourceGeluMlp<B> {
+    fn project_and_gate(
+        &self,
+        input: B::ScratchBuffer,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(B::ScratchBuffer, B::ScratchBuffer, B::ScratchBuffer), B::Error> {
+        if rows != 1 {
+            return Err(crate::backends::common::InvalidInput("assistant MLP requires one query").into());
+        }
+        let fused = self.up.encode(input, rows, commands)?;
+        let bytes = 2048 * size_of::<bf16>();
+        if fused.size() != bytes * 2 {
+            return Err(crate::backends::common::InvalidInput("invalid assistant fused MLP shape").into());
+        }
+        let mut activated = commands.allocate_scratch(bytes)?;
+        commands.encode_copy((&fused).subrange(bytes..bytes * 2), &mut activated);
+        self.gelu.encode(&mut activated, 2048, 1, commands);
+        let mut product = commands.allocate_scratch(bytes)?;
+        self.multiply.encode_fp(
+            &activated,
+            Some(&fused),
+            &mut product,
+            None::<&B::ScratchBuffer>,
+            2048,
+            1,
+            0,
+            4096,
+            ActivationType::IDENTITY,
+            commands,
+        );
+        Ok((fused, activated, product))
+    }
+}
+
+impl<B: Backend> Mlp<B> for AssistantSourceGeluMlp<B> {
+    fn encode(
+        &self,
+        input: B::ScratchBuffer,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        let (_fused, _activated, product) = self.project_and_gate(input, rows, commands)?;
+        self.down.encode_input(LinearInput::FullPrecision(product), rows, commands)
+    }
+
+    #[cfg(test)]
+    fn trace_dense(
+        &self,
+        input: B::ScratchBuffer,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<Vec<(String, B::ScratchBuffer)>>, B::Error> {
+        let (fused, activated, product) = self.project_and_gate(input, rows, commands)?;
+        let mut act_copy = commands.allocate_scratch(activated.size())?;
+        let mut product_copy = commands.allocate_scratch(product.size())?;
+        let mut product_candidate = commands.allocate_scratch(product.size())?;
+        commands.encode_copy(&activated, &mut act_copy);
+        commands.encode_copy(&product, &mut product_copy);
+        commands.encode_copy(&product, &mut product_candidate);
+        let down = self.down.encode_input(LinearInput::FullPrecision(product), rows, commands)?;
+        let mut down_copy = commands.allocate_scratch(down.size())?;
+        commands.encode_copy(&down, &mut down_copy);
+        Ok(Some(vec![
+            ("mlp.fused_up".into(), fused),
+            ("mlp.activation".into(), activated),
+            ("mlp.product".into(), product_copy),
+            ("mlp.down".into(), down),
+            ("mlp.reference_activation_candidate".into(), act_copy),
+            ("mlp.reference_product_candidate".into(), product_candidate),
+            ("mlp.reference_down_candidate".into(), down_copy),
+        ]))
+    }
+}
 
 #[derive(Clone, Copy)]
 pub enum Gemma4AssistantProfile {
@@ -112,6 +196,10 @@ pub struct Gemma4AssistantStep<B: Backend> {
 }
 
 impl<B: Backend> Gemma4Assistant<B> {
+    pub fn numerical_policy(&self) -> &'static str {
+        "gemma4-assistant-eager-bf16-source-gelu-v1"
+    }
+
     pub fn backbone_dim(&self) -> u32 {
         self.profile.backbone_dim()
     }
@@ -167,10 +255,6 @@ impl<B: Backend> Gemma4Assistant<B> {
             full_matrix(name)?;
             Ok(<dyn Linear<B>>::new(input, [output], false, context, DataType::BF16, &tree.subtree(name))?)
         };
-        let mlp_config: AnyMLPConfig = serde_json::from_value(serde_json::json!({
-            "type":"DenseMLPConfig","linear_config":{},"activation":{"type":"GELU","approximate":true},
-            "has_up_biases":false,"has_down_biases":false,"gate_clipping":null,"up_clipping":null
-        }))?;
         let mut layers = Vec::new();
         for index in 0..4 {
             let base = format!("layers.{index}");
@@ -215,17 +299,39 @@ impl<B: Backend> Gemma4Assistant<B> {
             if factors.is_some() {
                 return Err(Gemma4AssistantError::Invalid);
             }
-            let (mlp, factors) = <dyn Mlp<B>>::new(
-                &mlp_config,
+            let (up, up_factors) = <dyn Linear<B>>::new_with_input_rht(
                 DIM,
-                2048,
+                [2048, 2048],
+                false,
                 context,
-                &tree.subtree(&base).subtree("mlp"),
                 DataType::BF16,
+                &tree.subtree(&base).subtree("mlp").subtree("up_projection"),
             )?;
-            if factors.is_some() {
+            let (down, down_preparation) = <dyn Linear<B>>::new_for_fused_input(
+                2048,
+                [DIM],
+                false,
+                context,
+                DataType::BF16,
+                &tree.subtree(&base).subtree("mlp").subtree("down_projection"),
+            )?;
+            if up_factors.is_some() || down_preparation.is_some() {
                 return Err(Gemma4AssistantError::Invalid);
             }
+            let mlp: Box<dyn Mlp<B>> = Box::new(AssistantSourceGeluMlp {
+                up,
+                down,
+                gelu: <B::Kernels as Kernels>::VisionGeluBF16Kernel::new(context)
+                    .map_err(Gemma4AssistantError::Backend)?,
+                multiply: GatedActMul::<B>::full_precision(
+                    context,
+                    DataType::BF16,
+                    false,
+                    false,
+                    GatedActMulSettings::default(),
+                )
+                .map_err(Gemma4AssistantError::Backend)?,
+            });
             let scalar =
                 tree.subtree(&base).leaf("post_layer_scalar")?.validate(&[1], DataType::BF16)?.read_slice::<bf16>()?[0]
                     .to_f32();

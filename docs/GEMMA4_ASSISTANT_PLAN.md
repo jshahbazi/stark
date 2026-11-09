@@ -116,3 +116,12 @@ relaxing its limits, so actual batch/cache and later long-input controls have
 not executed. The public 512-position draft guard remains in force while the
 first divergent intermediate is diagnosed. These additions grant no serving
 capability or performance qualification.
+
+The assistant-only source GELU and separate BF16 product are now implemented
+and independently reviewed. The same unchanged long gate still fails at its
+first 512-token case, so later lengths and all actual batch/cache controls
+remain unexecuted. A matching bounded trace confirms layer-0 activation and
+MLP output are exact and moves the first difference to one BF16 value in the
+layer-1 fused up projection. The next test-only candidate isolates reference
+BF16 MLP linears; ordinary target and other assistant linears keep their
+current policy pending actual comparison. Serving remains disabled.

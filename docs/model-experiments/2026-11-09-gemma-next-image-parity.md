@@ -536,3 +536,94 @@ All additions are test-only, and production arithmetic remains unchanged.
 The previous `b636b695` executable is preserved as an independently hashed APFS
 clone before reusing this same checkout's distinct diagnostic target for the
 next build. Every new candidate still needs its own source/binary/tool seals.
+
+The finer test-only source `4e316404` compiles in 1 minute 52 seconds with the
+same pinned locked nightly release settings. New executable SHA-256
+`ec3a8e6bde5dfd6789dd1c8f3fc7025e67b9a9c7502065973b6f0e760515efb2`;
+source graph digest
+`36af1ba38163ba7429a1a32cc7af5366c1359a8c01c501fade6c32262c88a40d`;
+source/binary seal
+`04d564a5dfdb1225e7ff70bb47082d4d3d439e16e8f08ea8691b814f7568263b`.
+Its separately versioned MLP oracle is
+`25c1b5a3b1d1a08784e0e3ed88d001db288dfb93f777adf4c1c242ad6f194cad`,
+including reference stable-sort versus Torch tie-support counts. Execution
+remains held while the external resource-budget native-test reservation owns
+the GPU window. No head arithmetic has changed.
+
+### Finer primitive execution: source GELU candidate is exact
+
+The single guarded 512-token three-step MLP diagnostic completes on source
+`4e316404`, with ordinary/instrumented outputs and duplicated MLP outputs
+identical. The finer first difference is legacy GELU in layer 0: 18 of 2,048
+activation values differ, maximum absolute 0.0000153. Actual BF16 products
+match the product of native activation/up values. Sparse fused-projection and
+down-projection differences also exist and remain separately visible.
+
+The existing pinned-source `VisionGeluBF16` candidate matches source activation,
+BF16 product and down output exactly when given the same native inputs, across
+all four layers and all three steps. This is causal primitive evidence for an
+assistant-only activation change; it is not a rerun of the complete corrected
+head or a closed numerical gate. Neither native nor reference stable-sort
+selection differs from Torch top-k on its own centroid scores in these cases.
+The old masked-logit/feedback failures remain unchanged.
+
+The continuous guard reports no foreign worker or paging growth and observed
+peak RSS 10,920,427,520 bytes. All owned processes close before the explicit
+GLM tiny-control handoff. Aggregate/tool identities are recorded separately
+below, and the old `ec3a8e6b` binary is retained as an immutable APFS clone:
+aggregate `f8ec889d92658ef93b84d58514e911d6354ffedd909da24e5039378f8e222794`;
+guard `d1c9695fe4fb387c37e5a8598d3cd17890db4fd7c19f907fe40588818598b902`;
+execution seal
+`c06c67fc82ce5bd232001f225498001cb88b9b3814dc4dc6c13400fa8d1ce4f4`.
+
+## 20261109-G4AP-04: assistant-only source GELU
+
+Registered before implementation/execution. Replace only the assistant's GELU
+with the already source-matched `VisionGeluBF16` kernel and an explicit separate
+BF16 product before its existing down projection. Keep all ordinary target
+activation/attention paths and assistant legacy linear arithmetic unchanged.
+Do not remove the public position guard or enable worker serving before the
+same unchanged long/chained oracle and transactional/cache controls pass.
+Bind the unchanged exact E2B artifacts to a new source/binary/policy seal.
+
+The assistant now uses `gemma4-assistant-eager-bf16-source-gelu-v1`:
+source GELU and a separately rounded BF16 product, with existing legacy
+up/down linears. Independent review of immutable patch
+`813a0b7e72e64c36fa4f21522b973a6b8e2a9de389937043cfd29e743ff9caf1`
+finds no confirmed blocker; the extra 4 KiB live activation per one-row MLP
+must be included in future serving admission. The locked j2 release test
+build passes in 1 minute 40 seconds. Source graph
+`af1d7656037926210b3d55cb3416ace7616d4fd287f1c6525b9c4b34a0eacc8b`,
+executable `60de2cf152d89a31060cdf26d83ec5b9960decef7cb7e2ea62934364472dbed1`,
+and source/binary seal
+`64022cd3609f8009253c3813bc4029893085c91233a157dc966e626db6143db9`
+identify this candidate separately from the previous diagnostic binaries.
+
+The unchanged long oracle still fails its first 512-token case: first-step
+masked logits have maximum absolute error 55.125 with one exchanged centroid
+cluster (256-token support difference), and third-step feedback has maximum
+absolute error 0.625. All three greedy proposals and root embeddings match.
+The remaining long contexts and **all transactional batch/rollback/cache
+controls are not executed**, because the numerical gate aborts first.
+No tolerance, ordinary-target arithmetic, public position guard or serving
+setting changes. The failed aggregate receipt is
+`507d55792f6291ccffb28b0b35165f35580a3d6cb42af28fbd8b1f60f03c1df8`;
+continuous-guard receipt
+`8fa59af7425c79bfa82af6ce881cbdfdd22f37c4f1f670dc6fc14b70d462c6ef`.
+
+One bounded follow-up uses the existing finer trace oracle unchanged. Its
+instrumented and ordinary outputs remain identical, and the corrected
+layer-0 activation/product/output are now exact. The first common-input
+operator difference is layer 1 fused MLP up projection: one of 4,096 BF16
+values differs by 0.000030517578125, which propagates through the product
+and down projection. This moves the next causal investigation to legacy
+linear accumulation; it does not close the full numerical gate. Diagnostic
+receipt `39177cfb4fe99019d6cd060ea83b53606355eef8af142b06d935d64aa07128ea`,
+guard `750cbe55b963e71fe3b10396674197b865a0b0742401a226c93e07688f0d1995`,
+and execution seal
+`10758dec148ca73fdc5bc7ac4e1d787019af5888adb0da9e4e2eb4e431ecd104`
+preserve both outcomes. Both runs have zero paging growth and no foreign
+worker; peak observed RSS is 10,744,102,912 and 10,913,726,464 bytes.
+All owned workers, reference children and compilers close before the explicit
+slot release. The next source-only step isolates the remaining linear
+rounding using the same native inputs before any further math change.
