@@ -16,10 +16,10 @@ text state. Completion is per artifact, configuration and backend.
 
 | Family | Completed resumed gates | Open gate / next action |
 | --- | --- | --- |
-| Qwen BF16 0.8B | Corrected MTP0 dispatch; 34/34 image-loaded and 28/28 text-only lifecycle checks; headed/headless and text-only/image-loaded MTP0/3 short timing passes | Independent head hidden-feature numerical tolerance failed; trace the first divergence before any precision edit |
+| Qwen BF16 0.8B | Corrected MTP0 dispatch; 34/34 image-loaded and 28/28 text-only lifecycle checks; headed/headless and text-only/image-loaded MTP0/3 short timing passes | First drift localized to head FC fusion with exact input norms. A test-only alternate fusion experiment is compiling; unchanged numerical gates remain open |
 | Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved | Corrected full MoE lifecycle matrix was stopped by a foreign worker before case zero; repeat in an exclusive slot |
-| Gemma | E2B G4AP-02 unchanged short oracle passes exactly; G4AP-03 compiles and six tiny CPU/Metal committed-row controls pass | Long chained oracle failed at the first 512-token case; batch/cache controls did not execute. Diagnose attention/readout before worker integration |
-| GLM | Fresh worker/helper and native engine builds pass at `b76f560d`; arithmetic and live supervisor cleanup controls pass | Both short attempts stopped on global pageouts before text completion; prepare a separately registered functional-only screen after kernel-counter review. Image/cache/performance/MTP remain open |
+| Gemma | E2B G4AP-02 unchanged short oracle passes exactly; G4AP-03 compiles and six tiny CPU/Metal committed-row controls pass | Long gate failed; valid trace localizes first drift to one layer-one MLP element, with preceding attention exact. Split MLP primitives before changing arithmetic; worker/cache/performance still open |
+| GLM | Fresh worker/helper and native engine builds pass at `b76f560d`; arithmetic and live supervisor cleanup controls pass | Functional10 hit a hard compressor-growth limit before text completion. Full-model runs held; investigate physical mapping lifecycle with a tiny nonmodel control |
 
 The installed app was closed without implicitly reopening it. The coordinator
 verified no competing model/compiler/app processes, 95% free memory and zero
@@ -30,9 +30,11 @@ and GLM prepares a separately registered functional-only supervisor in source.
 Repeated external Metal tests from `stark-playground-resource-budget` are caught
 by the preflight. The user authorized cross-chat coordination, and that chat
 confirmed its current GPU run finished and it is holding new GPU/model runs.
-The exclusive queue is Qwen diagnostics/MoE cache, Gemma's bounded trace, then
-GLM's functional-only short control. The coordinator must explicitly hand the
-GPU back afterward. No PR is authorized here.
+That queue completed its initial attempts and reached a safe boundary. The
+coordinator explicitly handed the GPU/native-test window back for the separate
+chat's pending validation batch; Qwen may compile its next diagnostic, while
+all agents hold model/Metal runs until the next explicit handoff. No PR is
+authorized here.
 
 ## Ownership and source checkpoints
 
@@ -448,3 +450,48 @@ tests, model loads and app reloads. Its compact status acknowledged that its
 GPU run finished and it is continuing CPU checks/review. No external process
 was killed. This resolves the immediate interference; future starts still
 require fresh preflight and an explicit GPU handback at the queue boundary.
+
+### Primitive-level traces and actual GLM hard stop
+
+Qwen's valid trace is bit-exact with its normal head path. Embeddings and both
+input norms match the pinned reference exactly; first drift is FC fusion maximum
+absolute error 0.001953125, relative RMS 0.00251255. A separately registered,
+test-only alternate reference-FC experiment will measure causality before any
+production arithmetic change. Registration SHA-256:
+`2b29193fbe16524aef64ac060bd24b68eafe78c764fb5f64e70d5b81febb09d9`.
+Its source review found no confirmed blocker; the selected diagnostic adds a
+bounded four-MiB raw-weight loading overlap. This carries no performance claim.
+
+Gemma's merged-source trace also matches ordinary head execution exactly across
+three steps. The first difference is layer-one MLP: one of 256 output elements,
+maximum error 0.015625, relative L2 0.000374. Preceding projections, norms,
+Q/K, softmax and attention-value products match exactly. The small MLP difference
+propagates through chained feedback and changes one centroid cluster, accounting
+for 256 support differences; the tie-policy comparison itself matches. On common
+selected support, logit maximum error is 0.5 and relative L2 0.00371. This explains
+the discontinuous masked-logit error; it does not retroactively pass the failed
+strict gate. Next isolate up/gate projection, GELU, product and down projection.
+Trace receipt `3cc8f86b810c1236edc2e2e67e69b29479e6646853bf8e4bec198caad3a78704`;
+execution seal `bfb1b82679ea03541646092ff286cbe314746294ca42897d004cbc3522eb529f`.
+
+GLM's single approved functional10 run then hit the hard compressor-growth
+ceiling during the first text-only request, before any completion or image stage.
+The exact breach sample had 62,759,632,896 available bytes, compressor growth
+1,399,554,048 bytes, zero swap, worker RSS 762,822,656 and footprint 748,508,824.
+During cancellation/draining, compressor growth peaked at 13,427,277,824 bytes
+and available memory fell to 57,463,390,208. The owned worker was terminated and
+reaped, the supervisor joined, and no kill escalation was required.
+Receipt `d4b5fbd295d346ae6c37833345da4e97f70f43b5d54983e9e823cacc33188a35`.
+
+This actual pressure invalidates treating the active-view inventory as a complete
+physical ceiling. No text/image/cache/MTP/performance pass exists. Full-model
+execution stays held without weaker hard limits. Investigate full-file versus
+range mapping and no-copy versus bounded-copy physical lifetimes with a tiny,
+separately registered nonmodel fixture before any full-model retry.
+
+An independent ten-second post-exit screen found 105.23–109.40 GB available,
+zero swap, stable pageouts at 5,964 and no compressor growth (194,666→194,662
+pages, approximately 3.19 GB retained). The prior pressure remains recorded.
+Qwen was granted only a CPU diagnostic build while the resource-budget chat
+received the GPU/native-test window back; no model may start merely because a
+momentary process screen is clear.
