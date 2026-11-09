@@ -131,18 +131,52 @@ fn continuation<B: Backend>(
     (output, logits)
 }
 
-fn text_snapshot_matches_fresh<B: Backend>(hybrid: bool) {
+fn text_snapshot_matches_fresh<B: Backend>(
+    hybrid: bool,
+    ring: bool,
+) {
     let fixture = if hybrid {
         hybrid_fixture()
     } else {
-        TinyModel::new(128)
+        TinyModel::with_rope_mix(128, ring)
     };
+    if ring {
+        let path = fixture.directory.join("config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let layers = config["decoder_config"]["transformer_config"]["layer_configs"].as_array_mut().unwrap();
+        for layer in layers.iter_mut() {
+            layer["mixer_config"]["sliding_window_size"] = json!(256);
+        }
+        layers[1]["kv_source_layer_index"] = json!(0);
+        layers[1]["mixer_config"]["is_kv_sharing"] = json!(true);
+        layers[1]["rope_config"] = layers[0]["rope_config"].clone();
+        fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+        // A shared-KV consumer projects only Q. Retain the original synthetic
+        // Q rows and every other payload byte; the custom loader admits holes.
+        let path = fixture.directory.join("model.safetensors");
+        let mut weights = fs::read(&path).unwrap();
+        let header_len = u64::from_le_bytes(weights[..8].try_into().unwrap()) as usize;
+        let mut header: Value = serde_json::from_slice(&weights[8..8 + header_len]).unwrap();
+        let q = &mut header["decoder.transformer.layers.1.mixer.qkvg_projection.weights.weights"];
+        let begin = q["data_offsets"][0].as_u64().unwrap();
+        q["shape"] = json!([128, 128]);
+        q["data_offsets"][1] = json!(begin + 128 * 128 * 2);
+        let replacement = serde_json::to_vec(&header).unwrap();
+        assert!(replacement.len() <= header_len);
+        weights[8..8 + header_len].fill(b' ');
+        weights[8..8 + replacement.len()].copy_from_slice(&replacement);
+        fs::write(path, weights).unwrap();
+    }
     let engine = Engine::<B>::new().unwrap();
     let model = engine.load_language_model(&fixture.directory).unwrap();
-    // Spatial rotary capability blocks simple rewind, but its ordinary text
-    // state uses full attention caches with snapshot-compatible positions.
+    // Spatial rotary capability and rings block simple rewind. A snapshot
+    // restores overwritten ring payload as well as ordinary text positions.
     assert!(!model.prefix_reuse_supported());
     assert!(model.text_prefix_snapshot_supported());
+    if ring {
+        assert_eq!(model.context_memory_estimate(CAPACITY, 1280).unwrap().prefix_snapshot_bytes, 256 * 128 * 2 * 2);
+    }
     let original = prompt(1280);
     let mut follow_up = prompt(1400);
     for (index, token) in follow_up[1024..].iter_mut().enumerate() {
@@ -240,23 +274,24 @@ fn text_snapshot_guards<B: Backend>() {
     assert!(model.prepare_text_prefix_capture(&mut image_state, 1024).is_err());
     assert!(model.restore_text_prefix(&mut image_state, 1024, Some(CAPACITY), 0).is_err());
 
-    // Ring caches overwrite old rows; their immutable decoder layout must
-    // prevent admission rather than relying on a later snapshot failure.
+    // Ring caches overwrite old rows; they need owned snapshots rather than
+    // admitting the cheaper scalar-only rewind operation.
     let config_path = fixture.directory.join("config.json");
     let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     config["decoder_config"]["transformer_config"]["layer_configs"][0]["mixer_config"]["sliding_window_size"] =
         json!(128);
     fs::write(config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     let ring = engine.load_language_model(&fixture.directory).unwrap();
-    assert!(!ring.text_prefix_snapshot_supported());
+    assert!(ring.text_prefix_snapshot_supported());
+    assert!(!ring.prefix_reuse_supported());
     let mut ring_state = ring.create_empty_state(Some(CAPACITY), 0).unwrap();
-    assert!(ring.prepare_text_prefix_capture(&mut ring_state, 1024).is_err());
+    assert!(ring.prepare_text_prefix_capture(&mut ring_state, 1024).is_ok());
 }
 
 #[cfg(backend = "cpu")]
 #[stark_test]
 fn spatial_decoder_text_prefix_matches_fresh_cpu() {
-    text_snapshot_matches_fresh::<crate::backends::cpu::Cpu>(false);
+    text_snapshot_matches_fresh::<crate::backends::cpu::Cpu>(false, false);
 }
 
 #[cfg(backend = "cpu")]
@@ -268,7 +303,7 @@ fn spatial_decoder_text_prefix_guards_cpu() {
 #[cfg(backend = "metal")]
 #[stark_test]
 fn spatial_decoder_text_prefix_matches_fresh_metal() {
-    text_snapshot_matches_fresh::<crate::backends::metal::Metal>(false);
+    text_snapshot_matches_fresh::<crate::backends::metal::Metal>(false, false);
 }
 
 #[cfg(backend = "metal")]
@@ -280,11 +315,23 @@ fn spatial_decoder_text_prefix_guards_metal() {
 #[cfg(backend = "cpu")]
 #[stark_test]
 fn hybrid_spatial_decoder_text_prefix_matches_fresh_cpu() {
-    text_snapshot_matches_fresh::<crate::backends::cpu::Cpu>(true);
+    text_snapshot_matches_fresh::<crate::backends::cpu::Cpu>(true, false);
 }
 
 #[cfg(backend = "metal")]
 #[stark_test]
 fn hybrid_spatial_decoder_text_prefix_matches_fresh_metal() {
-    text_snapshot_matches_fresh::<crate::backends::metal::Metal>(true);
+    text_snapshot_matches_fresh::<crate::backends::metal::Metal>(true, false);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn overwritten_ring_shared_kv_text_prefix_matches_fresh_cpu() {
+    text_snapshot_matches_fresh::<crate::backends::cpu::Cpu>(false, true);
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn overwritten_ring_shared_kv_text_prefix_matches_fresh_metal() {
+    text_snapshot_matches_fresh::<crate::backends::metal::Metal>(false, true);
 }

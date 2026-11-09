@@ -96,7 +96,25 @@ The [original validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md)
 
 ## Generation prefix reuse
 
-Image requests clear and bypass generation prefix reuse. E2B/E4B text artifacts currently disable prefix reuse because their owned sliding-attention layers use ring caches, and exact restoration of the overwritten ring rows is not implemented. Shared-KV consumers own no separate cache. Their source-specific physical ring traversal and canonical/source precision policies remain intact. A future ring snapshot implementation needs independent numerical and cached trajectory qualification before enabling this capability.
+Image requests clear and bypass generation prefix reuse. Ordinary text on the
+Gemma 4 image worker can retain the last complete non-final 1,024-token prefill
+boundary. The snapshot copies each owned sliding layer's physical K/V rows,
+offset, length and source traversal origin. Full-attention prefix rows stay in
+the retained state; shared-KV consumers use their owning layer's state once.
+PLE weights and per-token lookups do not add mutable retained state. Exact
+scope, context and loaded instance must match, and the sampler is reseeded.
+Failed restoration fences the loaded wrapper. Original text-only exports still
+use their existing eligibility rules. See the
+[implementation attempt](model-experiments/2026-11-09-gemma4-image-text-parity.md)
+for artifact-specific qualification and remaining work.
+
+Google separately releases Gemma 4 MTP assistant checkpoints for all five target
+sizes. They share target embeddings/activations and require dedicated draft
+execution; E2B/E4B additionally use clustered readout. Stark does not currently
+convert or execute these assistants. This is missing implementation, not source
+MTP N/A; no Gemma MTP capability is advertised. See Google's
+[MTP architecture](https://ai.google.dev/gemma/docs/mtp/overview) and
+[assistant usage](https://ai.google.dev/gemma/docs/mtp/mtp).
 
 ## Larger dense Gemma 4 image path
 

@@ -12,6 +12,13 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Gemma 4 default-image text controls (2026-11-09).** Retained E2B/E4B pass
+their own exact ring/shared-KV cache and lifecycle checks. A short matched
+28-input/64-output text comparison with images resident observes useful decode
+changes of -0.287%/+0.024%, within the fixed 5% bound. Cached-request timing
+needs further investigation, and separate Gemma MTP assistants remain
+unimplemented. See the [artifact identities, medians and limits](2026-11-09-gemma4-image-text-parity.md).
+
 **Qwen vision artifact text prefix reuse (2026-11-08).** On the official
 Qwen3.5-0.8B BF16 artifact, 32 exactness cases pass and cached follow-ups reuse
 1,024 tokens. Four observations per timing arm show follow-up first-token

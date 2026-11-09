@@ -55,8 +55,13 @@ publication, invalidation and artifact-specific qualification requirements.
 
 Image requests still use fresh state and clear retained text prefixes. Their
 image-dependent M-RoPE positions and multimodal state are excluded from text
-snapshot capture and restoration. Gemma 3/4 sliding KV rings remain unsupported
-for reuse because overwritten ring rows have no snapshot/restore implementation.
+snapshot capture and restoration. The Gemma 4 image worker separately restores
+owned sliding-ring K/V payload and its offset, length and traversal origin at
+the same 1,024-token text boundary. Shared-KV layers reuse their owning layer's
+snapshot. Gemma 3 worker integration remains unsupported; the shared ring
+primitive alone does not qualify its complete image worker. See the
+[Gemma 4 attempt](model-experiments/2026-11-09-gemma4-image-text-parity.md)
+for exact-artifact checks and remaining scope.
 No artifact inherits numerical qualification from another checkpoint, precision
 or conversion layout. Prefix reuse does not enable MTP; image conversion omits
 its predictor weights pending separate qualification.

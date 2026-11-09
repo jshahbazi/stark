@@ -491,6 +491,49 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
     pub fn is_fenced(&self) -> bool {
         self.failed
     }
+
+    /// Plain-text requests restore owned ring payload and shared-KV owners.
+    /// Image-prefilled and failed states remain excluded by the decoder guards.
+    pub fn prefix_reuse_supported(&self) -> bool {
+        !self.failed && self.language_model.text_prefix_snapshot_supported()
+    }
+
+    pub fn decoder_text_prefix_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        self.language_model.generation_memory_bytes_with_text_prefix(input_tokens, context_tokens, max_new_tokens)
+    }
+
+    pub fn prepare_text_prefix_capture(
+        &mut self,
+        state: &mut LanguageModelState<B>,
+        position: usize,
+    ) -> Result<(), NativeVisionError<B>> {
+        if self.failed {
+            return Err(InvalidInput("native Gemma model is fenced").into());
+        }
+        self.language_model.prepare_text_prefix_capture(state, position)?;
+        Ok(())
+    }
+
+    pub fn rewind_state(
+        &mut self,
+        state: &mut LanguageModelState<B>,
+        prefix_length: usize,
+        max_context_length: Option<u32>,
+        sampling_seed: u64,
+    ) -> Result<(), NativeVisionError<B>> {
+        if self.failed {
+            return Err(InvalidInput("native Gemma model is fenced").into());
+        }
+        super::finish_text_prefix_restore(
+            self.language_model.restore_text_prefix(state, prefix_length, max_context_length, sampling_seed),
+            &mut self.failed,
+        )
+    }
     pub fn default_stream_options(&self) -> LanguageModelStreamOptions {
         self.language_model.default_stream_options()
     }
@@ -718,7 +761,11 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
         if self.failed {
             return Err(InvalidInput("Gemma vision model is fenced").into());
         }
-        self.language_model.preflight_multimodal_stream(tokens, state, &options)?;
+        if state.tokens().is_empty() {
+            self.language_model.preflight_multimodal_stream(tokens, state, &options)?;
+        } else {
+            self.language_model.preflight_restored_text_stream(tokens, state, &options)?;
+        }
         match self.language_model.stream(tokens, state, options) {
             Ok(stream) => Ok(stream.with_failure_fence(&mut self.failed)),
             Err(error) => {

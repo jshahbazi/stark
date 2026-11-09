@@ -344,6 +344,10 @@ impl<B: Backend> Mixer<B> for Attention<B> {
         self.num_kv_heads.is_some() && self.ring_capacity.is_none()
     }
 
+    fn prefix_snapshot_supported(&self) -> bool {
+        self.num_kv_heads.is_some()
+    }
+
     fn create_empty_state(
         &self,
         max_context_length: Option<u32>,
