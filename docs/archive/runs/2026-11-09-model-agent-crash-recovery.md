@@ -16,9 +16,9 @@ text state. Completion is per artifact, configuration and backend.
 
 | Family | Completed resumed gates | Open gate / next action |
 | --- | --- | --- |
-| Qwen BF16 0.8B | Corrected MTP0 dispatch; expanded 48/48 image-loaded and 26/26 text-only lifecycle checks, plus prior matrices; headed/headless and loading-mode MTP0/3 short timing passes. Finer trace proves same-operand Q/K norm, RoPE and SDPA exact | Full hidden-feature limit still fails. Independently reviewed test-only source sigmoid/SiLU plus reference-linear candidate is committed but unbuilt; no production arithmetic change |
-| Qwen affine 0.8B / 35B MoE | Original source-bound cache/timing evidence preserved; tiny routed operator measures command-heap growth and exact row splitting/reset reuse | Actual full matrix still stopped before case zero at its 64-GiB floor. Independently reviewed Qwen-only physical-256 prefill and completion-order fixes await compilation and actual-model qualification |
-| Gemma | G4AP05 passes 15/15 assistant steps, actual 3/3 acceptance through 1792 and boundary-cache controls. Staged normal worker/helper build and 136 worker unit tests pass | New normal-worker lifecycle/performance remain pending. Review rejects the inherited fail-open monitor before execution; replace it and strengthen stop/cap proof. Original raw tied-index mismatch remains recorded; default serving MTP is still disabled |
+| Qwen BF16 0.8B | Corrected MTP0 dispatch; 48/48 image-loaded and 26/26 text-only lifecycle checks; headed/headless and loading-mode MTP0/3 short timing passes. Source sigmoid/SiLU candidate passes stages 1/2 exactly | Stage 0 hidden maximum remains 0.09375 against unchanged 0.0625 limit. Targeted test-head projection reduction fix is under review; no production arithmetic change |
+| Qwen affine 0.8B / 35B MoE | Physical-256 prefill and completion-order fixes built. Actual 35B 1026-token cache 4/4 passes and matches old-worker output; sampled footprint 30.9 to 25.9 GB. Quick text-only/image-loaded comparison 39.25/39.42 tokens/s | Original 1792-token matrix remains stopped, not passed. Short comparison covers this affine artifact only; full BF16 MoE and executable MoE head remain unqualified |
+| Gemma | G4AP05 passes 15/15 assistant steps through 1792. Staged worker 136 unit tests, 9/9 smoke checks and 37/37 normal image-loaded lifecycle checks pass with actual draft acceptance/rejection, cancellation, stop and image invalidation | Matching text-only lifecycle retry and quick comparison pending. A shell-to-native identity transition stopped the first text-only launch before model load; direct native spawn fixes the adapter. Default serving MTP remains disabled pending completion |
 | GLM | `b76f560d` builds and accounting controls pass; tiny mapping control passes sixty blits; staged owned-buffer Control/Q5 initialization passes without pressure | Full functional run hit a hard compression limit; neither tiny test reproduces it. Audit actual GGUF mapping/Metal registration geometry before another full load. Full-model image/cache/MTP/performance remain held |
 
 The installed app was closed without implicitly reopening it. The coordinator
@@ -850,3 +850,52 @@ range checks and an actual wrong-offset hash negative pass. Receipt:
 No mapping or Metal execution occurs in that preparation. The bounded contrast
 will use fresh child processes per arm to avoid retained-footprint confounding;
 native source, build and execution still require review. Full GLM remains held.
+
+### Targeted fixes and actual worker results
+
+The user requested keeping implementation focused. Further calibration variants
+and new validation infrastructure are stopped; the remaining runs reuse existing
+checks and quick comparisons.
+
+Qwen branch `f249e1dc` includes the reviewed completion-order and physical-256
+prefill fixes. Worker SHA-256
+`7f41246a4e265ad2ba4060c64a57888c4d0541a758f19ec4e0c9f80511c5700a`
+passes all four actual affine 35B 1026-token cold/repeat/changed-tail/fresh cases;
+receipt `c6813324f7eb3fdf598a20faed58f73898a07c5c3188bdda7dce332ba7eb48e2`.
+Its output matches the old worker at the same length. Old/new sampled footprint
+is 30,881,831,136 / 25,884,543,840 bytes, with zero paging, compression or swap.
+The old-reference receipt is
+`e753f4748357b8004b38a209030c7270a6527b43f8bfd891a6fcd779f2fca999`.
+The original 1792-token stopped run is retained and does not become a pass.
+
+Six measured 64-token requests per loading mode give text-only/image-loaded
+medians 39.2466 / 39.4158 tokens/s, identical outputs and passing fixed 5% checks.
+Receipt `419b331222b50eec9f0e34eb3be965d8b902fbfc292d8e749ca7e9fcdf9ad119`
+is a short observed comparison; its functional guardian remains marked
+performance-ineligible. Image-loaded startup is approximately 74 seconds versus
+2 seconds text-only, separate from steady inference.
+
+The Qwen BF16 source-operator candidate was built and tested. Stages 1/2 match
+hidden features exactly, while stage 0 maximum error remains 0.09375 against the
+unchanged 0.0625 limit. Full-gate receipt:
+`e10a3413289d4b50cd1d5a0f3a0d05ccc763ce788ba839a6eb14840e42e9bd2b`.
+A targeted test-head projection reduction adaptation from pinned MLX is under
+review; ordinary production arithmetic is unchanged. The fast-exit primitive
+attempt lacked process telemetry and remains excluded.
+
+Gemma staged worker
+`a8775bb8fe43e0bdcabc3e3433de869e705089baa2f35bb4fc9ecf963aafff14`
+passes 9/9 smoke checks and 37/37 complete image-loaded lifecycle checks. Full
+receipt `5fc7f363e8aaf9cdba8badc550245a2b48fedebbd5cb3c8c39b632c24af48d7b`
+includes actual draft acceptance/rejection, seeded cache agreement, stop/cap,
+mid-generation cancellation and image invalidation. All 145 guardian samples
+report zero paging, compression or swap. The first matching text-only launch
+stopped before model loading because its shell shim changed process identity;
+that failed receipt is retained. Independently reviewed direct native spawning
+removes the shim while preserving guardian checks. Matching text lifecycle,
+then the already authorized quick comparison, are the current exclusive window.
+
+GLM's small mapping contrast remains unbuilt and held. Sparse fixtures were
+replaced by fully materialized high-entropy private files before freezing the
+minimal owned/dedicated/full contrast. No full model retry or further variants
+are authorized by this checkpoint.
