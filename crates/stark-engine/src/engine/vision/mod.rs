@@ -566,12 +566,19 @@ impl<B: Backend> Engine<B> {
                 NumericalProfile::Qwen35ReferenceBF16
             };
         let mut loader = ParameterLoader::new(weights, &*self.context)?.with_numerical_profile(numerical_profile);
-        // This first fast graph is bounded to admitted dense affine artifacts
-        // with a complete compatible head. Other family profiles retain their
-        // qualified image graph until separately validated.
+        // The ordinary text conversion uses the same raw parameter transforms
+        // for dense BF16/affine and affine MoE. Expert banks load through
+        // WeightMatrix too, so both graphs share the full immutable bank.
+        // BF16 MoE has no admitted ordinary-text baseline yet; its reference
+        // graph and expert-predictor work remain separately bounded.
         let fast_text = load_tower
-            && matches!(admission.profile, family::FamilyProfile::AffineV3)
-            && language_config.mtp_config.is_some();
+            && matches!(
+                admission.profile,
+                family::FamilyProfile::FixedV1
+                    | family::FamilyProfile::DynamicV2
+                    | family::FamilyProfile::AffineV3
+                    | family::FamilyProfile::MoeV4
+            );
         let extra = if fast_text {
             loader.qwen_text_graph_extra_bytes()
         } else {
@@ -668,7 +675,10 @@ impl<B: Backend> VisionLanguageModel<B> {
 
     pub fn text_execution_graph(&self) -> &'static str {
         if self.text_language_model.is_some() {
-            "qwen-affine-legacy-text-v1"
+            match self.family_profile {
+                family::FamilyProfile::AffineV3 | family::FamilyProfile::MoeV4 => "qwen-affine-legacy-text-v1",
+                _ => "qwen-bf16-legacy-text-v1",
+            }
         } else {
             "qwen-reference-bf16-text-v1"
         }

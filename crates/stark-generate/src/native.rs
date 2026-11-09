@@ -40,7 +40,7 @@ use crate::{
 const _: () = assert!(prefix_cache::PREFILL_CHUNK_TOKENS == PREFILL_CHUNK_TOKENS);
 
 type RetainedState = PrefixEntry<LanguageModelState<Metal>>;
-type VisionRetainedState = prefix_cache::BoundaryEntry<LanguageModelState<Metal>>;
+type VisionRetainedState = prefix_cache::BoundaryEntry<(LanguageModelState<Metal>, &'static str)>;
 type DenseRetainedState = prefix_cache::BoundaryEntry<(DenseMtpSession<Metal>, u32, &'static str)>;
 
 fn admit_generation_memory(
@@ -113,7 +113,8 @@ impl NativeModel {
         match self {
             Self::Vision(model) => model.text_execution_graph(),
             Self::Text(_) => "ordinary-text-v1",
-            _ => "other-image-family-v1",
+            Self::Gemma3Vision(_) => "gemma3-reference-bf16-text-v1",
+            Self::Gemma4Vision(_) => "gemma4-reference-bf16-text-v1",
         }
     }
     fn has_dense_mtp(&self) -> bool {
@@ -582,6 +583,8 @@ impl GenerationBackend for NativeBackend {
     fn prefix_cache_key(&self) -> &'static str {
         if self.model.has_dense_mtp() {
             "model-instance+context-tokens+cache-scope+mtp-selection+execution-graph+precision"
+        } else if matches!(&self.model, NativeModel::Vision(_)) {
+            "model-instance+context-tokens+cache-scope+execution-graph+precision"
         } else {
             prefix_cache::KEY
         }
@@ -600,7 +603,11 @@ impl GenerationBackend for NativeBackend {
             };
         }
         if let Some(entry) = &self.vision_prefix_cache {
-            return entry.reusable(input, options.context_tokens, options.cache_scope.as_ref());
+            return if entry.state.1 == self.model.text_execution_graph() {
+                entry.reusable(input, options.context_tokens, options.cache_scope.as_ref())
+            } else {
+                0
+            };
         }
         self.prefix_cache
             .as_ref()
@@ -876,6 +883,12 @@ impl NativeBackend {
         // The engine's iterator can encode one lookahead decode before returning
         // its first token, so this is a wall-clock prefill proxy, not GPU time.
         let started = Instant::now();
+        let text_request = image.is_none();
+        let reused = if text_request {
+            self.prefix_cache_plan(input, options)
+        } else {
+            0
+        };
         let cancellation = &mut self.cancellation;
         let mut cancelled = || match cancellation.as_mut() {
             Some(signal) => signal.check(options.request_id),
@@ -890,14 +903,8 @@ impl NativeBackend {
             NativeModel::Gemma4Vision(model) => model.tokenizer().clone(),
             NativeModel::Gemma3Vision(model) => model.tokenizer().clone(),
         };
-        let text_request = image.is_none();
         // Take the retained entry. A request that cannot reuse it drops it
         // before allocating, so two request states never coexist.
-        let reused = match (&self.prefix_cache, &self.vision_prefix_cache, &image) {
-            (Some(entry), _, None) => entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()),
-            (_, Some(entry), None) => entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()),
-            _ => 0,
-        };
         let retained = self.prefix_cache.take();
         let vision_retained = self.vision_prefix_cache.take();
         self.pending_prefix = None;
@@ -959,7 +966,7 @@ impl NativeBackend {
                 };
                 admit_memory_bytes(memory_bytes)?;
                 if let Some(entry) = vision_retained {
-                    let mut state = entry.state;
+                    let mut state = entry.state.0;
                     model
                         .rewind_state(&mut state, reused, Some(options.context_tokens), options.seed)
                         .map_err(|_| "native_generation_failed")?;
@@ -994,7 +1001,7 @@ impl NativeBackend {
                 };
                 admit_memory_bytes(memory_bytes)?;
                 if let Some(entry) = vision_retained {
-                    let mut state = entry.state;
+                    let mut state = entry.state.0;
                     model
                         .rewind_state(&mut state, reused, Some(options.context_tokens), options.seed)
                         .map_err(|_| "native_generation_failed")?;
@@ -1168,9 +1175,7 @@ impl NativeBackend {
             },
             (NativeModel::Text(_), Some(_)) => return Err("images_not_supported"),
         };
-        // Native readiness/counters must agree with the engine's actual work.
-        // A restored state must receive only its unprocessed suffix; replaying
-        // the full prompt can otherwise hide behind repetitive test inputs.
+        // Verify actual engine work, including restored-prefix suffix dispatch.
         if text_request && input_tokens.checked_sub(reused) != Some(stream.metrics().num_tokens_prefilled) {
             drop(stream);
             return Err("native_generation_failed");
@@ -1234,7 +1239,7 @@ impl NativeBackend {
                         && position > 0
                     {
                         self.vision_pending_prefix = Some(prefix_cache::BoundaryEntry::new(
-                            state,
+                            (state, self.model.text_execution_graph()),
                             scope,
                             options.context_tokens,
                             &prompt_ids[..position],

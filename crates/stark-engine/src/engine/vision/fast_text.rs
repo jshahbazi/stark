@@ -1,12 +1,13 @@
-//! The ordinary source-converted affine text graph, sharing raw admitted weights.
+//! The ordinary source-converted Qwen text graph, sharing raw admitted weights.
 use super::*;
 
 pub(super) fn config(config: &LanguageModelConfig) -> Result<LanguageModelConfig, serde_json::Error> {
     fn ordinary_text(value: &mut serde_json::Value) {
         match value {
             serde_json::Value::Object(fields) => {
-                // Affine exports already fold source normalization offsets in
-                // the payload. Preserve scale_offset and every weight spec.
+                // Both conversion modes use identical norm cast_f32 payloads:
+                // affine scales are already baked, while BF16 uses the same
+                // explicit scale_offset=1. Preserve offsets and weight specs.
                 if fields.get("type").and_then(serde_json::Value::as_str) == Some("Qwen35MRoPEConfig") {
                     fields.insert("type".into(), "UnscaledRoPEConfig".into());
                     fields.remove("mrope_section");
@@ -87,6 +88,40 @@ mod tests {
         let stats = model.parameter_storage_statistics();
         assert!(stats.shared_matrix_bytes > 10_000_000_000);
         assert!(stats.resident_bytes < 21_000_000_000);
+        let receipt = std::env::var("STARK_QWEN_STORAGE_RECEIPT").expect("private aggregate receipt required");
+        let file = OpenOptions::new().write(true).create_new(true).open(receipt).unwrap();
+        serde_json::to_writer(file, &stats).unwrap();
+    }
+
+    #[cfg(backend = "metal")]
+    #[stark_test]
+    #[ignore]
+    fn private_family_fast_text_state_and_expert_storage() {
+        use crate::backends::metal::Metal;
+        let image = std::env::var("STARK_QWEN_IMAGE_MODEL").expect("private image artifact required");
+        let path = Path::new(&image);
+        let engine = Engine::<Metal>::new().unwrap();
+        let mut model = engine.load_vision_language_model(path).unwrap();
+        assert!(model.text_language_model.is_some());
+        let mut image_state = model.create_empty_state(Some(128), 42).unwrap();
+        let mut text_state = model.create_text_state(Some(128), 42).unwrap();
+        let options = model.default_stream_options();
+        assert!(model.stream_text(&[100], &mut image_state, options).is_err());
+        assert!(!model.is_fenced());
+        let options = model.default_stream_options();
+        assert!(model.stream(&[100], &mut text_state, options).is_err());
+        assert!(!model.is_fenced());
+        let stats = model.parameter_storage_statistics();
+        let payload = usize::try_from(std::fs::metadata(path.join("model.safetensors")).unwrap().len()).unwrap();
+        assert!(stats.shared_matrix_bytes > payload / 2);
+        assert!(stats.resident_bytes < payload + 256 * 1024 * 1024);
+        assert_eq!(
+            stats.resident_bytes,
+            stats.shared_matrix_bytes + stats.unshared_parameter_bytes + stats.representation_copy_bytes
+        );
+        if matches!(model.family_profile, family::FamilyProfile::MoeV4) {
+            assert!(stats.shared_expert_matrix_bytes > payload / 2, "expert bank was duplicated");
+        }
         let receipt = std::env::var("STARK_QWEN_STORAGE_RECEIPT").expect("private aggregate receipt required");
         let file = OpenOptions::new().write(true).create_new(true).open(receipt).unwrap();
         serde_json::to_writer(file, &stats).unwrap();
