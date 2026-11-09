@@ -200,3 +200,38 @@ signature. Preserve the prior worker, receipts and timing source identities.
 Validation planned: focused error-disposition and CPU/Metal state tests, stable
 release build and the existing 32-case official artifact exactness workload with
 the VTP-02 recipe. Existing timings remain bound to their original executable.
+
+VTP-04 completed on inference source `eb5ea9b9` after syncing main through
+`43cd4323` (the main update only changed app UI). Seven focused tests passed:
+three CPU numerical/guard tests, three Metal equivalents, and one CPU error-
+disposition/sticky-fence policy test. Actual GPU device faults were not injected.
+The stable engine/worker check and release build passed. The 32-case VTP-02
+artifact workload was rerun against the final worker: every case was successful
+and exactly matched both fresh candidate and baseline output, every reuse count
+matched the rule, all six invalidation/preservation controls passed, and all
+three follow-ups reused 1,024 tokens. Overall gate: passed.
+
+Final worker SHA-256: `b3a4f851515a44d42975e120599d084a647fd36a8aa7010b915b4829bf9bc2fa`.
+Private VTP-04 receipt SHA-256: `8d1bddb2d42e338b2d4d6bec461f7c00a5fd0e4131ee0cecae3c2f8e761562d3`.
+The earlier qualified worker is preserved at ignored
+`runtime/vision-text-prefix-reuse-2026-11-08/stark-generate-qualified-0000f093`.
+Earlier VTP-03 timings retain their original executable identity and were not
+rerun for this error-path-only follow-up.
+
+## Retrospective 20261108-VTP-05: quick Lily text sanity check
+
+Registered during final PR review after the user requested a quick existing-
+script run. Existing Lily Q4-XL installed artifact; original worker and the
+VTP-01 candidate were run sequentially with `benchmark_hybrid.py`, greedy
+sampling, context 512, 64 requested output tokens and three runs per build.
+Each completed at 31 sampled tokens; the first run was excluded as warmup.
+Warm median useful decode rates were 83.6896 and 84.3240 tok/s, respectively;
+first-token medians were 0.129586 and 0.129160 seconds. All output hashes match
+across workers and repeats. This short unscreened check found no apparent
+regression; it does not establish a statistically significant speedup or
+qualify vision support on Lily. No fresh full-weight fingerprint was made.
+
+| Private quick receipt | SHA-256 |
+| --- | --- |
+| lily-quick-text-2026-11-08-baseline.json | `6e17c3ff102ed1b7d87c70080c878f15dc15632cf835dc585d403830baa9e95a` |
+| lily-quick-text-2026-11-08-candidate.json | `533cc6f9f6dab4bfd08d05ba8e49b77177a166cad2c5f6d4d218b45d90251562` |
