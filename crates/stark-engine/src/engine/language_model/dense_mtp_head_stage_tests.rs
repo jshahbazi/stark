@@ -110,6 +110,7 @@ fn dense_mtp_export_normalized_head_stages() {
     let engine = Engine::<Metal>::new().unwrap();
     let mut model = engine.load_language_model(&artifact).unwrap();
     let reference_fusion = std::env::var_os("STARK_TEST_HEAD_REFERENCE_FUSION").is_some();
+    let reference_linears = std::env::var_os("STARK_TEST_HEAD_REFERENCE_LINEARS").is_some();
     if reference_fusion {
         model.dense_mtp.as_mut().unwrap().validation_use_reference_fusion().unwrap();
     }
@@ -183,6 +184,6 @@ fn dense_mtp_export_normalized_head_stages() {
         stages
             .push(json!({"stage":stage,"input":input_record,"normalized_hidden":hidden_record,"logits":logits_record}));
     }
-    let report = json!({"schema":"private-dense-qwen-normalized-head-stages-v1","model_dim":dim,"vocab":vocab,"target_head_policy":"trunk_output_norm","chain_head_policy":"predictor_output_norm","arrays":manifest,"stages":stages,"input_stages":input_stages,"test_only_reference_fusion":reference_fusion});
+    let report = json!({"schema":"private-dense-qwen-normalized-head-stages-v1","model_dim":dim,"vocab":vocab,"target_head_policy":"trunk_output_norm","chain_head_policy":"predictor_output_norm","arrays":manifest,"stages":stages,"input_stages":input_stages,"test_only_reference_fusion":reference_fusion,"test_only_reference_linears":reference_linears});
     std::fs::write(root.join("manifest.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
 }

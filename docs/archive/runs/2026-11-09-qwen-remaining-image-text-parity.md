@@ -507,3 +507,32 @@ resource stop, without attribution to the model or a memory-limit failure.
 Receipt: `adceb2e976070e6abb9417542888a22a606acc0c15d06c6a28abab247fbc688d`.
 All owned workers close. The corrected affine MoE cache matrix remains open;
 no guard is relaxed and no incomplete case is counted as a pass.
+
+### QNIP all-head-linear experiment: rejected
+
+The next isolated candidate is confined to `cfg(test)`: a scoped head parameter
+tree selects the existing full-BF16 reference linear implementation, while
+target/readout, norms, attention and MLP activation policies remain unchanged.
+It accepts only an incoming Legacy profile and rejects conflicting FC-only /
+all-head selectors. The source-scoping CPU control passes 1/1; the model export
+passes 1/1. Build time is 1 minute 34 seconds. Test engine:
+`7b25eb5595e7b3cfa2b5834ce4941468bc9e9f2543c9d557c0d26c6be9f56f7e`;
+source/binary seal:
+`450a7ea768ad65eeadbd3b8b4f0113e4d8cd6c1617217ca3f0ecfe3eab2675be`.
+Its reference F32 accumulator workspace is explicitly inventoried; this is not
+a production admission or performance claim.
+
+The unchanged complete-head numerical gate rejects the candidate. Hidden
+maximum errors are `0.1875`, `0.25`, `0.15625`; the final stage also loses its
+top-1 match. Relative RMS and absolute logit limits pass. Gate receipt:
+`868cbd232975bd209d5c5cc1ad6c46dfc9c1750ef5b73dff3796ea3a018e2b71`;
+full aggregate:
+`d57901432eac1712f820a03f24d644688327c5cf5ea36a9836eebb4190e56e3c`.
+
+Common-input norms and residuals remain exact. Attention output is
+`0.004638671875` maximum / `0.00482802` relative RMS; MLP output is
+`0.0078125` / `0.00378840`. Local receipt:
+`ae9c89eae2d77de0fa9589ac504e5adaa4611abc0a1043dfa4154beafcee60bd`.
+All processes close with zero paging and no foreign worker. No arithmetic is
+adopted; the next diagnostic must isolate projection and activation primitives
+on identical operands rather than change the whole head profile.

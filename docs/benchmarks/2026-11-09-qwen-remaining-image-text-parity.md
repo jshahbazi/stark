@@ -176,6 +176,10 @@ are exact; attention/MLP arithmetic remains under diagnosis. No candidate
 arithmetic is adopted. Cache/speed passes do not close that numerical gate or
 imply original-training equivalence.
 
+A further test-only all-head-reference-linear candidate is also rejected:
+hidden errors `0.1875/0.25/0.15625` exceed the same limit and stage two's top-1
+match fails. This yields no new speed or production qualification.
+
 | Continuation aggregate receipt | SHA-256 |
 | --- | --- |
 | Headed/headless MTP0 ABBA | `88880038813cdfc7b85eb1cb6fa3ff43910cd89d78d85a221a4c246f8abf580f` |
@@ -187,6 +191,7 @@ imply original-training equivalence.
 | Additional image cache/image recovery, 48 cases | `aeb8a3034c56bc34ffdcf172be105906e9f8951d87fd50100c2e5fdd06c72012` |
 | Additional text cache geometry, 26 cases | `cadb6fe0a8f910c5ab674f9cce943644431bb092d1efd38ecdc7c969dc24225f` |
 | Failed test-only causal FC numerical gates | `e2acf10016bb868fbd674456bf2a9e44399ad8e4f4ecd10c6b76a39e5cb705b9` |
+| Rejected test-only all-head-linear numerical gates | `868cbd232975bd209d5c5cc1ad6c46dfc9c1750ef5b73dff3796ea3a018e2b71` |
 
 The corrected affine MoE lifecycle continuation was resource-deferred when an
 external installed worker reloaded. A later quiet attempt reaches readiness

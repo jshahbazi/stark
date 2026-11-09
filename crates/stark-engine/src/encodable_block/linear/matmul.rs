@@ -129,7 +129,11 @@ impl<B: Backend> LinearMatmul<B> {
 
         let biases = load_biases(weights_data_type, output_data_type, output_dim, bias_tree)?;
 
-        let reference_matmul = if weights_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16 {
+        let reference_linear = weights_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16;
+        #[cfg(test)]
+        let reference_linear =
+            reference_linear || weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears;
+        let reference_matmul = if reference_linear {
             if weights_data_type != DataType::BF16
                 || input_data_type != DataType::BF16
                 || !matches!(output_data_type, DataType::BF16 | DataType::F32)

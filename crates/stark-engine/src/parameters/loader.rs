@@ -51,6 +51,9 @@ pub(crate) enum NumericalProfile {
     Qwen35ReferenceBF16,
     /// BF16 activation boundaries with canonical packed affine matrices.
     Qwen35AffineBF16,
+    /// Test-only causal experiment: full BF16 linears with all other operators unchanged.
+    #[cfg(test)]
+    QwenMtpReferenceLinears,
 }
 
 impl NumericalProfile {
@@ -196,6 +199,8 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
         ParameterTree {
             loader: self,
             prefix: None,
+            #[cfg(test)]
+            validation_profile: None,
         }
     }
 }
@@ -276,6 +281,8 @@ impl<'a, 'leaf, B: Backend> ParameterLeaf<'a, 'leaf, B, true> {
 pub struct ParameterTree<'loader, B: Backend> {
     loader: &'loader ParameterLoader<'loader, B>,
     prefix: Option<String>,
+    #[cfg(test)]
+    validation_profile: Option<NumericalProfile>,
 }
 
 impl<'loader, B: Backend> ParameterTree<'loader, B> {
@@ -283,7 +290,23 @@ impl<'loader, B: Backend> ParameterTree<'loader, B> {
         self.loader.representation_copy_bytes.clone()
     }
     pub(crate) fn numerical_profile(&self) -> NumericalProfile {
+        #[cfg(test)]
+        if let Some(profile) = self.validation_profile {
+            return profile;
+        }
         self.loader.numerical_profile
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_with_numerical_profile(
+        &self,
+        profile: NumericalProfile,
+    ) -> Self {
+        Self {
+            loader: self.loader,
+            prefix: self.prefix.clone(),
+            validation_profile: Some(profile),
+        }
     }
 
     fn join_prefix(
@@ -300,6 +323,8 @@ impl<'loader, B: Backend> ParameterTree<'loader, B> {
         Self {
             loader: self.loader,
             prefix: Some(self.join_prefix(name)),
+            #[cfg(test)]
+            validation_profile: self.validation_profile,
         }
     }
 
@@ -425,6 +450,23 @@ mod payload_tests {
             loader.tree().subtree("decoder").subtree("mixer").numerical_profile(),
             NumericalProfile::Qwen35ReferenceBF16
         );
+    }
+
+    #[stark_test]
+    fn validation_profile_is_scoped_and_does_not_select_reference_activations() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(1, &[0]);
+        let loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+        let root = loader.tree();
+        let head = root.subtree("mtp").validation_with_numerical_profile(NumericalProfile::QwenMtpReferenceLinears);
+        assert_eq!(
+            head.subtree("transformer").subtree("mixer").numerical_profile(),
+            NumericalProfile::QwenMtpReferenceLinears
+        );
+        assert!(!head.numerical_profile().qwen35_bf16_activations());
+        assert_eq!(root.numerical_profile(), NumericalProfile::Legacy);
+        assert_eq!(root.subtree("decoder").numerical_profile(), NumericalProfile::Legacy);
+        assert_eq!(loader.tree().subtree("mtp").numerical_profile(), NumericalProfile::Legacy);
     }
 
     #[stark_test]

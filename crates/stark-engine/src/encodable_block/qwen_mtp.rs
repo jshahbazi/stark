@@ -108,6 +108,19 @@ impl<B: Backend> QwenMtp<B> {
         {
             return Err(QwenMtpError::Invalid);
         }
+        #[cfg(test)]
+        let validation_tree = if std::env::var_os("STARK_TEST_HEAD_REFERENCE_LINEARS").is_some() {
+            if std::env::var_os("STARK_TEST_HEAD_REFERENCE_FUSION").is_some()
+                || tree.numerical_profile() != crate::parameters::NumericalProfile::Legacy
+            {
+                return Err(QwenMtpError::Invalid);
+            }
+            Some(tree.validation_with_numerical_profile(crate::parameters::NumericalProfile::QwenMtpReferenceLinears))
+        } else {
+            None
+        };
+        #[cfg(test)]
+        let tree = validation_tree.as_ref().unwrap_or(tree);
         let norm = |name: &str| {
             Normalization::new(
                 config.model_dim,
