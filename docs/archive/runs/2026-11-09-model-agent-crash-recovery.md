@@ -222,3 +222,39 @@ A second external worker from the separate resource-budget app briefly paused
 timings. After the user reported that task finished, the coordinator verified
 no model/compiler processes, 94% memory free and zero swap, and resumed Qwen's
 exclusive hardware slot. No external process was killed by these agents.
+
+### Headed MTP0 performance restoration
+
+A quiet comparison completed before another external app load: corrected headed
+MTP0 decoded at 294.968 tokens/s versus 299.031 for the headless target, a 1.36%
+difference within the strict 5% gate, with zero paging. This closes the observed
+inactive-predictor dispatch regression for that short BF16 0.8B comparison.
+The private receipt SHA-256 is
+`88880038813cdfc7b85eb1cb6fa3ff43910cd89d78d85a221a4c246f8abf580f`.
+
+The subsequent loading-mode attempt was incomplete and excluded when the
+installed Stark app loaded Lily again. The coordinator used the normal app's
+Stop model control and observed Stopped, GPU memory unavailable and Stop model
+disabled, then verified no remaining model/compiler processes, 94% free memory
+and zero swap. Qwen resumed with a required hard quiet-screen and continuous
+external-worker check. The interrupted receipt remains preserved as invalid.
+
+The repeated loading-mode ABBA comparison then completed with the hard preflight
+and continuous external-worker supervisor. Context and sampling were matched;
+the 64-token budget ended validly at EOS after 62 tokens. Six requests were
+measured per arm/depth. Decode, first-token and request medians all passed the
+strict 5% gates; no paging or supervisor stops occurred. Peak RSS was
+2,126,823,424 bytes.
+
+| Exact BF16 0.8B headed artifact | Text-only tokens/s | Image-loaded tokens/s | Measured proposals / accepted, each arm |
+| --- | ---: | ---: | ---: |
+| MTP0 | 299.3765 | 299.8096 | 0 / 0 |
+| MTP3 | 149.5862 | 153.8603 | 468 / 222 |
+
+These results establish short loading-mode parity, not MTP acceleration on this
+small model. The separate ordinary MTP0 comparison above establishes that the
+resident inactive head no longer forces the slow predictor path.
+The receipt `runtime/bf16-08b-head-bench-mtp0-02.json` SHA-256 is
+`a5154274e9e9d4f9830de4c4693460424b667d8f8a194bd99308c52c8f7d9d7c`.
+Independent numerical head replay and the complete affine MoE cache matrix
+remain open at this checkpoint.
