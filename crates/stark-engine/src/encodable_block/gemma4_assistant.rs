@@ -23,7 +23,7 @@ use crate::{
     },
     data_type::DataType,
     encodable_block::{
-        linear::{Linear, LinearBlockError, LinearInput},
+        linear::{Linear, LinearBlockError, ReferenceBF16Matmul},
         mixer::attention::{
             Attention, AttentionNewError, CommittedAttentionKV, reference::ReferenceBF16Attention,
             rope::PrecalculatedRoPE,
@@ -39,18 +39,13 @@ const VOCAB: u32 = 262144;
 const CENTROIDS: u32 = 2048;
 const TOP_K: usize = 32;
 
-/// Pinned Torch GELU and an explicit BF16 product are confined to the assistant.
-/// Its matrices retain the existing legacy full-BF16 linear implementation.
+/// Pinned-source MLP reductions, GELU and a separate BF16 product are confined
+/// to the assistant. Its other linears retain their legacy implementation.
 struct AssistantSourceGeluMlp<B: Backend> {
-    up: Box<dyn Linear<B>>,
-    down: Box<dyn Linear<B>>,
     gelu: <B::Kernels as Kernels>::VisionGeluBF16Kernel,
     multiply: GatedActMul<B>,
-    #[cfg(test)]
-    reference: crate::encodable_block::linear::ReferenceBF16Matmul<B>,
-    #[cfg(test)]
+    reference: ReferenceBF16Matmul<B>,
     up_weights: Arc<B::GlobalBuffer>,
-    #[cfg(test)]
     down_weights: Arc<B::GlobalBuffer>,
 }
 
@@ -64,7 +59,7 @@ impl<B: Backend> AssistantSourceGeluMlp<B> {
         if rows != 1 {
             return Err(crate::backends::common::InvalidInput("assistant MLP requires one query").into());
         }
-        let fused = self.up.encode(input, rows, commands)?;
+        let fused = self.reference.encode(&input, 0, &*self.up_weights, rows, 4096, DIM, commands)?;
         let bytes = 2048 * size_of::<bf16>();
         if fused.size() != bytes * 2 {
             return Err(crate::backends::common::InvalidInput("invalid assistant fused MLP shape").into());
@@ -97,7 +92,7 @@ impl<B: Backend> Mlp<B> for AssistantSourceGeluMlp<B> {
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
         let (_fused, _activated, product) = self.project_and_gate(input, rows, commands)?;
-        self.down.encode_input(LinearInput::FullPrecision(product), rows, commands)
+        self.reference.encode(&product, 0, &*self.down_weights, rows, DIM, 2048, commands)
     }
 
     #[cfg(test)]
@@ -107,18 +102,20 @@ impl<B: Backend> Mlp<B> for AssistantSourceGeluMlp<B> {
         rows: u32,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<Option<Vec<(String, B::ScratchBuffer)>>, B::Error> {
-        // These candidates only expose the existing PyTorch-provenance
-        // reduction on identical native inputs; they never feed the head.
-        let reference_up = self.reference.encode(&input, 0, &*self.up_weights, rows, 4096, DIM, commands)?;
         let (fused, activated, product) = self.project_and_gate(input, rows, commands)?;
-        let reference_down = self.reference.encode(&product, 0, &*self.down_weights, rows, DIM, 2048, commands)?;
+        // The independently qualified primitive candidates are now the actual
+        // MLP operators; retain their names for the separate source trace.
+        let mut reference_up = commands.allocate_scratch(fused.size())?;
+        commands.encode_copy(&fused, &mut reference_up);
         let mut act_copy = commands.allocate_scratch(activated.size())?;
         let mut product_copy = commands.allocate_scratch(product.size())?;
         let mut product_candidate = commands.allocate_scratch(product.size())?;
         commands.encode_copy(&activated, &mut act_copy);
         commands.encode_copy(&product, &mut product_copy);
         commands.encode_copy(&product, &mut product_candidate);
-        let down = self.down.encode_input(LinearInput::FullPrecision(product), rows, commands)?;
+        let down = self.reference.encode(&product, 0, &*self.down_weights, rows, DIM, 2048, commands)?;
+        let mut reference_down = commands.allocate_scratch(down.size())?;
+        commands.encode_copy(&down, &mut reference_down);
         let mut down_copy = commands.allocate_scratch(down.size())?;
         commands.encode_copy(&down, &mut down_copy);
         Ok(Some(vec![
@@ -209,7 +206,7 @@ pub struct Gemma4AssistantStep<B: Backend> {
 
 impl<B: Backend> Gemma4Assistant<B> {
     pub fn numerical_policy(&self) -> &'static str {
-        "gemma4-assistant-eager-bf16-source-gelu-v1"
+        "gemma4-assistant-eager-bf16-source-mlp-v1"
     }
 
     pub fn backbone_dim(&self) -> u32 {
@@ -311,28 +308,7 @@ impl<B: Backend> Gemma4Assistant<B> {
             if factors.is_some() {
                 return Err(Gemma4AssistantError::Invalid);
             }
-            let (up, up_factors) = <dyn Linear<B>>::new_with_input_rht(
-                DIM,
-                [2048, 2048],
-                false,
-                context,
-                DataType::BF16,
-                &tree.subtree(&base).subtree("mlp").subtree("up_projection"),
-            )?;
-            let (down, down_preparation) = <dyn Linear<B>>::new_for_fused_input(
-                2048,
-                [DIM],
-                false,
-                context,
-                DataType::BF16,
-                &tree.subtree(&base).subtree("mlp").subtree("down_projection"),
-            )?;
-            if up_factors.is_some() || down_preparation.is_some() {
-                return Err(Gemma4AssistantError::Invalid);
-            }
             let mlp: Box<dyn Mlp<B>> = Box::new(AssistantSourceGeluMlp {
-                up,
-                down,
                 gelu: <B::Kernels as Kernels>::VisionGeluBF16Kernel::new(context)
                     .map_err(Gemma4AssistantError::Backend)?,
                 multiply: GatedActMul::<B>::full_precision(
@@ -343,17 +319,13 @@ impl<B: Backend> Gemma4Assistant<B> {
                     GatedActMulSettings::default(),
                 )
                 .map_err(Gemma4AssistantError::Backend)?,
-                #[cfg(test)]
-                reference: crate::encodable_block::linear::ReferenceBF16Matmul::new(context)
-                    .map_err(Gemma4AssistantError::Backend)?,
-                #[cfg(test)]
+                reference: ReferenceBF16Matmul::new(context).map_err(Gemma4AssistantError::Backend)?,
                 up_weights: tree
                     .subtree(&base)
                     .subtree("mlp.up_projection.weights")
                     .leaf("weights")?
                     .validate(&[4096, DIM], DataType::BF16)?
                     .read_shared_weight()?,
-                #[cfg(test)]
                 down_weights: tree
                     .subtree(&base)
                     .subtree("mlp.down_projection.weights")

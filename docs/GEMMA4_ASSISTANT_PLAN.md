@@ -6,9 +6,12 @@ branch. Three real proposals, fixed target position, ordinary target-root
 agreement and drained cancellation/retry pass. The first numerical gate failed;
 the assistant-only eager-BF16 follow-up now matches the unchanged short-input
 oracle exactly. Serial verification controls pass, while actual acceptance is
-zero of three drafts on that input. The separate 512-token, three-step follow-up
-fails its unchanged numerical gate; batch/cache execution remains blocked by
-that result. Worker MTP remains unimplemented. Gemma 4 has upstream
+zero of three drafts on that input. Source-matched assistant MLP reductions
+subsequently pass chained oracle and transactional controls at 512, 513, 1,024
+and 1,026 tokens, with actual three-of-three acceptance for those fixtures.
+Exact prefix restoration passes at 1,026. The 1,792-token masked selection
+still fails despite exact centroids and feedback; its batch/cache controls
+have not executed. Worker MTP remains unimplemented. Gemma 4 has upstream
 MTP assistants, and remains
 an open Stark implementation task. Image loading must preserve future text MTP;
 image requests keep zero drafts. Follow [model onboarding](MODEL_ONBOARDING.md)
@@ -117,11 +120,14 @@ not executed. The public 512-position draft guard remains in force while the
 first divergent intermediate is diagnosed. These additions grant no serving
 capability or performance qualification.
 
-The assistant-only source GELU and separate BF16 product are now implemented
-and independently reviewed. The same unchanged long gate still fails at its
-first 512-token case, so later lengths and all actual batch/cache controls
-remain unexecuted. A matching bounded trace confirms layer-0 activation and
-MLP output are exact and moves the first difference to one BF16 value in the
-layer-1 fused up projection. The next test-only candidate isolates reference
-BF16 MLP linears; ordinary target and other assistant linears keep their
-current policy pending actual comparison. Serving remains disabled.
+The assistant-only source GELU, separate BF16 product and source-reference MLP
+reductions are implemented and independently reviewed. Per-projection reference
+candidates match all four layers across three steps on identical native inputs.
+The corrected head passes the unchanged chained oracle and transactional
+controls at 512/513/1,024/1,026 tokens. Exact 1,024-boundary restoration and
+changed-tail checks pass at 1,026. The 1,792-token case still fails masked
+selection despite exact centroids and feedback; tied-centroid cutoff selection
+is the next diagnosis. Other assistant linears and ordinary target math retain
+their existing policy. Normal-worker MTP, supported sampling, full lifecycle
+and matched performance qualification remain open. Serving remains disabled,
+and the public position guard remains in force.

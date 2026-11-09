@@ -665,3 +665,49 @@ and guard receipt
 `6557478e33b4e5bc1d07460307d09c269fd382b826306470cd62f5f25cb8432b`
 record zero paging growth, no foreign worker and observed peak RSS
 10,898,489,344 bytes. All owned processes close before the slot release.
+
+## 20261109-G4AP-05: assistant MLP source reduction
+
+Registered before implementation/execution. Use the measured source-reference
+BF16 reduction only for the assistant MLP fused up and down projections, while
+retaining source GELU and the explicit BF16 product. All other assistant
+linears, ordinary target math, exact artifact admission, public position guard
+and disabled serving remain unchanged. Own one validated full-BF16 buffer per
+MLP matrix; remove the test-only duplicate candidate buffers after the prior
+independent primitive experiment. Reuse the unchanged long oracle, followed
+by transactional/cache controls only if the numerical gate passes. The
+49,152/3,072 exact primitive values are not full-head qualification.
+
+The narrow source MLP candidate builds in 1 minute 34 seconds and passes all
+three chained oracle steps at 512, 513, 1,024 and 1,026 tokens. At each input,
+three actual proposals are accepted and ordinary output matches. Supplied
+full/partial acceptance, deliberate rejection, zero drafts, cancellation after
+batch and restoration, and fresh recovery pass. The 1,026-token case also
+passes exact prefix restoration at 1,024 with two actual suffix rows, complete
+fresh/restored handoff equality and changed-tail equality. These are component
+controls; they do not qualify normal-worker MTP or performance. The earlier
+seven-token input's zero-of-three result remains a separate observation.
+
+At 1,792 tokens, the first masked-logit step still fails: maximum absolute
+53.375, relative L2 1.9332%, and 256-token selected-support difference.
+Feedback and centroids are exact in all three steps, and the second and third
+masked-logit steps pass. This is consistent with tied-centroid selection and
+requires explicit cutoff/tie diagnosis. The 1,792-token batch/cache controls
+do not execute. The unchanged full gate therefore remains failed, with the
+public position guard and disabled serving retained.
+
+Executable `75e5eff55ebcdf9cdbc0a22d1dcae7220e181fa74358c07d58215c4e3431a320`,
+source graph `50227ba15cc507857d70f2549f06878658adf4e882de42f508f5471a1fbf2a28`,
+source/binary seal
+`b8bce0144300f035b61d03a532d1c6c887dcc7e387807d1cbc10042982775c95`,
+aggregate `0c944464ea413ba0e3005375b6b0a8f9fe179c01ef4cec24e98f69ad52f4ebf1`,
+guard `dc7066407bf2e567c3979a75637c5aac7f053e856aa6e011357f4079d5a3525f`,
+and execution seal
+`20b206b7ab7c6bb987f415f973dbd3b2778f976db621c83aafb3f0582cfe61df`
+bind this run to the unchanged round oracle. No foreign worker or paging
+growth occurs; observed peak RSS is 12,537,675,776 bytes, below the unchanged
+12 GiB guard. F32 up/down accumulators require 16 KiB/1 KiB per query, in
+addition to the 4 KiB source activation; these fit within the existing 32 MiB
+assistant dynamic allowance. This is not a complete serving peak inventory.
+All owned workers, reference children and compilers close before direct
+handoff to the queued Qwen functional run.
