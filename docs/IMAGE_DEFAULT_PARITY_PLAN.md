@@ -8,6 +8,11 @@ This is the implementation and qualification worklist derived from the
 Their results qualify only their named artifacts; merging does not establish
 release or installed-app support. No model was run to create this worklist.
 
+The [2026-11-09 crash-recovery checkpoint](archive/runs/2026-11-09-model-agent-crash-recovery.md)
+records recovered branches, verified source snapshots, completed receipts,
+replacement owners and remaining gates. Original sessions ended at reboot;
+the Qwen, Gemma and GLM replacements resumed their preserved worktrees.
+
 ## Required product behavior
 
 Image support is the default for an image-capable model. The default installed
@@ -93,8 +98,13 @@ serialized by the coordinating agent; source work proceeds in isolated worktrees
 | IMGPAR-06/07/10/11/12/14: Gemma 3 and Gemma 4 | [codex/gemma-image-parity-next](https://github.com/jshahbazi/stark/tree/codex/gemma-image-parity-next) | One agent owns ring/worker integration: actual Gemma 3 4B cache/parity first, then native Gemma 4 assistant conversion/execution; larger/quantized artifacts keep individual gates |
 | IMGPAR-15: GLM-5.3 Flash | [codex/glm-image-parity](https://github.com/jshahbazi/stark/tree/codex/glm-image-parity) | Vision preparation/execution and backend-specific text cache, performance and supported MTP; source/artifact inventory first |
 
-The follow-up agents were launched after PR #114 was opened. GPU and heavy
-build ownership passes GLM → remaining Qwen → Gemma. Check available disk before
+The follow-up agents were launched after PR #114 was opened. After reboot,
+small Qwen controls ran first and Gemma resumed its saved build; source work
+continues in parallel. Model/Metal launches are paused while an installed
+non-agent Stark worker occupies approximately 71 GiB RSS. GLM and ddalcu full
+loads also require complete peak-memory review. Coordinate GPU and heavy build
+ownership through the recovery checkpoint rather than the original queue.
+Check available disk before
 each build/download; preserve an eight-GiB reserve and all existing model
 payloads. Only each agent's own reproducible build outputs may be retired after
 sealing evidence. A resource-deferred artifact remains unfinished.
