@@ -660,6 +660,23 @@ A proposed tiny staged Control-to-Q5 test measures these phases independently
 of full-model mapping and captures compiler-service peaks through cleanup.
 It is a source proposal; neither a cause nor a pressure fix is established.
 
+The source-only package is subsequently frozen as registration
+`2e4fd0d4dd69aeabcb0f3ecc41e6407be539431f585679132a45d7c265679138`,
+with source graph
+`39715e1e825f8291d5fa2974b3ccdb94019f8177a30e041ddc5c14bfb5cd05be`.
+Root reviews the ignored test, independent projection oracle, phase/start
+gates and owner-only supervisor. Twenty-one injected CPU controls pass, including
+new compiler-service growth that an exiting baseline service would otherwise
+mask. Positive per-PID RSS growth and net growth are recorded separately.
+Limits are 1 GiB for owned RSS/footprint, host wired growth and positive service
+RSS growth, 256 MiB compressor growth, zero swap and 60 seconds; no model or
+mapped file participates. CPU receipt:
+`876c72e95c74d02ee78e969f4db5ae0ae1f6f20aab59318172d0c5a489c6cbc7`.
+An exclusive build-only slot is granted, reusing only this checkout's test target
+after archiving/hashing its old binary. Native execution requires the new
+source/binary seal and host screen; full GLM remains held. Persistent shader-cache
+state is unknown, so the result cannot establish cold-cache behavior or speed.
+
 ### Pinned external implementation research
 
 The user authorized consulting other open source engines. These sources guide
@@ -680,3 +697,11 @@ bounded experiments; their reported performance is not Stark evidence:
 Family agents retain additional pinned MLX-VLM, Transformers, MLX and llama.cpp
 source/license records. No borrowed implementation is qualified merely by
 matching its design; new validation remains bound to Stark source and artifact.
+
+For MoE command-memory attribution, Apple's
+[allocator API](https://developer.apple.com/documentation/metal/mtl4commandallocator/allocatedsize%28%29)
+exposes internal command-heap bytes separately from scratch payloads. Its
+[reset contract](https://developer.apple.com/documentation/metal/mtl4commandallocator/reset%28%29)
+requires completion of all dependent command buffers first. This provides a
+direct diagnostic for the command-overhead hypothesis; no cause or fix is
+claimed from dispatch count alone.
