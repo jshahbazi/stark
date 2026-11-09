@@ -314,6 +314,40 @@ def test_worker_real_pipes_timeout_and_cleanup(tmp_path):
     assert worker.process.poll() is not None
 
 
+@pytest.mark.parametrize("vision", [False, True])
+@pytest.mark.parametrize("supported", [False, True])
+def test_worker_requests_text_prefix_reuse_for_both_artifact_types_but_trusts_readiness(tmp_path, vision, supported):
+    if vision:
+        (tmp_path / "config.json").write_text(json.dumps({"type": "Qwen35VisionLanguageModelConfig"}))
+    executable = tmp_path / "capability worker"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, stat, sys\n"
+        "assert sys.argv.count('--prefix-cache') == 1\n"
+        f"assert ('--vision-staging-root' in sys.argv) is {vision!r}\n"
+        "if '--vision-staging-root' in sys.argv:\n"
+        "    root = pathlib.Path(sys.argv[sys.argv.index('--vision-staging-root') + 1])\n"
+        "    assert stat.S_IMODE(root.stat().st_mode) == 0o700 and not list(root.iterdir())\n"
+        f"supported = {supported!r}\n"
+        "print(json.dumps({'ready': True, 'operations': ['generate', 'reset_cache'],\n"
+        "    'state_policy': 'consecutive-prefix-v1' if supported else 'fresh-per-request',\n"
+        "    'prefix_cache': {'supported': supported, 'enabled': supported, 'chunk_tokens': 1024}}), flush=True)\n"
+        "for _line in sys.stdin: pass\n"
+    )
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 5)
+    staging = worker.media.root if vision else None
+    try:
+        assert worker.read()["ready"] is True
+        assert worker.prefix_cache is supported
+        assert worker.prefix_chunk_tokens == (1024 if supported else None)
+        assert worker.images is False
+    finally:
+        worker.close()
+    if staging is not None:
+        assert not staging.exists()
+
+
 def test_main_suppresses_exception_payload_and_cleans_up(model, capsys):
     worker = FakeWorker()
     worker.close = lambda: None

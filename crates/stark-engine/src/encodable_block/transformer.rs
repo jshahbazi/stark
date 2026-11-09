@@ -451,6 +451,14 @@ impl<B: Backend> Transformer<B> {
             })
     }
 
+    /// Text-only snapshots do not carry image position state. Unlike simple
+    /// rewind, they can retain recurrent layers through explicit snapshots.
+    pub(crate) fn prefix_snapshot_supported(&self) -> bool {
+        self.layers
+            .iter()
+            .all(|(layer, _)| layer.kv_source_layer_index.is_some() || layer.mixer.prefix_snapshot_supported())
+    }
+
     pub fn prefill_cache_layer_count(&self) -> usize {
         let num_layers = self.layers.len();
         let Some(last_owned_kv_layer_index) =

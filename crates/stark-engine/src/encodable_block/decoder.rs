@@ -264,6 +264,10 @@ impl<B: Backend> Decoder<B> {
         self.transformer.prefix_reuse_supported()
     }
 
+    pub(crate) fn prefix_snapshot_supported(&self) -> bool {
+        self.transformer.prefix_snapshot_supported()
+    }
+
     pub fn prefill_requires_separate_logits_row(&self) -> bool {
         self.separate_prefill_last_token || self.prefill_cache_skips_trailing_layers()
     }

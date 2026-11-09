@@ -95,6 +95,7 @@ def make_worker(handler=None):
 
     def default(payload, _on_delta=None, cancelled=None):
         operation = payload["operation"]
+        assert "cache_scope" not in payload
         if operation in {"prepare_image", "generate_image"} and cancelled is not None and cancelled.is_set():
             raise ChatCancelled("Request cancelled.")
         worker.sent.append(operation)
@@ -136,6 +137,7 @@ def perform(worker, cancelled=None):
 
 def test_image_request_orders_prepare_generate_discard_and_removes_staged_file():
     worker = make_worker()
+    worker.prefix_cache = True
     root = worker.media.root
     try:
         reply = perform(worker)
