@@ -578,6 +578,7 @@ enum ModelBrowserSearch {
     static func matches(_ query: String, fields: [String]) -> Bool {
         let query = query.replacingOccurrences(of: "(?i)\\b([48])[-_ ]*bits?\\b", with: "$1bit", options: .regularExpression)
         let terms = query.split(whereSeparator: \.isWhitespace).map { normalized(String($0)) }.filter { !$0.isEmpty }
+        guard !terms.isEmpty else { return true }
         let text = fields.map(normalized).joined(separator: " ")
         return terms.allSatisfy { text.contains($0) }
     }
@@ -890,8 +891,10 @@ struct ModelsInventory {
             return sort.precedes(firstName, id: first.id, size: first.totalBytes,
                                  secondName, id: second.id, size: second.totalBytes)
         }
+        let hasSearchQuery = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         groups = allGroups.compactMap { group in
             var visible = group.models.filter { model in
+                !hasSearchQuery ||
                 ModelBrowserSearch.matches(query, fields: [group.name, group.family ?? "", model.name, model.sourceName,
                                                            model.sourceRevision ?? "", model.artifactMode?.title ?? "",
                                                            model.isRunning ? "Running" : ""] + model.detailLabels)
@@ -2633,6 +2636,8 @@ struct ModelsView: View {
     }
 
     var body: some View {
+        // Build once per render; the list accesses several inventory projections.
+        let inventory = self.inventory
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
                 if navigation.tab == .download, let family = selectedFamily {
