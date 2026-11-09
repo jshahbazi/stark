@@ -113,6 +113,42 @@ func exerciseCatalogFamilyLayout() -> Bool {
     return true
 }
 
+@MainActor
+func exerciseRunningModelNameLayout() -> Bool {
+    _ = NSApplication.shared
+    let suite = "stark.running-model-name-window-test." + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let credentials = APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage())
+    let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults)
+    let name = "Qwen3.8 Flash Next"
+    let quantization = "Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)"
+    let display = InstalledModelDisplay([
+        "schema_version": 1, "group_id": "repo:owner/Qwen3.8-Flash-Next-lily-q4-xl",
+        "group_name": "Qwen3.8-Flash-Next-lily-q4-xl", "family_id": "qwen4_exp",
+        "quantization": quantization, "weight_bytes": Int64(106_910_000_000),
+        "source_revision": String(repeating: "a", count: 40)
+    ])!
+    let model = InstalledModel(id: "fixture-qwen38", name: "qwen38-flash-next-lily-q4-xl-0f94842e",
+        path: "/private/fixture-qwen38", apiID: "owner/Qwen3.8-Flash-Next-lily-q4-xl", display: display)
+    engine.models = [model]
+    engine.loadedID = model.id
+    engine.state = "ready"
+    let host = NSHostingView(rootView: RunningModelLabel(engine: engine).font(.caption))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 350, height: 720),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    defer { window.close(); engine.desktopConnections.shutdown() }
+    host.layoutSubtreeIfNeeded()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+    host.layoutSubtreeIfNeeded()
+
+    let naturalWidth = host.fittingSize.width
+    // The 350-point menu leaves 256 points after padding, artwork and spacing.
+    return model.displayName == name && naturalWidth > 0 && naturalWidth <= 256
+}
+
 extension EngineController {
     func configureCatalogWindowFixture(_ report: [String: Any]) {
         catalog = FamilyModelCatalog(report)
@@ -367,6 +403,7 @@ struct WindowChecks {
         case "advanced-options": exit(AppDelegate.exerciseAdvancedOptionsLayouts() ? 0 : 1)
         case "catalog-picker": exit(exerciseCatalogPickerLayouts() ? 0 : 1)
         case "catalog-family": exit(exerciseCatalogFamilyLayout() ? 0 : 1)
+        case "running-model-name": exit(exerciseRunningModelNameLayout() ? 0 : 1)
         default: exit(2)
         }
     }
@@ -578,6 +615,9 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_qwen_family_content_stays_inside_manage_models_padding(self):
         self.run_check("catalog-family")
+
+    def test_menu_running_model_name_fits_without_variant_metadata(self):
+        self.run_check("running-model-name")
 
 
 if __name__ == "__main__":
