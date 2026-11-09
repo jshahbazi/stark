@@ -36,6 +36,8 @@ pub struct ParameterStorageStatistics {
     pub resident_bytes: usize,
     pub peak_loading_bytes: usize,
     pub shared_matrix_bytes: usize,
+    /// Subset of shared_matrix_bytes, not an additional allocation.
+    pub shared_expert_matrix_bytes: usize,
     pub representation_copy_bytes: usize,
     pub unshared_parameter_bytes: usize,
 }
@@ -161,14 +163,20 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
     pub(crate) fn storage_statistics(&self) -> ParameterStorageStatistics {
         let mut cache_only = 0usize;
         let mut shared = 0usize;
+        let mut shared_experts = 0usize;
         if let Some(cache) = &self.shared_weights {
-            for buffer in cache.borrow().values() {
+            for (name, buffer) in cache.borrow().iter() {
                 use crate::backends::common::Buffer;
                 let bytes = buffer.size();
                 match Arc::strong_count(buffer) {
                     1 => cache_only += bytes,
                     2 => {},
-                    _ => shared += bytes,
+                    _ => {
+                        shared += bytes;
+                        if name.contains(".mlp.experts.") {
+                            shared_experts += bytes;
+                        }
+                    },
                 }
             }
         }
@@ -178,6 +186,7 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
             resident_bytes: allocated + copies - cache_only,
             peak_loading_bytes: allocated + copies,
             shared_matrix_bytes: shared,
+            shared_expert_matrix_bytes: shared_experts,
             representation_copy_bytes: copies,
             unshared_parameter_bytes: allocated - cache_only - shared,
         }
