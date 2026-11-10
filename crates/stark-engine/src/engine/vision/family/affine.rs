@@ -56,7 +56,7 @@ pub(super) fn validate_header(
         let Some(prefix) = name.strip_suffix(".weights") else {
             continue;
         };
-        if *dtype != "BF16" || !prefix.starts_with("decoder.") {
+        if *dtype != "BF16" || !(prefix.starts_with("decoder.") || prefix.starts_with("mtp.")) {
             continue;
         }
         let layout = if matches!(prefix, "decoder.embedding.embedding" | "decoder.embedding.input_embedding") {

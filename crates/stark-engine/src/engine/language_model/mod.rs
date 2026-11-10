@@ -166,10 +166,18 @@ impl<B: Backend> Engine<B> {
                 if mtp.model_dim != config.decoder_config.transformer_config.model_dim {
                     return Err(crate::encodable_block::qwen_mtp::QwenMtpError::Invalid);
                 }
+                let head_tree = weight_loader.tree().subtree("mtp");
+                let head_tree = if mtp.source_bf16_geometry(&config.decoder_config.transformer_config)
+                    && weight_loader.qwen_target_and_head_full_bf16()
+                {
+                    head_tree.with_numerical_profile(crate::parameters::NumericalProfile::QwenMtpSourceBF16)
+                } else {
+                    head_tree
+                };
                 crate::encodable_block::qwen_mtp::QwenMtp::new(
                     mtp,
                     config.decoder_config.transformer_config.layer_configs.len(),
-                    &weight_loader.tree().subtree("mtp"),
+                    &head_tree,
                     self.context.as_ref(),
                 )
             })
@@ -525,7 +533,19 @@ impl<B: Backend> LanguageModel<B> {
         additional_generation_bytes(estimate, credit)
     }
 
-    pub(crate) fn generation_memory_bytes_with_text_prefix(
+    /// Inventory the ordinary target stream without allocating predictor state.
+    /// Loaded predictor weights remain resident and are not request workspace.
+    pub fn ordinary_text_generation_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        self.generation_memory_bytes_for_request(input_tokens, context_tokens, max_new_tokens, false)
+    }
+
+    /// Include the snapshot retained by an ordinary text stream.
+    pub fn generation_memory_bytes_with_text_prefix(
         &self,
         input_tokens: u32,
         context_tokens: u32,
@@ -540,7 +560,7 @@ impl<B: Backend> LanguageModel<B> {
         bytes.checked_add(snapshot)
     }
 
-    pub(crate) fn generation_memory_bytes_reusing_text_prefix(
+    pub fn generation_memory_bytes_reusing_text_prefix(
         &self,
         state: &state::LanguageModelState<B>,
         input_tokens: u32,

@@ -17,6 +17,7 @@ use crate::backends::common::InvalidInput;
 
 mod affine;
 mod dynamic;
+mod mtp;
 
 pub(super) const PROFILE: &str = "qwen35-dense-bf16-merged-v1";
 pub(super) const VERSION: u32 = 1;
@@ -296,7 +297,7 @@ pub(super) fn admit(
     {
         return Err(invalid());
     }
-    let (tower, vocab, tensors) = match profile {
+    let (tower, vocab, mut tensors) = match profile {
         FamilyProfile::FixedV1 => {
             if config["decoder_config"] != decoder_profile() || !vision_semantics(&contract["vision_config"]) {
                 return Err(invalid());
@@ -327,6 +328,7 @@ pub(super) fn admit(
             (geometry.tower, geometry.vocab, geometry.tensors)
         },
     };
+    mtp::extend_contract(config, profile, &mut tensors)?;
     for name in COMPONENTS {
         let digest = contract["component_hashes"][name].as_str().ok_or_else(invalid)?;
         if !valid_hash(digest) || hashes.get(name).map(String::as_str) != Some(digest) {
@@ -548,7 +550,7 @@ fn validate_tensor_header_with_specs(
         if let Some(prefix) = name.strip_suffix(".weights")
             && supplied_specs.is_none()
             && *dtype == "BF16"
-            && prefix.starts_with("decoder.")
+            && (prefix.starts_with("decoder.") || prefix.starts_with("mtp."))
         {
             specs.insert(format!("{prefix}.spec"), json!({"type":"FullPrecisionSpec","layout":if matches!(prefix, "decoder.embedding.embedding" | "decoder.embedding.input_embedding") {"input_output"} else {"output_input"}}));
         }
@@ -644,7 +646,7 @@ mod tests {
             );
             header.insert(name.clone(), json!({"dtype":dtype,"shape":shape,"data_offsets":[offset,offset+size]}));
             if let Some(prefix) = name.strip_suffix(".weights") {
-                if *dtype == "BF16" && prefix.starts_with("decoder.") {
+                if *dtype == "BF16" && (prefix.starts_with("decoder.") || prefix.starts_with("mtp.")) {
                     metadata.insert(format!("{prefix}.spec"), Value::String(json!({"type":"FullPrecisionSpec","layout":if matches!(prefix, "decoder.embedding.embedding" | "decoder.embedding.input_embedding") {"input_output"} else {"output_input"}}).to_string()));
                 }
             }
@@ -673,6 +675,33 @@ mod tests {
         assert!(validate_header(&changed, bytes + 8, 8).is_err());
         assert!(validate_header(&header, bytes + 7, 8).is_err());
         assert!(validate_header(&header, bytes + 9, 8).is_err());
+    }
+
+    #[stark_test]
+    fn bf16_header_binds_specs_for_every_admitted_predictor_matrix() {
+        let mut tensors = expected_tensors();
+        for (name, shape) in [
+            ("fusion.weights.weights", vec![1024, 2048]),
+            ("transformer.layers.0.mixer.qkvg_projection.weights.weights", vec![5120, 1024]),
+            ("transformer.layers.0.mixer.out_projection.weights.weights", vec![1024, 2048]),
+            ("transformer.layers.0.mlp.up_projection.weights.weights", vec![7168, 1024]),
+            ("transformer.layers.0.mlp.down_projection.weights.weights", vec![1024, 3584]),
+        ] {
+            tensors.insert(format!("mtp.{name}"), ("BF16", shape));
+        }
+        let (header, bytes) = valid_header_for(&tensors);
+        assert!(validate_tensor_header(&header, bytes + 8, 8, &tensors).is_ok());
+        let mut missing = header.clone();
+        missing["__metadata__"].as_object_mut().unwrap().remove("mtp.fusion.weights.spec");
+        assert!(validate_tensor_header(&missing, bytes + 8, 8, &tensors).is_err());
+        let mut changed = header.clone();
+        changed["__metadata__"]["mtp.fusion.weights.spec"] =
+            json!("{\"type\":\"MLXSpec\",\"bits\":4,\"group_size\":64,\"layout\":\"output_input\"}");
+        assert!(validate_tensor_header(&changed, bytes + 8, 8, &tensors).is_err());
+        let mut extra = header;
+        extra["__metadata__"]["mtp.unreviewed.weights.spec"] =
+            json!("{\"type\":\"FullPrecisionSpec\",\"layout\":\"output_input\"}");
+        assert!(validate_tensor_header(&extra, bytes + 8, 8, &tensors).is_err());
     }
 
     #[stark_test]

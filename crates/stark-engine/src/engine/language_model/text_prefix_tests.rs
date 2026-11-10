@@ -120,7 +120,7 @@ fn continuation<B: Backend>(
                 suffix_repetition_length: None,
             };
         }
-        let mut stream = model.stream(input, state, options).unwrap();
+        let mut stream = model.stream_text(input, state, options).unwrap();
         assert_eq!(stream.metrics().num_tokens_prefilled, expected_prefill);
         for _ in 0..4 {
             output.push(stream.next().unwrap().unwrap());

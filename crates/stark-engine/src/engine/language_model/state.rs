@@ -45,6 +45,8 @@ pub struct LanguageModelState<B: Backend> {
     pub(crate) vision_prefill_logits_readback: Option<B::GlobalBuffer>,
     #[cfg(test)]
     pub(crate) vision_prefill_layer_readbacks: Option<(usize, Box<[B::GlobalBuffer]>)>,
+    #[cfg(test)]
+    pub(crate) validation_fail_after_completed_prefill: Option<usize>,
 }
 
 impl<B: Backend> LanguageModelState<B> {
@@ -84,7 +86,7 @@ pub struct LanguageModelRewindStateError;
 /// Guard rejection leaves the loaded instance usable. A failure after entering
 /// restoration also fences the public vision wrapper's loaded instance.
 #[derive(Debug)]
-pub(crate) enum TextPrefixRestoreError {
+pub enum TextPrefixRestoreError {
     Invalid,
     RestoreFailed,
 }
@@ -152,6 +154,8 @@ impl<B: Backend> LanguageModel<B> {
             vision_prefill_logits_readback: None,
             #[cfg(test)]
             vision_prefill_layer_readbacks: None,
+            #[cfg(test)]
+            validation_fail_after_completed_prefill: None,
         })
     }
 
@@ -166,7 +170,7 @@ impl<B: Backend> LanguageModel<B> {
 
     /// Arm one non-final prefill chunk. The stream checks that the requested
     /// boundary is reached before sampling and publishes only completed copies.
-    pub(crate) fn prepare_text_prefix_capture(
+    pub fn prepare_text_prefix_capture(
         &self,
         state: &mut LanguageModelState<B>,
         position: usize,
@@ -237,7 +241,9 @@ impl<B: Backend> LanguageModel<B> {
         Ok(())
     }
 
-    pub(crate) fn restore_text_prefix(
+    /// Restore this loaded model's completed, chunk-aligned text snapshot.
+    /// A failed backend restoration invalidates the state; callers must drop it.
+    pub fn restore_text_prefix(
         &self,
         state: &mut LanguageModelState<B>,
         position: usize,

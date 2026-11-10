@@ -2,7 +2,7 @@
 use half::bf16;
 
 use super::*;
-use crate::backends::common::{BufferRef, Context};
+use crate::backends::common::{Buffer, BufferRef, Context};
 
 impl<B: Backend> WeightMatrix<B> {
     /// Drop low integer bits within each existing affine group. Midpoint bias
@@ -31,12 +31,12 @@ impl<B: Backend> WeightMatrix<B> {
         {
             return Ok(None);
         }
-        let source = (&self.values).as_slice::<u8>();
+        let source = self.values.as_ref().as_slice::<u8>();
         let expected = output_dim as usize * input_dim as usize * bits as usize / 8;
         let parameter_count = (input_dim / 64) as usize * output_dim.next_multiple_of(4) as usize;
         if source.len() != expected
-            || (&q.scales).size() != parameter_count * 2
-            || source_biases.size() != parameter_count * 2
+            || q.scales.as_ref().size() != parameter_count * 2
+            || source_biases.as_ref().size() != parameter_count * 2
         {
             return Ok(None);
         }
@@ -73,8 +73,8 @@ impl<B: Backend> WeightMatrix<B> {
             .as_slice_mut::<bf16>()
             .iter_mut()
             .zip((&mut biases).as_slice_mut::<bf16>())
-            .zip((&q.scales).as_slice::<bf16>())
-            .zip(source_biases.as_slice::<bf16>())
+            .zip(q.scales.as_ref().as_slice::<bf16>())
+            .zip(source_biases.as_ref().as_slice::<bf16>())
         {
             let scale = f32::from(scale);
             let bias = f32::from(bias);
@@ -87,11 +87,13 @@ impl<B: Backend> WeightMatrix<B> {
                 return Ok(None);
             }
         }
+        self.representation_copy_bytes.fetch_add(values.size() + scales.size() + biases.size(), Ordering::Relaxed);
         Ok(Some(Self {
-            values,
+            values: Arc::new(values),
+            representation_copy_bytes: self.representation_copy_bytes.clone(),
             quantized: Some(Quantized {
-                scales,
-                correction: QuantizedCorrection::Biases(biases),
+                scales: Arc::new(scales),
+                correction: QuantizedCorrection::Biases(Arc::new(biases)),
                 params: q.params,
                 info: QuantizationInfo {
                     mode: if coarse_bits == 3 {
@@ -116,6 +118,39 @@ mod tests {
     use crate::{backends::cpu::Cpu, tests::helpers::create_buffer_with_data};
 
     #[stark_test]
+    fn shared_raw_codes_are_isolated_from_a8_sign_conversion() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        for mode in [QuantizationMode::U8, QuantizationMode::I8, QuantizationMode::U4] {
+            let raw = Arc::new(create_buffer_with_data::<Cpu, u8>(&context, &[0, 127, 128, 255]));
+            let mut matrix = WeightMatrix::<Cpu> {
+                values: raw.clone(),
+                representation_copy_bytes: Arc::new(AtomicUsize::new(0)),
+                quantized: Some(Quantized {
+                    scales: Arc::new(create_buffer_with_data::<Cpu, bf16>(&context, &[bf16::ONE; 4])),
+                    correction: QuantizedCorrection::Symmetric,
+                    params: QuantParams::new(QuantParamsLayout::GroupOutput, 4, 1),
+                    info: QuantizationInfo {
+                        mode,
+                        method: QuantizationMethod::ScaleSymmetric,
+                        group_size: 64,
+                    },
+                    signed_codes: false,
+                }),
+            };
+            assert!(matrix.try_prepare_a8_storage(&context).unwrap());
+            assert_eq!(raw.as_ref().as_slice::<u8>(), &[0, 127, 128, 255]);
+            if mode == QuantizationMode::U8 {
+                assert!(!Arc::ptr_eq(&raw, &matrix.values));
+                assert_eq!(matrix.values.as_ref().as_slice::<u8>(), &[128, 255, 0, 127]);
+                assert_eq!(matrix.representation_copy_bytes.load(Ordering::Relaxed), 4);
+            } else {
+                assert!(Arc::ptr_eq(&raw, &matrix.values));
+                assert_eq!(matrix.representation_copy_bytes.load(Ordering::Relaxed), 0);
+            }
+        }
+    }
+
+    #[stark_test]
     fn coarse_head_uses_midpoint_proposal_weights_without_mutating_target() {
         let context = <Cpu as Backend>::Context::new().unwrap();
         for (mode, bits) in [(QuantizationMode::U5, 5), (QuantizationMode::U6, 6), (QuantizationMode::U8, 8)] {
@@ -129,13 +164,14 @@ mod tests {
                 }
             }
             let matrix = WeightMatrix::<Cpu> {
-                values: create_buffer_with_data::<Cpu, u8>(&context, &packed),
+                values: Arc::new(create_buffer_with_data::<Cpu, u8>(&context, &packed)),
+                representation_copy_bytes: Arc::new(AtomicUsize::new(0)),
                 quantized: Some(Quantized {
-                    scales: create_buffer_with_data::<Cpu, bf16>(&context, &[bf16::from_f32(0.125); 8]),
-                    correction: QuantizedCorrection::Biases(create_buffer_with_data::<Cpu, bf16>(
+                    scales: Arc::new(create_buffer_with_data::<Cpu, bf16>(&context, &[bf16::from_f32(0.125); 8])),
+                    correction: QuantizedCorrection::Biases(Arc::new(create_buffer_with_data::<Cpu, bf16>(
                         &context,
                         &[bf16::from_f32(-0.25); 8],
-                    )),
+                    ))),
                     params: QuantParams::new(QuantParamsLayout::GroupOutput, 4, 2),
                     info: QuantizationInfo {
                         mode,
@@ -147,7 +183,7 @@ mod tests {
             };
             for coarse_bits in [3, 4] {
                 let coarse = matrix.coarse_affine(&context, 4, 128, coarse_bits).unwrap().unwrap();
-                let actual = (&coarse.values).as_slice::<u8>();
+                let actual = coarse.values.as_ref().as_slice::<u8>();
                 for (index, &code) in codes.iter().enumerate() {
                     let bit = index * coarse_bits as usize;
                     let mut word = u16::from(actual[bit / 8]) >> (bit % 8);
@@ -158,7 +194,12 @@ mod tests {
                 }
                 let factor = (1 << (bits - coarse_bits as usize)) as f32;
                 assert!(
-                    (&coarse.quantized.as_ref().unwrap().scales)
+                    coarse
+                        .quantized
+                        .as_ref()
+                        .unwrap()
+                        .scales
+                        .as_ref()
                         .as_slice::<bf16>()
                         .iter()
                         .all(|&s| f32::from(s) == 0.125 * factor)
@@ -171,7 +212,7 @@ mod tests {
                         .iter()
                         .all(|&b| f32::from(b) == -0.25 + 0.125 * (factor - 1.0) * 0.5)
                 );
-                assert_eq!((&matrix.values).as_slice::<u8>(), packed);
+                assert_eq!(matrix.values.as_ref().as_slice::<u8>(), packed);
             }
         }
     }

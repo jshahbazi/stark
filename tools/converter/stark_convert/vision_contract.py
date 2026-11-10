@@ -79,6 +79,26 @@ def validate_vision_source(snapshot: Any, dtype: str) -> dict:
     return validate_family_source(snapshot, dtype)
 
 
+def vision_output_contract(contract: dict, mtp_config: dict | None) -> dict:
+    """Version a retained pinned predictor separately from the frozen headless tuple."""
+    if mtp_config is None or contract["schema_version"] != 2:
+        return contract
+    if (
+        contract.get("type") != "Qwen35VisionLanguageArtifact"
+        or contract.get("dtype") != "bfloat16"
+        or contract["source"].get("repo") != REPO
+        or contract["source"].get("revision") != REVISION
+    ):
+        _fail()
+    from .vision_family import FAMILY_PROFILE, FAMILY_VERSION
+
+    return {
+        **contract,
+        "schema_version": 3,
+        "family": {"profile": FAMILY_PROFILE, "version": FAMILY_VERSION},
+    }
+
+
 def _validate_pinned_vision_source(snapshot: Any, dtype: str) -> dict:
     """Validate the pinned metadata and return a private, versioned contract."""
     if dtype != "bfloat16" or snapshot.repo != REPO or snapshot.revision != REVISION:

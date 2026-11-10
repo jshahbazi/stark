@@ -41,6 +41,11 @@ Do not repair historical identities using the current filesystem. Record missing
 
 ## Workload and controls
 
+- Default install/load mode and actual image capability; image N/A source evidence when applicable:
+- Cache exactness on the default image-loaded worker; fresh/reference outputs, reused counts and complete restoration scope:
+- Matched text-only versus image-loaded performance arms with MTP off and each supported text MTP policy; preregistered regression bound and baseline variability:
+- Source MTP head/config inventory, preservation through conversion/loading, actual drafts and explicit absence/unsupported disposition where applicable:
+- Text-MTP/cache → image with zero drafts/proposals/reuse → text-MTP/cache recovery; failure/cancellation coverage:
 - Task/mode and privacy-preserving corpus/fixture identifier/hash:
 - Exact input/context/output budgets; sampled versus emitted/useful-token definitions:
 - Sampling, seeds, stop rules, MTP/draft depth and other state-affecting options:

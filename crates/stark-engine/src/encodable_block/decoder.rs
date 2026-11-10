@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput},
-    config::decoder::DecoderConfig,
+    config::{decoder::DecoderConfig, mlp::AnyMLPConfig},
     data_type::DataType,
     encodable_block::{
         batch_topology::BatchTopology,
@@ -43,6 +43,7 @@ pub struct Decoder<B: Backend> {
     scalar_image_embeddings: bool,
     bidirectional_image_attention: bool,
     separate_prefill_last_token: bool,
+    qwen_routed_prefill: bool,
 }
 
 /// A validated chunk of projected image rows. No public transport accepts this.
@@ -163,7 +164,36 @@ impl<B: Backend> Decoder<B> {
             scalar_image_embeddings: config.scalar_image_embeddings,
             bidirectional_image_attention: config.bidirectional_image_attention,
             separate_prefill_last_token: config.separate_prefill_last_token,
+            // This typed variant exclusively constructs QwenMoe in Mlp::new.
+            // Gemma4MoeConfig and dense targets retain their existing schedule.
+            qwen_routed_prefill: config
+                .transformer_config
+                .layer_configs
+                .iter()
+                .any(|layer| matches!(&layer.mlp_config, AnyMLPConfig::MixtureOfExpertsConfig(_))),
         })
+    }
+
+    pub(crate) fn ordinary_prefill_execution_cap(&self) -> Option<usize> {
+        // A fixed model policy, never selected from current free memory. This
+        // keeps full chunks on the existing >=256-token chunked GDN path.
+        self.qwen_routed_prefill.then_some(256)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_set_qwen_routed_prefill(
+        &mut self,
+        enabled: bool,
+    ) {
+        self.qwen_routed_prefill = enabled;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_set_separate_prefill_last_token(
+        &mut self,
+        enabled: bool,
+    ) {
+        self.separate_prefill_last_token = enabled;
     }
 
     pub fn speculation_supported(&self) -> bool {

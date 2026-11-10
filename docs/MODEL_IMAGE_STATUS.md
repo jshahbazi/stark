@@ -2,6 +2,11 @@
 
 Reviewed 2026-11-08 against main `2c1e75b1` and the open [text-prefix PR #110](https://github.com/jshahbazi/stark/pull/110). Saved on `codex/catalog-image-capability` as requested. This is a source/evidence audit; no new models were run for this inventory. It does not describe the capabilities of an installed release.
 
+The [default-image parity worklist](IMAGE_DEFAULT_PARITY_PLAN.md) turns this
+inventory into current implementation/qualification tasks, includes the later
+Lily text-MTP evidence on PR #112, and defines the standing requirements for
+future models. The source-bound snapshot below retains its original scope.
+
 The scope is all 18 generic converter families plus the two additional native families, their distinct image paths, and all 120 pinned repository entries. Live Hugging Face discovery can return more compatible checkpoints; those cannot be exhaustively enumerated and need individual preflight and validation.
 
 **Added** means implementation exists. **Verified** names the actual evidence. **Qualify** means run the missing checks; it does not imply a known numerical defect. **Implement/fix** identifies missing code or metadata. A text-only artifact can come from an image-capable source. Its format and preparation route determine what Stark can load.
