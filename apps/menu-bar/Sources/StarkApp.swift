@@ -3193,6 +3193,10 @@ struct AdvancedOptionsView: View {
         _mtpEnabled = State(initialValue: engine.mtpEnabled)
     }
 
+    private var usesRequiredReasoning: Bool {
+        engine.loadedID == modelID && engine.activeModel?.display?.familyID == "glm5_next"
+    }
+
     private var validation: String? {
         guard let count = Int(context), count >= 2, count <= engine.contextLimit else {
             return engine.contextCapacityKnown
@@ -3241,8 +3245,10 @@ struct AdvancedOptionsView: View {
                 Text("This model does not declare a context maximum. Auto sizes execution from the model's state requirements and available memory.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Toggle("Thinking mode", isOn: $thinking)
-            Text("Enables reasoning when the model's chat template supports it.")
+            Toggle(usesRequiredReasoning ? "Maximum reasoning effort" : "Thinking mode", isOn: $thinking)
+            Text(usesRequiredReasoning
+                 ? "GLM-5.3 Flash always reasons. Off selects Low effort; on selects Max effort."
+                 : "Enables reasoning when the model supports a thinking toggle.")
                 .font(.caption).foregroundStyle(.secondary)
             if engine.supportsMTP && engine.loadedID == modelID {
                 Toggle("Multi-token prediction (MTP)", isOn: $mtpEnabled)
