@@ -16,9 +16,11 @@ qualification; the ledger is not a completed historical backfill.
 [startup/Playground record](2026-11-09-lily-image-startup.md) preserves a canceled
 baseline, a functionally passing but latency-rejected full-scan candidate, and
 the subsequent unchanged-file digest reuse. The installed follow-up reached
-native vision readiness in 11.875 and 10.478 seconds; full-app timing is pending
-unlock. These unscreened native observations exclude app local checks and UI
-publication. This does not supersede generation-throughput studies.
+native vision readiness in 11.875 and 10.478 seconds; the final full-app routine
+restart was still loading at 5.098 seconds and Ready by 14.774 seconds. These
+unscreened observations have different boundaries. Playground attachment,
+bounded shape recognition and both UI-message removals passed. This does not
+supersede generation-throughput studies or establish an exact full-app duration.
 
 **Retained Lily vision-loaded text MTP (2026-11-08).** A
 [short paired check](2026-11-08-lily-vision-text-mtp.md) observes 104.71 tok/s

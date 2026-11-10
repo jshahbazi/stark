@@ -12,10 +12,11 @@ before registering this record. See the [attempt ledger](../model-experiments/RE
 | Baseline attempt | `20261109-LILY-STARTUP-01`: installed 0.18.9, exact source commit unavailable |
 | Candidate attempt | `20261109-LILY-STARTUP-02`: source `b0c0d9fb` plus this branch's retained-image hashing patch |
 | Follow-up attempt | `20261109-LILY-STARTUP-03`: reuse validated file digests and remove image-check UI messages |
+| Status-copy follow-up | `20261109-LILY-STARTUP-04`: remove the remaining backend checking status, with attempt 03's generator unchanged |
 | Kind / scope | Artifact compatibility, component correctness, startup and Playground lifecycle |
-| State / result | Attempt 02 passed image attachment and shape recognition; its startup latency was rejected. Attempt 03 installed; two native vision startups passed, full UI timing pending |
+| State / result | Attempt 02 passed image attachment and shape recognition; its startup latency was rejected. Attempt 03 passed native startups; attempt 04 passed final Playground image input and both UI-copy removals |
 | Acceptance | Reuse existing shards without a download, preserve every hash/admission check, load successfully, enable attachment and process a synthetic image in the Playground |
-| Decision / disposition | Attempt 02 superseded for latency; attempt 03 awaiting model-bound validation, adopted on branch and installed locally, not merged or released |
+| Decision / disposition | Attempt 02 superseded for latency; attempts 03/04 adopted on branch and installed with bounded functional validation. Historical ~8 s text startup is not matched or qualified here. Not merged or released |
 
 ## Hypothesis and change
 
@@ -107,8 +108,13 @@ copying weights. A private backup of the pre-upgrade metadata was retained.
 | Attempt 03 native controls | Four targeted engine tests passed: SHA order/vectors, corrupt/missing shards, private/manifest-bound cache, same-size mutation with restored mtime | Cache must invalidate on ctime changes |
 | Attempt 03 Python / UI controller controls | 25 preparation tests and 139 controller cases passed | Preparation/cache publication and retained capability/event handling |
 | Attempt 03 cache seeding | Existing 55 shards hashed in 11.340 seconds; no model download/copy | One-time preparation; excluded from ordinary startup boundary |
-| Attempt 03 UI activation | Installed signed app; computer-use tool reported locked Mac | Timing/visual verification pending unlock |
+| Attempt 03 initial UI activation | Installed signed app; computer-use tool reported locked Mac | Deferred until user unlocked; subsequently completed |
 | Attempt 03 native startup | Two serial installed-worker starts advertised readiness and image input; no generation requests sent | Native lifecycle passed; app local checks excluded |
+| Attempt 03 initial unlocked UI check | Persistent note absent; ordinary-load callback still showed the image-check message at 13.141 s; Ready first observed at 31.680 s | Copy regression found; first-start checks and coarse UI observation prevent treating this as routine latency |
+| Attempt 04 status-copy follow-up | Ordinary-load callback and installation status in `desktop.py` now use the generic loading message | Source change retains capability/check gates; signed app rebuilt and installed |
+| Final signed build first start | Loading at 5.122 s; Ready observed at 20.329 s; checking message absent | First-start local checks belong to this signed executable; not the routine restart boundary |
+| Final signed build routine restart | Loading at 5.098 s; Ready observed at 14.774 s; checking message absent | UI-observed completion lies in (5.098, 14.774] s; no exact duration inferred |
+| Final Playground image control | Button enabled, preview accepted, completed answer correctly identified both shapes, colors and positions; both requested messages absent | Bounded end-to-end visual smoke passed; test conversation left open |
 
 ## Performance, installation and limits
 
@@ -117,7 +123,7 @@ copying weights. A private backup of the pre-upgrade metadata was retained.
 | Complete native/app startup | Canceled; not measured | Attempt 02 Ready first observed at 31.753 s; still loading at 5.163 s | Single UI observation; rejected latency, no exact completion time |
 | Playground attachment and image request | Disabled for the text-mode artifact | Attempt 02 passed shape/color/location smoke | Functional execution only |
 | Attempt 03 native startup | Historical user estimate ~8 s, not reproduced here | 11.875 s, 10.478 s | Spawn-to-native-readiness, two observations, no quiet/cold-cache screen; app checks and UI publication excluded |
-| Attempt 03 complete Playground startup | Not measured on matching baseline | Pending unlock | Target: return toward prior startup latency |
+| Attempt 04 complete Playground routine startup | Not measured on matching baseline | Ready observed by 14.774 s, still loading at 5.098 s | Actual completion interval, not an exact 14.774 s duration; coarse unscreened UI observation |
 | Peak memory / generation throughput | Not measured | Not measured | No inference-performance claim |
 
 The attempt 02 app used Developer ID hardened signing with a secure timestamp,
@@ -125,8 +131,7 @@ build `20261110003125478391`; it was a development build based on dirty source
 `b0c0d9fb3eb2754879c69bb7883835638201a0fc`. The build manifest preserves its
 per-file source and executable hashes privately. This is not a release.
 
-Append attempt 03 installed hashes, observed startup boundaries and the final
-functional result after execution. No PR was requested.
+No PR was requested. The final model remains loaded in the Playground.
 
 Attempt 03 is signed with the same Developer ID team, development build
 `20261110010236089137`. Its private app manifest binds the dirty source tree and
@@ -142,3 +147,34 @@ Each run used the installed signed generator with the same model path,
 closed stdin and exited after receiving readiness, without submitting a prompt.
 The two native timing observations are not full-app timings or a controlled
 old/new speed comparison.
+
+## Attempt 04: final signed installation and verification
+
+The status-copy follow-up is based on `cc9aefc5ed73529953b5a74b264f305120372aa5`
+plus the two generic backend status strings. The final signed development app
+has build `20261110012314113986`; its manifest SHA-256 is
+`4098b5baf41290efe0c10d00e81254721a24fd4db113f2d5f18b5b30788670a8`.
+The unsigned generator is unchanged from attempt 03. Re-signing gives the
+installed executable SHA-256
+`8c3e51c906f686aecd84250c51b9a8a9d964f6339ce685236a564f52923206b6`.
+The private per-file source hashes bind the exact packaged code; documentation
+changes after packaging do not alter that executable.
+
+The matching local image-check receipt has SHA-256
+`304a353f1826be96c207577683534403aabc7a64f94ec3671ed6e81dd369212c`.
+All six checks passed: text/image generation, image token accounting,
+recoverable image error, fresh image replay and staging cleanup. The current
+private shard cache has SHA-256
+`f1c37c733289588bdff4f578a1a137fcd7694bf0404969621f037a7f5432671f`;
+all 55 digests and filesystem signatures still match the artifact. These are
+functional and file-identity results, not full decoder numerical parity.
+
+The final Playground test used the same private fixture and checked six
+shape/color/location properties, all passing. The completed response was first
+observed 9.818 seconds after send; that is an observation bound, not a qualified
+image-generation latency measurement. The persistent verification note and
+the checking status were absent. The full startup observation is materially
+coarser than the native readiness timings and does not demonstrate a return to
+the user's historical approximately eight-second text startup. Source review
+found no further full-payload scan on a valid cache hit; vision tower loading
+and tensor admission remain part of image-capable startup.
