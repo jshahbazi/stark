@@ -263,8 +263,14 @@ Native-source selection requires `model_type=qwen4_exp` and either
 4-bit, group-64 affine quantization plus `ngram_table.bin` with 4-bit,
 group-32 storage. The latter admits
 `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` at revision
-`788c07a8725642bccf13a0a3b8a21954ab84b4f2`. Native tensor admission still
-validates the complete stored layout. The typed `Qwen38LanguageModelConfig`
+`788c07a8725642bccf13a0a3b8a21954ab84b4f2`. The model catalog and
+`stark-convert --metadata-profile hf-generic` also prepare compatible
+external-table exports for native text generation. Preparation binds the
+selected revision and source hashes, preserves indexed shards and the separate
+n-gram table, and uses the source tokenizer and template. This route covers text
+generation. Retained vision admission has its own pinned artifact checks.
+Native tensor admission still validates the complete stored layout at load.
+The typed `Qwen38LanguageModelConfig`
 route uses the same specialized runtime through its Uzu storage adapter. Other
 Qwen exports retain the F32 graph below.
 Converted group-major affine parameters are restored once at load time with

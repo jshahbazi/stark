@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
+from . import qwen38_external
 from .model_support import (
     check_vision_processing_metadata,
     normalize_architecture,
@@ -20,6 +21,7 @@ from .model_support import (
 )
 from .registry import get_model, models
 from .sources import huggingface_repository
+from .streaming import ConversionError, UnsupportedConversion
 from .vision_contract import REPO as EXACT_VISION_REPO
 from .vision_contract import REVISION as EXACT_VISION_REVISION
 
@@ -882,12 +884,25 @@ def family_catalog(
                     # cannot silently replace the reviewed source or fall back
                     # to a text-only generic conversion.
                     return dict(native_items[repo])
-                quantization = _quantization(config, info, entry, family=family)
+                external_qwen = qwen38_external.is_external_affine(config)
+                quantization = (
+                    qwen38_external.QUANTIZATION
+                    if external_qwen
+                    else _quantization(config, info, entry, family=family)
+                )
                 if quantization is None:
                     return None
                 selected = _selected_weights(names, lambda filename, maximum: read(repo, filename, revision, maximum))
                 if selected is None:
                     return None
+                if external_qwen:
+                    if not qwen38_external.supported_shards(selected, qwen38_external.INDEX in names):
+                        return None
+                    try:
+                        qwen38_external.external_files(repo, names)
+                    except (ConversionError, UnsupportedConversion):
+                        return None
+                    selected = [*selected, qwen38_external.NGRAM_TABLE]
                 weight_bytes = _weight_bytes(selected, sizes)
                 modes = [base_mode]
                 if family in {"qwen3_5", "qwen3_5_moe", "gemma3", "gemma4_text"}:
