@@ -12,6 +12,15 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Gemma 4 warmed cache correction (2026-11-09).** Alternating controls expose
+full-prompt replay after restoration in the original worker. The suffix fix
+passes nonperiodic near-capacity/image controls and improves measured hit
+first-token latency by 43.2–50.2% on the named retained E2B/E4B workloads.
+See the [corrected source-bound controls](2026-11-09-gemma4-warmed-cache.md).
+The [earlier short image-loading measurements](2026-11-09-gemma4-image-text-parity.md)
+retain their own scope; their original worker cache qualification is withdrawn.
+Gemma assistant components remain outside serving qualification.
+
 **Remaining Qwen headless image-loaded text controls (2026-11-09).**
 The [bounded comparison](2026-11-09-qwen-remaining-image-text-parity.md)
 extends immutable shared fast text storage to BF16 0.8B, affine 0.8B and affine

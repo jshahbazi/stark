@@ -635,7 +635,37 @@ extension EngineController {
                 "max_context_tokens": 8192, "context_tokens": 8192, "max_output_tokens": 4096,
                 "max_new_tokens": 512, "mtp": capability, "mtp_enabled": true]
             engine.apply(ready)
-            guard engine.supportsMTP, engine.mtpEnabled else { return false }
+            guard engine.supportsMTP, engine.mtpEnabled, engine.defaultMTPEnabled else { return false }
+            var gemmaReady = ready
+            var gemmaCapability = capability
+            gemmaCapability["verification"] = "gemma4-e2b-target-verify-v1"
+            gemmaReady["mtp"] = gemmaCapability; gemmaReady["mtp_enabled"] = false
+            engine.apply(gemmaReady)
+            guard engine.supportsMTP, !engine.mtpEnabled, !engine.defaultMTPEnabled else { return false }
+            engine.apply(ready)
+            guard engine.defaultMTPEnabled else { return false }
+            let originalModels = engine.models
+            for (group, family, precision, enabled) in [
+                ("repo:google/gemma-4-E2B-it", "gemma4_text", "BF16", false),
+                ("repo:Qwen/Qwen3.5-0.8B", "qwen3_5", "BF16", false),
+                ("repo:Qwen/Qwen3.5-0.8B", "qwen3_5", "4-bit", true),
+                ("repo:Qwen/Qwen3.5-4B", "qwen3_5", "BF16", true),
+            ] {
+                guard let display = InstalledModelDisplay(["schema_version": 1, "group_id": group,
+                    "group_name": "Fixture", "family_id": family, "quantization": precision]) else { return false }
+                engine.models = [InstalledModel(id: "fixture-model", name: "Fixture", path: "/fixture",
+                    apiID: "fixture", display: display)]
+                guard engine.defaultMTPEnabled == enabled else { return false }
+            }
+            guard let unverifiedBF16 = InstalledModelDisplay(["schema_version": 1,
+                "group_id": "installed:fixture-model", "group_name": "Fixture", "quantization": "BF16"]) else { return false }
+            engine.models = [InstalledModel(id: "fixture-model", name: "Fixture", path: "/fixture",
+                apiID: "Qwen/Qwen3.5-0.8B", display: unverifiedBF16, source: "huggingface:Qwen/Qwen3.5-0.8B")]
+            guard !engine.defaultMTPEnabled else { return false }
+            engine.models = [InstalledModel(id: "fixture-model", name: "Qwen/Qwen3.5-0.8B", path: "/fixture",
+                apiID: "Qwen/Qwen3.5-0.8B", display: unverifiedBF16, source: "local:/fixture")]
+            guard engine.defaultMTPEnabled else { return false }
+            engine.models = originalModels
             let options = engine.options
             guard !engine.configure(options, mtpEnabled: false, modelID: "stale"), noCommandSent(),
                   engine.configure(options, mtpEnabled: false, modelID: "fixture-model") else { return false }

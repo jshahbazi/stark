@@ -561,6 +561,9 @@ pub(crate) trait GenerationBackend {
     fn mtp_metadata(&self) -> Option<Value> {
         None
     }
+    fn loaded_memory_metadata(&self) -> Option<Value> {
+        None
+    }
     /// Resolve sampling support before prefix planning and generation. Backends
     /// may fall back to serial, and the reply reports the effective selection.
     fn effective_mtp_drafts(
@@ -1421,6 +1424,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         readiness["generation_budget"] = json!("memory-context-v1");
         readiness["generation_budget_inputs"] = json!("token-ids-v1");
     }
+    if let Some(memory) = worker.backend.loaded_memory_metadata() {
+        readiness["loaded_memory"] = memory;
+    }
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
             "recommended_drafts":capabilities.recommended_drafts,"default_drafts":worker.default_mtp_drafts,
@@ -2240,6 +2246,19 @@ mod tests {
             json!({"enabled":true,"drafts":4,
             "sampling":"exact-rejection-v1","verification":"fake-model-exact-v1"})
         );
+    }
+
+    #[test]
+    fn mtp_execution_method_is_separate_from_stable_verification_contract() {
+        for method in ["transactional-greedy-batch", "exact-rejection-serial"] {
+            let mut worker = mtp_worker(3, 2);
+            worker.backend.mtp_reply_override = Some(json!({"verification_method":method}));
+            let mut request = standard();
+            request["mtp"] = json!(true);
+            let reply = post(&mut worker, request);
+            assert_eq!(reply["mtp"]["verification"], "fake-model-exact-v1");
+            assert_eq!(reply["mtp"]["verification_method"], method);
+        }
     }
 
     #[test]

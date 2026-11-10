@@ -2,12 +2,13 @@ use std::any::Any;
 
 use crate::{
     backends::common::{
-        Backend, Buffer, CommandBuffer, Context, DeviceCapabilities, InvalidInput, Kernels, SparseBuffer,
+        Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, Context, DeviceCapabilities,
+        InvalidInput, Kernels, SparseBuffer,
         gpu_types::{Copy, ring::RingParams},
         kernel::KVCacheUpdateKernel,
     },
     data_type::DataType,
-    encodable_block::mixer::{MixerState, attention::Attention},
+    encodable_block::mixer::{MixerState, MixerStateSnapshot, RewindSnapshot, attention::Attention},
 };
 
 pub const ATTENTION_SUFFIX_CAPACITY: u32 = 1024; // TODO: remove hardcoded suffix capacity
@@ -90,6 +91,7 @@ impl KVCacheView {
     }
 }
 
+#[derive(Clone, Copy)]
 enum KVCacheState {
     Full {
         length: u32,
@@ -249,7 +251,62 @@ pub struct AttentionState<B: Backend> {
     pub kv_cache_update: <B::Kernels as Kernels>::KVCacheUpdateKernel,
 }
 
+/// Rings overwrite the rows at a retained boundary. Keep physical K/V order
+/// together with every traversal scalar; shared-KV layers refer to this owner.
+struct AttentionRingPrefix<B: Backend> {
+    keys: B::GlobalBuffer,
+    values: B::GlobalBuffer,
+    cache: KVCacheState,
+    element_dim: u32,
+    data_type: DataType,
+}
+
+impl<B: Backend> MixerStateSnapshot<B> for AttentionRingPrefix<B> {
+    fn can_restore(
+        &self,
+        state: &dyn MixerState<B>,
+    ) -> bool {
+        let Some(state) = (state as &dyn Any).downcast_ref::<AttentionState<B>>() else {
+            return false;
+        };
+        matches!((self.cache, state.cache),
+            (KVCacheState::Ring { capacity: saved, .. }, KVCacheState::Ring { capacity: current, .. })
+                if saved == current)
+            && state.element_dim == self.element_dim
+            && state.data_type == self.data_type
+            && state.keys.size() >= self.keys.size()
+            && state.values.size() >= self.values.size()
+    }
+
+    fn restore(
+        &self,
+        state: &mut dyn MixerState<B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> bool {
+        if !self.can_restore(state) {
+            return false;
+        }
+        let state = (state as &mut dyn Any).downcast_mut::<AttentionState<B>>().unwrap();
+        command.encode_copy(&self.keys, state.keys.as_mut().subrange_mut(..self.keys.size()));
+        command.encode_copy(&self.values, state.values.as_mut().subrange_mut(..self.values.size()));
+        state.cache = self.cache;
+        true
+    }
+
+    fn payload_bytes(&self) -> usize {
+        self.keys.size() + self.values.size()
+    }
+}
+
 impl<B: Backend> AttentionState<B> {
+    pub(super) fn committed_view(
+        &self,
+        context_length: u32,
+    ) -> Option<KVCacheView> {
+        let view = self.view();
+        (context_length > 0 && view.prefix_len() == self.cache.required_prefix_len(context_length)).then_some(view)
+    }
+
     pub fn view(&self) -> KVCacheView {
         self.cache.view()
     }
@@ -312,6 +369,43 @@ impl<B: Backend> AttentionState<B> {
 }
 
 impl<B: Backend> MixerState<B> for AttentionState<B> {
+    fn capture_prefix(
+        &self,
+        context_length: u32,
+        context: &B::Context,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<Box<dyn MixerStateSnapshot<B>>>, B::Error> {
+        let KVCacheState::Ring {
+            length,
+            capacity,
+            ..
+        } = self.cache
+        else {
+            return Ok(self
+                .cache
+                .can_rewind(context_length)
+                .then(|| Box::new(RewindSnapshot(context_length)) as Box<dyn MixerStateSnapshot<B>>));
+        };
+        if length == 0 || length != context_length.min(capacity) {
+            return Ok(None);
+        }
+        let bytes = (length as usize)
+            .checked_mul(self.element_dim as usize)
+            .and_then(|size| size.checked_mul(self.data_type.size_in_bytes()))
+            .ok_or(InvalidInput("attention snapshot size overflow"))?;
+        let mut keys = context.create_buffer(bytes)?;
+        let mut values = context.create_buffer(bytes)?;
+        command.encode_copy(self.keys.as_ref().subrange(..bytes), &mut keys);
+        command.encode_copy(self.values.as_ref().subrange(..bytes), &mut values);
+        Ok(Some(Box::new(AttentionRingPrefix {
+            keys,
+            values,
+            cache: self.cache,
+            element_dim: self.element_dim,
+            data_type: self.data_type,
+        })))
+    }
+
     fn resident_payload_bytes(&self) -> Option<usize> {
         if self.is_sparse {
             let keys = (self.keys.as_ref() as &dyn Any).downcast_ref::<B::SparseBuffer>()?;
@@ -388,3 +482,7 @@ impl<B: Backend> MixerState<B> for AttentionState<B> {
 #[cfg(test)]
 #[path = "../../../../unit/encodable_block/kv_cache_state_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "prefix_tests.rs"]
+mod prefix_tests;

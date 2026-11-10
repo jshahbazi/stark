@@ -15,16 +15,19 @@ use stark_engine::{
         language_model::{
             LanguageModel,
             dense_mtp::{DenseMtpError, DenseMtpRound, DenseMtpSession},
+            gemma4_assistant::Gemma4AssistantRetainedPrefix,
             state::LanguageModelState,
             stream::{PREFILL_CHUNK_TOKENS, SamplingMethod},
         },
         vision::{
             NativeVisionErrorKind, PreparedVisionImage, VisionLanguageModel,
             gemma3::{Gemma3VisionLanguageModel, PreparedGemma3Image},
-            gemma4::{Gemma4VisionLanguageModel, PreparedGemmaImage},
+            gemma4::{Gemma4Assistant, Gemma4VisionLanguageModel, PreparedGemmaImage},
         },
     },
 };
+
+mod gemma4_mtp;
 
 use crate::{
     cancel::CancelSignal,
@@ -39,10 +42,12 @@ use crate::{
 
 // Reuse must follow the engine's prefill chunk grid exactly.
 const _: () = assert!(prefix_cache::PREFILL_CHUNK_TOKENS == PREFILL_CHUNK_TOKENS);
+const GEMMA4_ASSISTANT_VERIFICATION_POLICY: &str = "gemma4-e2b-target-verify-v1";
 
 type RetainedState = PrefixEntry<LanguageModelState<Metal>>;
 type TextSnapshotState = prefix_cache::BoundaryEntry<(LanguageModelState<Metal>, &'static str)>;
 type DenseRetainedState = prefix_cache::BoundaryEntry<(DenseMtpSession<Metal>, u32, &'static str)>;
+type GemmaRetainedState = prefix_cache::BoundaryEntry<(Gemma4AssistantRetainedPrefix<Metal>, u32, &'static str)>;
 
 fn admit_generation_memory(
     model: &LanguageModel<Metal>,
@@ -119,6 +124,9 @@ pub(crate) struct NativeBackend {
     dense_pending_prefix: Option<DenseRetainedState>,
     text_snapshot_prefix_cache: Option<TextSnapshotState>,
     text_snapshot_pending_prefix: Option<TextSnapshotState>,
+    gemma4_assistant: Option<Gemma4Assistant<Metal>>,
+    gemma_prefix_cache: Option<GemmaRetainedState>,
+    gemma_pending_prefix: Option<GemmaRetainedState>,
 }
 
 enum NativeModel {
@@ -345,20 +353,28 @@ impl NativeBackend {
         path: &Path,
         cancellation: Option<CancelSignal>,
     ) -> Result<Self, &'static str> {
-        Self::load_model(path, cancellation, false)
+        Self::load_model(path, cancellation, false, false)
     }
 
     pub(crate) fn load_vision(
         path: &Path,
         cancellation: Option<CancelSignal>,
     ) -> Result<Self, &'static str> {
-        Self::load_model(path, cancellation, true)
+        Self::load_model(path, cancellation, true, false)
+    }
+
+    pub(crate) fn load_gemma4_text_validation(
+        path: &Path,
+        cancellation: Option<CancelSignal>,
+    ) -> Result<Self, &'static str> {
+        Self::load_model(path, cancellation, true, true)
     }
 
     fn load_model(
         path: &Path,
         cancellation: Option<CancelSignal>,
         vision: bool,
+        validation_text_only: bool,
     ) -> Result<Self, &'static str> {
         if path.join("speculator").exists() {
             return Err("speculator_not_supported");
@@ -402,13 +418,23 @@ impl NativeBackend {
                 return Err("invalid_model_config");
             }
             let hint: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid_model_config")?;
+            if validation_text_only
+                && hint.get("type").and_then(Value::as_str) != Some("Gemma4VisionLanguageModelConfig")
+            {
+                return Err("validation_family_not_supported");
+            }
             if hint.get("type").and_then(Value::as_str) == Some("Gemma3VisionLanguageModelConfig") {
                 NativeModel::Gemma3Vision(Box::new(
                     engine.load_gemma3_vision_language_model(path).map_err(|_| "model_load_failed")?,
                 ))
             } else if hint.get("type").and_then(Value::as_str) == Some("Gemma4VisionLanguageModelConfig") {
                 NativeModel::Gemma4Vision(Box::new(
-                    engine.load_gemma4_vision_language_model(path).map_err(|_| "model_load_failed")?,
+                    if validation_text_only {
+                        engine.load_gemma4_text_validation_model(path)
+                    } else {
+                        engine.load_gemma4_vision_language_model(path)
+                    }
+                    .map_err(|_| "model_load_failed")?,
                 ))
             } else {
                 let budget =
@@ -452,6 +478,18 @@ impl NativeBackend {
             |token| tokenizer.token_to_id(token),
             |id| tokenizer_ids.contains(&id),
         )?;
+        // Staging exercises the ordinary worker protocol before default
+        // serving qualification. Exact sidecar/artifact admission is retained.
+        #[cfg(feature = "gemma4-assistant-staging")]
+        let gemma4_assistant = match &model {
+            NativeModel::Gemma4Vision(model) if path.join("assistant").exists() => {
+                admit_memory_bytes(Some(320 * 1024 * 1024))?;
+                Some(model.load_assistant_component(&path.join("assistant")).map_err(|_| "assistant_load_failed")?)
+            },
+            _ => None,
+        };
+        #[cfg(not(feature = "gemma4-assistant-staging"))]
+        let gemma4_assistant = None;
         Ok(Self {
             idle_engine: matches!(&model, NativeModel::Text(_)).then(|| engine.clone()),
             model,
@@ -466,6 +504,9 @@ impl NativeBackend {
             dense_pending_prefix: None,
             text_snapshot_prefix_cache: None,
             text_snapshot_pending_prefix: None,
+            gemma4_assistant,
+            gemma_prefix_cache: None,
+            gemma_pending_prefix: None,
         })
     }
 }
@@ -485,6 +526,14 @@ impl GenerationBackend for NativeBackend {
     }
 
     fn mtp_capabilities(&self) -> Option<crate::generation::MtpCapabilities> {
+        if self.gemma4_assistant.is_some() {
+            return Some(crate::generation::MtpCapabilities {
+                max_drafts: 3,
+                recommended_drafts: 3,
+                sampling: "exact-rejection-v1",
+                verification: GEMMA4_ASSISTANT_VERIFICATION_POLICY,
+            });
+        }
         match self.model.has_dense_mtp() {
             true => Some(crate::generation::MtpCapabilities {
                 max_drafts: 3,
@@ -498,6 +547,31 @@ impl GenerationBackend for NativeBackend {
 
     fn mtp_metadata(&self) -> Option<Value> {
         self.last_mtp.clone()
+    }
+
+    fn loaded_memory_metadata(&self) -> Option<Value> {
+        if !cfg!(feature = "gemma4-assistant-staging") {
+            return None;
+        }
+        let NativeModel::Gemma4Vision(model) = &self.model else {
+            return None;
+        };
+        let head = self.gemma4_assistant.as_ref();
+        let identity = head.and_then(|head| model.assistant_artifact_identity(head));
+        Some(serde_json::json!({
+            "image_tower_resident":model.image_tower_resident(),
+            "logical_vision_parameter_bytes":model.logical_vision_parameter_bytes(),
+            "resident_model_parameter_bytes":model.resident_parameter_bytes(),
+            "metal_allocated_bytes":model.metal_allocated_bytes(),
+            "target_config_sha256":model.artifact_identity().config_sha256,
+            "target_weights_sha256":model.artifact_identity().artifact_sha256,
+            "assistant_sha256":identity.map(|value| value.0),
+            "assistant_file_bytes":identity.map(|value| value.1),
+            "assistant_resident_storage_bytes":head.map(Gemma4Assistant::resident_storage_bytes),
+            "assistant_billed_resident_bytes":head.and_then(|head| model.assistant_resident_memory_bytes(head)),
+            "assistant_peak_loading_bytes":head.map(Gemma4Assistant::peak_loading_bytes),
+            "assistant_numerical_policy":head.map(Gemma4Assistant::numerical_policy),
+        }))
     }
 
     fn vocab_size(&self) -> usize {
@@ -618,15 +692,22 @@ impl GenerationBackend for NativeBackend {
         on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         self.last_mtp = None;
+        if self.gemma4_assistant.is_some() && options.mtp_drafts > 0 {
+            return self.generate_gemma4_assistant(input, options, on_text, on_progress);
+        }
         if self.model.has_dense_mtp() && options.mtp_drafts > 0 {
             return self.generate_dense_mtp(input, options, on_text, on_progress);
         }
-        self.last_mtp = self.model.has_dense_mtp().then(disabled_dense_mtp_stats);
+        self.last_mtp = (self.model.has_dense_mtp() || self.gemma4_assistant.is_some()).then(disabled_dense_mtp_stats);
         self.generate_inner(input, None, options, on_text, on_progress)
     }
 
     fn supports_images(&self) -> bool {
-        matches!(self.model, NativeModel::Vision(_) | NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_))
+        match &self.model {
+            NativeModel::Gemma4Vision(model) => model.image_tower_resident(),
+            NativeModel::Vision(_) | NativeModel::Gemma3Vision(_) => true,
+            NativeModel::Text(_) => false,
+        }
     }
 
     fn image_geometry(&self) -> (u32, u32) {
@@ -701,6 +782,9 @@ impl GenerationBackend for NativeBackend {
         context_tokens: u32,
         request_id: u64,
     ) -> Result<(NativePreparedImage, PreparedImageMetadata), &'static str> {
+        if self.gemma4_assistant.is_some() {
+            self.clear_prefix_cache();
+        }
         let tokens = input_token_ids.into_iter().map(u64::from).collect::<Vec<_>>().into_boxed_slice();
         let mut channel_error = false;
         let cancellation = &mut self.cancellation;
@@ -763,7 +847,7 @@ impl GenerationBackend for NativeBackend {
         on_text: Option<&mut TextCallback<'_>>,
         on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
-        self.last_mtp = self.model.has_dense_mtp().then(disabled_dense_mtp_stats);
+        self.last_mtp = (self.model.has_dense_mtp() || self.gemma4_assistant.is_some()).then(disabled_dense_mtp_stats);
         self.generate_inner(&[], Some(image), options, on_text, on_progress)
     }
 
@@ -771,14 +855,18 @@ impl GenerationBackend for NativeBackend {
         match &self.model {
             NativeModel::Text(model) => model.has_dense_mtp() || model.prefix_reuse_supported(),
             NativeModel::Vision(model) => model.has_dense_mtp() || model.prefix_reuse_supported(),
-            NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => false,
+            NativeModel::Gemma4Vision(model) => model.prefix_reuse_supported(),
+            NativeModel::Gemma3Vision(model) => model.prefix_reuse_supported(),
         }
     }
 
     fn prefix_cache_key(&self) -> &'static str {
-        if self.model.has_dense_mtp() {
+        if self.model.has_dense_mtp() || self.gemma4_assistant.is_some() {
             "model-instance+context-tokens+cache-scope+mtp-selection+execution-graph+precision"
-        } else if matches!(&self.model, NativeModel::Vision(_)) {
+        } else if matches!(
+            &self.model,
+            NativeModel::Vision(_) | NativeModel::Gemma3Vision(_) | NativeModel::Gemma4Vision(_)
+        ) {
             "model-instance+context-tokens+cache-scope+execution-graph+precision"
         } else {
             prefix_cache::KEY
@@ -790,6 +878,17 @@ impl GenerationBackend for NativeBackend {
         input: &[u32],
         options: &GenerationOptions,
     ) -> usize {
+        if self.gemma4_assistant.is_some() && options.mtp_drafts > 0 {
+            return self.gemma_prefix_cache.as_ref().map_or(0, |entry| {
+                if entry.state.1 == options.mtp_drafts
+                    && self.gemma4_assistant.as_ref().is_some_and(|head| entry.state.2 == head.numerical_policy())
+                {
+                    entry.reusable(input, options.context_tokens, options.cache_scope.as_ref())
+                } else {
+                    0
+                }
+            });
+        }
         if self.model.has_dense_mtp() && options.mtp_drafts > 0 {
             return self.dense_prefix_cache.as_ref().map_or(0, |entry| {
                 if entry.state.1 == options.mtp_drafts && entry.state.2 == self.model.text_execution_graph() {
@@ -801,7 +900,7 @@ impl GenerationBackend for NativeBackend {
         }
         // MTP0 uses the ordinary stream and its own target-only snapshot.
         // Predictor sessions cannot be restored into that execution path.
-        if self.dense_prefix_cache.is_some() {
+        if self.dense_prefix_cache.is_some() || self.gemma_prefix_cache.is_some() {
             return 0;
         }
         if let Some(entry) = &self.text_snapshot_prefix_cache {
@@ -820,6 +919,9 @@ impl GenerationBackend for NativeBackend {
     }
 
     fn publish_prefix_cache(&mut self) {
+        if let Some(entry) = self.gemma_pending_prefix.take() {
+            self.gemma_prefix_cache = Some(entry);
+        }
         if let Some(entry) = self.text_snapshot_pending_prefix.take() {
             self.text_snapshot_prefix_cache = Some(entry);
         }
@@ -832,6 +934,8 @@ impl GenerationBackend for NativeBackend {
     }
 
     fn clear_prefix_cache(&mut self) {
+        self.gemma_prefix_cache = None;
+        self.gemma_pending_prefix = None;
         self.prefix_cache = None;
         self.pending_prefix = None;
         self.dense_prefix_cache = None;
@@ -841,7 +945,9 @@ impl GenerationBackend for NativeBackend {
     }
 
     fn prefix_cache_retained(&self) -> bool {
-        self.prefix_cache.is_some()
+        self.gemma_prefix_cache.is_some()
+            || self.gemma_pending_prefix.is_some()
+            || self.prefix_cache.is_some()
             || self.pending_prefix.is_some()
             || self.dense_prefix_cache.is_some()
             || self.dense_pending_prefix.is_some()
@@ -1120,6 +1226,8 @@ impl NativeBackend {
         // before allocating, so two request states never coexist.
         let retained = self.prefix_cache.take();
         let snapshot_retained = self.text_snapshot_prefix_cache.take();
+        self.gemma_prefix_cache = None;
+        self.gemma_pending_prefix = None;
         self.dense_prefix_cache = None;
         self.dense_pending_prefix = None;
         self.pending_prefix = None;
@@ -1256,7 +1364,26 @@ impl NativeBackend {
             },
             (NativeModel::Gemma4Vision(model), retained) => {
                 drop(retained);
-                let memory_bytes = if text_request {
+                let capture_prefix = text_request
+                    && options.cache_scope.is_some()
+                    && prefix_cache::reusable_prefill_rows(input.len()) > 0
+                    && model.prefix_reuse_supported();
+                let memory_bytes = if let Some(entry) = snapshot_retained.as_ref() {
+                    model.decoder_reused_text_memory_bytes(
+                        &entry.state.0,
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                        capture_prefix,
+                        reused as u32,
+                    )
+                } else if capture_prefix {
+                    model.decoder_text_prefix_memory_bytes(
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                    )
+                } else if text_request {
                     model.decoder_text_generation_memory_bytes(
                         admission_input_tokens,
                         options.context_tokens,
@@ -1269,16 +1396,52 @@ impl NativeBackend {
                         options.max_new_tokens,
                     )
                 };
+                let memory_bytes = if let Some(head) = &self.gemma4_assistant {
+                    memory_bytes.and_then(|bytes| {
+                        bytes
+                            .checked_add(model.resident_parameter_bytes())?
+                            .checked_add(model.assistant_resident_memory_bytes(head)?)
+                    })
+                } else {
+                    memory_bytes
+                };
                 admit_memory_bytes_with_reclaim(memory_bytes, || {
                     model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed")
                 })?;
-                model
-                    .create_empty_state(Some(options.context_tokens), options.seed)
-                    .map_err(|_| "native_generation_failed")?
+                if let Some(entry) = snapshot_retained {
+                    let mut state = entry.state.0;
+                    model
+                        .rewind_state(&mut state, reused, Some(options.context_tokens), options.seed)
+                        .map_err(|_| "native_generation_failed")?;
+                    state
+                } else {
+                    model
+                        .create_empty_state(Some(options.context_tokens), options.seed)
+                        .map_err(|_| "native_generation_failed")?
+                }
             },
             (NativeModel::Gemma3Vision(model), retained) => {
                 drop(retained);
-                let memory_bytes = if text_request {
+                let capture_prefix = text_request
+                    && options.cache_scope.is_some()
+                    && prefix_cache::reusable_prefill_rows(input.len()) > 0
+                    && model.prefix_reuse_supported();
+                let memory_bytes = if let Some(entry) = snapshot_retained.as_ref() {
+                    model.decoder_reused_text_memory_bytes(
+                        &entry.state.0,
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                        capture_prefix,
+                        reused as u32,
+                    )
+                } else if capture_prefix {
+                    model.decoder_text_prefix_memory_bytes(
+                        admission_input_tokens,
+                        options.context_tokens,
+                        options.max_new_tokens,
+                    )
+                } else if text_request {
                     model.decoder_text_generation_memory_bytes(
                         admission_input_tokens,
                         options.context_tokens,
@@ -1294,9 +1457,17 @@ impl NativeBackend {
                 admit_memory_bytes_with_reclaim(memory_bytes, || {
                     model.reclaim_decoder_cached_memory().map_err(|_| "native_generation_failed")
                 })?;
-                model
-                    .create_empty_state(Some(options.context_tokens), options.seed)
-                    .map_err(|_| "native_generation_failed")?
+                if let Some(entry) = snapshot_retained {
+                    let mut state = entry.state.0;
+                    model
+                        .rewind_state(&mut state, reused, Some(options.context_tokens), options.seed)
+                        .map_err(|_| "native_generation_failed")?;
+                    state
+                } else {
+                    model
+                        .create_empty_state(Some(options.context_tokens), options.seed)
+                        .map_err(|_| "native_generation_failed")?
+                }
             },
         };
         if text_request && options.cache_scope.is_some() {
@@ -1310,6 +1481,24 @@ impl NativeBackend {
                 },
                 _ => {},
             }
+        }
+        if text_request
+            && options.cache_scope.is_some()
+            && let NativeModel::Gemma4Vision(model) = &mut self.model
+            && model.prefix_reuse_supported()
+        {
+            model
+                .prepare_text_prefix_capture(&mut state, prefix_cache::reusable_prefill_rows(input.len()))
+                .map_err(|_| "native_generation_failed")?;
+        }
+        if text_request
+            && options.cache_scope.is_some()
+            && let NativeModel::Gemma3Vision(model) = &mut self.model
+            && model.prefix_reuse_supported()
+        {
+            model
+                .prepare_text_prefix_capture(&mut state, prefix_cache::reusable_prefill_rows(input.len()))
+                .map_err(|_| "native_generation_failed")?;
         }
         let prompt_ids = input;
         let input: Vec<u64> = input.iter().map(|id| u64::from(*id)).collect();
@@ -1347,10 +1536,10 @@ impl NativeBackend {
                 .stream_text(&input[reused..], &mut state, stream_options)
                 .map_err(|_| "native_generation_failed")?,
             (NativeModel::Gemma4Vision(model), None) => {
-                model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
+                model.stream(&input[reused..], &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Gemma3Vision(model), None) => {
-                model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
+                model.stream(&input[reused..], &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Vision(model), Some(image)) => {
                 let PreparedImagePayload::Qwen(prepared) = image.image else {
@@ -1518,19 +1707,18 @@ impl NativeBackend {
                 NativeModel::Text(_) => {
                     self.pending_prefix = Some(PrefixEntry::new(state, scope, options.context_tokens, prompt_ids));
                 },
-                NativeModel::Vision(model) => {
+                NativeModel::Vision(_) | NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => {
                     if let Some(position) = state.text_prefix_position()
                         && position > 0
                     {
                         self.text_snapshot_pending_prefix = Some(prefix_cache::BoundaryEntry::new(
-                            (state, model.text_execution_graph()),
+                            (state, self.model.text_execution_graph()),
                             scope,
                             options.context_tokens,
                             &prompt_ids[..position],
                         ));
                     }
                 },
-                NativeModel::Gemma4Vision(_) | NativeModel::Gemma3Vision(_) => {},
             }
         }
         Ok(result)

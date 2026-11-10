@@ -404,6 +404,39 @@ impl<'loader, B: Backend> ParameterTree<'loader, B> {
             })
         }
     }
+
+    /// A caller that independently admits an exact artifact may intentionally
+    /// omit one complete subtree. This does not mark its tensors validated.
+    /// Return its logical storage, rejecting every other unvalidated tensor.
+    pub(crate) fn assert_only_unloaded_subtree(
+        &self,
+        name: &str,
+    ) -> Result<usize, ParameterLoaderError<B>> {
+        let allowed = format!("{}.", self.join_prefix(name));
+        let validated = self.loader.validated_tensors.borrow();
+        let mut unexpected = self
+            .loader
+            .index
+            .keys()
+            .filter(|key| !validated.contains(*key) && !key.starts_with(&allowed))
+            .cloned()
+            .collect::<Vec<_>>();
+        unexpected.sort();
+        if !unexpected.is_empty() {
+            return Err(ParameterLoaderError::UnvalidatedTensors {
+                prefix: self.prefix.clone(),
+                keys: unexpected.into_boxed_slice(),
+            });
+        }
+        self.loader.index.iter().filter(|(key, _)| key.starts_with(&allowed)).try_fold(0usize, |sum, (_, meta)| {
+            sum.checked_add(meta.size).ok_or_else(|| {
+                ParameterLoaderError::ArrayLoadingError(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "parameter inventory overflow",
+                ))
+            })
+        })
+    }
 }
 
 #[cfg(all(test, backend = "cpu"))]
@@ -430,6 +463,14 @@ mod payload_tests {
         end: usize,
         payload: &[u8],
     ) -> std::fs::File {
+        named_tensor_file("weight", end, payload)
+    }
+
+    fn named_tensor_file(
+        name: &str,
+        end: usize,
+        payload: &[u8],
+    ) -> std::fs::File {
         let path = std::env::temp_dir().join(format!(
             "stark-payload-test-{}-{}",
             std::process::id(),
@@ -438,7 +479,7 @@ mod payload_tests {
         let mut file = OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
         std::fs::remove_file(path).unwrap();
         let shape = end.min(u32::MAX as usize);
-        let header = format!(r#"{{"weight":{{"dtype":"U8","shape":[{shape}],"data_offsets":[0,{end}]}}}}"#);
+        let header = format!(r#"{{"{name}":{{"dtype":"U8","shape":[{shape}],"data_offsets":[0,{end}]}}}}"#);
         file.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
         file.write_all(header.as_bytes()).unwrap();
         file.write_all(payload).unwrap();
@@ -551,5 +592,21 @@ mod payload_tests {
         assert_eq!(stats.resident_bytes, 3);
         assert_eq!(stats.shared_matrix_bytes, 3);
         assert_eq!(stats.representation_copy_bytes, 0);
+    }
+
+    #[stark_test]
+    fn unloaded_subtree_inventory_never_marks_or_excuses_other_tensors() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        for (name, allowed) in [("vision.weight", true), ("visionary.weight", false), ("decoder.weight", false)] {
+            let file = named_tensor_file(name, 3, &[1, 2, 3]);
+            let loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+            let result = loader.tree().assert_only_unloaded_subtree("vision");
+            assert_eq!(result.is_ok(), allowed);
+            assert!(loader.tree().assert_all_tensors_validated().is_err());
+            if allowed {
+                assert_eq!(result.unwrap(), 3);
+                assert_eq!(loader.storage_statistics().resident_bytes, 0);
+            }
+        }
     }
 }

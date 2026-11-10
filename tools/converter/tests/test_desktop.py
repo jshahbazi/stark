@@ -2414,6 +2414,65 @@ def test_mtp_preference_write_failure_stale_model_and_busy_changes_are_atomic(de
     assert desktop.settings_summary()["mtp_enabled"] is True
 
 
+@pytest.mark.parametrize(
+    "display,verification,source,enabled",
+    [
+        ({"family_id": "gemma4_text"}, "fixture-exact-v1", None, False),
+        (None, "gemma4-e2b-target-verify-v1", None, False),
+        ({"group_id": "repo:Qwen/Qwen3.5-0.8B", "quantization": "BF16"}, "fixture-exact-v1", None, False),
+        ({"group_id": "repo:Qwen/Qwen3.5-0.8B", "quantization": "4-bit"}, "fixture-exact-v1", None, True),
+        ({"group_id": "repo:Qwen/Qwen3.5-4B", "quantization": "BF16"}, "fixture-exact-v1", None, True),
+        ({"quantization": "BF16"}, "fixture-exact-v1", "huggingface:Qwen/Qwen3.5-0.8B", False),
+        ({"quantization": "4-bit"}, "fixture-exact-v1", "huggingface:Qwen/Qwen3.5-0.8B", True),
+        ({"quantization": "BF16"}, "fixture-exact-v1", "huggingface:Qwen/Qwen3.5-4B", True),
+        ({"quantization": "BF16"}, "fixture-exact-v1", "local:canonical-name", True),
+        ({"quantization": "BF16"}, "fixture-exact-v1", None, True),
+        (None, "fixture-exact-v1", None, True),
+    ],
+)
+def test_model_specific_mtp_defaults_keep_explicit_choices(
+    desktop, model, mtp_executable, monkeypatch, display, verification, source, enabled
+):
+    config = json.loads((model / "config.json").read_text())
+    config["fixture_mtp"] = {
+        "supported": True,
+        "max_drafts": 3,
+        "recommended_drafts": 3,
+        "default_drafts": 0,
+        "sampling": "exact-rejection-v1",
+        "verification": verification,
+        "operations": ["generate"],
+    }
+    (model / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr("stark_convert.desktop.model_display", lambda _: display)
+    desktop.executable = mtp_executable
+    identifier = installed(desktop, model)
+    if source is not None:
+        desktop.models[0]["source"] = source
+        if source == "local:canonical-name":
+            desktop.models[0]["name"] = "Qwen/Qwen3.5-0.8B"
+        desktop.persist()
+    desktop.dispatch({"command": "run", "model_id": identifier})
+    finish(desktop)
+    assert "mtp_enabled" not in desktop.models[0]
+    assert desktop.settings_summary()["mtp_enabled"] is enabled
+    assert desktop.api_models()[0]["defaults"]["mtp"] is enabled
+    assert desktop.settings_summary()["mtp"]["recommended_drafts"] == 3
+    desktop.library()
+    assert events(desktop)[-1]["models"][0]["source"] == desktop.models[0]["source"]
+    payload = {"messages": [{"role": "user", "content": "fixture"}]}
+    for override, drafts in ((None, 3 if enabled else 0), (True, 3), (False, 0), (None, 3 if enabled else 0)):
+        body = {**payload, **({"mtp": override} if override is not None else {})}
+        with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+            desktop.api_complete(body)
+        assert request.call_args_list[-1].args[0]["mtp_drafts"] == drafts
+    assert "mtp_enabled" not in desktop.models[0]
+    for preference in (True, False):
+        set_mtp(desktop, identifier, preference)
+        assert desktop.settings_summary()["mtp_enabled"] is preference
+        assert json.loads(desktop.registry.read_text())[0]["mtp_enabled"] is preference
+
+
 def test_legacy_model_without_mtp_preference_defaults_on_after_restart(desktop, model, mtp_executable):
     desktop.executable = mtp_executable
     identifier = running(desktop, model)

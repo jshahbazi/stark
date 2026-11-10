@@ -10,6 +10,7 @@ license.workspace = true
 default = ["metal"]
 metal = ["dep:stark-engine", "stark-engine/metal"]
 glm-exl3 = ["metal", "stark-engine/glm-exl3"]
+gemma4-assistant-staging = ["metal"]
 
 [dependencies]
 stark-resource-budget = { path = "../stark-resource-budget" }
