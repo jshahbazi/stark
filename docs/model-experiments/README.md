@@ -16,6 +16,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261109-LAUNCH-RECHECK-01: image-resident Lily text controls](2026-11-09-model-launch-double-check.md) | Same ddalcu payload with explicitly prepared image metadata passes seeded three-draft history, 4,096-token reuse and real image-to-text recovery; original folder is not image-admitted, paging prevents speed claims |
 | [20261109-QMEM-01: F32 Qwen scalar attention workspace](2026-11-09-qwen-attention-memory.md) | Independent lazy scalar scores/probabilities and matching allocation inventory; allocation/stride and synthetic full-forward controls passed, production speed unmeasured |
 | [20261109-LILY-STARTUP-01/02/03/04: retained image startup](../benchmarks/2026-11-09-lily-image-startup.md) | Initial startup canceled; accelerated full scan passed image smoke but latency rejected; digest reuse/UI cleanup installed, native startup 10.5–11.9 s, routine UI Ready by 14.774 s; final image attachment and copy-removal checks passed |
 | [20261109-QDIP-01: dense default-image text parity](../archive/runs/2026-11-09-qwen-dense-image-default-parity.md) | Preserve the supported affine dense text MTP head with the image tower resident; source-bound cache, conversion and performance qualification is tracked separately |
