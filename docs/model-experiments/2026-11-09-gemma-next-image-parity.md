@@ -1184,7 +1184,7 @@ reload or preference migration is performed for this change.
 
 ## Source integration for pull-request review
 
-The uncommitted integration combines Gemma `2a747763` with Qwen
+Integration commit `671479c5` combines Gemma `2a747763` with Qwen
 `c92b9e81d02965ef431d621b24248cd70f05e518`, including main `b0c0d9fb`.
 It preserves the separate Gemma source-GELU/reference head and serial verifier,
 Qwen's isolated BF16 head policy and bounded routed prefill, main's request
@@ -1193,3 +1193,38 @@ Gemma typed ring snapshots also use main's existing reused-state memory credit.
 This is a new source candidate requiring independent integration review and
 source-matching checks; none of the historical binary receipts is reassigned
 to it. Staging, context and companion-provisioning limits remain unchanged.
+
+Independent parent and GLM source reviews clear the frozen integration patch
+`4fc7ae3bc0677c5aa836ceb08a9f31c4a0191cd1a4b370c2448adc6bb6858ecf`.
+Rust 1.98.1 locked j2 release builds pass for both default and assistant-staging
+workers and the matching template helper. Their SHA-256 identities are:
+
+| Component | SHA-256 |
+| --- | --- |
+| Default worker | `fde80f38d34dd60bbfc05e72daae33b5318feff1693d9a55167b04b40e7c8278` |
+| Staging worker | `feebfa6f42a17d5a339a3234e6fafb0ada11d2adca1a7de2a6e16a4e95137059` |
+| Matching helper | `71b4fe649290fb67ff5c26c684168fdc6216b6cac3740a24275cb989d429858f` |
+
+The build receipt is
+`cd9fe412b472eb610b50891b9478237120cdd55ab509a50c5d26e63d3a0767d9`;
+all tracked source hashes remain unchanged through compilation. The model-free
+worker suite passes 141 tests with three ignored and zero failures (receipt
+`2d067c45c5e85a39916e7091cb0d8d7994561e8884eecd87736a3c7a47b5a088`).
+The focused production Swift controller MTP/default case also passes. Subsequent
+commit `764e214c` changes only Python test-fixture formatting, leaving the
+compiled Rust closure unchanged. Package formatting and repository policy pass.
+
+The first current-source image lifecycle attempt stops before spawning a worker:
+the strict entry screen sees an unrelated installed Stark worker and insufficient
+available memory. It executes zero cases and is not a lifecycle pass; receipt
+`ac330fa0c1f44d5f039cb58992f46f7d044ea0c2d094a098a9275071425f5b9f`.
+Current-source image lifecycle and 64-token MTP0/MTP3 equality remain pending
+until the exclusive model window is available. No new timing run is attempted.
+
+Disk preparation retires only three explicitly authorized regenerable old build
+targets. Both older engine-test executables are APFS-cloned and hash-verified,
+with only system runtime dependencies; source and failure receipts remain.
+The two larger targets recover 1,879,162,880 measured free bytes (retirement
+receipt `90d48b623977831bf9fc59bc73ff91c81d3922b41237f16b91275b3dfc136fe7`).
+The reusable worker target and models remain. The new build maintains the
+unchanged 8 GiB reserve throughout.
