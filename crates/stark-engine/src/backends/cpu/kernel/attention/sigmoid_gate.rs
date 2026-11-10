@@ -15,7 +15,7 @@ pub fn sigmoid_gate<T: ArrayElement + Float>(
     #[specialize] reference_bf16: bool,
     #[specialize] source_bf16: bool,
 ) {
-    assert!(!source_bf16 || (!reference_bf16 && T::data_type() == crate::data_type::DataType::BF16));
+    assert!(!source_bf16 || (!reference_bf16 && std::any::TypeId::of::<T>() == std::any::TypeId::of::<bf16>()));
     assert!(gate_dim > 0, "sigmoid gate requires nonzero gate_dim");
     assert!(gate_row_stride >= gate_dim, "sigmoid gate row stride is too small");
     let gate_dim = gate_dim as usize;
