@@ -921,3 +921,43 @@ provisioning. Only that short timing was repeated; functional/numerical checks
 were not relabeled or rerun. All owned workers and compilers are closed and the
 hardware slot is released. The absent full BF16 MoE payload, retained ddalcu
 memory hold and full MoE 1,792-token lifecycle remain separate open work.
+
+### Current-main resource-budget integration
+
+Merge `c92b9e81d02965ef431d621b24248cd70f05e518` integrates main
+`b0c0d9fb3eb2754879c69bb7883835638201a0fc` with independent source review of
+the four manual resolutions. The ordinary MTP0 alias now delegates to main's
+request-specific estimator with predictor state disabled, retaining its host
+token/history charges. Warm planning, owned-payload credits, snapshot accounting
+and reclaim/resample follow main's policy while using the actual fast text graph
+and typed Qwen cache entries. Image accounting remains on the image decoder.
+The admitted BF16 head arithmetic and physical-256/logical-1,024 policy remain
+unchanged. Reviewed manual/full merge patches:
+`f19f8e270cc830a71afe2edb79f8cbf5c1a0dfbac02c1916b3e11b63ebf3a83f` /
+`b334b354eb209239dbef965b008f4f8903ab6258ce749ca7eaefab08fbfb0c0e`.
+
+The integrated worker builds in 55.55 seconds with a continuously monitored
+8 GiB disk reserve; minimum free space is 9,307,111,424 bytes. Worker:
+`8efbd38e7f7e67903627188d2a7b3ef27e277cd13fa190f90d8bb580a784b59b`.
+Fresh template helper `371df810` fixes the earlier Python fixture setup failure:
+the old helper rejected main's automatic request-budget setting before parsing.
+The coordinator's fresh-helper focused Python replay passes 256/256. Locally,
+139 worker and six resource-budget CPU controls pass (three worker tests remain
+ignored). Template checks pass two units and 19 protocol controls with ordinary
+pipe output. The first template-unit invocation used a regular stdout log and
+was stopped by its own zero-file-size-limit test; that setup attempt remains
+separate. The template-only test build relinks current helper
+`e5efac6acff9a51b344db254ccca95081cc08d89d0d70adc2ef63ee6e895802c`.
+
+On this integrated worker/helper, the existing 1,026-token lifecycle passes
+28/28 text-only and 34/34 images-loaded checks again. All 57 output hashes
+present in those cases match the prior production replay exactly. Both guards
+pass with positive samples, zero paging/compression/swap growth and owned
+drain/join; sampled footprints peak at 2.235/2.507 GB. Receipts:
+`9234a1a5715b3f33d33b8175c794670aa23b289af963fe114b910bb20a815fb8` /
+`b0e005c0846bc0f0cf7e683e1195885e3ed83e9145ecce3c802d416e82aeec50`.
+
+No new speed or numerical-reference replay is attributed to this merge. Those
+earlier results keep their original executable/source boundaries. No additional
+nightly engine build is attempted with unsafe remaining disk headroom. All
+owned model/compiler processes close before the hardware slot is released.
