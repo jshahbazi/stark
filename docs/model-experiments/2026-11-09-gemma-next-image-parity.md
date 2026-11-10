@@ -1218,8 +1218,9 @@ The first current-source image lifecycle attempt stops before spawning a worker:
 the strict entry screen sees an unrelated installed Stark worker and insufficient
 available memory. It executes zero cases and is not a lifecycle pass; receipt
 `ac330fa0c1f44d5f039cb58992f46f7d044ea0c2d094a098a9275071425f5b9f`.
-Current-source image lifecycle and 64-token MTP0/MTP3 equality remain pending
-until the exclusive model window is available. No new timing run is attempted.
+At that checkpoint, current-source image lifecycle and 64-token MTP0/MTP3 equality
+remain pending until the exclusive model window is available. The subsequent
+replay below records their execution separately. No new timing run is attempted.
 
 Disk preparation retires only three explicitly authorized regenerable old build
 targets. Both older engine-test executables are APFS-cloned and hash-verified,
@@ -1236,3 +1237,64 @@ from the Metal build above. The remaining changes update stale converter test
 fixtures and dated Qwen evidence. All five resulting files match the reviewed
 Qwen commit exactly, and its 175 focused Python checks pass. This correction
 does not change the compiled Metal closure or complete the pending model gates.
+
+## Current merged-source lifecycle replay
+
+After the user clears the model window, the unchanged v3 supervisor again stops
+before spawning: the host has no foreign model worker and more than 110 GB
+available, but retains 196,608 bytes of existing swap. This second zero-case
+attempt stays unqualified; its deterministic aggregate receipt has the same
+`ac330fa0` hash above. A separate host preflight receipt is
+`fd1bf1972117241b64e374b4383b37ed03c8fd3719b3435f4b179150edd423bb`.
+
+The coordinator preregisters a prospective private v4 supervisor: permit at most
+1 MiB of pre-existing entry swap and record its baseline, while every increase in
+swap use, swap-ins, swap-outs, page-outs or compressor use remains fatal. All
+memory, disk, deadline, telemetry, foreign-process and owned drain/join screens
+remain unchanged. Three focused CPU controls pass: the observed 196,608-byte
+baseline is allowed, a 16,384-byte increase fails and drains the owned child,
+and entry above 1 MiB fails before spawning. Parent and independent GLM reviews
+clear the minimal change. The original v3 failures are not relabeled as passes.
+
+| Private validation source | SHA-256 |
+| --- | --- |
+| v4 guard | `e464b79c0d12317df0821e07e225a25eb0e108df8107749a1114b90c41065c99` |
+| Focused review patch | `66ef988fa624d87170c45d1c821c821556d41f4d8c027ff037fd9f36a1bdae54` |
+| Three CPU controls receipt | `4b63646ac95b9aafd7ba833a9b8a54e02dc961061f30826f9c22783a9ca1cb27` |
+| Replay preregistration | `c0ece40a80a9f28e05bb3fff4b9828f66080783faacb73d1f7fcd8fef3c0cb9c` |
+| Existing image lifecycle driver, updated guard pin | `0b012882fb2dd27b872d1bab7e7e90132e9d08f2d645689416b84e6b38f184c2` |
+| Existing 64-token driver, updated guard/output pins | `59df0ab471e0ade4c3bdfafcdb73f90b3e210e11e5dcd896de84b7f31865c483` |
+
+The sealed `feebfa6f` staging worker and `71b4fe64` matching helper now pass
+**37/37 image-loaded lifecycle cases** on the merged source. Every one of the
+33 available per-case output hashes matches the earlier corrected serial worker.
+The controls exercise depth switches, actual greedy and stochastic acceptance
+and rejection, exact prefix restoration, scope/context changes, reset/error/
+cancel recovery, stop/cap boundaries and real images with zero MTP and cache
+invalidation. Across lifecycle requests, the assistant proposes 374 tokens and
+accepts 138 over 169 rounds. Image lifecycle receipt:
+`9e4ffa0b24df9fe9868ba0fcc9b4e528005402b7165cae281a2e6bda249fb750`.
+
+The separate tower-disabled text replay emits exactly 64 tokens in each of its
+MTP0 and MTP3 requests. Both output hashes match each other and the prior serial
+control. MTP3 executes 29 rounds, proposes 85 tokens, accepts 34 and verifies
+63 target rows with zero repairs. Its receipt is
+`965dbe4b7e5e5d197a56549a46d097f8554f909f3a8eb8d3640799e7a533b1c0`.
+The two single warm requests observe 103.35/70.41 decode tokens/s for MTP0/MTP3;
+this functional replay provides no new performance qualification or loading-mode
+comparison. The earlier provisional timing and default-off decision remain.
+
+| Replay | Positive guard samples | Peak RSS bytes | Peak footprint bytes | Minimum available bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Images loaded, 37 cases | 150 | 10,362,699,776 | 10,646,659,352 | 100,038,541,312 |
+| Tower-disabled text, two 64-token requests | 123 | 9,996,238,848 | 9,976,258,336 | 100,693,032,960 |
+
+Both guards pass, record entry/final swap of 196,608 bytes with zero growth in
+every paging/swap/compressor counter, and confirm owned drain/join. All owned
+workers close before release; the final foreign-worker screen is empty. The
+aggregate comparison/source-closure receipt is
+`845c96103bb9616cc9d861bec8e99e4403c6c4525a81aad0f4599c331196339a`.
+It binds branch `7858b108` to the above binaries built at `671479c5`: the only
+subsequent Rust change is the excluded CPU-backend type guard, with no Metal
+closure change. This completes the pending merged-source replay, retaining
+the staged feature, E2B-only scope and existing context/provisioning limits.
