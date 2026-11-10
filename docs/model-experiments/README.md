@@ -16,7 +16,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
-| [20261109-QMEM-01: F32 Qwen scalar attention workspace](2026-11-09-qwen-attention-memory.md) | Independent lazy scalar scores/probabilities and matching allocation inventory; synthetic component execution pending, production speed unmeasured |
+| [20261109-QMEM-01: F32 Qwen scalar attention workspace](2026-11-09-qwen-attention-memory.md) | Independent lazy scalar scores/probabilities and matching allocation inventory; allocation/stride and synthetic full-forward controls passed, production speed unmeasured |
 | [20261109-LILY-STARTUP-01/02/03/04: retained image startup](../benchmarks/2026-11-09-lily-image-startup.md) | Initial startup canceled; accelerated full scan passed image smoke but latency rejected; digest reuse/UI cleanup installed, native startup 10.5–11.9 s, routine UI Ready by 14.774 s; final image attachment and copy-removal checks passed |
 | [20261109-QDIP-01: dense default-image text parity](../archive/runs/2026-11-09-qwen-dense-image-default-parity.md) | Preserve the supported affine dense text MTP head with the image tower resident; source-bound cache, conversion and performance qualification is tracked separately |
 | [20261109-QDIP-02/05/06: dense image-loaded text controls](../benchmarks/2026-11-09-qwen-dense-image-text-parity.md) | Separates tower residency from changed target arithmetic; corrected short 27B comparison fails text speed parity despite exact output hashes and restored MTP |

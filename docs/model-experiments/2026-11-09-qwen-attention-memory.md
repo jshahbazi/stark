@@ -6,9 +6,9 @@
 | --- | --- |
 | Registered date / owner | 2026-11-09 / Codex; registered after source implementation and before execution |
 | Kind / evidence scope | Allocation correctness and memory; structural and synthetic component checks |
-| Attempt state / result | Implemented; execution pending |
-| Promotion / disposition | Awaiting checks; adopted on branch only |
-| Baseline / candidate | `1ac5b9dc`; `codex/model-launch-correctness` working patch in `qwen.rs`, `qwen_graph.rs` and `qwen_graph_tests.rs` |
+| Attempt state / result | Implemented; structural, Metal component and synthetic full-forward checks passed |
+| Promotion / disposition | Adopted on branch; production artifact speed/memory qualification pending |
+| Baseline / candidate | `1ac5b9dc`; `1a9c36b5` in `qwen.rs`, `qwen_graph.rs` and `qwen_graph_tests.rs` |
 | Related source | [Performance triage](../archive/runs/2026-11-09-model-launch-performance-triage.md) |
 
 ## Hypothesis and change
@@ -47,8 +47,9 @@ the arena limit. Separate persistent owners preserve that fallback.
   `qwen-fixture-f32-v1`, with context increased from 128 to 512 solely for the
   scalar-to-split transition test. This is not a production artifact run.
 - Toolchain: `nightly-2026-10-01` engine tests, existing locked dependencies.
-  Executable and fixture hashes, hardware/OS and observed memory are pending
-  the coordinated run; no speed or RSS measurements have been made.
+  Host: Mac17,7, 128 GiB unified memory, macOS 26.7.2 (25G332). Executable and
+  fixture hashes are in the [validation record](../archive/runs/2026-11-09-model-launch-correctness.md).
+  No speed or RSS measurements have been made.
 
 ## Fixed correctness controls
 
@@ -81,5 +82,16 @@ reduction is not a measured throughput claim.
 
 ## Execution follow-up
 
-Pending coordinated root validation. Preserve failed setups and measurements
-here when results become available.
+The native hybrid suite passed 240 tests with 60 ignored. This includes scalar
+workspace admission, independent KV/workspace growth and scalar stride parity.
+The complete synthetic 257-prefix scalar/split transition check passed, then
+passed separately with forced scalar attention. The tolerance remained `2e-5`
+as registered before execution. All GPU checks ran serially. Full readout
+values remain private.
+
+No failed numerical controls or tolerance changes occurred. The production
+PipeNetwork artifact was not loaded, and peak RSS/GPU memory and throughput
+were not measured. The memory change is supported by allocation/inventory
+assertions, not a production memory or speed benchmark. Final-source hashes,
+other model checks and the interrupted broad-engine-suite scope are in the
+[validation record](../archive/runs/2026-11-09-model-launch-correctness.md).
