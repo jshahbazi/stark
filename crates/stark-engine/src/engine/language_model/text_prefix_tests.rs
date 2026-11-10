@@ -175,7 +175,10 @@ fn text_snapshot_matches_fresh<B: Backend>(
     assert!(!model.prefix_reuse_supported());
     assert!(model.text_prefix_snapshot_supported());
     if ring {
-        assert_eq!(model.context_memory_estimate(CAPACITY, 1280).unwrap().prefix_snapshot_bytes, 256 * 128 * 2 * 2);
+        assert_eq!(
+            model.request_memory_estimate(CAPACITY, 1280, false).unwrap().prefix_snapshot_bytes,
+            256 * 128 * 2 * 2
+        );
     }
     let original = prompt(1280);
     let mut follow_up = prompt(1400);
