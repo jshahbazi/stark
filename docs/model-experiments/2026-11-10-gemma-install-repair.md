@@ -8,7 +8,7 @@ Reproduce the Google Gemma 4 E4B install failure from the complete cached source
 
 ## Identity and controls
 
-Baseline installed build source: `cb4cea9f18e59960b8f29bf0331d8a75ac86fee0`. Candidate branch: `codex/user-functional-test-2026-11-10`; source revision and validation receipt will be recorded after edits. BF16 source weights; existing runtime precision policy is unchanged. Apple M5 Max, 128 GB shared memory. Cached source is used offline; generated weights remain ignored under runtime. Only owned converter workers may be stopped. Exception dumps and inference contents are not published.
+Baseline installed build source: `cb4cea9f18e59960b8f29bf0331d8a75ac86fee0`. Candidate branch: `codex/user-functional-test-2026-11-10`; final package source identity and validation receipt are recorded under Promotion boundary below. BF16 source weights; existing runtime precision policy is unchanged. Apple M5 Max, 128 GB shared memory. Cached source is used offline; generated weights remain ignored under runtime. Only owned converter workers may be stopped. Exception dumps and inference contents are not published.
 
 ## Trials
 
@@ -19,6 +19,7 @@ Baseline installed build source: `cb4cea9f18e59960b8f29bf0331d8a75ac86fee0`. Can
 - Gemma and streaming regression tests: **264 passed**, including all five named image profiles with authorized cache links and rejection of outside-cache config links.
 - Fixed diagnostic categories now travel over the private progress pipe: disk full, permissions, unsupported format/config, invalid checkpoint, generic conversion failure. No exception text or paths are sent. Failure state is invocation-local; cancellation precedes reporting.
 - Desktop, vision installation, support-check, CLI and progress tests: **472 passed, 1 skipped**, with the installed native template helper in PATH. The first attempt lacked that prerequisite and failed fixture setup; it is excluded. Focused diagnostic checks: **12 passed**. Repository policy and Ruff passed.
+- Pre-PR review found five stale test assertions for the changed converter return/category contract in native preparation, vision preflight and mode preflight. After updating those assertions, the complete locked offline converter suite passed: **6,954 passed, 94 skipped**. Skips comprise 93 opt-in external-reference metadata cases without their private artifacts and one inapplicable Hermes argument-schema case. Ruff, repository policy and whitespace checks passed again. No additional runtime change was required by this review.
 
 ## OpenWork follow-up and limits
 

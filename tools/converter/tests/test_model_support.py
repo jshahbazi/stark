@@ -389,7 +389,7 @@ def test_actual_conversion_mode_mismatch_stops_before_resolution(tmp_path, monke
         ["stark-convert", FUTURE, "--output", str(tmp_path / "output"), "--support-mode", "vision-language"],
     )
     assert cli.main() == 1
-    assert json.loads(capsys.readouterr().err)["error_category"] == "ValueError"
+    assert json.loads(capsys.readouterr().err)["error_category"] == "conversion_failed"
 
 
 @pytest.mark.parametrize(

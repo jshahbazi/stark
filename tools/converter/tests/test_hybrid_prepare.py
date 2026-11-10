@@ -423,12 +423,13 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
     output = tmp_path / "prepared"
     try:
         controller.begin_install_progress(controller.epoch, "native")
-        result = controller.run_converter(
+        result, failure_category = controller.run_converter(
             [sys.executable, "-I", "-B", "-c", bootstrap, str(output), str(weight_bytes)],
             dict(os.environ, HF_HUB_OFFLINE="1"),
             controller.epoch,
         )
         assert controller.converter is None
+        assert failure_category is None
         assert controller.models == [] and controller.worker is None
         events = [json.loads(line) for line in controller.output.getvalue().splitlines()]
         assert all(event["event"] == "progress" for event in events)
