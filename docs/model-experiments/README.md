@@ -16,6 +16,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261109-LILY-STARTUP-01/02/03/04: retained image startup](../benchmarks/2026-11-09-lily-image-startup.md) | Initial startup canceled; accelerated full scan passed image smoke but latency rejected; digest reuse/UI cleanup installed, native startup 10.5–11.9 s, routine UI Ready by 14.774 s; final image attachment and copy-removal checks passed |
 | [20261109-QDIP-01: dense default-image text parity](../archive/runs/2026-11-09-qwen-dense-image-default-parity.md) | Preserve the supported affine dense text MTP head with the image tower resident; source-bound cache, conversion and performance qualification is tracked separately |
 | [20261109-QDIP-02/05/06: dense image-loaded text controls](../benchmarks/2026-11-09-qwen-dense-image-text-parity.md) | Separates tower residency from changed target arithmetic; corrected short 27B comparison fails text speed parity despite exact output hashes and restored MTP |
 | [20261109-QDIP-07: shared-weight 27B fast text](../archive/runs/2026-11-09-qwen27-shared-weight-fast-text.md) | Exact Jundot target/head payload and configuration equality; normal text regains Legacy graph and batched MTP with images resident. Paired 64-token MTP0/3 medians pass bounded parity; all 14 nonperiodic near-capacity cache/lifecycle controls pass. Other artifacts retain separate gates. |

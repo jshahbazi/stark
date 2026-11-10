@@ -2,12 +2,21 @@
 
 import hashlib
 import json
+import os
+import stat
+from pathlib import Path
 
 import pytest
 from test_hybrid_prepare import metadata
 
 from stark_convert import hybrid_prepare as hybrid
-from stark_convert.hybrid_vision import MANIFEST, PROCESSOR_BYTES, prepare_image_artifact, prepared_image_identity
+from stark_convert.hybrid_vision import (
+    HASH_CACHE,
+    MANIFEST,
+    PROCESSOR_BYTES,
+    prepare_image_artifact,
+    prepared_image_identity,
+)
 
 
 def fixture(tmp_path, monkeypatch):
@@ -52,6 +61,46 @@ def test_image_upgrade_requires_complete_declared_tower_and_regular_metadata(tmp
         prepare_image_artifact(tmp_path, "qwen38-lily-q4-xl")
     with pytest.raises(ValueError, match="supported Qwen"):
         prepare_image_artifact(tmp_path, "qwen38-mixed")
+
+
+def test_image_upgrade_seeds_private_descriptor_bound_digest_cache(tmp_path, monkeypatch):
+    fixture(tmp_path, monkeypatch)
+    manifest = prepare_image_artifact(tmp_path, "qwen38-lily-q4-xl")
+    cache_path = tmp_path / HASH_CACHE
+    cache = json.loads(cache_path.read_text())
+    assert stat.S_IMODE(cache_path.stat().st_mode) == 0o600
+    assert cache["schema_version"] == 1
+    assert cache["manifest_sha256"] == hashlib.sha256((tmp_path / MANIFEST).read_bytes()).hexdigest()
+    weight = (tmp_path / "model.safetensors").stat()
+    assert cache["files"] == {
+        "model.safetensors": {
+            "sha256": manifest["weight_files"]["model.safetensors"]["sha256"],
+            "signature": [
+                weight.st_dev,
+                weight.st_ino,
+                weight.st_size,
+                weight.st_mtime_ns // 1_000_000_000,
+                weight.st_mtime_ns % 1_000_000_000,
+                weight.st_ctime_ns // 1_000_000_000,
+                weight.st_ctime_ns % 1_000_000_000,
+            ],
+        }
+    }
+
+
+def test_optional_digest_cache_write_failure_does_not_block_preparation(tmp_path, monkeypatch):
+    fixture(tmp_path, monkeypatch)
+    original = os.open
+
+    def fail_cache(path, *args, **kwargs):
+        if Path(path).name.startswith(".stark-image-validation-"):
+            raise OSError("synthetic cache failure")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", fail_cache)
+    manifest = prepare_image_artifact(tmp_path, "qwen38-lily-q4-xl")
+    assert prepared_image_identity(tmp_path) == manifest
+    assert not (tmp_path / HASH_CACHE).exists()
 
 
 def test_retained_image_host_inspection_binds_metadata_and_inventory(tmp_path, monkeypatch):

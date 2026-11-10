@@ -1999,7 +1999,7 @@ class Desktop:
             if epoch != self.epoch:
                 raise DesktopError("Image checks were interrupted by a model change.")
         self.emit("image_check", epoch, state="checking")
-        self.status("installing", "Checking image support on this Mac…", epoch)
+        self.status("installing", "Loading model…", epoch)
         with self.lock:
             if epoch != self.epoch:
                 raise DesktopError("Image checks were interrupted by a model change.")
@@ -2070,9 +2070,7 @@ class Desktop:
             self.worker = worker
             if mode == "chat":
                 worker.image_check_dir = self.data_dir / "image-checks"
-                worker.image_check_progress = lambda: self.status(
-                    "loading", "Checking image support on this Mac…", epoch
-                )
+                worker.image_check_progress = lambda: self.status("loading", "Loading model…", epoch)
         ready = worker.read()
         if vision:
             codec, template = load_template(Path(model["path"]), expected_hashes=worker.image_input)

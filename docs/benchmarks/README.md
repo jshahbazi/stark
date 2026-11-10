@@ -12,6 +12,16 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Retained Lily image startup (2026-11-09).** The
+[startup/Playground record](2026-11-09-lily-image-startup.md) preserves a canceled
+baseline, a functionally passing but latency-rejected full-scan candidate, and
+the subsequent unchanged-file digest reuse. The installed follow-up reached
+native vision readiness in 11.875 and 10.478 seconds; the final full-app routine
+restart was still loading at 5.098 seconds and Ready by 14.774 seconds. These
+unscreened observations have different boundaries. Playground attachment,
+bounded shape recognition and both UI-message removals passed. This does not
+supersede generation-throughput studies or establish an exact full-app duration.
+
 **Gemma 4 warmed cache correction (2026-11-09).** Alternating controls expose
 full-prompt replay after restoration in the original worker. The suffix fix
 passes nonperiodic near-capacity/image controls and improves measured hit

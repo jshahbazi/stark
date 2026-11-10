@@ -2161,9 +2161,7 @@ extension EngineController {
             var verified = imageReady
             verified["image_verification"] = "locally_tested"
             engine.apply(verified)
-            guard engine.supportsImages, engine.imageVerification == "locally_tested",
-                  engine.imageVerificationNote.contains("Reference parity is unverified"),
-                  !engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            guard engine.supportsImages, engine.imageVerification == "locally_tested" else { return false }
             engine.pendingOptions = engine.options
             engine.pendingOptionsModelID = engine.loadedID
             engine.state = "configuring"
@@ -2174,18 +2172,15 @@ extension EngineController {
             var verified = imageReady
             verified["image_verification"] = "reference_verified"
             engine.apply(verified)
-            guard engine.supportsImages, engine.imageVerification == "reference_verified",
-                  engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            guard engine.supportsImages, engine.imageVerification == "reference_verified" else { return false }
             verified["images"] = false
             engine.apply(verified)
-            return !engine.supportsImages && engine.imageVerification == "unverified" &&
-                !engine.imageVerificationNote.contains("has reference-parity verification")
+            return !engine.supportsImages && engine.imageVerification == "unverified"
         case "image-unknown-evidence":
             var unsupported = imageReady
             unsupported["image_verification"] = "self-declared-reference-pass"
             engine.apply(unsupported)
-            guard engine.imageVerification == "unverified",
-                  !engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            guard engine.imageVerification == "unverified" else { return false }
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
             return !engine.supportsImages && engine.imageVerification == "unverified"
         case "image-install-check-clears":
@@ -2203,7 +2198,7 @@ extension EngineController {
                 engine.gpuMemoryBytes == nil && engine.gpuMemoryText == "GPU memory —" &&
                 !engine.supportsImages && engine.imageVerification == "unverified" &&
                 engine.messages.isEmpty && engine.draftImage == nil && engine.conversationImage == nil &&
-                staged().isEmpty && engine.message == "Checking image support on this Mac…"
+                staged().isEmpty && engine.message == "Loading model…"
         case "image-install-check-state-guard":
             try! engine.attachImage(bytes: imageBytes)
             engine.apply(["event": "image_check", "state": "checking"])

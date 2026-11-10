@@ -1372,13 +1372,6 @@ final class EngineController: ObservableObject {
             .compactMap { $0 }.joined(separator: " · ")
     }
     var canAttachImage: Bool { modelReady && supportsImages && conversationImage == nil }
-    var imageVerificationNote: String {
-        switch imageVerification {
-        case "locally_tested": return "Image support checked on this Mac. Reference parity is unverified."
-        case "reference_verified": return "Image support has reference-parity verification."
-        default: return "Image support available."
-        }
-    }
     var hasConversation: Bool { !messages.isEmpty || draftImage != nil || conversationImage != nil }
     var canSendMessage: Bool {
         modelReady && !attachmentLoading &&
@@ -1702,7 +1695,7 @@ final class EngineController: ObservableObject {
             loadedID = ""; loadedMode = nil; supportsImages = false; imageVerification = "unverified"
             gpuMemoryBytes = nil
             clearConversation(); clearDecision()
-            message = "Checking image support on this Mac…"
+            message = "Loading model…"
         case "decision":
             guard mode == .decision, loadedMode == .decision, state == "deciding",
                   let expected = pendingDecisionAnswers else { return }
@@ -3473,9 +3466,6 @@ struct ChatContentView: View {
                         ? "Reply reached the current context limit. Review Advanced Options or start a new chat for more room."
                         : "Reply reached the available context or execution budget."))
                     .font(.caption).foregroundStyle(.orange)
-            }
-            if engine.supportsImages {
-                Text(engine.imageVerificationNote).font(.caption).foregroundStyle(.secondary)
             }
             if let image = engine.draftImage {
                 HStack {
