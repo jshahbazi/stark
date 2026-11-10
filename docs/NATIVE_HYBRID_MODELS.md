@@ -122,6 +122,19 @@ binding the source, model shards, any external n-gram table, configuration,
 tokenizer, fixed processor recipe and standalone template. Native loading
 verifies the recorded payload hashes and retained BF16 tower before publishing
 image capability; automatic local checks must pass before image input is enabled.
+Preparation hashes every shard and seeds an owner-private
+`.stark-image-validation.json` content-digest cache. On later loads, the native
+loader reuses a recorded digest only when the exact manifest digest and the
+opened shard's device, inode, size, modification time and change time (including
+nanoseconds) match. Metadata/configuration checks and the post-load file-change
+guard still run. Missing, malformed, non-private or stale cache entries fall back
+to a full SHA-256 check; changed files must match the manifest before loading.
+Full validation uses ARM SHA-256 acceleration and at most four independent
+shards concurrently, with an 8 MiB buffer per shard. The cache is disposable
+local file-validation metadata, not an execution qualification receipt or
+persisted inference state. It assumes ordinary filesystem change-time semantics;
+privileged tampering with filesystem metadata is outside this optimization's
+unchanged-file guarantee.
 
 The path accepts one PNG/JPEG, clears generation-prefix reuse and keeps image
 MTP disabled. A retained image-loaded model also loads its declared MTP head

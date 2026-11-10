@@ -13,6 +13,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261109-LILY-STARTUP-01/02/03: retained image startup](../benchmarks/2026-11-09-lily-image-startup.md) | Initial startup canceled; accelerated full scan passed image smoke but latency rejected; private digest reuse and UI cleanup installed, native startup 10.5–11.9 s; full UI timing pending unlock |
 | [20261108-LVMTP-01: retained vision text MTP](../archive/runs/2026-11-08-lily-vision-text-mtp.md) | Lily vision/text MTP parity passed bounded output, 4,096-token prefix and image-transition controls; short paired text speed matched; memory recipe updated |
 | [Image-support retrospective](2026-11-08-image-support-retrospective.md) | Conversation-wide findings, model coverage, validation mistakes, review, delivery and remaining work |
 | [Qwen image attempts](2026-11-08-qwen-images.md) | BF16 and affine dense Qwen, affine and BF16-source MoE, retained Flash-Next/Lily numerical repairs and resource controls |

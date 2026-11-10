@@ -12,6 +12,14 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Retained Lily image startup (2026-11-09).** The
+[startup/Playground record](2026-11-09-lily-image-startup.md) preserves a canceled
+baseline, a functionally passing but latency-rejected full-scan candidate, and
+the subsequent unchanged-file digest reuse. The installed follow-up reached
+native vision readiness in 11.875 and 10.478 seconds; full-app timing is pending
+unlock. These unscreened native observations exclude app local checks and UI
+publication. This does not supersede generation-throughput studies.
+
 **Retained Lily vision-loaded text MTP (2026-11-08).** A
 [short paired check](2026-11-08-lily-vision-text-mtp.md) observes 104.71 tok/s
 on the previous text-only worker and 105.49 tok/s with vision and text MTP

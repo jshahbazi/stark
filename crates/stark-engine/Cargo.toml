@@ -99,7 +99,7 @@ derive_more = { workspace = true, features = ["debug"] }
 half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "=0.10.9"
+sha2 = { version = "=0.10.9", features = ["asm-aarch64"] }
 monostate.workspace = true
 thiserror.workspace = true
 tokenizers.workspace = true

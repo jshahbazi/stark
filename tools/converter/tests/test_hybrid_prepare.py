@@ -10,6 +10,15 @@ import pytest
 from stark_convert import hybrid_prepare as hybrid
 
 
+@pytest.fixture(autouse=True)
+def synthetic_download_disk_headroom(monkeypatch, tmp_path):
+    # Download tests use byte-sized local stand-ins. Their admission must not
+    # depend on how much disk happens to be free on the test host. Individual
+    # disk-rejection cases can override this fixture's probe.
+    usage = hybrid.shutil.disk_usage(tmp_path)
+    monkeypatch.setattr(hybrid.shutil, "disk_usage", lambda _: usage._replace(free=16 * 1024**3))
+
+
 def metadata(root: Path, architecture="glm5_next"):
     (root / "config.json").write_text(
         json.dumps(

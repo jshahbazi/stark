@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ._build_metadata import file_hash, open_regular
@@ -11,6 +14,7 @@ from .vision_family import _PROCESSOR
 
 PROFILE = "qwen38-lily-retained-bf16-vision-v1"
 MANIFEST = "stark-image-artifact.json"
+HASH_CACHE = ".stark-image-validation.json"
 # The native processor implements this fixed recipe, with its own smaller
 # request limits. Checkpoint sidecars cannot change its operations or budgets.
 PROCESSOR_BYTES = (json.dumps(_PROCESSOR, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -140,6 +144,63 @@ def _read(path: Path, maximum: int) -> bytes:
         return data
 
 
+def _signature(stream) -> list[int]:
+    stat = os.fstat(stream.fileno())
+    return [
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns // 1_000_000_000,
+        stat.st_mtime_ns % 1_000_000_000,
+        stat.st_ctime_ns // 1_000_000_000,
+        stat.st_ctime_ns % 1_000_000_000,
+    ]
+
+
+def _verified_weight(path: Path) -> tuple[dict, list[int]]:
+    with open_regular(path) as stream:
+        before = _signature(stream)
+        digest = hashlib.sha256()
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+        if _signature(stream) != before:
+            raise ValueError("native image weight changed during preparation")
+        return {"size": before[2], "sha256": digest.hexdigest()}, before
+
+
+def _save_hash_cache(directory: Path, manifest_sha256: str, records: dict, signatures: dict) -> None:
+    """Reuse content validation only while descriptor identities stay unchanged."""
+    cache = {
+        "schema_version": 1,
+        "manifest_sha256": manifest_sha256,
+        "files": {
+            name: {"sha256": record["sha256"], "signature": signatures[name]} for name, record in records.items()
+        },
+    }
+    temporary = directory / f".stark-image-validation-{os.getpid()}-{uuid.uuid4().hex}.tmp"
+    descriptor = -1
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            descriptor = -1
+            json.dump(cache, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(directory / HASH_CACHE)
+    except OSError:
+        # Full native validation remains available if this disposable cache
+        # cannot be published; preparing the artifact must still work.
+        pass
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def prepare_image_artifact(directory: Path, choice: str) -> dict:
     """Hash a complete pinned native folder; add no weights or execution claims."""
     from .hybrid_prepare import SOURCES, prepared_identity
@@ -189,7 +250,10 @@ def prepare_image_artifact(directory: Path, choice: str) -> dict:
     weights.sort(key=lambda path: path.name)
     if not 1 <= len(weights) <= 256:
         raise ValueError("native image shard inventory exceeds its limit")
-    records = {path.name: {"size": path.stat().st_size, "sha256": file_hash(path)} for path in weights}
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        verified = list(workers.map(_verified_weight, weights))
+    records = {path.name: record for path, (record, _) in zip(weights, verified)}
+    signatures = {path.name: signature for path, (_, signature) in zip(weights, verified)}
     shard_names = {name for name in records if name.endswith(".safetensors")}
     if set(index.get("weight_map", {}).values()) != shard_names:
         raise ValueError("native image shard index disagrees with its inventory")
@@ -219,4 +283,5 @@ def prepare_image_artifact(directory: Path, choice: str) -> dict:
         json.dump(result, stream, indent=2, sort_keys=True)
         stream.write("\n")
     temporary.replace(path)
+    _save_hash_cache(directory, file_hash(path), records, signatures)
     return result

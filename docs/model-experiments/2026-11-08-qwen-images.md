@@ -139,6 +139,13 @@ model runs. Raw prompts, responses, vectors, images and private logs remain
 outside tracked documentation. New evidence should append a new attempt ID and
 immutable source/artifact/binary/reference identity without replacing failures.
 
+Follow-up `20261109-LILY-STARTUP-01/02/03` records the separate
+[retained image startup and Playground installation](../benchmarks/2026-11-09-lily-image-startup.md).
+The first accelerated full scan passed a shape-recognition smoke but its
+startup latency was rejected; the digest-reuse follow-up retains separate
+source identities and verification status. These observations do not extend
+the numerical qualification recorded above.
+
 [families]: ../archive/runs/2026-11-07-qwen-image-families.md
 [bfmoe]: ../archive/runs/2026-11-07-qwen35-bf16-moe-images.md
 [lily]: ../archive/runs/2026-11-07-retained-lily-vision-numerics.md
