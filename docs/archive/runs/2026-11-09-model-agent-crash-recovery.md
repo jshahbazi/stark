@@ -1117,3 +1117,53 @@ Private evidence receipt:
 `761d6d39bf8ab71a391e3e282d458ee6139090603a2ac3e71358d2995d898572`.
 Gemma #119 includes the same reviewed correction, remains a draft and preserves
 its explicit current-model replay blocker. Both branch worktrees are clean.
+
+### Authorized Gemma integration replay
+
+The user released the model window and authorized the pending Gemma replay.
+Fresh inspection finds no installed Stark or foreign model worker, more than
+110 GB available memory and more than 23 GiB free disk. The unchanged v3
+preflight still stops before spawning because the host retains 196,608 bytes
+of old swap. This second stopped attempt remains a separate zero-case receipt;
+it is not relabeled as successful.
+
+A minimal prospective private guard v4 permits at most 1 MiB of pre-existing
+swap and records its baseline. All paging, swap-in/out/used and compressor
+growth limits remain zero; memory, disk, ownership, telemetry and cleanup
+limits are unchanged. Root and an independent agent review the frozen change;
+three CPU controls pass for unchanged 196,608-byte baseline, fatal 16,384-byte
+growth with cleanup, and rejection above the entry cap before spawning.
+Preregistration SHA-256:
+`c0ece40a80a9f28e05bb3fff4b9828f66080783faacb73d1f7fcd8fef3c0cb9c`.
+This is a new, explicitly recorded test policy, not a pass under original v3.
+No product code, cases, output-equality assertions or timing bounds change.
+
+The current integrated staging worker `feebfa6f` and matching helper `71b4fe64`
+now pass all 37 image-loaded lifecycle cases. All 33 non-null per-case output
+hashes match the preceding source-bound serial worker. The checks cover cache
+reuse/invalidation, context and draft-depth changes, actual assistant proposals
+and acceptance, cancellation/error recovery, output caps/stops, and zero drafts
+for an actual image request. Receipt SHA-256:
+`9e4ffa0b24df9fe9868ba0fcc9b4e528005402b7165cae281a2e6bda249fb750`.
+Its supervisor records 150 samples, approximately 10.65 GB peak physical
+footprint and 100.04 GB minimum available memory, with zero paging, swap and
+compressor growth and successful drain/join.
+
+The existing text-only 64-token MTP0/MTP3 pair also passes on the same worker:
+both output hashes are identical, with 34 of 85 real assistant proposals
+accepted. Receipt SHA-256:
+`965dbe4b7e5e5d197a56549a46d097f8554f909f3a8eb8d3640799e7a533b1c0`.
+Its supervisor records 123 samples, zero paging/swap/compressor growth and
+successful drain/join. Entry and final swap remain 196,608 bytes in both runs.
+Root independently verifies both aggregate receipts. These are functional
+replays; the single text pair is not a fresh matched speed benchmark. Prior
+performance measurements and assistant staging/provisioning/context limits
+retain their original scope. All owned workers are closed and the GPU window
+is released.
+
+Qwen #118 now has all hosted checks successful on exact head `1f26071f`,
+including aggregate CI and Security. Gemma #119's previously pending integrated
+model replay gate is satisfied by the new evidence above. Root verifies the
+receipts and documentation, and marks #119 ready for review. Its assistant
+feature and unqualified model/context scope remain explicitly limited. No merge
+is performed.
