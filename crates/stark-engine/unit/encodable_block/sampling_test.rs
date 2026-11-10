@@ -392,6 +392,41 @@ fn native_sampling_centers_only_temperature_overflow_and_preserves_seeded_draws(
     });
 }
 
+#[stark_test]
+fn native_sampling_handles_reciprocal_boundaries() {
+    fn method(temperature: f32) -> SamplingMethod {
+        SamplingMethod::Stochastic {
+            temperature: Some(temperature),
+            top_k: None,
+            top_p: None,
+            min_p: None,
+            repetition_penalty: None,
+            suffix_repetition_length: None,
+        }
+    }
+    assert!(method(f32::from_bits(0x00200000)).validate(3).is_err());
+    fn check<B: Backend, T: ArrayElement + Float>() {
+        let context = B::Context::new().unwrap();
+        let source = [10.0, 1.0, 2.0].map(|x| <T as NumCast>::from(x).unwrap());
+        for temperature in [f32::from_bits(0x00200001), f32::MIN_POSITIVE] {
+            let method = method(temperature);
+            assert!(method.validate(3).is_ok(), "finite-reciprocal boundary was rejected");
+            let actual = do_sampling_backend::<B, T>(&context, &source, Some(&[42]), None, 3, &method, 1).unwrap();
+            assert!(
+                actual.0 == [0],
+                "reciprocal boundary lost unique maximum: backend={} dtype={:?} temperature_bits={:#010x}",
+                std::any::type_name::<B>(),
+                T::data_type(),
+                temperature.to_bits()
+            );
+        }
+    }
+    crate::tests::helpers::for_each_backend!(|B| {
+        check::<B, f32>();
+        check::<B, half::bf16>();
+    });
+}
+
 fn repetition_penalty_backend<B: Backend>(context: &B::Context) {
     use crate::backends::common::{BufferMut, Kernels, kernel::RepetitionPenaltyKernel};
 
