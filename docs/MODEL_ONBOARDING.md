@@ -256,9 +256,12 @@ For each new template:
    checkpoint or training/evaluation work; adding instructions or a template
    does not establish that capability.
 4. Run a model-bound workflow on the actual checkpoint/quantization and worker.
-   At minimum check correct call selection/arguments, returned-result use and
-   ordinary chat. Check buffered/streamed API behavior and cancellation with a
-   real client before claiming an agent integration. Record failures honestly.
+   At minimum check correct call selection/arguments, returned-result use,
+   autonomous continuation after a tool result with tools still available,
+   and ordinary chat. A fresh user instruction or disabling tools does not
+   qualify autonomous completion. Check buffered/streamed API behavior and
+   cancellation with a real client before claiming an agent integration.
+   Record failures honestly.
 
 The bounded native smoke command below runs synthetic requests serially, returns
 a synthetic tool result without executing external tools, and writes only
@@ -278,8 +281,11 @@ uv run --project tools/converter --locked --python 3.13.13 python \
   --output runtime/model-tools-validation.json
 ```
 
-A passing run qualifies only those three bounded checks for those sealed bytes,
-budgets and sampling settings. It does not establish broad task competence.
+A schema-version-2 run includes a separate autonomous continuation check, in
+addition to the original three checks. Earlier receipts retain their original
+scope and do not inherit that coverage. A passing run qualifies only those
+bounded checks for those sealed bytes, budgets and sampling settings. It does
+not establish broad task competence.
 Store a separate dated record with the source/build identity, device/OS, parser,
 template and artifact hashes, aggregate outcomes and remaining limitations.
 Record protocol support and native model-loading results separately. A parser
