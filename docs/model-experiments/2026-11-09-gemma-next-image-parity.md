@@ -1228,3 +1228,11 @@ The two larger targets recover 1,879,162,880 measured free bytes (retirement
 receipt `90d48b623977831bf9fc59bc73ff91c81d3922b41237f16b91275b3dfc136fe7`).
 The reusable worker target and models remain. The new build maintains the
 unchanged 8 GiB reserve throughout.
+
+The reviewed Qwen hosted-CI correction `1f26071f` is subsequently cherry-picked
+as `f3679908`. Its CPU-only sigmoid type guard replaces a test-only trait lookup
+with the equivalent concrete BF16 type check; the CPU backend module is excluded
+from the Metal build above. The remaining changes update stale converter test
+fixtures and dated Qwen evidence. All five resulting files match the reviewed
+Qwen commit exactly, and its 175 focused Python checks pass. This correction
+does not change the compiled Metal closure or complete the pending model gates.
