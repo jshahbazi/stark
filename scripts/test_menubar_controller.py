@@ -1322,12 +1322,18 @@ extension EngineController {
                 inventory.groups[0].models.filter(\.isRunning).map(\.id) == ["text"]
         case "models-readable-names":
             var lily = modelDisplay("repo:owner/Qwen3.8-Flash-Next-lily-q4-xl", name: "Qwen3.8-Flash-Next-lily-q4-xl")
-            lily["quantization"] = "Lily q4-xl (Q4_K)"
+            lily["quantization"] = "Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)"
+            var mlxServe = modelDisplay("repo:owner/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit", name: "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit")
+            mlxServe["quantization"] = "MLX-Serve mixed 4/8-bit"
+            var mlx = modelDisplay("repo:owner/Qwen3.8-Flash-Next-MLX-mixed-4_8bit", name: "Qwen3.8-Flash-Next-MLX-mixed-4_8bit")
+            mlx["quantization"] = "MLX mixed 4/8-bit"
             var compact = modelDisplay("repo:owner/Qwen3-4B-4bit", name: "Qwen3-4B-4bit")
             compact["quantization"] = "4-bit"
             let saved = "qwen38-flash-next-lily-q4-xl-0f94842e"
             let dense = modelDisplay("repo:owner/Qwen3-0.6B", name: "Qwen3-0.6B")
             let fixtures = [variant("lily", name: saved, display: lily),
+                            variant("mlx-serve", name: "qwen38-flash-next-mixed-4-8bit-788c07a8", display: mlxServe),
+                            variant("mlx", name: "qwen38-flash-next-mixed-4-8bit-b2c422f3", display: mlx),
                             variant("mixed", name: "qwen38-flash-next-mixed-4-8bit-788c07a8", display: nil),
                             variant("small", name: "qwen3-4b-4bit", display: compact),
                             variant("dense", name: "qwen3-dense", display: dense),
@@ -1335,14 +1341,20 @@ extension EngineController {
             let inventory = ModelsInventory(models: fixtures, loadedID: "lily", registry: nil)
             let rows = Dictionary(uniqueKeysWithValues: inventory.models.map { ($0.id, $0) })
             guard rows["lily"]?.displayName == "Qwen3.8 Flash Next", rows["lily"]?.name == saved,
-                  rows["lily"]?.quantization == "Lily q4-xl (Q4_K)",
+                  rows["lily"]?.quantization == lily["quantization"] as? String,
+                  rows["lily"]?.variantLabel == "Lily q4",
+                  rows["mlx-serve"]?.displayName == "Qwen3.8 Flash Next", rows["mlx-serve"]?.variantLabel == "MLX-Serve",
+                  rows["mlx"]?.displayName == "Qwen3.8 Flash Next", rows["mlx"]?.variantLabel == "MLX",
                   rows["mixed"]?.displayName == "Qwen3.8 Flash Next (Mixed 4/8-bit)",
                   rows["small"]?.displayName == "Qwen3 4B", rows["custom"]?.displayName == "JevK5",
                   rows["dense"]?.displayName == "Qwen3 Dense",
-                  inventory.runningGroup?.models.first?.id == "lily" else { return false }
-            for query in [saved, "0f94842e", "Qwen3.8 Flash Next"] {
+                  ["mixed", "small", "custom", "dense"].allSatisfy({ rows[$0]?.variantLabel == nil }),
+                  inventory.runningGroup?.models.first?.variantLabel == "Lily q4" else { return false }
+            for query in [saved, "0f94842e", "Qwen3.8 Flash Next", "Lily q4"] {
                 guard ModelsInventory(models: fixtures, loadedID: "", registry: nil, query: query).models.contains(where: { $0.id == "lily" }) else { return false }
             }
+            let serveResults = ModelsInventory(models: fixtures, loadedID: "", registry: nil, query: "MLX-Serve")
+            guard serveResults.models.map(\.id) == ["mlx-serve"] else { return false }
             return ModelsInventory.readableName("My preferred model", display: InstalledModelDisplay(lily)) == "My preferred model"
                 && ModelsInventory.readableName("my-favorite-model", display: InstalledModelDisplay(lily)) == "My Favorite Model"
                 && ModelsInventory.readableName("experiment-deadbeef", display: nil) == "Experiment Deadbeef"
