@@ -253,7 +253,7 @@ where
             || self.decoder.embedding().model_dim() != profile.backbone_dim()
             || input.is_empty()
             || start.checked_add(input.len()).is_none_or(|end| end >= capacity as usize)
-            || capture_position % super::stream::PREFILL_CHUNK_TOKENS != 0
+            || !capture_position.is_multiple_of(super::stream::PREFILL_CHUNK_TOKENS)
             || capture_position >= start + input.len()
             || self.max_context_length().is_some_and(|n| capacity > n)
             || input.iter().any(|&t| t >= self.decoder.embedding().vocab_size())

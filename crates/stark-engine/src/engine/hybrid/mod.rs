@@ -774,6 +774,38 @@ impl Model {
         result
     }
 
+    /// Reserve the complete admitted request span before prompt execution.
+    /// Lily's scratch and state caches then use the same growth as admission.
+    pub fn reserve_generation_context(
+        &mut self,
+        tokens: u32,
+    ) -> Result<()> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.reserve_generation_context(tokens as usize);
+        }
+        let _ = tokens;
+        Ok(())
+    }
+
+    /// Initial readout with control checks between synchronous prefill passes.
+    pub fn step_controlled(
+        &mut self,
+        token: u32,
+        mut before_pass: impl FnMut() -> Result<()>,
+    ) -> Result<Vec<f32>> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            let result = model.step_controlled(token, &mut before_pass);
+            if result.is_err() {
+                self.reset_after_error();
+            }
+            return result;
+        }
+        before_pass()?;
+        self.step(token)
+    }
+
     /// Advance a prefill prefix without projecting vocabulary logits that the
     /// caller will discard. The final input token must still use `step`.
     pub fn ingest(
@@ -1047,6 +1079,23 @@ impl Model {
             self.reset_after_error();
         }
         result
+    }
+
+    pub fn step_greedy_controlled(
+        &mut self,
+        token: u32,
+        mut before_pass: impl FnMut() -> Result<()>,
+    ) -> Result<u32> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            let result = model.step_greedy_controlled(token, &mut before_pass);
+            if result.is_err() {
+                self.reset_after_error();
+            }
+            return result;
+        }
+        before_pass()?;
+        self.step_greedy(token)
     }
     /// Continue an already validated greedy draw within one serialized request.
     /// Dropping the iterator drains submitted work before the model is reusable.

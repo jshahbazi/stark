@@ -4564,6 +4564,35 @@ impl Qwen4ExpModel {
             )?;
             pass.level_barrier(&[capture.hyper, &capture.spec.logits])?;
         }
+        if capture.is_none()
+            && self.mtp_enabled
+            && let (Some(mtp), Some(mst)) = (&self.weights.mtp, &state.mtp)
+        {
+            // Ordinary decode also consumes a trunk row. In particular the
+            // official N-1 prefill holds its last prompt token for this graph;
+            // leaving the head behind here would draft from the penultimate
+            // hidden and leave a cache row from an earlier request visible.
+            // Reuse the prefill catch-up on views of the exact decode hidden
+            // and input ID, preserving the target graph's arithmetic.
+            let mut ps = s
+                .prefill
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("MTP decode without prefill scratch"))?
+                .rows(1)?;
+            ps.hyper = s.hyper.view(0, &[1, cfg.hc_width()])?;
+            ps.ids = ids;
+            self.mtp_catch_up(
+                ctx,
+                pass,
+                mtp,
+                mst,
+                state.pos,
+                s,
+                &ps,
+                Rope::Delta(state.rope_delta),
+                &[],
+            )?;
+        }
         pass.profile_stage(crate::metal::stage_profile::Phase::Draw)?;
         let out = s.next_token.view(slot_out, &[1])?;
         sample_f32(ctx, pass, &s.logits, &s.sampler, draw.params, draw.step, &out)?;

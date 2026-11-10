@@ -63,19 +63,6 @@ impl<B: Backend> Attention<B> {
         Ok(stages)
     }
 
-    /// One external-assistant query reads exactly the committed target rows.
-    /// This does not update target KV or admit partial ring speculation.
-    /// The caller binds model identity and builds RoPE at `target.position()`.
-    pub fn attend_committed_target(
-        &self,
-        hidden: B::ScratchBuffer,
-        precalculated_rope: Option<&PrecalculatedRoPE<B>>,
-        target: &super::CommittedAttentionKV<'_, B>,
-        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
-    ) -> Result<B::ScratchBuffer, B::Error> {
-        self.attend_committed_target_inner(hidden, precalculated_rope, target, None, command)
-    }
-
     pub(crate) fn attend_committed_target_eager(
         &self,
         hidden: B::ScratchBuffer,

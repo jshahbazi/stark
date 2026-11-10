@@ -1,6 +1,12 @@
 //! Serialized text generation through Stark's native hybrid-family forward.
 
-use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::Write,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use rayon::prelude::*;
 use stark_engine::engine::hybrid::{Model, NativeSampling, PrefixSnapshot, PreparedHybridImage, finite_guard, profile};
@@ -8,9 +14,9 @@ use stark_engine::engine::hybrid::{Model, NativeSampling, PrefixSnapshot, Prepar
 use crate::{
     cancel::CancelSignal,
     generation::{
-        ContextPlanningRequest, GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity,
-        MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback, admit_request_memory,
-        collect_tokens_controlled, native_result_after_cleanup,
+        ContextPlanningRequest, GeneratedTokens, GenerationBackend, GenerationOptions, GenerationProgress,
+        ImageArtifactIdentity, MtpCapabilities, PreparedImageMetadata, ProgressCallback, Sampling, TextCallback,
+        admit_request_memory, collect_tokens_controlled, native_result_after_cleanup,
     },
     prefix_cache::{self, BoundaryEntry},
     text_stop::StopFilter,
@@ -22,6 +28,24 @@ mod nucleus;
 
 /// Recurrent snapshots also depend on whether the draft head ran in prefill.
 const PREFIX_CACHE_KEY: &str = "model-instance+context-tokens+cache-scope+mtp-enabled";
+
+fn report_prefill_progress(
+    elapsed: Duration,
+    last_reported: &mut Duration,
+    on_progress: Option<&mut ProgressCallback<'_>>,
+) -> Result<(), &'static str> {
+    if elapsed.saturating_sub(*last_reported) >= Duration::from_secs(1) {
+        if let Some(progress) = on_progress {
+            progress(GenerationProgress {
+                sampled_tokens: 0,
+                elapsed_seconds: elapsed.as_secs_f64(),
+                prefill_seconds: None,
+            })?;
+        }
+        *last_reported = elapsed;
+    }
+    Ok(())
+}
 
 fn greedy_host_workspace(
     sampling: &Sampling,
@@ -407,7 +431,7 @@ impl HybridBackend {
         image: Option<PreparedHybridImage>,
         options: &GenerationOptions,
         mut on_text: Option<&mut TextCallback<'_>>,
-        on_progress: Option<&mut ProgressCallback<'_>>,
+        mut on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         let started = Instant::now();
         let is_image = image.is_some();
@@ -416,6 +440,11 @@ impl HybridBackend {
                 retained.filter(|snapshot| snapshot.position() == reused).ok_or("native_generation_failed")?;
             self.model.restore_prefix(snapshot).map_err(|_| "native_generation_failed")?;
         }
+        let admitted_span = u32::try_from(input.len())
+            .ok()
+            .and_then(|tokens| tokens.checked_add(options.max_new_tokens))
+            .ok_or("context_overflow")?;
+        self.model.reserve_generation_context(admitted_span).map_err(|_| "native_generation_failed")?;
         if let Some(position) = capture.filter(|&position| position > reused) {
             self.model.capture_prefix_at(position).map_err(|_| "native_generation_failed")?;
         }
@@ -448,49 +477,43 @@ impl HybridBackend {
         let mut greedy_token = None;
         let mut native_first = None;
         let mut prefill_control_error = None;
-        if let Some(image) = image {
-            let result = self.model.prefill_image_controlled(input, image, || match cancelled() {
-                Ok(cancelled) => cancelled,
-                Err(error) => {
+        let mut last_prefill_progress = Duration::ZERO;
+        {
+            let mut control = || {
+                let result = (|| -> Result<(), &'static str> {
+                    if cancelled()? {
+                        return Err("generation_cancelled");
+                    }
+                    report_prefill_progress(started.elapsed(), &mut last_prefill_progress, on_progress.as_deref_mut())?;
+                    Ok(())
+                })();
+                result.map_err(|error| {
                     prefill_control_error = Some(error);
-                    true
-                },
-            });
-            logits = match result {
-                Ok(logits) => logits,
-                Err(stark_engine::engine::hybrid::Error::Cancelled) => {
-                    return Err(prefill_control_error.unwrap_or("generation_cancelled"));
-                },
-                Err(_) => return Err("native_generation_failed"),
+                    stark_engine::engine::hybrid::Error::Cancelled
+                })
             };
-            if cancelled()? {
-                return Err("generation_cancelled");
-            }
-        } else {
-            let prefix = input.get(reused..input.len() - 1).ok_or("native_generation_failed")?;
-            let prefill = self.model.ingest_prefix(prefix, || {
-                let control = match cancelled() {
-                    Ok(false) => return Ok(()),
-                    Ok(true) => "generation_cancelled",
-                    Err(error) => error,
-                };
-                prefill_control_error = Some(control);
-                Err(stark_engine::engine::hybrid::Error::Invalid("prefill control stopped"))
-            });
-            if prefill.is_err() {
+            let prefill_result = (|| -> stark_engine::engine::hybrid::Result<()> {
+                if let Some(image) = image {
+                    logits = self.model.prefill_image_controlled(input, image, || control().is_err())?;
+                } else {
+                    let prefix = input
+                        .get(reused..input.len() - 1)
+                        .ok_or(stark_engine::engine::hybrid::Error::Invalid("prefill prefix"))?;
+                    self.model.ingest_prefix(prefix, &mut control)?;
+                    control()?;
+                    let token = input[input.len() - 1];
+                    if let Some(policy) = native_policy {
+                        native_first = Some(self.model.step_native_initial(token, policy)?);
+                    } else if gpu_greedy {
+                        greedy_token = Some(self.model.step_greedy_controlled(token, &mut control)?);
+                    } else {
+                        logits = self.model.step_controlled(token, &mut control)?;
+                    }
+                }
+                control()
+            })();
+            if prefill_result.is_err() {
                 return Err(prefill_control_error.unwrap_or("native_generation_failed"));
-            }
-            if cancelled()? {
-                return Err("generation_cancelled");
-            }
-            let token = input[input.len() - 1];
-            if let Some(policy) = native_policy {
-                native_first =
-                    Some(self.model.step_native_initial(token, policy).map_err(|_| "native_generation_failed")?);
-            } else if gpu_greedy {
-                greedy_token = Some(self.model.step_greedy(token).map_err(|_| "native_generation_failed")?);
-            } else {
-                logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
             }
         }
         // Native-only diagnostics add one request boundary. Qwen's existing
@@ -1239,6 +1262,34 @@ mod tests {
     use stark_engine::engine::hybrid::math;
 
     use super::*;
+
+    #[test]
+    fn prefill_progress_reports_content_free_activity_at_bounded_intervals() {
+        let mut last = Duration::ZERO;
+        let mut observations = Vec::new();
+        let mut callback = |progress| {
+            observations.push(progress);
+            Ok(())
+        };
+        for millis in [0, 999, 1_000, 1_500, 2_000] {
+            report_prefill_progress(Duration::from_millis(millis), &mut last, Some(&mut callback)).unwrap();
+        }
+        assert_eq!(observations.len(), 2);
+        assert!(observations.iter().all(|value| value.sampled_tokens == 0 && value.prefill_seconds.is_none()));
+        assert_eq!(observations[0].elapsed_seconds, 1.0);
+        assert_eq!(observations[1].elapsed_seconds, 2.0);
+    }
+
+    #[test]
+    fn prefill_progress_preserves_callback_failures() {
+        let mut last = Duration::ZERO;
+        let mut callback = |_| Err("stream_closed");
+        assert_eq!(
+            report_prefill_progress(Duration::from_secs(1), &mut last, Some(&mut callback)),
+            Err("stream_closed")
+        );
+        assert_eq!(last, Duration::ZERO);
+    }
 
     #[test]
     fn greedy_memory_mode_requires_greedy_sampling_and_disabled_mtp() {
