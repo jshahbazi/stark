@@ -406,6 +406,16 @@ impl<B: Backend> MixerState<B> for AttentionState<B> {
         })))
     }
 
+    fn resident_payload_bytes(&self) -> Option<usize> {
+        if self.is_sparse {
+            let keys = (self.keys.as_ref() as &dyn Any).downcast_ref::<B::SparseBuffer>()?;
+            let values = (self.values.as_ref() as &dyn Any).downcast_ref::<B::SparseBuffer>()?;
+            keys.mapped_size().checked_add(values.mapped_size())
+        } else {
+            self.keys.size().checked_add(self.values.size())
+        }
+    }
+
     fn prepare(
         &mut self,
         context_length: u32,

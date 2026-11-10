@@ -14,7 +14,7 @@ use crate::{
 pub mod constant;
 pub mod dense;
 pub mod global;
-mod retirement;
+pub(super) mod retirement;
 pub mod scratch;
 pub mod sparse;
 

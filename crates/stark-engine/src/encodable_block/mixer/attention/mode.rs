@@ -168,6 +168,94 @@ impl<B: Backend> Attention<B> {
         self.out_projection.encode(output, 1, command)
     }
 
+    /// Re-encode a small flat query with the actual projection/core/gate paths.
+    /// Persisted buffers belong only to the private test exporter, never KV state.
+    #[cfg(test)]
+    pub(crate) fn validation_stateless_stages(
+        &self,
+        hidden: B::ScratchBuffer,
+        rope: Option<&PrecalculatedRoPE<B>>,
+        topology: &BatchTopology,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Vec<(&'static str, B::ScratchBuffer, Vec<usize>)>, B::Error> {
+        use crate::{backends::common::Buffer, data_type::DataType};
+        let rows = topology.size();
+        if rows == 0
+            || rows > 16
+            || !topology.is_flat()
+            || self.ring_capacity.is_some()
+            || self.sinks.is_some()
+            || self.data_type != DataType::BF16
+            || rope.is_some() != self.max_rope_length.is_some()
+        {
+            return Err(crate::backends::common::InvalidInput("small stateless BF16 attention trace required").into());
+        }
+        let kv = self.num_kv_heads.ok_or(crate::backends::common::InvalidInput("owned KV trace required"))?;
+        let copy = |buffer: &B::ScratchBuffer, commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding| {
+            let mut output = commands.allocate_scratch(buffer.size())?;
+            commands.encode_copy(buffer, &mut output);
+            Ok::<_, B::Error>(output)
+        };
+        let mut result = Vec::new();
+        let mut qkvg = self.projection.lin.encode(hidden, rows, commands)?;
+        let packed_shape = vec![1, rows as usize, self.projection_dim as usize];
+        result.push(("attention_raw_qkvg", copy(&qkvg, commands)?, packed_shape.clone()));
+        if let Some(norm) = &self.projection.norm {
+            norm.encode(&mut qkvg, rows, commands)?;
+        }
+        result.push(("attention_normalized_qkvg", copy(&qkvg, commands)?, packed_shape));
+        let mut keys = commands.allocate_scratch_for_shape(&[rows, kv, self.head_dim], self.data_type)?;
+        let mut values = commands.allocate_scratch_for_shape(&[rows, kv, self.head_dim], self.data_type)?;
+        let queries =
+            self.prepare_kv_and_queries(&qkvg, &mut keys, &mut values, 0, self.num_q_heads, rope, rows, commands)?;
+        result.push((
+            "attention_queries",
+            copy(&queries, commands)?,
+            vec![self.num_q_heads as usize, rows as usize, self.head_dim as usize],
+        ));
+        result.push((
+            "attention_keys",
+            copy(&keys, commands)?,
+            vec![rows as usize, kv as usize, self.head_dim as usize],
+        ));
+        result.push((
+            "attention_values",
+            copy(&values, commands)?,
+            vec![rows as usize, kv as usize, self.head_dim as usize],
+        ));
+        let mut output = self.encode_core(
+            AttentionArguments {
+                image_span: None,
+                queries: &queries,
+                keys: &keys,
+                values: &values,
+                suffix_length: rows,
+                trie: None::<&B::ConstantBuffer>,
+                sinks: None::<&B::GlobalBuffer>,
+                cache: KVCacheView::full(0),
+            },
+            commands,
+        )?;
+        let core_shape = vec![1, rows as usize, (self.num_q_heads * self.head_dim) as usize];
+        result.push(("attention_core", copy(&output, commands)?, core_shape.clone()));
+        if let Some(gate) = &self.gate_kernel {
+            let width = self.num_q_heads * self.head_dim;
+            let offset = self.projection_dim - width;
+            let ones = vec![half::bf16::from_f32(1.0); (rows * width) as usize];
+            let ones = commands.allocate_constant_from_slice(&ones)?;
+            let mut sigmoid = commands.allocate_scratch(rows as usize * width as usize * 2)?;
+            commands.encode_copy(&ones, &mut sigmoid);
+            gate.encode(qkvg.subrange(offset as usize * 2..), &mut sigmoid, width, rows, self.projection_dim, commands);
+            result.push(("attention_sigmoid", sigmoid, core_shape.clone()));
+            gate.encode(qkvg.subrange(offset as usize * 2..), &mut output, width, rows, self.projection_dim, commands);
+        }
+        result.push(("attention_gated", copy(&output, commands)?, core_shape));
+        let output = self.out_projection.encode(output, rows, commands)?;
+        let output_dim = output.size() / (rows as usize * 2);
+        result.push(("attention_projected", output, vec![1, rows as usize, output_dim]));
+        Ok(result)
+    }
+
     pub(crate) fn supports_cache_only(&self) -> bool {
         self.num_kv_heads.is_some() && self.ring_capacity.is_none()
     }

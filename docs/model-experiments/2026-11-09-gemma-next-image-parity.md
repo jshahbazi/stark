@@ -1181,3 +1181,15 @@ tests and the focused production Swift controller CPU case. The Swift receipt
 is `911af67491dcdaa918227e9ed9562b2eff1ee445be646aaee58607528ab2ae93`.
 Repository policy and diff checks pass. No model, Metal run, installed-app
 reload or preference migration is performed for this change.
+
+## Source integration for pull-request review
+
+The uncommitted integration combines Gemma `2a747763` with Qwen
+`c92b9e81d02965ef431d621b24248cd70f05e518`, including main `b0c0d9fb`.
+It preserves the separate Gemma source-GELU/reference head and serial verifier,
+Qwen's isolated BF16 head policy and bounded routed prefill, main's request
+admission/reclaim accounting, and both model-specific default-off preferences.
+Gemma typed ring snapshots also use main's existing reused-state memory credit.
+This is a new source candidate requiring independent integration review and
+source-matching checks; none of the historical binary receipts is reassigned
+to it. Staging, context and companion-provisioning limits remain unchanged.

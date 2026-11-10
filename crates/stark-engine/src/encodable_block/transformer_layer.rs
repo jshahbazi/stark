@@ -423,14 +423,17 @@ impl<B: Backend> TransformerLayer<B> {
         Ok(output)
     }
 
-    pub(crate) fn memory_estimate(
+    pub(crate) fn memory_estimate_with_prefix(
         &self,
         context_tokens: u32,
         input_tokens: u32,
+        sequence_tokens: u32,
+        irregular_prefill: bool,
         model_dim: u32,
     ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
         use crate::encodable_block::memory::MemoryEstimate;
-        let mut estimate = self.mixer.memory_estimate(context_tokens, input_tokens)?;
+        let mut estimate =
+            self.mixer.memory_estimate_with_prefix(context_tokens, input_tokens, sequence_tokens, irregular_prefill)?;
         if self.kv_source_layer_index.is_some() {
             estimate = estimate.without_state();
         }

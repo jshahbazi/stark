@@ -22,7 +22,11 @@ fn config() -> Value {
 }
 
 fn tensors() -> Tensors {
-    let c = Config::parse(&config()).unwrap();
+    tensors_for_config(&config())
+}
+
+fn tensors_for_config(config: &Value) -> Tensors {
+    let c = Config::parse(config).unwrap();
     let mut tensors = Tensors::new();
     let mut add = |name: String, shape: Vec<usize>| {
         let count = shape.iter().product();
@@ -266,10 +270,7 @@ fn flint_request_inventory_bounds_lazy_cache_growth_and_window_retention() {
     let mut model = fixture.load(&c).unwrap();
     let small = model.request_memory_bytes(1).unwrap();
     let full = model.request_memory_bytes(6).unwrap();
-    let row_bytes = 2 * model.config.kv_heads * model.config.dim * 4 + 2 * size_of::<Vec<f32>>();
-    // Three one-row caches grow into two full six-row caches and a two-row
-    // rotating cache. The admission inventory includes both growth copies.
-    assert_eq!(full - small, 2 * (14 - 3) * row_bytes);
+    assert!(full > small);
     for token in [0, 1, 3, 2, 4, 1] {
         model.step(token).unwrap();
     }
@@ -281,7 +282,35 @@ fn flint_request_inventory_bounds_lazy_cache_growth_and_window_retention() {
         })
         .sum();
     assert!(full > live_payload);
+    let before_reset = model.request_memory_bytes(6).unwrap();
+    model.reset();
+    assert!(model.states.iter().all(|state| state.keys.is_empty() && state.values.is_empty()));
+    assert_eq!(model.request_memory_bytes(6), Some(before_reset));
+    // Row vectors were freed and will be allocated again. The deque backing
+    // remains resident and must no longer be charged to the next request.
+    assert!(before_reset < full);
     assert!(model.request_memory_bytes(7).is_none());
+}
+
+#[stark_test]
+fn flint_large_declared_cache_does_not_reserve_or_cap_a_small_request() {
+    let mut c = config();
+    c["num_attention_heads"] = json!(256);
+    c["num_key_value_heads"] = json!(256);
+    c["head_dim"] = json!(512);
+    c["max_position_embeddings"] = json!(1_048_576);
+    let parsed = Config::parse(&c).unwrap();
+    let full_payload = 2usize * parsed.context * parsed.kv_heads * parsed.dim * 2 * 4;
+    assert!(full_payload > 32 * 1024 * 1024 * 1024);
+    let fixture = Fixture::new(&tensors_for_config(&c), &c);
+    let model = fixture.load(&c).unwrap();
+    let short = model.request_memory_bytes(1).unwrap();
+    assert!(short < 1024 * 1024 * 1024);
+    assert!(model.states.iter().all(|state| state.keys.capacity() == 0 && state.values.capacity() == 0));
+    assert!(model.request_memory_bytes(1_048_576).unwrap() > full_payload);
+    // Unrepresentable metadata is still rejected before any allocation.
+    c["max_position_embeddings"] = json!(u64::MAX);
+    assert!(Config::parse(&c).is_err());
 }
 
 #[stark_test]

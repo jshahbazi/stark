@@ -2531,7 +2531,15 @@ class Desktop:
             else:
                 try:
                     context, maximum = automatic_generation_budget(
-                        worker, count, context, context_capacity_known=context_capacity_known, cancelled=cancelled
+                        worker,
+                        count,
+                        context,
+                        context_capacity_known=context_capacity_known,
+                        cancelled=cancelled,
+                        input_token_ids=tokens.get("token_ids"),
+                        cache_scope=cache_scope if prefix_cache else None,
+                        mtp_drafts=drafts,
+                        sampling=sampling,
                     )
                 except ChatBudgetUnavailable as error:
                     raise APIError(503, str(error), "automatic_output_unavailable") from None

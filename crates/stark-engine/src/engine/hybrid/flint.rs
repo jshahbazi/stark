@@ -16,10 +16,6 @@ use super::{
     weights::Weights,
 };
 
-// Allocated lazily, with a bounded, checked maximum across every layer. The
-// published checkpoint needs about 14 GiB of f32 full-attention KV at 256k.
-const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024 * 1024;
-
 #[derive(Clone, Debug)]
 struct LayerConfig {
     sliding: bool,
@@ -178,10 +174,9 @@ impl Config {
                 result.context
             })
         });
-        if cache_rows
-            .and_then(|n| n.checked_mul(result.kv_heads * result.dim * 2 * size_of::<f32>()))
-            .is_none_or(|n| n > MAX_CACHE_BYTES)
-        {
+        // The published window is an address/geometry bound, not a physical
+        // reservation. Actual requests admit their lazily allocated rows.
+        if cache_rows.and_then(|n| n.checked_mul(result.kv_heads * result.dim * 2 * size_of::<f32>())).is_none() {
             return Err(Error::Invalid("flint_cache_bound"));
         }
         Ok(result)
@@ -212,28 +207,34 @@ impl FlintModel {
         if context == 0 || context > c.context {
             return None;
         }
-        let rows = c.layers.iter().try_fold(0usize, |total, layer| {
-            total.checked_add(if layer.sliding {
+        let cache = c.layers.iter().zip(&self.states).try_fold(0usize, |total, (layer, state)| {
+            // Sliding caches pop the oldest row before appending. Projection
+            // temporaries are in the workspace allowance below; reset drops
+            // row payloads but keeps each deque's descriptor owner.
+            let rows = if layer.sliding {
                 context.min(c.window)
             } else {
                 context
-            })
+            };
+            let payload = super::memory::bytes(&[rows, 2, c.kv_heads, c.dim], 4)?;
+            let descriptors = super::memory::sum(&[
+                super::memory::vector_growth_bytes::<Vec<f32>>(state.keys.capacity(), rows)?,
+                super::memory::vector_growth_bytes::<Vec<f32>>(state.values.capacity(), rows)?,
+            ])?;
+            total.checked_add(payload)?.checked_add(descriptors)
         })?;
-        let row = super::memory::sum(&[
-            super::memory::bytes(&[2, c.kv_heads, c.dim], 4)?,
-            super::memory::bytes(&[2], size_of::<Vec<f32>>())?,
-        ])?;
-        // VecDeque storage growth can overlap old and replacement descriptors;
-        // twice the complete row payload also covers allocator rounding.
-        let cache = super::memory::bytes(&[rows, row], 2)?;
         let width = c
             .hidden
             .max(c.intermediate)
             .max(c.expert_intermediate.checked_mul(c.active)?)
             .max(c.shared_intermediate)
-            .max(c.heads.checked_mul(c.dim)?);
+            .max(c.heads.checked_mul(c.dim)?)
+            .max(c.hidden.checked_mul(c.active)?);
+        // Scalar layer kernels retain activation vectors only for the current
+        // layer/matrix group. This allowance covers their host/device copies;
+        // they do not use DecodeGraph's separate 512 MiB arena.
         let work = super::memory::bytes(&[width], 256)?;
-        super::memory::sum(&[cache, work, 512 * 1024 * 1024])
+        super::memory::sum(&[cache, work])
     }
 
     pub fn new(

@@ -28,6 +28,16 @@ pub trait Mlp<B: Backend>: Send + Sync {
         Ok(None)
     }
 
+    #[cfg(test)]
+    fn validation_trace_dense(
+        &self,
+        _input: B::ScratchBuffer,
+        _rows: u32,
+        _commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<Vec<(&'static str, B::ScratchBuffer)>>, B::Error> {
+        Ok(None)
+    }
+
     fn requires_residual_input(&self) -> bool {
         false
     }

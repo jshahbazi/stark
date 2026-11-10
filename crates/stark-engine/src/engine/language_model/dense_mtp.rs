@@ -65,6 +65,18 @@ struct DenseMtpPrefix<B: Backend> {
 }
 
 impl<B: Backend> DenseMtpSession<B> {
+    pub fn context_capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn resident_payload_bytes(&self) -> Option<usize> {
+        self.target
+            .resident_payload_bytes()?
+            .checked_add(self.predictor.resident_payload_bytes()?)?
+            .checked_add(self.last_hidden.size())?
+            .checked_add(self.logits.len().checked_mul(std::mem::size_of::<f32>())?)?
+            .checked_add(self.prefix_payload_bytes())
+    }
     pub fn logits(&self) -> &[f32] {
         &self.logits
     }
@@ -136,6 +148,67 @@ impl<B: Backend> LanguageModel<B> {
         // decoder. Multimodal positions and reference recurrent kernels never
         // enter the non-flat, partially accepted speculative target path.
         self.dense_mtp.is_some() && self.decoder.prefix_snapshot_supported()
+    }
+
+    pub fn generation_memory_bytes_reusing_dense_mtp(
+        &self,
+        session: &DenseMtpSession<B>,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+        reused_input_tokens: u32,
+    ) -> Option<usize> {
+        if session.failed
+            || !Arc::ptr_eq(&self.model_identity, &session.identity)
+            || session.capacity != context_tokens as usize
+            || reused_input_tokens == 0
+            || reused_input_tokens >= input_tokens
+            || reused_input_tokens as usize > session.position()
+            || !(reused_input_tokens as usize).is_multiple_of(super::stream::PREFILL_CHUNK_TOKENS)
+            || session.prefix_position() != Some(reused_input_tokens as usize)
+        {
+            return None;
+        }
+        let mut estimate = self.generation_memory_estimate_for_prefill(
+            input_tokens,
+            context_tokens,
+            max_new_tokens,
+            true,
+            input_tokens - reused_input_tokens,
+            false,
+        )?;
+        let allocated = self.generation_allocation_context_length(input_tokens, context_tokens, max_new_tokens)?;
+        let suffix = input_tokens - reused_input_tokens;
+        let head = self.dense_mtp.as_ref()?;
+        let target_limit = self.decoder.persistent_state_bytes(allocated, suffix.max(4), input_tokens.max(4), false)?;
+        let predictor_limit = head.persistent_state_bytes(allocated, suffix, input_tokens)?;
+        let mut credit = session
+            .target
+            .resident_payload_bytes()?
+            .min(target_limit)
+            .checked_add(session.predictor.resident_payload_bytes()?.min(predictor_limit))?;
+        let row_bytes = (self.decoder.embedding().model_dim() as usize).checked_mul(2)?;
+        credit = credit.checked_add(session.last_hidden.size().min(row_bytes))?;
+        let mut logits = session.logits.len().checked_mul(std::mem::size_of::<f32>())?;
+        if let Some(prefix) = &session.prefix {
+            let snapshot_limit = self
+                .decoder
+                .memory_estimate(allocated, suffix)?
+                .prefix_snapshot_bytes
+                .checked_add(head.memory_estimate(allocated, suffix)?.prefix_snapshot_bytes)?;
+            let snapshots = prefix.target.payload_bytes().checked_add(prefix.predictor.payload_bytes())?;
+            let boundary = input_tokens.saturating_sub(1) as usize / super::stream::PREFILL_CHUNK_TOKENS
+                * super::stream::PREFILL_CHUNK_TOKENS;
+            if prefix.position != boundary {
+                estimate.state_bytes = estimate.state_bytes.checked_add(snapshot_limit)?;
+            }
+            credit =
+                credit.checked_add(snapshots.min(snapshot_limit))?.checked_add(prefix.hidden.size().min(row_bytes))?;
+            logits = logits.checked_add(prefix.logits.len().checked_mul(std::mem::size_of::<f32>())?)?;
+        }
+        let logits_limit = (self.decoder.embedding().vocab_size() as usize).checked_mul(4)?.checked_mul(8)?;
+        credit = credit.checked_add(logits.min(logits_limit))?;
+        super::additional_generation_bytes(estimate, credit)
     }
 }
 

@@ -82,6 +82,42 @@ impl<B: Backend> MlpGateActMulEncodable<B> {
         ])
     }
 
+    #[cfg(test)]
+    pub(crate) fn validation_activation(
+        &self,
+        fused_up: impl BufferRef<Backend = B>,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        use crate::backends::common::{BufferMut, kernel::ActivationKernel};
+        if rows == 0
+            || rows > 16
+            || self.data_type != DataType::BF16
+            || self.reference.is_some()
+            || self.activation.custom_alpha().is_some()
+            || fused_up.size() != rows as usize * self.hidden_dim as usize * 4
+        {
+            return Err(InvalidInput("small unit-slope BF16 activation trace required").into());
+        }
+        let row_bytes = self.hidden_dim as usize * 2;
+        let mut activated = commands.allocate_scratch(rows as usize * row_bytes)?;
+        for row in 0..rows as usize {
+            commands.encode_copy(
+                fused_up.subrange((row * 2 + 1) * row_bytes..(row * 2 + 2) * row_bytes),
+                activated.subrange_mut(row * row_bytes..(row + 1) * row_bytes),
+            );
+        }
+        let kernel = <B::Kernels as Kernels>::ActivationKernel::new(commands.context(), self.data_type, true)?;
+        kernel.encode(
+            None::<&B::ScratchBuffer>,
+            &mut activated,
+            rows * self.hidden_dim,
+            self.activation.act_type(),
+            commands,
+        );
+        Ok(activated)
+    }
+
     pub fn new(
         context: &B::Context,
         data_type: DataType,

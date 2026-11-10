@@ -325,10 +325,14 @@ def test_api_requests_publish_content_free_progress_to_the_app(desktop, model, m
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_finite_auto_uses_memory_admission_and_preserves_reported_capacity(desktop, model, stream):
+@pytest.mark.parametrize("request_metadata_supported", [False, True])
+def test_finite_auto_uses_memory_admission_and_preserves_reported_capacity(
+    desktop, model, stream, request_metadata_supported
+):
     running(desktop, model)
     worker = desktop.worker
     worker.generation_budget = True
+    worker.generation_budget_inputs = request_metadata_supported
     original = worker.request
     planned, generated = [], []
 
@@ -350,7 +354,10 @@ def test_finite_auto_uses_memory_admission_and_preserves_reported_capacity(deskt
             {"messages": [{"role": "user", "content": "synthetic request"}], "stream": stream},
             on_delta=(lambda _: None) if stream else None,
         )
-    assert planned == [{"operation": "plan_generation", "input_tokens": 20, "context_tokens": 8192}]
+    expected = {"operation": "plan_generation", "input_tokens": 20, "context_tokens": 8192}
+    if request_metadata_supported:
+        expected.update(input_token_ids=generated[0]["input_token_ids"], mtp_drafts=0, sampling={"mode": "greedy"})
+    assert planned == [expected]
     assert generated[0]["context_tokens"] == 1024
     assert generated[0]["max_new_tokens"] == 1004
     assert desktop.api_models()[0]["context_length"] == 8192

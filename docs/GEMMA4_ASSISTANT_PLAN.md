@@ -135,6 +135,14 @@ The 1,792-token batch, rollback, cancellation and 1,024-boundary/768-row-suffix
 cache controls now pass. Reproducible source and negative CPU controls live in
 [validation tooling](../tools/validation/gemma4_assistant/README.md). Other
 assistant linears and ordinary target math retain their existing policy.
-Normal-worker MTP, supported sampling, full lifecycle and matched performance
-qualification remain open. Serving remains disabled, and the public position
-guard remains in force pending bounded worker integration.
+The staged normal E2B worker now supports greedy serial target verification
+and exact-rejection sampling, with source-bound cache, cancellation, stop/cap
+and image-zero-MTP controls. Experimental batched target verification failed a
+64-token ordinary-output equality gate and is not the worker default. Serial
+verification restores that equality; the paired timing comparison remains
+provisional and observes MTP slower than MTP0. Gemma's host preference therefore
+defaults off, preserving explicit opt-in. Normal-build companion provisioning
+and broader/default context remain open; the staging feature and qualified
+2,048-context/1,792-position limits remain in place. These controls do not
+qualify E4B or larger artifacts. See the continuation for exact source/binary
+identities, failed receipts and tested scopes.

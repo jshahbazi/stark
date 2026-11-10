@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput},
-    config::decoder::DecoderConfig,
+    config::{decoder::DecoderConfig, mlp::AnyMLPConfig},
     data_type::DataType,
     encodable_block::{
         batch_topology::BatchTopology,
@@ -43,6 +43,7 @@ pub struct Decoder<B: Backend> {
     scalar_image_embeddings: bool,
     bidirectional_image_attention: bool,
     separate_prefill_last_token: bool,
+    qwen_routed_prefill: bool,
 }
 
 /// A validated chunk of projected image rows. No public transport accepts this.
@@ -163,7 +164,36 @@ impl<B: Backend> Decoder<B> {
             scalar_image_embeddings: config.scalar_image_embeddings,
             bidirectional_image_attention: config.bidirectional_image_attention,
             separate_prefill_last_token: config.separate_prefill_last_token,
+            // This typed variant exclusively constructs QwenMoe in Mlp::new.
+            // Gemma4MoeConfig and dense targets retain their existing schedule.
+            qwen_routed_prefill: config
+                .transformer_config
+                .layer_configs
+                .iter()
+                .any(|layer| matches!(&layer.mlp_config, AnyMLPConfig::MixtureOfExpertsConfig(_))),
         })
+    }
+
+    pub(crate) fn ordinary_prefill_execution_cap(&self) -> Option<usize> {
+        // A fixed model policy, never selected from current free memory. This
+        // keeps full chunks on the existing >=256-token chunked GDN path.
+        self.qwen_routed_prefill.then_some(256)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_set_qwen_routed_prefill(
+        &mut self,
+        enabled: bool,
+    ) {
+        self.qwen_routed_prefill = enabled;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_set_separate_prefill_last_token(
+        &mut self,
+        enabled: bool,
+    ) {
+        self.separate_prefill_last_token = enabled;
     }
 
     pub fn speculation_supported(&self) -> bool {
@@ -214,13 +244,22 @@ impl<B: Backend> Decoder<B> {
         context_tokens: u32,
         input_tokens: u32,
     ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
-        let mut estimate = self.transformer.memory_estimate(context_tokens, input_tokens)?;
-        // The engine's u64 history can grow through a doubled Vec capacity;
-        // prefill also owns temporary u64 and retained u32 prompt copies.
-        estimate.state_bytes = estimate
-            .state_bytes
-            .checked_add((context_tokens as usize).checked_mul(16)?)?
-            .checked_add((input_tokens as usize).checked_mul(12)?)?;
+        self.workspace_memory_estimate_with_prefix(context_tokens, input_tokens, input_tokens, false)
+    }
+
+    fn workspace_memory_estimate_with_prefix(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        sequence_tokens: u32,
+        irregular_prefill: bool,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        let mut estimate = self.transformer.memory_estimate_with_prefix(
+            context_tokens,
+            input_tokens,
+            sequence_tokens,
+            irregular_prefill,
+        )?;
         for rows in [input_tokens.clamp(1, 1024), 1] {
             estimate.add_scratch(&[rows, self.embedding.model_dim()], 4, 3)?;
             if let Some(embedding) = &self.per_layer_embedding {
@@ -235,11 +274,40 @@ impl<B: Backend> Decoder<B> {
         context_tokens: u32,
         input_tokens: u32,
     ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
-        let mut estimate = self.workspace_memory_estimate(context_tokens, input_tokens)?;
+        self.memory_estimate_with_prefix(context_tokens, input_tokens, input_tokens, false)
+    }
+
+    pub(crate) fn memory_estimate_with_prefix(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        sequence_tokens: u32,
+        irregular_prefill: bool,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        let mut estimate = self.workspace_memory_estimate_with_prefix(
+            context_tokens,
+            input_tokens,
+            sequence_tokens,
+            irregular_prefill,
+        )?;
         // Generation reads one final logit row during prefill, not a
         // prefill_rows*vocabulary matrix. Include sampler/readback workspace.
         estimate.add_scratch(&[self.embedding.vocab_size()], 4, 4)?;
         Some(estimate)
+    }
+
+    pub(crate) fn persistent_state_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        sequence_tokens: u32,
+        irregular_prefill: bool,
+    ) -> Option<usize> {
+        Some(
+            self.transformer
+                .memory_estimate_with_prefix(context_tokens, input_tokens, sequence_tokens, irregular_prefill)?
+                .state_bytes,
+        )
     }
 
     pub(crate) fn scoring_memory_estimate(
@@ -248,6 +316,9 @@ impl<B: Backend> Decoder<B> {
         input_tokens: u32,
     ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
         let mut estimate = self.workspace_memory_estimate(context_tokens, input_tokens)?;
+        // score_next_token borrows the caller's IDs. Generation-only history,
+        // prompt copies and returned output storage are inventoried by the
+        // generation entry point rather than this shared decoder workspace.
         let row = crate::encodable_block::memory::checked_bytes(&[self.embedding.vocab_size()], 4)?;
         // Only the final chunk produces a vocabulary row. Keep its device
         // readout, CPU conversion, candidate arrays and logits cache in one

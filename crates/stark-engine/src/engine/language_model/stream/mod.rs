@@ -16,8 +16,9 @@ pub use crate::{
 
 mod stream;
 
-/// Prompts are prefilled in chunks of this many tokens starting at position
-/// zero. Attention's suffix capacity bounds the chunk length.
+/// Logical prefix-snapshot grid starting at position zero. Attention's suffix
+/// capacity bounds each batch; routed Qwen text can execute smaller submissions
+/// without changing this snapshot identity or grid.
 pub const PREFILL_CHUNK_TOKENS: usize = crate::encodable_block::mixer::attention::ATTENTION_SUFFIX_CAPACITY as usize;
 
 pub struct LanguageModelStreamOptions {
