@@ -8,9 +8,9 @@ belong in its dated validation record. No model-family performance claim is made
 | Field | Value |
 | --- | --- |
 | Kind | Correctness, sampling, state and memory |
-| Attempt state | Implemented; integrated compilation and execution pending |
+| Attempt state | Implemented; component/worker controls passed, production artifact qualification pending |
 | Evidence scope | Planned component, worker validation and bounded artifact controls |
-| Promotion decision | Adopted on branch pending validation |
+| Promotion decision | Adopted on branch at component scope |
 | Disposition | Unmerged source; no release or installation |
 | Canonical validation | [Dense correctness validation](../archive/runs/2026-11-10-dense-attention-sampling-correctness.md) |
 
@@ -95,3 +95,15 @@ directory for this worktree and serialized native execution; no downloads or
 unrelated workers are part of this attempt. Prompts, responses, token IDs,
 vectors and probabilities remain private; public records use aggregate counts
 and hashes only.
+
+## Final outcome
+
+Runtime source `b4120152` passes the registered CPU/Metal cap, invalid sampling,
+lookahead cleanup/fencing and full-vocabulary filter controls. The synthetic
+MTP fixture passes both explicit controls, including capture-off/on and exact
+continuation. Release generator tests pass 144 with four ignored; actual dense
+same-worker tiny-temperature recovery also passes on the retained Qwen3-4B Q4
+artifact. The complete counts, sealed executable/artifact identities, initial
+failures and remaining production/image acceptance gates are in the
+[aggregate record](../archive/runs/2026-11-10-model-family-triage.md).
+No speed, peak-memory or broad Gemma 2 fidelity claim is made.

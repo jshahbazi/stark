@@ -73,3 +73,32 @@ same-seed output equivalence across MTP modes is not an acceptance claim.
 The worker still conservatively admits snapshot memory even when capture is
 omitted; this change removes unused copies rather than reducing admission
 limits. Peak memory savings have not been measured.
+
+## Final integrated results
+
+The final source is `b41201523b547ea646f1378104319e7f501b3ac7`. The sealed
+CPU/Metal test executable passes capped attention against its independent
+F64 oracle, raw/scaled nonfinite and empty-mask sampling, sentinel resolution,
+abandoned submitted lookahead draining, and real-stream next/drop failure
+fencing on both backends. Sampling property controls also pass. The explicit
+synthetic dense MTP fixture passes two controls, including optional snapshot
+capture and exact continuation. No tolerance was relaxed.
+
+Independent review found three cleanup issues before finalization: a local
+ordinary grammar lookahead owner did not drain on early resolution failure;
+ordinary worker cleanup ignored the newly fenced state; and Metal could drop an
+overflowed candidate and choose a lower finite logit. All were fixed and their
+new regression controls passed. The reviewer checked the corrected source and
+reported no remaining concrete issue in that scope.
+
+Release generator tests pass 144 with four ignored. Six process-boundary cases
+pass; both scorer configurations pass 34 tests. Clippy with all generator
+targets and warnings denied passes. Actual converted Qwen3-4B Q4 returns
+recoverable invalid_sampling_request for temperature 1e-40 and then produces
+four greedy tokens successfully in the same process. This is a bounded recovery
+smoke, not a Gemma 2 numerical or image MTP qualification.
+
+The [aggregate validation record](2026-11-10-model-family-triage.md) owns exact
+binary/lock/artifact hashes, environment, setup failures and remaining gates.
+A subsequent Clippy-only correction replaced constant-size chunk iteration in
+the PNG converter; the sealed executable reran all selected engine controls.

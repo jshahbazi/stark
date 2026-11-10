@@ -1,7 +1,7 @@
 # Image loading and request admission correctness
 
 Attempt ID: `20261110-IMAGE-01`. Work starts from `746e482f` (merged #121).
-Status: implementation on branch; validation pending. No release or installation.
+Status: implemented on branch; component controls passed, artifact qualification pending. No release or installation.
 
 The candidate computes each component digest once per load, retains its selected
 file descriptor and checks inode, length and nanosecond write/change times
@@ -37,3 +37,17 @@ ignored). Header preflight now independently checks every chunk CRC using the
 already locked crc32fast 1.5.3 dependency. The failed attempt is retained; the
 corrected run is pending. The ordinary PNG pixel path and metadata-free output
 controls did pass in that first run.
+
+## Final component outcome
+
+The sealed CPU/Metal executable at runtime source `b4120152` passes 46 selected
+image controls (six actual-artifact controls ignored), plus the descriptor
+mutation test and tower accounting/overflow test. PNG palette/transparency,
+alpha discard/composite, primary MPO, ignored compressed ancillary payloads,
+independent CRC checks, malformed formats and existing bounds are covered.
+Weight/source precision is unchanged. Initial CRC failure and the final lint
+iteration repair are preserved in the
+[aggregate record](../archive/runs/2026-11-10-model-family-triage.md).
+No actual converted image artifact load, full image generation, image-loaded
+text/MTP parity, warm startup timing or peak RSS was measured for this change.
+The resident-state and workspace acceptance matrix remains artifact-specific.
