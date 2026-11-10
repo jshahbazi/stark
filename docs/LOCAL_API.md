@@ -63,7 +63,7 @@ The [reference catalog](../tools/converter/stark_convert/vision_runtime_qualific
 
 ## Chat completions
 
-Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user`, `metadata`, `mtp`, `tools`, `tool_choice`, `parallel_tool_calls` and `store`. Unknown fields are rejected.
+Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user`, `metadata`, `mtp`, `thinking`, `reasoning_effort`, `tools`, `tool_choice`, `parallel_tool_calls` and `store`. Unknown fields are rejected.
 
 **Storage.** Omit `store` or use `false`/`null`. Stark does not store completions. `store: true` and non-boolean values return `unsupported_parameter`; they do not enable retention.
 
@@ -78,6 +78,10 @@ The service accepts PNG or JPEG file bytes up to 4 MiB after Base64 decoding the
 Text models advertising [native memory planning](WORKER_PROTOCOLS.md#automatic-execution-for-undeclared-contexts) admit omitted output limits after tokenization. The worker selects an execution allowance from the loaded model's cache/state geometry and current memory headroom, bounded by any declared finite context. The planned allowance does not change the model's reported capacity. Models without a declared capacity continue to report `context_length: null`; Stark never reserves the unsigned 32-bit protocol ceiling. No context or output configuration is required. A worker predating memory planning keeps remaining-context Auto for finite models; undeclared-context Auto reports recoverable 503 `automatic_output_unavailable` and needs updating. Explicit output limits remain compatible with that worker.
 
 **Sampling.** `temperature` defaults to 0, which selects greedy decoding. A positive finite temperature up to 2 selects stochastic sampling with `top_p` (greater than 0, at most 1), `top_k` (1 through the vocabulary size), `min_p` (0 through 1) and `seed` (unsigned 64-bit, default 0). These values are accepted without effect at temperature 0. Non-zero `presence_penalty` or `frequency_penalty`, `logprobs: true`, `top_logprobs` above 0, and any `response_format` other than `{"type":"text"}` return 400 `unsupported_parameter`; the neutral values are accepted. `user` and `metadata` are accepted within their size bounds and discarded.
+
+**Reasoning.** `thinking` is a boolean, defaulting to `false`, passed to templates that support a boolean reasoning control. Qwen clients can enable it with `thinking: true`. The reviewed GLM-5.3 template always opens reasoning and supports effort levels instead: `thinking: false` selects Low effort and `thinking: true` selects Max. Explicit `reasoning_effort: "low"`, `"high"` or `"max"` overrides that mapping for GLM-5.3; other templates reject `reasoning_effort` with `unsupported_parameter`. Low effort does not disable GLM reasoning.
+
+When the rendered prompt opens a `<think>` block, or output begins with an explicit `<think>` opener, assistant replies separate `reasoning_content` from visible `content`. The closing marker is omitted from both fields. An unfinished reasoning block returns an empty visible `content` and its partial `reasoning_content`; finish reason and token usage retain the worker's values. Later literal thinking tags in ordinary content remain visible. Streaming uses `delta.reasoning_content` for reasoning and `delta.content` for visible text, including when boundary tags span worker deltas. Replay both fields in assistant history. Playground and terminal output retain their raw display while keeping structured assistant history in memory.
 
 **Stop sequences.** `stop` is one string or up to four non-empty strings of at most 1,024 characters. The worker matches them against decoded text, including across chunks, and withholds the match and everything after it. Usage counts still include the token that completed the match.
 
@@ -229,14 +233,16 @@ When the rendered generation prompt opens a thinking block, the host carries
 that state into tool-call validation. Generated text must close the block before
 an executable call. The flag comes from the rendered prompt; client parameters
 and worker reply fields cannot enable it. Templates such as Flint that do not
-open a thinking block continue to reject unmatched closing tags. Generated
-pre-call text retains the existing content/streaming representation.
+open a thinking block continue to reject unmatched closing tags. The final
+pre-call text is separated into `reasoning_content` and visible `content` after
+the complete raw output passes the existing tool validation. Streaming keeps
+tool calls private until that validation completes.
 
 ## Limits, queueing and cancellation
 
 - The server accepts at most 16 concurrent connections. Excess connections receive a bare 429 with `Retry-After: 1` and no `X-Request-Id` header.
 - One completion runs at a time. Up to eight more wait in FIFO order; a ninth receives 429 `queue_full`, and a queued request that waits more than 30 seconds receives 429 `queue_timeout`.
-- After its body has been read and parsed, each completion has a 300-second deadline covering queueing and execution; reaching it returns 504 `request_timeout`.
+- After its body has been read and parsed, each completion has a 300-second inactivity deadline covering queueing and execution. Validated native generation progress renews it, including progress during prefill; an active request can run longer than five minutes. A stalled request returns 504 `request_timeout`.
 - The handler polls the client connection every 50 ms while a request runs. A closed connection cancels the native generation at the next safe boundary and, when a response can still be written, returns 499 `request_cancelled`. Closing only the write side of the socket counts as a disconnect.
 - Stopping or changing the model in Stark fails waiting and running requests with 503 `model_changed`; cancellation and deadlines keep the model loaded.
 - Body admission, logical content and rendered worker framing each apply the [automatic shared policy](WORKER_PROTOCOLS.md#resource-budget). Normal app use requires no configuration; `STARK_REQUEST_BUDGET_MIB` is a developer/operator override accepting positive integers whose derived allowances fit the platform's allocation address space. Worker requests include the rendered prompt (system prompt, template framing and all messages) or token IDs, JSON encoding and the terminating newline. A request that exceeds the effective encoded line limit returns 400 `request_too_large` before being written to the worker. The model stays loaded, and a smaller request can be retried.
@@ -308,7 +314,7 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 | 429 | `memory_pressure` | Available RAM is too low to admit a large body before reading or parsing it; a smaller request can be retried |
 | 499 | `request_cancelled` | Client disconnected |
 | 503 | `model_not_loaded`, `model_changed`, `server_stopped`, `server_shutdown`, `request_stopped`, `streaming_unavailable`, `stop_sequences_unavailable`, `generation_failed` | No model in Chat mode, model stopped or changed, Stark quitting, worker lacks a capability, or native generation failed |
-| 504 | `request_timeout` | 300-second deadline reached |
+| 504 | `request_timeout` | No execution progress for 300 seconds |
 | 500 | `internal_error`, `http_error` | Unexpected failure |
 
 ## Managed OpenWork connection

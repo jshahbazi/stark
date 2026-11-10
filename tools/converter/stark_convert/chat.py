@@ -20,6 +20,7 @@ from ._build_metadata import ConversionError, file_hash, open_regular
 from .generation_eta import progress_frame
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .mtp import mtp_capabilities, resolve_mtp
+from .reasoning import assistant_message, prompt_opens_reasoning, reasoning_options
 from .resource_budget import REQUEST_BUDGET_MIB, WIRE_BYTES
 from .template_runtime import (
     IsolatedTemplate,
@@ -961,6 +962,7 @@ def run_chat(args, worker):
     ):
         raise ChatError("Requested token limits exceed this worker's limits.")
     worker.generation_budget = ready.get("generation_budget") == "memory-context-v1"
+    streaming = ready.get("streaming") == "text-delta-v1"
     image = None
     if image_path is not None:
         if not context_capacity_known:
@@ -1002,7 +1004,7 @@ def run_chat(args, worker):
                 messages=candidate,
                 tools=None,
                 add_generation_prompt=True,
-                enable_thinking=args.thinking,
+                **reasoning_options(codec, thinking=args.thinking),
                 bos_token=codec.get("bos_token") or "",
                 eos_token=codec.get("eos_token") or "",
             )
@@ -1014,7 +1016,9 @@ def run_chat(args, worker):
                         "context_tokens": context,
                         "max_new_tokens": args.max_new_tokens or 0,
                         "sampling": {"mode": "greedy"},
+                        **({"stream": True} if streaming else {}),
                     },
+                    **({"on_delta": lambda _text: None} if streaming else {}),
                 )
             else:
                 tokens = worker.request({"operation": "tokenize", "text": prompt, "add_special_tokens": False})
@@ -1053,7 +1057,11 @@ def run_chat(args, worker):
                     request["mtp_drafts"] = drafts
                 if getattr(worker, "prefix_cache", False) is True:
                     request["cache_scope"] = cache_scope
-                reply = worker.request(request)
+                if streaming:
+                    request["stream"] = True
+                    reply = worker.request(request, on_delta=lambda _text: None)
+                else:
+                    reply = worker.request(request)
             if not isinstance(reply.get("text"), str) or "error" in reply:
                 raise ChatError("Generation failed; chat closed.")
         except ChatError as error:
@@ -1065,7 +1073,7 @@ def run_chat(args, worker):
                 continue
             raise
         print("Stark> " + terminal_text(reply["text"]) + "\n")
-        messages = [*candidate, {"role": "assistant", "content": reply["text"]}]
+        messages = [*candidate, assistant_message(reply["text"], initial_thinking=prompt_opens_reasoning(prompt))]
         if image is not None:
             image_attached = True
 
@@ -1078,14 +1086,21 @@ def main(argv=None):
     parser.add_argument("--system", help="System message (default: model metadata)")
     parser.add_argument("--context-tokens", type=int, help="Context budget (default: loaded model's maximum)")
     parser.add_argument("--max-new-tokens", type=int, help="Reply budget (default: all remaining context)")
-    parser.add_argument("--thinking", action="store_true", help="Enable reasoning for templates that support it")
+    parser.add_argument(
+        "--thinking", action="store_true", help="Enable reasoning where supported; GLM uses max effort (default: low)"
+    )
     mtp = parser.add_mutually_exclusive_group()
     mtp.add_argument(
         "--mtp", dest="mtp", action="store_true", help="Enable exact MTP when the loaded model supports it"
     )
     mtp.add_argument("--no-mtp", dest="mtp", action="store_false", help="Disable MTP (default)")
     parser.set_defaults(mtp=False)
-    parser.add_argument("--timeout", type=float, default=300, help="Worker reply timeout in seconds (default: 300)")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300,
+        help="Worker inactivity timeout in seconds; progress renews it (default: 300)",
+    )
     args = parser.parse_args(argv)
     if (
         (args.context_tokens is not None and args.context_tokens < 1)

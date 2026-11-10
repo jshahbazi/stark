@@ -23,11 +23,15 @@ struct AttentionCache {
     query: DeviceVector,
     gates: DeviceVector,
     visible: DeviceVector,
-    scores: DeviceVector,
-    probabilities: DeviceVector,
     block_scores: DeviceVector,
     top_ids: DeviceVector,
     top_scores: DeviceVector,
+}
+
+struct ScalarAttentionWorkspace {
+    capacity: usize,
+    scores: DeviceVector,
+    probabilities: DeviceVector,
 }
 
 struct AttentionControls {
@@ -36,6 +40,7 @@ struct AttentionControls {
     index_q_norm: DeviceVector,
     index_k_norm: DeviceVector,
     cache: Option<AttentionCache>,
+    scalar: Option<ScalarAttentionWorkspace>,
 }
 
 impl AttentionControls {
@@ -46,6 +51,7 @@ impl AttentionControls {
             index_q_norm: DecodeGraph::upload(&attention.index_q_norm)?,
             index_k_norm: DecodeGraph::upload(&attention.index_k_norm)?,
             cache: None,
+            scalar: None,
         })
     }
 
@@ -78,8 +84,6 @@ impl AttentionControls {
             query: DecodeGraph::zeros(g.heads * g.head_dim)?,
             gates: DecodeGraph::zeros(g.heads * g.head_dim)?,
             visible: DecodeGraph::zeros(capacity)?,
-            scores: DecodeGraph::zeros(size(g.heads)?)?,
-            probabilities: DecodeGraph::zeros(size(g.heads)?)?,
             block_scores: DecodeGraph::zeros((capacity / g.ratio).max(1))?,
             top_ids: DecodeGraph::zeros(g.budget / g.ratio)?,
             top_scores: DecodeGraph::zeros(g.budget / g.ratio)?,
@@ -107,6 +111,31 @@ impl AttentionControls {
         Ok(())
     }
 
+    /// Scalar attention needs its own row stride, independent of the KV
+    /// cache's capacity. Normal decode stops using these arrays at 256 tokens;
+    /// retain their small owners rather than doubling them with every KV grow.
+    fn ensure_scalar_workspace(
+        &mut self,
+        g: &Geometry,
+        count: usize,
+    ) -> Result<()> {
+        if self.scalar.as_ref().is_some_and(|scalar| scalar.capacity >= count) {
+            return Ok(());
+        }
+        let capacity = count
+            .checked_next_power_of_two()
+            .ok_or(Error::Invalid("Qwen scalar attention capacity"))?
+            .max(16)
+            .min(g.context);
+        let elements = capacity.checked_mul(g.heads).ok_or(Error::Invalid("Qwen scalar attention size"))?;
+        self.scalar = Some(ScalarAttentionWorkspace {
+            capacity,
+            scores: DecodeGraph::zeros(elements)?,
+            probabilities: DecodeGraph::zeros(elements)?,
+        });
+        Ok(())
+    }
+
     fn encode(
         &mut self,
         graph: &mut DecodeGraph,
@@ -117,6 +146,12 @@ impl AttentionControls {
         position: usize,
     ) -> Result<DeviceVector> {
         self.ensure_cache(graph, g, position)?;
+        let count = position + 1;
+        let partial_len = g.attention_partial_elements(count);
+        let scalar_attention = count < 256 || partial_len.is_none() || super::forced_scalar_attention();
+        if scalar_attention {
+            self.ensure_scalar_workspace(g, count)?;
+        }
         let cache = self.cache.as_ref().ok_or(Error::Invalid("Qwen graph attention cache"))?;
         let project = |graph: &mut DecodeGraph, name: &str| {
             weights.encode_matvec(graph, &format!("{}.{name}.weight", attention.prefix), input)
@@ -127,7 +162,6 @@ impl AttentionControls {
         let keys = project(graph, "k_proj")?;
         let values = project(graph, "v_proj")?;
         graph.end_projection_level()?;
-        let count = position + 1;
         let scalar_prepare = std::env::var_os("STARK_QWEN38_SCALAR_QSA_PREPARE").is_some_and(|value| value == "1");
         graph.kernel(
             if scalar_prepare {
@@ -254,31 +288,27 @@ impl AttentionControls {
         }
         let output = graph.scratch(g.heads * g.head_dim)?;
         let splits = count.div_ceil(256);
-        let partial_len =
-            g.heads.checked_mul(splits).and_then(|n| n.checked_mul(g.head_dim + 2)).filter(|&n| n <= 8_000_000);
-        let scalar_attention = count < 256
-            || partial_len.is_none()
-            || std::env::var_os("STARK_QWEN38_SCALAR_ATTENTION").is_some_and(|value| value == "1");
         if scalar_attention {
+            let scalar = self.scalar.as_ref().ok_or(Error::Invalid("Qwen scalar attention workspace"))?;
             let parameters =
-                [count as u32, g.heads as u32, g.head_dim as u32, g.kv_heads as u32, cache.capacity as u32];
+                [count as u32, g.heads as u32, g.head_dim as u32, g.kv_heads as u32, scalar.capacity as u32];
             graph.kernel(
                 "qwen_graph_qsa_scores",
-                &[&cache.query, &cache.keys, &cache.visible, &cache.scores],
+                &[&cache.query, &cache.keys, &cache.visible, &scalar.scores],
                 &parameters,
                 g.heads * count,
                 64,
             )?;
             graph.kernel(
                 "qwen_graph_qsa_softmax",
-                &[&cache.scores, &cache.visible, &cache.probabilities],
-                &[count as u32, g.heads as u32, cache.capacity as u32],
+                &[&scalar.scores, &cache.visible, &scalar.probabilities],
+                &[count as u32, g.heads as u32, scalar.capacity as u32],
                 g.heads,
                 1,
             )?;
             graph.kernel(
                 "qwen_graph_qsa_output",
-                &[&cache.probabilities, &cache.values, &cache.gates, &cache.visible, &output],
+                &[&scalar.probabilities, &cache.values, &cache.gates, &cache.visible, &output],
                 &parameters,
                 g.heads * g.head_dim,
                 256,

@@ -77,6 +77,7 @@ from .native_catalog import allowed_choice as native_choice_allowed
 from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
+from .reasoning import ReasoningStream, assistant_message, prompt_opens_reasoning, reasoning_options
 from .registry import get_model
 from .resource_budget import (
     INPUT_BYTES,
@@ -2355,7 +2356,10 @@ class Desktop:
             if epoch != self.epoch:
                 return
             self.generation_estimates.record(estimate_key, reply)
-            self.messages = [*candidate, {"role": "assistant", "content": reply["text"]}]
+            self.messages = [
+                *candidate,
+                assistant_message(reply["text"], initial_thinking=reply.get("_tool_initial_thinking", False)),
+            ]
             self.image_identity = identity
             fields = metrics(reply)
             self.emit("metrics", epoch, **fields)
@@ -2375,6 +2379,7 @@ class Desktop:
         context=None,
         sampling=None,
         thinking=False,
+        reasoning_effort=None,
         image=False,
         tools=False,
         stop=None,
@@ -2387,6 +2392,7 @@ class Desktop:
             context or self.context,
             json.dumps(sampling or {"mode": "greedy"}, sort_keys=True),
             bool(thinking),
+            reasoning_effort,
             bool(image),
             bool(tools),
             bool(stop),
@@ -2406,6 +2412,8 @@ class Desktop:
         cancelled=None,
         epoch=None,
         thinking=False,
+        reasoning_effort=None,
+        on_reasoning=None,
         image=None,
         mtp=None,
         tools=None,
@@ -2432,6 +2440,7 @@ class Desktop:
                 context=context,
                 sampling=sampling,
                 thinking=thinking,
+                reasoning_effort=reasoning_effort,
                 image=image is not None,
                 tools=tools is not None,
                 stop=stop,
@@ -2451,10 +2460,9 @@ class Desktop:
 
         if stop and not worker.stop_sequences:
             raise APIError(503, "This worker needs an update for stop sequences.", "stop_sequences_unavailable")
-        if on_delta is not None:
-            deliver = on_delta
 
-            def on_delta(text):
+        def fenced_delivery(deliver):
+            def delivery(text):
                 # Keep delivery atomic with Stop/model replacement. The HTTP
                 # writer has a bounded timeout. OSError asks Worker to cancel
                 # and consume the terminal reply before the next request.
@@ -2463,12 +2471,21 @@ class Desktop:
                         raise OSError("Request no longer belongs to the running model.")
                     deliver(text)
 
+            return delivery
+
+        if on_delta is not None:
+            on_delta = fenced_delivery(on_delta)
+        if on_reasoning is not None:
+            on_reasoning = fenced_delivery(on_reasoning)
+
         def progress(value):
             with self.lock:
                 if self.epoch != dispatch_epoch or self.worker is not worker or self.active_model != identifier:
                     raise OSError("Request no longer belongs to the running model.")
                 if cancelled is not None and cancelled.is_set():
                     raise OSError("Request cancelled.")
+                if cancelled is not None:
+                    cancelled.last_activity = time.monotonic()
                 if on_progress is not None:
                     on_progress({**self.generation_estimates.estimate(estimate_key, value), **progress_counts(value)})
 
@@ -2484,7 +2501,7 @@ class Desktop:
                 messages=messages,
                 tools=template_tools(tools, parser=tool_parser_for(codec)),
                 add_generation_prompt=True,
-                enable_thinking=thinking,
+                **reasoning_options(codec, thinking=thinking, effort=reasoning_effort),
                 bos_token=codec.get("bos_token") or "",
                 eos_token=codec.get("eos_token") or "",
             )
@@ -2492,6 +2509,24 @@ class Desktop:
             raise
         except (TemplateError, ChatError):
             raise APIError(400, "The model's chat template rejected these messages.", "invalid_messages") from None
+        initial_thinking = prompt_opens_reasoning(prompt)
+        reasoning_stream = (
+            ReasoningStream(on_delta, on_reasoning, initial_thinking=initial_thinking)
+            if on_delta is not None and on_reasoning is not None
+            else None
+        )
+        if reasoning_stream is not None:
+            on_delta = reasoning_stream.feed
+
+        def completed_reply(reply):
+            if reasoning_stream is not None:
+                try:
+                    reasoning_stream.finish(reply["text"])
+                except OSError:
+                    raise APIError(499, "Request cancelled.", "request_cancelled") from None
+            # Bind parsing to the actual rendered prompt, never worker claims.
+            return {**reply, "_tool_initial_thinking": initial_thinking}
+
         if image is not None:
             if not context_capacity_known:
                 raise APIError(
@@ -2514,7 +2549,7 @@ class Desktop:
             )
             if not isinstance(reply.get("text"), str) or "error" in reply:
                 raise ValueError
-            return reply
+            return completed_reply(reply)
         tokens = worker.request(
             {"operation": "tokenize", "text": prompt, "add_special_tokens": False}, cancelled=cancelled
         )
@@ -2590,8 +2625,7 @@ class Desktop:
             raise ValueError
         if capability["supported"]:
             self.validate_mtp_reply(reply, capability, drafts)
-        # Bind output parsing to the actual prompt, never a worker/client claim.
-        return {**reply, "_tool_initial_thinking": prompt.endswith("<think>")}
+        return completed_reply(reply)
 
     def api_cache_scope(self, principal):
         """Return the random reuse scope for one API session and credential."""
@@ -2854,6 +2888,10 @@ class Desktop:
             if self.active_model is None or self.worker is None or self.active_mode != "chat":
                 raise APIError(503, "Run a model in Stark first.", "model_not_loaded")
             active = next(m for m in self.models if m["id"] == self.active_model)
+            try:
+                reasoning_options(self.codec, thinking=request["thinking"], effort=request["reasoning_effort"])
+            except ValueError:
+                raise APIError(400, "This model does not support reasoning_effort.", "unsupported_parameter") from None
             parser = tool_parser_for(self.codec)
             tool_request = bool(request["tools"] or request["has_tool_history"])
             if tool_request and parser is None:
@@ -2907,6 +2945,8 @@ class Desktop:
             estimate_key = self.estimate_key(
                 context=self.api_context,
                 sampling=request["sampling"],
+                thinking=request["thinking"],
+                reasoning_effort=request["reasoning_effort"],
                 image=request["image"] is not None,
                 tools=tool_request,
                 stop=request["stop"],
@@ -2923,13 +2963,22 @@ class Desktop:
 
         try:
             tool_stream = ToolTextStream(on_delta, parser=parser) if tool_request and on_delta is not None else None
+            reasoning_delivery = (lambda text: on_delta({"reasoning_content": text})) if on_delta is not None else None
+            tool_reasoning_stream = (
+                ToolTextStream(reasoning_delivery, parser=parser)
+                if tool_request and reasoning_delivery is not None
+                else None
+            )
             reply = self.infer(
                 candidate,
                 maximum,
                 on_delta=tool_stream.feed if tool_stream is not None else on_delta,
+                on_reasoning=tool_reasoning_stream.feed if tool_reasoning_stream is not None else reasoning_delivery,
                 context=self.api_context,
                 sampling=request["sampling"],
                 seed=request["seed"],
+                thinking=request["thinking"],
+                reasoning_effort=request["reasoning_effort"],
                 stop=request["stop"],
                 cancelled=cancelled,
                 epoch=epoch,
@@ -2965,9 +3014,17 @@ class Desktop:
                         "length" if reply.get("finish_reason") in ("length", "context") else "stop",
                     )
                 )
+                parts = assistant_message(
+                    message.get("content") or "", initial_thinking=reply.get("_tool_initial_thinking", False)
+                )
+                if "reasoning_content" in parts:
+                    message = {**message, **parts}
+                    if tool_request and not message["content"]:
+                        message["content"] = None
                 if tool_stream is not None:
                     try:
                         tool_stream.finish(message.get("content"))
+                        tool_reasoning_stream.finish(message.get("reasoning_content"))
                     except OSError:
                         # The terminal worker frame is already consumed. A
                         # failed client write must not unload the aligned model.

@@ -33,11 +33,18 @@ When a backend has no declared finite context maximum, the CLI tokenizes the con
 | `--image PATH` | none | Attach one local PNG or JPEG image; requires passing host image evidence |
 | `--context-tokens N` | model maximum, or automatic memory planning when undeclared | Upper context budget for prompt plus reply |
 | `--max-new-tokens N` | remaining context or memory-planned execution allowance | Explicit reply budget when supplied |
-| `--thinking` | off | Enable reasoning for templates that support `enable_thinking` |
+| `--thinking` | off | Enable reasoning where supported; GLM uses Max effort when on and Low when off |
 | `--mtp`, `--no-mtp` | off | Enable or disable exact MTP for this terminal session; enabling uses the loaded model's recommended draft count |
 | `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
 
 Generation is greedy. By default, the client tokenizes each rendered prompt and uses the remaining finite context for output, stopping on EOS or another termination condition. An explicit reply budget that does not fit beside the rendered prompt is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits, thinking and a supported-model MTP toggle through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)). The app uses model-specific MTP defaults and remembers an explicit choice per model; the terminal session defaults off.
+
+Terminal chat consumes worker streaming frames internally, including prefill
+progress, while displaying the completed reply. `--timeout` limits inactivity
+between frames. GLM and Lily report content-free prefill progress at existing
+execution control boundaries, so an active long prefill renews the timeout.
+Lily checks cancellation between its existing prefill passes. A submitted pass
+finishes before cancellation resets the request and clears its prefix state.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
@@ -425,6 +432,14 @@ Eligibility and key:
 - Gemma 3 image models implement the same owned ring snapshot capture/restore and suffix-only text prefill. Actual-artifact qualification is pending in the [continuation attempt](model-experiments/2026-11-09-gemma-next-image-parity.md); no other checkpoint inherits the Gemma 4 evidence.
 - Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window text exports and speculator models, and the native Flint and F32 Qwen graphs.
 - A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On Qwen3.8 and the private native EXL3 candidate, whether MTP is enabled must also match (`key` reports this). Dense MTP uses the exact selected draft count; model-level coarse-readout configuration is bound by the loaded model instance.
+
+The F32 `qwen4_exp` route used by the PipeNetwork `qwen38-mixed` catalog
+artifact has no boundary snapshot implementation. Exact restoration needs to
+save the Delta recurrence and convolution history, QSA attention/indexer state,
+and PLE/ngram history while retaining completed attention rows. Its current
+`Forward::Qwen` dispatch has no capture/restore hooks for these owners, so prefix
+reuse stays disabled. The separate mixed-affine Lily artifact's qualification
+does not cover this route.
 
 Exactness, converted models:
 

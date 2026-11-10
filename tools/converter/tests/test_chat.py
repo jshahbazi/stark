@@ -63,6 +63,31 @@ def options(model, **kwargs):
     return Namespace(**values)
 
 
+@pytest.mark.parametrize("prompt_open", [True, False])
+def test_terminal_reasoning_history_replays_structured_fields(model, prompt_open):
+    config = json.loads((model / "config.json").read_text())
+    config["token_codec_config"]["prompt_template"] = (
+        "{% for m in messages %}{{ m.role }}:{{ m.content }}"
+        "{% if m.reasoning_content is defined %}|reasoning={{ m.reasoning_content }}{% endif %};{% endfor %}"
+        + ("assistant:<think>\n" if prompt_open else "assistant:")
+    )
+    (model / "config.json").write_text(json.dumps(config))
+
+    class ReasoningWorker(FakeWorker):
+        def request(self, payload):
+            reply = super().request(payload)
+            if payload["operation"] == "generate":
+                return {"text": ("" if prompt_open else "<think>") + "Synthetic reasoning</think>Answer"}
+            return reply
+
+    worker = ReasoningWorker()
+    with patch("sys.stdin", io.StringIO("first turn\nsecond turn\n/exit\n")):
+        assert run_chat(options(model, thinking=True), worker) == 0
+    prompts = [request["text"] for request in worker.requests if request["operation"] == "tokenize"]
+    assert "assistant:Answer|reasoning=Synthetic reasoning;" in prompts[1]
+    assert "assistant:Synthetic reasoning</think>" not in prompts[1]
+
+
 @pytest.mark.parametrize("context_limit", [512, 32768, 262144, 1048576])
 def test_default_context_uses_the_loaded_model_maximum(model, context_limit):
     worker = FakeWorker(context_limit=context_limit)
@@ -354,6 +379,36 @@ def test_worker_real_pipes_timeout_and_cleanup(tmp_path):
     finally:
         worker.close()
     assert worker.process.poll() is not None
+
+
+def test_prefill_progress_keeps_active_worker_alive_past_inactivity_timeout(tmp_path):
+    executable = tmp_path / "progress worker"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys, time\n"
+        "print(json.dumps({'ready': True}), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    for i in range(8):\n"
+        "        print(json.dumps({'event': 'progress', 'input_tokens': 20000, 'sampled_tokens': 0,\n"
+        "            'output_token_budget': 8, 'elapsed_seconds': i * 0.05, 'prefill_seconds': None}), flush=True)\n"
+        "        time.sleep(0.05)\n"
+        "    print(json.dumps({'text': ''}), flush=True)\n"
+    )
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 5)
+    try:
+        assert worker.read() == {"ready": True}
+        worker.timeout = 0.25
+        observed = []
+        assert worker.request(
+            {"operation": "generate", "stream": True},
+            on_delta=lambda _text: None,
+            on_progress=observed.append,
+        ) == {"text": ""}
+        assert len(observed) == 8
+        assert observed[-1]["elapsed_seconds"] > worker.timeout
+    finally:
+        worker.close()
 
 
 @pytest.mark.parametrize("vision", [False, True])

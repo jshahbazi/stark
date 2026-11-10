@@ -7,6 +7,15 @@
 
 ## Extraction and local changes
 
+Stark maintains the draft head during ordinary single-token decode in
+`src/qwen4exp/model.rs`. It reuses the existing prefill catch-up with views of
+the exact decode residual and input token before drawing. This covers the
+official affine N-1 prompt partition's held final token and subsequent
+caller-selected decode steps. Target arithmetic, precision and speculative
+verification's separate head maintenance remain unchanged. Private checkpoint
+tests compare initial draft readouts before and after a different request;
+their presence alone does not establish artifact qualification.
+
 Stark adds an allocation-only text-request inventory in
 `src/qwen4exp/request_memory.rs`, exposed from the loaded model. It uses the
 selected K/V format, loaded draft-head presence, cache growth alignment,

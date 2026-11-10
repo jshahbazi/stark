@@ -193,6 +193,139 @@ def running(desktop, model):
     return identifier
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("thinking", "effort", "label"), [(False, None, "Low"), (True, None, "Max"), (False, "high", "High")]
+)
+def test_api_glm_reasoning_controls_and_separated_response(
+    desktop, model, monkeypatch, stream, thinking, effort, label
+):
+    from stark_convert.chat import _ChatTemplate
+
+    running(desktop, model)
+    source = (Path(__file__).parent / "fixtures" / "glm53_chat_template.jinja").read_text()
+    desktop.codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    desktop.template = _ChatTemplate(source)
+    generated = "Synthetic reasoning</think>Visible answer"
+    prompts = []
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            prompts.append(payload["text"])
+            return {"token_count": 24, "token_ids": [2] * 24}
+        if deliver := options.get("on_delta"):
+            for character in generated:
+                deliver(character)
+        return {
+            "text": generated,
+            "input_tokens": 24,
+            "output_tokens": 17,
+            "finish_reason": "eos",
+            "_tool_initial_thinking": False,
+        }
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    payload = {
+        "messages": [{"role": "user", "content": "Synthetic question"}],
+        "thinking": thinking,
+        **({"reasoning_effort": effort} if effort else {}),
+    }
+    deltas = []
+    response = desktop.api_complete(payload, on_delta=deltas.append if stream else None)
+    assert "<|system|>Reasoning Effort: " + label in prompts[0]
+    message = response["choices"][0]["message"]
+    assert message == {"role": "assistant", "content": "Visible answer", "reasoning_content": "Synthetic reasoning"}
+    if stream:
+        assert "".join(item for item in deltas if isinstance(item, str)) == message["content"]
+        assert (
+            "".join(item["reasoning_content"] for item in deltas if isinstance(item, dict))
+            == message["reasoning_content"]
+        )
+    assert response["usage"]["completion_tokens"] == 17
+
+
+def test_api_reasoning_effort_rejection_preserves_worker_before_dispatch(desktop, model, monkeypatch):
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    worker = desktop.worker
+    monkeypatch.setattr(worker, "request", lambda *args, **kwargs: pytest.fail("unsupported effort reached worker"))
+    with pytest.raises(APIError) as rejected:
+        desktop.api_complete(
+            {"messages": [{"role": "user", "content": "Synthetic question"}], "reasoning_effort": "high"}
+        )
+    assert rejected.value.code == "unsupported_parameter"
+    assert desktop.worker is worker and desktop.job is None
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_api_qwen_boolean_thinking_reaches_reviewed_template(desktop, model, monkeypatch, thinking):
+    from stark_convert.chat import _ChatTemplate
+
+    running(desktop, model)
+    source = (Path(__file__).parent / "fixtures" / "qwen3_4b_chat_template.jinja").read_text()
+    desktop.codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    desktop.template = _ChatTemplate(source)
+    prompts = []
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            prompts.append(payload["text"])
+            return {"token_count": 24, "token_ids": [2] * 24}
+        text = "<think>Synthetic reasoning</think>Answer" if thinking else "Answer"
+        if deliver := options.get("on_delta"):
+            for character in text:
+                deliver(character)
+        return {"text": text, "input_tokens": 24, "output_tokens": 17, "finish_reason": "eos"}
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    deltas = []
+    message = desktop.api_complete(
+        {"messages": [{"role": "user", "content": "Synthetic question"}], "thinking": thinking},
+        on_delta=deltas.append,
+    )["choices"][0]["message"]
+    assert prompts[0].endswith("<think>\n\n</think>\n\n") is (not thinking)
+    assert message["content"] == "Answer"
+    assert message.get("reasoning_content") == ("Synthetic reasoning" if thinking else None)
+    assert "".join(item for item in deltas if isinstance(item, str)) == "Answer"
+
+
+def test_playground_keeps_reasoning_out_of_visible_history(desktop, model, monkeypatch):
+    from stark_convert.chat import _ChatTemplate
+
+    running(desktop, model)
+    source = (
+        "{% for m in messages %}{{ m.role }}:{{ m.content }}"
+        "{% if m.reasoning_content is defined %}|reasoning={{ m.reasoning_content }}{% endif %};{% endfor %}"
+        "assistant:<think>\n"
+    )
+    desktop.codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    desktop.template = _ChatTemplate(source)
+    prompts = []
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            prompts.append(payload["text"])
+            return {"token_count": 24, "token_ids": [2] * 24}
+        return {
+            "text": "Synthetic reasoning</think>Answer",
+            "input_tokens": 24,
+            "output_tokens": 17,
+            "finish_reason": "eos",
+        }
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    desktop.generate(desktop.epoch, "first synthetic turn")
+    assert desktop.messages[-1] == {
+        "role": "assistant",
+        "content": "Answer",
+        "reasoning_content": "Synthetic reasoning",
+    }
+    desktop.generate(desktop.epoch, "second synthetic turn")
+    assert "assistant:Answer|reasoning=Synthetic reasoning;" in prompts[1]
+    assert "assistant:Synthetic reasoning</think>" not in prompts[1]
+
+
 def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
     from stark_convert.local_api import APIError
 
@@ -904,7 +1037,12 @@ def test_tool_parsing_uses_rendered_generation_prefix_not_worker_claim(
         with pytest.raises(APIError) as error:
             desktop.api_complete(payload, on_delta=deltas.append if stream else None)
         assert error.value.code == "invalid_tool_call"
-    assert "<tool_call>" not in "".join(deltas)
+    assert "<tool_call>" not in "".join(
+        item if isinstance(item, str) else item["reasoning_content"] for item in deltas
+    )
+    if fixture == "glm53" and closed:
+        assert result["choices"][0]["message"]["reasoning_content"] == "Synthetic reasoning"
+        assert result["choices"][0]["message"]["content"] is None
     assert desktop.worker is not None and desktop.job is None
 
 

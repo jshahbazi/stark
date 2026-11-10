@@ -562,6 +562,18 @@ impl LilyModel {
         self.model.additional_request_memory_bytes(&self.context, capacity, input_tokens as usize, &self.scratch)
     }
 
+    /// Reserve the span used by admission before prompt execution can trigger
+    /// a smaller geometric growth followed by a second, larger decode growth.
+    pub fn reserve_generation_context(
+        &mut self,
+        tokens: usize,
+    ) -> Result<()> {
+        if self.is_fenced() {
+            return Err(Error::Invalid("mixed precision context requires reload"));
+        }
+        self.ensure_context_capacity(tokens)
+    }
+
     pub fn supports_mtp(&self) -> bool {
         self.mtp_capabilities().is_some()
     }
@@ -793,9 +805,17 @@ impl LilyModel {
         &mut self,
         token: u32,
     ) -> Result<Vec<f32>> {
+        self.step_controlled(token, &mut || Ok(()))
+    }
+
+    pub fn step_controlled(
+        &mut self,
+        token: u32,
+        before_pass: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<f32>> {
         self.last_greedy = None;
         self.last_full_readout = None;
-        let result = self.forward(token).and_then(|_| {
+        let result = self.forward_controlled(token, before_pass).and_then(|_| {
             let logits = {
                 let _scope = profile::Scope::bytes("qwen.mixed.logit_readback", self.vocab_size * 4);
                 self.scratch.logits().to_f32().map_err(|_| Error::Invalid("mixed precision readout failed"))?
@@ -819,9 +839,17 @@ impl LilyModel {
         &mut self,
         token: u32,
     ) -> Result<u32> {
+        self.step_greedy_controlled(token, &mut || Ok(()))
+    }
+
+    pub fn step_greedy_controlled(
+        &mut self,
+        token: u32,
+        before_pass: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<u32> {
         self.last_greedy = None;
         self.last_full_readout = None;
-        let result = self.forward(token).and_then(|slot| {
+        let result = self.forward_controlled(token, before_pass).and_then(|slot| {
             let values = self
                 .scratch
                 .next_token
@@ -997,10 +1025,12 @@ impl LilyModel {
     }
 
     /// Returns the GPU sampler slot written by this synchronous forward pass.
-    fn forward(
+    fn forward_controlled(
         &mut self,
         token: u32,
+        before_pass: &mut dyn FnMut() -> Result<()>,
     ) -> Result<usize> {
+        before_pass()?;
         let expected_position = self.check_token(token)?;
         self.ensure_context_capacity(expected_position)?;
         let greedy = SamplingParams::greedy();
@@ -1017,7 +1047,7 @@ impl LilyModel {
             {
                 // Match the official server's N-1 prompt forward followed by
                 // one initialized S1 logits forward. The prefix cannot draw.
-                self.prefill_pending(prefix_len, None)?;
+                self.prefill_pending(prefix_len, None, before_pass)?;
                 if self.state.pos.checked_add(1) != Some(expected_position) {
                     return Err(Error::Invalid("mixed precision prefill position"));
                 }
@@ -1025,6 +1055,10 @@ impl LilyModel {
                     params: &greedy,
                     step: self.state.pos,
                 };
+                if let Err(error) = before_pass() {
+                    self.usable = true;
+                    return Err(error);
+                }
                 self.forward_decode_admitted(token, expected_position, held_draw)?;
                 if self.state.pos != expected_position {
                     return Err(Error::Invalid("mixed precision prefill position"));
@@ -1037,7 +1071,7 @@ impl LilyModel {
                 Ok(1)
             } else {
                 // Preserve legacy/reference execution and cold N1 prefill.
-                self.prefill_pending(self.pending.len(), Some(draw))?;
+                self.prefill_pending(self.pending.len(), Some(draw), before_pass)?;
                 self.usable = true;
                 self.pending.clear();
                 if self.state.pos != expected_position {
@@ -1066,6 +1100,7 @@ impl LilyModel {
         &mut self,
         end: usize,
         draw: Option<Draw<'_>>,
+        before_pass: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         let gpu_busy_before = gpu_busy_snapshot();
         let chunk = self.prefill_chunk_tokens();
@@ -1075,31 +1110,61 @@ impl LilyModel {
                 && split.is_multiple_of(chunk)
                 && self.state.pos.is_multiple_of(chunk)
         });
-        let failed = |_| Error::Invalid("mixed precision prefill failed");
         let Some(split) = split else {
-            let result = self
-                .model
-                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..end], draw)
-                .map_err(failed);
+            let result = self.prefill_span_controlled(0, end, draw, before_pass);
             record_gpu_busy_delta("qwen.mixed.prefill.gpu_busy", gpu_busy_before);
             return result;
         };
         let result = (|| -> Result<()> {
             if split > 0 {
-                self.model
-                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..split], None)
-                    .map_err(failed)?;
+                self.prefill_span_controlled(0, split, None, before_pass)?;
             }
             self.capture_prefix()?;
             if split < end {
-                self.model
-                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[split..end], draw)
-                    .map_err(failed)?;
+                self.prefill_span_controlled(split, end, draw, before_pass)?;
             }
             Ok(())
         })();
         record_gpu_busy_delta("qwen.mixed.prefill.gpu_busy", gpu_busy_before);
         result
+    }
+
+    fn prefill_span_controlled(
+        &mut self,
+        start: usize,
+        end: usize,
+        draw: Option<Draw<'_>>,
+        before_pass: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let control = std::cell::RefCell::new(before_pass);
+        let control_error = std::cell::RefCell::new(None);
+        let stop = || match (control.borrow_mut())() {
+            Ok(()) => false,
+            Err(error) => {
+                *control_error.borrow_mut() = Some(error);
+                true
+            },
+        };
+        let tokens = &self.pending[start..end];
+        let fed = self
+            .model
+            .prefill_with_vision_until(&self.context, &mut self.state, &mut self.scratch, tokens, draw, None, &stop)
+            .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
+        // A cancelled pass has completed and the context remains healthy.
+        // Let the public step reset request state without fencing the model.
+        if let Some(error) = control_error.into_inner() {
+            self.usable = true;
+            return Err(error);
+        }
+        if fed != tokens.len() {
+            self.usable = true;
+            return Err(Error::Cancelled);
+        }
+        if let Err(error) = (control.borrow_mut())() {
+            self.usable = true;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Copies the recurrent state at the current position. The GPU is idle
@@ -1713,6 +1778,15 @@ mod tests {
 
     use super::*;
 
+    fn digest_logits(logits: &[f32]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        for value in logits {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        digest.finalize().into()
+    }
+
     #[stark_test]
     #[ignore]
     #[cfg(debug_assertions)]
@@ -2126,6 +2200,86 @@ mod tests {
         assert!(planned_context_capacity(0, 0, 0).is_err());
         assert_eq!(admitted_position(262_144, 0, 7, 8, published).unwrap(), 262_145);
         assert_eq!(admitted_decode_end(262_144, published - 262_144, published).unwrap(), published);
+    }
+
+    #[stark_test]
+    fn reserving_request_end_preserves_the_capacity_charged_by_admission() {
+        let maximum = 1_048_576;
+        let prompt = 33_000;
+        let end = 34_000;
+        let admitted = planned_context_capacity(INITIAL_CONTEXT_CAPACITY, end, maximum).unwrap();
+        // Growing first for the prompt and then decode would charge a second
+        // geometric expansion absent from the original request estimate.
+        let prompt_first = planned_context_capacity(INITIAL_CONTEXT_CAPACITY, prompt, maximum).unwrap();
+        assert!(planned_context_capacity(prompt_first, end, maximum).unwrap() > admitted);
+        assert_eq!(planned_context_capacity(admitted, prompt, maximum).unwrap(), admitted);
+        assert_eq!(planned_context_capacity(admitted, end, maximum).unwrap(), admitted);
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn private_checkpoint_cancelled_prefill_resets_and_replays() {
+        let path = std::env::var_os("STARK_TEST_MODEL_PATH").expect("private checkpoint path");
+        let path = Path::new(&path);
+        let mut model = LilyModel::load(path).unwrap();
+        model.model.set_prefill_chunk(256).unwrap();
+        let input: Vec<u32> = (0..513).map(|i| 1 + (i % 31) as u32).collect();
+        for &token in &input[..input.len() - 1] {
+            model.ingest(token).unwrap();
+        }
+        let mut checks = 0;
+        let result = model.step_controlled(*input.last().unwrap(), &mut || {
+            checks += 1;
+            if checks == 3 {
+                Err(Error::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(checks == 3 && model.position() == 0 && model.pending.is_empty());
+        assert!(!model.is_fenced() && model.take_prefix_snapshot().is_none());
+        let prefill = |model: &mut LilyModel| {
+            model.reset();
+            for &token in &input[..input.len() - 1] {
+                model.ingest(token).unwrap();
+            }
+            digest_logits(&model.step(*input.last().unwrap()).unwrap())
+        };
+        let replay = prefill(&mut model);
+        assert!(prefill(&mut model) == replay, "cancelled prefill changed a later request");
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn private_checkpoint_mtp_first_drafts_are_independent_of_previous_request() {
+        let path = std::env::var_os("STARK_TEST_MODEL_PATH").expect("private checkpoint path");
+        let mut model = LilyModel::load_with_mtp(Path::new(&path), true).unwrap();
+        assert!(model.model.config.official_mlx_rounding() && model.supports_mtp());
+        let draft_readouts = |model: &mut LilyModel, count: usize| {
+            model.reset();
+            model.set_mtp_enabled(true).unwrap();
+            let input: Vec<u32> = (0..count).map(|i| 1 + (i % 31) as u32).collect();
+            for &token in &input[..count - 1] {
+                model.ingest(token).unwrap();
+            }
+            let logits = model.step(input[count - 1]).unwrap();
+            let argmax = |values: &[f32]| {
+                values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).unwrap().0 as u32
+            };
+            let mut hashes = Vec::new();
+            model
+                .model
+                .draft_host(&model.context, &mut model.state, &mut model.scratch, argmax(&logits), 2, &mut |values| {
+                    hashes.push(digest_logits(values));
+                    Ok(argmax(values))
+                })
+                .unwrap();
+            hashes
+        };
+        let first = draft_readouts(&mut model, 17);
+        let _ = draft_readouts(&mut model, 65);
+        assert!(draft_readouts(&mut model, 17) == first, "draft readouts retained previous request data");
     }
 
     #[stark_test]
@@ -2622,7 +2776,7 @@ mod tests {
         }
         let next = model.scratch.next_token.view(0, &[2]).unwrap();
         model.scratch.next_token = next.view(0, &[0]).unwrap();
-        let failure = model.forward(input[2]);
+        let failure = model.forward_controlled(input[2], &mut || Ok(()));
         assert!(
             matches!(failure, Err(Error::Invalid("mixed precision input staging failed"))),
             "held-token staging failure boundary"

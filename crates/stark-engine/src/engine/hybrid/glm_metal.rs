@@ -1110,6 +1110,10 @@ impl Attention {
         self.capacity
     }
 
+    pub(super) fn can_append_without_growth(&self) -> bool {
+        self.position < self.capacity
+    }
+
     #[cfg(test)]
     pub(super) fn test_pool_keys(&self) -> DeviceVector {
         self.pool_keys.clone()

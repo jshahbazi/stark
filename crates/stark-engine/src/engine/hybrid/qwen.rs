@@ -945,7 +945,37 @@ pub struct QwenModel {
     graph_enabled: bool,
 }
 
+pub(super) fn forced_scalar_attention() -> bool {
+    std::env::var_os("STARK_QWEN38_SCALAR_ATTENTION").is_some_and(|value| value == "1")
+}
+
 impl Geometry {
+    fn attention_partial_elements(
+        &self,
+        count: usize,
+    ) -> Option<usize> {
+        self.heads
+            .checked_mul(count.div_ceil(256))?
+            .checked_mul(self.head_dim.checked_add(2)?)
+            .filter(|&elements| elements <= 8_000_000)
+    }
+
+    fn scalar_attention_capacity(
+        &self,
+        count: u32,
+        forced: bool,
+    ) -> Option<usize> {
+        // Every request passes through the short scalar prefix, even when its
+        // final step uses split attention. Oversized split workspace and the
+        // explicit scalar override can still need full request-sized arrays.
+        let rows = if forced || self.attention_partial_elements(count as usize).is_none() {
+            count
+        } else {
+            count.min(255)
+        };
+        super::memory::growth_capacity(rows, self.context, 16)
+    }
+
     fn recurrent_inventory_bytes(
         &self,
         layers: usize,
@@ -974,7 +1004,7 @@ impl Geometry {
         super::memory::sum(&[
             super::memory::bytes(&[capacity, key_width.checked_mul(2)?.checked_add(g.index_dim)?], 4)?,
             super::memory::bytes(&[pooled, g.index_dim.checked_add(1)?], 4)?,
-            super::memory::bytes(&[capacity, g.heads.checked_mul(2)?.checked_add(1)?], 4)?,
+            super::memory::bytes(&[capacity], 4)?,
             super::memory::bytes(&[g.index_heads, g.index_dim], 4)?,
             super::memory::bytes(&[2, g.heads, g.head_dim], 4)?,
             super::memory::bytes(&[2, g.budget / g.ratio], 4)?,
@@ -992,8 +1022,12 @@ impl Geometry {
         let cache = if graph {
             // reset drops the graph and its attention owners. Each new graph
             // owns only device rows, not a duplicate scalar F32 host cache.
-            super::memory::growing_owner_bytes(0, capacity, 16, |rows| g.graph_cache_bytes(rows))?
-                .checked_mul(attention_layers)?
+            let attention = super::memory::growing_owner_bytes(0, capacity, 16, |rows| g.graph_cache_bytes(rows))?;
+            let scalar_capacity = g.scalar_attention_capacity(context_tokens, forced_scalar_attention())?;
+            let scalar = super::memory::growing_owner_bytes(0, scalar_capacity, 16, |rows| {
+                super::memory::bytes(&[2, rows, g.heads], 4)
+            })?;
+            attention.checked_add(scalar)?.checked_mul(attention_layers)?
         } else {
             // Scalar row payloads are dropped by reset. Outer descriptor Vecs
             // remain resident and are accounted separately from actual capacity.
@@ -1059,7 +1093,8 @@ impl QwenModel {
             let capacity = super::memory::growth_capacity(context_tokens, g.context, 16)?;
             super::memory::gpu_buffer_fits(&[capacity, g.kv_heads, g.head_dim], 4)?;
             super::memory::gpu_buffer_fits(&[capacity, g.index_dim], 4)?;
-            super::memory::gpu_buffer_fits(&[capacity, g.heads], 4)?;
+            let scalar_capacity = g.scalar_attention_capacity(context_tokens, forced_scalar_attention())?;
+            super::memory::gpu_buffer_fits(&[scalar_capacity, g.heads], 4)?;
         }
         let g = &self.geometry;
         #[cfg(feature = "metal")]
@@ -1491,6 +1526,26 @@ mod tests {
     }
 
     #[stark_test]
+    fn qwen_scalar_attention_inventory_tracks_short_prefix_and_long_fallback() {
+        let mut g = Geometry {
+            heads: 8,
+            head_dim: 128,
+            context: 262_144,
+            ..Geometry::default()
+        };
+        assert_eq!(g.scalar_attention_capacity(1, false), Some(16));
+        assert_eq!(g.scalar_attention_capacity(255, false), Some(256));
+        assert_eq!(g.scalar_attention_capacity(4096, false), Some(256));
+        assert_eq!(g.scalar_attention_capacity(262_144, false), Some(256));
+        assert_eq!(g.scalar_attention_capacity(4096, true), Some(4096));
+        g.heads = 64;
+        assert!(g.attention_partial_elements(262_144).is_none());
+        assert_eq!(g.scalar_attention_capacity(262_144, false), Some(262_144));
+        g.head_dim = usize::MAX;
+        assert!(g.attention_partial_elements(256).is_none());
+    }
+
+    #[stark_test]
     fn qwen_lazy_recurrent_inventory_has_no_aggregate_memory_ceiling() {
         let mut g = Geometry {
             value_heads: 256,
@@ -1714,6 +1769,39 @@ mod tests {
         assert!(graph.graph.is_none());
         let reset = graph.step(tokens[0]).unwrap_or_else(|_| panic!("private Qwen graph reset failed"));
         assert!(reset == first, "private Qwen graph explicit reset differs");
+    }
+
+    /// A synthetic complete fixture may use a longer context without changing
+    /// its weights. This crosses the 255/256 scalar-to-split transition; it is
+    /// component evidence and does not qualify a production checkpoint.
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    #[ignore]
+    fn qwen_decode_graph_scalar_workspace_matches_staged_across_split_transition() {
+        let path = std::env::var_os("STARK_QWEN38_NUMERICAL_FIXTURE_PATH")
+            .map(std::path::PathBuf::from)
+            .expect("private Qwen numerical fixture path required");
+        assert!(!path.join("HEADER-ADMISSION-ONLY.json").exists());
+        let mut config: Value = serde_json::from_slice(&std::fs::read(path.join("config.json")).unwrap()).unwrap();
+        config["text_config"]["max_position_embeddings"] = serde_json::json!(512);
+        let tokens: Vec<u32> = serde_json::from_slice(&std::fs::read(path.join("tokens.json")).unwrap()).unwrap();
+        assert!(!tokens.is_empty());
+        let load = || QwenModel::new(Weights::open(&path).unwrap(), &config).unwrap();
+        let mut graph = load();
+        assert!(graph.weights.indexed_banks_admitted());
+        graph.graph_enabled = true;
+        let mut staged = load();
+        staged.graph_enabled = false;
+        for position in 0..257 {
+            let token = tokens[position % tokens.len()];
+            let expected = staged.step(token).expect("private Qwen staged step failed");
+            let actual = graph.step(token).expect("private Qwen graph step failed");
+            assert_eq!(actual.len(), expected.len());
+            assert!(
+                actual.iter().zip(expected).all(|(actual, expected)| (actual - expected).abs() <= 2e-5),
+                "private Qwen attention workspace changed full readout"
+            );
+        }
     }
 
     /// The private fixture preserves complete production headers and only the
