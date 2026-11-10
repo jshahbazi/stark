@@ -70,6 +70,7 @@ impl AttentionSinglePass {
                 self.config.is_causal,
                 is_trie,
                 self.config.sliding_window_size.is_some(),
+                self.config.logit_soft_cap.is_some(),
             )?;
             entry.insert(kernel);
         }
@@ -94,7 +95,7 @@ impl AttentionSinglePass {
             config.data_type,
         )?;
         macro_rules! encode_vector {
-            ($kernel:expr $(, $source_origin:expr)?) => {
+            ($kernel:expr $(, $source_origin:expr)?; $($soft_cap:expr)?) => {
                 $kernel.encode(
                     arguments.queries,
                     arguments.keys,
@@ -109,6 +110,7 @@ impl AttentionSinglePass {
                     arguments.cache.ring_params(),
                     $($source_origin,)?
                     config.scale.unwrap_or(1.0 / (config.head_dim as f32).sqrt()),
+                    $($soft_cap,)?
                     arguments.trie,
                     config.sliding_window_size,
                     arguments.sinks,
@@ -128,10 +130,10 @@ impl AttentionSinglePass {
             && arguments.cache.prefix_len() + arguments.suffix_length < 1024;
         if source {
             let kernel = self.get_or_create_source(command_buffer.context())?;
-            encode_vector!(kernel, arguments.cache.source_ring_origin());
+            encode_vector!(kernel, arguments.cache.source_ring_origin(););
         } else {
             let kernel = self.get_or_create(command_buffer.context(), arguments.trie.is_some())?;
-            encode_vector!(kernel);
+            encode_vector!(kernel; config.logit_soft_cap);
         }
         Ok(output)
     }

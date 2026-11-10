@@ -95,9 +95,11 @@ PUBLIC KERNEL(UnifiedSampling) (
 
   float thread_pre_filter_logit_max = -INFINITY;
   float thread_pre_filter_logit_norm = 0.0;
+  uint32_t thread_invalid_logits = 0;
   Logit thread_post_gumbel_logit_max = Logit::LOWEST;
   for (uint32_t logit_index = thread_idx; logit_index < vocab_size; logit_index += THREADGROUP_SIZE) {
     Logit logit = Logit::load(logits, logit_index);
+    thread_invalid_logits |= uint32_t(!isfinite(logit.value));
 
     if (has_bitmask) {
       bool mask = (bitmask[logit_index / BITS_IN_U32] >> (logit_index % BITS_IN_U32)) & 0b1;
@@ -105,7 +107,9 @@ PUBLIC KERNEL(UnifiedSampling) (
     }
 
     if (has_temperature) {
+      bool admitted = logit.value != -INFINITY;
       logit.value *= recip_temperature;
+      thread_invalid_logits |= uint32_t(admitted && !isfinite(logit.value));
     }
 
     if (has_top_p && logit.value != -INFINITY) {
@@ -124,7 +128,16 @@ PUBLIC KERNEL(UnifiedSampling) (
       logit.value += -log(-log(uniform_float(&rng)));
     }
 
-    thread_post_gumbel_logit_max = logit > thread_post_gumbel_logit_max ? logit : thread_post_gumbel_logit_max;
+    if (isfinite(logit.value)) {
+      thread_post_gumbel_logit_max = logit > thread_post_gumbel_logit_max ? logit : thread_post_gumbel_logit_max;
+    }
+  }
+  // Return a sentinel, never a fabricated vocabulary token. Embedding gathers
+  // bound device-produced IDs, and the stream rejects this after completion.
+  if (threadgroup_cooperative_reduce<SimdReduceSum<uint32_t>, THREADGROUP_SIZE>(
+          thread_invalid_logits, (threadgroup uint32_t*)shared, thread_context) != 0) {
+    *output = UINT_MAX;
+    return;
   }
   float pre_filter_logit_max;
   if (has_top_p || has_min_p) {
@@ -152,10 +165,9 @@ PUBLIC KERNEL(UnifiedSampling) (
   );
 
   for (uint32_t iteration = 0; iteration < MAX_ITERS; iteration++) {
-    // Empty/nonfinite candidate sets and exhausted filters have no readable index.
-    // A bounded vocabulary token is the deterministic fallback for this case.
+    // Empty candidate sets and exhausted filters have no readable index.
     if (candidate_logit_post_gumbel.index >= vocab_size) {
-      *output = 0;
+      *output = UINT_MAX;
       return;
     }
     Logit candidate_logit_pre_filter = Logit::load(logits, candidate_logit_post_gumbel.index);

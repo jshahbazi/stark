@@ -71,7 +71,7 @@ impl NativeBackend {
         let tokenizer = model.tokenizer().clone();
         let mut rng = options.seed;
         let mut mapper = crate::hybrid::ProbabilityMapper::default();
-        let mut sampler = crate::hybrid::mtp::ExactMtpSampler::new(&options.sampling, &mut rng, &mut mapper);
+        let mut sampler = crate::hybrid::mtp::ExactMtpSampler::new_dense(&options.sampling, &mut rng, &mut mapper);
         let first = sampler.sample_initial(frame.logits())?;
         let mut frame = Some(frame);
         let mut root = first;

@@ -179,6 +179,25 @@ fn text_snapshot_matches_fresh<B: Backend>(
             model.request_memory_estimate(CAPACITY, 1280, false).unwrap().prefix_snapshot_bytes,
             256 * 128 * 2 * 2
         );
+        let input_tokens = 1280;
+        let cold_bytes =
+            model.generation_memory_bytes_for_request(input_tokens, CAPACITY, CAPACITY - input_tokens, false).unwrap();
+        let snapshot_bytes =
+            model.request_memory_estimate(CAPACITY, input_tokens, false).unwrap().prefix_snapshot_bytes;
+        let budget = cold_bytes.checked_add(snapshot_bytes).unwrap() - 1;
+        assert_eq!(model.automatic_context_length_for_request(input_tokens, CAPACITY, budget, false), Some(CAPACITY));
+        let planned =
+            model.automatic_context_length_for_request_with_text_prefix(input_tokens, CAPACITY, budget, false, true);
+        assert!(
+            planned.is_none_or(|capacity| capacity < CAPACITY),
+            "snapshot planner admitted the unaffordable maximum"
+        );
+        if let Some(capacity) = planned {
+            let required = model
+                .generation_memory_bytes_with_text_prefix(input_tokens, capacity, capacity - input_tokens)
+                .unwrap();
+            assert!(required <= budget, "snapshot planner exceeded its admitted byte budget");
+        }
     }
     let original = prompt(1280);
     let mut follow_up = prompt(1400);

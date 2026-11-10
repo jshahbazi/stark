@@ -38,6 +38,11 @@ pub fn unified_sampling<T: ArrayElement + Float>(
         .map(|logit| logit.to_f32().unwrap())
         .collect::<Vec<f32>>();
 
+        if logits.iter().any(|logit| !logit.is_finite()) {
+            unsafe { *output.wrapping_add(batch_idx as usize) = u32::MAX };
+            continue;
+        }
+
         if has_bitmask {
             let bitmask = unsafe {
                 std::slice::from_raw_parts(
@@ -54,8 +59,15 @@ pub fn unified_sampling<T: ArrayElement + Float>(
 
         if has_temperature {
             let recip_temperature = 1.0 / temperature.unwrap();
+            let mut invalid = false;
             for logit in logits.iter_mut() {
+                let admitted = logit.is_finite();
                 *logit *= recip_temperature;
+                invalid |= admitted && !logit.is_finite();
+            }
+            if invalid {
+                unsafe { *output.wrapping_add(batch_idx as usize) = u32::MAX };
+                continue;
             }
         }
 
@@ -91,9 +103,9 @@ pub fn unified_sampling<T: ArrayElement + Float>(
             .into_iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal).then(b.0.cmp(&a.0)))
-            .unwrap()
-            .0;
+            .filter(|(_, logit)| logit.is_finite())
+            .map_or(u32::MAX, |(index, _)| index as u32);
 
-        unsafe { *output.wrapping_add(batch_idx as usize) = argmax as u32 }
+        unsafe { *output.wrapping_add(batch_idx as usize) = argmax }
     }
 }

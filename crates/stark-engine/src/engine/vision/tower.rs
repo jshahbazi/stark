@@ -628,6 +628,22 @@ impl<B: Backend> VisionTower<B> {
         })
     }
 
+    pub(super) fn workspace_bytes(
+        &self,
+        grid: [u32; 3],
+    ) -> Option<usize> {
+        let rows = checked_rows(grid, self.config.spatial_merge_size).ok()?;
+        super::memory::tower_workspace_bytes(
+            rows,
+            self.config.patch_width().ok()?,
+            self.config.hidden_size,
+            self.config.intermediate_size,
+            self.config.out_hidden_size,
+            self.config.depth,
+            true,
+        )
+    }
+
     pub(crate) fn encode(
         &self,
         patches: &[bf16],

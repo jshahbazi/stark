@@ -108,7 +108,7 @@ impl<B: Backend> ForwardPassChaining<B> {
                 })?;
                 let output_tokens = in_flight.output_tokens.as_slice::<u32>();
                 assert_eq!(output_tokens.len(), 1);
-                let token_id = output_tokens[0] as u64;
+                let token_id = checked_sampled_token(output_tokens[0])?;
                 let output_norm = in_flight.output_norm.take();
                 *self = Self::Constant {
                     token: token_id,
@@ -175,10 +175,9 @@ impl<P, S> SubmittedScratchPool<P, S> {
 
     fn with_drop_wait(
         mut self,
-        enabled: bool,
         wait: fn(P),
     ) -> Self {
-        self.wait_on_drop = enabled.then_some(wait);
+        self.wait_on_drop = Some(wait);
         self
     }
 
@@ -714,12 +713,9 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                     full_accept: true,
                     // Large prefill workspaces are released rather than retained
                     // for the stream's single-token decode pool rotation.
-                    pending: Some(SubmittedScratchPool::new(pending, None).with_drop_wait(
-                        multimodal_request,
-                        |pending| {
-                            let _ = pending.wait_until_completed();
-                        },
-                    )),
+                    pending: Some(SubmittedScratchPool::new(pending, None).with_drop_wait(|pending| {
+                        let _ = pending.wait_until_completed();
+                    })),
                     capture_span,
                     hidden_features: None,
                     output_norm,
@@ -823,8 +819,8 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                         .output_tokens
                         .as_slice::<u32>()
                         .iter()
-                        .map(|x| *x as u64)
-                        .collect::<Box<[u64]>>();
+                        .map(|x| checked_sampled_token(*x))
+                        .collect::<Result<Box<[u64]>, _>>()?;
                     let flat_trie = forward_pass_pending.input_trie.linearize();
                     let full = flat_trie.accept(
                         &sampled_tokens,
@@ -980,7 +976,6 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         };
 
         let mut pending = SubmittedScratchPool::new(Box::new([]), None::<Arc<B::AllocationPool>>).with_drop_wait(
-            self.model_state.has_multimodal_context(),
             |pending: <B::CommandBuffer as CommandBuffer>::Pending| {
                 let _ = pending.wait_until_completed();
             },
@@ -1224,6 +1219,34 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
     pub fn metrics(&self) -> &TokenStreamMetrics {
         &self.metrics
     }
+
+    #[cfg(test)]
+    pub(crate) fn validation_replace_pending_sample(
+        &mut self,
+        token: u32,
+    ) -> Result<(), LanguageModelStreamError<B>> {
+        let mut output = self
+            .model
+            .engine
+            .context
+            .create_buffer(std::mem::size_of::<u32>())
+            .map_err(LanguageModelStreamError::Backend)?;
+        output.copyin(&[token]);
+        let DecodingState::ForwardPassPending(in_flight) = &mut self.decoding_state else {
+            return Err(LanguageModelStreamError::InvalidSamplingResult);
+        };
+        let pool =
+            in_flight.pending.take().unwrap().wait(|pending| {
+                pending.wait_until_completed().map(|_| ()).map_err(LanguageModelStreamError::Backend)
+            })?;
+        in_flight.pending = Some(SubmittedScratchPool::new(Box::new([]), pool).with_drop_wait(
+            |pending: <B::CommandBuffer as CommandBuffer>::Pending| {
+                let _ = pending.wait_until_completed();
+            },
+        ));
+        in_flight.output_tokens = Arc::new(output);
+        Ok(())
+    }
 }
 
 fn fence_multimodal_state<B: Backend>(model_state: &mut LanguageModelState<B>) {
@@ -1237,6 +1260,14 @@ fn valid_stream_tokens<'a>(
     tokens: impl IntoIterator<Item = &'a u64>,
 ) -> bool {
     vocab_size != 0 && tokens.into_iter().all(|&token| token < u64::from(vocab_size))
+}
+
+fn checked_sampled_token<B: Backend>(token: u32) -> Result<u64, LanguageModelStreamError<B>> {
+    if token == u32::MAX {
+        Err(LanguageModelStreamError::InvalidSamplingResult)
+    } else {
+        Ok(u64::from(token))
+    }
 }
 
 impl<'a, B: Backend> Iterator for LanguageModelStream<'a, B> {
@@ -1268,7 +1299,10 @@ impl<'a, B: Backend> Iterator for LanguageModelStream<'a, B> {
         {
             **fence = true;
         }
-        if result.is_err() && self.model_state.has_multimodal_context() {
+        if result.is_err()
+            && (self.model_state.has_multimodal_context()
+                || matches!(result, Err(LanguageModelStreamError::InvalidSamplingResult)))
+        {
             fence_multimodal_state(self.model_state);
         }
         result.transpose()
@@ -1283,18 +1317,13 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
             } => Some(seed_token),
             DecodingState::ForwardPassPending(in_flight) => {
                 let completion = in_flight.pending.unwrap().wait(|pending| pending.wait_until_completed().map(|_| ()));
-                if completion.is_err()
-                    && (self.model_state.multimodal_failed
-                        || self.model_state.has_multimodal_context()
-                        || self.failure_fence.is_some())
-                {
+                if completion.is_err() {
                     fence_multimodal_state(self.model_state);
                     if let Some(fence) = &mut self.failure_fence {
                         **fence = true;
                     }
                     return;
                 }
-                completion.unwrap();
                 if self.model_state.multimodal_failed {
                     if let Some(fence) = &mut self.failure_fence {
                         **fence = true;
@@ -1324,7 +1353,16 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
                     command_buffer.end_encoding().submit().wait_until_completed().unwrap();
                 }
 
-                Some(in_flight.output_tokens.as_slice::<u32>()[0] as u64)
+                match checked_sampled_token::<B>(in_flight.output_tokens.as_slice::<u32>()[0]) {
+                    Ok(token) => Some(token),
+                    Err(_) => {
+                        fence_multimodal_state(self.model_state);
+                        if let Some(fence) = &mut self.failure_fence {
+                            **fence = true;
+                        }
+                        None
+                    },
+                }
             },
             DecodingState::Accepting {
                 full,
@@ -1394,6 +1432,42 @@ mod decode_pool_tests {
     use stark_engine_macros::stark_test;
 
     use super::{SubmittedScratchPool, valid_stream_tokens};
+
+    #[stark_test]
+    fn failed_device_sampling_never_commits_a_token_to_history() {
+        use crate::{
+            backends::common::{Backend, BufferMut, Context},
+            tests::helpers::for_each_backend,
+        };
+        fn check<B: Backend>() {
+            let context = B::Context::new().unwrap();
+            let mut output = context.create_buffer(std::mem::size_of::<u32>()).unwrap();
+            output.copyin(&[u32::MAX]);
+            let mut chain = super::ForwardPassChaining::InFlight(super::DecodingStatePending::<B> {
+                input_trie: crate::trie::TrieNode::new(1, 42, 0.0),
+                full_accept: true,
+                pending: Some(SubmittedScratchPool::new(Box::new([]), None)),
+                capture_span: None,
+                hidden_features: None,
+                output_norm: None,
+                output_tokens: std::sync::Arc::new(output),
+                _input_token_source: None,
+            });
+            let mut tokens = vec![1, 2];
+            assert!(matches!(
+                chain.resolve(
+                    &mut tokens,
+                    #[cfg(grammar)]
+                    None
+                ),
+                Err(super::LanguageModelStreamError::InvalidSamplingResult)
+            ));
+            assert_eq!(tokens, vec![1, 2]);
+        }
+        for_each_backend!(|B| {
+            check::<B>();
+        });
+    }
 
     #[stark_test]
     fn stream_tokens_reject_vocabulary_edges_and_narrowing() {
@@ -1481,7 +1555,7 @@ mod decode_pool_tests {
         let pool = Rc::new(Pool {
             outstanding: Cell::new(0),
         });
-        let submitted = Pool::submit(&pool, 3).with_drop_wait(true, |pending| {
+        let submitted = Pool::submit(&pool, 3).with_drop_wait(|pending| {
             let _ = Pool::complete(pending);
         });
         // A local pass can be abandoned by an allocation/encoding error before
@@ -1491,12 +1565,35 @@ mod decode_pool_tests {
         assert_eq!(Rc::strong_count(&pool), 1);
 
         // Explicit completion must disarm cleanup rather than complete twice.
-        let submitted = Pool::submit(&pool, 2).with_drop_wait(true, |pending| {
+        let submitted = Pool::submit(&pool, 2).with_drop_wait(|pending| {
             let _ = Pool::complete(pending);
         });
         let returned_pool = submitted.wait(Pool::complete).unwrap().unwrap();
         assert_eq!(returned_pool.outstanding.get(), 0);
         assert_eq!(Rc::strong_count(&pool), 2);
+    }
+
+    #[stark_test]
+    fn failed_sample_resolution_drains_abandoned_text_lookahead() {
+        fn early_failure<B: crate::backends::common::Backend>(
+            pool: &Rc<Pool>
+        ) -> Result<(), super::LanguageModelStreamError<B>> {
+            // Grammar-backed decode submits lookahead before resolving its
+            // prior sample. An error must drain this still-local owner.
+            let _submitted = Pool::submit(pool, 3).with_drop_wait(|pending| {
+                let _ = Pool::complete(pending);
+            });
+            super::checked_sampled_token::<B>(u32::MAX)?;
+            Ok(())
+        }
+        crate::tests::helpers::for_each_backend!(|B| {
+            let pool = Rc::new(Pool {
+                outstanding: Cell::new(0),
+            });
+            assert!(matches!(early_failure::<B>(&pool), Err(super::LanguageModelStreamError::InvalidSamplingResult)));
+            assert_eq!(pool.outstanding.get(), 0);
+            assert_eq!(Rc::strong_count(&pool), 1);
+        });
     }
 }
 

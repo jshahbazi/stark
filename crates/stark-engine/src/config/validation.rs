@@ -121,6 +121,9 @@ pub(crate) fn validate_attention(
     rope: Option<&AnyRoPEConfig>,
 ) -> Result<(), InvalidInput> {
     validate_heads(config.num_heads, config.num_groups, config.head_dim)?;
+    if config.logit_soft_cap.is_some_and(|cap| !cap.is_finite() || cap <= 0.0) {
+        return Err(InvalidInput("invalid attention logit soft cap"));
+    }
     if let Some(rope) = rope {
         rope.validate()?;
         let width = *rope.head_dim();

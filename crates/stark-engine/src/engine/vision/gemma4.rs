@@ -11,7 +11,9 @@ use std::{
 
 use half::bf16;
 
-use super::{ArtifactConfig, NativeVisionError, VisionArtifactIdentity, file_digest, open_artifact_component};
+use super::{
+    ArtifactConfig, ComponentSignature, NativeVisionError, VisionArtifactIdentity, file_digest, open_artifact_component,
+};
 use crate::{
     backends::common::{
         Backend, BufferRef, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context, InvalidInput,
@@ -181,6 +183,19 @@ enum ImageTower<B: Backend> {
 }
 
 impl<B: Backend> ImageTower<B> {
+    fn workspace_bytes(
+        &self,
+        grid: [u32; 3],
+        output: u32,
+    ) -> Option<usize> {
+        match self {
+            Self::Encoder(tower) => tower.workspace_bytes(grid, output),
+            Self::Unified(_) => {
+                super::memory::tower_workspace_bytes(grid[1].checked_mul(grid[2])? / 9, 6912, 3840, 0, output, 0, false)
+            },
+        }
+    }
+
     fn encode(
         &self,
         patches: &[bf16],
@@ -361,6 +376,7 @@ impl<B: Backend> Engine<B> {
         }
         let mut selected: BTreeMap<&str, File> = BTreeMap::new();
         let mut hashes = BTreeMap::new();
+        let mut signatures = BTreeMap::new();
         let mut components = BTreeMap::new();
         for (name, limit) in [
             ("config.json", 1_048_576),
@@ -370,6 +386,7 @@ impl<B: Backend> Engine<B> {
             ("chat_template.jinja", 262_144),
         ] {
             let mut file = open_artifact_component(&path.join(name))?;
+            let signature = ComponentSignature::read(&file)?;
             let length = file.metadata()?.len();
             if length == 0 || length > limit {
                 return Err(InvalidInput("Gemma image component exceeds bounds").into());
@@ -386,6 +403,10 @@ impl<B: Backend> Engine<B> {
                 file.rewind()?;
             }
             hashes.insert(name, hash);
+            if !signature.unchanged(&file)? {
+                return Err(InvalidInput("image component changed during admission").into());
+            }
+            signatures.insert(name, signature);
             selected.insert(name, file);
         }
         let raw: serde_json::Value = serde_json::from_slice(&components["config.json"])?;
@@ -466,11 +487,10 @@ impl<B: Backend> Engine<B> {
         }
         let parameter_storage = loader.storage_statistics();
         drop(loader);
-        for (name, expected) in &hashes {
-            let file = selected.get_mut(name).ok_or(InvalidInput("missing Gemma selected component"))?;
-            file.rewind()?;
-            if file_digest(file)? != *expected {
-                return Err(InvalidInput("Gemma artifact changed while loading").into());
+        for (name, signature) in &signatures {
+            let file = selected.get(name).ok_or(InvalidInput("missing selected image component"))?;
+            if !signature.unchanged(file)? {
+                return Err(InvalidInput("image artifact changed while loading").into());
             }
         }
         let hash = |name| hashes.get(name).cloned().ok_or(InvalidInput("missing Gemma artifact identity"));
@@ -522,6 +542,14 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
     }
 
     /// Decoder-only admission; image-tower execution is separately qualified.
+    pub fn image_workspace_bytes(
+        &self,
+        image: &PreparedGemmaImage,
+    ) -> Option<usize> {
+        self.validate_image(image).ok()?;
+        self.tower.as_ref()?.workspace_bytes(image.patches.grid, self.profile.model_dim)
+    }
+
     pub fn decoder_generation_memory_bytes(
         &self,
         input_tokens: u32,

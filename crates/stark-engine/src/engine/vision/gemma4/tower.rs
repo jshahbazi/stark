@@ -271,6 +271,7 @@ impl<B: Backend> Gemma4VisionTower<B> {
                 false,
                 false,
                 false,
+                false,
             )
             .map_err(VisionTowerError::Backend)?,
         })
@@ -303,6 +304,7 @@ impl<B: Backend> Gemma4VisionTower<B> {
             self.heads * self.padded_dim,
             None,
             1.0,
+            None,
             None::<&B::ScratchBuffer>,
             None,
             None::<&B::ScratchBuffer>,
@@ -317,6 +319,22 @@ impl<B: Backend> Gemma4VisionTower<B> {
         } else {
             Ok(output)
         }
+    }
+
+    pub(super) fn workspace_bytes(
+        &self,
+        grid: [u32; 3],
+        output: u32,
+    ) -> Option<usize> {
+        super::super::memory::tower_workspace_bytes(
+            grid[1].checked_mul(grid[2])?,
+            768,
+            self.width,
+            self.mlp,
+            output,
+            u32::try_from(self.blocks.len()).ok()?,
+            self.source_attention.is_some(),
+        )
     }
 
     pub(crate) fn encode(

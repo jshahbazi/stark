@@ -48,6 +48,7 @@ mod family;
 mod fast_text;
 pub mod gemma3;
 pub mod gemma4;
+mod memory;
 
 #[cfg(test)]
 mod logit_tests;
@@ -319,6 +320,47 @@ pub struct VisionLanguageModel<B: Backend> {
     family_profile: family::FamilyProfile,
 }
 
+// A digest is computed once from a selected descriptor. Preserve that identity
+// through materialization using inode/length and nanosecond write/change times;
+// ctime detects same-size edits even if a writer restores mtime. This is a
+// per-load check, never a persistent digest or inference-state cache.
+#[derive(PartialEq, Eq)]
+struct ComponentSignature {
+    length: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    unix: [u64; 6],
+}
+
+impl ComponentSignature {
+    fn read(file: &File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Self {
+            length: metadata.len(),
+            modified: metadata.modified()?,
+            #[cfg(unix)]
+            unix: {
+                use std::os::unix::fs::MetadataExt;
+                [
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.mtime() as u64,
+                    metadata.mtime_nsec() as u64,
+                    metadata.ctime() as u64,
+                    metadata.ctime_nsec() as u64,
+                ]
+            },
+        })
+    }
+    fn unchanged(
+        &self,
+        file: &File,
+    ) -> io::Result<bool> {
+        Ok(*self == Self::read(file)?)
+    }
+}
+
+#[cfg(test)]
 fn file_matches(
     file: &mut File,
     expected: &str,
@@ -419,10 +461,12 @@ impl<B: Backend> Engine<B> {
         // descriptor throughout loading, so path replacement cannot switch it.
         let mut verified = BTreeMap::new();
         let mut hashes = BTreeMap::new();
+        let mut signatures = BTreeMap::new();
         let mut components: BTreeMap<&str, Vec<u8>> = BTreeMap::new();
         let mut family_profile = family::FamilyProfile::FixedV1;
         for (name, _) in ARTIFACT_FILES {
             let mut file = open_artifact_component(&model_path.join(name))?;
+            let signature = ComponentSignature::read(&file)?;
             let length = file.metadata()?.len();
             let maximum = match name {
                 "config.json" => 1_048_576,
@@ -461,6 +505,10 @@ impl<B: Backend> Engine<B> {
                 family_profile = family::FamilyProfile::parse(&candidate["artifact_contract"]["family"])
                     .ok_or(InvalidInput("unsupported native vision artifact family"))?;
             }
+            if !signature.unchanged(&file)? {
+                return Err(InvalidInput("native vision component changed during admission").into());
+            }
+            signatures.insert(name, signature);
             hashes.insert(name, hash);
             file.rewind()?;
             verified.insert(name, file);
@@ -630,13 +678,11 @@ impl<B: Backend> Engine<B> {
         }
         let parameter_storage = loader.storage_statistics();
         drop(loader);
-        // Recheck the same selected objects before publishing loaded buffers.
-        // Ordinary concurrent in-place artifact changes cannot silently acquire
-        // the source identity established by the initial admission pass.
-        for (name, expected) in &hashes {
-            let file = verified.get_mut(name).ok_or(InvalidInput("missing native vision artifact component"))?;
-            file.rewind()?;
-            if !file_matches(file, expected)? {
+        // Recheck the same opened objects without rereading the entire weight
+        // payload. Small metadata was parsed from owned, initially hashed bytes.
+        for (name, signature) in &signatures {
+            let file = verified.get(name).ok_or(InvalidInput("missing native vision artifact component"))?;
+            if !signature.unchanged(file)? {
                 return Err(InvalidInput("native vision artifact changed while loading").into());
             }
         }
@@ -727,6 +773,16 @@ impl<B: Backend> VisionLanguageModel<B> {
 
     /// Decoder-only admission for plain text or a prepared image prompt.
     /// The bounded image encoder is qualified independently.
+    /// Additional tower work must be admitted before decoder state allocation.
+    pub fn image_workspace_bytes(
+        &self,
+        image: &PreparedVisionImage,
+    ) -> Option<usize> {
+        self.validate_prepared_identity(image).ok()?;
+        let tower = self.tower.as_ref()?;
+        tower.workspace_bytes(image.prepared.grid)
+    }
+
     pub fn decoder_generation_memory_bytes(
         &self,
         input_tokens: u32,
@@ -1250,6 +1306,16 @@ where
         capacity: u32,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<DenseMtpSession<B>, DenseMtpError<B>> {
+        self.prefill_dense_mtp_with_prefix_controlled(input, capacity, true, cancelled)
+    }
+
+    pub fn prefill_dense_mtp_with_prefix_controlled(
+        &mut self,
+        input: &[u32],
+        capacity: u32,
+        capture_prefix: bool,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<DenseMtpSession<B>, DenseMtpError<B>> {
         if !self.has_dense_mtp()
             || input.is_empty()
             || capacity == 0
@@ -1259,7 +1325,9 @@ where
         {
             return Err(DenseMtpError::Invalid);
         }
-        let result = self.dense_text_operation(|model| model.prefill_dense_mtp_controlled(input, capacity, cancelled));
+        let result = self.dense_text_operation(|model| {
+            model.prefill_dense_mtp_with_prefix_controlled(input, capacity, capture_prefix, cancelled)
+        });
         self.failed |= result.as_ref().is_err_and(|error| !matches!(error, DenseMtpError::Cancelled));
         result
     }

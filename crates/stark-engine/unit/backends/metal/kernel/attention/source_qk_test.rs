@@ -55,6 +55,7 @@ fn source_qk_split_keeps_f32_partitions_until_the_bf16_score_store() {
             scale: Some(1.0),
             data_type: DataType::BF16,
             materialize_prefill_scores: true,
+            logit_soft_cap: None,
             source_bf16_prefill: false,
         },
         AttentionArguments {

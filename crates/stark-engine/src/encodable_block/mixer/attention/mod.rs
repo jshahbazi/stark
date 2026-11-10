@@ -247,9 +247,10 @@ impl<B: Backend> Attention<B> {
                 is_causal,
                 sliding_window_size,
                 scale: config.scale,
+                logit_soft_cap: config.logit_soft_cap,
                 data_type,
                 materialize_prefill_scores: config.materialize_prefill_scores,
-                source_bf16_prefill: source_profile && matches!(head_dim, 64 | 128),
+                source_bf16_prefill: source_profile && matches!(head_dim, 64 | 128) && config.logit_soft_cap.is_none(),
             },
         )
         .map_err(AttentionNewError::Backend)?;

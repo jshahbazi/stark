@@ -50,6 +50,11 @@ pub struct LanguageModelState<B: Backend> {
 }
 
 impl<B: Backend> LanguageModelState<B> {
+    /// A failed stream or cleanup invalidates this request's state and caches.
+    pub fn is_fenced(&self) -> bool {
+        self.multimodal_failed
+    }
+
     pub fn resident_payload_bytes(&self) -> Option<usize> {
         self.transformer_state.resident_payload_bytes()
     }
@@ -164,7 +169,9 @@ impl<B: Backend> LanguageModel<B> {
         self.speculator.is_none() && self.decoder.prefix_reuse_supported()
     }
 
-    pub(crate) fn text_prefix_snapshot_supported(&self) -> bool {
+    /// Whether ordinary text requests can retain and restore a completed
+    /// prefill boundary, including decoders whose KV state cannot be rewound.
+    pub fn text_prefix_snapshot_supported(&self) -> bool {
         self.speculator.is_none() && self.decoder.prefix_snapshot_supported()
     }
 

@@ -48,6 +48,8 @@ pub enum LanguageModelStreamError<B: Backend> {
     InvalidToken,
     #[error("Invalid sampling options")]
     InvalidSampling,
+    #[error("Sampling produced no finite candidate")]
+    InvalidSamplingResult,
     #[error("State belongs to a different model")]
     ForeignState,
     #[error("Invalid multimodal input or request state")]

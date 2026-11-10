@@ -74,6 +74,7 @@ impl Sampling {
         } = self
             && (!temperature.is_finite()
                 || *temperature <= 0.0
+                || !temperature.recip().is_finite()
                 || *temperature > 100.0
                 || top_k.is_some_and(|k| k == 0 || k as usize > vocab_size)
                 || top_p.is_some_and(|p| !p.is_finite() || p <= 0.0 || p > 1.0)
@@ -3203,6 +3204,7 @@ mod tests {
             json!({"rendered_prompt":"both sources"}),
             json!({"input_token_ids":null}),
             json!({"sampling":{"mode":"stochastic","temperature":0.0}}),
+            json!({"sampling":{"mode":"stochastic","temperature":1e-40}}),
             json!({"sampling":{"mode":"stochastic","temperature":0.6,"top_k":0}}),
             json!({"sampling":{"mode":"stochastic","temperature":0.6,"top_k":9}}),
             json!({"sampling":{"mode":"stochastic","temperature":0.6,"top_p":0.0}}),

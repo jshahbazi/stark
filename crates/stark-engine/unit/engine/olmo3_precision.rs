@@ -451,6 +451,7 @@ fn attention_fixture_probe() -> Result<(), &'static str> {
         scale: Some(scale),
         data_type: DataType::BF16,
         materialize_prefill_scores: path == "materialized",
+        logit_soft_cap: None,
         source_bf16_prefill: path == "source-profile",
     };
     let mut commands = context

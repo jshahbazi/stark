@@ -188,6 +188,11 @@ impl AttentionMetalKernel {
         command_buffer: &mut MetalCommandBufferEncoding,
     ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
         let suffix_length = arguments.suffix_length;
+        // Capped attention uses online F32 score accumulation for every batch
+        // size, without introducing quadratic score/probability scratch.
+        if self.config.logit_soft_cap.is_some() && arguments.image_span.is_none() {
+            return self.single_pass.encode(arguments, command_buffer);
+        }
         if arguments.image_span.is_some() {
             return crate::backends::common::kernel::attention::encode_image_span(
                 self.config,

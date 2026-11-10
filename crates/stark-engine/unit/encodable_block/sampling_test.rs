@@ -211,24 +211,58 @@ fn native_sampling_options_reject_invalid_effective_values() {
 }
 
 #[stark_test]
-fn native_sampling_keeps_nonfinite_candidates_within_vocabulary() {
-    let contexts = TestContextes::new();
-    let check = || -> Result<(), TestCaseError> {
-        for logits in [[f32::NAN; 3], [f32::NEG_INFINITY; 3], [1.0, 3.0, 2.0]] {
-            for_each_context!(contexts, |context: C| do_sampling_backend::<<C as Context>::Backend, f32>(
-                context,
-                &logits,
-                None,
-                None,
-                3,
-                &SamplingMethod::Greedy,
-                1,
-            ))
-            .compare_results()?;
+fn native_sampling_rejects_nonfinite_logits_and_empty_masks() {
+    fn check<B: Backend>() {
+        let context = B::Context::new().unwrap();
+        for method in [
+            SamplingMethod::Greedy,
+            SamplingMethod::Stochastic {
+                temperature: Some(0.7),
+                top_k: Some(2),
+                top_p: Some(0.95),
+                min_p: None,
+                repetition_penalty: None,
+                suffix_repetition_length: None,
+            },
+        ] {
+            let seeds = matches!(method, SamplingMethod::Stochastic { .. }).then_some([42]);
+            for (logits, bitmask, expected) in [
+                ([f32::NAN; 3], None, u32::MAX),
+                ([f32::NEG_INFINITY; 3], None, u32::MAX),
+                ([1.0, f32::NAN, 2.0], None, u32::MAX),
+                ([1.0, f32::INFINITY, 2.0], None, u32::MAX),
+                ([1.0, 3.0, 2.0], Some([0]), u32::MAX),
+                ([1.0, 3.0, 2.0], Some([2]), 1),
+            ] {
+                let actual = do_sampling_backend::<B, f32>(
+                    &context,
+                    &logits,
+                    seeds.as_ref().map(|s| &s[..]),
+                    bitmask.as_ref().map(|s| &s[..]),
+                    3,
+                    &method,
+                    1,
+                )
+                .unwrap();
+                assert_eq!(actual.0, vec![expected]);
+            }
         }
-        Ok(())
-    };
-    check().unwrap();
+        let overflow = SamplingMethod::Stochastic {
+            temperature: Some(1e-38),
+            top_k: None,
+            top_p: None,
+            min_p: None,
+            repetition_penalty: None,
+            suffix_repetition_length: None,
+        };
+        assert!(overflow.validate(3).is_ok());
+        let actual =
+            do_sampling_backend::<B, f32>(&context, &[10.0, 1.0, 2.0], Some(&[42]), None, 3, &overflow, 1).unwrap();
+        assert_eq!(actual.0, vec![u32::MAX]);
+    }
+    crate::tests::helpers::for_each_backend!(|B| {
+        check::<B>();
+    });
 }
 
 fn repetition_penalty_backend<B: Backend>(context: &B::Context) {
