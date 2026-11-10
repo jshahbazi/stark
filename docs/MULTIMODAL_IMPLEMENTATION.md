@@ -239,8 +239,14 @@ the pinned processor, with ties-to-even rounding. Antialiased bicubic uint8
 resizing, fused rescale/normalization, static-frame temporal repetition, and
 merge-group patch ordering feed owned BF16 patch rows to the tower. The official
 processor's 65,536–16,777,216 pixel recipe remains unchanged. Internal admission
-rejects a recipe result beyond 1,048,576 pixels or 4,096 encoder patches instead
-of changing that resize result. Other internal bounds are 20 MiB compressed,
+for the converted Qwen backend rejects a recipe result beyond 1,048,576 pixels
+or 4,096 encoder patches instead of changing that resize result. The retained
+Lily streaming backend admits up to the original 16,777,216-pixel processor
+ceiling (65,536 patches / 16,384 image tokens), with separate checked vision
+storage, device-buffer and decoder memory admission. See the [family-specific
+limits](GENERATION.md#prepared-image-operations) and [bounded validation
+evidence](model-experiments/2026-11-10-lily-image-size.md); full-ceiling model
+execution remains unqualified. Other internal bounds are 20 MiB compressed,
 32 million source pixels, dimension 16,384, aspect ratio 200, and 64 JPEG scans.
 These are implementation admission guards; they are not measured hardware or
 public service capabilities, and do not claim a strict global allocator ceiling.

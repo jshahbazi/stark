@@ -94,3 +94,23 @@ large-image-to-text MTP/cache recovery have not been measured in this attempt.
 The other retained mixed-precision checkpoint has source/contract coverage
 only, without a new execution run. Image prefix reuse remains disabled because
 image embeddings and rotary state lack a qualified restore path.
+
+## Pre-PR double check
+
+Review against the unchanged `92289590` main baseline found stale shared-limit
+wording in `GENERATION.md` and `MULTIMODAL_IMPLEMENTATION.md`. The reference
+pages now list the loaded family/backend ceilings and keep the retained Lily
+extension separate from converted Qwen and Gemma. A separate read-only review
+found no actionable limit-propagation or UI-state defect.
+
+Added a worker-level boundary control covering the exact Lily ceiling, its next
+complete patch row, the converted Qwen ceiling and a larger geometry that is
+valid only for Lily. It checks advertised limits, actual preparation admission,
+rejection cleanup and release of the prepared image owner. This is synthetic
+protocol coverage, not full-resolution model execution. The rerun passes all
+145 worker tests (five private-artifact controls ignored); the focused converter
+image/attachment/capability suites pass 204 tests. Repository policy, whitespace,
+Rust formatting and converter lint/format checks pass. These additions affect
+tests and documentation only; the installed runtime remains the signed build
+recorded above. The original full-suite and actual-model results retain their
+original source/build identities.

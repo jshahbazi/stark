@@ -1594,6 +1594,7 @@ mod tests {
         cancel_image: bool,
         cancel_after_prepare: bool,
         fail_image_prepare: bool,
+        prepared_metadata_override: Option<PreparedImageMetadata>,
         prefix_supported: bool,
         prefix_entry: Option<prefix_cache::PrefixEntry<usize>>,
         prefix_pending: Option<prefix_cache::PrefixEntry<usize>>,
@@ -1890,7 +1891,7 @@ mod tests {
                 FakePreparedImage {
                     dropped: self.prepared_drops.clone(),
                 },
-                PreparedImageMetadata {
+                self.prepared_metadata_override.take().unwrap_or(PreparedImageMetadata {
                     input_tokens: 7,
                     image_tokens: if self.image_schema == 4 {
                         1
@@ -1907,7 +1908,7 @@ mod tests {
                     } else {
                         [64, 64]
                     },
-                },
+                }),
             ))
         }
 
@@ -1953,6 +1954,7 @@ mod tests {
             cancel_image: false,
             cancel_after_prepare: false,
             fail_image_prepare: false,
+            prepared_metadata_override: None,
             prefix_supported: false,
             prefix_entry: None,
             prefix_pending: None,
@@ -2323,6 +2325,47 @@ mod tests {
     fn image_generate(prepared: &Value) -> Value {
         json!({"operation":"generate_image","prepared_id":prepared["prepared_id"],
             "context_tokens":16,"max_new_tokens":8,"request_id":11})
+    }
+
+    #[test]
+    fn image_preparation_enforces_each_loaded_familys_advertised_ceiling() {
+        for (profile, version, schema, side, expected_patches, accepted) in [
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, [256, 256], 65_536, true),
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, [256, 258], 65_536, false),
+            ("qwen35-dense-bf16-merged-v2", 2, 3, [64, 64], 4096, true),
+            ("qwen35-dense-bf16-merged-v2", 2, 3, [64, 66], 4096, false),
+            ("qwen35-dense-bf16-merged-v2", 2, 3, [256, 256], 4096, false),
+        ] {
+            let root = crate::media::tests::PrivateRoot::new();
+            let mut worker = image_worker(&root);
+            worker.backend.family_profile = profile;
+            worker.backend.family_version = version;
+            worker.backend.image_schema = schema;
+            worker.backend.max_context = Some(65_536);
+            let image_tokens = side[0] * side[1] / 4;
+            worker.backend.prepared_metadata_override = Some(PreparedImageMetadata {
+                input_tokens: image_tokens as usize + 3,
+                image_tokens,
+                grid: [1, side[0], side[1]],
+                processed_dimensions: [side[1] * 16, side[0] * 16],
+            });
+            assert_eq!(readiness(&mut worker)["image_input"]["max_patches"], expected_patches);
+            let mut request = image_prepare(&root);
+            request["context_tokens"] = json!(65_536);
+            let mut output = Vec::new();
+            let result = worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output);
+            let reply: Value = serde_json::from_slice(&output).unwrap();
+            if accepted {
+                assert!(result.is_ok());
+                assert!(reply.get("prepared_id").is_some());
+                assert_eq!(reply["image_tokens"], image_tokens);
+            } else {
+                assert_eq!(result, Err("native_operation_failed"));
+                assert_eq!(reply["error"], "invalid_image_preparation_output");
+                assert!(worker.prepared.is_none());
+                assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+            }
+        }
     }
 
     #[test]
