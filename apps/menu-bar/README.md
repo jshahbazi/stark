@@ -134,7 +134,8 @@ current browsing session. Sort choices are remembered between app launches.
 The family overview uses compact, full-width rows in a single column.
 
 **Installed** shows compact rows with a readable model name, quantization, file size,
-repo link, **Run** or **Stop**, and removal button. Names may use two lines.
+repo link, **Run** or **Stop**, and removal button. Names may wrap. Recognized
+variants such as **Lily q4** and **MLX-Serve** appear below the name.
 Recognized generated revision suffixes and packaging labels are omitted from the displayed
 name; known precision remains in its own column. Verified source names are used
 when they match the saved name after removing packaging and revision suffixes.

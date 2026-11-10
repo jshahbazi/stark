@@ -905,6 +905,16 @@ struct ModelsInventory {
         let repositoryURL: URL?
         let toolSupport: ModelToolSupport
 
+        var variantLabel: String? {
+            // Native preparation supplies these labels independently of the saved name.
+            switch quantization?.components(separatedBy: " (").first {
+            case "Lily q4-xl": return "Lily q4"
+            case "MLX mixed 4/8-bit": return "MLX"
+            case "MLX-Serve mixed 4/8-bit": return "MLX-Serve"
+            default: return nil
+            }
+        }
+
         var detailLabels: [String] {
             [quantization,
              weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
@@ -2917,9 +2927,16 @@ struct ModelsView: View {
     }
 
     private func savedModelRow(_ model: ModelsInventory.Model, family: String?) -> some View {
-        HStack(spacing: 10) {
-            Text(model.displayName).font(.callout.weight(.medium)).lineLimit(2).truncationMode(.tail)
-                .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+        let variantLabel = model.variantLabel
+        return HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.displayName).font(.callout.weight(.medium)).lineLimit(2).truncationMode(.tail)
+                if let variantLabel {
+                    Text(variantLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+            .accessibilityHidden(true)
             Text(model.quantization ?? "—").font(.caption).foregroundStyle(.secondary)
                 .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
             Text(model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
@@ -2939,7 +2956,8 @@ struct ModelsView: View {
             removalButton(model).frame(width: 22)
         }.frame(minHeight: 32)
             .help(savedModelHelp(model, family: family))
-            .accessibilityElement(children: .contain).accessibilityLabel(model.displayName)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(variantLabel.map { model.displayName + ", " + $0 } ?? model.displayName)
     }
 
     private func savedModelHelp(_ model: ModelsInventory.Model, family: String?) -> String {
