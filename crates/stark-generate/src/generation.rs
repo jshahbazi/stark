@@ -217,8 +217,8 @@ fn image_family_limits(
         | ("qwen35-dense-bf16-merged-v2", 2, 3)
         | ("qwen35-dense-affine-merged-v3", 3, 3)
         | ("qwen35-moe-affine-merged-v4", 4, 3)
-        | ("qwen35-moe-bf16-merged-v5", 5, 3)
-        | ("qwen38-lily-retained-bf16-vision-v1", 1, 6) => ((16, 2), 4096, 1024),
+        | ("qwen35-moe-bf16-merged-v5", 5, 3) => ((16, 2), 4096, 1024),
+        ("qwen38-lily-retained-bf16-vision-v1", 1, 6) => ((16, 2), 65_536, 16_384),
         (
             "gemma4-e2b-bf16-v1"
             | "gemma4-e4b-bf16-v1"
@@ -245,7 +245,7 @@ mod image_family_tests {
             ("qwen35-dense-affine-merged-v3", 3, 3, (16, 2), (4096, 1024, 1048576)),
             ("qwen35-moe-affine-merged-v4", 4, 3, (16, 2), (4096, 1024, 1048576)),
             ("qwen35-moe-bf16-merged-v5", 5, 3, (16, 2), (4096, 1024, 1048576)),
-            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, (16, 2), (4096, 1024, 1048576)),
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, (16, 2), (65_536, 16_384, 16_777_216)),
             ("gemma4-e2b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma4-e4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma4-31b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
@@ -276,7 +276,7 @@ fn valid_image_metadata(
 ) -> bool {
     let (patch_size, merge_size) = geometry;
     let (max_patches, max_image_tokens) = match geometry {
-        (16, 2) => (4096, 1024),
+        (16, 2) => (65_536, 16_384),
         (16, 3) => (2520, 280),
         (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
         _ => return false,
@@ -1174,7 +1174,20 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if self.backend.cancelled(request_id)? {
                     return Err("generation_cancelled");
                 }
-                if !valid_image_metadata(&metadata, self.backend.image_geometry()) {
+                let limits = self.backend.image_family_profile().and_then(|(profile, version)| {
+                    image_family_limits(
+                        profile,
+                        version,
+                        self.backend.image_artifact_identity()?.schema_version,
+                        self.backend.image_geometry(),
+                    )
+                });
+                if !valid_image_metadata(&metadata, self.backend.image_geometry())
+                    || limits.is_none_or(|(patches, tokens, _)| {
+                        metadata.grid[1].checked_mul(metadata.grid[2]).is_none_or(|count| count > patches)
+                            || metadata.image_tokens > tokens
+                    })
+                {
                     return Err("invalid_image_preparation_output");
                 }
                 if metadata

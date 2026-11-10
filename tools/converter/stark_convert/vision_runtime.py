@@ -188,6 +188,7 @@ def family_image_input_contract(value: object) -> bool:
         or value.get("max_processed_pixels") != 645120
     ):
         return False
+    retained = value.get("family_profile") == LILY_FAMILY_PROFILE
     return (
         supported_image_family({"profile": value.get("family_profile"), "version": value.get("family_version")})
         and isinstance(source, str)
@@ -202,9 +203,9 @@ def family_image_input_contract(value: object) -> bool:
             for key, maximum in (
                 ("max_compressed_bytes", 20 * 1024 * 1024),
                 ("max_source_pixels", 32_000_000),
-                ("max_processed_pixels", 1_048_576),
-                ("max_patches", 4096),
-                ("max_image_tokens", 1024),
+                ("max_processed_pixels", 16_777_216 if retained else 1_048_576),
+                ("max_patches", 65_536 if retained else 4096),
+                ("max_image_tokens", 16_384 if retained else 1024),
             )
         )
     )

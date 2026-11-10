@@ -32,13 +32,18 @@ pub(super) fn prepare(
     owner: Arc<()>,
     encoded: &[u8],
 ) -> Result<PreparedHybridImage> {
-    let limits = PreprocessLimits::default();
+    // Retained streaming attention supports the source processor maximum.
+    let limits = PreprocessLimits {
+        max_processed_pixels: 16_777_216,
+        max_encoder_patches: 65_536,
+        ..PreprocessLimits::default()
+    };
     let image = decode_image(encoded, &limits).map_err(|_| Error::Invalid("image decoding failed"))?;
     let prepared = prepare_image(&image, &limits).map_err(|_| Error::Invalid("image preprocessing failed"))?;
     let tokens = prepared.grid[1]
         .checked_mul(prepared.grid[2])
         .and_then(|patches| patches.checked_div(4))
-        .filter(|tokens| (1..=1024).contains(tokens))
+        .filter(|tokens| (1..=16_384).contains(tokens))
         .ok_or(Error::Invalid("image patch bounds"))?;
     if prepared.grid[0] != 1 || tokens == 0 {
         return Err(Error::Invalid("static image grid"));
@@ -64,7 +69,7 @@ impl Tokens {
         tokens: &[u32],
         image_count: usize,
     ) -> Result<usize> {
-        if !(1..=1024).contains(&image_count) {
+        if !(1..=16_384).contains(&image_count) {
             return Err(Error::Invalid("image token count"));
         }
         let start = tokens
@@ -98,7 +103,7 @@ impl Tokens {
             .and_then(|n| n.checked_add(image_count))
             .filter(|n| *n <= capacity)
             .ok_or(Error::Invalid("image prompt context capacity"))?;
-        if !(1..=1024).contains(&image_count) {
+        if !(1..=16_384).contains(&image_count) {
             return Err(Error::Invalid("image token count"));
         }
         let mut expanded = Vec::new();
@@ -125,6 +130,8 @@ mod tests {
 
     #[stark_test]
     fn exact_image_expansion_and_span_reject_extra_controls() {
+        let maximum = TOKENS.expand(&[1, 10, 12, 11, 2], 16_384, 16_388).unwrap();
+        assert_eq!(TOKENS.span(&maximum, 16_384).unwrap(), 2);
         let expanded = TOKENS.expand(&[1, 10, 12, 11, 2], 4, 8).unwrap();
         assert_eq!(&*expanded, &[1, 10, 12, 12, 12, 12, 11, 2]);
         assert_eq!(TOKENS.span(&expanded, 4).unwrap(), 2);
@@ -141,6 +148,6 @@ mod tests {
             assert!(TOKENS.span(&tokens, 1).is_err());
         }
         assert!(TOKENS.expand(&[10, 12, 11], usize::MAX, usize::MAX).is_err());
-        assert!(TOKENS.expand(&[10, 12, 11], 1025, 2048).is_err());
+        assert!(TOKENS.expand(&[10, 12, 11], 16_385, 32_768).is_err());
     }
 }

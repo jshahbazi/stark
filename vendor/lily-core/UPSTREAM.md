@@ -262,8 +262,14 @@ BF16 tower bytes before allocation. The external MLX config bridge preserves a
 declared tower and aliases `vision_tower.*` into its canonical namespace. The
 existing pinned tower, 3-axis positions and image-row overrides are reused.
 `prefill_with_vision_until` exposes the existing stop-between-chunks behavior
-with the final target readout enabled. The host bounds a single image to 4096
+with the final target readout enabled. The host bounds a single image to 65,536
 patches, disables image MTP, and excludes image state from prefix snapshots.
+Stark extends the retained streaming vision dispatch row guards to the pinned
+processor's 16,777,216-pixel ceiling (16-pixel patches, 2 x 2 merge). Shader
+arithmetic and source processor parameters are unchanged. A checked inventory
+charges vision scratch and host copies alongside decoder growth and checks the
+largest buffer against the actual Metal device. This ceiling is an admission
+bound; full-resolution quality and latency need separate artifact evidence.
 Cancellation waits for the submitted tower pass or text chunk to complete;
 submitted Metal commands cannot be safely interrupted. Checkpoint execution
 and numerical parity remain separately qualified.

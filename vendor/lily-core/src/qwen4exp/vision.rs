@@ -70,7 +70,7 @@ const ROPE_THETA: f32 = 10000.0;
 const LAYERNORM_EPS: f32 = 1e-6;
 
 /// Intermediates for up to `capacity` patches; every forward uses exact
-/// row-prefix views. Under 0.3 GB at the 8 192-patch cap.
+/// row-prefix views. Allocation admission checks the full processor ceiling before execution.
 pub struct VisionScratch {
     capacity: usize,
     /// `[n, patch_dim]` bf16: the pixel rows cast on upload.
@@ -130,7 +130,7 @@ fn rotary_coefficients(gh: usize, gw: usize) -> Result<(Vec<f32>, Vec<f32>)> {
         .checked_mul(gw)
         .ok_or_else(|| anyhow::anyhow!("vision rotary grid overflow"))?;
     ensure!(
-        gh >= 2 && gw >= 2 && gh.is_multiple_of(2) && gw.is_multiple_of(2) && n <= 8192,
+        gh >= 2 && gw >= 2 && gh.is_multiple_of(2) && gw.is_multiple_of(2) && n <= 65_536,
         "vision rotary grid bounds"
     );
     let inverse = (0..18)
@@ -231,7 +231,7 @@ pub(super) fn forward_with(
         let n = gh
             .checked_mul(gw)
             .ok_or_else(|| anyhow::anyhow!("vision grid size overflow"))?;
-        ensure!(n > 0 && n <= 8192, "vision grid exceeds native patch budget");
+        ensure!(n > 0 && n <= 65_536, "vision grid exceeds native patch budget");
         ensure!(
             gh >= 2 && gw >= 2 && gh.is_multiple_of(2) && gw.is_multiple_of(2),
             "grid ({gh}, {gw}) is not made of 2 x 2 merge blocks"

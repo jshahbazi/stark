@@ -67,6 +67,43 @@ fn image_dimensions_match_pinned_smart_resize_and_admission() {
 }
 
 #[stark_test]
+fn retained_image_dimensions_preserve_source_processor_maximum() {
+    let bounds = PreprocessLimits {
+        max_processed_pixels: 16_777_216,
+        max_encoder_patches: 65_536,
+        ..limits()
+    };
+    for (source, expected) in [
+        ((256, 256), (256, 256)),
+        ((1344, 1788), (1344, 1792)),
+        ((4096, 4096), (4096, 4096)),
+        ((8000, 4000), (5792, 2880)),
+    ] {
+        assert_eq!(resized_dimensions(source.0, source.1, &bounds).unwrap(), expected);
+    }
+    assert!(resized_dimensions(8001, 4000, &bounds).is_err());
+    assert!(resized_dimensions(16_385, 32, &bounds).is_err());
+    assert!(resized_dimensions(1, 201, &bounds).is_err());
+}
+
+#[stark_test]
+#[ignore]
+fn retained_private_image_preparation() {
+    // Opt-in private file; neither its path, pixels nor patches are emitted.
+    let source = std::env::var_os("STARK_TEST_IMAGE_PATH").expect("private image required");
+    let bytes = std::fs::read(source).expect("private image unreadable");
+    let bounds = PreprocessLimits {
+        max_processed_pixels: 16_777_216,
+        max_encoder_patches: 65_536,
+        ..limits()
+    };
+    let decoded = decode_image(&bytes, &bounds).expect("private image decoding failed");
+    let prepared = prepare_image(&decoded, &bounds).expect("private image preparation failed");
+    assert!(prepared.grid[1] * prepared.grid[2] <= 65_536);
+    assert!(!prepared.patches.is_empty());
+}
+
+#[stark_test]
 fn image_patch_order_temporal_repeat_and_normalization_match_index_oracle() {
     let bounds = limits();
     let pixels = (0..256 * 256 * 3).map(|index| ((index * 37 + index / 11) % 256) as u8).collect::<Vec<_>>();

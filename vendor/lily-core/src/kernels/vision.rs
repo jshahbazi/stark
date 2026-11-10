@@ -18,6 +18,29 @@ pub const ATTN_D: usize = 72;
 const ATTN_BQ: usize = 32;
 const ATTN_THREADS: usize = 128;
 
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+    use half::bf16;
+
+    #[test]
+    fn retained_norm_and_gelu_execute_at_processor_row_ceiling() {
+        let ctx = MetalContext::new().expect("Metal setup failed");
+        let rows = 65_536;
+        let input = Tensor::zeros(&ctx, &[rows, 1152], DType::BF16).unwrap();
+        let ones = vec![bf16::ONE; rows * 1152];
+        let output = Tensor::from_bytes(&ctx, bytemuck::cast_slice(&ones), &[rows, 1152], DType::BF16).unwrap();
+        let weight = Tensor::from_bytes(&ctx, bytemuck::cast_slice(&ones[..1152]), &[1152], DType::BF16).unwrap();
+        let bias = Tensor::zeros(&ctx, &[1152], DType::BF16).unwrap();
+        drop(ones);
+        let pass = ctx.begin().unwrap();
+        layernorm_vision_bf16(&ctx, &pass, &input, &weight, &bias, &output, 1e-6).unwrap();
+        gelu_vision_bf16(&ctx, &pass, &output, crate::kernels::elementwise::Gelu::Tanh).unwrap();
+        pass.commit_wait().unwrap();
+        assert!(output.to_f32().unwrap().iter().all(|value| *value == 0.0));
+    }
+}
+
 pub(crate) fn qkv_rope_coefficients_bf16(
     ctx: &MetalContext,
     pass: &ComputePass<'_>,
@@ -31,7 +54,7 @@ pub(crate) fn qkv_rope_coefficients_bf16(
     let n = qkv.shape()[0];
     check_grid(n, gh, gw)?;
     ensure!(
-        n <= 8192
+        n <= 65_536
             && qkv.shape()[1] == 3456
             && cos.shape() == [n, 36]
             && sin.shape() == [n, 36],
@@ -68,7 +91,7 @@ pub(crate) fn layernorm_vision_bf16(
 ) -> Result<()> {
     ensure!(input.shape().len() == 2, "vision norm rank");
     let (rows, width) = (input.shape()[0], input.shape()[1]);
-    ensure!(rows > 0 && rows <= 8192 && width > 0, "vision norm row bound");
+    ensure!(rows > 0 && rows <= 65_536 && width > 0, "vision norm row bound");
     ensure!(
         weight.numel() == width
             && bias.numel() == width
@@ -109,14 +132,14 @@ pub(crate) fn gelu_vision_bf16(
         "vision GELU shape/type"
     );
     let (rows, width) = (values.shape()[0], values.shape()[1]);
-    ensure!(rows > 0 && rows <= 8192 && width > 0, "vision GELU row bound");
+    ensure!(rows > 0 && rows <= 65_536 && width > 0, "vision GELU row bound");
     if width > 4608 {
         return crate::kernels::elementwise::gelu_bf16(ctx, pass, values, kind);
     }
     let elements = rows
         .checked_mul(width)
         .ok_or_else(|| anyhow::anyhow!("vision GELU element overflow"))?;
-    ensure!(elements <= 8192 * 4608, "vision GELU element bound");
+    ensure!(elements <= 65_536 * 4608, "vision GELU element bound");
     let approximate = match kind {
         crate::kernels::elementwise::Gelu::Tanh => 1,
         crate::kernels::elementwise::Gelu::Erf => 0,
@@ -159,7 +182,7 @@ pub(crate) fn linear_bf16_bias(
     let elements = m
         .checked_mul(n)
         .ok_or_else(|| anyhow::anyhow!("vision linear element overflow"))?;
-    ensure!(m > 0 && m <= 8192 && k > 0 && n > 0, "vision linear row bounds");
+    ensure!(m > 0 && m <= 65_536 && k > 0 && n > 0, "vision linear row bounds");
     ensure!(
         weight.shape() == [n, k] && bias.numel() == n && out.numel() == elements,
         "vision linear shape"
@@ -251,7 +274,7 @@ pub fn patch_pos_embed_bf16(
     ensure!(x.shape().len() == 2, "x must be [N, H], got {:?}", x.shape());
     let (n, h) = (x.shape()[0], x.shape()[1]);
     check_grid(n, gh, gw)?;
-    ensure!(n <= 8192, "vision position patch budget");
+    ensure!(n <= 65_536, "vision position patch budget");
     ensure!(
         table.shape().len() == 2 && table.shape()[1] == h,
         "position table {:?} is not [side^2, {h}]",
@@ -353,7 +376,7 @@ pub fn attention_full_bf16(
         "attention expects BF16"
     );
     ensure!(
-        n <= 8192 && scale.is_finite() && scale > 0.0,
+        n <= 65_536 && scale.is_finite() && scale > 0.0,
         "vision attention source bounds"
     );
     if h == 1152 && heads == 16 && n.is_multiple_of(4) {

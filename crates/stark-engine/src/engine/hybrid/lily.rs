@@ -494,7 +494,7 @@ impl LilyModel {
                 .model
                 .encode_image(&self.context, &mut self.scratch, &pixels, span.grid_h, span.grid_w)
                 .map_err(|_| Error::Invalid("image tower execution failed"))?;
-            // A tower pass owns one bounded image (at most 4096 patches).
+            // A tower pass owns one bounded image (at most 65,536 patches).
             // Submitted Metal commands cannot be interrupted safely; observe
             // cancellation immediately after completion, before text prefill.
             if stop() {
@@ -560,6 +560,13 @@ impl LilyModel {
         let capacity =
             planned_context_capacity(self.scratch_capacity, context_tokens as usize, self.max_context).ok()?;
         self.model.additional_request_memory_bytes(&self.context, capacity, input_tokens as usize, &self.scratch)
+    }
+
+    pub(crate) fn image_request_memory_bytes(
+        &self,
+        patches: usize,
+    ) -> Option<usize> {
+        self.model.image_request_memory_bytes(&self.context, patches)
     }
 
     /// Reserve the span used by admission before prompt execution can trigger

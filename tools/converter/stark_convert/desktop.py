@@ -2163,6 +2163,12 @@ class Desktop:
             ),
             "image_attachment_transport": "private-file-v1",
             "max_image_bytes": MAX_IMAGE_BYTES,
+            "image_limits": {
+                key: getattr(self.worker, "image_input", {}).get(key)
+                for key in ("max_source_pixels", "max_processed_pixels", "max_patches", "max_image_tokens")
+            }
+            if self.worker and isinstance(getattr(self.worker, "image_input", None), dict)
+            else None,
             "mtp": capability,
             "mtp_enabled": enabled,
             "image_verification": (

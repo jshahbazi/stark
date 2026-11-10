@@ -155,7 +155,15 @@ class ChatImageError(ChatError):
 
     def __init__(self, code):
         self.code = code
-        super().__init__("The image request could not be prepared or executed.")
+        message = {
+            "invalid_image_request": "This image could not be decoded or exceeds the model's image limits.",
+            "context_overflow": (
+                "The image and conversation exceed the context budget. Start a new chat or reduce the output limit."
+            ),
+            "invalid_image_reference": "The image attachment is no longer available. Remove it and attach it again.",
+            "image_read_failed": "The image attachment could not be read. Remove it and attach it again.",
+        }.get(code, "The image request could not be prepared or executed.")
+        super().__init__(message)
 
 
 class _ChatTemplate(IsolatedTemplate):

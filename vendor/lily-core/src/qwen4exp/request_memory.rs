@@ -250,6 +250,21 @@ fn scratch(
 }
 
 impl Qwen4ExpModel {
+    /// Request-owned streaming vision buffers plus host staging. Charge the
+    /// complete new scratch even on reuse; existing allocations are resident
+    /// in the OS headroom observation. No quadratic attention buffer exists.
+    pub fn image_request_memory_bytes(
+        &self,
+        context: &MetalContext,
+        patches: usize,
+    ) -> Option<usize> {
+        let inventory = vision_request_inventory(self.config.vision.as_ref()?, patches)?;
+        if inventory.max_buffer > context.device().maxBufferLength() as u128 {
+            return None;
+        }
+        usize::try_from(inventory.bytes).ok()
+    }
+
     /// Peak text-request inventory without allocating tensors. Caches use the
     /// loaded KV format and include a loaded draft head even while disabled.
     pub fn request_memory_bytes(
@@ -318,6 +333,28 @@ impl Qwen4ExpModel {
         }
         Some(bytes)
     }
+}
+
+fn vision_request_inventory(c: &crate::qwen4exp::config::VisionConfig, patches: usize) -> Option<Inventory> {
+    if patches == 0 || patches > 65_536 || !patches.is_multiple_of(4) {
+        return None;
+    }
+    let (n, h, i, out) = (patches as u128, c.hidden_size as u128,
+        c.intermediate_size as u128, c.out_hidden_size as u128);
+    let mut s = Inventory::default();
+    // VisionScratch::new: pixels, x/h/qkv/attn/tmp, mlp, merged, rotary.
+    s.add(&[n, c.patch_dim() as u128], 2, 1)?;
+    s.add(&[n, h], 2, 7)?;
+    s.add(&[n, i], 2, 1)?;
+    s.add(&[n / 4, out], 2, 2)?; // scratch merged plus owned image rows
+    s.add(&[n, 36], 4, 2)?;
+    // Prepared BF16 patches, F32 upload, temporary BF16 upload and CPU rotary.
+    s.add(&[n, c.patch_dim() as u128], 2, 4)?;
+    s.add(&[n, 36], 4, 3)?;
+    // Allocation/command metadata margin; available-memory admission adds its
+    // separate host reserve. Checked products also bind the largest buffer.
+    s.add(&[64 * 1024 * 1024], 1, 1)?;
+    Some(s)
 }
 
 #[derive(Clone, Copy)]
@@ -529,6 +566,27 @@ mod tests {
         EosTokenIds, GateAct, IndexerConfig, QuantizationConfig, RopeParameters,
         StoragePolicy,
     };
+
+    #[test]
+    fn retained_vision_inventory_covers_source_ceiling_and_rejects_invalid_extents() {
+        let v = crate::qwen4exp::config::VisionConfig {
+            depth: 27, hidden_size: 1152, num_heads: 16, intermediate_size: 4304,
+            patch_size: 16, temporal_patch_size: 2, spatial_merge_size: 2,
+            in_channels: 3, num_position_embeddings: 2304, out_hidden_size: 2560,
+            hidden_act: "gelu_pytorch_tanh".into(), deepstack_visual_indexes: vec![],
+            image_token_id: 1, video_token_id: 2, vision_start_token_id: 3,
+            vision_end_token_id: 4, tensors: 0,
+        };
+        let small = vision_request_inventory(&v, 4096).unwrap();
+        let large = vision_request_inventory(&v, 65_536).unwrap();
+        assert_eq!(large.max_buffer, 65_536 * 4304 * 2);
+        assert_eq!(large.bytes - 64 * 1024 * 1024,
+            16 * (small.bytes - 64 * 1024 * 1024));
+        assert!(large.bytes < 3 * 1024 * 1024 * 1024);
+        for invalid in [0, 1, 65_537, 65_540, usize::MAX] {
+            assert!(vision_request_inventory(&v, invalid).is_none());
+        }
+    }
 
     fn geometry() -> Qwen4ExpConfig {
         Qwen4ExpConfig {
