@@ -1060,3 +1060,50 @@ independent. This is an onboarding decision based on measurements, without a new
 runtime autotuning framework. Gemma's automatic assistant provisioning and
 broader opt-in context qualification remain open; this defaults change does not
 enable the staged feature in normal builds or imply complete family delivery.
+
+### PR review and current-main integration
+
+The user requested independent rechecks and PRs. Both original branches
+conflicted with main `b0c0d9fb`'s resource-budget corrections. Qwen integrated
+main at `c92b9e81`; Gemma then integrated that reviewed Qwen tree at `671479c5`.
+Independent reviews preserve source head arithmetic, selected text graphs,
+ring/prefix restoration, per-class F32 scratch accounting and main's
+reclaim/resample and resident-state credits. Earlier model receipts retain
+their original source identities.
+
+Qwen's rebuilt worker
+`8efbd38e7f7e67903627188d2a7b3ef27e277cd13fa190f90d8bb580a784b59b`
+passes current-integration 28/28 text and 34/34 image-loaded lifecycle cases;
+all 57 non-null output hashes match its prior production worker. Receipts:
+`9234a1a5715b3f33d33b8175c794670aa23b289af963fe114b910bb20a815fb8`
+and `b0e005c0846bc0f0cf7e683e1195885e3ed83e9145ecce3c802d416e82aeec50`.
+Observed paging/compression/swap growth is zero and all workers drain. Current
+checks pass 139 worker, 6 resource-budget, 2 template unit, 19 template protocol
+and 256 selected Python cases, plus formatting/policy. The template helper was
+rebuilt because main's expanded automatic budget is incompatible with the old
+helper's limit; initial setup failures are preserved separately.
+
+[Qwen PR #118](https://github.com/jshahbazi/stark/pull/118) is open against main.
+The user identified failing CI. The assigned agent found a CPU-only build
+calling a test-only type helper and outdated converter fixtures expecting heads
+to be omitted. Reviewed correction `1f26071f` replaces only the CPU eligibility
+lookup with equivalent type identity and updates fixtures/negative controls;
+incomplete heads remain rejected. Its 175 focused Python cases pass, and hosted
+CI is rerunning on that exact head. Pending jobs are not recorded as green.
+
+Gemma's current default/staging workers and matching helper build; 141 worker
+CPU cases, 183 assistant/inventory/contract/budget/chat cases, 60 selected
+desktop cases and the actual Swift controller MTP case pass. A test-fixture
+formatting correction and the shared Qwen CI fix are integrated; final branch
+head is `7858b108`. Its new model replay stops at preflight with zero cases and
+no owned worker spawned: another installed Stark worker is loaded, leaving
+27,334,344,704 bytes available, below the unchanged 64-GiB entry floor. The
+external process is untouched. Current 37-case/64-token replay gates remain
+pending; prior actual model proof remains bound to the original worker.
+
+[Gemma PR #119](https://github.com/jshahbazi/stark/pull/119) is open as a draft,
+stacked on #118, with this replay limitation and staged delivery scope explicit.
+Build space was recovered only from verified inactive generated intermediates
+and two old Gemma targets, preserving sealed executables, system dependency
+checks, source, models and receipts. No further local heavy work is authorized
+while the machine remains below the disk reserve or shared model-entry floor.
