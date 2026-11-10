@@ -255,7 +255,17 @@ Greedy decoding is the default. Stochastic sampling supplies a temperature and o
 {"mode":"stochastic","temperature":0.6,"top_k":20,"top_p":0.95,"min_p":0.0}
 ```
 
-`temperature` must be finite, positive and at most 100, with a finite F32 reciprocal. Invalid values are rejected before native generation and leave the worker usable. `top_k` is 1 through `vocab_size`. `top_p` is greater than 0 and at most 1. `min_p` is 0 through 1. Omitted filters are disabled. Repetition, frequency and presence penalties are not part of this interface. Nonfinite native logits or an empty candidate mask fail generation; they never fabricate token 0.
+`temperature` must be finite, positive and at most 100, with a finite F32 reciprocal. Invalid values are rejected before native generation and leave the worker usable. `top_k` is 1 through `vocab_size`. `top_p` is greater than 0 and at most 1. `min_p` is 0 through 1. Omitted filters are disabled. Repetition, frequency and presence penalties are not part of this interface.
+
+Ordinary converted decoding retains its existing F32 temperature arithmetic
+when scaling stays finite. Metal reconstructs positive subnormal temperature
+reciprocals from their F32 bits using normal intermediates; ordinary temperature
+reciprocals retain their prior arithmetic. If finite admitted logits would overflow that
+scaling, the sampler subtracts their maximum before retrying temperature and
+filters. The retry uses the same seeded random positions; negative-infinity
+tails represent zero mass. This translation preserves the sampling distribution
+and keeps accepted tiny temperatures usable. Nonfinite raw native logits or an
+empty candidate mask still fail generation; they never fabricate token 0.
 
 The converted-model sampler applies temperature before filtering and evaluates
 top-k and top-p against the same full-vocabulary distribution. The native hybrid

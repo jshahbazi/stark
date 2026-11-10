@@ -86,7 +86,18 @@ PUBLIC KERNEL(UnifiedSampling) (
   }
   float recip_temperature;
   if (has_temperature) {
-    recip_temperature = 1.0 / temperature;
+    uint temperature_bits = as_type<uint>(temperature);
+    uint mantissa = temperature_bits & 0x007fffffu;
+    if ((temperature_bits & 0xff800000u) == 0 && mantissa != 0) {
+      // The host admits positive subnormal temperatures with finite F32
+      // reciprocals. Reconstruct temperature * 2^24 from its bits so device
+      // arithmetic never has to consume a subnormal denominator. Both the
+      // conversion and multiplication are exact, with normal intermediates.
+      float scaled_temperature = float(mantissa) * 2.350988701644575e-38f; // 2^-125
+      recip_temperature = 16777216.0f / scaled_temperature;              // 2^24
+    } else {
+      recip_temperature = 1.0 / temperature;
+    }
   }
   float log_min_p;
   if (has_min_p) {
@@ -99,7 +110,9 @@ PUBLIC KERNEL(UnifiedSampling) (
   Logit thread_post_gumbel_logit_max = Logit::LOWEST;
   for (uint32_t logit_index = thread_idx; logit_index < vocab_size; logit_index += THREADGROUP_SIZE) {
     Logit logit = Logit::load(logits, logit_index);
-    thread_invalid_logits |= uint32_t(!isfinite(logit.value));
+    if (!isfinite(logit.value)) {
+      thread_invalid_logits = 2;
+    }
 
     if (has_bitmask) {
       bool mask = (bitmask[logit_index / BITS_IN_U32] >> (logit_index % BITS_IN_U32)) & 0b1;
@@ -109,7 +122,9 @@ PUBLIC KERNEL(UnifiedSampling) (
     if (has_temperature) {
       bool admitted = logit.value != -INFINITY;
       logit.value *= recip_temperature;
-      thread_invalid_logits |= uint32_t(admitted && !isfinite(logit.value));
+      if (admitted && !isfinite(logit.value)) {
+        thread_invalid_logits = max(thread_invalid_logits, 1u);
+      }
     }
 
     if (has_top_p && logit.value != -INFINITY) {
@@ -132,12 +147,58 @@ PUBLIC KERNEL(UnifiedSampling) (
       thread_post_gumbel_logit_max = logit > thread_post_gumbel_logit_max ? logit : thread_post_gumbel_logit_max;
     }
   }
-  // Return a sentinel, never a fabricated vocabulary token. Embedding gathers
-  // bound device-produced IDs, and the stream rejects this after completion.
-  if (threadgroup_cooperative_reduce<SimdReduceSum<uint32_t>, THREADGROUP_SIZE>(
-          thread_invalid_logits, (threadgroup uint32_t*)shared, thread_context) != 0) {
+  // Raw nonfinite logits are model failures. A finite-logit temperature
+  // overflow instead selects a bounded, centered retry below.
+  uint32_t sampling_domain = threadgroup_cooperative_reduce<SimdReduceMax<uint32_t>, THREADGROUP_SIZE>(
+      thread_invalid_logits, (threadgroup uint32_t*)shared, thread_context);
+  if (sampling_domain == 2) {
     *output = UINT_MAX;
     return;
+  }
+  bool center_temperature = sampling_domain == 1;
+  float temperature_shift = 0.0;
+  if (has_temperature && center_temperature) {
+    // Find the maximum among admitted raw logits. At least one exists when
+    // scaling overflowed; empty masks retain the ordinary sentinel path.
+    float thread_raw_max = -INFINITY;
+    for (uint32_t logit_index = thread_idx; logit_index < vocab_size; logit_index += THREADGROUP_SIZE) {
+      float value = float(logits[logit_index]);
+      if (!has_bitmask || ((bitmask[logit_index / BITS_IN_U32] >> (logit_index % BITS_IN_U32)) & 0b1)) {
+        thread_raw_max = max(thread_raw_max, value);
+      }
+    }
+    temperature_shift = threadgroup_cooperative_reduce<SimdReduceMax<float>, THREADGROUP_SIZE>(
+        thread_raw_max, (threadgroup float*)shared, thread_context);
+    thread_pre_filter_logit_max = -INFINITY;
+    thread_pre_filter_logit_norm = 0.0;
+    thread_post_gumbel_logit_max = Logit::LOWEST;
+    if (is_stochastic) {
+      philox_init(&rng, rng_seed, rng_offset);
+    }
+    for (uint32_t logit_index = thread_idx; logit_index < vocab_size; logit_index += THREADGROUP_SIZE) {
+      Logit logit = Logit::load(logits, logit_index);
+      if (has_bitmask) {
+        bool mask = (bitmask[logit_index / BITS_IN_U32] >> (logit_index % BITS_IN_U32)) & 0b1;
+        logit.value = mask ? logit.value : -INFINITY;
+      }
+      // Shift before scaling only in this overflow arm. The maximum becomes
+      // zero; negative infinity is a valid zero-probability tail.
+      logit.value = (logit.value - temperature_shift) * recip_temperature;
+      if (has_top_p && logit.value != -INFINITY) {
+        float next_max = max(thread_pre_filter_logit_max, logit.value);
+        thread_pre_filter_logit_norm = thread_pre_filter_logit_norm * exp(thread_pre_filter_logit_max - next_max) +
+                                      exp(logit.value - next_max);
+        thread_pre_filter_logit_max = next_max;
+      } else if (has_min_p) {
+        thread_pre_filter_logit_max = max(thread_pre_filter_logit_max, logit.value);
+      }
+      if (is_stochastic) {
+        logit.value += -log(-log(uniform_float(&rng)));
+      }
+      if (isfinite(logit.value)) {
+        thread_post_gumbel_logit_max = logit > thread_post_gumbel_logit_max ? logit : thread_post_gumbel_logit_max;
+      }
+    }
   }
   float pre_filter_logit_max;
   if (has_top_p || has_min_p) {
@@ -172,6 +233,9 @@ PUBLIC KERNEL(UnifiedSampling) (
     }
     Logit candidate_logit_pre_filter = Logit::load(logits, candidate_logit_post_gumbel.index);
     if (has_temperature) {
+      if (center_temperature) {
+        candidate_logit_pre_filter.value -= temperature_shift;
+      }
       candidate_logit_pre_filter.value *= recip_temperature;
     }
     if (is_stochastic) {
@@ -190,6 +254,9 @@ PUBLIC KERNEL(UnifiedSampling) (
       }
 
       if (has_temperature) {
+        if (center_temperature) {
+          logit.value -= temperature_shift;
+        }
         logit.value *= recip_temperature;
       }
 

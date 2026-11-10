@@ -1896,22 +1896,40 @@ mod dense_mtp_stats_tests {
             request_id: 1,
             cache_scope: Some([9; 16]),
         };
-        let prompt = vec![2; 1025];
-        cached.generate(&prompt, &options, None, None).unwrap();
-        cached.publish_prefix_cache();
-
+        let prompt: Vec<u32> = (0..1025).map(|index| 2 + ((index * 7 + index / 11) % 11) as u32).collect();
         let mut extended = prompt.clone();
         extended.push(3);
+
+        fn prime(
+            backend: &mut NativeBackend,
+            input: &[u32],
+            options: &GenerationOptions,
+        ) {
+            backend.clear_prefix_cache();
+            let first = backend.generate(input, options, None, None).unwrap();
+            assert_eq!(first.reused_input_tokens, 0, "priming must execute from fresh state");
+            backend.publish_prefix_cache();
+            assert!(backend.prefix_cache_retained(), "priming must publish an eligible snapshot");
+        }
+        fn assert_fresh_output(
+            input: &[u32],
+            options: &GenerationOptions,
+            actual: &GeneratedTokens,
+            path: &Path,
+        ) {
+            let mut cold = NativeBackend::load(path, None).unwrap();
+            let expected = cold.generate(input, options, None, None).unwrap();
+            assert!(actual.generated_token_ids == expected.generated_token_ids, "output differs from fresh state");
+        }
+
+        prime(&mut cached, &prompt, &options);
+        assert_eq!(cached.prefix_cache_plan(&extended, &options), 1024, "growing request must be eligible");
         options.request_id += 1;
         let warm = cached.generate(&extended, &options, None, None).unwrap();
         assert_eq!(warm.reused_input_tokens, 1024, "expected the complete eligible snapshot boundary");
-
-        let mut cold = NativeBackend::load(&path, None).unwrap();
-        let expected = cold.generate(&extended, &options, None, None).unwrap();
-        assert!(warm.generated_token_ids == expected.generated_token_ids, "snapshot output diverged from fresh state");
+        assert_fresh_output(&extended, &options, &warm, &path);
 
         for seed in [0, 7, 42] {
-            cached.clear_prefix_cache();
             options.seed = seed;
             options.sampling = Sampling::Stochastic {
                 temperature: 0.7,
@@ -1919,68 +1937,44 @@ mod dense_mtp_stats_tests {
                 top_p: Some(0.9),
                 min_p: None,
             };
-            options.cache_scope = Some([9; 16]);
             options.request_id += 1;
-            cached.generate(&prompt, &options, None, None).unwrap();
-            cached.publish_prefix_cache();
+            prime(&mut cached, &prompt, &options);
+            assert_eq!(cached.prefix_cache_plan(&extended, &options), 1024, "seeded request must be eligible");
             options.request_id += 1;
             let warm = cached.generate(&extended, &options, None, None).unwrap();
-            assert_eq!(warm.reused_input_tokens, 1024, "stochastic seeded request should reuse its prefix");
-            let mut cold = NativeBackend::load(&path, None).unwrap();
-            let expected = cold.generate(&extended, &options, None, None).unwrap();
-            assert!(warm.generated_token_ids == expected.generated_token_ids, "seeded snapshot output diverged");
+            assert_eq!(warm.reused_input_tokens, 1024, "seeded request must reuse its prefix");
+            assert_fresh_output(&extended, &options, &warm, &path);
         }
-        cached.clear_prefix_cache();
+
         options.seed = 42;
         options.sampling = Sampling::Greedy {};
-        options.cache_scope = Some([9; 16]);
-
-        cached.publish_prefix_cache();
-        options.context_tokens = 2048;
-        options.request_id += 1;
-        let miss = cached.generate(&extended, &options, None, None).unwrap();
-        assert_eq!(miss.reused_input_tokens, 0, "changed context size must miss");
-        cached.publish_prefix_cache();
-        options.context_tokens = 4096;
-
-        let mut changed = extended.clone();
-        changed[100] = 4;
-        options.request_id += 1;
-        let miss = cached.generate(&changed, &options, None, None).unwrap();
-        assert_eq!(miss.reused_input_tokens, 0, "changed prompt prefix must miss");
-
-        cached.publish_prefix_cache();
-        options.cache_scope = Some([8; 16]);
-        options.request_id += 1;
-        let miss = cached.generate(&extended, &options, None, None).unwrap();
-        assert_eq!(miss.reused_input_tokens, 0, "changed cache scope must miss");
-
-        cached.publish_prefix_cache();
-        assert!(cached.prefix_cache_retained(), "successful scoped text request should publish a snapshot");
-        cached.clear_prefix_cache();
-        assert!(!cached.prefix_cache_retained(), "explicit cache clear must release retained state");
-
-        options.cache_scope = Some([8; 16]);
-        options.request_id += 1;
-        cached.generate(&extended, &options, None, None).unwrap();
-        cached.publish_prefix_cache();
-        assert!(cached.prefix_cache_retained(), "scoped request should retain the eligible snapshot");
-
-        options.cache_scope = None;
-        options.request_id += 1;
-        let miss = cached.generate(&extended, &options, None, None).unwrap();
-        assert_eq!(miss.reused_input_tokens, 0, "requests without cache scope must not reuse");
-        assert!(!cached.prefix_cache_retained(), "scope-less request must clear the prior snapshot");
-
-        cached.publish_prefix_cache();
-        options.cache_scope = Some([8; 16]);
-        options.request_id += 1;
-        cached.generate(&extended, &options, None, None).unwrap();
-        cached.publish_prefix_cache();
-        let shorter = prompt[..512].to_vec();
-        options.request_id += 1;
-        let miss = cached.generate(&shorter, &options, None, None).unwrap();
-        assert_eq!(miss.reused_input_tokens, 0, "shorter prompt must not reuse a longer snapshot");
+        let baseline = options.clone();
+        for gate in ["context", "divergence", "scope", "unscoped", "shorter", "clear"] {
+            // Each gate starts with a proven hit. Mutating only one key avoids
+            // attributing an empty-cache or context miss to another condition.
+            prime(&mut cached, &extended, &baseline);
+            assert_eq!(cached.prefix_cache_plan(&extended, &baseline), 1024, "control must be a cache hit");
+            let mut request = baseline.clone();
+            request.request_id += 1;
+            let mut input = extended.clone();
+            match gate {
+                "context" => request.context_tokens = 2048,
+                "divergence" => input[100] = 14,
+                "scope" => request.cache_scope = Some([8; 16]),
+                "unscoped" => request.cache_scope = None,
+                "shorter" => input.truncate(512),
+                "clear" => cached.clear_prefix_cache(),
+                _ => unreachable!(),
+            }
+            assert_eq!(cached.prefix_cache_plan(&input, &request), 0, "single changed condition must reject reuse");
+            let miss = cached.generate(&input, &request, None, None).unwrap();
+            assert_eq!(miss.reused_input_tokens, 0, "single changed condition must execute fresh");
+            assert_fresh_output(&input, &request, &miss, &path);
+            cached.publish_prefix_cache();
+            if gate == "unscoped" || gate == "shorter" {
+                assert!(!cached.prefix_cache_retained(), "ineligible requests must not retain a snapshot");
+            }
+        }
     }
 
     #[test]

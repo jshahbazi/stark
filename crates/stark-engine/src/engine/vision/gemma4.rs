@@ -190,9 +190,7 @@ impl<B: Backend> ImageTower<B> {
     ) -> Option<usize> {
         match self {
             Self::Encoder(tower) => tower.workspace_bytes(grid, output),
-            Self::Unified(_) => {
-                super::memory::tower_workspace_bytes(grid[1].checked_mul(grid[2])? / 9, 6912, 3840, 0, output, 0, false)
-            },
+            Self::Unified(_) => super::memory::gemma4_unified_workspace_bytes(grid[1].checked_mul(grid[2])? / 9),
         }
     }
 

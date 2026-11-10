@@ -326,15 +326,7 @@ impl<B: Backend> Gemma4VisionTower<B> {
         grid: [u32; 3],
         output: u32,
     ) -> Option<usize> {
-        super::super::memory::tower_workspace_bytes(
-            grid[1].checked_mul(grid[2])?,
-            768,
-            self.width,
-            self.mlp,
-            output,
-            u32::try_from(self.blocks.len()).ok()?,
-            self.source_attention.is_some(),
-        )
+        super::super::memory::gemma4_workspace_bytes(grid[1].checked_mul(grid[2])?, output)
     }
 
     pub(crate) fn encode(

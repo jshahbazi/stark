@@ -59,15 +59,21 @@ pub fn unified_sampling<T: ArrayElement + Float>(
 
         if has_temperature {
             let recip_temperature = 1.0 / temperature.unwrap();
-            let mut invalid = false;
+            // Preserve the qualified arithmetic in the normal range. When
+            // finite raw logits cannot be scaled, a uniform logit translation
+            // makes the maximum zero. Negative overflow then means zero mass,
+            // rather than invalidating an otherwise valid sampling request.
+            let center = logits.iter().any(|logit| logit.is_finite() && !(*logit * recip_temperature).is_finite());
+            let shift = if center {
+                logits.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            } else {
+                0.0
+            };
             for logit in logits.iter_mut() {
-                let admitted = logit.is_finite();
+                if center {
+                    *logit -= shift;
+                }
                 *logit *= recip_temperature;
-                invalid |= admitted && !logit.is_finite();
-            }
-            if invalid {
-                unsafe { *output.wrapping_add(batch_idx as usize) = u32::MAX };
-                continue;
             }
         }
 

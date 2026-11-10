@@ -3933,3 +3933,37 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "metal"))]
+mod native_sampling_recovery_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a private converted dense artifact with ordinary streaming"]
+    fn accepted_tiny_temperature_keeps_the_loaded_worker_usable() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("STARK_DENSE_RECOVERY_MODEL_PATH").expect("set private converted model path"),
+        );
+        let backend = crate::native::NativeBackend::load(&path, None).unwrap();
+        let mut worker = GenerationWorker::new(backend).unwrap();
+        let mut request = json!({
+            "operation":"generate", "input_token_ids":[2,3,4,5],
+            "context_tokens":512,"max_new_tokens":4,"seed":42,"mtp":false,
+            "sampling":{"mode":"stochastic","temperature":1e-38,"top_k":20,"top_p":0.9}
+        });
+        for stochastic in [true, false] {
+            if !stochastic {
+                request["sampling"] = json!({"mode":"greedy"});
+            }
+            let mut output = Vec::new();
+            let result = worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output);
+            assert!(result.is_ok(), "accepted temperature request or following request stopped the worker");
+            let reply: Value = serde_json::from_slice(&output).unwrap();
+            assert!(reply.get("error").is_none(), "native sampling request returned an error");
+            assert!(
+                reply["generated_token_ids"].as_array().is_some_and(|ids| !ids.is_empty()),
+                "native sampling request did not emit output"
+            );
+        }
+    }
+}

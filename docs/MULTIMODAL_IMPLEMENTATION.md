@@ -408,10 +408,16 @@ Torchvision reference revisions, licenses, and validation harness identities.
 Converted Qwen, Gemma 3 and Gemma 4 image requests admit decoder state together
 with conservative tower workspace before allocating that state. The inventory
 includes patch uploads, BF16/F32 intermediates, eager score matrices where used,
-projection/readback copies and allocation margin. It does not assume allocator
-reuse before GPU completion. Gemma 3 waits after each block; its estimate uses
-one block rather than all 27. This is conservative payload accounting, not an
-observed RSS bound. The prepared CPU image is also bounded by preprocessing.
+projection/readback copies and allocation margin. Scratch counts every rounded
+allocation in one block plus the initial/final stage owners. Identically shaped
+later blocks reuse pool size classes; Metal's access barriers preserve their
+dispatch order. Command constants use a separate lifetime and include all
+append-only uploads. Gemma 3 waits after each block and sums its initial,
+single-block and final submission inventories. Gemma 4's larger source tower
+counts its fixed tiled-attention buffers, without a quadratic score plane.
+This is conservative payload accounting, not an observed RSS bound. The
+[workspace inventory record](archive/runs/2026-11-10-vision-workspace-inventory.md)
+describes the accounting and synthetic production-path allocation controls.
 
 Each selected image-artifact component is hashed once per load. The loader
 retains the opened descriptor and compares inode, size and nanosecond mtime/ctime

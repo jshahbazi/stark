@@ -247,21 +247,148 @@ fn native_sampling_rejects_nonfinite_logits_and_empty_masks() {
                 assert_eq!(actual.0, vec![expected]);
             }
         }
-        let overflow = SamplingMethod::Stochastic {
-            temperature: Some(1e-38),
-            top_k: None,
-            top_p: None,
-            min_p: None,
-            repetition_penalty: None,
-            suffix_repetition_length: None,
-        };
-        assert!(overflow.validate(3).is_ok());
-        let actual =
-            do_sampling_backend::<B, f32>(&context, &[10.0, 1.0, 2.0], Some(&[42]), None, 3, &overflow, 1).unwrap();
-        assert_eq!(actual.0, vec![u32::MAX]);
     }
     crate::tests::helpers::for_each_backend!(|B| {
         check::<B>();
+    });
+}
+
+#[stark_test]
+fn native_sampling_centers_only_temperature_overflow_and_preserves_seeded_draws() {
+    fn check<B: Backend, T: ArrayElement + Float>() {
+        let context = B::Context::new().unwrap();
+        for (filter_case, (top_k, top_p, min_p)) in
+            [(None, None, None), (Some(2), Some(0.9), None), (Some(1), Some(0.5), None), (None, Some(0.9), Some(0.9))]
+                .into_iter()
+                .enumerate()
+        {
+            let method = SamplingMethod::Stochastic {
+                temperature: Some(1e-38),
+                top_k,
+                top_p,
+                min_p,
+                repetition_penalty: None,
+                suffix_repetition_length: None,
+            };
+            assert!(method.validate(3).is_ok());
+            // The overflow arm must use precisely the same RNG mapping as a
+            // normal-range translated input. Two equal maxima exercise real
+            // stochastic draws rather than a trivially greedy answer.
+            for (fixture_case, (source, translated, mask)) in [
+                ([10.0, 10.0, 9.0], [0.0, 0.0, -1.0], None),
+                ([-10.0, -10.0, -11.0], [0.0, 0.0, -1.0], None),
+                ([100.0, 10.0, 10.0], [0.0, 0.0, 0.0], Some([6u32])),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let source = source.map(|x| <T as NumCast>::from(x).unwrap());
+                let translated = translated.map(|x| <T as NumCast>::from(x).unwrap());
+                for seed in 0..16 {
+                    let actual = do_sampling_backend::<B, T>(
+                        &context,
+                        &source,
+                        Some(&[seed]),
+                        mask.as_ref().map(|m| &m[..]),
+                        3,
+                        &method,
+                        1,
+                    )
+                    .unwrap();
+                    let reference = do_sampling_backend::<B, T>(
+                        &context,
+                        &translated,
+                        Some(&[seed]),
+                        mask.as_ref().map(|m| &m[..]),
+                        3,
+                        &method,
+                        1,
+                    )
+                    .unwrap();
+                    assert!(
+                        actual.0 == reference.0,
+                        "centered draw mismatch: backend={} dtype={:?} filter={filter_case} fixture={fixture_case} seed={seed}",
+                        std::any::type_name::<B>(),
+                        T::data_type()
+                    );
+                    assert!(
+                        actual.0.iter().all(|&id| id < 3),
+                        "overflow returned invalid token: backend={} dtype={:?} filter={filter_case} fixture={fixture_case} seed={seed}",
+                        std::any::type_name::<B>(),
+                        T::data_type()
+                    );
+                }
+            }
+            let source = [10.0, 1.0, 2.0].map(|x| <T as NumCast>::from(x).unwrap());
+            let actual = do_sampling_backend::<B, T>(&context, &source, Some(&[42]), None, 3, &method, 1).unwrap();
+            assert!(
+                actual.0 == [0],
+                "unique maximum lost: backend={} dtype={:?} filter={filter_case}",
+                std::any::type_name::<B>(),
+                T::data_type()
+            );
+
+            // Multiple values per GPU thread and maxima in different
+            // simdgroups verify both cooperative centering and RNG replay.
+            let mut source = vec![<T as NumCast>::from(9.0).unwrap(); 2061];
+            let mut translated = vec![<T as NumCast>::from(-1.0).unwrap(); 2061];
+            for index in [1153, 2053] {
+                source[index] = <T as NumCast>::from(10.0).unwrap();
+                translated[index] = <T as NumCast>::from(0.0).unwrap();
+            }
+            for seed in [0, 7, 42] {
+                let actual =
+                    do_sampling_backend::<B, T>(&context, &source, Some(&[seed]), None, 2061, &method, 1).unwrap();
+                let reference =
+                    do_sampling_backend::<B, T>(&context, &translated, Some(&[seed]), None, 2061, &method, 1).unwrap();
+                assert!(
+                    actual.0 == reference.0,
+                    "multi-tile draw mismatch: backend={} dtype={:?} filter={filter_case} seed={seed}",
+                    std::any::type_name::<B>(),
+                    T::data_type()
+                );
+                assert!(
+                    actual.0.iter().all(|&id| id == 1153 || id == 2053),
+                    "zero-mass tail selected: backend={} dtype={:?} filter={filter_case} seed={seed}",
+                    std::any::type_name::<B>(),
+                    T::data_type()
+                );
+            }
+
+            let normal = SamplingMethod::Stochastic {
+                temperature: Some(1.0),
+                top_k,
+                top_p,
+                min_p,
+                repetition_penalty: None,
+                suffix_repetition_length: None,
+            };
+            let unscaled = SamplingMethod::Stochastic {
+                temperature: None,
+                top_k,
+                top_p,
+                min_p,
+                repetition_penalty: None,
+                suffix_repetition_length: None,
+            };
+            let source = [1.0, 3.0, 2.0].map(|x| <T as NumCast>::from(x).unwrap());
+            for seed in 0..16 {
+                let actual =
+                    do_sampling_backend::<B, T>(&context, &source, Some(&[seed]), None, 3, &normal, 1).unwrap();
+                let reference =
+                    do_sampling_backend::<B, T>(&context, &source, Some(&[seed]), None, 3, &unscaled, 1).unwrap();
+                assert!(
+                    actual.0 == reference.0,
+                    "normal-range draw changed: backend={} dtype={:?} filter={filter_case} seed={seed}",
+                    std::any::type_name::<B>(),
+                    T::data_type()
+                );
+            }
+        }
+    }
+    crate::tests::helpers::for_each_backend!(|B| {
+        check::<B, f32>();
+        check::<B, half::bf16>();
     });
 }
 

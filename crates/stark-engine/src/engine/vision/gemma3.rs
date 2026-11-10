@@ -437,7 +437,7 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
     ) -> Option<usize> {
         self.validate_image(image).ok()?;
         // Each SigLIP block is submitted and waited before the next block.
-        super::memory::tower_workspace_bytes(4096, 588, 1152, 4304, self.model_dim, 1, true)
+        super::memory::gemma3_workspace_bytes(self.model_dim)
     }
 
     pub fn decoder_generation_memory_bytes(

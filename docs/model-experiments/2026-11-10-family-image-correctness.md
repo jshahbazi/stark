@@ -51,3 +51,13 @@ iteration repair are preserved in the
 No actual converted image artifact load, full image generation, image-loaded
 text/MTP parity, warm startup timing or peak RSS was measured for this change.
 The resident-state and workspace acceptance matrix remains artifact-specific.
+
+## Workspace estimate continuation
+
+The later independent review found the original depth-multiplied scratch bound
+could reject ordinary Gemma 4 E2B images unnecessarily. Attempt
+`20261110-FAMILY-RECHECK-01` replaces that bound with per-profile allocator-rounded
+stage inventories and a separate persistent-constant budget. The original
+`b4120152` result above remains source-bound; revised controls and numerical
+limits are recorded in the [continuation](2026-11-10-family-double-check.md) and
+[workspace inventory](../archive/runs/2026-11-10-vision-workspace-inventory.md).
