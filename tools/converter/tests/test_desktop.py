@@ -2435,8 +2435,13 @@ def test_model_specific_mtp_defaults_keep_explicit_choices(
 ):
     config = json.loads((model / "config.json").read_text())
     config["fixture_mtp"] = {
-        "supported": True, "max_drafts": 3, "recommended_drafts": 3, "default_drafts": 0,
-        "sampling": "exact-rejection-v1", "verification": verification, "operations": ["generate"],
+        "supported": True,
+        "max_drafts": 3,
+        "recommended_drafts": 3,
+        "default_drafts": 0,
+        "sampling": "exact-rejection-v1",
+        "verification": verification,
+        "operations": ["generate"],
     }
     (model / "config.json").write_text(json.dumps(config))
     monkeypatch.setattr("stark_convert.desktop.model_display", lambda _: display)
