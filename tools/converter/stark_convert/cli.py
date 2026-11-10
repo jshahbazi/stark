@@ -23,7 +23,7 @@ from .adapters.gemma4_vision import PROFILES as GEMMA4_IMAGE_PROFILES
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
 from .model_support import MODES, preflight_source, support_matrix
 from .profiles import GENERIC_PROFILE, generic_entry
-from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
+from .progress import FDProgressSink, ProgressCallback, ProgressReporter, converter_failure_category, reporter
 from .provenance import file_hash, toolchain_provenance
 from .registry import (
     CONFIG_ADAPTERS,
@@ -891,7 +891,9 @@ def main() -> int:
             **({"progress": progress} if progress is not None else {}),
         )
     except BaseException as error:
-        category = "interrupted" if isinstance(error, KeyboardInterrupt) else type(error).__name__
+        category = "interrupted" if isinstance(error, KeyboardInterrupt) else converter_failure_category(error)
+        if progress is not None and category != "interrupted":
+            progress.failure(category)
         print(json.dumps({"status": "error", "error_category": category}), file=sys.stderr)
         return 130 if isinstance(error, KeyboardInterrupt) else 1
     finally:

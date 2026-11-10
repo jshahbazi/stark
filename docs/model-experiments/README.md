@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261110-G4INSTALL-01: Gemma installation repair](2026-11-10-gemma-install-repair.md): bounded HF config-link authorization, E4B conversion/app image smoke, and content-free failure diagnostics.
+
 Current continuation: [Gemma3 cache and Gemma4 assistant implementation](2026-11-09-gemma-next-image-parity.md)
 records attempts `20261109-G3IP-01` and `20261109-G4AP-01`; execution is pending.
 

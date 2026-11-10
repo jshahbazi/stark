@@ -6,6 +6,7 @@ counts describe source bytes available locally, including reusable cached bytes.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import threading
@@ -15,6 +16,31 @@ from pathlib import Path
 from typing import Any
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+
+CONVERTER_FAILURE_CATEGORIES = frozenset(
+    {
+        "disk_full",
+        "permission_denied",
+        "unsupported_format_or_config",
+        "invalid_checkpoint",
+        "conversion_failed",
+    }
+)
+
+
+def converter_failure_category(error: BaseException) -> str:
+    """Map failures to a fixed, content-free diagnostic category."""
+    error_name = type(error).__name__
+    error_number = getattr(error, "errno", None)
+    if error_number in {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}:
+        return "disk_full"
+    if isinstance(error, PermissionError) or error_number in {errno.EPERM, errno.EACCES}:
+        return "permission_denied"
+    if error_name == "UnsupportedConversion":
+        return "unsupported_format_or_config"
+    if error_name == "ConversionError":
+        return "invalid_checkpoint"
+    return "conversion_failed"
 
 
 class FDProgressSink:
@@ -71,6 +97,12 @@ class ProgressReporter:
             if force or changed or now - previous[0] >= self.interval:
                 self.callback(event)
                 self.last[phase] = (now, event)
+
+    def failure(self, category: str) -> None:
+        """Publish one allowlisted, content-free converter failure category."""
+        if category not in CONVERTER_FAILURE_CATEGORIES:
+            raise ValueError("invalid_converter_failure_category")
+        self.callback({"phase": "failure", "category": category})
 
 
 def reporter(progress: ProgressCallback | ProgressReporter | None) -> ProgressReporter | None:

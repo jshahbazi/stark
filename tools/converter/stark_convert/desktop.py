@@ -77,6 +77,7 @@ from .native_catalog import allowed_choice as native_choice_allowed
 from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
 from .native_catalog import source_choice as native_source_choice
+from .progress import CONVERTER_FAILURE_CATEGORIES
 from .reasoning import ReasoningStream, assistant_message, prompt_opens_reasoning, reasoning_options
 from .registry import get_model
 from .resource_budget import (
@@ -350,6 +351,14 @@ def progress_counts(frame):
 
 def converter_progress(value):
     """Accept only the content-free converter pipe contract."""
+    if (
+        isinstance(value, dict)
+        and set(value) == {"phase", "category"}
+        and value["phase"] == "failure"
+        and isinstance(value["category"], str)
+        and value["category"] in CONVERTER_FAILURE_CATEGORIES
+    ):
+        return {"failure_category": value["category"]}
     if not isinstance(value, dict) or set(value) != {"phase", "state", "completed_bytes", "total_bytes"}:
         return None
     if (
@@ -367,6 +376,17 @@ def converter_progress(value):
     if value["state"] == "complete" and total is not None and completed != total:
         return None
     return {key: value[key] for key in ("phase", "state", "completed_bytes", "total_bytes")}
+
+
+def converter_failure_message(category):
+    """Turn an allowlisted converter category into a fixed recovery hint."""
+    return {
+        "disk_full": "Not enough disk space to convert this model. Free space and retry.",
+        "permission_denied": "Stark could not read or write the model files. Check folder permissions and retry.",
+        "unsupported_format_or_config": "This model format or configuration is not supported by the converter.",
+        "invalid_checkpoint": "The checkpoint is incomplete or invalid. Check the source revision and retry.",
+        "conversion_failed": "Model conversion failed. Check the model source and try again.",
+    }.get(category, "Model conversion failed. Check the model source and try again.")
 
 
 def api_model_id(model):
@@ -1519,6 +1539,7 @@ class Desktop:
         pending = b""
         discarding = False
         exited_at = None
+        failure_category = None
         while True:
             if process.poll() is not None:
                 exited_at = exited_at or time.monotonic()
@@ -1544,6 +1565,10 @@ class Desktop:
                 except (ValueError, UnicodeError):
                     continue
                 if event is not None:
+                    if "failure_category" in event:
+                        if failure_category is None:
+                            failure_category = event["failure_category"]
+                        continue
                     # The app still validates/publishes the model and registry.
                     if event["phase"] == "conversion" and event["state"] == "complete":
                         event["state"] = "running"
@@ -1551,6 +1576,7 @@ class Desktop:
             if len(pending) > MAX_PROGRESS_BYTES:
                 pending = b""
                 discarding = True
+        return failure_category
 
     def run_converter(self, command, environment, epoch):
         read_descriptor, write_descriptor = os.pipe()
@@ -1572,9 +1598,9 @@ class Desktop:
                 self.converter = process
             os.close(write_descriptor)
             write_descriptor = None
-            self.read_converter_progress(read_descriptor, process, epoch)
+            failure_category = self.read_converter_progress(read_descriptor, process, epoch)
             self.check_install_cancelled(epoch)
-            return process.wait()
+            return process.wait(), failure_category
         finally:
             os.close(read_descriptor)
             if write_descriptor is not None:
@@ -1913,14 +1939,23 @@ class Desktop:
                     raise DesktopError("The native download folder is unavailable.")
                 # A completed download may remain after cancellation or a
                 # registry failure. Validate and reuse it before any new child.
-                result = 0 if kind == "native" and output.exists() else self.run_converter(command, environment, epoch)
+                if kind == "native" and output.exists():
+                    result, failure_category = 0, None
+                else:
+                    converter_result = self.run_converter(command, environment, epoch)
+                    if isinstance(converter_result, tuple) and len(converter_result) == 2:
+                        result, failure_category = converter_result
+                    else:
+                        result, failure_category = converter_result, None
                 with self.lock:
                     if epoch != self.epoch:
                         return
                     self.check_install_cancelled(epoch)
                 if result != 0 or not model_valid(output):
                     raise DesktopError(
-                        "Model installation failed. Check model support, free disk space and Hugging Face access."
+                        converter_failure_message(failure_category)
+                        if result != 0 and failure_category
+                        else "Model installation failed. Check model support, free disk space and Hugging Face access."
                     )
                 if guided_recipe is not None and not matches_recipe(output, guided_recipe):
                     raise DesktopError("The downloaded model does not match its checked source. Check models again.")

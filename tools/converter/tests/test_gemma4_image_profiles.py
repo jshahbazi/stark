@@ -9,7 +9,7 @@ import pytest
 
 from stark_convert.adapters import gemma4, gemma4_vision
 from stark_convert.registry import get_model
-from stark_convert.streaming import TensorInfo, UnsupportedConversion
+from stark_convert.streaming import ConversionError, TensorInfo, UnsupportedConversion
 
 FIXTURES = Path(__file__).parent / "fixtures" / "gemma4_image_profiles"
 SIZES = ("E2B", "E4B", "12B", "26B-A4B", "31B")
@@ -101,6 +101,32 @@ def decoder_control(control):
         copy.deepcopy(control["layer_templates"][index]) for index in control["layer_order"]
     ]
     return decoder
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_named_image_profiles_accept_authorized_hub_config_links(tmp_path, size):
+    import hashlib
+
+    repo = "google/gemma-4-" + size + "-it"
+    profile = gemma4_vision.PROFILES[repo]
+    payload = (FIXTURES / (size.lower() + ".config.json")).read_bytes()
+    cache = tmp_path / "hub"
+    snapshot = cache / ("models--" + repo.replace("/", "--")) / "snapshots" / profile["revision"]
+    snapshot.mkdir(parents=True)
+    digest = hashlib.sha256(payload).hexdigest()
+    blob = cache / "blobs" / digest[:2] / digest
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(payload)
+    (snapshot / "config.json").symlink_to(blob)
+    (snapshot / "processor_config.json").write_bytes((FIXTURES / (size.lower() + ".processor.json")).read_bytes())
+    assert gemma4_vision.gemma4_vision_contract(snapshot, repo, profile["revision"])["family"] == profile["family"]
+    # Exact trusted bytes outside the selected cache still must be rejected.
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(payload)
+    (snapshot / "config.json").unlink()
+    (snapshot / "config.json").symlink_to(outside)
+    with pytest.raises(ConversionError, match="authorized source roots"):
+        gemma4_vision.gemma4_vision_contract(snapshot, repo, profile["revision"])
 
 
 @pytest.mark.parametrize("size", SIZES)

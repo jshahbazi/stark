@@ -15,6 +15,7 @@ from ..streaming import (
     ConversionError,
     TensorOperation,
     UnsupportedConversion,
+    authorize_source_path,
     load_checkpoint,
     read_json,
     read_regular_bytes,
@@ -169,7 +170,8 @@ def gemma4_vision_contract(source: Path, repo: str | None = None, revision: str 
             raise UnsupportedConversion("Native Gemma image source differs from its pinned official profile")
         # Hash and parse the same selected bytes. A local --repo conversion
         # must not relabel a changed decoder as the official source.
-        payload = read_regular_bytes(source / "config.json")
+        root = source.resolve(strict=True)
+        payload = read_regular_bytes(authorize_source_path(root, root / "config.json"))
         if hashlib.sha256(payload).hexdigest() != _CONFIG_HASHES[profile["model_dim"]]:
             raise UnsupportedConversion("Native Gemma image configuration differs from its pinned official source")
         config = json.loads(payload)
