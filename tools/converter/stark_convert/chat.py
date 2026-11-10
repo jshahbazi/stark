@@ -649,12 +649,18 @@ class Worker:
                 ):
                     raise ChatError("Invalid worker stream; restart the model.")
                 progress = accepted
-                if on_progress is not None and (control is None or not control.is_set()):
-                    try:
-                        on_progress(accepted)
-                    except OSError:
-                        control = control or threading.Event()
-                        control.set()
+                if control is None or not control.is_set():
+                    if (
+                        payload.get("operation") == "generate_image"
+                        and getattr(self, "_image_deadline", None) is not None
+                    ):
+                        self._renew_image_deadline()
+                    if on_progress is not None:
+                        try:
+                            on_progress(accepted)
+                        except OSError:
+                            control = control or threading.Event()
+                            control.set()
                 continue
             if (
                 on_delta is None
@@ -665,21 +671,26 @@ class Worker:
                 raise ChatError("Invalid worker stream; restart the model.")
             chunks.append(reply["text"])
             if control is None or not control.is_set():
+                if payload.get("operation") == "generate_image" and getattr(self, "_image_deadline", None) is not None:
+                    self._renew_image_deadline()
                 try:
                     on_delta(reply["text"])
                 except OSError:
                     control = control or threading.Event()
                     control.set()
 
+    def _renew_image_deadline(self):
+        # Only validated generation activity renews an active transaction. Image
+        # verification still has an absolute cap, and cancellation cannot renew.
+        deadline = time.monotonic() + self.timeout
+        verification_deadline = getattr(self, "_verification_deadline", None)
+        self._image_deadline = min(deadline, verification_deadline) if verification_deadline is not None else deadline
+
     def request_image(self, prompt, image, options, on_delta=None, cancelled=None, *, on_progress=None):
         """Own one complete prepare/generate/discard transaction on the serialized worker."""
         with self._transaction_lock:
             self._last_image_tokens = None
-            deadline = time.monotonic() + self.timeout
-            verification_deadline = getattr(self, "_verification_deadline", None)
-            self._image_deadline = (
-                min(deadline, verification_deadline) if verification_deadline is not None else deadline
-            )
+            self._renew_image_deadline()
             try:
                 return self._request_image(
                     prompt, image, options, on_delta=on_delta, cancelled=cancelled, on_progress=on_progress

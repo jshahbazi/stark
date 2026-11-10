@@ -19,6 +19,10 @@ def prompt_opens_reasoning(prompt):
 def reasoning_options(codec, *, thinking=False, effort=None):
     """Map controls only to the reviewed GLM effort template or boolean input."""
     source = (codec or {}).get("prompt_template", "")
+    reasoning = (codec or {}).get("reasoning_config")
+    field = reasoning.get("field_name") if isinstance(reasoning, dict) else None
+    if not isinstance(field, str) or field not in {"enable_thinking", "thinking"}:
+        field = "enable_thinking"
     try:
         glm = isinstance(source, str) and (
             hashlib.sha256(source.encode("utf-8")).hexdigest() == GLM53_TEMPLATE_SHA256
@@ -29,7 +33,7 @@ def reasoning_options(codec, *, thinking=False, effort=None):
     if effort is not None and (not glm or effort not in {"low", "high", "max"}):
         raise ValueError("This model does not support the requested reasoning effort.")
     return {
-        "enable_thinking": thinking,
+        field: thinking,
         **({"reasoning_effort": effort or ("max" if thinking else "low")} if glm else {}),
     }
 
