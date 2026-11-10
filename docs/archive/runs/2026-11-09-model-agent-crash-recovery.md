@@ -1167,3 +1167,15 @@ model replay gate is satisfied by the new evidence above. Root verifies the
 receipts and documentation, and marks #119 ready for review. Its assistant
 feature and unqualified model/context scope remain explicitly limited. No merge
 is performed.
+
+### Earlier Qwen PR superseded
+
+The user initially requests conflict resolution for #114, then authorizes
+closing it after learning that #118 supersedes it. The earlier implementation
+through `c18f1d23` is an ancestor of #118; #114's remaining unique commit
+`67284748` only formats retained-MTP tensor filtering, which #118 also retains.
+The coordinator closes #114 with a supersession link to #118. No code is merged
+or branch deleted. The local conflict-resolution attempt is saved privately and
+aborted, restoring the original clean branch. Its owned in-progress build is
+interrupted, not reported as a successful check. #118 remains open and mergeable
+with all hosted CI/Security checks successful at `1f26071f`.
