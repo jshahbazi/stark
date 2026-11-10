@@ -318,7 +318,10 @@ def test_qualification_checks_behavior_and_never_returns_model_content(failure):
     checks = module.run_checks(worker, _ChatTemplate(source), {"prompt_template": source}, context=8192, maximum=2048)
     assert all(checks.values()) == (failure is None)
     assert set(checks) == {
-        "single_call_and_arguments", "tool_result_use", "autonomous_tool_result_use", "ordinary_chat"
+        "single_call_and_arguments",
+        "tool_result_use",
+        "autonomous_tool_result_use",
+        "ordinary_chat",
     }
     if failure == "repeated_call":
         assert checks["tool_result_use"] and not checks["autonomous_tool_result_use"]
