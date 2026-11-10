@@ -88,7 +88,7 @@ def test_future_mlx_checkpoint_uses_its_declared_packing(tmp_path, bits):
 def test_future_hybrid_mlx_checkpoint_converts_and_replays_offline(tmp_path, architecture, bits):
     source = tmp_path / "source"
     if architecture == "qwen3_5":
-        mlx_qwen35_fixture(source, bits=bits, wrapper=True, vl_wrapper=True, layout="grouped", sharded=True, mtp=True)
+        mlx_qwen35_fixture(source, bits=bits, wrapper=True, vl_wrapper=True, layout="grouped", sharded=True)
     else:
         mlx_lfm2_fixture(source, bits=bits, variant="flat", sharded=True)
     tokenizer = Tokenizer(models.WordLevel({f"[SYNTHETIC_{i}]": i for i in range(17)}, unk_token="[SYNTHETIC_0]"))
@@ -236,7 +236,7 @@ def test_generic_modern_llama_preserves_nested_rope_xml_template_and_multiple_st
 
 def test_local_text_only_qwen35_export_converts_and_replays_with_own_metadata(tmp_path):
     source = tmp_path / "source"
-    config, _ = qwen35_fixture(source, mtp=True, sharded=True)
+    config, _ = qwen35_fixture(source, sharded=True)
     config.update(
         model_type="qwen3_5_text",
         architectures=["Qwen3_5ForCausalLM"],

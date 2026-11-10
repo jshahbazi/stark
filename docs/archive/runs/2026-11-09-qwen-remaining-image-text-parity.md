@@ -961,3 +961,16 @@ No new speed or numerical-reference replay is attributed to this merge. Those
 earlier results keep their original executable/source boundaries. No additional
 nightly engine build is attempted with unsafe remaining disk headroom. All
 owned model/compiler processes close before the hardware slot is released.
+
+### PR #118 hosted CI follow-up
+
+The first hosted run finds a production-CPU compile failure: the source sigmoid
+guard called an `ArrayElement` method available only under `cfg(test)`. The guard
+now checks the concrete BF16 type directly, preserving the same rejection and
+arithmetic. The converter suite reports 6,792 passed / 30 failed / 96 skipped;
+the failures are outdated synthetic partial-head fixtures and an Empero header
+test still expecting a complete predictor to be omitted. Target-only fixtures
+now explicitly omit heads, complete-head preservation stays tested, and partial
+heads remain rejected. The focused follow-up passes 175 tests. Hosted reruns
+remain pending at this checkpoint; no local build/model run or new numerical
+qualification is claimed for this CI correction.

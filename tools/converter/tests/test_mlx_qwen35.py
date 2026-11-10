@@ -195,6 +195,10 @@ def assert_reference_export(
     reference = json.loads(reference_path.read_text())
     case = reference["cases"][case_name(bits, group_size, source_dtype, target, layout, variant)]
     source = tmp_path / "source"
+    # These frozen loader references cover target tensors and omit MTP. The
+    # old input generator's two-by-two dummy predictor is intentionally partial;
+    # complete predictor preservation has its own source-bound tests.
+    options = {**options, "mtp": False} if options.get("mtp") else options
     _, tensors = mlx_qwen35_fixture(
         source, bits=bits, group_size=group_size, dtype=source_dtype, layout=layout, sharded=True, **options
     )
@@ -421,14 +425,12 @@ def test_sliced_mlx_plane_source_change_is_rejected(tmp_path):
         write_plan(plan, tmp_path / "output.safetensors", chunk_bytes=96)
 
 
-@pytest.mark.parametrize(
-    "namespace,vl_wrapper", (("model.visual", False), ("mtp", False), ("vision_tower", True), ("mtp", True))
-)
+@pytest.mark.parametrize("namespace,vl_wrapper", (("model.visual", False), ("vision_tower", True)))
 def test_omitted_quantized_wrapper_auxiliary_source_is_verified(tmp_path, namespace, vl_wrapper):
     from test_streaming import save_tensors
 
     source = tmp_path / "source"
-    _, tensors = mlx_qwen35_fixture(source, wrapper=True, mtp=True, vl_wrapper=vl_wrapper)
+    _, tensors = mlx_qwen35_fixture(source, wrapper=True, vl_wrapper=vl_wrapper)
     auxiliary = {name: value for name, value in tensors.items() if name.startswith(namespace + ".")}
     text = {name: value for name, value in tensors.items() if name not in auxiliary}
     save_tensors(source / "model.safetensors", text)
@@ -444,13 +446,27 @@ def test_omitted_quantized_wrapper_auxiliary_source_is_verified(tmp_path, namesp
         write_plan(plan, tmp_path / "output.safetensors", chunk_bytes=96)
 
 
+@pytest.mark.parametrize("vl_wrapper", (False, True))
+def test_partial_quantized_wrapper_predictor_cannot_be_omitted(tmp_path, vl_wrapper):
+    source = tmp_path / "source"
+    mlx_qwen35_fixture(source, wrapper=True, mtp=True, vl_wrapper=vl_wrapper)
+    with pytest.raises(ConversionError, match="missing its fusion matrix"):
+        build_qwen35_plan(source)
+
+
 @pytest.mark.parametrize("namespace", ("vision", "mtp"))
 def test_mlx_wrapper_omission_requires_declaration(tmp_path, namespace):
     source = tmp_path / "source"
-    config, _ = mlx_qwen35_fixture(source, wrapper=True, mtp=True)
-    config.pop("vision_config" if namespace == "vision" else "mtp_num_hidden_layers")
+    if namespace == "mtp":
+        from test_qwen35_mtp import complete_mtp_fixture
+
+        config, _ = complete_mtp_fixture(source)
+        config["text_config"].pop("mtp_num_hidden_layers")
+    else:
+        config, _ = mlx_qwen35_fixture(source, wrapper=True)
+        config.pop("vision_config")
     (source / "config.json").write_text(json.dumps(config))
-    with pytest.raises(ConversionError, match="unexpected"):
+    with pytest.raises(ConversionError, match="explicitly declared predictor" if namespace == "mtp" else "unexpected"):
         build_qwen35_plan(source)
 
 
