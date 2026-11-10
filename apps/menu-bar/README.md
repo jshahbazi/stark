@@ -1,5 +1,11 @@
 # Stark menu bar app
 
+Converter failures report fixed recovery guidance for insufficient disk space,
+file permissions, unsupported formats/configurations and invalid checkpoints.
+Unknown failures retain a generic message. These categories travel over the
+private installation progress pipe; exception text and file paths are not
+displayed or logged. Cancelling an installation discards its pending failure.
+
 A native macOS menu bar application for installing, running and chatting with converted models. Stark starts in the menu bar without restoring windows. Reopening the app shows its main menu when no window is visible; **Connections** and **Open Playground** open only through their named controls. Click the cat icon and **Manage Models** to run or stop a saved model. **Open Playground** opens a window with a **Chat** mode and a **Decision** mode. Status and the last request's input and output token rates appear in the menu and the playground window.
 
 The status dot is red when idle or in error, orange during work, and green when ready.

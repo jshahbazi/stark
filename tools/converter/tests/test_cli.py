@@ -1,6 +1,7 @@
 """End-to-end synthetic conversion and fail-closed orchestration contracts."""
 
 import json
+import os
 import shutil
 from dataclasses import asdict
 from pathlib import Path
@@ -435,7 +436,7 @@ def test_source_or_tool_mutation_prevents_publication(source, tmp_path, source_t
 @pytest.mark.parametrize(
     "error,code,category",
     [
-        (RuntimeError("sensitive exception details"), 1, "RuntimeError"),
+        (RuntimeError("sensitive exception details"), 1, "conversion_failed"),
         (KeyboardInterrupt("private interruption"), 130, "interrupted"),
     ],
 )
@@ -453,6 +454,39 @@ def test_cli_emits_only_fixed_error_category(source, tmp_path, monkeypatch, caps
     assert captured.out == ""
     assert json.loads(captured.err) == {"status": "error", "error_category": category}
     assert "private" not in captured.err and "sensitive" not in captured.err and str(source) not in captured.err
+
+
+def test_cli_sends_fixed_failure_category_over_progress_pipe(source, tmp_path, monkeypatch):
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "stark-convert",
+            str(source),
+            "--repo",
+            REPOS["qwen3"],
+            "--output",
+            str(tmp_path / "output"),
+            "--progress-fd",
+            str(write_fd),
+        ],
+    )
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("sensitive exception details")
+
+    monkeypatch.setattr(cli, "convert", fail)
+    try:
+        assert cli.main() == 1
+    finally:
+        os.close(write_fd)
+    try:
+        payload = os.read(read_fd, 4096)
+    finally:
+        os.close(read_fd)
+    events = [json.loads(line) for line in payload.splitlines()]
+    assert events[-1] == {"phase": "failure", "category": "conversion_failed"}
+    assert b"sensitive" not in payload and b"private" not in payload
 
 
 def test_removed_external_backend_argument_does_not_echo_private_values(monkeypatch, capsys):

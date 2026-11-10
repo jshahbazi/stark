@@ -1,5 +1,9 @@
 # Model change and experiment ledger
 
+- [20261110-TOOL-QUALITY-01: bounded tool output and continuation replay](2026-11-10-tool-output-quality-replay.md): five installed artifacts checked; all passed synthetic tool continuation, four passed ordinary-chat exact match; 17×19 arithmetic controls isolated no demonstrated parser failure.
+- [20261110-TOOL-QUALITY-02: restored Qwen3 0.6B artifact replay](2026-11-10-tool-quality-qwen06-replay.md): pinned-source recreation failed the tiny-tool control; replay of actual host input fit context and ended at EOS with no calls. Model/workload limitation supported, no parser repair established; temporary import removed.
+- [20261110-G4INSTALL-01: Gemma installation repair](2026-11-10-gemma-install-repair.md): bounded HF config-link authorization, E4B conversion/app image smoke, and content-free failure diagnostics.
+
 Current continuation: [Gemma3 cache and Gemma4 assistant implementation](2026-11-09-gemma-next-image-parity.md)
 records attempts `20261109-G3IP-01` and `20261109-G4AP-01`; execution is pending.
 

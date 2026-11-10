@@ -2989,6 +2989,27 @@ def test_failed_conversion_does_not_complete_progress_or_publish_model(desktop, 
     assert not list(desktop.model_dir.iterdir())
 
 
+@pytest.mark.parametrize(
+    "category,message",
+    [
+        ("disk_full", "Not enough disk space to convert this model. Free space and retry."),
+        ("permission_denied", "Stark could not read or write the model files. Check folder permissions and retry."),
+        ("unsupported_format_or_config", "This model format or configuration is not supported by the converter."),
+        ("invalid_checkpoint", "The checkpoint is incomplete or invalid. Check the source revision and retry."),
+        ("conversion_failed", "Model conversion failed. Check the model source and try again."),
+    ],
+)
+def test_converter_failure_category_maps_to_fixed_ui_message(desktop, model, converter_support, category, message):
+    lines = [json.dumps({"phase": "failure", "category": category}).encode()]
+    with patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, exit_code=1)):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+    failure = [event for event in events(desktop) if event["event"] == "error"][-1]
+    assert failure["message"] == message
+    assert "private" not in desktop.output.getvalue()
+    assert not desktop.models
+
+
 def test_registry_failure_keeps_conversion_progress_failed(desktop, model, converter_support):
     lines = [progress_line("download", "complete", 100, 100), progress_line("conversion", "complete", 200, 200)]
     with (
@@ -3005,7 +3026,10 @@ def test_registry_failure_keeps_conversion_progress_failed(desktop, model, conve
 
 
 def test_cancelled_progress_reaps_converter_and_cannot_emit_late_completion(desktop, model, converter_support):
-    lines = [progress_line("download", "running", 5, 100)]
+    lines = [
+        json.dumps({"phase": "failure", "category": "conversion_failed"}).encode(),
+        progress_line("download", "running", 5, 100),
+    ]
     with patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, pause=True)):
         desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
         deadline = time.monotonic() + 3
@@ -3022,6 +3046,7 @@ def test_cancelled_progress_reaps_converter_and_cannot_emit_late_completion(desk
     assert progress_events(desktop, "download")[-1]["state"] == "cancelled"
     assert progress_events(desktop, "conversion")[-1]["state"] == "cancelled"
     assert not any(e["state"] == "complete" for e in progress_events(desktop))
+    assert not any(e["event"] == "error" for e in events(desktop))
     assert not list(desktop.model_dir.iterdir())
 
 
@@ -3109,6 +3134,8 @@ def test_exited_converter_cannot_leave_a_descendant_holding_progress_pipe(deskto
         {"total_bytes": -1},
         {"state": "complete"},
         {"private": "private fixture"},
+        {"phase": "failure", "category": "unlisted_category"},
+        {"phase": "failure", "category": ["private"]},
     ],
 )
 def test_converter_progress_rejects_invalid_schema(patch_value):

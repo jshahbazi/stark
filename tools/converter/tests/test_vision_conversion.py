@@ -294,7 +294,7 @@ def test_cli_native_vision_without_records_fails_before_source_resolution(tmp_pa
     assert cli.main() == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert json.loads(captured.err) == {"status": "error", "error_category": "UnsupportedConversion"}
+    assert json.loads(captured.err) == {"status": "error", "error_category": "unsupported_format_or_config"}
     assert not (tmp_path / "output").exists()
 
 
