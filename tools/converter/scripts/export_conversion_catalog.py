@@ -303,6 +303,16 @@ def export(reference: Path) -> dict:
             "trymirai/health-related-router",
         }:
             adapter = None
+        # These reference rows use YaRN variants whose attention/extrapolation
+        # controls cannot be represented by the current Stark RoPE schema.
+        if repo in {"EssentialAI/rnj-1-instruct", "POLARIS-Project/Polaris-4B-Preview"}:
+            adapter = None
+        # Correct the reference's 2B Q4 copy of the 0.8B temperature override;
+        # use the same reviewed scalar profile as the 2B BF16 and Q8 rows.
+        if repo == "mlx-community/Qwen3.5-2B-MLX-4bit":
+            inline["generation_params_overrides"] = {
+                "sha256": "1e9d0c7d3febdfaeef2b3c552a742aa9b5431b564c1b818b30c6ba1a3a95b26b"
+            }
         metadata = {
             "parser_id": parser_id,
             "reasoning_id": reasoning_id,

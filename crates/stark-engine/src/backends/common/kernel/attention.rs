@@ -5,6 +5,10 @@ use crate::{
     encodable_block::mixer::attention::KVCacheView,
 };
 
+#[cfg(test)]
+#[path = "attention/soft_cap_tests.rs"]
+mod soft_cap_tests;
+
 /// Image blocks extend the causal/window mask. Text calls retain their dispatch.
 pub(crate) fn encode_image_span<B: Backend>(
     config: AttentionKernelConfig,
@@ -35,7 +39,8 @@ pub(crate) fn encode_image_span<B: Backend>(
         .and_then(|n| n.checked_mul(element_bytes))
         .ok_or(InvalidInput("image attention cache shape overflow"))?;
     crate::config::validation::validate_heads(config.num_q_heads, config.num_groups, config.head_dim)?;
-    if !config.is_causal
+    if config.logit_soft_cap.is_some()
+        || !config.is_causal
         || config.has_sinks
         || arguments.sinks.is_some()
         || arguments.trie.is_some()
@@ -115,6 +120,8 @@ pub struct AttentionKernelConfig {
     pub is_causal: bool,
     pub sliding_window_size: Option<u32>,
     pub scale: Option<f32>,
+    /// Apply cap * tanh(scaled QK / cap) before masking and softmax.
+    pub logit_soft_cap: Option<f32>,
     pub data_type: DataType,
     pub materialize_prefill_scores: bool,
     pub source_bf16_prefill: bool,
@@ -210,6 +217,11 @@ impl AttentionKernelConfig {
     }
 
     pub(crate) fn validate_prefill_materialization(&self) -> Result<(), InvalidInput> {
+        if self.logit_soft_cap.is_some_and(|cap| !cap.is_finite() || cap <= 0.0)
+            || (self.logit_soft_cap.is_some() && (self.materialize_prefill_scores || self.source_bf16_prefill))
+        {
+            return Err(InvalidInput("invalid attention logit soft cap or precision policy"));
+        }
         if self.materialize_prefill_scores
             && (self.data_type != DataType::BF16
                 || !matches!(self.head_dim, 256 | 512)
@@ -313,6 +325,7 @@ mod image_span_tests {
                         scale: Some(1.0),
                         data_type: DataType::F32,
                         materialize_prefill_scores: false,
+                        logit_soft_cap: None,
                         source_bf16_prefill: false,
                     },
                 )
@@ -403,6 +416,7 @@ mod materialized_tests {
             scale: Some(1.0),
             data_type: DataType::BF16,
             materialize_prefill_scores: enabled,
+            logit_soft_cap: None,
             source_bf16_prefill: false,
         }
     }
@@ -412,6 +426,7 @@ mod materialized_tests {
         let source = AttentionKernelConfig {
             head_dim: 128,
             materialize_prefill_scores: false,
+            logit_soft_cap: None,
             source_bf16_prefill: true,
             ..config(false)
         };
@@ -423,6 +438,7 @@ mod materialized_tests {
             assert!(!source.uses_source_mxu_prefill(rows, false));
             assert!(
                 !AttentionKernelConfig {
+                    logit_soft_cap: None,
                     source_bf16_prefill: false,
                     ..source
                 }

@@ -641,10 +641,38 @@ impl<B: Backend> LanguageModel<B> {
         memory_budget_bytes: usize,
         dense_mtp: bool,
     ) -> Option<u32> {
+        self.automatic_context_length_for_request_with_text_prefix(
+            input_tokens,
+            maximum_context_tokens,
+            memory_budget_bytes,
+            dense_mtp,
+            false,
+        )
+    }
+
+    /// Plan ordinary text capacity including the boundary snapshot allocated
+    /// when the request is eligible to publish a reusable prefix.
+    pub fn automatic_context_length_for_request_with_text_prefix(
+        &self,
+        input_tokens: u32,
+        maximum_context_tokens: u32,
+        memory_budget_bytes: usize,
+        dense_mtp: bool,
+        capture_text_prefix: bool,
+    ) -> Option<u32> {
         let maximum =
             self.max_context_length().map_or(maximum_context_tokens, |limit| limit.min(maximum_context_tokens));
         crate::encodable_block::memory::automatic_context(input_tokens, maximum, memory_budget_bytes, |capacity| {
-            self.generation_memory_estimate_for_request(input_tokens, capacity, capacity - input_tokens, dense_mtp)
+            let mut estimate = self.generation_memory_estimate_for_request(
+                input_tokens,
+                capacity,
+                capacity - input_tokens,
+                dense_mtp,
+            )?;
+            if capture_text_prefix && !dense_mtp && self.text_prefix_snapshot_supported() {
+                estimate.state_bytes = estimate.state_bytes.checked_add(estimate.prefix_snapshot_bytes)?;
+            }
+            Some(estimate)
         })
     }
 

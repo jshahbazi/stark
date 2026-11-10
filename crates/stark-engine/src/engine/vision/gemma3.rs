@@ -14,7 +14,9 @@ use std::{
 
 use half::bf16;
 
-use super::{ArtifactConfig, NativeVisionError, VisionArtifactIdentity, file_digest, open_artifact_component};
+use super::{
+    ArtifactConfig, ComponentSignature, NativeVisionError, VisionArtifactIdentity, file_digest, open_artifact_component,
+};
 use crate::{
     backends::common::{
         Backend, BufferRef, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context, InvalidInput,
@@ -300,6 +302,7 @@ impl<B: Backend> Engine<B> {
         }
         let mut selected: BTreeMap<&str, File> = BTreeMap::new();
         let mut hashes = BTreeMap::new();
+        let mut signatures = BTreeMap::new();
         let mut components = BTreeMap::new();
         for (name, limit) in [
             ("config.json", 1_048_576u64),
@@ -309,6 +312,7 @@ impl<B: Backend> Engine<B> {
             ("chat_template.jinja", 262_144),
         ] {
             let mut file = open_artifact_component(&path.join(name))?;
+            let signature = ComponentSignature::read(&file)?;
             let length = file.metadata()?.len();
             if length == 0 || length > limit {
                 return Err(InvalidInput("Gemma 3 image component exceeds bounds").into());
@@ -324,6 +328,10 @@ impl<B: Backend> Engine<B> {
                 components.insert(name, bytes);
                 file.rewind()?;
             }
+            if !signature.unchanged(&file)? {
+                return Err(InvalidInput("image component changed during admission").into());
+            }
+            signatures.insert(name, signature);
             selected.insert(name, file);
         }
         let raw: serde_json::Value = serde_json::from_slice(&components["config.json"])?;
@@ -368,11 +376,10 @@ impl<B: Backend> Engine<B> {
             self.language_model_from_config(path, language, &loader, Some(tokenizer), SpeculatorPolicy::Disabled)?;
         loader.tree().assert_all_tensors_validated()?;
         drop(loader);
-        for (name, expected) in &hashes {
-            let file = selected.get_mut(name).ok_or(InvalidInput("Gemma 3 selected component missing"))?;
-            file.rewind()?;
-            if file_digest(file)? != *expected {
-                return Err(InvalidInput("Gemma 3 artifact changed while loading").into());
+        for (name, signature) in &signatures {
+            let file = selected.get(name).ok_or(InvalidInput("missing selected image component"))?;
+            if !signature.unchanged(file)? {
+                return Err(InvalidInput("image artifact changed while loading").into());
             }
         }
         let hash = |name| hashes.get(name).cloned().ok_or(InvalidInput("Gemma 3 artifact identity missing"));
@@ -424,6 +431,15 @@ impl<B: Backend> Gemma3VisionLanguageModel<B> {
     }
 
     /// Decoder-only admission; image-tower execution is separately qualified.
+    pub fn image_workspace_bytes(
+        &self,
+        image: &PreparedGemma3Image,
+    ) -> Option<usize> {
+        self.validate_image(image).ok()?;
+        // Each SigLIP block is submitted and waited before the next block.
+        super::memory::gemma3_workspace_bytes(self.model_dim)
+    }
+
     pub fn decoder_generation_memory_bytes(
         &self,
         input_tokens: u32,

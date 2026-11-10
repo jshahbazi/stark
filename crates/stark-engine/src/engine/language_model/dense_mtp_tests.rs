@@ -139,6 +139,16 @@ fn dense_mtp_toy_greedy_and_prefix_metal() {
         assert!(result == baseline, "greedy target and MTP token hashes differ");
     }
     let prompt = (0..1100).map(|i| 1 + i % 31).collect::<Vec<u32>>();
+    let mut uncached = model.prefill_dense_mtp_with_prefix_controlled(&prompt, 4096, false, &mut || false).unwrap();
+    assert_eq!(uncached.prefix_position(), None);
+    assert_eq!(uncached.prefix_payload_bytes(), 0);
+    let mut cached = model.prefill_dense_mtp_with_prefix_controlled(&prompt, 4096, true, &mut || false).unwrap();
+    assert_eq!(cached.prefix_position(), Some(1024));
+    assert!(uncached.logits() == cached.logits(), "snapshot control changed prefill logits");
+    assert!(
+        collect(&model, &mut uncached, 2, false) == collect(&model, &mut cached, 2, false),
+        "snapshot control changed dense MTP continuation"
+    );
     let mut followup = prompt.clone();
     followup.extend([3, 5, 7]);
     for stochastic in [false, true] {

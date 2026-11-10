@@ -23,6 +23,10 @@ use crate::{
     parameters::{ParameterLoaderError, ParameterTree},
 };
 
+#[cfg(all(test, backend = "metal"))]
+#[path = "tower_memory_tests.rs"]
+mod memory_tests;
+
 /// Internal architectural description. Its admitting loader validates either
 /// the exact official artifact or a supported structural family profile.
 #[derive(Clone, Debug, PartialEq)]
@@ -626,6 +630,14 @@ impl<B: Backend> VisionTower<B> {
             activation: <B::Kernels as Kernels>::VisionGeluBF16Kernel::new(context)
                 .map_err(VisionTowerError::Backend)?,
         })
+    }
+
+    pub(super) fn workspace_bytes(
+        &self,
+        grid: [u32; 3],
+    ) -> Option<usize> {
+        let rows = checked_rows(grid, self.config.spatial_merge_size).ok()?;
+        super::memory::qwen_workspace_bytes(rows, &self.config)
     }
 
     pub(crate) fn encode(

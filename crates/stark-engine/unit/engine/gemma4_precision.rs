@@ -732,6 +732,7 @@ fn attention_stages_probe() -> Result<(), &'static str> {
         scale: Some(1.0),
         data_type: DataType::BF16,
         materialize_prefill_scores: true,
+        logit_soft_cap: None,
         source_bf16_prefill: false,
     };
     let mut commands = context.create_command_buffer(None, None).map_err(|_| "commands")?;
@@ -1069,6 +1070,7 @@ fn cached_vector_attention_probe() -> Result<(), &'static str> {
         scale: Some(1.0),
         data_type: DataType::BF16,
         materialize_prefill_scores: true,
+        logit_soft_cap: None,
         source_bf16_prefill: false,
     };
     let mut commands = context.create_command_buffer(None, None).map_err(|_| "commands")?;

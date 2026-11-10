@@ -455,3 +455,17 @@ fn native_vision_official_artifact_image_request_metal() {
     assert_eq!(fresh.vision_validation_state(), (70, Some(-56)));
     assert!(!model.failed);
 }
+
+#[cfg(unix)]
+#[stark_test]
+fn native_vision_selected_signature_detects_same_size_restored_mtime_edit() {
+    use std::fs::FileTimes;
+    let directory = PrivateDirectory::new();
+    let mut file = directory.write("weights", b"original");
+    let signature = ComponentSignature::read(&file).unwrap();
+    let times = FileTimes::new().set_modified(file.metadata().unwrap().modified().unwrap());
+    assert!(signature.unchanged(&file).unwrap());
+    file.write_all(b"mutation").unwrap();
+    file.set_times(times).unwrap();
+    assert!(!signature.unchanged(&file).unwrap());
+}

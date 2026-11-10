@@ -321,6 +321,7 @@ fn source_prefill_scales_f32_score_after_cancelling_bf16_dot() {
     };
     let baseline_config = attention_config(&input);
     let source_config = AttentionKernelConfig {
+        logit_soft_cap: None,
         source_bf16_prefill: true,
         ..baseline_config
     };
@@ -385,6 +386,7 @@ fn source_prefill_mass_keeps_paired_half_ulp_contributions() {
         ..attention_config(&input)
     };
     let source = AttentionKernelConfig {
+        logit_soft_cap: None,
         source_bf16_prefill: true,
         ..baseline
     };
@@ -441,6 +443,7 @@ fn source_prefill_finish_preserves_f32_reciprocal_boundary() {
     };
     let config = AttentionKernelConfig {
         scale: Some(std::f32::consts::LN_2),
+        logit_soft_cap: None,
         source_bf16_prefill: true,
         ..attention_config(&input)
     };

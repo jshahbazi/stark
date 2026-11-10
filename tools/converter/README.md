@@ -143,11 +143,11 @@ The command prints one JSON object on success and `{"status":"error","error_cate
 
 ## Catalog coverage and qualification
 
-The declarative [catalog](stark_convert/catalog.json) records 110 reference model identities from the pinned Lalamo inventory plus six Stark extensions. Adapters and metadata profiles cover 92 identities: 43 existing dense language profiles, 40 MLX profiles, two ModernBERT classifier profiles, the five existing extensions, plus Gemma 4 and OLMo 3:
+The declarative [catalog](stark_convert/catalog.json) records 110 reference model identities from the pinned Lalamo inventory plus ten Stark extensions. Adapters and metadata profiles cover 95 identities. A registered identity can remain planned when its configuration is outside the adapter's admitted semantics; the current catalog status and preflight result are authoritative:
 
 | Adapter | Implemented identities |
 | --- | --- |
-| Qwen3 | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, `POLARIS-Project/Polaris-4B-Preview` |
+| Qwen3 | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507` |
 | Qwen3 MLX | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}-MLX-{4bit,8bit}`; affine groups 16/32/64/128 |
 | Qwen2 | `Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
 | Qwen3.5 text | Dense `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`; extensions `empero-ai/Qwen3.8-4B-Distill` and `Jundot/Qwen3.8-27B-oQ4e-mtp`. Vision and floating auxiliary MTP tensors are omitted in text mode; a complete declared quantized MTP head is retained. MoE is unsupported |
@@ -159,7 +159,7 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 | Llama MLX | `mlx-community/Llama-3.1-8B-Instruct-4bit`, `mlx-community/Llama-3.2-{1B,3B}-Instruct-{4bit,8bit}` |
 | Mistral | `mistralai/Codestral-22B-v0.1`, `mistralai/Devstral-Small-2505`; extensions `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}` |
 | Gemma 2 | Extension `google/gemma-2-2b-it` |
-| Gemma 3 text | `google/gemma-3-1b-it`, `google/functiongemma-270m-it`, `EssentialAI/rnj-1-instruct` |
+| Gemma 3 text | `google/gemma-3-1b-it`, `google/functiongemma-270m-it` |
 | Gemma 3 text MLX | `mlx-community/gemma-3-1b-it-{4bit,8bit}`; multimodal 4B and 27B variants are unsupported |
 | Gemma 4 text | `google/gemma-4-{E2B,E4B}-it`; dense PLE E2B/E4B text layouts. E2B affine Q4 conversion emits 901 tensors in a 2.605 GB packed artifact. Separate schema-4 BF16 image profiles support pinned E2B/E4B sources. No audio/video, 31B, 26B MoE or unified 12B support |
 | OLMo 3 | Extension `allenai/Olmo-3-7B-Instruct`; dense text profile with MLX affine Q4/Q8 matrix imports |
@@ -168,6 +168,24 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` |
 | SmolLM3 MLX | `mlx-community/SmolLM3-3B-{4bit,8bit}` |
 | ModernBERT classifier | `trymirai/chat-moderation-router`, `trymirai/health-related-router` (both repositories currently inaccessible) |
+
+`EssentialAI/rnj-1-instruct` and `POLARIS-Project/Polaris-4B-Preview` remain
+planned. Their YaRN configurations carry attention-factor controls absent from
+Stark's current RoPE schema; RNJ also records an extrapolation factor and a
+singular `layer_type` list. They require source-matched YaRN implementation
+and numerical qualification before conversion can be advertised.
+
+Unquantized Qwen3.5 MLX exports use their saved `[channels, kernel, 1]`
+convolution layout to identify normalization gains that already include one.
+Raw Hugging Face `[channels, 1, kernel]` exports retain the runtime offset.
+Ambiguous flat unquantized convolutions and mixed storage conventions are
+rejected. Packed MLX imports retain their existing normalization convention.
+The reviewed Qwen3.5 2B and 4B generation override profiles now resolve for
+BF16, Q4 and Q8; the 2B Q4 row uses the 2B profile. Stored sampling defaults
+remain metadata and do not change the host's greedy default.
+
+The [converter regression record](../../docs/archive/runs/2026-11-10-family-converter-correctness.md)
+separates synthetic conversion coverage from full-checkpoint qualification.
 
 The additional `qwen4_exp` adapter converts the implemented Lily-format
 Qwen3.8-Flash-Next text layout through `hf-generic`, including

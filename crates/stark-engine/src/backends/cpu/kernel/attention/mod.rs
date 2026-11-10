@@ -78,6 +78,7 @@ impl AttentionKernel for AttentionCpuKernel {
             config.is_causal,
             arguments.trie.is_some(),
             config.sliding_window_size.is_some(),
+            config.logit_soft_cap.is_some(),
         )?;
         command_buffer.push_debug_group("attention core");
         single_pass.encode(
@@ -93,6 +94,7 @@ impl AttentionKernel for AttentionCpuKernel {
             config.num_groups * config.head_dim,
             arguments.cache.ring_params(),
             config.scale.unwrap_or(1.0 / (config.head_dim as f32).sqrt()),
+            config.logit_soft_cap,
             arguments.trie,
             config.sliding_window_size,
             arguments.sinks,

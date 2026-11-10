@@ -113,8 +113,9 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     if include_vision and dtype != "bfloat16":
         raise UnsupportedConversion("Qwen3.5 vision exports require BF16 output")
     target = _DTYPES[dtype]
-    # The pinned Qwen importer uses this specific field to select baked norms.
-    # An alias-only description cannot safely establish that interpretation.
+    # Preserve the existing packed-checkpoint gate. Unquantized MLX exports
+    # also contain baked normalization gains; their saved convolution layout
+    # is inspected below instead of assuming unquantized means Hugging Face.
     if config.get("quantization_config") is not None and config.get("quantization") is None:
         raise UnsupportedConversion("Qwen3.5 MLX requires the quantization field for baked normalization weights")
     quantization = parse_mlx_quantization(config, allow_mixed=True)
@@ -265,6 +266,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     operations: list[TensorOperation] = []
     metadata: dict[str, str] = {}
     used_mlx = False
+    baked_norms = quantization is not None
+    conv_layouts: set[bool] = set()
 
     def tensor(name: str, shape: tuple[int, ...]) -> TensorInfo:
         expected.add(name)
@@ -503,6 +506,17 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
             shape = tensors[conv_name].shape
             if shape not in ((conv_width, 1, kernel), (conv_width, kernel), (conv_width, kernel, 1)):
                 raise ConversionError("Qwen3.5 convolution shape disagrees with its config")
+            if quantization is None:
+                # MLX-LM sanitize moves HF [C,1,K] to saved [C,K,1] and
+                # adds one to the zero-centered norms in that same operation.
+                # This marker applies to full-precision exports too. A flat
+                # custom convolution loses the marker, so do not guess.
+                if len(shape) != 3 or kernel == 1:
+                    raise UnsupportedConversion("Qwen3.5 unquantized convolution has ambiguous normalization storage")
+                conv_layouts.add(shape[-1] == 1)
+                if len(conv_layouts) != 1:
+                    raise UnsupportedConversion("Qwen3.5 checkpoint mixes normalization storage conventions")
+                baked_norms = shape[-1] == 1
             conv = tensor(conv_name, shape)
             operations.append(
                 TensorOperation(out + ".mixer.conv.weights", (conv,), "F32", (conv_width, kernel), "cast_f32")
@@ -605,7 +619,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
         raise UnsupportedConversion(unsupported[0])
     norm_config = {
         "epsilon": epsilon,
-        "scale_offset": None if quantization is not None else 1.0,
+        "scale_offset": None if baked_norms else 1.0,
         # Qwen3.5 keeps zero-centered RMS normalization and its gain in FP32
         # through one final activation cast. Preserve the existing text export
         # profile while qualifying the exact full-vision artifact separately.

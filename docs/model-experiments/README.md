@@ -16,6 +16,11 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261110-FAMILY-RECHECK-01: independent pre-PR review](2026-11-10-family-double-check.md) | Isolated cache invalidation controls, accepted-temperature overflow handling and scratch-pool high-water admission; revised validation tracked separately |
+| [20261110-DENSE-01: capped attention and dense sampling](2026-11-10-dense-attention-sampling-correctness.md) | Gemma 2 soft cap, recoverable sampling validation, dense MTP filter semantics, nonfinite readout errors and optional snapshot copying; component controls and artifact limits tracked separately |
+| [20261110-CONVERT-01: family conversion regressions](../archive/runs/2026-11-10-family-converter-correctness.md) | Safe dense config annotations, Qwen3.5 norm convention and size-specific metadata; RNJ/Polaris remain planned pending YaRN support |
+| [20261110-IMAGE-01: image loading and request admission](2026-11-10-family-image-correctness.md) | Single component scan with mutation checks, skipped PNG ancillary inflation, primary MPO decoding and tower workspace accounting; artifact qualification pending |
+| [20261110-PREFIX-01: text-only snapshot routing](2026-11-10-text-prefix-snapshot-capability.md) | Route snapshot-only ordinary text through existing exact state capture/restore; artifact qualification pending |
 | [20261109-LAUNCH-RECHECK-01: image-resident Lily text controls](2026-11-09-model-launch-double-check.md) | Same ddalcu payload with explicitly prepared image metadata passes seeded three-draft history, 4,096-token reuse and real image-to-text recovery; original folder is not image-admitted, paging prevents speed claims |
 | [20261109-QMEM-01: F32 Qwen scalar attention workspace](2026-11-09-qwen-attention-memory.md) | Independent lazy scalar scores/probabilities and matching allocation inventory; allocation/stride and synthetic full-forward controls passed, production speed unmeasured |
 | [20261109-LILY-STARTUP-01/02/03/04: retained image startup](../benchmarks/2026-11-09-lily-image-startup.md) | Initial startup canceled; accelerated full scan passed image smoke but latency rejected; digest reuse/UI cleanup installed, native startup 10.5–11.9 s, routine UI Ready by 14.774 s; final image attachment and copy-removal checks passed |

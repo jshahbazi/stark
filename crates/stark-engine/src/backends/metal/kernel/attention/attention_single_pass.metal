@@ -28,6 +28,7 @@ PUBLIC KERNEL(AttentionSinglePass)(
     const constant uint& v_seq_stride,
     const constant RingParams& ring_params OPTIONAL(is_kv_cache_ring),
     const constant float& scale,
+    const constant float& logit_soft_cap OPTIONAL(has_logit_soft_cap),
     const device TrieNode* trie OPTIONAL(is_trie),
     const constant uint& sliding_window_size OPTIONAL(is_sliding_window),
     const device T* sinks OPTIONAL(has_sinks),
@@ -41,6 +42,7 @@ PUBLIC KERNEL(AttentionSinglePass)(
     const bool is_causal SPECIALIZE,
     const bool is_trie SPECIALIZE,
     const bool is_sliding_window SPECIALIZE,
+    const bool has_logit_soft_cap SPECIALIZE,
     const ThreadContext thread_context,
     const uint head_idx GROUPS(num_heads),
     const uint q_seq_idx GROUPS(suffix_length),
@@ -122,6 +124,9 @@ PUBLIC KERNEL(AttentionSinglePass)(
         score += q[j] * k[j];
       }
       score = simd_sum(score);
+      if (has_logit_soft_cap) {
+        score = logit_soft_cap * tanh(score / logit_soft_cap);
+      }
 
       // Update the accumulators
       U new_max = max(max_score, score);

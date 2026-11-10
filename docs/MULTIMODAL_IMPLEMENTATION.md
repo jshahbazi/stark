@@ -224,13 +224,14 @@ A tower failure fences the loaded instance before language-state mutation;
 decoder execution failures fence the loaded instance and request state.
 
 The shared decoder accepts one static 8-bit PNG or baseline/progressive JPEG.
-PNG decoding uses exact-locked `image 0.25.10`; JPEG uses exact-locked
+PNG decoding uses exact-locked `png 0.18.1`; JPEG uses exact-locked
 `jpeg-decoder 0.3.2` with default features disabled. Both are native Rust, with no
-Python or system codec dependency. JPEG support on `image` is enabled only for
+Python or system codec dependency. The `image` crate is used only for
 test-fixture encoding. Header validation precedes codec construction and checks
 dimensions, frame/scan structure, arithmetic, and encoded length. Animated,
-multiple, 16-bit, CMYK, and unsupported JPEG encodings fail. Compressed PNG
-profile/text metadata is rejected before decompression.
+16-bit, CMYK, and unsupported JPEG encodings fail. PNG ICC and text chunks are
+skipped without decompression; chunk CRCs remain checked. MPO JPEGs decode only
+the primary image. Unlabelled concatenated JPEGs remain rejected.
 
 EXIF orientation is applied. Grayscale expands to RGB and transparency composites
 over white; ICC color conversion is not performed. Smart-resize dimensions follow
@@ -401,3 +402,27 @@ version `v2.11.0`, under its
 [BSD-style license](https://github.com/pytorch/pytorch/blob/v2.11.0/LICENSE).
 The dated native vision record pins the additional processor, vision-helper and
 Torchvision reference revisions, licenses, and validation harness identities.
+
+### Tower request memory and loading identity
+
+Converted Qwen, Gemma 3 and Gemma 4 image requests admit decoder state together
+with conservative tower workspace before allocating that state. The inventory
+includes patch uploads, BF16/F32 intermediates, eager score matrices where used,
+projection/readback copies and allocation margin. Scratch counts every rounded
+allocation in one block plus the initial/final stage owners. Identically shaped
+later blocks reuse pool size classes; Metal's access barriers preserve their
+dispatch order. Command constants use a separate lifetime and include all
+append-only uploads. Gemma 3 waits after each block and sums its initial,
+single-block and final submission inventories. Gemma 4's larger source tower
+counts its fixed tiled-attention buffers, without a quadratic score plane.
+This is conservative payload accounting, not an observed RSS bound. The
+[workspace inventory record](archive/runs/2026-11-10-vision-workspace-inventory.md)
+describes the accounting and synthetic production-path allocation controls.
+
+Each selected image-artifact component is hashed once per load. The loader
+retains the opened descriptor and compares inode, size and nanosecond mtime/ctime
+through admission and materialization. Same-size in-place changes with restored
+mtime are rejected by ctime; selected paths cannot swap the admitted descriptor.
+There is no persistent warm-start digest cache on these converted routes yet.
+The [20261110-IMAGE-01 record](model-experiments/2026-11-10-family-image-correctness.md)
+tracks tests and the remaining full-artifact qualification.

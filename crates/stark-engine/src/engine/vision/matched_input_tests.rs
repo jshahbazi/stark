@@ -327,6 +327,7 @@ fn attention<B: Backend>(backend: &str) {
                     scale: Some(scale),
                     data_type: DataType::BF16,
                     materialize_prefill_scores: false,
+                    logit_soft_cap: None,
                     source_bf16_prefill: false,
                 },
             )

@@ -177,6 +177,8 @@ An image-capable model adds an `image_input` object without changing `mode: "tex
 
 The owning host creates an empty mode-0700 staging directory and launches the worker with `--vision-staging-root PATH`. At startup the worker requires an absolute, owner-private directory with no entries. The host then writes mode-0600 regular files named with opaque IDs. The JSON line contains only an ID, byte length and media type; image bytes never enter worker JSON. The engine accepts PNG and JPEG up to 20 MiB compressed, while the terminal and HTTP services apply their narrower 4 MiB limit. Image processing is bounded by 32 million source pixels, a 16,384-pixel maximum source dimension, 1,048,576 processed pixels, 4,096 patches and 1,024 image tokens.
 
+The native decoder ignores PNG ICC/text metadata without inflating it and checks chunk CRCs. MPO JPEGs use only their primary image; unlabelled concatenated JPEGs remain rejected. Decoder state and tower submission workspace share request memory admission. The existing Qwen processed-size guard is unchanged; oversized images still require preprocessing into an admitted geometry.
+
 The owning host sends `prepare_image` with the rendered prompt, file reference, context limit and output limit. The worker validates the opened file's owner, regular-file type, private permissions, single link, declared length, stable metadata and image signature. It immediately unlinks the name before processing and retains the opened-file lease through terminal completion. A successful prepare reply provides a single-use `prepared_id` and token counts. The host sends `generate_image` with that ID and the usual generation options, then consumes a `discard_image` reply to clear any remaining prepared state. Prepared state belongs to one loaded model and is consumed once. A different operation, request error, cancellation, process failure or explicit discard clears it. Each image request repeats this transaction with fresh model state. Gemma E2B additionally limits processed image input to at most 2,520 16-pixel patches and 280 pooled soft tokens; this model-specific bound is lower than the Qwen3.5 image limits above.
 
 The host serializes the whole transaction and shares one inactivity deadline across frame writes, preparation, generation, streaming reads and discard. Validated generation progress or deltas renew that deadline; operation boundaries and activity after cancellation do not. Local image verification retains its absolute time limit. A protocol failure or expired deadline closes and reaps the worker. The host's staging cleanup removes an unclaimed file on every exit path. Worker teardown also removes remaining opaque, owner-private, single-link regular files in its pinned directory. The exact request structs and cleanup fence are in [`generation.rs`](../crates/stark-generate/src/generation.rs); the file checks and teardown are in [`media.rs`](../crates/stark-generate/src/media.rs).
@@ -253,7 +255,17 @@ Greedy decoding is the default. Stochastic sampling supplies a temperature and o
 {"mode":"stochastic","temperature":0.6,"top_k":20,"top_p":0.95,"min_p":0.0}
 ```
 
-`temperature` must be finite, positive and at most 100. `top_k` is 1 through `vocab_size`. `top_p` is greater than 0 and at most 1. `min_p` is 0 through 1. Omitted filters are disabled. Repetition, frequency and presence penalties are not part of this interface.
+`temperature` must be finite, positive and at most 100, with a finite F32 reciprocal. Invalid values are rejected before native generation and leave the worker usable. `top_k` is 1 through `vocab_size`. `top_p` is greater than 0 and at most 1. `min_p` is 0 through 1. Omitted filters are disabled. Repetition, frequency and presence penalties are not part of this interface.
+
+Ordinary converted decoding retains its existing F32 temperature arithmetic
+when scaling stays finite. Metal reconstructs positive subnormal temperature
+reciprocals from their F32 bits using normal intermediates; ordinary temperature
+reciprocals retain their prior arithmetic. If finite admitted logits would overflow that
+scaling, the sampler subtracts their maximum before retrying temperature and
+filters. The retry uses the same seeded random positions; negative-infinity
+tails represent zero mass. This translation preserves the sampling distribution
+and keeps accepted tiny temperatures usable. Nonfinite raw native logits or an
+empty candidate mask still fail generation; they never fabricate token 0.
 
 The converted-model sampler applies temperature before filtering and evaluates
 top-k and top-p against the same full-vocabulary distribution. The native hybrid
@@ -261,6 +273,10 @@ sampler retains top-k candidates first, then computes the mass used by top-p
 over those candidates; omitting top-k uses the full vocabulary. Seeded requests
 are reproducible on the same build and hardware; they are not expected to match
 another engine token for token.
+
+Dense Qwen MTP and the Gemma assistant retain the converted-model filtering policy, including full-vocabulary
+nucleus mass when top-k is supplied. Native hybrid MTP retains its own sampler's
+top-k-first policy. Enabling MTP does not switch either family's filter semantics.
 
 <a id="qwen38-multi-token-prediction"></a>
 
@@ -423,6 +439,7 @@ Agent clients resend the same instructions, tool definitions and history on ever
 Eligibility and key:
 
 - Converted text models whose owned layers are all full, non-ring attention caches (for example Qwen3 dense models) rewind their attention cache.
+- Text-only models whose decoder cannot rewind can still advertise prefix reuse when every owned layer provides an exact completed-boundary snapshot. This is a worker capability; checkpoint qualification remains model-bound and does not enable image loading.
 - Converted dense `qwen3_5` models with an admitted MTP head restore a snapshot on a 1,024-token grid. With drafts enabled it holds each DeltaNet layer's F32 recurrence and convolution history, the BF16 normalized target hidden state, F32 next-token logits and the predictor's committed position. Full-attention prefix rows in the target and predictor remain in the retained session. MTP0 instead retains the ordinary stream's target-only recurrence/convolution snapshot and attention prefix rows. Switching between ordinary and predictor sessions misses; the exact selected draft count and text graph are part of the reuse key. Draft-readout width is immutable loaded-model configuration. The packed 27B artifact and its separately configured three/four-bit draft-head variants passed artifact-bound prefix checks on the older build named in the [follow-up report](benchmarks/2026-11-06-qwen38-27b-packed-followup.md); that evidence does not qualify a changed driver.
 - Native GGUF GLM-5.3 resumes from a snapshot on a 1,024-token grid. The snapshot includes KDA recurrence and convolution history, plus the MLA/indexer position and incomplete pooling tail. Completed attention and indexer prefix rows remain in the loaded model's own state.
 - The ordinary [EXL3/FP8 GLM backend](validation/GLM_EXL3_BACKEND.md) resumes on a 16,384-token grid with MTP off and its head unloaded. A private native MTP candidate, enabled through a separately prepared capability stage and explicit `STARK_GLM_EXL3_VALIDATE_NATIVE=1`, snapshots the draft-head state with the native prefix state. Its native greedy, sampled and prefix mechanism/invalidation checks pass; full Rust-worker and quality validation remain pending, so production MTP is unqualified. The state-hash diagnostic build setting is separate. See the [native mechanism record](archive/runs/2026-11-04-glm-exl3-native-mtp-prefix.md) and [comparison record](benchmarks/2026-11-04-glm-mlx-stream-comparison.md).
@@ -430,7 +447,13 @@ Eligibility and key:
 - Ordinary text requests on native Qwen vision artifacts can resume from an exact decoder snapshot on the 1,024-token grid when every owned mixer supports boundary restoration. The snapshot includes DeltaNet recurrence and convolution history; completed full-attention rows stay in the retained state. Image operations clear this entry and never populate it. The host requests caching for vision workers and uses loaded readiness to determine support.
 - Ordinary text on Gemma 4 image artifacts can restore the last complete non-final 1,024-token boundary. Each owning sliding-attention layer retains independent physical K/V rows and its ring offset, length and source traversal origin; shared-KV consumers reuse that owner's restored state. Images clear the entry and never populate it. Exact checkpoint qualification is recorded in the [Gemma 4 attempt](model-experiments/2026-11-09-gemma4-image-text-parity.md); larger component evidence is not full-model cache qualification.
 - Gemma 3 image models implement the same owned ring snapshot capture/restore and suffix-only text prefill. Actual-artifact qualification is pending in the [continuation attempt](model-experiments/2026-11-09-gemma-next-image-parity.md); no other checkpoint inherits the Gemma 4 evidence.
-- Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window text exports and speculator models, and the native Flint and F32 Qwen graphs.
+- Readiness remains `prefix_cache.supported: false` for recurrent or sliding-window exports whose mixers lack the required snapshot hook (including LFM2 short-convolution and LLaMBA Mamba2), and for speculator models. Native Flint and the F32 Qwen graph also remain on fresh per-request state.
+
+### Known state inventories without generation prefix reuse
+
+- **LFM2** combines per-layer short-convolution history with attention KV state. The short-convolution mixer owns a `conv_state` global buffer and transient suffix state; attention owns its KV cache. Attention can snapshot its full KV prefix, but the short-convolution mixer does not advertise snapshot capture/restore, so the decoder-level capability check fails for this mixed topology. Reuse needs a consistent prefill-boundary copy of convolution state alongside the attention prefix and memory accounting for both; no family-specific blocker says this is impossible.
+- **LLaMBA/Mamba2** owns F32 convolution state shaped `[conv_dim, kernel_size - 1]` and F32 SSM state shaped `[num_heads, head_dim, state_dim]` per Mamba2 layer. Its current state accepts speculative suffixes but has no cross-request boundary snapshot/restore hook. Reuse needs both buffers and their position semantics captured/restored together, with the snapshot bytes included in admission. No such worker path is implemented.
+- **Flint** uses its separate native hybrid model state: each attention layer owns `VecDeque<Vec<f32>>` key and value rows, while the model tracks a single logical `position`. Sliding layers evict from the deque at `sliding_window`; full-attention layers retain all request rows. The worker currently starts fresh per request and has no Flint snapshot/restore path or retained-state memory accounting. A possible implementation must snapshot each layer's exact row sequence and the model position, then bound/admit the duplicate F32 payload; sliding and full-attention layers need distinct row-count accounting. The state shape is finite and explicit, but no exact cross-request restore has been qualified.
 - A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On Qwen3.8 and the private native EXL3 candidate, whether MTP is enabled must also match (`key` reports this). Dense MTP uses the exact selected draft count; model-level coarse-readout configuration is bound by the loaded model instance.
 
 The F32 `qwen4_exp` route used by the PipeNetwork `qwen38-mixed` catalog

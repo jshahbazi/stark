@@ -80,12 +80,12 @@ after native work fence the loaded instance, requiring worker replacement.
 Controlled cancellation between completed tower blocks releases private scratch
 and leaves immutable model weights available for a fresh request.
 
-Text generation through this image artifact also leaves generation prefix
-reuse disabled. Five out of every six decoder layers use overwriting sliding
-KV rings. The current engine can rewind full KV caches, but it cannot restore
-an earlier ring state after those rows have been overwritten. Exact ring
-snapshots have not been implemented for this path; a new request therefore
-allocates fresh state instead of claiming a reusable prefix.
+Text-only generation through this image artifact can retain and restore a
+completed decoder prefix snapshot. The snapshot includes each sliding KV
+owner's ring payload and cursor state; shared-KV consumers refer to the owner's
+restored state. Image requests still clear text prefixes and never publish
+image-dependent decoder state. Artifact-bound qualification remains separate
+from implementation support; see the dated image/text prefix records.
 
 ## Validation
 

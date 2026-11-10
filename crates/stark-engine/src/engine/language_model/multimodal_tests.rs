@@ -1044,3 +1044,38 @@ fn scalar_bidirectional_linear_rope_image_stream_cpu() {
 fn scalar_bidirectional_linear_rope_image_stream_metal() {
     scalar_bidirectional_linear_rope_stream::<crate::backends::metal::Metal>();
 }
+
+fn ordinary_sampling_failure_fences_lookahead_state<B: Backend>() {
+    let fixture = TinyModel::new(128);
+    let engine = Engine::<B>::new().unwrap();
+    let model = engine.load_language_model(&fixture.directory).unwrap();
+    for poll_failed_sample in [false, true] {
+        let mut state = model.create_empty_state(Some(64), 0).unwrap();
+        assert!(!state.is_fenced());
+        let mut stream = model.stream(&[5, 6], &mut state, greedy_options(&model)).unwrap();
+        assert!(stream.next().unwrap().is_ok());
+        // The finite first draw leaves a genuine native lookahead submission.
+        // Replace only its completed sampling slot to exercise both consumers.
+        stream.validation_replace_pending_sample(u32::MAX).unwrap();
+        if poll_failed_sample {
+            assert!(matches!(stream.next(), Some(Err(super::stream::LanguageModelStreamError::InvalidSamplingResult))));
+        }
+        drop(stream);
+        assert!(state.is_fenced(), "text cleanup failure must remain visible to the worker");
+        assert!(state.last_output_token.is_none());
+        assert!(state.text_prefix_position().is_none());
+        assert!(model.stream(&[7], &mut state, greedy_options(&model)).is_err());
+    }
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn ordinary_sampling_failure_fences_lookahead_state_cpu() {
+    ordinary_sampling_failure_fences_lookahead_state::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn ordinary_sampling_failure_fences_lookahead_state_metal() {
+    ordinary_sampling_failure_fences_lookahead_state::<crate::backends::metal::Metal>();
+}

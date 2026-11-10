@@ -26,6 +26,7 @@ fn default_attention_config<T: ArrayElement>(
         scale: Some(1.0 / (head_dim as f32).sqrt()),
         data_type: T::data_type(),
         materialize_prefill_scores: false,
+        logit_soft_cap: None,
         source_bf16_prefill: false,
     }
 }

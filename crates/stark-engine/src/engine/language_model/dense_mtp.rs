@@ -465,6 +465,17 @@ where
         capacity: u32,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<DenseMtpSession<B>, DenseMtpError<B>> {
+        self.prefill_dense_mtp_with_prefix_controlled(input, capacity, true, cancelled)
+    }
+
+    /// Skip snapshot copies when no host cache scope can retain the result.
+    pub fn prefill_dense_mtp_with_prefix_controlled(
+        &self,
+        input: &[u32],
+        capacity: u32,
+        capture_prefix: bool,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<DenseMtpSession<B>, DenseMtpError<B>> {
         if !self.has_dense_mtp()
             || input.is_empty()
             || capacity == 0
@@ -497,8 +508,11 @@ where
             failed: false,
             prefix: None,
         };
-        let boundary =
-            input.len().saturating_sub(1) / super::stream::PREFILL_CHUNK_TOKENS * super::stream::PREFILL_CHUNK_TOKENS;
+        let boundary = if capture_prefix {
+            input.len().saturating_sub(1) / super::stream::PREFILL_CHUNK_TOKENS * super::stream::PREFILL_CHUNK_TOKENS
+        } else {
+            0
+        };
         self.continue_prefill_dense_mtp_controlled(&mut session, input, boundary, cancelled)?;
         Ok(session)
     }

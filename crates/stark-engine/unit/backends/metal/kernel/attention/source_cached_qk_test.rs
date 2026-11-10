@@ -59,6 +59,7 @@ fn source_cached_qk_has_independent_f64_bf16_midpoint_and_tail_oracles() {
             scale: Some(1.0),
             data_type: DataType::BF16,
             materialize_prefill_scores: true,
+            logit_soft_cap: None,
             source_bf16_prefill: false,
         };
         let mut commands = context.create_command_buffer(None, None).unwrap();

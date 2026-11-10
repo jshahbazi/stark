@@ -180,6 +180,7 @@ fn committed_external_view<B: Backend>() {
                 scale: Some(1.0),
                 data_type: DataType::F32,
                 materialize_prefill_scores: false,
+                logit_soft_cap: None,
                 source_bf16_prefill: false,
             },
         )

@@ -73,10 +73,20 @@ _COMMON_KEYS = {
     "pretraining_tp",
 }
 _FAMILY_KEYS = {
-    "qwen2": {"use_sliding_window", "sliding_window", "max_window_layers"},
+    "qwen2": {"use_sliding_window", "sliding_window", "max_window_layers", "use_mrope"},
     # Unsloth's mirror records a packaging annotation ignored by HFLlamaConfig;
     # it changes neither the decoder nor tensor interpretation.
-    "llama": {"unsloth_fixed", "transformers.js_config", "fp8", "use_grouped_mm"},
+    "llama": {
+        "unsloth_fixed",
+        "transformers.js_config",
+        "fp8",
+        "use_grouped_mm",
+        "embd_pdrop",
+        "resid_pdrop",
+        "classifier_dropout",
+        "id2label",
+        "label2id",
+    },
     "mistral": {"sliding_window"},
 }
 
@@ -234,6 +244,24 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         if _bool(config, "fp8", False):
             unsupported.append("FP8 checkpoint is outside qualified dense coverage")
         _bool(config, "use_grouped_mm", False)
+        # Nanbeige and Reka retain training/classifier annotations in their
+        # LlamaForCausalLM configs. Admit only the reviewed inactive dropout
+        # values; the causal-LM architecture and complete tensor inventory are
+        # still checked independently.
+        for key in ("embd_pdrop", "resid_pdrop", "classifier_dropout"):
+            value = config.get(key, 0.0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ConversionError("Dense config has malformed dropout metadata")
+            if value != 0.0:
+                unsupported.append("Nonzero training/classifier dropout is outside qualified dense coverage")
+        for key, key_type, value_type in (("id2label", str, str), ("label2id", str, int)):
+            labels = config.get(key, {})
+            if not isinstance(labels, dict) or any(
+                type(label) is not key_type or type(value) is not value_type for label, value in labels.items()
+            ):
+                raise ConversionError("Dense config has malformed classifier labels")
+    if family == "qwen2" and _bool(config, "use_mrope", False):
+        unsupported.append("Qwen2 multimodal RoPE is outside qualified dense coverage")
     if (family == "qwen2" and not attention_bias) or (family != "qwen2" and attention_bias) or mlp_bias:
         unsupported.append("Projection bias variant is outside qualified dense coverage")
     if dropout != 0.0:

@@ -87,6 +87,7 @@ impl<B: Backend> WeaverLayer<B> {
                 scale: Some(attention_scale),
                 data_type: DATA_TYPE,
                 materialize_prefill_scores: false,
+                logit_soft_cap: None,
                 source_bf16_prefill: false,
             },
         )
