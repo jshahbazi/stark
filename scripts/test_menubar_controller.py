@@ -2157,6 +2157,26 @@ extension EngineController {
             engine.apply(imageReady)
             engine.selectedID = "different-fixture"
             return engine.supportsImages && !engine.canAttachImage
+        case "image-limits-follow-model":
+            var retained = imageReady
+            retained["image_limits"] = ["max_source_pixels": 32_000_000,
+                "max_processed_pixels": 16_777_216, "max_image_tokens": 16_384]
+            engine.apply(retained)
+            guard engine.imageLimits?.processedPixels == 16_777_216,
+                  engine.imageLimits?.imageTokens == 16_384 else { return false }
+            var gemma = imageReady
+            gemma["image_limits"] = ["max_source_pixels": 32_000_000,
+                "max_processed_pixels": 645_120, "max_image_tokens": 280]
+            engine.apply(gemma)
+            guard engine.imageLimits?.processedPixels == 645_120,
+                  engine.imageLimits?.imageTokens == 280 else { return false }
+            engine.apply(imageReady)
+            guard engine.imageLimits == nil else { return false }
+            engine.apply(retained)
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            return !engine.supportsImages && engine.imageLimits == nil &&
+                ModelImageLimits(["max_source_pixels": true,
+                    "max_processed_pixels": 16_777_216, "max_image_tokens": 16_384]) == nil
         case "image-local-evidence":
             var verified = imageReady
             verified["image_verification"] = "locally_tested"
@@ -2627,6 +2647,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_image_capability_requires_complete_negotiation(self):
         self.exercise("image-capability")
+
+    def test_image_limits_follow_loaded_model_and_clear_on_stop(self):
+        self.exercise("image-limits-follow-model")
 
     def test_vision_install_is_explicit_opt_in(self):
         self.exercise("vision-install-opt-in")

@@ -472,6 +472,20 @@ impl Model {
         Err(Error::Unsupported("native image preparation unavailable"))
     }
 
+    /// Full request-owned vision storage, including host upload copies.
+    pub fn image_request_memory_bytes(
+        &self,
+        image: &PreparedHybridImage,
+    ) -> Option<usize> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            let grid = image.grid();
+            return model.image_request_memory_bytes((grid[1] as usize).checked_mul(grid[2] as usize)?);
+        }
+        let _ = image;
+        None
+    }
+
     pub fn prepare_image_prompt(
         &self,
         tokens: &[u32],

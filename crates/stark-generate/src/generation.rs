@@ -217,8 +217,8 @@ fn image_family_limits(
         | ("qwen35-dense-bf16-merged-v2", 2, 3)
         | ("qwen35-dense-affine-merged-v3", 3, 3)
         | ("qwen35-moe-affine-merged-v4", 4, 3)
-        | ("qwen35-moe-bf16-merged-v5", 5, 3)
-        | ("qwen38-lily-retained-bf16-vision-v1", 1, 6) => ((16, 2), 4096, 1024),
+        | ("qwen35-moe-bf16-merged-v5", 5, 3) => ((16, 2), 4096, 1024),
+        ("qwen38-lily-retained-bf16-vision-v1", 1, 6) => ((16, 2), 65_536, 16_384),
         (
             "gemma4-e2b-bf16-v1"
             | "gemma4-e4b-bf16-v1"
@@ -245,7 +245,7 @@ mod image_family_tests {
             ("qwen35-dense-affine-merged-v3", 3, 3, (16, 2), (4096, 1024, 1048576)),
             ("qwen35-moe-affine-merged-v4", 4, 3, (16, 2), (4096, 1024, 1048576)),
             ("qwen35-moe-bf16-merged-v5", 5, 3, (16, 2), (4096, 1024, 1048576)),
-            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, (16, 2), (4096, 1024, 1048576)),
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, (16, 2), (65_536, 16_384, 16_777_216)),
             ("gemma4-e2b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma4-e4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
             ("gemma4-31b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
@@ -276,7 +276,7 @@ fn valid_image_metadata(
 ) -> bool {
     let (patch_size, merge_size) = geometry;
     let (max_patches, max_image_tokens) = match geometry {
-        (16, 2) => (4096, 1024),
+        (16, 2) => (65_536, 16_384),
         (16, 3) => (2520, 280),
         (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
         _ => return false,
@@ -1174,7 +1174,20 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if self.backend.cancelled(request_id)? {
                     return Err("generation_cancelled");
                 }
-                if !valid_image_metadata(&metadata, self.backend.image_geometry()) {
+                let limits = self.backend.image_family_profile().and_then(|(profile, version)| {
+                    image_family_limits(
+                        profile,
+                        version,
+                        self.backend.image_artifact_identity()?.schema_version,
+                        self.backend.image_geometry(),
+                    )
+                });
+                if !valid_image_metadata(&metadata, self.backend.image_geometry())
+                    || limits.is_none_or(|(patches, tokens, _)| {
+                        metadata.grid[1].checked_mul(metadata.grid[2]).is_none_or(|count| count > patches)
+                            || metadata.image_tokens > tokens
+                    })
+                {
                     return Err("invalid_image_preparation_output");
                 }
                 if metadata
@@ -1581,6 +1594,7 @@ mod tests {
         cancel_image: bool,
         cancel_after_prepare: bool,
         fail_image_prepare: bool,
+        prepared_metadata_override: Option<PreparedImageMetadata>,
         prefix_supported: bool,
         prefix_entry: Option<prefix_cache::PrefixEntry<usize>>,
         prefix_pending: Option<prefix_cache::PrefixEntry<usize>>,
@@ -1877,7 +1891,7 @@ mod tests {
                 FakePreparedImage {
                     dropped: self.prepared_drops.clone(),
                 },
-                PreparedImageMetadata {
+                self.prepared_metadata_override.take().unwrap_or(PreparedImageMetadata {
                     input_tokens: 7,
                     image_tokens: if self.image_schema == 4 {
                         1
@@ -1894,7 +1908,7 @@ mod tests {
                     } else {
                         [64, 64]
                     },
-                },
+                }),
             ))
         }
 
@@ -1940,6 +1954,7 @@ mod tests {
             cancel_image: false,
             cancel_after_prepare: false,
             fail_image_prepare: false,
+            prepared_metadata_override: None,
             prefix_supported: false,
             prefix_entry: None,
             prefix_pending: None,
@@ -2310,6 +2325,47 @@ mod tests {
     fn image_generate(prepared: &Value) -> Value {
         json!({"operation":"generate_image","prepared_id":prepared["prepared_id"],
             "context_tokens":16,"max_new_tokens":8,"request_id":11})
+    }
+
+    #[test]
+    fn image_preparation_enforces_each_loaded_familys_advertised_ceiling() {
+        for (profile, version, schema, side, expected_patches, accepted) in [
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, [256, 256], 65_536, true),
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, [256, 258], 65_536, false),
+            ("qwen35-dense-bf16-merged-v2", 2, 3, [64, 64], 4096, true),
+            ("qwen35-dense-bf16-merged-v2", 2, 3, [64, 66], 4096, false),
+            ("qwen35-dense-bf16-merged-v2", 2, 3, [256, 256], 4096, false),
+        ] {
+            let root = crate::media::tests::PrivateRoot::new();
+            let mut worker = image_worker(&root);
+            worker.backend.family_profile = profile;
+            worker.backend.family_version = version;
+            worker.backend.image_schema = schema;
+            worker.backend.max_context = Some(65_536);
+            let image_tokens = side[0] * side[1] / 4;
+            worker.backend.prepared_metadata_override = Some(PreparedImageMetadata {
+                input_tokens: image_tokens as usize + 3,
+                image_tokens,
+                grid: [1, side[0], side[1]],
+                processed_dimensions: [side[1] * 16, side[0] * 16],
+            });
+            assert_eq!(readiness(&mut worker)["image_input"]["max_patches"], expected_patches);
+            let mut request = image_prepare(&root);
+            request["context_tokens"] = json!(65_536);
+            let mut output = Vec::new();
+            let result = worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output);
+            let reply: Value = serde_json::from_slice(&output).unwrap();
+            if accepted {
+                assert!(result.is_ok());
+                assert!(reply.get("prepared_id").is_some());
+                assert_eq!(reply["image_tokens"], image_tokens);
+            } else {
+                assert_eq!(result, Err("native_operation_failed"));
+                assert_eq!(reply["error"], "invalid_image_preparation_output");
+                assert!(worker.prepared.is_none());
+                assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+            }
+        }
     }
 
     #[test]

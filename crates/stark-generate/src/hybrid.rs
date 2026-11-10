@@ -717,12 +717,14 @@ impl GenerationBackend for HybridBackend {
         // The separately bounded encoder is not an automatic-context planner.
         let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
         admit_request_memory(
-            self.model.generation_memory_bytes_for_request(
-                end,
-                input_tokens,
-                false,
-                greedy_host_workspace(&options.sampling, options.mtp_drafts),
-            ),
+            self.model
+                .generation_memory_bytes_for_request(
+                    end,
+                    input_tokens,
+                    false,
+                    greedy_host_workspace(&options.sampling, options.mtp_drafts),
+                )
+                .and_then(|decoder| decoder.checked_add(self.model.image_request_memory_bytes(&prepared.image)?)),
             available,
         )?;
         self.clear_prefix_cache();

@@ -83,6 +83,27 @@ struct ImageAttachment {
     }
 }
 
+struct ModelImageLimits {
+    let sourcePixels: Int64
+    let processedPixels: Int64
+    let imageTokens: Int64
+
+    init?(_ value: Any?) {
+        guard let value = value as? [String: Any],
+              let source = SupportMetadata.integer(value["max_source_pixels"]), source > 0,
+              let processed = SupportMetadata.integer(value["max_processed_pixels"]), processed > 0,
+              let tokens = SupportMetadata.integer(value["max_image_tokens"]), tokens > 0 else { return nil }
+        sourcePixels = source; processedPixels = processed; imageTokens = tokens
+    }
+
+    var summary: String { "Image processing: up to \(processedPixels.formatted()) pixels" }
+    var help: String {
+        "Attach one PNG or JPEG up to 4 MiB and \(sourcePixels.formatted()) source pixels. " +
+        "This model processes up to \(processedPixels.formatted()) pixels (\(imageTokens.formatted()) image tokens), " +
+        "subject to available memory and conversation context."
+    }
+}
+
 final class AttachmentStaging {
     let root: URL
     private let descriptor: Int32
@@ -1177,7 +1198,10 @@ final class EngineController: ObservableObject {
     @Published var draft = ""
     @Published private(set) var draftImage: ImageAttachment?
     @Published private(set) var conversationImage: ImageAttachment?
-    @Published private(set) var supportsImages = false
+    @Published private(set) var supportsImages = false {
+        didSet { if !supportsImages { imageLimits = nil } }
+    }
+    @Published private(set) var imageLimits: ModelImageLimits?
     @Published private(set) var imageVerification = "unverified"
     @Published private(set) var imageProgress = ""
     @Published private(set) var attachmentLoading = false
@@ -1840,6 +1864,7 @@ final class EngineController: ObservableObject {
         let verification = event["image_verification"] as? String ?? "unverified"
         imageVerification = supportsImages && ["locally_tested", "reference_verified"].contains(verification)
             ? verification : "unverified"
+        imageLimits = supportsImages ? ModelImageLimits(event["image_limits"]) : nil
         if !supportsImages {
             draftImage = nil; conversationImage = nil; attachmentSelection = UUID(); attachmentLoading = false
         }
@@ -3510,12 +3535,15 @@ struct ChatContentView: View {
             HStack {
                 Button("Attach Image…", action: engine.selectImage)
                     .disabled(!engine.canAttachImage)
-                    .help(engine.supportsImages ? "Attach one PNG or JPEG image, up to 4 MiB." : "Run a qualified vision model to attach an image.")
+                    .help(engine.supportsImages ? engine.imageLimits?.help ?? "Attach one PNG or JPEG image, up to 4 MiB." : "Run a qualified vision model to attach an image.")
                 Text("Conversation stays in memory").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Send") { engine.generate(); composerFocused = true }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
                     .disabled(!engine.canSendMessage)
+            }
+            if engine.supportsImages, let limits = engine.imageLimits {
+                Text(limits.summary).font(.caption).foregroundStyle(.secondary).help(limits.help)
             }
         }
             .onDrop(of: [UTType.fileURL, .png, .jpeg], isTargeted: nil, perform: engine.acceptImageProviders)

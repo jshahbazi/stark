@@ -16,6 +16,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
+| [20261110-LILY-SIZE-01: retained image resolution](2026-11-10-lily-image-size.md) | Retained Lily 16 MP processor ceiling, negotiated app limits, 65,536-row component controls and 2.4 MP native execution; signed local build installed, full-ceiling model qualification pending |
 | [20261110-FAMILY-RECHECK-01: independent pre-PR review](2026-11-10-family-double-check.md) | Isolated cache invalidation controls, accepted-temperature overflow handling and scratch-pool high-water admission; revised validation tracked separately |
 | [20261110-DENSE-01: capped attention and dense sampling](2026-11-10-dense-attention-sampling-correctness.md) | Gemma 2 soft cap, recoverable sampling validation, dense MTP filter semantics, nonfinite readout errors and optional snapshot copying; component controls and artifact limits tracked separately |
 | [20261110-CONVERT-01: family conversion regressions](../archive/runs/2026-11-10-family-converter-correctness.md) | Safe dense config annotations, Qwen3.5 norm convention and size-specific metadata; RNJ/Polaris remain planned pending YaRN support |
