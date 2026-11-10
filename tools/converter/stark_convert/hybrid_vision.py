@@ -252,8 +252,8 @@ def prepare_image_artifact(directory: Path, choice: str) -> dict:
         raise ValueError("native image shard inventory exceeds its limit")
     with ThreadPoolExecutor(max_workers=4) as workers:
         verified = list(workers.map(_verified_weight, weights))
-    records = {path.name: record for path, (record, _) in zip(weights, verified)}
-    signatures = {path.name: signature for path, (_, signature) in zip(weights, verified)}
+    records = {path.name: record for path, (record, _) in zip(weights, verified, strict=True)}
+    signatures = {path.name: signature for path, (_, signature) in zip(weights, verified, strict=True)}
     shard_names = {name for name in records if name.endswith(".safetensors")}
     if set(index.get("weight_map", {}).values()) != shard_names:
         raise ValueError("native image shard index disagrees with its inventory")

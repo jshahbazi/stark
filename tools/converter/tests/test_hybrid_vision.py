@@ -10,7 +10,13 @@ import pytest
 from test_hybrid_prepare import metadata
 
 from stark_convert import hybrid_prepare as hybrid
-from stark_convert.hybrid_vision import HASH_CACHE, MANIFEST, PROCESSOR_BYTES, prepare_image_artifact, prepared_image_identity
+from stark_convert.hybrid_vision import (
+    HASH_CACHE,
+    MANIFEST,
+    PROCESSOR_BYTES,
+    prepare_image_artifact,
+    prepared_image_identity,
+)
 
 
 def fixture(tmp_path, monkeypatch):
@@ -70,9 +76,13 @@ def test_image_upgrade_seeds_private_descriptor_bound_digest_cache(tmp_path, mon
         "model.safetensors": {
             "sha256": manifest["weight_files"]["model.safetensors"]["sha256"],
             "signature": [
-                weight.st_dev, weight.st_ino, weight.st_size,
-                weight.st_mtime_ns // 1_000_000_000, weight.st_mtime_ns % 1_000_000_000,
-                weight.st_ctime_ns // 1_000_000_000, weight.st_ctime_ns % 1_000_000_000,
+                weight.st_dev,
+                weight.st_ino,
+                weight.st_size,
+                weight.st_mtime_ns // 1_000_000_000,
+                weight.st_mtime_ns % 1_000_000_000,
+                weight.st_ctime_ns // 1_000_000_000,
+                weight.st_ctime_ns % 1_000_000_000,
             ],
         }
     }

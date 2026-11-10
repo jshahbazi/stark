@@ -178,3 +178,14 @@ coarser than the native readiness timings and does not demonstrate a return to
 the user's historical approximately eight-second text startup. Source review
 found no further full-payload scan on a valid cache hit; vision tower loading
 and tensor admission remain part of image-capable startup.
+
+## CI maintenance follow-up
+
+PR #120's repository-check job found two missing explicit `zip` strictness
+arguments and an unformatted test import. Both shard/result joins now use
+`strict=True`, enforcing the existing one-result-per-input invariant. The full
+CI formatting command also exposed the shortened desktop status callback's
+layout; Ruff formatted it. Local CI-equivalent Python lint/format checks,
+25 preparation tests and repository policy checks were rerun. This follow-up
+does not add a model run or change the source identity of the installed build
+and the model-bound observations above.

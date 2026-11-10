@@ -2069,9 +2069,7 @@ class Desktop:
             self.worker = worker
             if mode == "chat":
                 worker.image_check_dir = self.data_dir / "image-checks"
-                worker.image_check_progress = lambda: self.status(
-                    "loading", "Loading model…", epoch
-                )
+                worker.image_check_progress = lambda: self.status("loading", "Loading model…", epoch)
         ready = worker.read()
         if vision:
             codec, template = load_template(Path(model["path"]), expected_hashes=worker.image_input)
