@@ -319,14 +319,16 @@ and W8 row arithmetic while multiplying each packed segment. Other layouts,
 including input-output embeddings, widen losslessly to eight-bit storage.
 No weight codes or affine coefficients are requantized.
 
-A complete, explicitly declared one-layer quantized MTP predictor is converted
+A complete, explicitly declared one-layer dense MTP predictor is converted
 alongside the target. Once a fusion matrix identifies a predictor, every head
-tensor is required. Mixed-quantization predictor namespaces also reject a
-missing fusion matrix. Its typed
-configuration remains subject to native tensor and graph admission. Floating
-text conversions and legacy uniform sources with declared bare `mtp.*`
-auxiliary tensors retain their existing omission policy when no complete
-predictor is identified. Omitted tensors never grant MTP capability.
+tensor is required. Any predictor namespace with a missing fusion matrix fails
+conversion. Raw BF16 predictors preserve zero-centered norm scales with an
+explicit gain offset of one; already folded affine-source gains remain folded.
+The official BF16 MoE per-expert predictor layout also converts to canonical
+expert banks without dropping source tensors. Quantized MoE heads and dedicated
+predictor embeddings are unsupported. Typed configuration remains subject to
+native tensor and graph admission, and these new BF16 heads still need independent
+runtime and performance qualification. Headless sources retain no MTP capability.
 The optional MTP config may set `draft_readout_bits` to three or four, deriving
 a coarse proposal matrix from the original vocabulary head; each proposal is
 rescored over 64 selected rows with the original matrix. The full target

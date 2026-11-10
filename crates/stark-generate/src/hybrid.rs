@@ -348,6 +348,7 @@ impl HybridBackend {
             Model::load_with_native_decode(path, true)
         }
         .map_err(|_| "hybrid_model_load_failed")?;
+
         let image_runtime_identity = if images {
             if !model.supports_images() {
                 return Err("images_not_supported");

@@ -27,9 +27,15 @@ use crate::{
             stream::{LanguageModelStream, LanguageModelStreamOptions},
         },
     },
-    parameters::ParameterLoader,
+    parameters::{ParameterLoader, ParameterStorageStatistics},
 };
 
+mod assistant;
+#[cfg(all(test, backend = "metal"))]
+mod assistant_tests;
+pub use assistant::Gemma4AssistantAdmissionError;
+
+pub use crate::encodable_block::gemma4_assistant::Gemma4Assistant;
 mod decoder_contract;
 mod flash;
 #[cfg(test)]
@@ -160,11 +166,13 @@ impl PreparedGemmaImage {
 pub struct Gemma4VisionLanguageModel<B: Backend> {
     engine: Arc<Engine<B>>,
     language_model: LanguageModel<B>,
-    tower: ImageTower<B>,
+    tower: Option<ImageTower<B>>,
     failed: bool,
     identity: VisionArtifactIdentity,
     codec_eos_token: Option<String>,
     profile: ImageProfile,
+    parameter_storage: ParameterStorageStatistics,
+    vision_parameter_bytes: usize,
 }
 
 enum ImageTower<B: Backend> {
@@ -331,6 +339,23 @@ impl<B: Backend> Engine<B> {
         self: &Arc<Self>,
         path: &Path,
     ) -> Result<Gemma4VisionLanguageModel<B>, NativeVisionError<B>> {
+        self.load_gemma4_image_artifact(path, true)
+    }
+
+    /// Explicit validation comparison using the same exact E2B artifact/head.
+    /// No tower buffers are ever allocated or retained in this loading arm.
+    pub fn load_gemma4_text_validation_model(
+        self: &Arc<Self>,
+        path: &Path,
+    ) -> Result<Gemma4VisionLanguageModel<B>, NativeVisionError<B>> {
+        self.load_gemma4_image_artifact(path, false)
+    }
+
+    fn load_gemma4_image_artifact(
+        self: &Arc<Self>,
+        path: &Path,
+        load_tower: bool,
+    ) -> Result<Gemma4VisionLanguageModel<B>, NativeVisionError<B>> {
         if self.capture_manager.is_some() || path.join("speculator").exists() {
             return Err(InvalidInput("Gemma image loading requires capture-free non-speculative execution").into());
         }
@@ -365,6 +390,12 @@ impl<B: Backend> Engine<B> {
         }
         let raw: serde_json::Value = serde_json::from_slice(&components["config.json"])?;
         let profile = validate_contract(&raw)?;
+        if !load_tower
+            && (hashes.get("config.json").map(String::as_str) != Some(assistant::TARGET_CONFIG)
+                || hashes.get("model.safetensors").map(String::as_str) != Some(assistant::TARGET_WEIGHTS))
+        {
+            return Err(InvalidInput("Gemma text validation requires the exact qualified E2B artifact").into());
+        }
         // E2B retains its original admission cap. E4B's larger PLE decoder
         // needs its own bound; neither profile permits unbounded components.
         if selected["model.safetensors"].metadata()?.len() > profile.weight_limit_gib * 1024 * 1024 * 1024u64 {
@@ -410,18 +441,30 @@ impl<B: Backend> Engine<B> {
         let language: LanguageModelConfig = serde_json::from_value(serde_json::json!({"type":"LanguageModelConfig",
             "decoder_config":config.decoder_config,"token_codec_config":config.token_codec_config,"generation_config":config.generation_config}))?;
         let loader = ParameterLoader::new(&selected["model.safetensors"], &*self.context)?;
-        let tower = if profile.unified {
-            ImageTower::Unified(unified::UnifiedVisionEmbedder::new(&*self.context, &loader.tree().subtree("vision"))?)
+        let tower = if !load_tower {
+            None
+        } else if profile.unified {
+            Some(ImageTower::Unified(unified::UnifiedVisionEmbedder::new(
+                &*self.context,
+                &loader.tree().subtree("vision"),
+            )?))
         } else {
-            ImageTower::Encoder(Gemma4VisionTower::new(
+            Some(ImageTower::Encoder(Gemma4VisionTower::new(
                 &*self.context,
                 &loader.tree().subtree("vision"),
                 profile.model_dim,
-            )?)
+            )?))
         };
         let language_model =
             self.language_model_from_config(path, language, &loader, Some(tokenizer), SpeculatorPolicy::Disabled)?;
-        loader.tree().assert_all_tensors_validated()?;
+        if load_tower {
+            loader.tree().assert_all_tensors_validated()?;
+        }
+        let vision_parameter_bytes = loader.tree().assert_only_unloaded_subtree("vision")?;
+        if vision_parameter_bytes == 0 {
+            return Err(InvalidInput("Gemma artifact has no declared vision parameters").into());
+        }
+        let parameter_storage = loader.storage_statistics();
         drop(loader);
         for (name, expected) in &hashes {
             let file = selected.get_mut(name).ok_or(InvalidInput("missing Gemma selected component"))?;
@@ -438,6 +481,8 @@ impl<B: Backend> Engine<B> {
             failed: false,
             codec_eos_token,
             profile,
+            parameter_storage,
+            vision_parameter_bytes,
             identity: VisionArtifactIdentity {
                 schema_version: 4,
                 config_sha256: hash("config.json")?,
@@ -494,6 +539,25 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
     ) -> Option<usize> {
         self.language_model.generation_memory_bytes_for_request(input_tokens, context_tokens, max_new_tokens, false)
     }
+    pub fn decoder_reused_text_memory_bytes(
+        &self,
+        state: &LanguageModelState<B>,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+        capture_prefix: bool,
+        reused_input_tokens: u32,
+    ) -> Option<usize> {
+        self.language_model.generation_memory_bytes_reusing_text_prefix(
+            state,
+            input_tokens,
+            context_tokens,
+            max_new_tokens,
+            capture_prefix,
+            reused_input_tokens,
+        )
+    }
+
     pub fn reclaim_decoder_cached_memory(&self) -> Result<usize, B::Error> {
         self.language_model.reclaim_cached_memory()
     }
@@ -502,6 +566,59 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
     }
     pub fn is_fenced(&self) -> bool {
         self.failed
+    }
+    pub fn resident_parameter_bytes(&self) -> usize {
+        self.parameter_storage.resident_bytes
+    }
+    pub fn image_tower_resident(&self) -> bool {
+        self.tower.is_some()
+    }
+
+    pub fn logical_vision_parameter_bytes(&self) -> usize {
+        self.vision_parameter_bytes
+    }
+
+    /// Plain-text requests restore owned ring payload and shared-KV owners.
+    /// Image-prefilled and failed states remain excluded by the decoder guards.
+    pub fn prefix_reuse_supported(&self) -> bool {
+        !self.failed && self.language_model.text_prefix_snapshot_supported()
+    }
+
+    pub fn decoder_text_prefix_memory_bytes(
+        &self,
+        input_tokens: u32,
+        context_tokens: u32,
+        max_new_tokens: u32,
+    ) -> Option<usize> {
+        self.language_model.generation_memory_bytes_with_text_prefix(input_tokens, context_tokens, max_new_tokens)
+    }
+
+    pub fn prepare_text_prefix_capture(
+        &mut self,
+        state: &mut LanguageModelState<B>,
+        position: usize,
+    ) -> Result<(), NativeVisionError<B>> {
+        if self.failed {
+            return Err(InvalidInput("native Gemma model is fenced").into());
+        }
+        self.language_model.prepare_text_prefix_capture(state, position)?;
+        Ok(())
+    }
+
+    pub fn rewind_state(
+        &mut self,
+        state: &mut LanguageModelState<B>,
+        prefix_length: usize,
+        max_context_length: Option<u32>,
+        sampling_seed: u64,
+    ) -> Result<(), NativeVisionError<B>> {
+        if self.failed {
+            return Err(InvalidInput("native Gemma model is fenced").into());
+        }
+        super::finish_text_prefix_restore(
+            self.language_model.restore_text_prefix(state, prefix_length, max_context_length, sampling_seed),
+            &mut self.failed,
+        )
     }
     pub fn default_stream_options(&self) -> LanguageModelStreamOptions {
         self.language_model.default_stream_options()
@@ -674,7 +791,8 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
         let context = &self.engine.context;
         let mut commands =
             context.create_command_buffer(Some("Gemma vision"), None).map_err(NativeVisionError::backend)?;
-        let output = self.tower.encode(&image.patches.patches, image.patches.grid, &mut commands)?;
+        let tower = self.tower.as_ref().ok_or(InvalidInput("Gemma image tower is not loaded"))?;
+        let output = tower.encode(&image.patches.patches, image.patches.grid, &mut commands)?;
         let count = (image.image_token_count() * self.profile.model_dim) as usize;
         let bytes = count * size_of::<bf16>();
         if (&output).size() != bytes {
@@ -730,7 +848,11 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
         if self.failed {
             return Err(InvalidInput("Gemma vision model is fenced").into());
         }
-        self.language_model.preflight_multimodal_stream(tokens, state, &options)?;
+        if state.tokens().is_empty() {
+            self.language_model.preflight_multimodal_stream(tokens, state, &options)?;
+        } else {
+            self.language_model.preflight_restored_text_stream(tokens, state, &options)?;
+        }
         match self.language_model.stream(tokens, state, options) {
             Ok(stream) => Ok(stream.with_failure_fence(&mut self.failed)),
             Err(error) => {
@@ -738,6 +860,14 @@ impl<B: Backend> Gemma4VisionLanguageModel<B> {
                 Err(error.into())
             },
         }
+    }
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+impl Gemma4VisionLanguageModel<crate::backends::metal::Metal> {
+    pub fn metal_allocated_bytes(&self) -> usize {
+        use metal::MTLDevice;
+        self.engine.context.device.current_allocated_size()
     }
 }
 

@@ -19,6 +19,51 @@ entries do not enable reuse; the loaded worker's readiness contract remains the
 runtime authority. Follow the [model-family support contract](MODEL_SUPPORT.md),
 [generation contract](GENERATION.md#prefix-reuse) and [repository rules](../AGENTS.md).
 
+## Default images must preserve text behavior
+
+Image support is the default for an image-capable model. New families,
+checkpoints/fine-tunes, sizes, quantizations, formats, backends and state-affecting
+options must complete the applicable acceptance matrix in the
+[default-image parity worklist](IMAGE_DEFAULT_PARITY_PLAN.md). This requirement
+also applies when extending an existing family; shared implementation is not
+artifact qualification.
+
+- Verify the normal catalog/preparation/load route retains image support and
+  honest live capabilities after local checks. Missing implementation or failed
+  qualification stays visible; a text-only default is not a parity fix.
+- Establish exact text cache restoration on the image-loaded worker. Include
+  scope/context/MTP keys, shrinking/divergent/chunk-edge prompts and all required
+  invalidations. Keep incomplete restoration disabled and the work item open.
+- Compare qualified prior text execution, candidate text-only loading and the
+  candidate default image-loaded worker with matching weights, precision,
+  sampling/seed, context, output/stop budget, MTP policy and dispatch options.
+  Measure cache-cold text and reused follow-ups separately. Predeclare the
+  regression bound from repeated baseline variability; a short or inconclusive
+  observation cannot close broad performance qualification.
+- Where the model has a compatible supported text MTP path, retain its declared
+  head/config and user/model opt-in policy with images loaded. Verify actual
+  drafts and matched-mode output controls. Inspect the real source inventory;
+  neither arbitrary auxiliary tensors nor a converter that dropped the head
+  establish a valid N/A disposition.
+- Exercise text MTP/cache → real image → text MTP/cache, including failures and
+  cancellation. Image requests have zero drafts/proposals/reuse; following text
+  starts fresh, resumes its selected MTP policy and can subsequently reuse state.
+- Charge resident tower/head weights, predictor and snapshot state, verification
+  and prefill scratch, staging and allocation margins even while image MTP is
+  off. Report load cost and memory separately from inference performance.
+
+For a genuinely text-only source, record why image on/off comparisons are N/A;
+the normal text cache/performance/MTP gates remain. For a model without a
+compatible MTP head, record the actual absence or unsupported architecture and
+its disposition. An image-capable source with no Stark bridge is an unfinished
+image implementation, not a text-only source. Compare stochastic outputs only
+under matching algorithms/options; different valid MTP sampling policies need
+their own stated correctness criteria.
+
+Completion must distinguish implementation, artifact proof, measured speed,
+review/CI, merge, release and installed behavior. Keep failed, deferred and
+untested scopes explicit. The worklist does not schedule model runs by itself.
+
 ## Record changes and experiments
 
 Create or extend a [model experiment record](model-experiments/README.md) for
@@ -160,6 +205,13 @@ cache capacity separately, and distinguish payload accounting from process RSS,
 allocator overhead and transient copies. Record observed peak memory when
 available. Keep timing observations separate
 from correctness results. A successful restore does not establish a speedup.
+
+Choose the model's MTP default by measured speed: use whichever supported
+setting is faster, MTP on or off, in a matched comparison on representative text
+requests. Record the artifact, backend, draft depth and timing evidence for that
+choice. Supporting an MTP head does not by itself justify enabling it by
+default. Preserve an explicit user override and keep image support enabled by
+default independently of this choice.
 
 Update the current support documentation with one of these dispositions:
 

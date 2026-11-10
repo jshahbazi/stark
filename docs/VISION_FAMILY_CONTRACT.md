@@ -55,11 +55,37 @@ publication, invalidation and artifact-specific qualification requirements.
 
 Image requests still use fresh state and clear retained text prefixes. Their
 image-dependent M-RoPE positions and multimodal state are excluded from text
-snapshot capture and restoration. Gemma 3/4 sliding KV rings remain unsupported
-for reuse because overwritten ring rows have no snapshot/restore implementation.
+snapshot capture and restoration. The Gemma 4 image worker separately restores
+owned sliding-ring K/V payload and its offset, length and traversal origin at
+the same 1,024-token text boundary. Shared-KV layers reuse their owning layer's
+snapshot. Gemma 3 now uses the same model-bound worker capture/restore contract,
+including suffix-only prefill and an actual-prefill-count invariant. Its exact
+4B artifact is awaiting execution in the
+[continuation attempt](model-experiments/2026-11-09-gemma-next-image-parity.md);
+the shared ring primitive alone does not qualify its complete image worker. See the
+[Gemma 4 attempt](model-experiments/2026-11-09-gemma4-image-text-parity.md)
+for exact-artifact checks and remaining scope.
 No artifact inherits numerical qualification from another checkpoint, precision
-or conversion layout. Prefix reuse does not enable MTP; image conversion omits
-its predictor weights pending separate qualification.
+or conversion layout. Prefix reuse does not by itself enable MTP. Dense affine
+version-3 conversion retains a complete declared compatible predictor and binds
+its configuration and tensors to the admitted target. Text requests can execute
+that predictor while the tower is resident; image requests retain zero drafts.
+Admitted dense BF16, dense affine and affine MoE artifacts retain a separate ordinary
+text execution graph using the existing Legacy numerical policy, unscaled text
+RoPE and, when an admitted compatible head exists, batched MTP verification.
+It shares immutable validated matrix buffers
+with the reference image graph; graph-specific controls remain independent and
+any signed-code representation change uses private storage. Normal text worker
+requests select this graph, including MTP-off requests. Image requests use the
+reference graph and zero drafts. Their states have distinct model identities;
+retained dense text prefixes additionally key the execution graph, precision and
+draft depth. Cross-graph preflight rejection does not fence a usable model.
+The [27B follow-up](archive/runs/2026-11-09-qwen27-shared-weight-fast-text.md)
+records exact configuration/payload equality and bounded performance and cache
+checks. The [remaining-family comparison](benchmarks/2026-11-09-qwen-remaining-image-text-parity.md)
+records bounded headless dense BF16, affine and affine MoE speed evidence, including
+shared expert banks. These results do not qualify BF16 heads, other artifacts or
+BF16 MoE, which retains its reference text graph pending separate work.
 
 ## Config-derived family profile
 
@@ -93,8 +119,15 @@ covered by geometry fixtures; that evidence alone does not establish runtime
 execution for each size.
 
 Required matrices and convolution weights must be BF16. Explicit norm-scale,
-`a_log` and `dt_bias` control-weight exceptions may originate in FP32. Declared
-auxiliary MTP tensors are omitted as in the existing text adapter.
+`a_log` and `dt_bias` control-weight exceptions may originate in FP32. Complete
+declared raw BF16 dense predictors and the official separate-expert BF16 MoE
+predictor now have conversion and strict tensor-contract implementations. A
+present incomplete head fails conversion; it is never silently stripped. Raw
+norm scales retain the explicit gain offset of one. The pinned 0.8B output uses
+schema 3 when a head is retained; existing headless schema-2 artifacts keep their
+frozen contract. Native BF16-head execution and performance remain unqualified
+in this increment, and the full official BF16 MoE payload is absent locally.
+Quantized MoE heads and dedicated predictor embeddings require separate support.
 
 Weights may differ from the official checkpoint. Metadata must use recognized
 forms:

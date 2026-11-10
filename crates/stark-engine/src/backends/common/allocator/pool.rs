@@ -6,6 +6,8 @@ pub struct PoolAllocator<T> {
     pages: [Mutex<VecDeque<T>>; 32],
     #[cfg(test)]
     requested_bytes: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    reserved_bytes: std::sync::atomic::AtomicUsize,
 }
 
 impl<T> PoolAllocator<T> {
@@ -14,6 +16,8 @@ impl<T> PoolAllocator<T> {
             pages: Default::default(),
             #[cfg(test)]
             requested_bytes: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            reserved_bytes: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -29,7 +33,10 @@ impl<T> PoolAllocator<T> {
         let page = if let Some(page) = self.pages[(size - 1).bit_width() as usize].lock().pop_front() {
             page
         } else {
-            upstream(size.next_power_of_two())?
+            let page = upstream(size.next_power_of_two())?;
+            #[cfg(test)]
+            self.reserved_bytes.fetch_add(size.next_power_of_two(), std::sync::atomic::Ordering::Relaxed);
+            page
         };
 
         Ok(PoolAllocation {
@@ -44,6 +51,13 @@ impl<T> PoolAllocator<T> {
     #[cfg(test)]
     pub(crate) fn requested_bytes(&self) -> usize {
         self.requested_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Upstream payload retained by this pool, including page rounding. Does
+    /// not include Metal command heaps, argument tables or constant pages.
+    #[cfg(test)]
+    pub(crate) fn reserved_bytes(&self) -> usize {
+        self.reserved_bytes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn alias(
@@ -109,5 +123,8 @@ mod tests {
         drop(retained);
         assert_eq!(*allocate().page(), retained_page);
         assert_eq!(next_page.get(), 2);
+        assert_eq!(pool.reserved_bytes(), 8);
+        assert!(pool.allocate(16, |_| Err::<usize, _>(())).is_err());
+        assert_eq!(pool.reserved_bytes(), 8);
     }
 }

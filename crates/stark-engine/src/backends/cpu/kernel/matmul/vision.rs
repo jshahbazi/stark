@@ -55,6 +55,56 @@ pub fn reference_gather_matmul_bf16(
     }
 }
 
+/// Scalar reference for the pinned MLX wide head's float4/32-lane schedule.
+/// CPU dot association is explicit; the actual Metal source gate qualifies
+/// the hardware dot operation against the pinned MLX Metal implementation.
+#[kernel(MlxHeadMatmulBF16)]
+pub fn mlx_head_matmul_bf16(
+    input: *const bf16,
+    weights: *const bf16,
+    output: *mut f32,
+    m: u32,
+    n: u32,
+    k: u32,
+) {
+    let (m, n, k) = (m as usize, n as usize, k as usize);
+    assert!(k.is_multiple_of(4));
+    for row in 0..m {
+        for column in 0..n {
+            let dot4 = |vector: usize| {
+                let mut products = [0.0f32; 4];
+                for (part, product) in products.iter_mut().enumerate() {
+                    let inner = vector * 4 + part;
+                    *product =
+                        unsafe { (*input.add(row * k + inner)).to_f32() * (*weights.add(column * k + inner)).to_f32() };
+                }
+                ((products[0] + products[1]) + products[2]) + products[3]
+            };
+            let vectors = k / 4;
+            let main = vectors / 256 * 256;
+            let mut lanes = [0.0f32; 32];
+            for (lane, result) in lanes.iter_mut().enumerate() {
+                for base in (0..main).step_by(256) {
+                    let mut acc = 0.0f32;
+                    for i in 0..8 {
+                        acc += dot4(base + i * 32 + lane);
+                    }
+                    *result += acc;
+                }
+                for vector in (main + lane..vectors).step_by(32) {
+                    *result += dot4(vector);
+                }
+            }
+            for offset in [16, 8, 4, 2, 1] {
+                for lane in 0..offset {
+                    lanes[lane] += lanes[lane + offset];
+                }
+            }
+            unsafe { *output.add(row * n + column) = lanes[0] };
+        }
+    }
+}
+
 /// Reproduce the pinned BF16 operation's FP32 accumulation before its final cast.
 /// Contiguous dot products use eight four-lane registers; the non-transposed
 /// strided and Conv3d paths use four independent scalar partial sums.

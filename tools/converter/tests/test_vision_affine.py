@@ -17,6 +17,56 @@ from stark_convert.streaming import ConversionError, read_safetensors_header
 family_source = _family_source
 
 
+def add_dense_mtp(config, tensors):
+    config["text_config"]["mtp_num_hidden_layers"] = 1
+    trunk, head = "language_model.model", "language_model.mtp"
+    for name, value in list(tensors.items()):
+        if name.startswith(trunk + ".layers.1."):
+            tensors[name.replace(trunk + ".layers.1.", head + ".layers.0.")] = value
+    for name in ("pre_fc_norm_embedding", "pre_fc_norm_hidden", "norm"):
+        tensors[f"{head}.{name}.weight"] = tensors[f"{trunk}.norm.weight"]
+    tensors[f"{head}.fc.weight"] = "BF16", np.zeros((128, 256), dtype="<u2")
+
+
+def test_affine_image_conversion_preserves_complete_text_predictor(family_source, tmp_path, monkeypatch):
+    source, config, tensors = affine_image_source(family_source, tmp_path, monkeypatch, True)
+    add_dense_mtp(config, tensors)
+    save_tensors(source / "model.safetensors", tensors)
+    (source / "config.json").write_text(json.dumps(config))
+    output = tmp_path / "with-mtp"
+    cli.convert(source, output, repo=FINE_TUNE, artifact_mode="vision-language")
+    published = json.loads((output / "config.json").read_text())
+    assert published["mtp_config"]["target_layer"] == 1
+    predictor = published["mtp_config"]["transformer_config"]["layer_configs"][0]
+    target = published["decoder_config"]["transformer_config"]["layer_configs"][1]
+    assert {k: v for k, v in predictor.items() if k != "rope_config"} == {
+        k: v for k, v in target.items() if k != "rope_config"
+    }
+    assert predictor["rope_config"]["type"] == "UnscaledRoPEConfig"
+    assert target["rope_config"]["type"] == "Qwen35MRoPEConfig"
+    assert predictor["rope_config"]["head_dim"] == target["rope_config"]["head_dim"]
+    _, infos = read_safetensors_header(output / "model.safetensors")
+    assert infos["mtp.fusion.weights.weights"].shape == (128, 256)
+    assert infos["mtp.transformer.layers.0.mlp.down_projection.weights.weights"].dtype == "U8"
+    assert any(name.startswith("vision.") for name in infos)
+
+
+@pytest.mark.parametrize("mutation", ["extra", "missing", "undeclared"])
+def test_image_predictor_is_complete_and_fails_closed(family_source, tmp_path, monkeypatch, mutation):
+    source, config, tensors = affine_image_source(family_source, tmp_path, monkeypatch, True)
+    add_dense_mtp(config, tensors)
+    if mutation == "extra":
+        tensors["language_model.mtp.unexpected.weight"] = "BF16", np.zeros((2,), dtype="<u2")
+    elif mutation == "missing":
+        del tensors["language_model.mtp.fc.weight"]
+    else:
+        del config["text_config"]["mtp_num_hidden_layers"]
+    save_tensors(source / "model.safetensors", tensors)
+    (source / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ConversionError):
+        build_qwen35_plan(source, include_vision=True)
+
+
 def affine_image_source(family_source, tmp_path, monkeypatch, vl_wrapper):
     original = json.loads((family_source / "config.json").read_text())
     _, old = read_safetensors_header(family_source / "model.safetensors")

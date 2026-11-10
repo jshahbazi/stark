@@ -1,3 +1,8 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use derive_more::Debug;
 use thiserror::Error;
 
@@ -5,7 +10,7 @@ mod coarse;
 
 use crate::{
     backends::common::{
-        Backend, BufferCpuAccessible, BufferMut,
+        Backend, BufferMut, BufferRef, Context,
         gpu_types::{QuantizationMethod, QuantizationMode},
         kernel::matmul::{MatmulB, QuantParams, QuantParamsLayout, QuantizedB, QuantizedCorrection},
     },
@@ -92,16 +97,17 @@ pub fn parse_spec<B: Backend>(spec: &AnyWeightMatrixSpec) -> Result<ParsedWeight
 }
 
 struct Quantized<B: Backend> {
-    scales: B::GlobalBuffer,
-    correction: QuantizedCorrection<B::GlobalBuffer>,
+    scales: Arc<B::GlobalBuffer>,
+    correction: QuantizedCorrection<Arc<B::GlobalBuffer>>,
     params: QuantParams,
     info: QuantizationInfo,
     signed_codes: bool,
 }
 
 pub struct WeightMatrix<B: Backend> {
-    values: B::GlobalBuffer,
+    values: Arc<B::GlobalBuffer>,
     quantized: Option<Quantized<B>>,
+    representation_copy_bytes: Arc<AtomicUsize>,
 }
 
 impl<B: Backend> WeightMatrix<B> {
@@ -134,10 +140,11 @@ impl<B: Backend> WeightMatrix<B> {
         let (rows, columns) = physical_shape(&layout, output_dim, input_dim);
 
         let Some(info) = quantization_info else {
-            let values = tree.leaf("weights")?.validate(&[rows, columns], data_type)?.read_buffer()?;
+            let values = tree.leaf("weights")?.validate(&[rows, columns], data_type)?.read_shared_weight()?;
             return Ok(Self {
                 values,
                 quantized: None,
+                representation_copy_bytes: tree.representation_copy_counter(),
             });
         };
         // Parameters swap the weight axes once K is grouped: output-input stores [G, N], input-output stores [N, G].
@@ -173,13 +180,15 @@ impl<B: Backend> WeightMatrix<B> {
             .mode
             .packed_row_bytes(columns)
             .ok_or_else(|| WeightMatrixError::UnsupportedConfiguration("packed row size overflow".into()))?;
-        let values = tree.leaf("weights")?.validate(&[rows, row_bytes], storage_data_type)?.read_buffer()?;
+        let values = tree.leaf("weights")?.validate(&[rows, row_bytes], storage_data_type)?.read_shared_weight()?;
         let params = QuantParams::new(params_layout, rows, groups)
             .with_materialized_affine_input_sum(materialize_affine_input_sum);
-        let load_plane =
-            |name: &str, shape: [u32; 2], storage_type: DataType| -> Result<B::GlobalBuffer, WeightMatrixError<B>> {
-                Ok(tree.leaf(name)?.validate(&shape, storage_type)?.read_buffer()?)
-            };
+        let load_plane = |name: &str,
+                          shape: [u32; 2],
+                          storage_type: DataType|
+         -> Result<Arc<B::GlobalBuffer>, WeightMatrixError<B>> {
+            Ok(tree.leaf(name)?.validate(&shape, storage_type)?.read_shared_weight()?)
+        };
         let scales = load_plane("scales", params.scale_shape(), data_type)?;
         let correction = match info.method {
             QuantizationMethod::ScaleBias => {
@@ -195,6 +204,7 @@ impl<B: Backend> WeightMatrix<B> {
 
         Ok(Self {
             values,
+            representation_copy_bytes: tree.representation_copy_counter(),
             quantized: Some(Quantized {
                 scales,
                 correction,
@@ -206,7 +216,7 @@ impl<B: Backend> WeightMatrix<B> {
     }
 
     pub fn values(&self) -> &B::GlobalBuffer {
-        &self.values
+        self.values.as_ref()
     }
 
     pub fn quantization(&self) -> Option<QuantizationInfo> {
@@ -214,30 +224,34 @@ impl<B: Backend> WeightMatrix<B> {
     }
 
     pub fn scales(&self) -> Option<&B::GlobalBuffer> {
-        self.quantized.as_ref().map(|quantized| &quantized.scales)
+        self.quantized.as_ref().map(|quantized| quantized.scales.as_ref())
     }
 
     pub fn zero_points(&self) -> Option<&B::GlobalBuffer> {
-        self.quantized.as_ref()?.correction.zero_points()
+        self.quantized.as_ref()?.correction.zero_points().map(Arc::as_ref)
     }
 
     pub fn biases(&self) -> Option<&B::GlobalBuffer> {
-        self.quantized.as_ref()?.correction.biases()
+        self.quantized.as_ref()?.correction.biases().map(Arc::as_ref)
     }
 
     pub fn matmul_b(&self) -> MatmulB<&B::GlobalBuffer> {
         let Some(quantized) = self.quantized.as_ref() else {
             return MatmulB::FullPrecision {
-                b: &self.values,
+                b: self.values.as_ref(),
             };
         };
         let mode = quantized.info.mode;
         let group_size = quantized.info.group_size;
         let signed_codes = quantized.signed_codes;
         MatmulB::Quantized(QuantizedB {
-            codes: &self.values,
-            scales: &quantized.scales,
-            correction: quantized.correction.as_ref(),
+            codes: self.values.as_ref(),
+            scales: quantized.scales.as_ref(),
+            correction: match &quantized.correction {
+                QuantizedCorrection::Symmetric => QuantizedCorrection::Symmetric,
+                QuantizedCorrection::Biases(bytes) => QuantizedCorrection::Biases(bytes.as_ref()),
+                QuantizedCorrection::ZeroPoints(bytes) => QuantizedCorrection::ZeroPoints(bytes.as_ref()),
+            },
             params: quantized.params,
             mode,
             group_size,
@@ -245,11 +259,40 @@ impl<B: Backend> WeightMatrix<B> {
         })
     }
 
-    pub fn try_prepare_a8_storage(&mut self) -> bool {
+    pub fn try_prepare_a8_storage(
+        &mut self,
+        context: &B::Context,
+    ) -> Result<bool, WeightMatrixError<B>> {
         let Some(quantized) = self.quantized.as_mut() else {
-            return false;
+            return Ok(false);
         };
-        quantized.prepare_a8_storage(&mut self.values)
+        if matches!(quantized.info.mode, QuantizationMode::U3 | QuantizationMode::U5 | QuantizationMode::U6)
+            || quantized.params.materializes_affine_input_sum()
+            || quantized.params.layout() != QuantParamsLayout::GroupOutput
+        {
+            return Ok(false);
+        }
+        if quantized.info.mode != QuantizationMode::U4 && !quantized.signed_codes {
+            if let Some(sign_flip_mask) = quantized.info.mode.weight_codes_sign_flip_mask() {
+                if Arc::get_mut(&mut self.values).is_none() {
+                    // The image reference graph still reads unsigned source codes.
+                    // Never rewrite its shared bytes when the text graph prepares A8.
+                    let mut copy = context.create_buffer(self.values.as_ref().size()).map_err(|error| {
+                        WeightMatrixError::ParameterError(ParameterLoaderError::BackendError(error))
+                    })?;
+                    copy.as_slice_mut::<u8>().copy_from_slice(self.values.as_ref().as_slice::<u8>());
+                    self.representation_copy_bytes.fetch_add(self.values.as_ref().size(), Ordering::Relaxed);
+                    self.values = Arc::new(copy);
+                }
+                let values = Arc::get_mut(&mut self.values).unwrap();
+                let broadcast_mask = u64::from(sign_flip_mask) * 0x0101_0101_0101_0101;
+                let (prefix, words, suffix) = bytemuck::pod_align_to_mut::<u8, u64>(values.as_slice_mut());
+                words.iter_mut().for_each(|word| *word ^= broadcast_mask);
+                prefix.iter_mut().chain(suffix.iter_mut()).for_each(|code| *code ^= sign_flip_mask);
+            }
+            quantized.signed_codes = true;
+        }
+        Ok(true)
     }
 
     pub fn set_source_output_widths(
@@ -272,34 +315,6 @@ impl<B: Backend> WeightMatrix<B> {
             QuantizationMode::I8 | QuantizationMode::U8 => Some(true),
             QuantizationMode::U3 | QuantizationMode::U5 | QuantizationMode::U6 => None,
         })
-    }
-}
-
-impl<B: Backend> Quantized<B> {
-    fn prepare_a8_storage(
-        &mut self,
-        values: impl BufferMut<Buffer: BufferCpuAccessible>,
-    ) -> bool {
-        if matches!(self.info.mode, QuantizationMode::U3 | QuantizationMode::U5 | QuantizationMode::U6)
-            || self.params.materializes_affine_input_sum()
-        {
-            return false;
-        }
-        if self.params.layout() != QuantParamsLayout::GroupOutput {
-            return false;
-        }
-        if self.info.mode != QuantizationMode::U4 {
-            if !self.signed_codes
-                && let Some(sign_flip_mask) = self.info.mode.weight_codes_sign_flip_mask()
-            {
-                let broadcast_mask = u64::from(sign_flip_mask) * 0x0101_0101_0101_0101;
-                let (prefix, words, suffix) = bytemuck::pod_align_to_mut::<u8, u64>(values.as_slice_mut());
-                words.iter_mut().for_each(|word| *word ^= broadcast_mask);
-                prefix.iter_mut().chain(suffix.iter_mut()).for_each(|code| *code ^= sign_flip_mask);
-            }
-            self.signed_codes = true;
-        }
-        true
     }
 }
 

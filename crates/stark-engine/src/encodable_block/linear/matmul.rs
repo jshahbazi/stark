@@ -129,7 +129,14 @@ impl<B: Backend> LinearMatmul<B> {
 
         let biases = load_biases(weights_data_type, output_data_type, output_dim, bias_tree)?;
 
-        let reference_matmul = if weights_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16 {
+        let reference_linear = matches!(
+            weights_tree.numerical_profile(),
+            NumericalProfile::Qwen35ReferenceBF16 | NumericalProfile::QwenMtpSourceBF16
+        );
+        #[cfg(test)]
+        let reference_linear =
+            reference_linear || weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears;
+        let reference_matmul = if reference_linear {
             if weights_data_type != DataType::BF16
                 || input_data_type != DataType::BF16
                 || !matches!(output_data_type, DataType::BF16 | DataType::F32)
@@ -140,7 +147,18 @@ impl<B: Backend> LinearMatmul<B> {
                     "reference BF16 linear requires full BF16 weights/activations without biases".into(),
                 ));
             }
-            Some(ReferenceBF16Matmul::new(context).map_err(LinearMatmulError::BackendError)?)
+            let reference = ReferenceBF16Matmul::new(context).map_err(LinearMatmulError::BackendError)?;
+            let source_wide = weights_tree.numerical_profile() == NumericalProfile::QwenMtpSourceBF16;
+            #[cfg(test)]
+            let source_wide = source_wide
+                || (weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears
+                    && std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some());
+            let reference = if source_wide {
+                reference.with_mlx_wide(context).map_err(LinearMatmulError::BackendError)?
+            } else {
+                reference
+            };
+            Some(reference)
         } else {
             None
         };
@@ -193,11 +211,16 @@ impl<B: Backend> LinearMatmul<B> {
     pub(super) fn prepare_a8(
         &mut self,
         context: &B::Context,
-    ) -> Option<ActivationQuantization> {
+    ) -> Result<Option<ActivationQuantization>, LinearMatmulError<B>> {
         let mut candidate = self.matmul_shape(1, false);
-        candidate.signed_codes = self.matrix.a8_signed_codes()?;
-        let quantization = self.kernel.lock().select_activation_quantization(&candidate, context)?;
-        self.matrix.try_prepare_a8_storage().then_some(quantization)
+        let Some(signed_codes) = self.matrix.a8_signed_codes() else {
+            return Ok(None);
+        };
+        candidate.signed_codes = signed_codes;
+        let Some(quantization) = self.kernel.lock().select_activation_quantization(&candidate, context) else {
+            return Ok(None);
+        };
+        Ok(self.matrix.try_prepare_a8_storage(context)?.then_some(quantization))
     }
 
     pub(crate) fn encode_with_a(

@@ -538,6 +538,7 @@ class Desktop:
                 rows.append(
                     {
                         **{key: model[key] for key in ("id", "name", "path")},
+                        "source": model["source"],
                         "api_id": api_model_id(model),
                         "display": display,
                         "artifact_mode": display.get("artifact_mode", "text") if display else "text",
@@ -2186,7 +2187,21 @@ class Desktop:
             active = self.active_mode == "chat" and self.worker is not None
             capability = mtp_capabilities({"mtp": getattr(self.worker, "mtp", None)} if active else {})
             model = next((m for m in self.models if m["id"] == self.active_model), None)
-            enabled = bool(capability["supported"] and model and model.get("mtp_enabled", True) is True)
+            default_enabled = True
+            if capability["supported"] and model and "mtp_enabled" not in model:
+                display = model_display(model) or {}
+                default_enabled = not (
+                    capability.get("verification", "").startswith("gemma4-")
+                    or str(display.get("family_id") or "").startswith("gemma")
+                    or (
+                        (
+                            display.get("group_id") == "repo:Qwen/Qwen3.5-0.8B"
+                            or model.get("source") == "huggingface:Qwen/Qwen3.5-0.8B"
+                        )
+                        and display.get("quantization") == "BF16"
+                    )
+                )
+            enabled = bool(capability["supported"] and model and model.get("mtp_enabled", default_enabled) is True)
             return capability, enabled
 
     def configure_mtp(self, payload):

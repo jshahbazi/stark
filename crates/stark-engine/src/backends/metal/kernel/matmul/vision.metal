@@ -36,6 +36,57 @@ PUBLIC KERNEL(ReferenceGatherMatmulBF16)(
   output[index] = (sums[0][0] + sums[0][1]) + (sums[0][2] + sums[0][3]);
 }
 
+// Pinned MLX 36969c094354086e15d2a327a9c50feb20b9cf11 GemvWide
+// float4/32-lane reduction. Apple Inc., MIT; see mlx-LICENSE and manifest.
+// This test-head path preserves the source accumulation order without changing
+// the existing Torch-reference kernels' arithmetic policy.
+#pragma METAL fp math_mode(fast)
+#pragma METAL fp contract(on)
+PUBLIC KERNEL(MlxHeadMatmulBF16)(
+    const device bfloat* input,
+    const device bfloat* weights,
+    device float* output,
+    constant uint& m,
+    constant uint& n,
+    constant uint& k,
+    const uint task AXIS(m * n * 32, 128)
+) {
+  const uint index = task / 32;
+  const uint lane = task % 32;
+  const uint row = index / n;
+  const uint column = index % n;
+  const device bfloat4* w4 = (const device bfloat4*)(weights + ulong(column) * k);
+  const device bfloat4* x4 = (const device bfloat4*)(input + ulong(row) * k);
+  const uint vectors = k / 4;
+  const uint main = vectors - vectors % (32 * 8);
+  float result = 0.0f;
+  for (uint base = 0; base < main; base += 32 * 8) {
+    float4 wf[8];
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 8; ++i) {
+      wf[i] = float4(w4[base + i * 32 + lane]);
+    }
+    float acc = 0.0f;
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 8; ++i) {
+      acc += dot(wf[i], float4(x4[base + i * 32 + lane]));
+    }
+    result += acc;
+  }
+  for (uint vector = main + lane; vector < vectors; vector += 32) {
+    result += dot(float4(w4[vector]), float4(x4[vector]));
+  }
+  #pragma clang loop unroll(full)
+  for (ushort offset = 16; offset >= 1; offset >>= 1) {
+    result += simd_shuffle_down(result, offset);
+  }
+  if (lane == 0) {
+    output[index] = result;
+  }
+}
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+
 PUBLIC KERNEL(VisionMatmulBF16)(
     const device bfloat* input,
     const device bfloat* weights,

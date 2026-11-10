@@ -22,6 +22,32 @@ unscreened observations have different boundaries. Playground attachment,
 bounded shape recognition and both UI-message removals passed. This does not
 supersede generation-throughput studies or establish an exact full-app duration.
 
+**Gemma 4 warmed cache correction (2026-11-09).** Alternating controls expose
+full-prompt replay after restoration in the original worker. The suffix fix
+passes nonperiodic near-capacity/image controls and improves measured hit
+first-token latency by 43.2–50.2% on the named retained E2B/E4B workloads.
+See the [corrected source-bound controls](2026-11-09-gemma4-warmed-cache.md).
+The [earlier short image-loading measurements](2026-11-09-gemma4-image-text-parity.md)
+retain their own scope; their original worker cache qualification is withdrawn.
+Gemma assistant components remain outside serving qualification.
+
+**Remaining Qwen headless image-loaded text controls (2026-11-09).**
+The [bounded comparison](2026-11-09-qwen-remaining-image-text-parity.md)
+extends immutable shared fast text storage to BF16 0.8B, affine 0.8B and affine
+MoE 35B. Matched MTP0 decode, first-token and request medians pass the registered
+five-percent bound. Complete cache/lifecycle matrices, BF16 source heads, other
+artifacts and retained ddalcu remain separate open gates.
+
+**Qwen dense image-default parity (2026-11-09).** The complete 27B image artifact
+now preserves its ordinary optimized text graph and batched MTP while the image
+tower stays loaded. The [QDIP-07 comparison](2026-11-09-qwen-dense-image-text-parity.md)
+measures 48.309 versus 48.315 decode tok/s at MTP3 on a matched 64-token workload;
+MTP0 also shows no observed regression. Output hashes and all 14 nonperiodic
+near-capacity cache/lifecycle controls pass. The earlier 94.44% regression is
+preserved as a failed predecessor. This is bounded Jundot artifact evidence;
+startup, broader workloads, other models and installed-release behavior remain
+separate qualifications.
+
 **Retained Lily vision-loaded text MTP (2026-11-08).** A
 [short paired check](2026-11-08-lily-vision-text-mtp.md) observes 104.71 tok/s
 on the previous text-only worker and 105.49 tok/s with vision and text MTP

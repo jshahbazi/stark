@@ -16,8 +16,9 @@ pub use crate::{
 
 mod stream;
 
-/// Prompts are prefilled in chunks of this many tokens starting at position
-/// zero. Attention's suffix capacity bounds the chunk length.
+/// Logical prefix-snapshot grid starting at position zero. Attention's suffix
+/// capacity bounds each batch; routed Qwen text can execute smaller submissions
+/// without changing this snapshot identity or grid.
 pub const PREFILL_CHUNK_TOKENS: usize = crate::encodable_block::mixer::attention::ATTENTION_SUFFIX_CAPACITY as usize;
 
 pub struct LanguageModelStreamOptions {
@@ -54,6 +55,14 @@ pub enum LanguageModelStreamError<B: Backend> {
 }
 
 impl<B: Backend> LanguageModel<B> {
+    pub(crate) fn preflight_plain_text_stream(
+        &self,
+        input: &[u64],
+        state: &LanguageModelState<B>,
+        options: &LanguageModelStreamOptions,
+    ) -> Result<(), LanguageModelStreamError<B>> {
+        self.preflight_fresh_stream(input, state, options, false)
+    }
     /// Check request ownership and cheap bounds before image decoding or tower
     /// allocation. The projected-feature stream repeats these checks at entry.
     pub(crate) fn preflight_multimodal_stream(
@@ -62,10 +71,20 @@ impl<B: Backend> LanguageModel<B> {
         state: &LanguageModelState<B>,
         options: &LanguageModelStreamOptions,
     ) -> Result<(), LanguageModelStreamError<B>> {
+        self.preflight_fresh_stream(input, state, options, true)
+    }
+
+    fn preflight_fresh_stream(
+        &self,
+        input: &[u64],
+        state: &LanguageModelState<B>,
+        options: &LanguageModelStreamOptions,
+        image: bool,
+    ) -> Result<(), LanguageModelStreamError<B>> {
         if !std::sync::Arc::ptr_eq(&self.model_identity, &state.model_identity) {
             return Err(LanguageModelStreamError::ForeignState);
         }
-        if !self.decoder.multimodal_supported()
+        if (image && !self.decoder.multimodal_supported())
             || self.speculator.is_some()
             || state.multimodal_failed
             || !state.tokens.is_empty()
@@ -104,6 +123,22 @@ impl<B: Backend> LanguageModel<B> {
         options: LanguageModelStreamOptions,
     ) -> Result<LanguageModelStream<'a, B>, LanguageModelStreamError<B>> {
         LanguageModelStream::new(self, input, state, options)
+    }
+
+    /// Ordinary text execution with optional exact snapshot restoration.
+    /// Fresh state and a restored non-final chunk have separate admission.
+    pub fn stream_text<'a>(
+        &'a self,
+        input: &[u64],
+        state: &'a mut LanguageModelState<B>,
+        options: LanguageModelStreamOptions,
+    ) -> Result<LanguageModelStream<'a, B>, LanguageModelStreamError<B>> {
+        if state.tokens().is_empty() {
+            self.preflight_plain_text_stream(input, state, &options)?;
+        } else {
+            self.preflight_restored_text_stream(input, state, &options)?;
+        }
+        self.stream(input, state, options)
     }
 
     /// Internal projected-feature path. Serving remains disabled until the

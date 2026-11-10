@@ -11,10 +11,10 @@ use stark_engine_macros::stark_test;
 
 use super::*;
 
-struct PrivateDirectory(PathBuf);
+pub(super) struct PrivateDirectory(PathBuf);
 
 impl PrivateDirectory {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "stark-vision-contract-{}-{}-{}",
@@ -30,6 +30,10 @@ impl PrivateDirectory {
         }
         builder.create(&path).unwrap();
         Self(path)
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.0
     }
 
     fn write(

@@ -217,6 +217,10 @@ pub fn attention_estimate_with_prefix(
     let decode_sequence = context_tokens.min(cache_rows);
     let mut result = scratch(prefill_rows, prefill_sequence)?.sequential(scratch(1, decode_sequence)?)?;
     result.set_state_buffers(state_bytes, state_bytes / 2);
+    if let (Some(window), Some(heads)) = (ring_capacity, kv_heads) {
+        // Only committed physical ring rows are copied, without suffix scratch.
+        result.prefix_snapshot_bytes = checked_bytes(&[window.min(context_tokens), heads, head_dim, 2], element_bytes)?;
+    }
     Some(result)
 }
 
@@ -630,8 +634,11 @@ mod tests {
         assert_eq!(f32.state_bytes, 2 * full.state_bytes);
         let ring = attention_estimate(4096, 20, 64, 8, Some(2), Some(256), 768, 2, false).unwrap();
         assert_eq!(ring.state_bytes, (256 + 1024) * 2 * 64 * 2 * 2);
+        assert_eq!(ring.prefix_snapshot_bytes, 256 * 2 * 64 * 2 * 2);
+        assert_eq!(full.prefix_snapshot_bytes, 0);
         let shared = attention_estimate(4096, 20, 64, 8, None, None, 512, 2, false).unwrap();
         assert_eq!(shared.state_bytes, 0);
+        assert_eq!(shared.prefix_snapshot_bytes, 0);
         assert!(shared.scratch_bytes > 0);
         assert!(attention_estimate(u32::MAX, 1, 64, 8, Some(2), None, 768, 2, false).is_none());
         let indexed_limit = u32::MAX / (8 * 128) - 1024;

@@ -240,11 +240,14 @@ The readout box below **Manage Models** and at the top of the playground shows i
 While a request runs, the time row shows elapsed time against an estimated total, such as `1.3 s of ~8.7 s`, with a progress bar. The estimate is the middle of a range that updates from live token timings and recent successful requests for the same model session and options. A new session first learns its speed and shows elapsed time alone, as does a request that runs past its estimate. Response length and system load can change the estimate. These timings start when the worker begins generation; loading, queueing and prompt preparation are separate. Live values contain counts and timings only, never request or response content. Estimates and calibration counts stay in memory, and replies still appear when generation finishes.
 
 Supported models also show **Multi-token prediction (MTP)** in **Advanced
-Options**. It defaults on and uses the running model's recommended draft count.
+Options**. Gemma and full-BF16 Qwen3.5-0.8B default off because MTP was slower
+in the measured runs. Other supported models retain their existing default on.
+Turning it on uses the running model's recommended draft count.
 **Apply and New Chat** saves the on/off choice separately for that model across
 stops, model switches and app restarts. Existing models with no saved choice
-default on; a saved off choice stays off. **Restore Defaults** selects MTP on for
-review. Image requests keep MTP off while preserving the text preference.
+use the model-specific default; an explicit saved choice is preserved.
+**Restore Defaults** selects that model's default for review. Image requests
+keep MTP off while preserving the text preference.
 Connected apps inherit this setting unless they override `mtp` for a request.
 
 ## Beginner and Advanced setup

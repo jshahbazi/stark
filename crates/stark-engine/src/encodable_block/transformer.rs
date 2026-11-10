@@ -48,6 +48,10 @@ pub(crate) struct TransformerPrefix<B: Backend> {
 }
 
 impl<B: Backend> TransformerPrefix<B> {
+    pub(crate) fn position(&self) -> u32 {
+        self.position
+    }
+
     pub(crate) fn payload_bytes(&self) -> usize {
         self.layers.iter().flatten().map(|state| state.payload_bytes()).sum()
     }
@@ -83,6 +87,76 @@ fn scoring_cache_only_requested(
 }
 
 impl<B: Backend> TransformerState<B> {
+    pub(crate) fn capture_assistant_local_handoff(
+        &self,
+        suffix_rows: u32,
+        context: &B::Context,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<crate::encodable_block::mixer::attention::AssistantAttentionHandoff<B>>, B::Error> {
+        if self.rotary_position_delta.is_some() {
+            return Ok(None);
+        }
+        let position =
+            self.context_length.checked_add(suffix_rows).ok_or(InvalidInput("assistant position overflow"))?;
+        for (index, state) in self.layer_states.iter().enumerate().rev() {
+            let TransformerLayerStateType::Owned(state) = state else {
+                continue;
+            };
+            let Some(attention) = (state.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<crate::encodable_block::mixer::attention::AttentionState<B>>()
+            else {
+                continue;
+            };
+            if attention.view().ring_params().is_some() {
+                return attention.capture_assistant_handoff(index as u32, position, suffix_rows, context, command);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The source Gemma assistant consumes the last owning KV of each kind.
+    pub fn last_committed_attention_kv(
+        &self,
+        ring: bool,
+    ) -> Option<crate::encodable_block::mixer::attention::CommittedAttentionKV<'_, B>> {
+        for index in (0..self.layer_states.len()).rev() {
+            if !matches!(self.layer_states[index], TransformerLayerStateType::Owned(_)) {
+                continue;
+            }
+            if let Some(view) = self.committed_attention_kv(index)
+                && view.is_ring() == ring
+            {
+                return Some(view);
+            }
+        }
+        None
+    }
+
+    /// A read-only borrow keeps the selected target owner immutable while an
+    /// external assistant reads it. The loaded model must separately validate
+    /// state identity and target/companion geometry before constructing a round.
+    pub fn committed_attention_kv(
+        &self,
+        layer_index: usize,
+    ) -> Option<crate::encodable_block::mixer::attention::CommittedAttentionKV<'_, B>> {
+        if self.rotary_position_delta.is_some() {
+            return None;
+        }
+        let owner = match self.layer_states.get(layer_index)? {
+            TransformerLayerStateType::Owned(_) => layer_index,
+            TransformerLayerStateType::Shared(owner) => *owner as usize,
+        };
+        let TransformerLayerStateType::Owned(state) = self.layer_states.get(owner)? else {
+            return None;
+        };
+        let attention = (state.as_ref() as &dyn std::any::Any).downcast_ref()?;
+        crate::encodable_block::mixer::attention::CommittedAttentionKV::new(
+            attention,
+            u32::try_from(owner).ok()?,
+            self.context_length,
+        )
+    }
+
     pub(crate) fn resident_payload_bytes(&self) -> Option<usize> {
         self.layer_states.iter().try_fold(0usize, |bytes, state| match state {
             TransformerLayerStateType::Owned(state) => bytes.checked_add(state.resident_payload_bytes()?),
@@ -282,6 +356,18 @@ pub struct Transformer<B: Backend> {
 }
 
 impl<B: Backend> Transformer<B> {
+    #[cfg(test)]
+    pub(crate) fn validation_first_layer(
+        &self
+    ) -> Option<(&crate::encodable_block::transformer_layer::TransformerLayer<B>, Option<&AnyRoPEConfig>)> {
+        let (layer, rope) = self.layers.first()?;
+        Some((layer, rope.map(|index| &self.ropes[index])))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_output_norm(&self) -> &Normalization<B> {
+        &self.output_norm
+    }
     pub fn new(
         context: &B::Context,
         output_norm_hadamard_factors: Option<B::GlobalBuffer>,
