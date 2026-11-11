@@ -198,7 +198,7 @@ def test_glm_choice_counts_limits_and_empty_arguments():
     [
         ({}, "x", "tool_argument_type_unsupported"),
         ({"type": ["string", "integer"]}, "3", "invalid_tool_call"),
-        ({"type": "boolean"}, "True", "invalid_tool_call"),
+        ({"type": "boolean"}, "yes", "invalid_tool_call"),
         ({"type": "number"}, "NaN", "invalid_tool_call"),
         ({"type": "object"}, '{"a":1,"a":2}', "invalid_tool_call"),
     ],

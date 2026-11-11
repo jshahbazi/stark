@@ -655,7 +655,12 @@ def _xml_parameter_value(body, types, invalid, parser):
         body = body[1:-1]
     if types == {"string"}:
         return body
-    if parser == _QWEN35_XML_PARSER and body in {"True", "False", "None"}:
+    boolean = body.strip().lower() if "boolean" in types else None
+    if boolean in {"true", "false"}:
+        # XML scalars have no JSON envelope. Models also emit Python/uppercase
+        # spellings; a declared boolean type makes these representations exact.
+        value = boolean == "true"
+    elif parser == _QWEN35_XML_PARSER and body in {"True", "False", "None"}:
         value = {"True": True, "False": False, "None": None}[body]
     else:
         try:

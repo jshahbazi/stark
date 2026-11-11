@@ -21,6 +21,40 @@ def wire(parser):
 
 
 @pytest.mark.parametrize("tool_desktop", ["qwen38-xml-v1"], indirect=True)
+@pytest.mark.parametrize("body,expected", [("True", True), ("FALSE", False), ("tRuE", True), ("fAlSe", False)])
+@pytest.mark.parametrize("stream", [False, True])
+def test_xml_boolean_capitalization_reaches_http_as_json_boolean(tool_desktop, body, expected, stream):
+    desktop, payload, _, reply = tool_desktop
+    payload["tools"][0]["function"]["parameters"]["properties"]["value"] = {"type": "boolean"}
+    reply["text"] = reply["text"].replace("\n3\n", f"\n{body}\n")
+    api = LocalAPI(desktop.api_models, desktop.api_complete, api_key="b" * 64, port=0, cancellable=True)
+    info = api.start()
+    try:
+        request = urllib.request.Request(
+            info["base_url"] + "/chat/completions",
+            data=json.dumps({**payload, "stream": stream}).encode(),
+            headers={"Authorization": "Bearer " + "b" * 64, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            received = response.read()
+        if stream:
+            chunks = [json.loads(line[6:]) for line in received.splitlines() if line.startswith(b"data: {")]
+            assert not any("error" in chunk for chunk in chunks)
+            calls = [
+                call
+                for chunk in chunks
+                for choice in chunk.get("choices", [])
+                for call in choice["delta"].get("tool_calls", [])
+            ]
+        else:
+            calls = json.loads(received)["choices"][0]["message"]["tool_calls"]
+        assert len(calls) == 1
+        assert json.loads(calls[0]["function"]["arguments"])["value"] is expected
+    finally:
+        api.close()
+
+
+@pytest.mark.parametrize("tool_desktop", ["qwen38-xml-v1"], indirect=True)
 @pytest.mark.parametrize(
     "schema,body,tag",
     [

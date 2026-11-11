@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+from itertools import product
 from pathlib import Path
 
 import pytest
@@ -596,15 +597,50 @@ def test_xml_unsupported_schema_error_identifies_only_a_fixed_form_category():
 @pytest.mark.parametrize(
     "body,expected,kind", [("True", True, "boolean"), ("False", False, "boolean"), ("None", None, "null")]
 )
-def test_qwen35_xml_typed_scalar_lexemes_are_bound_to_its_parser_flavor(body, expected, kind):
+def test_xml_legacy_scalar_lexemes_preserve_boolean_support_and_flavor_specific_null(body, expected, kind):
     tool = xml_property_tool({"type": kind})
     message, _ = xml_output(xml_call({"key": body}), tools=[tool], parser="qwen35-xml-v1")
     assert json.loads(message["tool_calls"][0]["function"]["arguments"])["key"] is expected
-    with pytest.raises(APIError) as error:
-        xml_output(xml_call({"key": body}), tools=[tool], parser="qwen38-xml-v1")
-    assert error.value.code == "invalid_tool_call"
+    if kind == "null":
+        with pytest.raises(APIError) as error:
+            xml_output(xml_call({"key": body}), tools=[tool], parser="qwen38-xml-v1")
+        assert error.value.code == "invalid_tool_call"
+    else:
+        message, _ = xml_output(xml_call({"key": body}), tools=[tool], parser="qwen38-xml-v1")
+        assert json.loads(message["tool_calls"][0]["function"]["arguments"])["key"] is expected
     string_message, _ = xml_output(xml_call({"key": body}), parser="qwen35-xml-v1")
     assert json.loads(string_message["tool_calls"][0]["function"]["arguments"])["key"] == body
+
+
+BOOLEAN_CASES = [
+    ("".join(letters), expected)
+    for literal, expected in [("true", True), ("false", False)]
+    for letters in product(*[(letter, letter.upper()) for letter in literal])
+]
+
+
+@pytest.mark.parametrize("parser", ["qwen38-xml-v1", "qwen35-xml-v1", "glm53-xml-v1"])
+@pytest.mark.parametrize("body,expected", BOOLEAN_CASES)
+def test_xml_booleans_accept_every_capitalization_without_changing_strings_or_guessing_unions(parser, body, expected):
+    def parse(schema, value):
+        wire = (
+            f"<tool_call>lookup<arg_key>key</arg_key><arg_value>{value}</arg_value></tool_call>"
+            if parser == "glm53-xml-v1"
+            else xml_call({"key": value})
+        )
+        return xml_output(wire, tools=[xml_property_tool(schema)], parser=parser)
+
+    for value in (body, f" \t{body}\t "):
+        message, reason = parse({"type": "boolean"}, value)
+        assert reason == "tool_calls"
+        assert json.loads(message["tool_calls"][0]["function"]["arguments"])["key"] is expected
+        message, _ = parse({"type": "string"}, value)
+        assert json.loads(message["tool_calls"][0]["function"]["arguments"])["key"] == value
+        with pytest.raises(APIError) as error:
+            parse({"type": ["string", "boolean"]}, value)
+        assert "[xml_value_ambiguous]" in error.value.message
+        with pytest.raises(APIError):
+            parse({"type": "integer"}, value)
 
 
 @pytest.mark.parametrize(
