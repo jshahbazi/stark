@@ -97,11 +97,11 @@ struct ConnectionDetailsView: View {
                         Text(engine.supportsTools ? "Chat mode · Tool use available" : "Chat mode · Text chat available")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        HStack(alignment: .center, spacing: 8) {
                             Image(systemName: "circle.fill")
                                 .font(.system(size: 8)).foregroundStyle(.red).accessibilityHidden(true)
                             Text("Model is not running - will not show up in OpenWork")
-                                .font(.headline).fixedSize(horizontal: false, vertical: true)
+                                .font(.body).fixedSize(horizontal: false, vertical: true)
                         }
                         .phaseAnimator(reduceMotion ? [false] : [false, true]) { content, dimmed in
                             content.opacity(dimmed ? 0.4 : 1)
