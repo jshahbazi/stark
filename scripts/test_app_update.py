@@ -1019,6 +1019,37 @@ struct ControllerChecks {
         precondition(currentController.available == nil && current.events == ["fetch"])
         currentController.checkIfNeeded()
         precondition(current.fetchCount == 1)
+        current.latest = manual.latest
+        currentController.performAction()
+        await waitFor { current.events.last == "quit" }
+        precondition(current.fetchCount == 2 && currentController.busy)
+        current.cleanup()
+
+        // Quitting during discovery or preparation must stop before installation,
+        // even when an awaited operation finishes successfully after cancellation.
+        for background in [false, true] {
+            for duringPreparation in [false, true] {
+                let cancelled = Scenario()
+                cancelled.blockFetch = !duringPreparation
+                cancelled.blockPrepare = duringPreparation
+                let cancelledController = cancelled.controller()
+                if background { cancelledController.checkIfNeeded() }
+                else { cancelledController.performAction() }
+                await waitFor {
+                    duringPreparation ? cancelled.prepareGate != nil : cancelled.fetchGate != nil
+                }
+                cancelledController.prepareForTermination()
+                if duringPreparation { cancelled.prepareGate?.resume() }
+                else { cancelled.fetchGate?.resume() }
+                await waitFor { !cancelledController.busy }
+                precondition(!cancelled.events.contains("install"))
+                if !duringPreparation { precondition(cancelled.events == ["fetch"]) }
+                precondition(cancelled.workspaces.allSatisfy {
+                    !FileManager.default.fileExists(atPath: $0.path)
+                })
+                cancelled.cleanup()
+            }
+        }
 
         // Failed discovery or verification stays retryable and never installs.
         for failure in [AppUpdateError.download, .checksum] {

@@ -432,7 +432,9 @@ final class AppUpdateController: ObservableObject {
             let previousFailure = background && installFailed ? message : nil
             defer { if let previousFailure { message = previousFailure } }
             do {
+                try Task.checkCancellation()
                 let release = try await operations.fetch(installedBuild.updateComparisonVersion)
+                try Task.checkCancellation()
                 if release != available {
                     discardPreparedUpdate()
                 }
@@ -475,7 +477,14 @@ final class AppUpdateController: ObservableObject {
 
     private func prepare(_ release: AppUpdateDownload) async throws {
         message = "Downloading Stark \(release.version)…"
-        preparedUpdate = try await operations.prepare(release) { [weak self] status in self?.message = status }
+        let update = try await operations.prepare(release) { [weak self] status in self?.message = status }
+        // Preparation may finish after quit cancelled this task (for example,
+        // while detached verification was running). It still owns its workspace.
+        guard !Task.isCancelled else {
+            try? FileManager.default.removeItem(at: update.workspace)
+            throw CancellationError()
+        }
+        preparedUpdate = update
         message = "Stark \(release.version) is ready to upgrade."
     }
 
@@ -487,12 +496,14 @@ final class AppUpdateController: ObservableObject {
             defer { task = nil }
             var installing = false
             do {
+                try Task.checkCancellation()
                 let release: AppUpdateDownload
                 if let selectedRelease {
                     release = selectedRelease
                 } else {
                     lastCheck = now()
                     let latest = try await operations.fetch(installedBuild.updateComparisonVersion)
+                    try Task.checkCancellation()
                     if latest != available { discardPreparedUpdate() }
                     available = latest
                     guard let latest else {
@@ -544,7 +555,9 @@ struct AppUpdateView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !updater.busy {
-                Text("Upgrading restarts Stark and clears the current conversation.")
+                Text(updater.available == nil
+                     ? "If an update is found, it installs and restarts Stark, clearing the current conversation."
+                     : "Upgrading restarts Stark and clears the current conversation.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
