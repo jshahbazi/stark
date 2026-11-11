@@ -57,7 +57,7 @@ You may need one access approval and to update copied API keys in connected apps
 Open **Connections → Apps**, choose **Manage** for OpenWork, then **Reconnect** to
 repair the Stark-owned public connection entry. If the app is not set up, choose
 **Connect** instead. Quit OpenWork completely and reopen it when instructed.
-Guided Setup also offers **Reconnect** on the OpenWork, Connect and Ready steps
+Guided Setup also offers **Reconnect** on the Open OpenWork and Ready steps
 for an authorized connection, including when OpenWork reports a rejected API key.
 It refreshes the managed connector settings and saves approval again. Quit
 OpenWork completely and reopen it after reconnecting, even if its saved settings
@@ -275,7 +275,10 @@ Playground, Connections and chat controls.
 
 Beginner's **Guided Steps** flow asks what you want help with and whether to
 prioritize a balance of capacity and memory, a lighter model, or more model
-capacity. It reads the native Metal device name, unified-memory support and
+capacity. Recommendations show a simple model name with the specific installed
+or source variant underneath, and a **View on Hugging Face** link to the source
+repository. The same identity remains visible during setup and connection.
+It reads the native Metal device name, unified-memory support and
 recommended working-set budget, plus CPU count, physical and available memory,
 and free space in the library and download cache. GPU and system memory share
 the same physical memory; the algorithm never adds their budgets together.
@@ -286,8 +289,8 @@ the guide to apply its tool-use benchmark references to that choice.
 
 The guide checks a bounded window of candidates in each supported catalog
 family using metadata only. Every candidate retains its exact source revision
-and quantization. A new catalog choice needs complete dense attention geometry,
-at least 32,768 tokens of published context, a usable chat template and a
+and quantization. A new catalog choice needs a complete memory plan for its
+attention or recurrent layout, at least 32,768 tokens of published context, a usable chat template and a
 supported tool parser for OpenWork. These are separate capabilities: conversion
 handles recognized architecture/configuration and weight layouts; chat requires
 a template Stark can load and render; tool calling additionally requires a
@@ -304,6 +307,10 @@ cover Flint INT4, GLM Flash UD-Q2_K_XL and the three supported Qwen Flash Next
 exports. They retain separate source, quantization, template and preparation
 bindings. Other layouts remain available through Advanced. Catalog compatibility describes metadata
 support; it does not inherit another model's native qualification.
+
+Installed dense text artifacts with supported attention geometry and the pinned
+Lily q4-xl Qwen3.8 Flash Next artifact also have local planners. They enter the
+comparison even when online discovery fails or misses their source revision.
 
 Dense memory plans include weights, both full-context BF16 KV buffers, attention
 score scratch and a workspace allowance. DeltaNet also includes F32 recurrent,
@@ -331,15 +338,16 @@ second weight-sized copy in the Hugging Face cache. Starting rechecks available
 memory after releasing the previous worker. A running model's memory is never
 assumed to be reclaimable during recommendations.
 
-Ranking first prefers comfortable memory headroom, then explicit source task
-tags when available. **Balanced** scales its memory penalty to this Mac: its
+Fallback ranking first prefers comfortable memory headroom. **Balanced** next
+prefers source task tags when available, then scales its memory penalty to this Mac: its
 target is half the smaller of physical memory minus 2 GiB and 85% of Metal's
 budget. It ranks parameter capacity divided by
 `1 + (estimated runtime memory / target)^2`, so unused memory on a larger Mac
 reduces the penalty on larger candidates. **Lighter model** prefers lower weight
 traffic; and
-**More model capacity** prefers higher parameter counts. These are documented
-fallback heuristics, with no measured tokens-per-second or Stark artifact quality score. Unknown
+**More model capacity** prefers higher parameter counts. Source task tags break
+otherwise equal weight/capacity comparisons for these explicit priorities. These
+are documented fallback heuristics, with no measured tokens-per-second or Stark artifact quality score. Unknown
 parameter counts receive no capacity credit. Installed copies break otherwise
 equal ties. The guide offers up to three choices and explains each choice's
 resource fit and evidence. CPU count and GPU name describe the machine; core
@@ -365,12 +373,20 @@ The [recommendation evidence policy](../../docs/MODEL_RECOMMENDATIONS.md) descri
 the imported coverage, exact comparison policy and future artifact evaluation
 requirements. MaxxBench remains deferred until model-specific runs exist.
 
+Changing the task or priority invalidates the previous recommendation. A retry
+updates the visible priority, and keeping the current model restores the
+previous selection.
+
 Discovery runs separately from generation, with three concurrent family lookups
 and a 65-second overall process limit. Successful nonempty catalog scans are
-cached only in memory for ten minutes; failed family lookups retry immediately.
+cached only in memory for ten minutes; partial and failed family lookups retry
+on the next check. A failed source lookup preserves successful candidates while
+marking the search incomplete.
 Resource checks are fresh on every recommendation,
-installation and start. A failed search offers only the recorded starter
-recipes that still meet the hardware checks and identifies the limited search.
+installation and start. A failed search compares locally planned installed
+models and recorded starter recipes that still meet the hardware checks.
+Identical installed artifacts share one offer;
+choosing another model excludes every registered copy of the current artifact.
 
 The flow shows download and preparation as separate stages. After
 installation, you must explicitly start the model; when another model is
@@ -396,16 +412,30 @@ general OpenWork competence still require artifact-specific validation.
 
 After the model is running, Beginner can guide setup of the official OpenWork
 app. **Download OpenWork** opens its official download page in a browser; the
-user installs and opens the app, chooses a local workspace, and confirms that
-choice in Stark. Stark does not select or inspect the folder. The flow then
-offers the existing managed connection authorization, asks the user to select
-Stark and the running model in OpenWork, and checks that OpenWork's connector
-is active before enabling **Finish setup**. Connector authorization, an active
-connector, and the user's workspace/model confirmations are separate checks.
-Stark does not automatically grant folder access, restart OpenWork, select a
-model in OpenWork, or execute its tools. The ready check confirms connector
-metadata and the user's workspace/model confirmations; it does not prove that
-OpenWork can perform a task or that the selected model will perform it well.
+user installs the app in Applications. Detection advances **Get OpenWork** to
+**Connect**, which offers the existing managed connection authorization. Beginner connection setup gracefully reopens OpenWork to load the managed
+connector, then uses its authenticated loopback UI-control bridge to prepare a
+new empty task in the workspace OpenWork already selected (its default or last
+workspace). No folder picker or workspace/model confirmation is required in Stark.
+The handoff checks the workspace catalog for the exact running Stark API model,
+creates a task, binds it with `session.set_model`, and verifies the saved binding
+and displayed task before advancing automatically to **Ready**. It never sends a
+prompt or runs tools. OpenWork retains its folder and tool permission controls.
+
+The handoff targets the newly prepared task; it does not change OpenWork’s global
+or workspace defaults for later tasks or rebind existing conversations. Switching
+models through Beginner prepares another task. Readiness is scoped to the Stark
+API session, verified OpenWork process, connector identity, model and context
+budget. Cancellation, revocation, model changes and process restarts invalidate
+stale handoff results. Transient startup failures retry up to ten times; **Try
+again** retries setup without asking the user to confirm choices. A created task
+is reused on retry to avoid duplicate tasks after a binding failure. The bridge
+must support discovery version 2, `models.list`, `session.create_task` and
+`session.set_model` (present in the inspected official OpenWork 0.18.66 release).
+Older or incompatible clients remain in setup with recovery guidance.
+
+The ready check verifies configuration and connector metadata; it does not prove
+that OpenWork can perform a task or that the selected model will perform it well.
 
 After setup, **Try a different model** is available from Beginner chat and the
 ready step. Choosing or preparing an alternative keeps the current running

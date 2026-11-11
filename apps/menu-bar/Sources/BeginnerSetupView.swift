@@ -6,7 +6,7 @@ struct BeginnerSetupView: View {
     var actions: BeginnerSetupActions
     @State private var showAlternatives = false
 
-    private let steps = ["Choose a model", "Set up model", "Get OpenWork", "Connect", "Ready"]
+    private let steps = ["Choose a model", "Set up model", "Get OpenWork", "Connect", "Open OpenWork", "Ready"]
     private var choice: BeginnerModelChoice? { session.choice(in: snapshot) }
     private var ownInstallation: Bool {
         guard let identifier = snapshot.installChoiceID else { return false }
@@ -72,6 +72,9 @@ struct BeginnerSetupView: View {
                 Label(snapshot.modelGenerating ? "Model working" : snapshot.modelReady ? "Model running" : snapshot.modelStarting ? "Starting model" : !snapshot.runningModelID.isEmpty ? "Model loaded" : "No model running",
                       systemImage: snapshot.modelReady || snapshot.modelGenerating ? "checkmark.circle" : "circle")
                 if !snapshot.runningModelName.isEmpty { Text(snapshot.runningModelName) }
+                if !snapshot.runningModelVariantName.isEmpty, snapshot.runningModelVariantName != snapshot.runningModelName {
+                    Text(snapshot.runningModelVariantName).font(.caption2)
+                }
             }.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
@@ -86,6 +89,7 @@ struct BeginnerSetupView: View {
         case .installation: installationStep
         case .openWork: openWorkStep
         case .connection: connectionStep
+        case .openOpenWork: openOpenWorkStep
         case .ready:
             if session.canFinish(snapshot: snapshot) || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot) { readyStep }
             else { connectionStep }
@@ -98,10 +102,10 @@ struct BeginnerSetupView: View {
             heading("What would you like help with?", detail: "Pick a starting point. Stark will choose the download settings for you.")
             ForEach(BeginnerTask.allCases) { task in
                 selection(title: task.title, detail: task.detail, symbol: task.symbol, selected: session.task == task) {
-                    session.task = task
+                    session.selectTask(task)
                 }
             }
-            Picker("Model priority", selection: $session.modelPriority) {
+            Picker("Model priority", selection: Binding(get: { session.modelPriority }, set: session.selectModelPriority)) {
                 ForEach(BeginnerModelPriority.allCases) { priority in
                     Text(priority.title).tag(priority)
                 }
@@ -127,13 +131,10 @@ struct BeginnerSetupView: View {
             ProgressView().controlSize(.small)
         } else if let choice {
             let installed = session.installedID(for: choice, in: snapshot)
-            heading(session.choosingAnotherModel ? "Try another starting model." : installed == nil ? "Start with this model." : "Use the model already on your Mac.",
-                    detail: installed == nil ? "You can change models later." : "No new download is needed.")
+            heading(choice.availabilityMessage != nil ? "Check this model again." : session.choosingAnotherModel ? "Try another starting model." : installed == nil ? "Start with this model." : "Use the model already on your Mac.",
+                    detail: choice.availabilityMessage != nil ? "The saved model inventory changed." : installed == nil ? "You can change models later." : "No new download is needed.")
             modelCard(choice)
             deviceSummary
-            if !snapshot.recommendationMessage.isEmpty {
-                Text(snapshot.recommendationMessage).font(.caption).foregroundStyle(.secondary)
-            }
             if let unavailable = choice.availabilityMessage {
                 notice(unavailable, symbol: "exclamationmark.triangle", color: .orange)
             }
@@ -141,13 +142,14 @@ struct BeginnerSetupView: View {
                 notice("\(snapshot.runningModelName) stays installed while you prepare this model. You’ll choose when to switch.", symbol: "checkmark.circle")
             }
             HStack {
-                if installed != nil {
+                if choice.availabilityMessage != nil {
+                    Button("Check models again") { requestChoices() }.buttonStyle(.borderedProminent)
+                } else if installed != nil {
                     Button(startLabel(choice)) { start(choice) }.buttonStyle(.borderedProminent)
                         .disabled(!snapshot.canStartModel || choice.availabilityMessage != nil)
                 } else {
                     Button(downloadLabel(choice)) {
-                        session.requestInstall(choiceID: choice.id)
-                        actions.install(choice)
+                        install(choice)
                     }.buttonStyle(.borderedProminent).disabled(!snapshot.canInstall || choice.availabilityMessage != nil)
                 }
                 if session.choosingAnotherModel { keepCurrentButton }
@@ -163,6 +165,9 @@ struct BeginnerSetupView: View {
                             } label: {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(alternative.name)
+                                    if !alternative.variantName.isEmpty, alternative.variantName != alternative.name {
+                                        Text(alternative.variantName).font(.caption).foregroundStyle(.secondary)
+                                    }
                                     Text(alternative.summary).font(.caption).foregroundStyle(.secondary)
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                             }.buttonStyle(.bordered).disabled(installInProgress)
@@ -191,7 +196,10 @@ struct BeginnerSetupView: View {
             heading(starting ? "Starting your model…" : installed != nil ? "Your model is installed." : "Set up your model.",
                     detail: starting ? "Waiting for the selected model to be ready before moving on."
                         : installed != nil ? "Start it when you’re ready." : "Downloading and preparing are separate steps.")
-            modelIdentity(choice.name)
+            modelIdentity(choice)
+            if let unavailable = choice.availabilityMessage {
+                notice(unavailable, symbol: "exclamationmark.triangle", color: .orange)
+            }
             if ownInstallation {
                 if snapshot.installPhase == .downloading { progress(snapshot.downloadFraction, label: "Downloading model") }
                 if snapshot.installPhase == .preparing { progress(snapshot.preparationFraction, label: "Preparing for your Mac") }
@@ -206,14 +214,16 @@ struct BeginnerSetupView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
-                if installed != nil {
+                if choice.availabilityMessage != nil {
+                    Button("Check models again") { requestChoices() }.buttonStyle(.borderedProminent)
+                } else if installed != nil {
                     Button(starting ? "Starting…" : startLabel(choice)) { start(choice) }
                         .buttonStyle(.borderedProminent).disabled(starting || !snapshot.canStartModel)
                 } else if installInProgress {
                     Button(snapshot.installPhase == .cancelling ? "Canceling…" : "Cancel new setup", action: actions.cancelInstall)
                         .disabled(snapshot.installPhase == .cancelling)
                 } else {
-                    Button("Try setup again") { session.requestInstall(choiceID: choice.id); actions.install(choice) }
+                    Button("Try setup again") { install(choice) }
                         .buttonStyle(.borderedProminent).disabled(!snapshot.canInstall || choice.availabilityMessage != nil)
                 }
                 if session.choosingAnotherModel {
@@ -234,31 +244,13 @@ struct BeginnerSetupView: View {
 
     private var openWorkStep: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading(snapshot.openWorkInstalled ? "Open OpenWork." : "Get OpenWork.",
+            heading("Get OpenWork.",
                     detail: "OpenWork gives your local model a workspace and tools. Stark supplies the model.")
-            modelIdentity("OpenWork", detail: snapshot.openWorkInstalled ? "Installed on this Mac" : "Install the official macOS app")
-            if !snapshot.openWorkInstalled {
-                Text("Download OpenWork, move it to Applications, and open it. Return here to continue.")
-                    .foregroundStyle(.secondary)
-                Button("Download OpenWork", action: actions.downloadOpenWork).buttonStyle(.borderedProminent)
-                Button("Check installation", action: actions.checkConnection)
-            } else {
-                Text("In OpenWork, choose a local workspace folder you’re comfortable letting it access. Review folder and tool permissions there.")
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Button("Open OpenWork", action: actions.openOpenWork).buttonStyle(.borderedProminent)
-                    Button("I’ve chosen a workspace in OpenWork") {
-                        session.confirmWorkspace()
-                        session.stage = .connection
-                    }.disabled(!snapshot.openWorkRunning)
-                }
-                if snapshot.openWorkApproved { reconnectOpenWorkButton }
-                if session.workspaceConfirmed {
-                    Label("Workspace choice confirmed by you", systemImage: "checkmark.circle")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Text("Stark does not choose or inspect your OpenWork folder.").font(.caption).foregroundStyle(.secondary)
+            modelIdentity("OpenWork", detail: "Install the official macOS app")
+            Text("Download OpenWork and move it to Applications. Stark will take you to the connection step when it detects the installed app.")
+                .foregroundStyle(.secondary)
+            Button("Download OpenWork", action: actions.downloadOpenWork).buttonStyle(.borderedProminent)
+            Button("Check installation", action: actions.checkConnection)
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.caption).foregroundStyle(.secondary) }
             Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
         }
@@ -266,13 +258,15 @@ struct BeginnerSetupView: View {
 
     private var reconnectOpenWorkButton: some View {
         Button(snapshot.openWorkBusy ? "Reconnecting…" : "Reconnect", action: actions.connectOpenWork)
-            .disabled(snapshot.openWorkBusy || !snapshot.localAPIAvailable || !snapshot.openWorkInstalled)
-            .help("Refresh Stark’s managed connection settings. Quit and reopen OpenWork afterward if its settings changed.")
+            .disabled(snapshot.openWorkBusy || snapshot.openWorkPreparing || !snapshot.localAPIAvailable || !snapshot.openWorkInstalled)
+            .help("Refresh the connection and reopen OpenWork automatically to apply its settings.")
     }
 
     @ViewBuilder private var connectionStep: some View {
         heading("Connect OpenWork to Stark.", detail: "Use the model running on this Mac. Your saved connection can be reused when you change models.")
-        modelIdentity(snapshot.runningModelName.isEmpty ? "No model running" : snapshot.runningModelName)
+        modelIdentity(snapshot.runningModelName.isEmpty ? "No model running" : snapshot.runningModelName,
+                      variant: snapshot.runningModelVariantName)
+        modelRepositoryLink(snapshot.runningModelRepositoryURL)
         if !snapshot.localAPIAvailable {
             notice("Stark’s local connection is unavailable.", symbol: "exclamationmark.triangle", color: .orange)
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
@@ -294,46 +288,48 @@ struct BeginnerSetupView: View {
                 Button("Chat in Stark instead", action: actions.openChat)
             }
         } else {
+            checkRow("Connection allowed", detail: "Allow OpenWork to send requests to this model.", checked: snapshot.openWorkApproved)
+            if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
+            Button(snapshot.openWorkBusy ? "Connecting…" : "Allow and connect", action: actions.connectOpenWork)
+                .buttonStyle(.borderedProminent).disabled(snapshot.openWorkBusy || !snapshot.openWorkInstalled)
+            Text("Stark uses OpenWork’s existing workspace and opens a new task with the running model selected. OpenWork may reopen to apply connection settings. You can revoke access in Stark’s Connections window.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
+        }
+    }
+
+    private var openOpenWorkStep: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            heading("Getting OpenWork ready…", detail: "Stark uses OpenWork’s current workspace and selects your running model in a new task.")
+            modelIdentity("OpenWork", detail: "Installed on this Mac")
             VStack(alignment: .leading, spacing: 14) {
-                checkRow("Connection allowed", detail: snapshot.openWorkApproved ? "OpenWork is authorized to use Stark." : "Allow OpenWork to send requests to this model.", checked: snapshot.openWorkApproved)
-                checkRow("OpenWork checked this model", detail: snapshot.openWorkClientActive ? "Its verified connector requested this model’s current settings." : "Waiting for OpenWork to refresh its model list.", checked: snapshot.openWorkClientActive)
-                checkRow("Workspace chosen", detail: "Confirmed by you in OpenWork.", checked: session.workspaceConfirmed)
-                checkRow("Running model selected", detail: "Confirmed by you for \(snapshot.runningModelName).", checked: session.confirmedOpenWorkModelID == snapshot.runningModelID)
+                checkRow("Connection allowed", detail: "OpenWork is authorized to use Stark.", checked: snapshot.openWorkApproved)
+                checkRow("OpenWork checked this model", detail: "Waiting for its verified connector to refresh.", checked: snapshot.openWorkClientActive)
+                checkRow("Task configured", detail: "Stark and \(snapshot.runningModelName) selected automatically.", checked: snapshot.openWorkPreparedModelID == snapshot.runningModelID)
             }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
-            if snapshot.openWorkApproved {
-                Text("If OpenWork asks, quit it completely and reopen it. Select Stark and \(snapshot.runningModelName) in OpenWork’s model picker.")
-                    .font(.callout).foregroundStyle(.secondary)
-                HStack {
-                    Button("Open OpenWork", action: actions.openOpenWork)
-                    reconnectOpenWorkButton
-                    Button("Check connection", action: actions.checkConnection).disabled(snapshot.openWorkBusy)
-                }
-                if !session.workspaceConfirmed {
-                    Button("I’ve chosen a workspace in OpenWork") { session.confirmWorkspace() }
-                        .disabled(!snapshot.openWorkRunning)
-                }
-                Button("I selected this model in OpenWork") { session.confirmModelSelection(snapshot: snapshot) }
-                    .disabled(!snapshot.openWorkRunning || snapshot.openWorkBusy)
-                Button("Finish setup") { session.finish(snapshot: snapshot) }.buttonStyle(.borderedProminent)
-                    .disabled(!session.canFinish(snapshot: snapshot))
-            } else {
-                Button(snapshot.openWorkBusy ? "Connecting…" : "Allow and connect", action: actions.connectOpenWork)
-                    .buttonStyle(.borderedProminent).disabled(snapshot.openWorkBusy || !snapshot.openWorkInstalled)
-                Text("OpenWork can send requests to this model. Review file and tool access in OpenWork. You can revoke this connection in Stark’s Connections window.")
-                    .font(.caption).foregroundStyle(.secondary)
+            if snapshot.openWorkPreparing { ProgressView("Selecting your model…") }
+            HStack {
+                Button("Open OpenWork", action: actions.openOpenWork).buttonStyle(.borderedProminent)
+                reconnectOpenWorkButton
+                Button("Try again", action: actions.checkConnection).disabled(snapshot.openWorkBusy || snapshot.openWorkPreparing)
             }
+            Text("Review file and tool permissions in OpenWork before starting a task.").font(.caption).foregroundStyle(.secondary)
+            Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
         }
     }
 
     private var readyStep: some View {
         VStack(alignment: .leading, spacing: 20) {
             Image(systemName: "checkmark.circle.fill").font(.largeTitle).foregroundStyle(.green).accessibilityHidden(true)
-            heading("OpenWork is ready.", detail: "Your local model is running. OpenWork’s connector has checked its current settings.")
+            heading("OpenWork is ready.", detail: "Your local model is selected in a new OpenWork task, using its existing workspace.")
             VStack(alignment: .leading, spacing: 15) {
-                checkRow(snapshot.runningModelName, detail: "Running on this Mac.", checked: snapshot.modelReady || snapshot.modelGenerating)
+                checkRow(snapshot.runningModelName,
+                         detail: [snapshot.runningModelVariantName, "Running on this Mac."].filter { !$0.isEmpty }.joined(separator: "\n"),
+                         checked: snapshot.modelReady || snapshot.modelGenerating)
+                modelRepositoryLink(snapshot.runningModelRepositoryURL)
                 checkRow("OpenWork checked this model", detail: "Recent connector check detected by Stark.", checked: snapshot.openWorkClientActive)
-                checkRow("Workspace and model selected", detail: "Confirmed by you in OpenWork.", checked: session.workspaceConfirmed && session.confirmedOpenWorkModelID == snapshot.runningModelID)
+                checkRow("Task configured automatically", detail: "Stark and your running model are selected.", checked: snapshot.openWorkPreparedModelID == snapshot.runningModelID)
             }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
             HStack {
                 Button("Open OpenWork", action: actions.openOpenWork).buttonStyle(.borderedProminent)
@@ -390,9 +386,7 @@ struct BeginnerSetupView: View {
 
     private func requestChoices() {
         guard let task = session.task else { return }
-        session.stage = .recommendation
-        session.selectedChoiceID = nil
-        let preference = session.retryPreference == .speed ? "speed" : session.retryPreference == .answers ? "answers" : session.modelPriority.rawValue
+        let preference = session.requestRecommendations()
         actions.refreshChoices(task, session.excludedModelID, preference)
     }
 
@@ -402,6 +396,7 @@ struct BeginnerSetupView: View {
         case 1: return .installation
         case 2: return .openWork
         case 3: return .connection
+        case 4: return .openOpenWork
         default: return .ready
         }
     }
@@ -417,12 +412,14 @@ struct BeginnerSetupView: View {
         case .installation:
             return snapshot.installChoiceID != nil || snapshot.installedResultID != nil || session.selectedChoiceID != nil
                 ? "Review the selected model setup." : "Choose a model first."
+        case .openOpenWork:
+            return snapshot.openWorkApproved ? "Prepare an OpenWork task with your running model automatically." : "Connect OpenWork first."
         case .openWork, .connection:
             return snapshot.modelReady || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot)
                 ? "Continue OpenWork setup." : "Start a model first."
         case .ready:
             return session.canFinish(snapshot: snapshot) || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot)
-                ? "Review completed setup." : "Complete and confirm OpenWork setup first."
+                ? "Review completed setup." : "Wait for automatic OpenWork setup to finish."
         }
     }
 
@@ -434,6 +431,11 @@ struct BeginnerSetupView: View {
         } else if actions.startModel(choice.installed(as: identifier)) {
             session.requestStart(modelID: identifier)
         }
+    }
+
+    private func install(_ choice: BeginnerModelChoice) {
+        if choice.availabilityMessage != nil { requestChoices(); return }
+        if actions.install(choice) { session.requestInstall(choiceID: choice.id) }
     }
 
     private func startLabel(_ choice: BeginnerModelChoice) -> String {
@@ -473,22 +475,39 @@ struct BeginnerSetupView: View {
         }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    private func modelIdentity(_ name: String, detail: String = "") -> some View {
+    private func modelIdentity(_ name: String, variant: String = "", detail: String = "") -> some View {
         HStack(spacing: 12) {
             Image(systemName: "shippingbox").font(.title2).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 4) {
                 Text(name).font(.headline).fixedSize(horizontal: false, vertical: true)
+                if !variant.isEmpty, variant != name {
+                    Text(variant).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
                 if !detail.isEmpty { Text(detail).font(.caption).foregroundStyle(.secondary) }
             }
         }
     }
 
+    private func modelIdentity(_ choice: BeginnerModelChoice, detail: String = "") -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            modelIdentity(choice.name, variant: choice.variantName, detail: detail)
+            modelRepositoryLink(choice.repositoryURL)
+        }
+    }
+
+    @ViewBuilder private func modelRepositoryLink(_ url: URL?) -> some View {
+        if let url {
+            Link("View on Hugging Face", destination: url).font(.caption).help(url.absoluteString)
+        }
+    }
+
     private func modelCard(_ choice: BeginnerModelChoice) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            modelIdentity(choice.name, detail: choice.summary)
+            modelIdentity(choice, detail: choice.summary)
             if session.installedID(for: choice, in: snapshot) != nil {
                 Label("Already on your Mac", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
-            } else if let bytes = choice.downloadBytes {
+            } else if let bytes = choice.downloadBytes, bytes > 0 {
                 Text("\(Self.bytes(bytes)) download").font(.callout)
             }
             if let space = setupSpaceDescription(choice) { Text(space).font(.caption).foregroundStyle(.secondary) }

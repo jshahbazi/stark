@@ -44,18 +44,33 @@ extension BeginnerSetupView {
     }
 
     @MainActor static func checkRecommendationPreferences() -> Bool {
-        let session = BeginnerSetupSession()
-        session.task = .code
-        session.modelPriority = .speed
-        var received: [(BeginnerTask, String?, String)] = []
-        var actions = BeginnerSetupActions()
-        actions.refreshChoices = { received.append(($0, $1, $2)) }
-        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
-        view.requestChoices()
-        session.retryPreference = .answers
-        view.requestChoices()
-        return received.count == 2 && received[0].0 == .code && received[0].2 == "speed"
-            && received[1].2 == "answers" && session.stage == .recommendation
+        for task in BeginnerTask.allCases {
+            for priority in BeginnerModelPriority.allCases {
+                let session = BeginnerSetupSession()
+                session.selectTask(task)
+                session.selectModelPriority(priority)
+                var received: [(BeginnerTask, String?, String)] = []
+                var actions = BeginnerSetupActions()
+                actions.refreshChoices = { received.append(($0, $1, $2)) }
+                let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+                view.requestChoices()
+                guard received.count == 1, received[0].0 == task, received[0].2 == priority.rawValue,
+                      session.stage == .recommendation else { return false }
+                for retry in BeginnerRetryPreference.allCases {
+                    session.selectModelPriority(priority)
+                    session.retryPreference = retry
+                    view.requestChoices()
+                    let expected = retry == .speed ? "speed" : retry == .answers ? "answers" : priority.rawValue
+                    guard received.last?.0 == task, received.last?.2 == expected,
+                          session.modelPriority.rawValue == expected, session.retryPreference == nil else { return false }
+                    // Returning to the visible picker must override the previous retry.
+                    session.selectModelPriority(.balanced)
+                    view.requestChoices()
+                    guard received.last?.2 == "balanced" else { return false }
+                }
+            }
+        }
+        return true
     }
 
     @MainActor static func checkStartPolicy(restart: Bool, accepted: Bool = true) -> Bool {
@@ -83,6 +98,42 @@ extension BeginnerSetupView {
         return restart
             ? calls == 1 && session.startRequestedModelID == "installed-a" && session.stage == .installation
             : calls == 0 && session.startRequestedModelID == nil && session.stage == .openWork
+    }
+
+    @MainActor static func checkInstallPolicy(accepted: Bool) -> Bool {
+        let session = BeginnerSetupSession()
+        session.stage = .recommendation
+        let choice = BeginnerModelChoice(id: "recipe-a", name: "Fixture model", summary: "Fixture")
+        var actions = BeginnerSetupActions()
+        var calls = 0
+        actions.install = { received in
+            if received.id == choice.id { calls += 1 }
+            return accepted
+        }
+        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+        view.install(choice)
+        return calls == 1 && (accepted
+            ? session.installingChoiceID == choice.id && session.stage == .installation
+            : session.installingChoiceID == nil && session.stage == .recommendation)
+    }
+
+    @MainActor static func checkRemovedInstalledCopy() -> Bool {
+        let session = BeginnerSetupSession()
+        session.selectTask(.code)
+        let source = BeginnerModelChoice(id: "installed-source", name: "Fixture model", summary: "Fixture", downloadBytes: 0)
+        let existing = source.resolvingInstalledCopy(as: "installed-a")
+        guard existing.installedModelID == "installed-a", existing.availabilityMessage == nil else { return false }
+        let removed = source.resolvingInstalledCopy(as: nil)
+        guard removed.installedModelID == nil, removed.availabilityMessage != nil else { return false }
+        var calls = 0, refreshes = 0
+        var actions = BeginnerSetupActions()
+        actions.install = { _ in calls += 1; return true }
+        actions.refreshChoices = { _, _, _ in refreshes += 1 }
+        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+        view.install(removed)
+        let downloadable = BeginnerModelChoice(id: "downloadable", name: "Fixture", summary: "Fixture", downloadBytes: 100)
+        return calls == 0 && refreshes == 1 && session.installingChoiceID == nil
+            && downloadable.resolvingInstalledCopy(as: nil).availabilityMessage == nil
     }
 }
 """
@@ -112,14 +163,62 @@ struct BeginnerChecks {
         snapshot.openWorkClientActive = true
         snapshot.openWorkScope = "connection-a"
         session.synchronize(with: snapshot)
-        session.confirmWorkspace()
-        session.confirmModelSelection(snapshot: snapshot)
+        snapshot.openWorkPreparedModelID = snapshot.runningModelID
         session.finish(snapshot: snapshot)
         return (session, snapshot)
     }
 
     @MainActor static func check(_ scenario: String) -> Bool {
         switch scenario {
+        case "openwork-step-order":
+            let session = BeginnerSetupSession()
+            let (_, base) = ready()
+            var snapshot = base
+            snapshot.openWorkInstalled = false
+            snapshot.openWorkRunning = false
+            snapshot.openWorkApproved = false
+            snapshot.openWorkClientActive = false
+            snapshot.openWorkPreparedModelID = nil
+            session.continueAfterModel(snapshot: snapshot)
+            guard session.stage == .openWork,
+                  !session.canNavigate(to: .connection, snapshot: snapshot),
+                  !session.canNavigate(to: .openOpenWork, snapshot: snapshot) else { return false }
+            snapshot.openWorkInstalled = true
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection, snapshot.openWorkPreparedModelID == nil,
+                  !session.canNavigate(to: .openOpenWork, snapshot: snapshot) else { return false }
+            // A pending or failed connection must leave authorization visible.
+            snapshot.openWorkBusy = true
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkBusy = false
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkApproved = true
+            snapshot.openWorkBusy = true
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkBusy = false
+            session.synchronize(with: snapshot)
+            guard session.stage == .openOpenWork, snapshot.openWorkPreparedModelID == nil,
+                  !session.canFinish(snapshot: snapshot) else { return false }
+            snapshot.openWorkApproved = false
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkInstalled = false
+            session.synchronize(with: snapshot)
+            return session.stage == .openWork
+        case "openwork-already-installed":
+            let (_, base) = ready()
+            var snapshot = base
+            snapshot.openWorkApproved = false
+            snapshot.openWorkPreparedModelID = nil
+            let session = BeginnerSetupSession()
+            session.continueAfterModel(snapshot: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkApproved = true
+            session.continueAfterModel(snapshot: snapshot)
+            return session.stage == .openOpenWork && !session.canFinish(snapshot: snapshot)
         case "installation-identity":
             let (session, base) = ready()
             var snapshot = base
@@ -172,18 +271,34 @@ struct BeginnerChecks {
                 && snapshot.runningModelID == "installed-a" && snapshot.modelReady
         case "retry-preserves-current":
             let (session, snapshot) = ready()
+            session.modelPriority = .speed
             let unchanged = snapshot
             session.beginAnotherModel(snapshot: snapshot)
             guard session.stage == .retry, session.choosingAnotherModel,
                   session.excludedModelID == "installed-a",
                   session.choices(in: snapshot).map(\.id) == ["recipe-b"],
-                  session.workspaceConfirmed,
-                  session.confirmedOpenWorkModelID == "installed-a" else { return false }
+                  snapshot.openWorkPreparedModelID == "installed-a" else { return false }
             session.task = .code
+            session.modelPriority = .answers
             session.keepCurrentModel()
             session.synchronize(with: snapshot)
-            return session.stage == .ready && session.task == .text && !session.choosingAnotherModel
+            return session.stage == .ready && session.task == .text && session.modelPriority == .speed && !session.choosingAnotherModel
                 && session.canFinish(snapshot: snapshot) && snapshot == unchanged
+        case "changed-preferences-invalidate-offers":
+            let (session, base) = ready()
+            _ = session.requestRecommendations()
+            session.selectedChoiceID = "recipe-b"
+            guard session.choice(in: base)?.id == "recipe-b" else { return false }
+            session.selectTask(.code)
+            guard session.selectedChoiceID == nil, session.choices(in: base).isEmpty,
+                  !session.canNavigate(to: .installation, snapshot: base) else { return false }
+            _ = session.requestRecommendations()
+            guard !session.choices(in: base).isEmpty else { return false }
+            session.selectModelPriority(.answers)
+            guard session.choices(in: base).isEmpty,
+                  !session.canNavigate(to: .installation, snapshot: base) else { return false }
+            _ = session.requestRecommendations()
+            return !session.choices(in: base).isEmpty && session.recommendationsMatchSelection
         case "retry-before-first-guide":
             let (_, snapshot) = ready()
             let session = BeginnerSetupSession()
@@ -209,9 +324,8 @@ struct BeginnerChecks {
             snapshot.modelReady = true
             snapshot.modelStarting = false
             session.synchronize(with: snapshot)
-            return session.stage == .connection && session.startRequestedModelID == nil
-                && !session.choosingAnotherModel && session.workspaceConfirmed
-                && session.confirmedOpenWorkModelID == nil
+            return session.stage == .openOpenWork && session.startRequestedModelID == nil
+                && !session.choosingAnotherModel && !session.canFinish(snapshot: snapshot)
         case "failed-start-can-retry":
             let (session, base) = ready()
             var snapshot = base
@@ -234,52 +348,51 @@ struct BeginnerChecks {
                 && session.excludedModelID == nil && session.selectedChoiceID == nil
                 && session.startRequestedModelID == nil && snapshot.runningModelID.isEmpty
                 && session.choices(in: snapshot).contains(where: { $0.installedModelID == "installed-a" })
-        case "confirmations-and-facts":
+        case "automatic-handoff-and-facts":
             let session = BeginnerSetupSession()
-            let (_, snapshot) = ready()
+            let (_, base) = ready()
+            var snapshot = base
+            snapshot.openWorkPreparedModelID = nil
             session.synchronize(with: snapshot)
             guard !session.canFinish(snapshot: snapshot) else { return false }
-            session.confirmWorkspace()
-            guard !session.canFinish(snapshot: snapshot) else { return false }
-            session.confirmModelSelection(snapshot: snapshot)
-            var noClient = snapshot
-            noClient.openWorkClientActive = false
-            guard !session.canFinish(snapshot: noClient) else { return false }
-            return session.canFinish(snapshot: snapshot)
+            snapshot.openWorkPreparedModelID = snapshot.runningModelID
+            session.stage = .openOpenWork
+            session.synchronize(with: snapshot)
+            guard session.stage == .ready else { return false }
+            snapshot.openWorkClientActive = false
+            return !session.canFinish(snapshot: snapshot)
         case "scope-invalidation":
             let (session, base) = ready()
             var snapshot = base
             snapshot.openWorkScope = "connection-b"
+            snapshot.openWorkPreparedModelID = nil
             session.synchronize(with: snapshot)
-            return !session.workspaceConfirmed && session.confirmedOpenWorkModelID == nil
-                && session.stage == .openWork && !session.canFinish(snapshot: snapshot)
-        case "first-approval-preserves-workspace":
+            return session.stage == .openOpenWork && !session.canFinish(snapshot: snapshot)
+        case "approval-awaits-handoff":
             let session = BeginnerSetupSession()
             let (_, base) = ready()
             var snapshot = base
             snapshot.openWorkApproved = false
+            snapshot.openWorkPreparedModelID = nil
             session.synchronize(with: snapshot)
-            session.confirmWorkspace()
             snapshot.openWorkApproved = true
             session.synchronize(with: snapshot)
-            return session.workspaceConfirmed && session.confirmedOpenWorkModelID == nil
-        case "model-confirmation-scoped":
+            return !session.canFinish(snapshot: snapshot)
+        case "model-handoff-scoped":
             let (session, base) = ready()
             var snapshot = base
             snapshot.runningModelID = "installed-b"
             session.synchronize(with: snapshot)
-            guard session.stage == .connection, session.workspaceConfirmed,
-                  session.confirmedOpenWorkModelID == nil,
-                  !session.canFinish(snapshot: snapshot) else { return false }
-            session.confirmModelSelection(snapshot: snapshot)
-            session.finish(snapshot: snapshot)
+            guard session.stage == .openOpenWork, !session.canFinish(snapshot: snapshot) else { return false }
+            snapshot.openWorkPreparedModelID = snapshot.runningModelID
+            session.synchronize(with: snapshot)
             return session.stage == .ready && session.canFinish(snapshot: snapshot)
         case "ready-regresses":
             let mutations: [(inout BeginnerSetupSnapshot) -> Void] = [
                 { $0.modelReady = false }, { $0.runningSupportsTools = false },
                 { $0.runningContextKnown = false }, { $0.openWorkRunning = false },
                 { $0.openWorkApproved = false }, { $0.openWorkClientActive = false },
-                { $0.localAPIAvailable = false }
+                { $0.localAPIAvailable = false }, { $0.openWorkPreparedModelID = nil }
             ]
             for mutate in mutations {
                 let (session, base) = ready()
@@ -306,9 +419,9 @@ struct BeginnerChecks {
             let mutations: [(inout BeginnerSetupSnapshot) -> Void] = [
                 { $0.runningModelID = "" }, { $0.runningModelID = "different-model" },
                 { $0.runningSupportsTools = false }, { $0.runningContextKnown = false },
-                { $0.localAPIAvailable = false }, { $0.openWorkRunning = false },
+                { $0.localAPIAvailable = false }, { $0.openWorkPreparedModelID = nil }, { $0.openWorkRunning = false },
                 { $0.openWorkApproved = false }, { $0.openWorkClientActive = false },
-                { $0.openWorkScope = "another-client" }, { $0.modelGenerating = false }
+                { $0.openWorkScope = "another-client"; $0.openWorkPreparedModelID = nil }, { $0.modelGenerating = false }
             ]
             for mutate in mutations {
                 let (session, base) = ready()
@@ -355,6 +468,9 @@ struct BeginnerChecks {
         case "recommendation-preferences": return BeginnerSetupView.checkRecommendationPreferences()
         case "start-applies-restart-policy": return BeginnerSetupView.checkStartPolicy(restart: true)
         case "start-rejection-does-not-wait": return BeginnerSetupView.checkStartPolicy(restart: true, accepted: false)
+        case "install-accepted-waits": return BeginnerSetupView.checkInstallPolicy(accepted: true)
+        case "install-rejection-does-not-wait": return BeginnerSetupView.checkInstallPolicy(accepted: false)
+        case "removed-installed-copy-refreshes": return BeginnerSetupView.checkRemovedInstalledCopy()
         case "memory-report":
             var raw: [String: Any] = [
                 "id": "fixture", "name": "Fixture", "repo": "example/model",
@@ -496,6 +612,11 @@ class BeginnerSetupTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, f"beginner_{scenario}_check_failed")
 
+    def test_openwork_install_connect_and_open_are_separate_steps(self):
+        for scenario in ["openwork-step-order", "openwork-already-installed"]:
+            with self.subTest(scenario=scenario):
+                self.run_check(scenario)
+
     def test_installation_identity_and_cancellation(self):
         for scenario in ["installation-identity", "installation-cancel-fence"]:
             with self.subTest(scenario=scenario):
@@ -507,7 +628,7 @@ class BeginnerSetupTests(unittest.TestCase):
     def test_sidebar_navigation_preserves_choices_and_enforces_prerequisites(self):
         self.run_check("navigation-policy")
 
-    def test_retry_preserves_current_model_and_confirmations(self):
+    def test_retry_preserves_current_model_and_handoff(self):
         for scenario in ["retry-preserves-current", "retry-before-first-guide"]:
             with self.subTest(scenario=scenario):
                 self.run_check(scenario)
@@ -518,6 +639,16 @@ class BeginnerSetupTests(unittest.TestCase):
     def test_model_priority_and_retry_preference_reach_recommendations(self):
         self.run_check("recommendation-preferences")
 
+    def test_changed_task_or_priority_requires_new_recommendations(self):
+        self.run_check("changed-preferences-invalidate-offers")
+
+    def test_installation_waits_only_for_an_accepted_request(self):
+        for scenario in ["install-accepted-waits", "install-rejection-does-not-wait"]:
+            with self.subTest(scenario=scenario):
+                self.run_check(scenario)
+
+    def test_removed_installed_only_copy_refreshes_instead_of_downloading(self):
+        self.run_check("removed-installed-copy-refreshes")
     def test_files_task_is_visible_and_reaches_recommendation_action(self):
         self.run_check("files-task-selection")
 
@@ -532,14 +663,14 @@ class BeginnerSetupTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.run_check(scenario)
 
-    def test_readiness_requires_detected_facts_and_user_confirmations(self):
-        self.run_check("confirmations-and-facts")
+    def test_readiness_requires_verified_automatic_handoff(self):
+        self.run_check("automatic-handoff-and-facts")
 
-    def test_confirmation_scopes_and_ready_regression(self):
+    def test_handoff_scopes_and_ready_regression(self):
         for scenario in [
             "scope-invalidation",
-            "first-approval-preserves-workspace",
-            "model-confirmation-scoped",
+            "approval-awaits-handoff",
+            "model-handoff-scoped",
             "ready-regresses",
             "completed-setup-survives-generation",
             "generation-cannot-hide-invalidated-setup",

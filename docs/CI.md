@@ -114,6 +114,7 @@ identities without a backend or production credentials:
 
 ```sh
 uv run --project tools/converter --locked --python 3.13.13 python scripts/test_beginner_setup.py
+uv run --project tools/converter --locked --python 3.13.13 python scripts/test_openwork_beginner_handoff.py
 ```
 
 Rust formatting, dependencies and the workers (Apple silicon with Xcode's Metal tools):

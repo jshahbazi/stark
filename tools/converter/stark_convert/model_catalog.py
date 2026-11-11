@@ -60,7 +60,7 @@ _PLANNING_DENSE_FAMILIES = {
     "smollm3",
 }
 _CONTEXT_FIELDS = ("max_position_embeddings", "n_positions", "max_seq_len")
-_CODE_TASK_TAGS = {"code", "coding", "programming", "coder"}
+_CODE_TASK_TAGS = {"code", "coding", "programming", "coder", "code-generation", "code_generation", "code-completion"}
 _GENERATION_BLOCK_TAG = re.compile(r"{%-?\s*(?:generation|endgeneration)\s*-?%}")
 _MAX_CHAT_TEMPLATE_BYTES = 256 * 1024
 _GEMMA3_IMAGE_TEMPLATE = "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"
@@ -319,6 +319,66 @@ def _parameters(info, quantized):
     ):
         return None
     return total
+
+
+def _dense_config_parameters(config, family):
+    """Count logical parameters from complete supported decoder geometry.
+
+    Quantized Hub tensor totals describe packed storage. These formulas instead
+    follow the matrix, normalization and bias shapes checked by qwen3.py and
+    adapters/dense.py. They describe the pinned config, not tensor admission;
+    missing geometry and layouts outside these adapters remain unknown.
+    """
+    if family not in {"qwen3", "qwen2", "llama", "mistral"} or config.get("model_type") != family:
+        return None
+    bounds = {
+        "hidden_size": 262144,
+        "intermediate_size": 1048576,
+        "num_hidden_layers": 512,
+        "num_attention_heads": 512,
+        "vocab_size": 1000000,
+    }
+    if any(type(config.get(key)) is not int or not 0 < config[key] <= high for key, high in bounds.items()):
+        return None
+    dim, intermediate, layers, heads, vocab = (config[key] for key in bounds)
+    groups = config.get("num_key_value_heads", heads)
+    if type(groups) is not int or not 0 < groups <= heads or heads % groups:
+        return None
+    head_dim = config.get("head_dim")
+    if head_dim is None:
+        if dim % heads:
+            return None
+        head_dim = dim // heads
+    if type(head_dim) is not int or not 0 < head_dim <= 1024 or head_dim % 2:
+        return None
+    if family == "qwen2" and heads * head_dim != dim:
+        return None
+    tied = config.get("tie_word_embeddings", False)
+    biased = config.get("attention_bias", family == "qwen2")
+    if type(tied) is not bool or type(biased) is not bool:
+        return None
+    if family in {"llama", "mistral"} and biased or family == "qwen2" and not biased:
+        return None
+    if config.get("mlp_bias", False) is not False or config.get("use_qk_norm", True) is not True:
+        return None
+    if family == "qwen3" and config.get("qkv_bias", biased) is not biased:
+        return None
+    # Do not apply the dense formula to a custom expert, cross-attention or
+    # pruned decoder even if its model_type reuses a dense family identifier.
+    if any(
+        config.get(key)
+        for key in ("num_experts", "num_local_experts", "pruned_heads", "add_cross_attention", "is_encoder_decoder")
+    ):
+        return None
+    query, kv = heads * head_dim, groups * head_dim
+    attention = 2 * dim * (query + kv)
+    mlp = 3 * dim * intermediate
+    norms = 2 * dim + (2 * head_dim if family == "qwen3" else 0)
+    biases = query + 2 * kv if biased else 0
+    if family == "qwen3" and biased:
+        biases += dim
+    total = (1 if tied else 2) * vocab * dim + dim + layers * (attention + mlp + norms + biases)
+    return total if 0 < total < 2**63 else None
 
 
 def _size_label(entry, parameters):
@@ -1036,6 +1096,8 @@ def family_catalog(
                     unavailable_reason = next((layout[mode] for mode in modes if layout[mode] is not None), None)
                 extra_weights = any(name.endswith(".safetensors") and name not in selected for name in names)
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
+                if parameters is None and quantization != "BF16" and not extra_weights:
+                    parameters = _dense_config_parameters(config, family)
                 chat_template, chat_template_blocker = (None, None)
                 if planning:
 
@@ -1093,18 +1155,27 @@ def family_catalog(
                 except Exception:
                     failures += 1
         accepted.sort(key=_size_order)
-        if failures:
+        if failures and (not planning or not accepted):
             return report(family, "error", "Models could not be loaded. Check your connection and try again.")
-        return report(
+        partial_failure = discovery_failed or bool(failures)
+        result = report(
             family,
             "ready",
-            "Choose a model to download."
+            "Some model metadata could not be checked. Check again to retry."
+            if failures
+            else "Choose a model to download."
             if any(item["downloadable"] for item in accepted)
             else "No models on this page are available to download."
             if accepted
             else "No compatible models were found in this family.",
             accepted,
-            next_offset=offset + len(candidates) if omitted else None,
+            # A partial guided result must retry this window instead of
+            # advancing past sources whose metadata could not be checked.
+            next_offset=offset if planning and partial_failure else offset + len(candidates) if omitted else None,
         )
+        if planning:
+            result["incomplete"] = omitted or partial_failure
+            result["partial_failure"] = partial_failure
+        return result
     except Exception:
         return report(family, "error", "Models could not be loaded. Check your connection and try again.")

@@ -92,6 +92,7 @@ class DesktopConnectionsTests(unittest.TestCase):
                 str(sources / "DesktopClientPeer.swift"),
                 str(sources / "DesktopConnectionBroker.swift"),
                 str(sources / "OpenWorkConnectorInstaller.swift"),
+                str(sources / "OpenWorkBeginnerHandoff.swift"),
                 str(sources / "OpenWorkConnectionController.swift"),
                 str(sources / "OpenCodeConnectionController.swift"),
                 str(sources / "DesktopConnections.swift"),
