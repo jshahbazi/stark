@@ -481,7 +481,11 @@ def test_identical_local_imports_share_one_offer_and_different_model_exclusion(h
         (path / "config.json").write_text("{}")
         host.models.append({"id": identifier, "name": "Same source", "path": str(path), "source": "local:copy"})
     monkeypatch.setattr(guided_installed, "inspect_installed", lambda _path: installed_metadata())
-    monkeypatch.setattr(module, "host_resources", lambda _path: resources(physical_memory_bytes=256 * guided.GIB, available_memory_bytes=200 * guided.GIB))
+    monkeypatch.setattr(
+        module,
+        "host_resources",
+        lambda _path: resources(physical_memory_bytes=256 * guided.GIB, available_memory_bytes=200 * guided.GIB),
+    )
     report = offer(host, preference="answers")
     item = report["items"][0]
     assert item["installed_ids"] == ["first-copy", "second-copy"]

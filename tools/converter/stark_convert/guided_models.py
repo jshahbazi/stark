@@ -915,7 +915,8 @@ def recommendation_report(
                 "id": recipe.id,
                 "name": recipe.name,
                 "capacity_is_lower_bound": recipe.capacity_is_lower_bound,
-                "display_name": recipe.display_name or (
+                "display_name": recipe.display_name
+                or (
                     recipe.catalog_item.get("model_group", {}).get("name", recipe.name)
                     if isinstance(recipe.catalog_item, dict)
                     and isinstance(recipe.catalog_item.get("model_group"), dict)
