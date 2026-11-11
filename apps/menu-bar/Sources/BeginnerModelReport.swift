@@ -47,6 +47,7 @@ struct BeginnerModelReport {
     struct Item: Identifiable, Equatable {
         let id: String
         let name: String
+        let displayName: String
         let source: String
         let revision: String
         let quantization: String
@@ -64,6 +65,10 @@ struct BeginnerModelReport {
         let benchmarkDetails: [String]
         let benchmarkReference: BenchmarkReference?
 
+        var variantName: String {
+            name == displayName ? String(source.split(separator: "/").last ?? Substring(name)) : name
+        }
+
         init?(_ raw: [String: Any]) {
             guard let id = BeginnerMetadata.string(raw["id"], limit: 128),
                   let name = BeginnerMetadata.string(raw["name"], limit: 200),
@@ -72,16 +77,18 @@ struct BeginnerModelReport {
                   revision.count == 40, revision.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
                   raw["artifact_mode"] as? String == "text",
                   let quantization = BeginnerMetadata.string(raw["quantization"], limit: 80),
-                  let download = BeginnerMetadata.integer(raw["download_bytes"]), download > 0,
+                  let download = BeginnerMetadata.integer(raw["download_bytes"]),
                   let installed = BeginnerMetadata.integer(raw["installed_bytes_estimate"]), installed > 0,
                   let setup = BeginnerMetadata.integer(raw["setup_disk_bytes_estimate"]), setup >= installed,
                   let runtime = BeginnerMetadata.integer(raw["runtime_memory_bytes_estimate"]), runtime > 0,
                   let context = BeginnerMetadata.integer(raw["context_tokens"]), (512...1_048_576).contains(context),
                   let ids = BeginnerMetadata.strings(raw["installed_ids"], count: 64, length: 512),
+                  download > 0 || !ids.isEmpty,
                   let license = BeginnerMetadata.string(raw["license"], limit: 160),
                   let qualification = BeginnerMetadata.string(raw["qualification"], limit: 2_000),
                   let caveats = BeginnerMetadata.strings(raw["caveats"], count: 16, length: 2_000) else { return nil }
             self.id = id; self.name = name; self.source = source; self.revision = revision
+            displayName = BeginnerMetadata.string(raw["display_name"], limit: 256) ?? name
             self.quantization = quantization; downloadBytes = download; installedBytes = installed
             if let value = raw["setup_disk_bytes_remaining_estimate"] {
                 guard let remaining = BeginnerMetadata.integer(value), remaining <= setup else { return nil }

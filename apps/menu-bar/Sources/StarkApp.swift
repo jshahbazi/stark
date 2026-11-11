@@ -5,6 +5,24 @@ import Metal
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum WorkerPipeReader {
+    /// Read one currently available chunk. FileHandle.readData(ofLength:) can
+    /// wait for the entire requested length while a persistent worker is alive.
+    static func readChunk(from handle: FileHandle) -> Data? {
+        var bytes = Data(count: 65_536)
+        let amount = bytes.withUnsafeMutableBytes { buffer -> Int in
+            while true {
+                let count = Darwin.read(handle.fileDescriptor, buffer.baseAddress!, buffer.count)
+                if count < 0 && errno == EINTR { continue }
+                return count
+            }
+        }
+        guard amount >= 0 else { return nil }
+        bytes.count = amount
+        return bytes
+    }
+}
+
 enum ImageAttachmentError: Error {
     case invalid, tooLarge, unavailable
 
@@ -1473,7 +1491,6 @@ final class EngineController: ObservableObject {
                 self.attachmentStaging = nil
             }
         }
-        output = outgoing.fileHandleForReading
         observeBackendOutput(outgoing.fileHandleForReading)
         do {
             try child.run()
@@ -1490,11 +1507,12 @@ final class EngineController: ObservableObject {
     }
 
     private func observeBackendOutput(_ handle: FileHandle) {
+        output = handle
         handle.readabilityHandler = { [weak self] handle in
-            // The backend keeps stdout open between JSONL events. A fixed-size
-            // read can wait for the rest of that size and starve short replies.
-            let bytes = handle.availableData
-            guard !bytes.isEmpty else { handle.readabilityHandler = nil; return }
+            guard let bytes = WorkerPipeReader.readChunk(from: handle), !bytes.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
             self?.reader.async { [weak self] in self?.receive(bytes) }
         }
     }
@@ -1628,6 +1646,8 @@ final class EngineController: ObservableObject {
             guard applyResourceBudget(event) else {
                 state = "error"
                 message = "The runtime reported an invalid request budget. Quit and reopen Stark."
+                errorMessage = message
+                beginnerRunRequestID = nil; beginnerRunBackup = nil
                 return
             }
             if beginnerRunRequestID != nil {
@@ -2201,10 +2221,18 @@ final class EngineController: ObservableObject {
         }
     }
 
-    func installBeginnerModel(recipeID: String) {
-        guard !busy, let recommendation = beginnerRequestID,
+    @discardableResult
+    func installBeginnerModel(recipeID: String) -> Bool {
+        guard !busy else {
+            errorMessage = "Wait for the current request to finish, then try setting up this model again."
+            return false
+        }
+        guard let recommendation = beginnerRequestID,
               let choice = beginnerReport?.items.first(where: { $0.id == recipeID }),
-              choice.installedIDs.allSatisfy({ id in !models.contains(where: { $0.id == id }) }) else { return }
+              choice.installedIDs.allSatisfy({ id in !models.contains(where: { $0.id == id }) }) else {
+            errorMessage = "This starting choice changed. Check the recommendation again before downloading it."
+            return false
+        }
         resetInstallProgress(kind: "huggingface")
         errorMessage = nil; beginnerInstallError = nil; beginnerCancelPending = false
         let requestID = UUID().uuidString.lowercased()
@@ -2218,7 +2246,9 @@ final class EngineController: ObservableObject {
             beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
             endInstallProgress("failed")
             state = loadedID.isEmpty ? "idle" : "ready"
+            return false
         }
+        return true
     }
 
     func cancelBeginnerInstallation() {

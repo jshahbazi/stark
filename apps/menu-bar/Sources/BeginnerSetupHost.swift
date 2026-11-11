@@ -150,28 +150,27 @@ struct BeginnerSetupHost: View {
     var snapshot: BeginnerSetupSnapshot {
         var result = BeginnerSetupSnapshot()
         result.choices = (engine.beginnerReport?.items ?? []).map { item in
-            BeginnerModelChoice(id: item.id, name: item.name,
-                summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
-                downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
-                contextTokens: item.contextTokens,
-                installedModelID: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) },
-                source: item.source, revision: item.revision,
-                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL)
-        }
-        // Keep the exact operation choice available if another surface refreshes recommendations.
-        if let item = engine.beginnerInstallChoice,
-           !result.choices.contains(where: { $0.id == item.id }),
-           engine.beginnerInstallState != "idle", (session.installingChoiceID == item.id || session.selectedChoiceID == item.id) {
-            result.choices.append(BeginnerModelChoice(id: item.id, name: item.name,
+            BeginnerModelChoice(id: item.id, name: item.displayName,
                 summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens, source: item.source, revision: item.revision,
-                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL))
+                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL,
+                variantName: item.variantName)
+                .resolvingInstalledCopy(as: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) })
+        }
+        if let item = engine.beginnerInstallChoice,
+           !result.choices.contains(where: { $0.id == item.id }),
+           engine.beginnerInstallState != "idle", (session.installingChoiceID == item.id || session.selectedChoiceID == item.id) {
+            result.choices.append(BeginnerModelChoice(id: item.id, name: item.displayName,
+                summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
+                downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
+                contextTokens: item.contextTokens, source: item.source, revision: item.revision,
+                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL,
+                variantName: item.variantName))
         }
         result.choicesLoading = engine.beginnerChoicesLoading
         result.choicesError = engine.beginnerChoicesError
         result.deviceSummary = engine.beginnerReport?.deviceSummary ?? ""
-        result.recommendationMessage = engine.beginnerReport.map { $0.items.isEmpty ? $0.message : "" } ?? ""
         result.installChoiceID = engine.beginnerInstallChoice?.id
         result.installedResultID = engine.beginnerInstalledResultID
         result.installPhase = installationPhase
@@ -181,7 +180,18 @@ struct BeginnerSetupHost: View {
         result.installError = engine.beginnerInstallError
         result.canInstall = !engine.busy && !engine.beginnerChoicesLoading
         result.canStartModel = !engine.busy
-        result.runningModelID = engine.loadedID; result.runningModelName = engine.activeModel?.name ?? ""
+        result.runningModelID = engine.loadedID
+        result.runningModelName = engine.activeModel?.displayName ?? ""
+        result.runningModelVariantName = engine.activeModel?.display?.quantization ?? ""
+        result.runningModelRepositoryURL = engine.activeModel?.display?.repositoryURL
+        let runningChoiceID = engine.beginnerReport?.items.first { $0.installedIDs.contains(engine.loadedID) }?.id
+        if let running = result.choices.first(where: {
+            session.installedID(for: $0, in: result) == engine.loadedID || $0.id == runningChoiceID
+        }) {
+            result.runningModelName = running.name
+            if result.runningModelVariantName.isEmpty { result.runningModelVariantName = running.variantName }
+            result.runningModelRepositoryURL = running.repositoryURL
+        }
         result.modelReady = engine.modelReady && engine.loadedMode == .chat
         result.modelStarting = engine.state == "loading"
         result.modelGenerating = engine.state == "generating"
@@ -196,6 +206,9 @@ struct BeginnerSetupHost: View {
         result.openWorkClientActive = observation.running && openWork.hasDiscoveredModel(
             apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
         result.openWorkBusy = openWork.busy
+        result.openWorkPreparing = openWork.beginnerPreparing
+        result.openWorkPreparedModelID = openWork.beginnerIsPrepared(
+            apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens) ? engine.loadedID : nil
         result.openWorkMessage = engine.apiBaseURL.isEmpty ? engine.apiMessage : (observation.message ?? openWork.message)
         result.openWorkScope = observation.scope
         let choice = session.choice(in: result)
@@ -233,14 +246,12 @@ struct BeginnerSetupHost: View {
             },
             openOpenWork: openOpenWork,
             downloadOpenWork: { NSWorkspace.shared.open(URL(string: "https://openworklabs.com/download")!) },
-            connectOpenWork: { observation.message = nil; openWork.connect() },
+            connectOpenWork: { observation.message = nil; openWork.connectBeginner() },
             checkConnection: {
-                observation.message = "Checking OpenWork’s connection…"
-                observation.refresh(engine: engine, force: true) { connected in
-                    observation.message = connected
-                        ? "OpenWork’s verified connector has requested this model’s settings. Confirm the workspace and model you selected there."
-                        : "Open OpenWork with a local workspace, then select Stark and the running model. Quit and reopen OpenWork if its connection settings changed."
-                }
+                observation.message = nil
+                openWork.prepareBeginnerModel(apiID: engine.activeModel?.apiID ?? "",
+                    contextTokens: engine.apiContextTokens, retry: true)
+                observation.refresh(engine: engine, force: true)
             },
             openChat: openChat,
             showAdvanced: { selectInterface(.advanced) },
@@ -249,6 +260,9 @@ struct BeginnerSetupHost: View {
 
     private func refreshOpenWork(force: Bool = false) {
         observation.refresh(engine: engine, force: force)
+        if session.stage == .openOpenWork, snapshot.canUseOpenWork {
+            openWork.prepareBeginnerModel(apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
+        }
     }
 
     private func openOpenWork() {

@@ -73,6 +73,13 @@ class Recipe:
     logical_parameters: int | None = None
     task_tags: tuple[str, ...] = ()
     query_heads: int | None = None
+    installed_only: bool = False
+    installed_config_sha256: str | None = None
+    estimated_runtime_bytes: int | None = None
+    estimated_gpu_runtime_bytes: int | None = None
+    estimated_startup_bytes: int | None = None
+    capacity_is_lower_bound: bool = False
+    display_name: str | None = None
     native_choice: str | None = None
     native_profile: dict | None = None
     recurrent_state_bytes: int = 0
@@ -87,6 +94,8 @@ class Recipe:
 
     @property
     def download_bytes(self):
+        if self.installed_only:
+            return 0
         if self.native_choice is not None:
             return self.native_profile["download_bytes"]
         if self.catalog_item is not None:
@@ -101,15 +110,22 @@ class Recipe:
 
     @property
     def setup_bytes(self):
+        if self.installed_only:
+            return self.installed_bytes
         if self.native_choice is not None:
-            # hybrid_prepare downloads directly into the library volume and
-            # publishes by rename: there is no second converted weight copy.
+            # Native preparation publishes downloaded weights by rename.
             return self.installed_bytes + 4 * GIB
         # Keep source and converted copies, plus a 512 MiB setup reserve.
         return self.download_bytes + self.installed_bytes + 512 * MIB
 
     @property
+    def startup_memory(self):
+        return self.runtime_memory if self.estimated_startup_bytes is None else self.estimated_startup_bytes
+
+    @property
     def runtime_memory(self):
+        if self.estimated_runtime_bytes is not None:
+            return self.estimated_runtime_bytes
         if self.native_profile is not None:
             state = native_request_bytes(self.native_choice, self.native_profile["geometry"], self.context_tokens)
             if self.resident_profile is not None:
@@ -138,6 +154,8 @@ class Recipe:
 
     @property
     def gpu_runtime_memory(self):
+        if self.estimated_gpu_runtime_bytes is not None:
+            return self.estimated_gpu_runtime_bytes
         # GPU planning is independent of qualified resident-system accounting.
         # Only the admitted Lily/MLX-Serve paths stage selected rows on the GPU.
         paged = self.native_profile["paged_weight_bytes"] if self.native_profile is not None else 0
@@ -542,6 +560,26 @@ def matches_recipe(path, recipe):
     """
     try:
         root = Path(path)
+        if recipe.installed_only:
+            from .guided_installed import inspect_installed
+
+            metadata = inspect_installed(root)
+            return (
+                metadata is not None
+                and (metadata.get("gpu_runtime_memory", metadata["runtime_memory"]) == recipe.gpu_runtime_memory)
+                and (metadata.get("startup_memory", metadata["runtime_memory"]) == recipe.startup_memory)
+                and all(
+                    metadata[key] == expected
+                    for key, expected in (
+                        ("repo", recipe.repo),
+                        ("revision", recipe.revision),
+                        ("weight_bytes", recipe.weight_bytes),
+                        ("quantization", recipe.quantization),
+                        ("config_sha256", recipe.installed_config_sha256),
+                        ("runtime_memory", recipe.runtime_memory),
+                    )
+                )
+            )
         config = _small_file(root, "config.json")
         if recipe.native_choice is not None:
             from .api_tools import tool_parser_for
@@ -639,6 +677,8 @@ def setup_credit(recipe, host):
 
 
 def installation_allowed(recipe, host, *, installed=False):
+    if recipe.installed_only and not installed:
+        return False
     if host.get("supported") is not True:
         return False
     physical = host.get("physical_memory_bytes")
@@ -684,36 +724,35 @@ def execution_allowed(recipe, host):
     return (
         installation_allowed(recipe, host, installed=True)
         and type(available) is int
-        and available >= recipe.runtime_memory
+        and available >= recipe.startup_memory
     )
 
 
 def _fit_tier(recipe, host):
     """A comfortable fit leaves 10% beyond the admission planning reserves."""
-    if recipe.native_choice is None:
-        return int(recipe.runtime_memory * 110 <= _planning_budget(host) * 100)
-    return int(
-        recipe.runtime_memory * 110 <= (host["physical_memory_bytes"] - 2 * GIB) * 100
-        and recipe.gpu_runtime_memory * 110 <= host["gpu_memory_budget_bytes"] * 85
-    )
+    physical = host["physical_memory_bytes"] - 2 * GIB
+    budget = host.get("gpu_memory_budget_bytes")
+    physical_fit = recipe.runtime_memory * 110 <= physical * 100
+    gpu_fit = recipe.gpu_runtime_memory * 110 <= budget * 85 if type(budget) is int and budget > 0 else True
+    return int(physical_fit and gpu_fit)
 
 
 def _ranking_key(recipe, host, installed, task, preference):
-    common = (-_fit_tier(recipe, host), -int(task in recipe.task_tags))
+    common = (-_fit_tier(recipe, host),)
+    task_match = -int(task in recipe.task_tags)
     if preference == "speed":
-        objective = (recipe.weight_bytes, recipe.runtime_memory)
+        objective = (recipe.weight_bytes, task_match, recipe.runtime_memory)
     elif preference == "answers":
-        objective = (-(recipe.logical_parameters or 0), recipe.runtime_memory)
+        objective = (-(recipe.logical_parameters or 0), task_match, recipe.runtime_memory)
     else:
-        # Below half the host's planning budget, prioritize capacity with a
-        # modest memory penalty. Above it, the penalty grows quadratically.
-        # A fixed parameters/memory^2 score picked the same tiny checkpoint on
-        # small and large Macs. This remains a heuristic, not a quality score.
+        # Below half the host planning budget, prioritize capacity with a
+        # modest memory penalty; above it the penalty grows quadratically.
+        # Published comparable evidence is applied after this fallback order.
         target = _planning_budget(host) // 2
         capacity_per_cost = Fraction(
             (recipe.logical_parameters or 0) * target**2, target**2 + recipe.runtime_memory**2
         )
-        objective = (-capacity_per_cost, recipe.runtime_memory)
+        objective = (task_match, -capacity_per_cost, recipe.runtime_memory)
     return (
         *common,
         *objective,
@@ -772,9 +811,60 @@ def _recommendation_reason(recipe, host, task, preference, *, benchmark_used=Fal
     else:
         reasons.append("Parameter capacity is unknown, so the choice uses resource fit and deterministic tie-breaks.")
     available = host.get("available_memory_bytes")
-    if type(available) is not int or available < recipe.runtime_memory:
+    if type(available) is not int or available < recipe.startup_memory:
         reasons.append("More memory must be available when starting; switching away from a running model may free it.")
     return " ".join(reasons)
+
+
+def recipe_from_installed(model):
+    """Offer a checked local artifact independently of bounded online discovery."""
+    from .guided_installed import inspect_installed
+
+    metadata = inspect_installed(Path(model["path"]))
+    if metadata is None:
+        return None
+    name = metadata.get("name", model["name"])
+    if (
+        not isinstance(name, str)
+        or not 0 < len(name.encode()) <= 200
+        or any(ord(character) < 32 or ord(character) == 127 for character in name)
+    ):
+        name = metadata["repo"].split("/")[-1]
+    identifier = (
+        "installed-"
+        + hashlib.sha256(
+            json.dumps(
+                {key: metadata[key] for key in ("repo", "revision", "config_sha256", "quantization", "weight_bytes")},
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()[:32]
+    )
+    return Recipe(
+        id=identifier,
+        name=name,
+        repo=metadata["repo"],
+        revision=metadata["revision"],
+        architecture=metadata["architecture"],
+        metadata_profile=None,
+        quantization=metadata["quantization"],
+        minimum_memory=metadata["runtime_memory"] + 2 * GIB,
+        context_tokens=metadata["context_tokens"],
+        attention_layers=0,
+        kv_heads=0,
+        head_dim=0,
+        qualification="Installed artifact with a local metadata memory plan; native loading and task success "
+        "are checked separately. No download is needed.",
+        files=(),
+        estimated_weight_bytes=metadata["weight_bytes"],
+        logical_parameters=metadata["logical_parameters"],
+        installed_only=True,
+        installed_config_sha256=metadata["config_sha256"],
+        estimated_runtime_bytes=metadata["runtime_memory"],
+        estimated_gpu_runtime_bytes=metadata.get("gpu_runtime_memory"),
+        estimated_startup_bytes=metadata.get("startup_memory"),
+        capacity_is_lower_bound=metadata.get("capacity_is_lower_bound", False),
+        display_name=metadata.get("display_name"),
+    )
 
 
 def _license_label(value):
@@ -817,13 +907,21 @@ def recommendation_report(
             if recipe.native_profile is not None
             else recipe.catalog_item.get("license")
             if recipe.catalog_item is not None
-            else "Apache-2.0"
+            else ("Review the installed source license" if recipe.installed_only else "Apache-2.0")
         )
         license_name = _license_label(license_name)
         items.append(
             {
                 "id": recipe.id,
                 "name": recipe.name,
+                "capacity_is_lower_bound": recipe.capacity_is_lower_bound,
+                "display_name": recipe.display_name
+                or (
+                    recipe.catalog_item.get("model_group", {}).get("name", recipe.name)
+                    if isinstance(recipe.catalog_item, dict)
+                    and isinstance(recipe.catalog_item.get("model_group"), dict)
+                    else recipe.name
+                ),
                 "repo": recipe.repo,
                 "revision": recipe.revision,
                 "artifact_mode": "text",
@@ -833,6 +931,7 @@ def recommendation_report(
                 "setup_disk_bytes_estimate": recipe.setup_bytes,
                 "setup_disk_bytes_remaining_estimate": recipe.setup_bytes - setup_credit(recipe, host),
                 "runtime_memory_bytes_estimate": recipe.runtime_memory,
+                "startup_memory_bytes_estimate": recipe.startup_memory,
                 "gpu_memory_bytes_estimate": recipe.gpu_runtime_memory,
                 "context_tokens": recipe.context_tokens,
                 "installed_ids": ids,
@@ -849,7 +948,9 @@ def recommendation_report(
                 "benchmarks": evidence,
                 "benchmark_details": benchmark_details,
                 "evidence": (
-                    "recorded_native_checks"
+                    "installed_metadata"
+                    if recipe.installed_only
+                    else "recorded_native_checks"
                     if recipe.native_profile is not None and recipe.native_profile["native_workflow_checked"]
                     else "native_source_metadata"
                     if recipe.native_choice is not None

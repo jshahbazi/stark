@@ -60,6 +60,7 @@ from .guided_models import (
     matches_recipe,
     native_recipes,
     recipe_from_catalog,
+    recipe_from_installed,
     recommendation_report,
     with_resident_profile,
 )
@@ -1103,6 +1104,19 @@ class Desktop:
                 # source-only download estimate cannot authorize its startup.
                 candidates[recipe.id] = inspected[0]
             installed[recipe.id] = ids
+        matched_ids = {identifier for ids in installed.values() for identifier in ids}
+        unassessed = len(models) - len(valid_models)
+        for model, _display in valid_models:
+            if model["id"] in matched_ids:
+                continue
+            recipe = recipe_from_installed(model)
+            if recipe is None:
+                unassessed += 1
+                continue
+            candidates[recipe.id] = recipe
+            installed.setdefault(recipe.id, []).append(model["id"])
+            if model["id"] in excluded["excluded_model_ids"]:
+                excluded_recipes.add(recipe.id)
         report = recommendation_report(
             self.guided_resources(hardware),
             installed,
@@ -1111,6 +1125,10 @@ class Desktop:
             preference=preference,
             candidates=tuple(candidates.values()),
         )
+        if unassessed:
+            report["message"] += (
+                f" {unassessed} installed model(s) could not be assessed by this guide; review them in Advanced."
+            )
         if discovery is not None:
             report["catalog_search"] = {
                 "bounded": True,
@@ -1120,7 +1138,7 @@ class Desktop:
             search_note = (
                 "The search checked a bounded window of the supported catalog. "
                 if discovery["items"]
-                else "Catalog discovery is unavailable; only recorded starter choices were checked. "
+                else "Catalog discovery is unavailable; installed models and recorded starter choices were checked. "
             )
             if discovery.get("failed_families", 0):
                 search_note += "Some families could not be checked; Check again retries the search. "

@@ -70,7 +70,7 @@ enum BeginnerModelPriority: String, CaseIterable, Identifiable {
 }
 
 enum BeginnerSetupStage: String, CaseIterable {
-    case task, recommendation, installation, openWork, connection, ready, retry
+    case task, recommendation, installation, openWork, connection, openOpenWork, ready, retry
 
     var step: Int {
         switch self {
@@ -78,7 +78,8 @@ enum BeginnerSetupStage: String, CaseIterable {
         case .installation: return 1
         case .openWork: return 2
         case .connection: return 3
-        case .ready: return 4
+        case .openOpenWork: return 4
+        case .ready: return 5
         }
     }
 }
@@ -103,10 +104,27 @@ struct BeginnerModelChoice: Identifiable, Equatable {
     var qualification = ""
     var benchmarkSourceURL: URL? = nil
     var availabilityMessage: String? = nil
+    var variantName = ""
+
+    var repositoryURL: URL? {
+        guard source.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$",
+                           options: .regularExpression) != nil else { return nil }
+        return URL(string: "https://huggingface.co/" + source)
+    }
 
     func installed(as modelID: String) -> BeginnerModelChoice {
         var result = self
         result.installedModelID = modelID
+        result.availabilityMessage = nil
+        return result
+    }
+
+    func resolvingInstalledCopy(as modelID: String?) -> BeginnerModelChoice {
+        var result = self
+        result.installedModelID = modelID
+        if downloadBytes == 0 && modelID == nil {
+            result.availabilityMessage = "This installed model is no longer available. Check models again to refresh your choices."
+        }
         return result
     }
 }
@@ -116,7 +134,6 @@ struct BeginnerSetupSnapshot: Equatable {
     var choicesLoading = false
     var choicesError: String? = nil
     var deviceSummary = ""
-    var recommendationMessage = ""
     var installChoiceID: String? = nil
     var installedResultID: String? = nil
     var installPhase: BeginnerInstallPhase = .idle
@@ -129,6 +146,8 @@ struct BeginnerSetupSnapshot: Equatable {
     var choiceRequiresRestart = false
     var runningModelID = ""
     var runningModelName = ""
+    var runningModelVariantName = ""
+    var runningModelRepositoryURL: URL? = nil
     var modelReady = false
     var modelStarting = false
     var modelGenerating = false
@@ -142,10 +161,12 @@ struct BeginnerSetupSnapshot: Equatable {
     var openWorkRunning = false
     var openWorkApproved = false
     var openWorkClientActive = false
+    var openWorkPreparedModelID: String? = nil
+    var openWorkPreparing = false
     var openWorkBusy = false
     var openWorkMessage = ""
     // An adapter-owned identity for the connection/profile. Revocation or a
-    // different client must change this value to invalidate local confirmations.
+    // different client must change this value to invalidate the automatic handoff.
     var openWorkScope = ""
 
     var canUseOpenWork: Bool {
@@ -155,7 +176,7 @@ struct BeginnerSetupSnapshot: Equatable {
 
 struct BeginnerSetupActions {
     var refreshChoices: (BeginnerTask, String?, String) -> Void = { _, _, _ in }
-    var install: (BeginnerModelChoice) -> Void = { _ in }
+    var install: (BeginnerModelChoice) -> Bool = { _ in false }
     var cancelInstall: () -> Void = {}
     var startModel: (BeginnerModelChoice) -> Bool = { _ in false }
     var openOpenWork: () -> Void = {}
@@ -176,18 +197,50 @@ final class BeginnerSetupSession: ObservableObject {
     @Published var retryPreference: BeginnerRetryPreference?
     @Published private(set) var choosingAnotherModel = false
     @Published private(set) var excludedModelID: String?
-    @Published private(set) var workspaceConfirmed = false
-    @Published private(set) var confirmedOpenWorkModelID: String?
     @Published private(set) var startRequestedModelID: String?
     @Published private(set) var installingChoiceID: String?
 
     private var previousTask: BeginnerTask?
+    private var previousPriority: BeginnerModelPriority = .balanced
     private var previousStage: BeginnerSetupStage = .ready
     private var observedModelID: String?
     private var connectionScope: String?
+    private var recommendationTask: BeginnerTask?
+    private var recommendationPriority: BeginnerModelPriority?
+
+    var recommendationsMatchSelection: Bool {
+        recommendationTask == nil || (recommendationTask == task && recommendationPriority == modelPriority)
+    }
+
+    func selectTask(_ value: BeginnerTask) {
+        guard task != value else { return }
+        task = value
+        selectedChoiceID = nil
+        retryPreference = nil
+    }
+
+    func selectModelPriority(_ value: BeginnerModelPriority) {
+        modelPriority = value
+        selectedChoiceID = nil
+        retryPreference = nil
+    }
+
+    /// Retry intent becomes the visible priority, so returning to the task
+    /// picker cannot leave an invisible override of the user's next choice.
+    func requestRecommendations() -> String {
+        if retryPreference == .speed { modelPriority = .speed }
+        if retryPreference == .answers { modelPriority = .answers }
+        retryPreference = nil
+        recommendationTask = task
+        recommendationPriority = modelPriority
+        selectedChoiceID = nil
+        stage = .recommendation
+        return modelPriority.rawValue
+    }
 
     func choices(in snapshot: BeginnerSetupSnapshot) -> [BeginnerModelChoice] {
-        snapshot.choices.filter { choice in
+        guard recommendationsMatchSelection else { return [] }
+        return snapshot.choices.filter { choice in
             !choosingAnotherModel || excludedModelID == nil || choice.installedModelID != excludedModelID
         }
     }
@@ -211,6 +264,7 @@ final class BeginnerSetupSession: ObservableObject {
             return
         }
         previousTask = task
+        previousPriority = modelPriority
         previousStage = stage
         task = task ?? .unsure
         choosingAnotherModel = true
@@ -224,6 +278,7 @@ final class BeginnerSetupSession: ObservableObject {
     func keepCurrentModel() {
         choosingAnotherModel = false
         task = previousTask ?? task
+        modelPriority = previousPriority
         selectedChoiceID = nil
         excludedModelID = nil
         retryPreference = nil
@@ -255,18 +310,9 @@ final class BeginnerSetupSession: ObservableObject {
         stage = .installation
     }
 
-    func confirmWorkspace() { workspaceConfirmed = true }
-
-    func confirmModelSelection(snapshot: BeginnerSetupSnapshot) {
-        guard snapshot.canUseOpenWork, snapshot.openWorkApproved,
-              snapshot.openWorkRunning else { return }
-        confirmedOpenWorkModelID = snapshot.runningModelID
-    }
-
     func canFinish(snapshot: BeginnerSetupSnapshot) -> Bool {
         snapshot.canUseOpenWork && snapshot.openWorkRunning && snapshot.openWorkApproved &&
-            snapshot.openWorkClientActive && workspaceConfirmed &&
-            confirmedOpenWorkModelID == snapshot.runningModelID
+            snapshot.openWorkClientActive && snapshot.openWorkPreparedModelID == snapshot.runningModelID
     }
 
     // A request temporarily makes the worker unavailable for a model switch;
@@ -275,7 +321,7 @@ final class BeginnerSetupSession: ObservableObject {
         snapshot.modelGenerating && !snapshot.runningModelID.isEmpty &&
             snapshot.runningSupportsTools && snapshot.runningContextKnown && snapshot.localAPIAvailable &&
             snapshot.openWorkRunning && snapshot.openWorkApproved && snapshot.openWorkClientActive &&
-            workspaceConfirmed && confirmedOpenWorkModelID == snapshot.runningModelID
+            snapshot.openWorkPreparedModelID == snapshot.runningModelID
     }
 
     func finish(snapshot: BeginnerSetupSnapshot) {
@@ -296,10 +342,13 @@ final class BeginnerSetupSession: ObservableObject {
         if target == .task { return true }
         if target == .recommendation || target == .retry { return task != nil }
         if target == .installation {
+            guard recommendationsMatchSelection else { return false }
             return snapshot.installChoiceID != nil || snapshot.installedResultID != nil
                 || selectedChoiceID != nil || canFinish(snapshot: snapshot)
         }
-        if target == .openWork || target == .connection {
+        if target == .openWork || target == .connection || target == .openOpenWork {
+            if target != .openWork && !snapshot.openWorkInstalled { return false }
+            if target == .openOpenWork && (!snapshot.openWorkApproved || snapshot.openWorkBusy) { return false }
             return (snapshot.modelReady || keepsCompletedSetupWhileGenerating(snapshot: snapshot))
                 && !snapshot.runningModelID.isEmpty
         }
@@ -309,6 +358,7 @@ final class BeginnerSetupSession: ObservableObject {
     func navigate(to target: BeginnerSetupStage, snapshot: BeginnerSetupSnapshot) {
         guard canNavigate(to: target, snapshot: snapshot) else { return }
         stage = target
+        synchronize(with: snapshot)
     }
 
     func continueAfterModel(snapshot: BeginnerSetupSnapshot) {
@@ -317,25 +367,35 @@ final class BeginnerSetupSession: ObservableObject {
         choosingAnotherModel = false
         excludedModelID = nil
         retryPreference = nil
-        stage = snapshot.openWorkInstalled && workspaceConfirmed ? .connection : .openWork
+        stage = snapshot.openWorkInstalled ? .connection : .openWork
+        synchronize(with: snapshot)
     }
 
     func synchronize(with snapshot: BeginnerSetupSnapshot) {
         if let scope = connectionScope, scope != snapshot.openWorkScope {
-            workspaceConfirmed = false
-            confirmedOpenWorkModelID = nil
             if stage == .ready { stage = .openWork }
         }
         connectionScope = snapshot.openWorkScope
         if let previous = observedModelID, previous != snapshot.runningModelID {
-            confirmedOpenWorkModelID = nil
             if stage == .ready { stage = .connection }
         }
         observedModelID = snapshot.runningModelID
-        if !snapshot.openWorkApproved { confirmedOpenWorkModelID = nil }
         if stage == .ready, !canFinish(snapshot: snapshot), !keepsCompletedSetupWhileGenerating(snapshot: snapshot) {
-            stage = snapshot.openWorkInstalled && workspaceConfirmed ? .connection : .openWork
+            stage = snapshot.openWorkInstalled ? .connection : .openWork
         }
+        // Authorization and discovery do not prove that the automatic model
+        // binding was saved and displayed in OpenWork.
+        if stage == .openWork, snapshot.openWorkInstalled { stage = .connection }
+        if stage == .connection, snapshot.openWorkInstalled, snapshot.openWorkApproved,
+           !snapshot.openWorkBusy, snapshot.canUseOpenWork { stage = .openOpenWork }
+        if stage == .connection || stage == .openOpenWork {
+            if !snapshot.openWorkInstalled { stage = .openWork }
+            else if stage == .openOpenWork,
+                    !snapshot.openWorkApproved || (!snapshot.canUseOpenWork && !keepsCompletedSetupWhileGenerating(snapshot: snapshot)) {
+                stage = .connection
+            }
+        }
+        if stage == .openOpenWork, canFinish(snapshot: snapshot) { finish(snapshot: snapshot) }
         if let pending = installingChoiceID, pending == snapshot.installChoiceID,
            [.ready, .cancelled, .failed].contains(snapshot.installPhase) {
             installingChoiceID = nil
