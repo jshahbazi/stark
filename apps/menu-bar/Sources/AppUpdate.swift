@@ -89,7 +89,7 @@ struct AppRelease: Decodable {
     }
 }
 
-struct AppUpdateDownload {
+struct AppUpdateDownload: Equatable {
     let version: String
     let url: URL
     let sha256: String
@@ -323,6 +323,7 @@ final class AppUpdateController: ObservableObject {
     private var automaticChecks: Task<Void, Never>?
     private var lastCheck: Date?
     private var installFailed = false
+    private var preparedUpdate: PreparedAppUpdate?
     private let installedBuild: InstalledAppBuild
     private let operations: AppUpdateOperations
     private let now: () -> Date
@@ -336,6 +337,12 @@ final class AppUpdateController: ObservableObject {
     }
 
     var versionLabel: String { installedBuild.label }
+
+    deinit {
+        if let preparedUpdate {
+            try? FileManager.default.removeItem(at: preparedUpdate.workspace)
+        }
+    }
 
     init(installed: String? = nil, installedBuild: InstalledAppBuild? = nil,
          operations: AppUpdateOperations? = nil, now: @escaping () -> Date = Date.init,
@@ -409,14 +416,25 @@ final class AppUpdateController: ObservableObject {
         busy = true
         if !background { message = "Checking for updates…" }
         task = Task {
+            var preparing = false
             do {
-                available = try await operations.fetch(installedBuild.updateComparisonVersion)
+                let release = try await operations.fetch(installedBuild.updateComparisonVersion)
+                if release != available {
+                    discardPreparedUpdate()
+                }
+                available = release
                 if !background || !installFailed {
                     message = available == nil ? (background ? "" : "Stark is up to date.") : "A new version is available."
                     installFailed = false
                 }
+                if let release, preparedUpdate == nil {
+                    preparing = true
+                    try await prepare(release)
+                } else if let release, !installFailed {
+                    message = "Stark \(release.version) is ready to upgrade."
+                }
             } catch {
-                if !background {
+                if !background || preparing && !installFailed {
                     message = (error as? AppUpdateError)?.localizedDescription ?? AppUpdateError.download.localizedDescription
                 }
             }
@@ -425,13 +443,30 @@ final class AppUpdateController: ObservableObject {
         }
     }
 
+    private func discardPreparedUpdate() {
+        if let preparedUpdate {
+            try? FileManager.default.removeItem(at: preparedUpdate.workspace)
+        }
+        preparedUpdate = nil
+    }
+
+    private func prepare(_ release: AppUpdateDownload) async throws {
+        message = "Downloading Stark \(release.version)…"
+        preparedUpdate = try await operations.prepare(release) { [weak self] status in self?.message = status }
+        message = "Stark \(release.version) is ready to upgrade."
+    }
+
     private func upgrade(_ release: AppUpdateDownload) {
-        busy = true; message = "Downloading Stark \(release.version)…"
+        busy = true
         installFailed = false
         task = Task {
             var installing = false
             do {
-                let update = try await operations.prepare(release) { [weak self] status in self?.message = status }
+                if preparedUpdate == nil { try await prepare(release) }
+                guard let update = preparedUpdate else { throw AppUpdateError.helper }
+                // The helper owns this workspace from here, including any
+                // recovery backup. Never discard it after an install failure.
+                preparedUpdate = nil
                 installing = true
                 message = "Preparing to relaunch Stark \(release.version)…"
                 try await operations.install(update, release)
