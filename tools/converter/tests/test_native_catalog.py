@@ -51,6 +51,101 @@ def test_native_catalog_rejects_other_families_and_mutated_items():
     assert not native_catalog.allowed_choice("unregistered")
 
 
+def test_unavailable_native_catalog_rows_surface_unqualified_native_layouts():
+    glm = native_catalog.unavailable_item(
+        native_catalog.FAMILY_ID,
+        "someone/GLM-5.3-Flash-MLX",
+        "a" * 40,
+        {"model_type": "glm5_next"},
+        ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],
+        {"model-00001-of-00002.safetensors": 12, "model-00002-of-00002.safetensors": 15},
+    )
+    assert glm["downloadable"] is False
+    assert glm["artifact_modes"] == ["text"]
+    assert glm["weight_bytes"] == 27
+    assert "Safetensors import is unavailable" in glm["unavailable_reason"]
+
+    flint = native_catalog.unavailable_item(
+        native_catalog.FLINT_FAMILY_ID,
+        "someone/flint-affine-export",
+        "b" * 40,
+        {"model_type": "flint"},
+        ["weights.safetensors"],
+        {"weights.safetensors": 99},
+    )
+    assert flint["downloadable"] is False
+    assert flint["quantization"] == "Safetensors/MLX"
+    assert "pinned MLX affine INT4 checkpoint" in flint["unavailable_reason"]
+
+
+def test_unavailable_native_catalog_rows_require_matching_family_and_weights():
+    assert native_catalog.unavailable_item("other", "owner/repo", "a" * 40, {}, ["weights.gguf"], {}) is None
+    assert (
+        native_catalog.unavailable_item(
+            native_catalog.FAMILY_ID,
+            "owner/GLM-5.3-Flash",
+            "a" * 40,
+            {"model_type": "glm_moe_dsa"},
+            ["weights.gguf"],
+            {},
+        )
+        is None
+    )
+    assert (
+        native_catalog.unavailable_item(
+            native_catalog.FAMILY_ID,
+            "owner/GLM-5.3-Flash",
+            "a" * 40,
+            {},
+            ["config.json"],
+            {},
+        )
+        is None
+    )
+    gguf = native_catalog.unavailable_item(
+        native_catalog.FAMILY_ID,
+        "owner/GLM-5.3-Flash-GGUF",
+        "a" * 40,
+        {},
+        ["model.gguf"],
+        {"model.gguf": 123},
+    )
+    assert gguf["quantization"] == "GGUF"
+    assert gguf["weight_bytes"] == 123
+    assert gguf["downloadable"] is False
+
+
+def test_unavailable_native_catalog_weight_bytes_are_bounded_and_exclude_sidecars():
+    config = {"model_type": "flint"}
+    base = native_catalog.unavailable_item(
+        "flint",
+        "owner/flint-export",
+        "a" * 40,
+        config,
+        ["weights.safetensors"],
+        {"weights.safetensors": 2**63},
+    )
+    assert base["weight_bytes"] is None
+    zero = native_catalog.unavailable_item(
+        "flint",
+        "owner/flint-export",
+        "a" * 40,
+        config,
+        ["weights.safetensors"],
+        {"weights.safetensors": 0},
+    )
+    assert zero["weight_bytes"] is None
+    sidecars = native_catalog.unavailable_item(
+        "flint",
+        "owner/flint-export",
+        "a" * 40,
+        config,
+        ["tokenizer.bin", "adapter_model.safetensors"],
+        {"tokenizer.bin": 512, "adapter_model.safetensors": 1024},
+    )
+    assert sidecars is None
+
+
 def test_qwen_native_install_prepares_and_registers_the_pinned_source(tmp_path, monkeypatch):
     from test_hybrid_prepare import metadata
 

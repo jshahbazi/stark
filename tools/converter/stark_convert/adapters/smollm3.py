@@ -6,10 +6,13 @@ MIT; Copyright (c) 2025 Mirai Tech Inc. See LICENSE.lalamo.
 
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata
 from ..streaming import ConversionPlan
 from .granite import _build_plan
 
 
-def build_smollm3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_smollm3_plan(
+    source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
     """Validate every tensor and preserve the pinned per-layer mask semantics."""
-    return _build_plan(source, family="smollm3", dtype=dtype)
+    return _build_plan(source, family="smollm3", dtype=dtype, checkpoint_metadata=checkpoint_metadata)

@@ -57,12 +57,16 @@ def clean_offline_environment(monkeypatch):
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: [])
     monkeypatch.setattr(catalog, "get_model", lambda _repo: None)
+    # These tests isolate discovery/metadata routing. Header admission has its
+    # own tests with complete converter fixtures and bounded HTTP responses.
+    monkeypatch.setattr(catalog, "_verify_hub_layout", lambda *args: dict.fromkeys(args[-1]))
 
 
 class Hub:
     def __init__(self):
         self.repos = {}
         self.discovered = {}
+        self.searched = {}
         self.cached = {}
         self.events = []
 
@@ -102,9 +106,10 @@ class Hub:
     def HfApi(self):
         return self
 
-    def list_models(self, *, filter, **kwargs):
-        self.events.append(("list", filter, kwargs))
-        return [SimpleNamespace(id=repo) for repo in self.discovered.get(filter, [])]
+    def list_models(self, *, filter=None, search=None, **kwargs):
+        self.events.append(("list", filter or search, kwargs))
+        results = self.searched.get(search, []) if search is not None else self.discovered.get(filter, [])
+        return [SimpleNamespace(id=repo) for repo in results]
 
     def model_info(self, *, repo_id, **kwargs):
         self.events.append(("info", repo_id, kwargs))
@@ -370,7 +375,13 @@ def test_metadata_proven_incompatible_candidates_are_not_downloadable(tmp_path, 
     hub.add(tmp_path, "someone/Wrong", config, names=names, parameters=parameters)
     hub.discovered["qwen3"] = ["someone/Wrong"]
     report = catalog.family_catalog("qwen3", hub=hub)
-    assert report["status"] == "ready" and report["items"] == []
+    assert report["status"] == "ready"
+    if config["model_type"] in {"qwen3_moe", "llama"} or names and "adapter_model.safetensors" in names:
+        assert report["items"] == []
+    else:
+        assert len(report["items"]) == 1
+        assert report["items"][0]["downloadable"] is False
+        assert report["items"][0]["unavailable_reason"]
 
 
 @pytest.mark.parametrize("architecture", ["Qwen3Model", "Qwen3ForSequenceClassification", "Qwen3ForTextEmbedding"])
@@ -766,7 +777,8 @@ def test_bf16_qwen_moe_catalog_requires_image_metadata_and_never_offers_text(
         assert len(items) == 1 and items[0]["artifact_modes"] == ["vision-language"]
         assert items[0]["default_artifact_mode"] == "vision-language"
     else:
-        assert not items
+        assert len(items) == 1 and items[0]["downloadable"] is False
+        assert "processing metadata" in items[0]["unavailable_reason"]
     assert not any(event[0] in {"head", "download"} and event[-1].endswith(".safetensors") for event in hub.events)
 
 
@@ -814,13 +826,15 @@ def test_download_bytes_follow_converter_selection_not_alternate_or_optimizer_fi
     assert item["parameter_count"] is None
 
 
-def test_multiple_unindexed_checkpoints_are_not_offered(tmp_path):
+def test_multiple_unindexed_checkpoints_explain_why_download_is_unavailable(tmp_path):
     hub = Hub()
     hub.add(
         tmp_path, "someone/Ambiguous", {"model_type": "qwen3"}, names={"one.safetensors": 100, "two.safetensors": 200}
     )
     hub.discovered["qwen3"] = ["someone/Ambiguous"]
-    assert catalog.family_catalog("qwen3", hub=hub)["items"] == []
+    items = catalog.family_catalog("qwen3", hub=hub)["items"]
+    assert len(items) == 1 and items[0]["downloadable"] is False
+    assert "shard index" in items[0]["unavailable_reason"]
 
 
 def test_source_revision_is_required_and_stable_id_changes_with_it(tmp_path):
@@ -1083,12 +1097,8 @@ def test_offline_or_invalid_family_never_uses_the_hub():
     assert catalog.family_catalog("qwen3", limit=31, hub=object())["status"] == "error"
 
 
-def test_native_glm_catalog_is_one_fixed_pinned_item_without_hub_access():
+def test_native_glm_catalog_preserves_fixed_pinned_item_alongside_discovery():
     from stark_convert import hybrid_prepare, native_catalog
-
-    class NoHub:
-        def __getattr__(self, name):
-            pytest.fail(f"native GLM catalog unexpectedly accessed hub.{name}")
 
     item = native_catalog.catalog_item()
     source = hybrid_prepare.SOURCES[native_catalog.CHOICE]
@@ -1100,10 +1110,12 @@ def test_native_glm_catalog_is_one_fixed_pinned_item_without_hub_access():
     assert item["size_label"] is None and item["parameter_count"] is None
     assert native_catalog.source_choice(native_catalog.FAMILY_ID, item) == native_catalog.CHOICE
 
-    report = catalog.family_catalog(native_catalog.FAMILY_ID, hub=NoHub())
+    hub = Hub()
+    report = catalog.family_catalog(native_catalog.FAMILY_ID, hub=hub)
     assert report["status"] == "ready"
     assert report["items"] == [item]
     assert report["items"][0]["artifact_modes"] == ["text"]
+    assert hub.events and all(event[0] == "list" for event in hub.events)
 
     mutated = native_catalog.family_definition()
     mutated["modes"]["text"]["status"] = "qualified"

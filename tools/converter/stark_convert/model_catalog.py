@@ -64,6 +64,95 @@ _CODE_TASK_TAGS = {"code", "coding", "programming", "coder"}
 _GENERATION_BLOCK_TAG = re.compile(r"{%-?\s*(?:generation|endgeneration)\s*-?%}")
 _MAX_CHAT_TEMPLATE_BYTES = 256 * 1024
 _GEMMA3_IMAGE_TEMPLATE = "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"
+_SEARCH_TERMS = {
+    "qwen3": ("Qwen3",),
+    "qwen2": ("Qwen2",),
+    "llama": ("Llama",),
+    "mistral": ("Mistral",),
+    "gemma2": ("gemma-2",),
+    "gemma3_text": ("gemma-3",),
+    "gemma3": ("gemma-3",),
+    "gemma4_text": ("gemma-4",),
+    "olmo3": ("OLMo-3",),
+    "phi3": ("Phi-3",),
+    "granite": ("Granite",),
+    "smollm3": ("SmolLM3",),
+    "qwen3_5": ("Qwen3.5", "Qwen3.6"),
+    "qwen3_5_moe": ("Qwen3.5", "Qwen3.6"),
+    "qwen4_exp": ("Qwen3.8-Flash-Next",),
+    "lfm2": ("LFM2",),
+    "llamba": ("LLaMBA",),
+    "glm5_next": ("GLM-5.3-Flash",),
+    "flint": ("flint",),
+}
+
+
+def _repository_search(api, definition, remaining):
+    """Interleave aliases and name searches so large tags cannot starve others."""
+    queries = [
+        *({"filter": alias} for alias in definition["architecture_aliases"]),
+        *({"search": term} for term in _SEARCH_TERMS.get(definition["family_id"], ())),
+    ]
+
+    def results(query):
+        yield from api.list_models(**query, sort="downloads", expand=["sha"])
+
+    streams = [iter(results(query)) for query in queries]
+    while streams:
+        active = []
+        for stream in streams:
+            remaining()
+            try:
+                item = next(stream)
+            except StopIteration:
+                continue
+            active.append(stream)
+            repo = _repo(_field(item, "id"))
+            if repo is not None:
+                yield repo
+        streams = active
+
+
+def _unsupported_quantization(config):
+    """Describe declared packing for an unavailable row without granting support."""
+    text = config.get("text_config", config)
+    merged = {**text, **config} if isinstance(text, dict) else config
+    packing = merged.get("quantization", merged.get("quantization_config"))
+    if isinstance(packing, dict):
+        bits = packing.get("bits")
+        if type(bits) is int and 1 <= bits <= 16:
+            return f"{bits}-bit"
+    return "Unsupported format"
+
+
+def _verify_hub_layout(family, hub, repo, revision, config, shards, index, sizes, remaining, modes):
+    from .checkpoint_metadata import CheckpointMetadata
+    from .hub_headers import HeaderAccessError, HeaderBudgetError, checkpoint_headers
+    from .planning import plan_from_headers
+
+    unsupported = "The checkpoint's tensor names, shapes or packing do not match Stark's importer for this family."
+    try:
+        tensors = checkpoint_headers(hub, repo, revision, shards, index, sizes, remaining)
+    except (ConversionError, UnsupportedConversion):
+        return dict.fromkeys(modes, unsupported)
+    except HeaderBudgetError:
+        return dict.fromkeys(modes, "A tensor header exceeds the catalog's 4 MiB verification limit.")
+    except HeaderAccessError:
+        return dict.fromkeys(modes, qwen38_external.UNVERIFIED)
+    except Exception:
+        return dict.fromkeys(modes, qwen38_external.UNVERIFIED)
+
+    verdicts = {}
+    for mode in modes:
+        try:
+            remaining()
+            plan_from_headers(family, CheckpointMetadata(config, tensors), mode=mode)
+            verdicts[mode] = None
+        except (ConversionError, UnsupportedConversion, ValueError, TypeError, KeyError, OverflowError):
+            verdicts[mode] = unsupported
+        except Exception:
+            verdicts[mode] = qwen38_external.UNVERIFIED
+    return verdicts
 
 
 class _Unavailable(Exception):
@@ -636,7 +725,13 @@ def _generation_architecture(config, family):
             or (family == "gemma3" and name == "Gemma3ForConditionalGeneration")
             or (
                 family == "gemma4_text"
-                and name in {"Gemma4ForConditionalGeneration", "Gemma4UnifiedForConditionalGeneration"}
+                and name
+                in {
+                    "Gemma4ForConditionalGeneration",
+                    "Gemma4UnifiedForConditionalGeneration",
+                    "Gemma4TextModel",
+                    "Gemma4UnifiedTextModel",
+                }
             )
         )
         for name in declared
@@ -693,9 +788,9 @@ def family_catalog(
 ):
     """Return candidate downloads; actual installation must repeat pinned preflight."""
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
-    from .native_catalog import FLINT_CHOICE, FLINT_FAMILY_ID
-    from .native_catalog import catalog_item as native_catalog_item
+    from .native_catalog import FLINT_FAMILY_ID
     from .native_catalog import catalog_items as native_catalog_items
+    from .native_catalog import unavailable_item as native_unavailable_item
 
     valid_offset = type(offset) is int and 0 <= offset <= 10_000_000
 
@@ -707,47 +802,8 @@ def family_catalog(
     if type(planning) is not bool or type(deadline_seconds) not in (int, float) or not 0 < deadline_seconds <= 600:
         return report(family_id or "", "error", "The model catalogue request is invalid.")
 
-    if family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID}:
-        if type(limit) is not int or not 1 <= limit <= MAX_ITEMS or offset != 0:
-            return report(family_id, "error", "The model catalogue request is invalid.")
-        if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
-            return report(family_id, "offline", "Connect to the internet to browse models.")
-        native_item = native_catalog_item(FLINT_CHOICE) if family_id == FLINT_FAMILY_ID else native_catalog_item()
-        return report(
-            family_id,
-            "ready",
-            "Choose a model to download.",
-            [
-                {
-                    **native_item,
-                    **(
-                        {
-                            "planning": {
-                                "status": "unavailable",
-                                "architecture": family_id,
-                                "context_limit": None,
-                                "attention_layers": None,
-                                "query_heads": None,
-                                "kv_heads": None,
-                                "head_dim": None,
-                                "hidden_size": None,
-                                "download_bytes": native_item["weight_bytes"],
-                                "task_tags": [],
-                                "license": None,
-                                "chat_template_available": False,
-                                "supports_tools": False,
-                                "tool_parser": None,
-                                "blockers": ["runtime_layout_not_covered"],
-                            }
-                        }
-                        if planning
-                        else {}
-                    ),
-                }
-            ],
-        )
-
-    family = normalize_architecture(family_id)
+    native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID}
+    family = family_id if native_family else normalize_architecture(family_id)
     definition = next((item for item in support_matrix()["families"] if item["family_id"] == family), None)
     if definition is None or not any(
         definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language")
@@ -768,35 +824,36 @@ def family_catalog(
             raise _Unavailable()
 
     try:
-        api = hub.HfApi()
-        seeds = _catalog_seeds(family)
+        try:
+            api = hub.HfApi()
+        except Exception:
+            if not native_family:
+                raise
+            api = None
         pins = _catalog_pins(family)
         native_items = {item["repo"]: item for item in native_catalog_items(family)}
-        discovery_failed = False
+        seeds = list(native_items) if native_family else []
+        seeds = list(dict.fromkeys([*seeds, *_catalog_seeds(family)]))
+        discovery_failed = api is None
 
         def repositories():
             nonlocal discovery_failed
             yield from seeds
-            for alias in definition["architecture_aliases"]:
-                try:
-                    # Let the Hub iterator follow every result page. The local
-                    # window bounds metadata inspection, rather than hiding the
-                    # tail of each family behind a fixed discovery limit.
-                    for item in api.list_models(filter=alias, sort="downloads", expand=["sha"]):
-                        remaining()
-                        repo = _repo(_field(item, "id"))
-                        if repo is not None:
-                            yield repo
-                except Exception:
-                    discovery_failed = True
-                    return  # Retry this frontier instead of skipping a failed alias.
+            if api is None:
+                return
+            try:
+                yield from _repository_search(api, definition, remaining)
+            except Exception:
+                discovery_failed = True
+                # Retain the frontier so a retry never skips a failed search.
+                return
 
         candidates, seen = [], set()
         for repo in repositories():
             remaining()
-            if repo in seen:
+            if repo.casefold() in seen:
                 continue
-            seen.add(repo)
+            seen.add(repo.casefold())
             if len(seen) > offset:
                 candidates.append(repo)
                 if len(candidates) > limit:
@@ -844,6 +901,13 @@ def family_catalog(
                 if requested_revision is not None and revision != requested_revision:
                     raise _Unavailable()
                 names, sizes = _weight_inventory(info)
+                if native_family:
+                    config = (
+                        _json(read(repo, "config.json", revision, MAX_CONFIG_BYTES))
+                        if "config.json" in names
+                        else None
+                    )
+                    return native_unavailable_item(family, repo, revision, config, names, sizes)
                 # The original registry's Gemma3 wrappers predate the native
                 # image adapter. Bind their complete, same-revision metadata
                 # through the generic vision path rather than a text recipe.
@@ -872,18 +936,25 @@ def family_catalog(
                 bf16_qwen_moe = family == "qwen3_5_moe" and not any(
                     scope.get(key) is not None
                     for scope in (config, text_config)
+                    if isinstance(scope, dict)
                     for key in ("quantization", "quantization_config")
                 )
                 base_mode = "vision-language" if family == "gemma3" or bf16_qwen_moe else "text"
                 verdict = preflight_model(config, mode=base_mode, expected_architecture=family)
-                if verdict["status"] != "conditional":
+                if verdict["family_id"] != family:
                     return None
+                unavailable_reason = None
+                if verdict["status"] != "conditional":
+                    unavailable_reason = verdict["message"]
                 if repo in native_items:
                     # Retained image choices keep their exact native preparation
                     # identity after the pinned metadata check. A moved revision
                     # cannot silently replace the reviewed source or fall back
                     # to a text-only generic conversion.
-                    return dict(native_items[repo])
+                    item = dict(native_items[repo])
+                    if unavailable_reason is not None:
+                        item.update(downloadable=False, unavailable_reason=unavailable_reason)
+                    return item
                 external_qwen = qwen38_external.is_external_affine(config)
                 quantization = (
                     qwen38_external.QUANTIZATION
@@ -891,12 +962,24 @@ def family_catalog(
                     else _quantization(config, info, entry, family=family)
                 )
                 if quantization is None:
-                    return None
+                    unavailable_reason = unavailable_reason or (
+                        "This checkpoint's declared weight format has no supported import path."
+                    )
+                    quantization = _unsupported_quantization(config)
                 selected = _selected_weights(names, lambda filename, maximum: read(repo, filename, revision, maximum))
                 if selected is None:
-                    return None
-                unavailable_reason = None
-                if external_qwen:
+                    selected = [
+                        name
+                        for name in names
+                        if name.endswith((".gguf", ".safetensors", ".bin", ".exl3"))
+                        and not PurePosixPath(name).name.startswith("adapter_model")
+                    ]
+                    if not selected:
+                        return None
+                    unavailable_reason = unavailable_reason or (
+                        "This checkpoint requires a supported Safetensors file or a complete shard index."
+                    )
+                if external_qwen and unavailable_reason is None:
                     indexed = qwen38_external.INDEX in names
                     if not qwen38_external.supported_shards(selected, indexed):
                         return None
@@ -922,7 +1005,7 @@ def family_catalog(
                     selected = [*selected, qwen38_external.NGRAM_TABLE]
                 weight_bytes = _weight_bytes(selected, sizes)
                 modes = [base_mode]
-                if family in {"qwen3_5", "qwen3_5_moe", "gemma3", "gemma4_text"}:
+                if unavailable_reason is None and family in {"qwen3_5", "qwen3_5_moe", "gemma3", "gemma4_text"}:
                     image_metadata = _catalog_image_metadata(
                         family,
                         config,
@@ -932,9 +1015,26 @@ def family_catalog(
                         lambda filename, maximum: read(repo, filename, revision, maximum),
                     )
                     if base_mode == "vision-language" and (quantization != "BF16" or not image_metadata):
-                        return None
+                        unavailable_reason = (
+                            "Image import requires supported BF16 vision weights and complete processing metadata."
+                        )
                     if base_mode != "vision-language" and image_metadata:
                         modes.append("vision-language")
+                if unavailable_reason is None and not external_qwen:
+                    index = (
+                        _json(read(repo, "model.safetensors.index.json", revision, MAX_CONFIG_BYTES))["weight_map"]
+                        if "model.safetensors.index.json" in names
+                        else None
+                    )
+                    layout = _verify_hub_layout(
+                        family, hub, repo, revision, config, selected, index, sizes, remaining, modes
+                    )
+                    supported_modes = [mode for mode in modes if layout[mode] is None]
+                    if supported_modes:
+                        modes = supported_modes
+                        base_mode = modes[0]
+                    else:
+                        unavailable_reason = layout[base_mode]
                 extra_weights = any(name.endswith(".safetensors") and name not in selected for name in names)
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
                 chat_template, chat_template_blocker = (None, None)

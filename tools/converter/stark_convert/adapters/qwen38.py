@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..checkpoint_metadata import CheckpointMetadata
 from ..compressed import MLXQuantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
@@ -371,13 +372,15 @@ def describe_text_weights(architecture, tensors, matrix, control, *, include_mtp
         layer("mtp.layers.0", "full_attention")
 
 
-def build_qwen38_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_qwen38_plan(
+    source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
     """Plan text-only standard storage while preserving every consumed source bit."""
     if dtype != "bfloat16":
         raise UnsupportedConversion("Qwen3.8 currently preserves BF16 parameters and requires bfloat16 output")
-    config = read_json(source / "config.json")
+    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
     architecture, regexes = architecture_config(config)
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     validate_planning_layers(architecture["num_hidden_layers"], tensors)
     expected: set[str] = set()
     operations: list[TensorOperation] = []

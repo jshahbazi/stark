@@ -143,6 +143,92 @@ def test_discover_uses_capped_concurrent_family_windows_and_hides_exceptions(mon
     assert "secret" not in repr(result) and "do-not-leak" not in repr(result)
 
 
+def test_discover_reaches_downloadable_model_after_unavailable_page(monkeypatch):
+    monkeypatch.setattr(
+        guided_discovery,
+        "support_matrix",
+        lambda: {"families": [{"family_id": "llama", "modes": {"text": {"status": "conditional"}}}]},
+    )
+    ticks = iter([100, 106])
+    monkeypatch.setattr(guided_discovery.time, "monotonic", lambda: next(ticks))
+    calls = []
+    unavailable = {**catalog_item(identifier="c" * 32), "downloadable": False}
+    available = catalog_item()
+
+    def catalog(family, **options):
+        calls.append((family, options))
+        if "offset" not in options:
+            return {"status": "ready", "has_more": True, "next_offset": 30, "items": [unavailable]}
+        return {"status": "ready", "has_more": True, "next_offset": 60, "items": [available]}
+
+    result = guided_discovery.discover(catalog=catalog)
+
+    assert calls == [
+        ("llama", {"planning": True, "deadline_seconds": 10, "limit": 30}),
+        ("llama", {"planning": True, "deadline_seconds": 4, "limit": 30, "offset": 30}),
+    ]
+    assert result["items"] == [unavailable, available]
+    assert guided.recipe_from_catalog(result["items"][1]) is not None
+    assert result["incomplete"] is True and result["failed_families"] == 0
+
+
+def test_family_discovery_stops_at_shared_deadline(monkeypatch):
+    ticks = iter([100, 111])
+    monkeypatch.setattr(guided_discovery.time, "monotonic", lambda: next(ticks))
+    calls = []
+
+    def catalog(family, **options):
+        calls.append(options)
+        return {"status": "ready", "has_more": True, "next_offset": 30, "items": []}
+
+    report = guided_discovery._discover_family(catalog, "llama")
+
+    assert len(calls) == 1
+    assert report["has_more"] is True
+
+
+@pytest.mark.parametrize("next_offset", [None, False, 0, -1, "30", 10_000_001])
+def test_family_discovery_stops_at_invalid_frontier(next_offset):
+    calls = []
+
+    def catalog(family, **options):
+        calls.append(options)
+        return {"status": "ready", "has_more": True, "next_offset": next_offset, "items": []}
+
+    report = guided_discovery._discover_family(catalog, "llama")
+
+    assert len(calls) == 1
+    assert report["has_more"] is True
+
+
+def test_family_discovery_retains_rows_when_later_page_fails():
+    unavailable = {**catalog_item(), "downloadable": False}
+
+    def catalog(family, **options):
+        if "offset" in options:
+            raise RuntimeError("private exception sentinel")
+        return {"status": "ready", "has_more": True, "next_offset": 30, "items": [unavailable]}
+
+    report = guided_discovery._discover_family(catalog, "llama")
+
+    assert report == {"status": "error", "has_more": True, "items": [unavailable]}
+    assert "sentinel" not in repr(report)
+
+
+def test_family_discovery_caps_metadata_pages_even_with_immediate_responses(monkeypatch):
+    monkeypatch.setattr(guided_discovery.time, "monotonic", lambda: 100)
+    calls = []
+
+    def catalog(family, **options):
+        calls.append(options)
+        return {"status": "ready", "has_more": True, "next_offset": 30 * len(calls), "items": []}
+
+    report = guided_discovery._discover_family(catalog, "llama")
+
+    assert len(calls) == guided_discovery.MAX_FAMILY_PAGES
+    assert report["has_more"] is True
+
+
 def test_catalog_recipe_binds_dynamic_revision_and_rejects_forged_or_unplannable_candidates():
     item = catalog_item(revision="c" * 40, repo="some-org/custom-model")
     recipe = guided.recipe_from_catalog(item)

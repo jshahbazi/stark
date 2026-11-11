@@ -1,11 +1,12 @@
 """The external-table affine dialect handled by the native Qwen3.8 loader."""
 
 import math
-import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import PurePosixPath
 
 from .adapters.qwen38 import describe_text_weights, text_architecture
+from .hub_headers import HeaderAccessError
+from .hub_headers import read_range as _read_range
 from .profiles import generic_files
 from .streaming import ConversionError, UnsupportedConversion, parse_safetensors_header
 
@@ -15,7 +16,6 @@ QUANTIZATION = "MLX-Serve mixed 4/8-bit"
 UNVERIFIED = "Could not verify the tensor headers. Refresh the catalog to retry."
 UNSUPPORTED = "The tensor layout does not match Stark’s Qwen3.8 text loader."
 _MAX_HEADER = 128 * 1024
-_RANGE = re.compile(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)")
 _NGRAM_STEM = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0"
 # Keep these geometry constraints in sync with Qwen4ExpConfig::validate_flash_next.
 _NATIVE_TEXT_GEOMETRY = {
@@ -47,10 +47,6 @@ _NATIVE_TEXT_GEOMETRY = {
 
 class LayoutError(UnsupportedConversion):
     """A bounded, user-facing reason produced by the layout checker."""
-
-
-class HeaderAccessError(Exception):
-    """A complete, pinned header could not be fetched."""
 
 
 def is_external_affine(config: dict) -> bool:
@@ -325,35 +321,6 @@ def validate_layout(config, tensors, table):
     describe_text_weights(architecture, canonical, matrix, control, include_mtp=mtp is not None)
     if any(not name.startswith("model.visual.") for name in canonical.keys() - required):
         raise LayoutError("The checkpoint contains tensors outside Stark’s Qwen3.8 text layout.")
-
-
-def _read_range(hub, url, start, end, check_deadline, expected_total=None):
-    check_deadline()
-    headers = {
-        **hub.utils.build_hf_headers(),
-        "Range": f"bytes={start}-{end}",
-        "Accept-Encoding": "identity",
-    }
-    with hub.utils.get_session().stream("GET", url, headers=headers, timeout=5, follow_redirects=True) as response:
-        content_range = _RANGE.fullmatch(response.headers.get("content-range", ""))
-        if (
-            response.status_code != 206
-            or content_range is None
-            or response.headers.get("content-encoding", "identity") != "identity"
-        ):
-            raise HeaderAccessError()
-        first, last, total = map(int, content_range.groups())
-        if (first, last) != (start, end) or not end < total <= 2**63 - 1 or expected_total not in (None, total):
-            raise HeaderAccessError()
-        data = bytearray()
-        for chunk in response.iter_raw(chunk_size=8192):
-            check_deadline()
-            if len(data) + len(chunk) > end - start + 1:
-                raise HeaderAccessError()
-            data.extend(chunk)
-        if len(data) != end - start + 1:
-            raise HeaderAccessError()
-    return bytes(data), total
 
 
 def verify_hub_layout(hub, repo, revision, config, shards, index, check_deadline, sizes=None):

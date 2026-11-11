@@ -13,6 +13,7 @@ import json
 import math
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
@@ -21,7 +22,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
     validate_planning_layers,
 )
 from .dense import _COMMON_KEYS, _bool, _positive_float, _positive_int
@@ -81,9 +81,11 @@ def _rope(config: dict, head_dim: int, context: int, unsupported: list[str]) -> 
     return rope
 
 
-def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_olmo3_plan(
+    source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
     """Preserve whole-projection Q/K RMSNorm and branch-postnorm residuals."""
-    config = read_json(source / "config.json")
+    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
     if config.get("model_type") != "olmo3":
         raise UnsupportedConversion("Checkpoint model_type does not match OLMo 3")
     if dtype not in _DTYPES:
@@ -145,7 +147,7 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
         and quantization.group_size == 64
         and target_dtype == "BF16"
     )
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     validate_planning_layers(layers, tensors)
     expected: set[str] = set()
     operations: list[TensorOperation] = []
@@ -221,7 +223,7 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     elif "lm_head.weight" in tensors:
         head = tensor("lm_head.weight", (vocab, model_dim))
         embedding = tensor("model.embed_tokens.weight", (vocab, model_dim))
-        if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
+        if not tensor_aliases_equal(head, embedding, header_only=checkpoint_metadata is not None):
             raise ConversionError("OLMo 3 tied output embedding disagrees with input embedding")
     q_width, kv_width = heads * head_dim, groups * head_dim
     for index in range(layers):

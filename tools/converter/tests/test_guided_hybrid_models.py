@@ -451,13 +451,29 @@ def test_guided_native_install_uses_preparation_reuses_and_rejects_receipt_drift
 
 def test_flint_is_an_explicit_native_catalog_family(monkeypatch):
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+
+    class EmptyHub:
+        def HfApi(self):
+            return self
+
+        def model_info(self, **_kwargs):
+            raise AssertionError("pinned Flint item should not require Hub lookup")
+
+        def list_models(self, **_kwargs):
+            return []
+
+        def hf_hub_url(self, **_kwargs):
+            raise AssertionError("pinned Flint item should not require Hub lookup")
+
+    monkeypatch.setattr(model_catalog, "_catalog_seeds", lambda _family: [])
     item = native_catalog.catalog_item("flint-int4")
     assert native_catalog.source_choice("flint", item) == "flint-int4"
     assert native_catalog.family_definition("flint")["conversion"]["containers"] == [".safetensors"]
-    assert model_catalog.family_catalog("flint")["items"] == [item]
+    assert model_catalog.family_catalog("flint", hub=EmptyHub())["items"] == [item]
 
 
 def test_recurrent_catalog_plan_counts_attention_mtp_and_f32_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "_verify_hub_layout", lambda *args: dict.fromkeys(args[-1]))
     config = geometry()
     config["text_config"]["mtp_num_hidden_layers"] = 1
     hub = Hub()

@@ -11,6 +11,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata
 from ..streaming import (
     ConversionError,
     TensorOperation,
@@ -247,13 +248,21 @@ def gemma4_vision_contract(source: Path, repo: str | None = None, revision: str 
     }
 
 
-def build_gemma4_vision_plan(source: Path, *, dtype: str = "bfloat16"):
+def build_gemma4_vision_plan(
+    source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+):
     if dtype != "bfloat16":
         raise UnsupportedConversion("Native Gemma images require BF16 activations and weights")
-    contract = gemma4_vision_contract(source)
-    model_dim = read_json(source / "config.json")["text_config"]["hidden_size"]
-    base = build_gemma4_plan(source, dtype=dtype)
-    tensors = load_checkpoint(source)
+    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    if checkpoint_metadata is None:
+        contract = gemma4_vision_contract(source)
+    else:
+        # Header admission checks tensor storage only. The catalogue separately
+        # admits the pinned processing metadata before offering image support.
+        contract = {"vision_config": config["vision_config"], "family": {"id": "gemma4-header-admission"}}
+    model_dim = config["text_config"]["hidden_size"]
+    base = build_gemma4_plan(source, dtype=dtype, checkpoint_metadata=checkpoint_metadata)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     operations = list(base.operations)
     geometry = contract["vision_config"]
     if geometry["model_type"] == "gemma4_unified_vision":
