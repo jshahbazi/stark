@@ -1,8 +1,8 @@
 """Offline, attributed upstream reference scores for the beginner guide.
 
 These are not measurements of Stark artifacts. Compare one published cohort
-at a time. Coding prioritizes covered models after hard resource admission;
-other tasks retain unscored candidates in their fallback slots.
+at a time. Coding and unsure prioritize covered models after hard resource
+admission; other tasks retain unscored candidates in their fallback slots.
 """
 
 from __future__ import annotations
@@ -118,17 +118,18 @@ class BenchmarkRegistry:
     def model_id(self, recipe):
         return self.bindings.get((recipe.repo, recipe.revision), recipe.repo)
 
-    def rank(self, ordered, task, preference, fit_tier):
-        """Prioritize coding evidence; keep other tasks' bounded comparisons."""
+    def rank(self, ordered, task, preference, fit_tier, *, workflow_checked=lambda recipe: False):
+        """Prioritize coding/unsure evidence; keep other tasks' bounded comparisons."""
         benchmark = TASK_BENCHMARKS.get(task, "ifeval")
         coding_priority = task == "code" and preference not in {"speed", "answers"}
+        general_priority = task == "unsure" and preference not in {"speed", "answers"}
         tiers = {fit_tier(recipe) for recipe in ordered}
         matches = []
         for cohort in self.cohorts:
             if cohort.benchmark != benchmark:
                 continue
             comparable = set()
-            if coding_priority:
+            if coding_priority or general_priority:
                 # Admission has already removed unsafe/unsupported choices.
                 # One covered parent is enough to prefer recorded evidence to
                 # unknown quality, without pretending that unknown means zero.
@@ -148,9 +149,14 @@ class BenchmarkRegistry:
             default=(None, 0),
         )[0]
         ranked, used = list(ordered), set()
-        if selected is not None and coding_priority:
+        if selected is not None and (coding_priority or general_priority):
             scored = [recipe for recipe in ordered if self.model_id(recipe) in selected.results]
-            scored.sort(key=lambda recipe: -selected.results[self.model_id(recipe)][0])
+            scored.sort(
+                key=lambda recipe: (
+                    not workflow_checked(recipe) if general_priority else False,
+                    -selected.results[self.model_id(recipe)][0],
+                )
+            )
             used = {recipe.id for recipe in scored}
             ranked = scored + [recipe for recipe in ordered if recipe.id not in used]
         elif selected is not None and preference not in {"speed", "answers"}:
@@ -210,6 +216,8 @@ class BenchmarkRegistry:
                 + (
                     "Used to prioritize coding recommendations. "
                     if compared and task == "code"
+                    else "Used to prioritize general-purpose starting choices. "
+                    if compared and task == "unsure"
                     else "Used to compare scored options. "
                     if compared
                     else "Reference only in this selection. "

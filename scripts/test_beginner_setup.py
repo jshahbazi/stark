@@ -419,6 +419,21 @@ struct BeginnerChecks {
             guard let fallback = BeginnerModelReport.Item(unscored), fallback.benchmarkReference == nil,
                   fallback.beginnerDetails.split(separator: "\n").count == 1,
                   fallback.beginnerSummary(availableMemoryBytes: nil).contains("No benchmark result is recorded") else { return false }
+            unscored["selection_basis"] = "checked_workflow"
+            guard let checkedFallback = BeginnerModelReport.Item(unscored),
+                  checkedFallback.beginnerSummary(availableMemoryBytes: nil).contains("recorded chat and tool checks"),
+                  checkedFallback.beginnerSummary(availableMemoryBytes: nil).contains("Answer quality is unmeasured") else { return false }
+            unscored["selection_basis"] = "resource_fallback"
+            guard let unknownFallback = BeginnerModelReport.Item(unscored),
+                  unknownFallback.beginnerSummary(availableMemoryBytes: nil).contains("reliability are unverified"),
+                  unknownFallback.beginnerSummary(availableMemoryBytes: 1).contains("Free up memory") else { return false }
+            var instructionBenchmark = benchmark; instructionBenchmark["benchmark"] = "ifeval"
+            var instructionRaw = raw; instructionRaw["benchmarks"] = [instructionBenchmark]
+            instructionRaw["selection_basis"] = "instruction_reference"
+            guard let instructionItem = BeginnerModelReport.Item(instructionRaw),
+                  instructionItem.beginnerSummary(availableMemoryBytes: nil).contains("instruction-following"),
+                  instructionItem.beginnerDetails.contains("this Stark model has not been benchmarked"),
+                  instructionItem.beginnerDetails.contains("Instruction following only") else { return false }
             var unranked = benchmark; unranked["used_for_ranking"] = false
             var unrankedRaw = raw; unrankedRaw["benchmarks"] = [unranked]
             guard let unrankedItem = BeginnerModelReport.Item(unrankedRaw),

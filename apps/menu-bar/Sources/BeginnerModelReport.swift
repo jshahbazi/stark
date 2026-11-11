@@ -61,10 +61,12 @@ struct BeginnerModelReport {
         let qualification: String
         let caveats: [String]
         let recommendationReason: String
+        let selectionBasis: String?
         let benchmarkDetails: [String]
         let benchmarkReference: BenchmarkReference?
 
         init?(_ raw: [String: Any]) {
+            selectionBasis = raw["selection_basis"] as? String
             guard let id = BeginnerMetadata.string(raw["id"], limit: 128),
                   let name = BeginnerMetadata.string(raw["name"], limit: 200),
                   let source = BeginnerMetadata.string(raw["repo"], limit: 256),
@@ -111,6 +113,11 @@ struct BeginnerModelReport {
 
         func beginnerSummary(availableMemoryBytes: Int64?) -> String {
             var summary = "Selected to fit your Mac."
+            if selectionBasis == "checked_workflow" {
+                summary = "Fallback with recorded chat and tool checks. Answer quality is unmeasured."
+            } else if selectionBasis == "resource_fallback" {
+                summary = "Resource-based fallback. Answer quality and workflow reliability are unverified."
+            }
             if let reference = benchmarkReference, reference.usedForRanking { summary = reference.recommendation }
             if benchmarkReference == nil { summary += " No benchmark result is recorded." }
             if let availableMemoryBytes, availableMemoryBytes < runtimeBytes {
@@ -123,7 +130,9 @@ struct BeginnerModelReport {
             var lines = ["Estimated memory: " + ByteCountFormatter.string(fromByteCount: runtimeBytes, countStyle: .memory)]
             if let benchmarkReference {
                 lines.append(benchmarkReference.name + ": " + benchmarkReference.score + "/100")
-                lines.append(benchmarkReference.usedForRanking
+                lines.append(selectionBasis == "instruction_reference"
+                    ? "Published upstream score; this Stark model has not been benchmarked. Instruction following only."
+                    : benchmarkReference.usedForRanking
                     ? "Published model score; local results may vary."
                     : "Reference only; it did not determine this choice.")
             }

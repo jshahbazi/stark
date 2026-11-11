@@ -283,7 +283,7 @@ def test_preferences_and_explicit_task_metadata_change_order():
     large = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
     coding = guided.recipe_from_catalog(catalog_candidate(3, tags=("code",)))
     candidates = [small, large, coding]
-    balanced = guided.recommendation_report(gpu_resources(), {}, candidates=candidates)
+    balanced = guided.recommendation_report(gpu_resources(), {}, candidates=candidates, task="everyday")
     assert balanced["items"][0]["id"] == large.id
     speed = guided.recommendation_report(gpu_resources(), {}, preference="speed", candidates=candidates)
     assert speed["items"][0]["id"] == small.id
@@ -299,7 +299,9 @@ def test_balanced_penalizes_memory_cost_without_always_choosing_largest_checkpoi
     large = guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=12_000_000_000))
     candidates = [small, medium, large]
     for preference, expected in (("balanced", medium), ("speed", small), ("answers", large)):
-        report = guided.recommendation_report(gpu_resources(), {}, preference=preference, candidates=candidates)
+        report = guided.recommendation_report(
+            gpu_resources(), {}, preference=preference, candidates=candidates, task="everyday"
+        )
         assert report["items"][0]["id"] == expected.id
 
 
@@ -358,7 +360,9 @@ def test_large_query_head_count_includes_attention_prefill_workspace():
 def test_installed_copy_does_not_override_hardware_or_capacity_ranking():
     small = guided.recipe_from_catalog(catalog_candidate(1))
     large = guided.recipe_from_catalog(catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000))
-    report = guided.recommendation_report(gpu_resources(), {small.id: ["installed"]}, candidates=[small, large])
+    report = guided.recommendation_report(
+        gpu_resources(), {small.id: ["installed"]}, candidates=[small, large], task="everyday"
+    )
     assert report["items"][0]["id"] == large.id
     host = gpu_resources()
     host["gpu_memory_budget_bytes"] = 10 * guided.GIB
@@ -449,7 +453,8 @@ def test_catalog_results_are_bounded_and_unknown_parameter_count_is_honest():
     item["parameter_count"] = None
     candidate = guided.recipe_from_catalog(item)
     report = guided.recommendation_report(gpu_resources(), {}, candidates=[candidate])
-    assert "capacity is unknown" in report["items"][0]["recommendation_reason"]
+    assert "general-purpose answer quality is unknown" in report["items"][0]["recommendation_reason"]
+    assert report["items"][0]["selection_basis"] == "resource_fallback"
 
 
 @pytest.mark.parametrize("item", [None, [], {}, {"planning": []}])

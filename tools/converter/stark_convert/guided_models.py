@@ -698,7 +698,30 @@ def _fit_tier(recipe, host):
     )
 
 
+def workflow_checked(recipe):
+    """Bounded local workflow evidence, never a general answer-quality score."""
+    return recipe in RECIPES or (
+        recipe.native_profile is not None and recipe.native_profile.get("native_workflow_checked") is True
+    )
+
+
 def _ranking_key(recipe, host, installed, task, preference):
+    if task == "unsure" and preference not in {"speed", "answers"}:
+        # Without capability references, use the recorded starter order, then
+        # other checked workflows, then inexpensive unknowns. Parameter count
+        # must not manufacture general-purpose capability evidence.
+        starter = next((index for index, candidate in enumerate(RECIPES) if recipe == candidate), len(RECIPES))
+        return (
+            not workflow_checked(recipe),
+            starter,
+            -_fit_tier(recipe, host),
+            recipe.runtime_memory,
+            recipe.weight_bytes,
+            not bool(installed.get(recipe.id)),
+            recipe.repo.casefold(),
+            recipe.revision,
+            recipe.id,
+        )
     common = (-_fit_tier(recipe, host), -int(task in recipe.task_tags))
     if preference == "speed":
         objective = (recipe.weight_bytes, recipe.runtime_memory)
@@ -752,6 +775,21 @@ def _recommendation_reason(recipe, host, task, preference, *, benchmark_used=Fal
                 "No eligible coding benchmark references are available. "
                 "This is a resource-based fallback; coding quality is unknown."
             )
+    elif task == "unsure" and preference not in {"speed", "answers"}:
+        if benchmark_used:
+            reasons.append(
+                "Prioritizes published instruction-following evidence; this Stark artifact has not been benchmarked."
+            )
+        else:
+            reasons.append(
+                "No result in the selected instruction-following cohort is recorded for this model. "
+                "This is a fallback; general-purpose answer quality is unknown."
+            )
+        reasons.append(
+            "This exact source has recorded bounded native chat/tool workflow checks; reliability is not guaranteed."
+            if workflow_checked(recipe)
+            else "This exact source still needs native chat/tool workflow checks."
+        )
     elif benchmark_used:
         evaluation = {
             "code": "coding benchmark",
@@ -806,7 +844,7 @@ def recommendation_report(
     eligible.sort(key=lambda recipe: _ranking_key(recipe, host, installed, task, preference))
     benchmarks = load_registry() if benchmarks is None else benchmarks
     eligible, cohort, benchmark_used = benchmarks.rank(
-        eligible, task, preference, lambda recipe: _fit_tier(recipe, host)
+        eligible, task, preference, lambda recipe: _fit_tier(recipe, host), workflow_checked=workflow_checked
     )
     items = []
     for recipe in eligible[:3]:
@@ -846,6 +884,15 @@ def recommendation_report(
                     benchmark_used=recipe.id in benchmark_used,
                     coding_evidence_available=bool(benchmark_used),
                 ),
+                "selection_basis": (
+                    "instruction_reference"
+                    if recipe.id in benchmark_used
+                    else "checked_workflow"
+                    if workflow_checked(recipe)
+                    else "resource_fallback"
+                )
+                if task == "unsure" and preference not in {"speed", "answers"}
+                else None,
                 "benchmarks": evidence,
                 "benchmark_details": benchmark_details,
                 "evidence": (
@@ -868,6 +915,13 @@ def recommendation_report(
     native = [recipe for recipe in candidates if recipe.native_choice is not None]
     if native:
         message += " Native hybrid models were also checked for memory and setup storage."
+    if items and task == "unsure" and preference not in {"speed", "answers"}:
+        message += (
+            " Starting choices prioritize published instruction-following references and recorded workflow checks."
+            if benchmark_used
+            else " No eligible instruction-following references are available; starting choices use recorded "
+            "workflow checks where available. General-purpose answer quality is unknown."
+        )
     if items and task == "code" and preference not in {"speed", "answers"}:
         message += (
             " Coding choices prioritize published benchmark references; missing scores remain unknown."

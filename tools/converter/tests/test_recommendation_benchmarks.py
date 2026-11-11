@@ -81,6 +81,98 @@ def test_coding_evidence_displaces_unknown_models_including_first_place():
     assert "missing scores remain unknown" in report["message"]
 
 
+@pytest.mark.parametrize("score", ["0", "90"])
+def test_unsure_promotes_single_instruction_reference_over_unbenchmarked_capacity(score):
+    unknown, scored = recipe("unknown", 125_000_000_000), recipe("small", 1)
+    report = guided.recommendation_report(
+        host(),
+        {},
+        candidates=[unknown, scored],
+        task="unsure",
+        benchmarks=registry(cohort(benchmark="ifeval", scores={"example/small": score})),
+    )
+    assert [item["id"] for item in report["items"]] == ["small", "unknown"]
+    assert report["items"][0]["benchmarks"][0]["used_for_ranking"]
+    assert "Stark artifact has not been benchmarked" in report["items"][0]["recommendation_reason"]
+    assert "general-purpose answer quality is unknown" in report["items"][1]["recommendation_reason"]
+
+
+def test_unsure_prioritizes_workflow_checks_within_instruction_evidence():
+    checked = guided.RECIPES[0]
+    unchecked = recipe("unchecked", 125_000_000_000)
+    scores = registry(cohort(benchmark="ifeval", scores={checked.repo: "50", unchecked.repo: "99"}))
+    report = guided.recommendation_report(host(), {}, candidates=[unchecked, checked], benchmarks=scores)
+    assert [item["id"] for item in report["items"]] == [checked.id, unchecked.id]
+    assert "recorded bounded native chat/tool workflow checks" in report["items"][0]["recommendation_reason"]
+
+
+def test_unsure_without_benchmarks_prefers_recorded_starters_over_flint():
+    machine = {**host(), "gpu_available": True, "unified_memory": True, "gpu_memory_budget_bytes": 115_448_725_504}
+    flint = next(candidate for candidate in guided.native_recipes() if candidate.native_choice == "flint-int4")
+    report = guided.recommendation_report(
+        machine, {}, candidates=[flint, *reversed(guided.RECIPES)], benchmarks=module.load_registry()
+    )
+    assert [item["id"] for item in report["items"]] == [r.id for r in (*guided.RECIPES, flint)]
+    assert not report["benchmark_ranking"]["applied"]
+    assert "No eligible instruction-following references" in report["message"]
+
+
+def test_unsure_128gb_mac_promotes_packaged_instruction_evidence_over_flint():
+    # Synthetic memory geometry isolates policy; no live model fit/quality claim.
+    instructions = replace(recipe("instructions", 14_000_000_000), repo="Qwen/Qwen2.5-14B-Instruct")
+    machine = {
+        **host(),
+        "gpu_available": True,
+        "unified_memory": True,
+        "gpu_memory_budget_bytes": 115_448_725_504,
+    }
+    report = guided.recommendation_report(
+        machine, {}, candidates=[*guided.native_recipes(), *guided.RECIPES, instructions]
+    )
+    assert report["items"][0]["repo"] == instructions.repo
+    assert report["items"][0]["selection_basis"] == "instruction_reference"
+    assert report["items"][0]["benchmarks"][0]["used_for_ranking"]
+    assert [item["id"] for item in report["items"]][1:] == [r.id for r in guided.RECIPES]
+
+
+def test_unsure_unknown_fallback_uses_cost_instead_of_parameter_count():
+    large = recipe("large", 125_000_000_000, weights=2 * guided.GIB)
+    small = recipe("small", 1)
+    report = guided.recommendation_report(host(), {}, candidates=[large, small], benchmarks=registry())
+    assert [item["id"] for item in report["items"]] == ["small", "large"]
+
+
+def test_unsure_checked_native_fallback_precedes_unchecked_source():
+    flint = next(candidate for candidate in guided.native_recipes() if candidate.native_choice == "flint-int4")
+    unknown = recipe("unknown", 125_000_000_000)
+    machine = {**host(), "gpu_available": True, "unified_memory": True, "gpu_memory_budget_bytes": 115_448_725_504}
+    report = guided.recommendation_report(machine, {}, candidates=[unknown, flint], benchmarks=registry())
+    assert [item["id"] for item in report["items"]] == [flint.id, unknown.id]
+
+
+@pytest.mark.parametrize("preference, expected", [("speed", "small"), ("answers", "large")])
+def test_unsure_preserves_explicit_resource_preferences(preference, expected):
+    large, small = recipe("large", 100, weights=2 * guided.GIB), recipe("small", 1)
+    scores = registry(cohort(benchmark="ifeval"))
+    report = guided.recommendation_report(
+        host(), {}, candidates=[large, small], preference=preference, benchmarks=scores
+    )
+    assert report["items"][0]["id"] == expected
+    assert not report["benchmark_ranking"]["applied"]
+
+
+def test_unsure_evidence_never_bypasses_exclusion_or_resource_admission():
+    scored, fallback = recipe("small", 1), guided.RECIPES[0]
+    scores = registry(cohort(benchmark="ifeval", scores={scored.repo: "99"}))
+    for candidates, excluded in [
+        ([scored, fallback], [scored.id]),
+        ([replace(scored, estimated_weight_bytes=256 * guided.GIB), fallback], []),
+    ]:
+        report = guided.recommendation_report(host(), {}, excluded, candidates=candidates, benchmarks=scores)
+        assert [item["id"] for item in report["items"]] == [fallback.id]
+        assert not report["benchmark_ranking"]["applied"]
+
+
 def test_one_coding_reference_including_zero_is_enough_to_prioritize_evidence():
     unknown, scored = recipe("unknown", 50), recipe("small", 1)
     scores = registry(cohort(scores={"example/small": "0"}))

@@ -1,9 +1,11 @@
 # Beginner recommendation evidence
 
 Beginner checks resource fit before ranking a bounded set of choices. Its
-fallback uses resource/capacity heuristics and explicit task metadata. Coding
-with Balanced prioritizes published benchmark evidence among admitted models.
-Other tasks use bounded comparisons of scored options. All scores come from an
+fallback uses resource/capacity heuristics and explicit task metadata except for
+“I’m not sure,” whose fallback prioritizes recorded starters and workflow checks
+without a parameter-count objective. Coding and “I’m not sure” with Balanced
+prioritize published task benchmark evidence among admitted models. Other tasks
+use bounded comparisons of scored options. All scores come from an
 offline snapshot of published upstream benchmarks; they do not measure Stark's quantized exports.
 Native tool workflow checks establish specific protocol/lifecycle behavior;
 they do not establish general coding-agent competence.
@@ -114,7 +116,23 @@ or BFCL.
    prioritizes evidence availability; it does not prove that an unscored model
    has lower coding quality. Soft memory-headroom tiers and task tags cannot
    override coding scores after hard admission. Equal scores use fallback order.
-4. For other tasks with Balanced, select one task cohort with at least two
+4. For “I’m not sure” with Balanced, select one instruction-following (IFEval)
+   cohort with at least one eligible covered parent, using the same coverage,
+   publisher and cohort-ID rules as Coding. Covered candidates precede all
+   unscored candidates, even across soft memory-headroom tiers. Within that
+   cohort, prefer sources with recorded bounded native chat/tool workflow
+   checks, then descending score. Unscored fallbacks prefer the exact recorded
+   starters in declared order (Qwen3 4B, then Qwen3 0.6B), then other sources
+   with recorded workflow checks, then unchecked sources. Within those latter
+   groups, prefer comfortable headroom, lower runtime memory and fewer weight
+   bytes. Installed status and source identity break remaining ties. Parameter
+   count never ranks this path. If references are unavailable, including a
+   missing or invalid snapshot, the report explicitly labels the fallback and
+   unknown answer quality. Bounded workflow checks do not guarantee reliability;
+   IFEval does not establish writing quality, factual accuracy or local artifact
+   performance. A single covered parent establishes evidence availability,
+   without proving superiority to an unknown model.
+5. For other tasks with Balanced, select one task cohort with at least two
    distinct covered parents in the same memory-headroom tier. Prefer greater
    comparable-parent coverage across those tiers, then publisher authority,
    then cohort ID. Reorder only scored slots within each tier by descending
@@ -123,7 +141,7 @@ or BFCL.
    task. Never merge FC/Prompt, versions, publishers or metrics. Results from
    nonselected cohorts remain reference information. Lighter model and More
    model capacity retain their explicit resource objectives.
-5. Select up to three choices. Beginner shows a short recommendation reason,
+6. Select up to three choices. Beginner shows a short recommendation reason,
    estimated memory, a compact benchmark score, a brief published-model caveat
    and a link to the evaluated model's Hugging Face page. It retains actionable memory-pressure notices.
    Full revisions, settings, qualification text and caveats remain in the
