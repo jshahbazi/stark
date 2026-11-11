@@ -31,6 +31,44 @@ struct CatalogPickerBoundsProbe: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
+extension AppDelegate {
+    @MainActor static func exerciseBeginnerChatFooterLayouts() -> Bool {
+        _ = NSApplication.shared
+        let suite = "stark.chat-footer-test." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let credentials = APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage())
+        let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults)
+        engine.configureConnectionFixture(state: "ready", loadedMode: .chat, apiAvailable: true, hasModels: true)
+        let delegate = AppDelegate(engine: engine)
+        for height in [600, 650, 850] {
+            for error in [nil, "A longer model error that wraps across multiple lines. " + String(repeating: "Details. ", count: 30)] as [String?] {
+                engine.errorMessage = error
+                let view = BeginnerChatView(engine: engine, interface: StarkInterfacePreferences(defaults: defaults),
+                    selectInterface: { _ in }, setup: {}, tryAnotherModel: {})
+                let window = delegate.window(title: "Chat footer fixture", view: view, resizable: true)
+                window.setContentSize(NSSize(width: 520, height: height))
+                guard let content = window.contentView else { return false }
+                for _ in 0..<3 {
+                    content.layoutSubtreeIfNeeded()
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                }
+                let probe = view.windowFixtureFooterProbe
+                guard probe.window === window else { return false }
+                let bounds = probe.convert(probe.bounds, to: content)
+                let bottomGap = content.isFlipped ? content.bounds.maxY - bounds.maxY : bounds.minY - content.bounds.minY
+                guard abs(bottomGap - 20) < 1, bounds.height > 10,
+                      bounds.minX >= 19, bounds.maxX <= content.bounds.maxX - 19,
+                      content.bounds.contains(bounds), !window.isVisible else { return false }
+                window.close()
+            }
+        }
+        engine.desktopConnections.shutdown()
+        return true
+    }
+
+}
+
 @MainActor
 func exerciseCatalogPickerLayouts() -> Bool {
     _ = NSApplication.shared
@@ -397,6 +435,7 @@ struct WindowChecks {
     @MainActor static func main() {
         switch CommandLine.arguments.dropFirst().first {
         case "parents": exit(AppDelegate.exerciseParentNavigation() ? 0 : 1)
+        case "chat-footer": exit(AppDelegate.exerciseBeginnerChatFooterLayouts() ? 0 : 1)
         case "lifecycle": exit(AppDelegate.exerciseWindowLifecycle() ? 0 : 1)
         case "connections": exit(AppDelegate.exerciseConnectionLayouts() ? 0 : 1)
         case "beginner-discovery": exit(AppDelegate.exerciseCurrentModelDiscovery() ? 0 : 1)
@@ -543,8 +582,16 @@ class WindowLifecycleTests(unittest.TestCase):
         connection = directory / "ConnectionDetailsView.swift"
         connection.write_text(connection_source + CONNECTION_FIXTURE)
         beginner_host = directory / "BeginnerSetupHost.swift"
+        beginner_source = (sources / "BeginnerSetupHost.swift").read_text()
+        chat_declaration = "struct BeginnerChatView: View {"
+        footer_end = 'Button("Try a different model", action: tryAnotherModel).disabled(!engine.modelReady)\n                }.font(.caption)'
+        if beginner_source.count(chat_declaration) != 1 or beginner_source.count(footer_end) != 1:
+            raise RuntimeError("chat_footer_fixture_source_boundary_invalid")
+        beginner_source = beginner_source.replace(
+            chat_declaration, chat_declaration + "\n    let windowFixtureFooterProbe = NSView()"
+        ).replace(footer_end, footer_end + ".background(CatalogPickerBoundsProbe(view: windowFixtureFooterProbe))")
         beginner_host.write_text(
-            (sources / "BeginnerSetupHost.swift").read_text()
+            beginner_source
             + BEGINNER_CONNECTION_FIXTURE
         )
         cls.executable = directory / "window-checks"
@@ -593,6 +640,9 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_reopen_and_background_updates_do_not_present_retained_windows(self):
         self.run_check("lifecycle")
+
+    def test_beginner_chat_footer_keeps_bottom_padding_at_short_and_tall_sizes(self):
+        self.run_check("chat-footer")
 
     def test_nested_window_returns_and_reopened_ancestors_do_not_form_cycles(self):
         self.run_check("parents")
