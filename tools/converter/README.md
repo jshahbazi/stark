@@ -60,11 +60,13 @@ Browse download candidates for one family without fetching weights:
 uv run --project tools/converter --locked stark-convert --family-models qwen3_5
 ```
 
-This visits known sources and then the complete Hugging Face result iterators for
-the family's architecture aliases, deduplicating repositories. Each request
-checks up to 30 candidates using parsed configuration and recognized source
-formats. It reads bounded metadata and repository file information only; no
-weight payloads are fetched. The JSON report has `ready`, `offline` or `error`
+This visits known sources, then interleaves Hugging Face architecture-tag and
+model-name searches, deduplicating repositories. Each request checks up to 30
+candidates. Generic Safetensors candidates pass the same tensor planner used by
+conversion using pinned headers fetched with bounded HTTP ranges. Family
+variants with unsupported formats or layouts retain a non-downloadable row
+and an explanation. GLM and Flint searches preserve their pinned native entries
+and explain other exports' import limits. The JSON report has `ready`, `offline` or `error`
 status, an `offset`, and a `next_offset` when more candidates remain. Pass that
 exact continuation value with `--catalog-offset`:
 
@@ -77,6 +79,11 @@ candidates, including incompatible repositories, so a ready page can contain no
 items and still have a next page. Continue until `next_offset` is null. There is
 no fixed 45-candidate or 30-choice ceiling across pages. The discovery budget is
 80 seconds per request.
+
+Header requests stop before the weight payload and reject servers that ignore
+the requested range. Headers exceeding the catalogue's 4 MiB per-file inspection
+limit are unavailable with a reason. Duplicate tied-tensor byte equality remains
+part of full conversion, followed by native loading and model execution checks.
 
 Each choice includes an immutable primary revision, metadata-derived size when
 known, output weight precision and offered artifact modes. Missing size metadata

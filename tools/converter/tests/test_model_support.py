@@ -154,6 +154,54 @@ def test_gemma4_nested_architecture_cannot_masquerade_as_supported_text():
     assert preflight_model(config, mode="text")["reasons"] == ["unsupported_nested_architecture"]
 
 
+@pytest.mark.parametrize("wrapper", [False, True])
+@pytest.mark.parametrize("bits", [4, 8])
+def test_gemma4_quantized_global_kv_is_rejected_before_tensor_download(tmp_path, wrapper, bits):
+    from stark_convert.adapters.gemma4 import build_gemma4_plan
+
+    text = {"model_type": "gemma4_text", "hidden_size_per_layer_input": 0, "attention_k_eq_v": True}
+    config = {"model_type": "gemma4", "text_config": text} if wrapper else text
+    config["quantization"] = {"bits": bits, "group_size": 64}
+    report = preflight_model(config, mode="text")
+    assert report["status"] == "unsupported"
+    assert report["reasons"] == ["unsupported_weight_format"]
+    assert "requires canonical BF16" in report["message"]
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(UnsupportedConversion, match=report["message"]):
+        build_gemma4_plan(tmp_path)
+    del config["quantization"]
+    assert preflight_model(config, mode="text")["status"] == "conditional"
+
+
+def test_gemma4_wrapper_cannot_hide_conflicting_nested_quantization():
+    config = {
+        "model_type": "gemma4",
+        "text_config": {
+            "model_type": "gemma4_text",
+            "hidden_size_per_layer_input": 256,
+            "quantization": {"bits": 8, "group_size": 64},
+        },
+        "quantization": {"bits": 4, "group_size": 64},
+    }
+    report = preflight_model(config, mode="text")
+    assert report["status"] == "unsupported"
+    assert report["message"] == "Gemma 4 wrapper and text quantization disagree"
+
+
+def test_qwen35_quantization_alias_requires_baked_norm_marker(tmp_path):
+    from stark_convert.adapters.qwen35 import build_qwen35_plan
+
+    config = {"model_type": "qwen3_5", "quantization_config": {"bits": 4, "group_size": 64}}
+    report = preflight_model(config, mode="text")
+    assert report["status"] == "unsupported"
+    assert "requires the quantization field" in report["message"]
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(UnsupportedConversion, match=report["message"]):
+        build_qwen35_plan(tmp_path)
+    config["quantization"] = config["quantization_config"]
+    assert preflight_model(config, mode="text")["status"] == "conditional"
+
+
 @pytest.mark.parametrize("source_dtype", ["float16", "float32", "bfloat16"])
 def test_floating_source_precision_is_not_confused_with_native_output_dtype(source_dtype):
     config = {"model_type": "qwen3", "torch_dtype": source_dtype}

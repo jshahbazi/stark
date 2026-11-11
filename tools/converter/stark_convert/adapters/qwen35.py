@@ -13,7 +13,9 @@ import math
 from dataclasses import replace
 from pathlib import Path
 
-from ..compressed import MLXMatrixSource, MLXQuantization, parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
+from ..compressed import MLXMatrixSource, MLXQuantization, plan_mlx_matrix, read_mlx_matrix
+from ..family_quantization import qwen35_quantization
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -22,7 +24,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
 )
 from .dense import _COMMON_KEYS, _DTYPES, _bool, _positive_float, _positive_int
 from .qwen35_vision import build_qwen35_vision_plan
@@ -92,14 +93,20 @@ def _matrix_row_range(info: TensorInfo | MLXMatrixSource, start: int, count: int
     return _row_range(info, start, count)
 
 
-def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: bool = False) -> ConversionPlan:
+def build_qwen35_plan(
+    source: Path,
+    *,
+    dtype: str = "bfloat16",
+    include_vision: bool = False,
+    checkpoint_metadata: CheckpointMetadata | None = None,
+) -> ConversionPlan:
     """Plan dense or existing affine MLX text weights from checkpoint dimensions.
 
     Split, directly fused and group-interleaved DeltaNet projections share this
     adapter. Vision weights are omitted only from an explicitly declared wrapper;
     every original file remains in the final signature/content verification set.
     """
-    outer = read_json(source / "config.json")
+    outer = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
     text = outer.get("text_config", {})
     config = normalize_qwen35_config(outer)
     moe = config.get("model_type") == "qwen3_5_moe"
@@ -116,9 +123,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     # Preserve the existing packed-checkpoint gate. Unquantized MLX exports
     # also contain baked normalization gains; their saved convolution layout
     # is inspected below instead of assuming unquantized means Hugging Face.
-    if config.get("quantization_config") is not None and config.get("quantization") is None:
-        raise UnsupportedConversion("Qwen3.5 MLX requires the quantization field for baked normalization weights")
-    quantization = parse_mlx_quantization(config, allow_mixed=True)
+    quantization = qwen35_quantization(config)
     unsupported: list[str] = []
     dim = _positive_int(config, "hidden_size")
     hidden = _positive_int(config, "shared_expert_intermediate_size" if moe else "intermediate_size")
@@ -253,7 +258,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     for field in ("is_encoder_decoder", "add_cross_attention", "tie_encoder_decoder"):
         if _bool(config, field, False):
             unsupported.append("Qwen3.5 encoder/cross-attention variants are unsupported")
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     prefixes = [
         prefix
         for prefix in ("model.language_model", "language_model.model", "model")
@@ -408,7 +413,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
             head_planes = head.planes if isinstance(head, MLXMatrixSource) else (head,)
             embed_planes = embed.planes if isinstance(embed, MLXMatrixSource) else (embed,)
             if any(
-                left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                not tensor_aliases_equal(left, right, header_only=checkpoint_metadata is not None)
                 for left, right in zip(head_planes, embed_planes, strict=True)
             ):
                 raise ConversionError("Qwen3.5 tied lm_head differs from its embedding")

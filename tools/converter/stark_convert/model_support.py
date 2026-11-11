@@ -488,6 +488,13 @@ def preflight_model(
             "Mixture-of-experts operations are outside implemented dense coverage.",
         )
     quantized = any(text.get(key) is not None for key in ("quantization", "quantization_config"))
+    if architecture == "gemma4_text":
+        from .family_quantization import gemma4_quantization
+
+        try:
+            gemma4_quantization(config, dtype=dtype)
+        except (ConversionError, UnsupportedConversion) as error:
+            return _report(family, mode, "unsupported", "unsupported_weight_format", str(error))
     if (
         architecture == "qwen3_5_moe"
         and text.get("num_experts") is not None
@@ -525,15 +532,19 @@ def preflight_model(
             )
         try:
             from .compressed import parse_mlx_quantization
+            from .family_quantization import qwen35_quantization
 
-            parse_mlx_quantization(text, allow_mixed=architecture in {"qwen3_5", "qwen3_5_moe"})
-        except (ConversionError, UnsupportedConversion):
+            if architecture in {"qwen3_5", "qwen3_5_moe"}:
+                qwen35_quantization(text)
+            else:
+                parse_mlx_quantization(text)
+        except (ConversionError, UnsupportedConversion) as error:
             return _report(
                 family,
                 mode,
                 "unsupported",
                 "unsupported_weight_format",
-                "Only supported MLX affine descriptions can be repacked; each matrix is validated during conversion.",
+                str(error),
             )
     warnings = []
     if config.get("vision_config") is not None and mode in {None, "text", "decision"}:

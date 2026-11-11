@@ -186,23 +186,7 @@ def _validate_request(request: ConversionRequest) -> None:
 
 def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> PlannedConversion:
     """Validate a complete supported layout and build its single tensor/config plan."""
-    from .adapters import (
-        build_gemma4_plan,
-        build_gemma_plan,
-        build_granite_plan,
-        build_lfm2_plan,
-        build_llama_plan,
-        build_llamba_plan,
-        build_mistral_plan,
-        build_modernbert_plan,
-        build_olmo3_plan,
-        build_phi_plan,
-        build_qwen2_plan,
-        build_qwen35_plan,
-        build_qwen38_plan,
-        build_smollm3_plan,
-    )
-    from .qwen3 import build_qwen3_plan
+    from .planning import planner_for
 
     if request.artifact_mode == "vision-language" and snapshot.conversion_profile is not None:
         request = replace(
@@ -301,38 +285,14 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             raise UnsupportedConversion("Packed checkpoint requires a registered compressed profile")
         if llamba_packing is not None and quantization is not None and quantization.bits != llamba_packing["bits"]:
             raise ConversionError("Checkpoint packing disagrees with its catalog profile")
-    planners = {
-        "qwen3": build_qwen3_plan,
-        "qwen2": build_qwen2_plan,
-        "llama": build_llama_plan,
-        "mistral": build_mistral_plan,
-        "gemma2": partial(build_gemma_plan, family="gemma2"),
-        "gemma3_text": partial(build_gemma_plan, family="gemma3_text"),
-        "gemma4_text": build_gemma4_plan,
-        "olmo3": build_olmo3_plan,
-        "phi3": build_phi_plan,
-        "granite": build_granite_plan,
-        "smollm3": build_smollm3_plan,
-        "qwen3_5": partial(build_qwen35_plan, include_vision=request.artifact_mode == "vision-language"),
-        "qwen3_5_moe": partial(build_qwen35_plan, include_vision=request.artifact_mode == "vision-language"),
-        "qwen4_exp": build_qwen38_plan,
-        "lfm2": build_lfm2_plan,
-        "llamba": partial(
-            build_llamba_plan,
+    planner = planner_for(adapter, mode=request.artifact_mode)
+    if adapter == "llamba":
+        planner = partial(
+            planner,
             config=config,
             expected_mlx_bits=llamba_packing["bits"] if llamba_packing else None,
-        ),
-        "modernbert": build_modernbert_plan,
-    }
-    if gemma_images:
-        from .adapters.gemma4_vision import build_gemma4_vision_plan
-
-        planners["gemma4_text"] = build_gemma4_vision_plan
-    if gemma3_images:
-        from .adapters.gemma3_vision import build_gemma3_vision_plan
-
-        planners["gemma3"] = build_gemma3_vision_plan
-    tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
+        )
+    tensors = planner(snapshot.checkpoint, dtype=request.dtype)
     if artifact_contract is not None:
         artifact_contract = vision_output_contract(artifact_contract, tensors.mtp_config)
     if artifact_contract is not None and artifact_contract["schema_version"] == 3:

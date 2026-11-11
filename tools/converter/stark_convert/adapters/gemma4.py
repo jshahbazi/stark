@@ -20,7 +20,9 @@ from pathlib import Path
 import ml_dtypes
 import numpy as np
 
-from ..compressed import MLXMatrixSource, parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
+from ..compressed import MLXMatrixSource, plan_mlx_matrix, read_mlx_matrix
+from ..family_quantization import gemma4_quantization
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -28,7 +30,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
     validate_planning_layers,
 )
 from .dense import _COMMON_KEYS, _DTYPES
@@ -79,7 +80,13 @@ def normalize_gemma4_config(config: dict) -> dict:
     }
 
 
-def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profile: str = "auto") -> ConversionPlan:
+def build_gemma4_plan(
+    source: Path,
+    *,
+    dtype: str = "bfloat16",
+    precision_profile: str = "auto",
+    checkpoint_metadata: CheckpointMetadata | None = None,
+) -> ConversionPlan:
     """Export E2B/E4B text inference without importing modality towers.
 
     Official multimodal wrappers and MLX-LM text exports have explicit, distinct
@@ -89,7 +96,7 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
     full-precision sources retain canonical HF arithmetic. Explicit profiles
     remain available for independently recorded controls.
     """
-    outer = read_json(source / "config.json")
+    outer = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
     unified = outer.get("model_type") in {"gemma4_unified", "gemma4_unified_text"}
     wrapper = outer.get("model_type") in {"gemma4", "gemma4_unified"}
     if wrapper:
@@ -121,7 +128,7 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Gemma 4 text exports require BF16, F16 or F32")
     target = _DTYPES[dtype]
-    quantization = parse_mlx_quantization(outer)
+    quantization = gemma4_quantization(outer, dtype=dtype)
     if precision_profile not in {"auto", "canonical", "mlx-bf16"}:
         raise UnsupportedConversion("Gemma 4 precision profile is outside coverage")
     mlx_bf16 = precision_profile == "mlx-bf16" or (
@@ -137,8 +144,6 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
         raise UnsupportedConversion(
             "Gemma 4 MLX BF16 profile requires imported W4/group64 matrices and BF16 activations"
         )
-    if wrapper and parse_mlx_quantization(config) not in (None, quantization):
-        raise ConversionError("Gemma 4 wrapper and text quantization disagree")
     if set(config) - _KEYS:
         raise UnsupportedConversion("Gemma 4 text config has unimplemented options")
     moe = _boolean(config, "enable_moe_block", False)
@@ -190,8 +195,6 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
     if k_eq_v:
         if ple_dim or type(global_groups) is not int or global_groups < 1 or heads % global_groups or shared_count:
             raise UnsupportedConversion("Gemma 4 global K=V requires a no-PLE decoder without shared layers")
-        if quantization is not None or target != "BF16":
-            raise UnsupportedConversion("Gemma 4 no-PLE global K=V currently requires canonical BF16")
     elif not ple_dim or global_groups is not None:
         raise UnsupportedConversion("Gemma 4 no-PLE decoder requires its explicit global K=V profile")
     if ple_dim and config.get("use_bidirectional_attention") == "vision":
@@ -270,7 +273,7 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
             if kind not in owners:
                 raise ConversionError("Gemma 4 shared attention has no preceding owner of its type")
             sources.append(owners[kind])
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     validate_planning_layers(count, tensors)
     prefixes = ("model.language_model", "language_model.model") if wrapper else ("model",)
     matches = [prefix for prefix in prefixes if prefix + ".embed_tokens.weight" in tensors]
@@ -355,7 +358,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profil
         left = left.planes if isinstance(left, MLXMatrixSource) else (left,)
         right = right.planes if isinstance(right, MLXMatrixSource) else (right,)
         if len(left) != len(right) or any(
-            a.dtype != b.dtype or tensor_sha256(a) != tensor_sha256(b) for a, b in zip(left, right, strict=True)
+            not tensor_aliases_equal(a, b, header_only=checkpoint_metadata is not None)
+            for a, b in zip(left, right, strict=True)
         ):
             raise ConversionError("Gemma 4 tied output head differs from the embedding")
     norm_config = {

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata
 from ..streaming import ConversionError, TensorOperation, UnsupportedConversion, load_checkpoint, read_json
 from .gemma import build_gemma_text_plan
 
@@ -204,12 +205,14 @@ def image_decoder_config(decoder):
     }
 
 
-def build_gemma3_vision_plan(source: Path, *, dtype: str = "bfloat16"):
+def build_gemma3_vision_plan(
+    source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+):
     if dtype != "bfloat16":
         raise UnsupportedConversion("Gemma 3 native image execution requires merged BF16 weights")
-    config = read_json(source / "config.json")
+    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
     text, _ = gemma3_config(config)
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     # Original Transformers checkpoints and their newer canonical namespace are
     # distinct, complete representations. A mixture is never silently accepted.
     original = any(name.startswith("language_model.model.") for name in tensors)
@@ -220,7 +223,9 @@ def build_gemma3_vision_plan(source: Path, *, dtype: str = "bfloat16"):
     remainder = {name: info for name, info in tensors.items() if not name.startswith(prefix)}
     if not original:
         remainder = {name.removeprefix("model."): info for name, info in remainder.items()}
-    base = build_gemma_text_plan(text, decoder, family="gemma3_text", dtype=dtype)
+    base = build_gemma_text_plan(
+        text, decoder, family="gemma3_text", dtype=dtype, header_only=checkpoint_metadata is not None
+    )
     operations = plan_vision_tensors(remainder, text["hidden_size"])
     if any(info.dtype != "BF16" for info in tensors.values()):
         raise UnsupportedConversion("Gemma 3 images require complete BF16 source storage")
