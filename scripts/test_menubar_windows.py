@@ -31,7 +31,96 @@ struct CatalogPickerBoundsProbe: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
+@MainActor
+enum SetupLayoutProbes {
+    static let action = NSView()
+    static let form = NSView()
+}
+
 extension AppDelegate {
+    @MainActor static func exerciseBeginnerInitialLayout() -> Bool {
+        _ = NSApplication.shared
+        let suite = "stark.setup-initial-layout-test." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let engine = EngineController(apiCredentials: APICredentialStore(service: suite,
+            storage: ForbiddenWindowCredentialStorage()), apiDefaults: defaults)
+        let delegate = AppDelegate(engine: engine)
+        delegate.beginnerSession.selectTask(.code)
+        let window = delegate.makeBeginnerWindow()
+        defer { window.close(); engine.desktopConnections.shutdown() }
+        guard let content = window.contentView, let screen = window.screen ?? NSScreen.main else { return false }
+        for _ in 0..<3 {
+            content.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        guard abs(content.bounds.width - 700) < 1,
+              window.frame.height <= screen.visibleFrame.height + 1,
+              !window.isVisible else { return false }
+        let titleHeight = window.frame.height - content.bounds.height
+        if screen.visibleFrame.height >= 800 + titleHeight {
+            let form = SetupLayoutProbes.form
+            let action = SetupLayoutProbes.action
+            guard form.window === window, action.window === window else { return false }
+            let bounds = form.convert(form.bounds, to: content)
+            let actionBounds = action.convert(action.bounds, to: content)
+            // The whole task form, including its heading and final copy, fits at once.
+            guard abs(content.bounds.height - 800) < 1,
+                  content.bounds.contains(bounds), content.bounds.contains(actionBounds),
+                  !bounds.intersects(actionBounds),
+                  form.visibleRect.height >= form.bounds.height - 1 else { return false }
+        }
+        return true
+    }
+
+    @MainActor static func exerciseBeginnerSetupFooterLayouts() -> Bool {
+        _ = NSApplication.shared
+        let suite = "stark.setup-footer-test." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let credentials = APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage())
+        let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults)
+        let delegate = AppDelegate(engine: engine)
+        defer { engine.desktopConnections.shutdown() }
+        for anotherModel in [false, true] {
+            engine.configureConnectionFixture(state: anotherModel ? "ready" : "idle",
+                loadedMode: anotherModel ? .chat : nil, apiAvailable: false, hasModels: anotherModel)
+            let session = BeginnerSetupSession()
+            session.selectTask(.code)
+            if anotherModel {
+                var snapshot = BeginnerSetupSnapshot()
+                snapshot.modelReady = true; snapshot.runningModelID = "window-fixture"
+                session.beginAnotherModel(snapshot: snapshot)
+                session.stage = .task
+            }
+            let view = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
+                session: session, interface: StarkInterfacePreferences(defaults: defaults),
+                observation: BeginnerOpenWorkStatus(), selectInterface: { _ in }, openChat: {})
+            let window = delegate.window(title: "Setup footer fixture", view: view, resizable: true)
+            // Resize the same retained window down, up, then back to the reported size.
+            for size in [NSSize(width: 700, height: 650), NSSize(width: 700, height: 600),
+                         NSSize(width: 900, height: 850), NSSize(width: 700, height: 650)] {
+                window.setContentSize(size)
+                guard let content = window.contentView else { return false }
+                for _ in 0..<3 {
+                    content.layoutSubtreeIfNeeded()
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                }
+                let probe = SetupLayoutProbes.action
+                guard probe.window === window else { return false }
+                let bounds = probe.convert(probe.bounds, to: content)
+                let bottomGap = content.isFlipped ? content.bounds.maxY - bounds.maxY : bounds.minY - content.bounds.minY
+                guard abs(bottomGap - 28) < 1, bounds.height >= 20,
+                      bounds.minX >= 208, abs(content.bounds.maxX - bounds.maxX - 28) < 1,
+                      abs(content.bounds.width - size.width) < 1,
+                      abs(content.bounds.height - size.height) < 1,
+                      content.bounds.contains(bounds), !window.isVisible else { return false }
+            }
+            window.close()
+        }
+        return true
+    }
+
     @MainActor static func exerciseBeginnerChatFooterLayouts() -> Bool {
         _ = NSApplication.shared
         let suite = "stark.chat-footer-test." + UUID().uuidString
@@ -465,6 +554,8 @@ struct WindowChecks {
     @MainActor static func main() {
         switch CommandLine.arguments.dropFirst().first {
         case "parents": exit(AppDelegate.exerciseParentNavigation() ? 0 : 1)
+        case "setup-initial": exit(AppDelegate.exerciseBeginnerInitialLayout() ? 0 : 1)
+        case "setup-footer": exit(AppDelegate.exerciseBeginnerSetupFooterLayouts() ? 0 : 1)
         case "chat-footer": exit(AppDelegate.exerciseBeginnerChatFooterLayouts() ? 0 : 1)
         case "lifecycle": exit(AppDelegate.exerciseWindowLifecycle() ? 0 : 1)
         case "connections": exit(AppDelegate.exerciseConnectionLayouts() ? 0 : 1)
@@ -625,6 +716,18 @@ class WindowLifecycleTests(unittest.TestCase):
             beginner_source
             + BEGINNER_CONNECTION_FIXTURE
         )
+        setup_view = directory / "BeginnerSetupView.swift"
+        setup_source = (sources / "BeginnerSetupView.swift").read_text()
+        action_end = ".buttonStyle(.borderedProminent).disabled(session.task == nil || snapshot.choicesLoading)"
+        if setup_source.count(action_end) != 1:
+            raise RuntimeError("setup_footer_fixture_source_boundary_invalid")
+        form_end = "        }\n    }\n\n    // Keep the next step visible"
+        if setup_source.count(form_end) != 1:
+            raise RuntimeError("setup_form_fixture_source_boundary_invalid")
+        setup_source = setup_source.replace(form_end,
+            "        }.background(CatalogPickerBoundsProbe(view: SetupLayoutProbes.form))\n    }\n\n    // Keep the next step visible")
+        setup_view.write_text(setup_source.replace(action_end,
+            action_end + ".background(CatalogPickerBoundsProbe(view: SetupLayoutProbes.action))"))
         cls.executable = directory / "window-checks"
         compiled = subprocess.run(
             [
@@ -636,6 +739,7 @@ class WindowLifecycleTests(unittest.TestCase):
                 str(main),
                 str(connection),
                 str(beginner_host),
+                str(setup_view),
                 *(
                     str(path)
                     for path in sorted(sources.glob("*.swift"))
@@ -644,6 +748,7 @@ class WindowLifecycleTests(unittest.TestCase):
                         "StarkApp.swift",
                         "ConnectionDetailsView.swift",
                         "BeginnerSetupHost.swift",
+                        "BeginnerSetupView.swift",
                     }
                 ),
                 "-o",
@@ -671,6 +776,12 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_reopen_and_background_updates_do_not_present_retained_windows(self):
         self.run_check("lifecycle")
+
+    def test_beginner_setup_action_stays_visible_in_short_windows(self):
+        self.run_check("setup-footer")
+
+    def test_beginner_initial_window_shows_entire_task_form(self):
+        self.run_check("setup-initial")
 
     def test_beginner_chat_footer_keeps_bottom_padding_at_short_and_tall_sizes(self):
         self.run_check("chat-footer")

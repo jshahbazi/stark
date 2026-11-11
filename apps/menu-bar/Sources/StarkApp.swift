@@ -3882,9 +3882,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let origin = parent ?? navigationSource
         dismissMenu()
         if beginnerWindow == nil {
-            beginnerWindow = window(title: "Stark — Guided Setup", view: beginnerHost, resizable: true)
+            beginnerWindow = makeBeginnerWindow()
         }
         present(beginnerWindow, from: origin)
+    }
+
+    private func makeBeginnerWindow() -> NSWindow {
+        let result = window(title: "Stark — Guided Setup", view: beginnerHost, resizable: true)
+        // Set AppKit's initial size explicitly: SwiftUI's ideal size is not
+        // applied reliably when the hosting controller contains a ScrollView.
+        result.setContentSize(NSSize(width: 700, height: 800))
+        if let screen = result.screen ?? NSScreen.main {
+            var frame = result.frame
+            frame.size.width = min(frame.width, screen.visibleFrame.width)
+            frame.size.height = min(frame.height, screen.visibleFrame.height)
+            result.setFrame(frame, display: false)
+        }
+        result.center()
+        return result
     }
 
     private func showBeginnerChat() {
