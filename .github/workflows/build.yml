@@ -2,7 +2,10 @@ name: Build
 
 on:
   push:
-    branches: [main, 'codex/**']
+    # Not `main`: the branch build already covered the merged tree, and a
+    # post-merge build holds a macOS runner that a signed release waits for.
+    # Dispatch this workflow on `main` when a development bundle is needed.
+    branches: ['codex/**']
     paths:
       - '.github/workflows/build.yml'
       - '.cargo/**'

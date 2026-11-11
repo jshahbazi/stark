@@ -22,6 +22,38 @@ env:
   CARGO_INCREMENTAL: '0'
 
 jobs:
+  changes:
+    name: Detect Rust job inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      rust: ${{ steps.detect.outputs.rust }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          # A pull request merge commit and both of its parents.
+          fetch-depth: 2
+      - name: Find the last commit with a successful CI run on this branch
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Best effort: without a base the next step runs every job.
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=$GITHUB_REF_NAME&event=push&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // empty' || true)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Decide whether the macOS Rust jobs can be skipped
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: bash scripts/ci/rust-jobs-needed.sh >> "$GITHUB_OUTPUT"
+
   quality:
     name: Repository checks
     runs-on: ubuntu-24.04
@@ -149,6 +181,8 @@ jobs:
     name: Scorer (${{ matrix.configuration }})
     runs-on: macos-26
     timeout-minutes: 45
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -202,6 +236,11 @@ jobs:
     name: CXX panic safety and grammar compatibility
     runs-on: macos-26
     timeout-minutes: 30
+    # Scheduling only: this short job follows the short lifecycle job so one CI
+    # run holds at most four of the five concurrent macOS runners, leaving one
+    # for a signed release. It still runs when lifecycle fails.
+    needs: [changes, lifecycle]
+    if: ${{ !cancelled() && needs.changes.outputs.rust == 'true' }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -218,6 +257,8 @@ jobs:
     name: Engine unit suite (CPU and Metal compilation)
     runs-on: macos-26
     timeout-minutes: 60
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     env:
       # The suite uses custom_test_frameworks; the cache key fingerprints this compiler.
       RUSTUP_TOOLCHAIN: nightly-2026-10-01
@@ -249,8 +290,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [quality, lifecycle, scoring, cxx, engine-unit]
+    needs: [changes, quality, lifecycle, scoring, cxx, engine-unit]
     env:
+      CHANGES_RESULT: ${{ needs.changes.result }}
+      RUST_JOBS: ${{ needs.changes.outputs.rust }}
       QUALITY_RESULT: ${{ needs.quality.result }}
       LIFECYCLE_RESULT: ${{ needs.lifecycle.result }}
       SCORING_RESULT: ${{ needs.scoring.result }}
@@ -258,8 +301,15 @@ jobs:
       ENGINE_UNIT_RESULT: ${{ needs.engine-unit.result }}
     steps:
       - run: |
+          test "$CHANGES_RESULT" = success
           test "$QUALITY_RESULT" = success
           test "$LIFECYCLE_RESULT" = success
-          test "$SCORING_RESULT" = success
-          test "$CXX_RESULT" = success
-          test "$ENGINE_UNIT_RESULT" = success
+          # The Rust jobs may be skipped only when change detection said so.
+          case "$RUST_JOBS" in
+            true) expected=success ;;
+            false) expected=skipped ;;
+            *) exit 1 ;;
+          esac
+          test "$SCORING_RESULT" = "$expected"
+          test "$CXX_RESULT" = "$expected"
+          test "$ENGINE_UNIT_RESULT" = "$expected"
