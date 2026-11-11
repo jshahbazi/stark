@@ -267,7 +267,10 @@ group-32 storage. The latter admits
 `stark-convert --metadata-profile hf-generic` also prepare compatible
 external-table exports for native text generation. Preparation binds the
 selected revision and source hashes, preserves indexed shards and the separate
-n-gram table, and uses the source tokenizer and template. This route covers text
+n-gram table, and uses the source tokenizer and template. Catalog and remote
+import checks read exact byte ranges for the pinned Safetensors headers.
+They verify shard/index membership and the native text and declared draft
+tensor shapes, packing, and dtypes before any weight download. This route covers text
 generation. Retained vision admission has its own pinned artifact checks.
 Native tensor admission still validates the complete stored layout at load.
 The typed `Qwen38LanguageModelConfig`

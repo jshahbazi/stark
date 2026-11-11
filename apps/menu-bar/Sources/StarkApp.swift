@@ -626,6 +626,7 @@ struct FamilyModelCatalog {
         let artifactModes: [ModelArtifactMode]
         let defaultArtifactMode: ModelArtifactMode
         let downloadable: Bool
+        let unavailableReason: String?
         let installedIDs: [String]
         let modelGroup: CatalogModelGroup?
 
@@ -644,6 +645,8 @@ struct FamilyModelCatalog {
                   installedIDs.allSatisfy({ $0.utf8.count <= 128 }), Set(installedIDs).count == installedIDs.count else { return nil }
             let artifactModes = modes.compactMap(ModelArtifactMode.init(rawValue:))
             guard artifactModes.count == modes.count else { return nil }
+            let unavailableReason = SupportMetadata.string(raw["unavailable_reason"], maximum: 240)
+            guard downloadable ? raw["unavailable_reason"] == nil : unavailableReason != nil else { return nil }
             if let size = raw["size_label"], !(size is NSNull), SupportMetadata.string(size, maximum: 64) == nil { return nil }
             for key in ["parameter_count", "weight_bytes"] {
                 if let value = raw[key], !(value is NSNull), SupportMetadata.integer(value) == nil { return nil }
@@ -653,6 +656,7 @@ struct FamilyModelCatalog {
             weightBytes = SupportMetadata.integer(raw["weight_bytes"]); self.quantization = quantization
             self.artifactModes = artifactModes; defaultArtifactMode = defaultMode
             self.downloadable = downloadable; self.installedIDs = installedIDs
+            self.unavailableReason = unavailableReason
             modelGroup = CatalogModelGroup(raw["model_group"])
         }
 

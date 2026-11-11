@@ -13,6 +13,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -772,10 +773,26 @@ def resolve_source(
                 normalize_processor(json.loads(inspect_sidecar("preprocessor_config.json", 65536)))
             else:
                 check_vision_processing_metadata(names, inspect_sidecar)
+    if external_qwen and not local and qwen38_external.INDEX in names:
+        check_hub_metadata_size(hub, repo, qwen38_external.INDEX, revisions[repo], 1024 * 1024)
     if selected is None:
         selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
     if external_qwen and not qwen38_external.supported_shards(selected, index_name is not None):
         raise UnsupportedConversion("External Qwen3.8 requires flat native checkpoint shards")
+    if external_qwen and not local:
+        index = read_json(loader(index_name))["weight_map"] if index_name is not None else None
+        deadline = time.monotonic() + 80
+
+        def check_header_deadline():
+            if time.monotonic() >= deadline:
+                raise qwen38_external.HeaderAccessError()
+
+        try:
+            qwen38_external.verify_hub_layout(
+                hub, repo, revisions[repo], config, selected, index, check_header_deadline
+            )
+        except qwen38_external.HeaderAccessError:
+            raise ConversionError("Cannot verify the pinned Qwen3.8 tensor headers") from None
     descriptors = list(rules)
     if index_name:
         descriptors.append({"role": "weight_index", "repo": repo, "filename": index_name})

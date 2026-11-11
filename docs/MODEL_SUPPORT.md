@@ -156,7 +156,10 @@ Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
 its fixed Q8 control projections. The Qwen3.8 catalog also discovers compatible
 MLX-Serve external-table exports by config and file inventory, including
 importance-calibrated exports using the supported affine layout. Their download
-size includes the external n-gram table. Embedding/reranking tasks, known
+size includes the external n-gram table. The catalog checks the pinned shard
+headers, index, and n-gram table layout before enabling Download. Incompatible
+external-table candidates display an explanation in their catalog row.
+Embedding/reranking tasks, known
 internal test models, quantized vision towers, MoE architectures outside the implemented
 Qwen3.5 and Qwen3.8 paths, adapter-only and unsupported packed formats are
 excluded. Qwen image profiles can retain supported packed decoder matrices

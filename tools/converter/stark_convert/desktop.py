@@ -741,12 +741,22 @@ class Desktop:
                 or any(ord(char) < 32 or ord(char) == 127 for char in item["name"])
                 or not isinstance(item.get("quantization"), str)
                 or not 0 < len(item["quantization"]) <= 64
-                or item.get("downloadable") is not True
+                or type(item.get("downloadable")) is not bool
                 or not isinstance(item.get("artifact_modes"), list)
                 or not item["artifact_modes"]
                 or len(item["artifact_modes"]) != len(set(item["artifact_modes"]))
                 or not set(item["artifact_modes"]) <= {"text", "vision-language"}
                 or item.get("default_artifact_mode") not in item["artifact_modes"]
+            ):
+                raise ValueError()
+            reason = item.get("unavailable_reason")
+            if item["downloadable"]:
+                if reason is not None:
+                    raise ValueError()
+            elif (
+                not isinstance(reason, str)
+                or not 0 < len(reason.encode()) <= 240
+                or any(ord(char) < 32 or ord(char) == 127 for char in reason)
             ):
                 raise ValueError()
             group = item.get("model_group")
@@ -845,6 +855,8 @@ class Desktop:
             request_id = payload.get("support_request_id")
             if item is None or not self.request_id(request_id):
                 raise DesktopError("Choose an available model to download.")
+            if not item["downloadable"]:
+                raise DesktopError(item["unavailable_reason"])
             mode = payload.get("artifact_mode", item["default_artifact_mode"])
             if mode not in item["artifact_modes"]:
                 raise DesktopError("Choose an available model version.")

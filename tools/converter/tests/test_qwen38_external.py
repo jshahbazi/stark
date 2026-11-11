@@ -1,107 +1,229 @@
-"""Regression coverage for external-table Qwen3.8 catalog and install routing."""
+"""External-table Qwen3.8 discovery and import use actual tensor headers."""
 
 import hashlib
 import json
+import math
 import struct
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 from test_model_catalog import PIN, Hub
 
-from stark_convert import model_catalog
+from stark_convert import model_catalog, qwen38_external
+from stark_convert.adapters.qwen38 import describe_text_weights
 from stark_convert.cli import convert
 from stark_convert.desktop import model_valid
 from stark_convert.hybrid_prepare import prepared_identity
 from stark_convert.model_inventory import model_display
 from stark_convert.model_support import preflight_source
 from stark_convert.sources import resolve_source
-from stark_convert.streaming import ConversionError, UnsupportedConversion
+from stark_convert.streaming import UnsupportedConversion
+
+EXPERT = "model.language_model.layers.0.mlp.experts.gate_proj"
 
 
-def external_config():
+@pytest.fixture
+def external_config(monkeypatch):
+    geometry = {
+        "hidden_size": 128,
+        "vocab_size": 16,
+        "num_experts": 2,
+        "num_experts_per_tok": 1,
+        "moe_intermediate_size": 128,
+        "shared_expert_intermediate_size": 64,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 32,
+        "linear_num_key_heads": 1,
+        "linear_num_value_heads": 2,
+        "linear_key_head_dim": 32,
+        "linear_value_head_dim": 32,
+        "linear_conv_kernel_dim": 4,
+        "hc_count": 2,
+        "hc_lowrank": 64,
+        "indexer_n_heads": 1,
+        "indexer_head_dim": 16,
+        "indexer_budget": 4,
+        "indexer_compress_ratio": 2,
+        "ple_embed_dim": 128,
+        "ple_conv_kernel_size": 4,
+        "heads_per_ngram": 2,
+    }
+    monkeypatch.setattr(qwen38_external, "_NATIVE_TEXT_GEOMETRY", geometry)
     return {
         "model_type": "qwen4_exp",
         "architectures": ["Qwen4ExpForConditionalGeneration"],
         "text_config": {
+            **geometry,
             "model_type": "qwen4_exp_text",
-            "vocab_size": 248320,
-            "eos_token_id": 248044,
+            "hidden_act": "silu",
+            "eos_token_id": 1,
+            "rms_norm_eps": 1e-6,
+            "max_position_embeddings": 1024,
+            "num_hidden_layers": 4,
+            "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+            "indexer_kv_heads": 1,
             "ple_layer_ids": [2],
+            "ngram_vocab_size_base": 5,
+            "rope_parameters": {"rope_theta": 10_000, "partial_rotary_factor": 0.25},
         },
         "quantization": {"mode": "affine", "bits": 4, "group_size": 64, "calibration": "imatrix-weighted affine"},
         "ngram_table": {"file": "ngram_table.bin", "bits": 4, "group_size": 32},
     }
 
 
-def write_tensors(path, planes):
+def tensor_files(config, *, expert_bits=4):
+    tensors, table = {}, {}
+    # 5 + 7 + 11 + 13 is padded to 128 rows for this synthetic table.
+    architecture = {
+        **config["text_config"],
+        "ngram_size": 3,
+        "split_ngram_parts": 1,
+        "ple": {"padded_vocab_size": 128},
+    }
+
+    def control(name, shape, integers=False):
+        tensors[name] = ("I64" if integers else "BF16", shape)
+
+    def matrix(stem, shape, *, group=None, fixed_q8=False, embedding=False, ngram=False):
+        if stem.endswith((".block_inject_weight", ".mlp.shared_expert_gate")):
+            control(stem + ".weight", shape)
+            return
+        bits = 8 if fixed_q8 or group in {"attn", "gdn", "shared", "head"} else 4
+        group_size = 32 if ngram else 64
+        if stem == EXPERT and expert_bits == 3:
+            bits, group_size = 3, 128
+        leading, columns = shape[:-1], shape[-1]
+        for plane, dtype, width in (
+            ("weight", "U32", columns * bits // 32),
+            ("scales", "BF16", columns // group_size),
+            ("biases", "BF16", columns // group_size),
+        ):
+            target, name = (table, plane) if ngram else (tensors, stem + "." + plane)
+            target[name] = (dtype, (*leading, width))
+
+    describe_text_weights(architecture, {}, matrix, control)
+    return tensors, table
+
+
+def tensor_bytes(tensors):
     header, offset = {}, 0
-    for name, dtype, columns in planes:
-        width = columns * {"U32": 4, "BF16": 2}[dtype]
-        header[name] = {"dtype": dtype, "shape": [1, columns], "data_offsets": [offset, offset + width]}
+    for name, (dtype, shape) in tensors.items():
+        width = math.prod(shape) * {"U32": 4, "BF16": 2, "I64": 8}[dtype]
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + width]}
         offset += width
     payload = json.dumps(header).encode()
-    path.write_bytes(struct.pack("<Q", len(payload)) + payload + bytes(offset))
+    return struct.pack("<Q", len(payload)) + payload + bytes(offset)
 
 
-@pytest.mark.parametrize("valid_table", [True, False])
-def test_external_qwen_catalog_uses_config_and_includes_table_bytes(tmp_path, monkeypatch, valid_table):
+class RangeHub(Hub):
+    def __init__(self):
+        super().__init__()
+        self.utils = SimpleNamespace(build_hf_headers=dict, get_session=lambda: self)
+        self.ignores_ranges = False
+
+    def list_repo_files(self, *, repo_id, revision):
+        assert revision == PIN
+        return [path.name for path in self.repos[repo_id][0].iterdir()]
+
+    def hf_hub_download(self, *, repo_id, filename, revision, **kwargs):
+        assert revision == PIN
+        self.events.append(("download", repo_id, filename))
+        return str(self.repos[repo_id][0] / filename)
+
+    @contextmanager
+    def stream(self, method, url, *, headers, timeout, follow_redirects):
+        repo, filename, revision = url
+        assert method == "GET" and revision == PIN
+        assert headers["Accept-Encoding"] == "identity" and follow_redirects
+        start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+        self.events.append(("range", repo, filename, start, end))
+        path = self.repos[repo][0] / filename
+        with path.open("rb") as stream:
+            boundary = 8 + int.from_bytes(stream.read(8), "little")
+            assert (start, end) in {(0, 7), (8, boundary - 1)}
+            stream.seek(start)
+
+            def chunks(chunk_size):
+                assert not self.ignores_ranges, "A full-body response must be closed without being read"
+                yield stream.read(end - start + 1)
+
+            yield SimpleNamespace(
+                status_code=200 if self.ignores_ranges else 206,
+                headers={"content-range": f"bytes {start}-{end}/{path.stat().st_size}"},
+                iter_raw=chunks,
+            )
+
+
+@pytest.mark.parametrize("case", ["compatible", "three_bit", "missing_table", "ignored_range", "wrong_index"])
+def test_catalog_checks_pinned_tensor_headers(tmp_path, monkeypatch, external_config, case):
     monkeypatch.setattr(model_catalog, "_catalog_seeds", lambda _family: [])
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    hub = Hub()
+    hub = RangeHub()
     repo = "example/weighted-export"
-    names = {"model.safetensors": 120, "config.json": 100, "tokenizer.json": 20, "tokenizer_config.json": 20}
-    if valid_table:
-        names["ngram_table.bin"] = 30
-    hub.add(tmp_path, repo, external_config(), names=names)
+    tensors, table = tensor_files(external_config, expert_bits=3 if case == "three_bit" else 4)
+    files = {"model.safetensors": tensor_bytes(tensors), "tokenizer.json": {}, "tokenizer_config.json": {}}
+    if case != "missing_table":
+        files["ngram_table.bin"] = tensor_bytes(table)
+    if case == "wrong_index":
+        files["model.safetensors.index.json"] = {
+            "weight_map": {**dict.fromkeys(tensors, "model.safetensors"), "phantom": "model.safetensors"}
+        }
+    names = {name: len(data) if isinstance(data, bytes) else 20 for name, data in files.items()}
+    hub.add(tmp_path, repo, external_config, names={**names, "config.json": 100}, sidecars=files)
     hub.discovered["qwen4_exp"] = [repo]
+    hub.ignores_ranges = case == "ignored_range"
+
     report = model_catalog.family_catalog("qwen4_exp", hub=hub)
     assert report["status"] == "ready"
-    if not valid_table:
+    if case == "missing_table":
         assert report["items"] == []
+        assert not any(event[0] == "range" for event in hub.events)
         return
     (item,) = report["items"]
     assert item["repo"] == repo and item["revision"] == PIN
-    assert item["weight_bytes"] == 150
+    assert item["weight_bytes"] == names["model.safetensors"] + names["ngram_table.bin"]
     assert item["artifact_modes"] == ["text"]
-    assert not any(event[-1] == "ngram_table.bin" for event in hub.events)
+    assert item["downloadable"] is (case == "compatible")
+    if case == "three_bit":
+        assert "3-bit packing with groups of 128" in item["unavailable_reason"]
+        assert "4-bit packing with groups of 64" in item["unavailable_reason"]
+    if case == "ignored_range":
+        assert item["unavailable_reason"] == qwen38_external.UNVERIFIED
+    if case == "wrong_index":
+        assert "shard index" in item["unavailable_reason"]
+    assert not any(event[0] == "download" and event[-1].endswith((".bin", ".safetensors")) for event in hub.events)
 
 
 @pytest.mark.parametrize("remote", [False, True])
-def test_generic_external_qwen_import_preserves_indexed_source_and_binds_table(tmp_path, remote):
+def test_generic_external_qwen_import_preserves_indexed_source_and_binds_table(tmp_path, external_config, remote):
     root = tmp_path / "checkpoint"
     root.mkdir()
     config_path = root / "config.json"
-    config_path.write_text(json.dumps(external_config()))
+    config_path.write_text(json.dumps(external_config))
     (root / "tokenizer.json").write_text("{}")
     (root / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages[0].content }}"}))
     (root / "LICENSE").write_text("Synthetic license fixture")
-    name = "language_model.model.embed_tokens.weight"
+    tensors, planes = tensor_files(external_config)
     shard = root / "model-00001-of-00001.safetensors"
-    write_tensors(shard, [(name, "U32", 8)])
+    shard.write_bytes(tensor_bytes(tensors))
     table = root / "ngram_table.bin"
-    write_tensors(table, [("weight", "U32", 20), ("scales", "BF16", 5), ("biases", "BF16", 5)])
+    table.write_bytes(tensor_bytes(planes))
     index = root / "model.safetensors.index.json"
-    index.write_text(json.dumps({"weight_map": {name: shard.name}}))
+    index.write_text(json.dumps({"weight_map": dict.fromkeys(tensors, shard.name)}))
 
     assert preflight_source(root)["status"] == "conditional"
     assert preflight_source(root, mode="decision")["status"] == "unsupported"
     assert preflight_source(root, mode="vision-language")["status"] == "unsupported"
     if remote:
-
-        class SourceHub(Hub):
-            def list_repo_files(self, *, repo_id, revision):
-                assert repo_id == repo and revision == PIN
-                return [path.name for path in root.iterdir()]
-
-            def hf_hub_download(self, *, repo_id, filename, revision, **kwargs):
-                assert repo_id == repo and revision == PIN
-                return str(root / filename)
-
         repo = "example/external-export"
-        hub = SourceHub()
+        hub = RangeHub()
         hub.repos[repo] = (root, SimpleNamespace(sha=PIN))
         assert preflight_source(repo, hub=hub)["source"]["revision"] == PIN
         snapshot = resolve_source(repo, revision=PIN, metadata_profile="hf-generic", hub=hub)
+        first_bulk = hub.events.index(("download", repo, shard.name))
+        assert any(event[0] == "range" and event[2] == shard.name for event in hub.events[:first_bulk])
     else:
         repo = None
         snapshot = resolve_source(root, metadata_profile="hf-generic", offline=True)
@@ -127,15 +249,20 @@ def test_generic_external_qwen_import_preserves_indexed_source_and_binds_table(t
     (output / index.name).write_bytes(index.read_bytes().replace(b"embed_tokens", b"other_tokens"))
     assert prepared_identity(output) is None
 
-    write_tensors(table, [("weight", "U32", 20), ("scales", "BF16", 5)])
+    del planes["biases"]
+    table.write_bytes(tensor_bytes(planes))
     invalid = tmp_path / "invalid"
-    with pytest.raises(ConversionError, match="n-gram table planes"):
+    with pytest.raises(UnsupportedConversion, match="n-gram table must contain"):
         convert(root, invalid, repo=None, metadata_profile="hf-generic")
     assert not invalid.exists()
+    if remote:
+        hub.events.clear()
+        with pytest.raises(UnsupportedConversion, match="n-gram table must contain"):
+            resolve_source(repo, revision=PIN, metadata_profile="hf-generic", hub=hub)
+        assert not any(event[0] == "download" and event[-1].endswith((".bin", ".safetensors")) for event in hub.events)
 
-    config = external_config()
-    config["quantization"]["bits"] = 3
-    config_path.write_text(json.dumps(config))
+    external_config["quantization"]["bits"] = 3
+    config_path.write_text(json.dumps(external_config))
     assert preflight_source(root)["status"] == "unsupported"
     with pytest.raises(UnsupportedConversion):
         resolve_source(root, metadata_profile="hf-generic", offline=True)

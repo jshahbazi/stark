@@ -42,3 +42,16 @@ The full model was too large for the approximately 62 GiB of available local
 storage. Exact payload verification, native load, generation, image parity,
 memory, and throughput were deferred. The [earlier iQ-MLX investigation](../benchmarks/QWEN38_IQ47_INVESTIGATION_2026_10_29.md)
 records its own source-bound results before the external-affine loader existed.
+
+## Catalog header admission follow-up
+
+The metadata-only filter also offered the iQ-MLX 3.3 bpw revision
+`4fabeb5ee1ef4577cb24a58b495341b5b85c866c`. Its config uses the same default
+affine fields as 4.7 bpw. A pinned expert header showed 3-bit packing with
+groups of 128, outside the native requirement of 4-bit packing with groups
+of 64. The revised catalog checks every selected shard header and the
+n-gram table header against the native text and declared draft layout.
+It leaves 4.7 bpw downloadable and lists 3.3 bpw as unavailable with the
+packing mismatch. Remote preparation repeats the check before bulk downloads,
+and local preparation rechecks the staged headers. These checks cover
+structure and leave native execution and vision qualification open.

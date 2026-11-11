@@ -895,13 +895,30 @@ def family_catalog(
                 selected = _selected_weights(names, lambda filename, maximum: read(repo, filename, revision, maximum))
                 if selected is None:
                     return None
+                unavailable_reason = None
                 if external_qwen:
-                    if not qwen38_external.supported_shards(selected, qwen38_external.INDEX in names):
+                    indexed = qwen38_external.INDEX in names
+                    if not qwen38_external.supported_shards(selected, indexed):
                         return None
                     try:
                         qwen38_external.external_files(repo, names)
                     except (ConversionError, UnsupportedConversion):
                         return None
+                    index = (
+                        _json(read(repo, qwen38_external.INDEX, revision, MAX_CONFIG_BYTES))["weight_map"]
+                        if indexed
+                        else None
+                    )
+                    try:
+                        qwen38_external.verify_hub_layout(
+                            hub, repo, revision, config, selected, index, remaining, sizes
+                        )
+                    except qwen38_external.LayoutError as error:
+                        unavailable_reason = str(error)
+                    except qwen38_external.HeaderAccessError:
+                        unavailable_reason = qwen38_external.UNVERIFIED
+                    if unavailable_reason is not None:
+                        quantization = "MLX-Serve"
                     selected = [*selected, qwen38_external.NGRAM_TABLE]
                 weight_bytes = _weight_bytes(selected, sizes)
                 modes = [base_mode]
@@ -940,7 +957,8 @@ def family_catalog(
                     "default_artifact_mode": modes[-1]
                     if family == "qwen3_5" and quantization == "BF16"
                     else base_mode,
-                    "downloadable": True,
+                    "downloadable": unavailable_reason is None,
+                    **({"unavailable_reason": unavailable_reason} if unavailable_reason is not None else {}),
                     "model_group": _model_group(family, repo, repo.split("/")[-1], quantization, entry),
                 }
                 if planning:
@@ -981,7 +999,11 @@ def family_catalog(
         return report(
             family,
             "ready",
-            "Choose a model to download." if accepted else "No compatible models were found in this family.",
+            "Choose a model to download."
+            if any(item["downloadable"] for item in accepted)
+            else "No models on this page are available to download."
+            if accepted
+            else "No compatible models were found in this family.",
             accepted,
             next_offset=offset + len(candidates) if omitted else None,
         )

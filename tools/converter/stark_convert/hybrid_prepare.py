@@ -220,18 +220,13 @@ def stage_external_qwen(snapshot: SourceSnapshot, staging: Path) -> dict:
         raise ConversionError("External Qwen3.8 source changed during preparation")
     snapshot.assert_unchanged(verify_content=False)
     tensors = load_checkpoint(staging)
-    if "language_model.model.embed_tokens.weight" not in tensors:
-        raise ConversionError("External Qwen3.8 tensor names do not match the native layout")
     table = staging / qwen38_external.NGRAM_TABLE
     _, planes = read_safetensors_header(table)
-    if set(planes) != {"weight", "scales", "biases"}:
-        raise ConversionError("External Qwen3.8 requires three n-gram table planes")
-    rows = planes["weight"].shape[0] if planes["weight"].shape else 0
-    if any(
-        (planes[name].dtype, planes[name].shape) != (dtype, (rows, columns))
-        for name, dtype, columns in (("weight", "U32", 20), ("scales", "BF16", 5), ("biases", "BF16", 5))
-    ):
-        raise ConversionError("External Qwen3.8 n-gram table has an unsupported affine layout")
+    qwen38_external.validate_layout(
+        _json(staging / "config.json"),
+        {name: (info.dtype, info.shape) for name, info in tensors.items()},
+        {name: (info.dtype, info.shape) for name, info in planes.items()},
+    )
     source = {
         "architecture": "qwen4_exp",
         "weights_repo": snapshot.repo,

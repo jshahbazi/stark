@@ -211,9 +211,21 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
             header_bytes = stream.read(header_size)
             if len(header_bytes) != header_size or not header_bytes.startswith(b"{"):
                 raise ConversionError("Invalid safetensors JSON header")
-            header = json.loads(header_bytes, object_pairs_hook=_unique_object)
-    except (OSError, ValueError, UnicodeError) as exc:
+    except OSError as exc:
         raise ConversionError("Cannot read safetensors header") from exc
+    metadata, headers = parse_safetensors_header(header_bytes, signature[2])
+    return metadata, {
+        name: TensorInfo(path, dtype, shape, offset, nbytes, signature)
+        for name, (dtype, shape, offset, nbytes) in headers.items()
+    }
+
+
+def parse_safetensors_header(header_bytes: bytes, file_size: int):
+    """Validate header records and byte ranges without reading any tensors."""
+    try:
+        header = json.loads(header_bytes, object_pairs_hook=_unique_object)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise ConversionError("Cannot parse safetensors header") from exc
     if not isinstance(header, dict):
         raise ConversionError("Safetensors header must be an object")
     metadata = header.pop("__metadata__", {})
@@ -221,7 +233,7 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
         not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items()
     ):
         raise ConversionError("Safetensors metadata must contain strings")
-    data_start = 8 + header_size
+    data_start = 8 + len(header_bytes)
     tensors = {}
     spans = []
     for name, info in header.items():
@@ -235,12 +247,12 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
         if not isinstance(offsets, list) or len(offsets) != 2 or any(type(x) is not int for x in offsets):
             raise ConversionError("Invalid safetensors tensor offsets")
         start, end = offsets
-        if start < 0 or end < start or data_start + end > signature[2]:
+        if start < 0 or end < start or data_start + end > file_size:
             raise ConversionError("Safetensors tensor byte size or offset mismatch")
         nbytes = bounded_tensor_bytes(shape, DTYPE_BYTES[dtype], end - start)
-        if start < 0 or end < start or end - start != nbytes or data_start + end > signature[2]:
+        if start < 0 or end < start or end - start != nbytes or data_start + end > file_size:
             raise ConversionError("Safetensors tensor byte size or offset mismatch")
-        tensors[name] = TensorInfo(path, dtype, tuple(shape), data_start + start, nbytes, signature)
+        tensors[name] = (dtype, tuple(shape), data_start + start, nbytes)
         if len(tensors) > MAX_SOURCE_TENSORS:
             raise ConversionError("Tensor inventory exceeds the metadata planning budget")
         spans.append((start, end))
@@ -249,7 +261,7 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
         if start != cursor:
             raise ConversionError("Safetensors data has gaps or overlapping tensors")
         cursor = end
-    if data_start + cursor != signature[2]:
+    if data_start + cursor != file_size:
         raise ConversionError("Safetensors file has unindexed trailing data")
     return metadata, tensors
 

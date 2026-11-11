@@ -253,6 +253,25 @@ def test_catalogue_download_resolves_server_cache_and_pins_mode_and_revision(hos
     assert len(called) == 1 and events(host)[-1]["request_id"] == "install"
 
 
+def test_unavailable_catalogue_item_explains_the_reason_and_cannot_start_download(host, monkeypatch):
+    value = report()
+    item = value["items"][0]
+    item["downloadable"] = False
+    with pytest.raises(ValueError):
+        host.catalog_report(value, "qwen3")
+    reason = "Expert weights use 3-bit packing with groups of 128."
+    item["unavailable_reason"] = reason
+    host.catalog_request_id, host.catalog_family_id = "request", "qwen3"
+    monkeypatch.setattr(host, "run_catalog_check", lambda *_args: value)
+    host.load_catalog("qwen3", "request", host.catalog_generation)
+    assert events(host)[-1]["report"]["items"][0]["unavailable_reason"] == reason
+    with pytest.raises(DesktopError, match=reason):
+        host.install_catalog(
+            {"catalog_request_id": "request", "entry_id": item["id"], "support_request_id": "install"}
+        )
+    assert host.job is None
+
+
 def test_glm_catalogue_download_uses_only_the_offered_pinned_native_choice(host, monkeypatch):
     item = native_catalog.catalog_item()
     host.catalog_request_id, host.catalog_family_id = "request", native_catalog.FAMILY_ID
