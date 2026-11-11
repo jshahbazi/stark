@@ -114,6 +114,9 @@ _INVALID_CALL_REASONS = {
     "tool": "the call names a tool that this request does not offer or allow",
     "argument": "the call uses an argument that the tool does not define, or repeats one",
     "value": "an argument value does not match the tool's schema",
+    "xml_value_json": "[xml_value_json] a non-string XML argument is not valid unambiguous JSON",
+    "xml_value_type": "[xml_value_type] a decoded XML argument has a type the schema does not allow",
+    "xml_value_ambiguous": "[xml_value_ambiguous] an XML argument could be either a raw string or a non-string value",
     "limits": "the call's arguments exceed the size or nesting limits",
     "count": "the reply has more tool calls than this request allows",
 }
@@ -653,7 +656,7 @@ def _xml_parameter_value(body, types, invalid, parser):
         except (ValueError, RecursionError):
             if "string" in types:
                 return body
-            raise invalid("value") from None
+            raise invalid("xml_value_json") from None
     kind = (
         "null"
         if value is None
@@ -672,10 +675,10 @@ def _xml_parameter_value(body, types, invalid, parser):
     matches = kind in types or (kind == "integer" and "number" in types)
     if "string" in types:
         if matches and kind != "string":
-            raise invalid("value")  # Both the raw string and JSON value fit: no guessed coercion.
+            raise invalid("xml_value_ambiguous")  # Both representations fit: no guessed coercion.
         return body
     if not matches:
-        raise invalid("value")
+        raise invalid("xml_value_type")
     bounded_json(value, MAX_ARGUMENT_BYTES, label="Function arguments")
     return value
 

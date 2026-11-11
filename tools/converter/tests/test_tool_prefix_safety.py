@@ -20,6 +20,50 @@ def wire(parser):
     return OUTPUT if parser == "qwen3-hermes-v1" else xml_call()
 
 
+@pytest.mark.parametrize("tool_desktop", ["qwen38-xml-v1"], indirect=True)
+@pytest.mark.parametrize(
+    "schema,body,tag",
+    [
+        ({"type": "integer"}, "synthetic_private_value", "xml_value_json"),
+        ({"type": "integer"}, '"synthetic_private_value"', "xml_value_type"),
+        ({"type": ["string", "integer"]}, "735291", "xml_value_ambiguous"),
+    ],
+)
+@pytest.mark.parametrize("stream", [False, True])
+def test_xml_diagnostic_survives_http_without_releasing_calls(tool_desktop, schema, body, tag, stream):
+    desktop, payload, _, reply = tool_desktop
+    payload["tools"][0]["function"]["parameters"]["properties"]["value"] = schema
+    reply["text"] = "Synthetic preamble.\n" + reply["text"].replace("\n3\n", f"\n{body}\n")
+    api = LocalAPI(desktop.api_models, desktop.api_complete, api_key="b" * 64, port=0, cancellable=True)
+    info = api.start()
+    try:
+        request = urllib.request.Request(
+            info["base_url"] + "/chat/completions",
+            data=json.dumps({**payload, "stream": stream}).encode(),
+            headers={"Authorization": "Bearer " + "b" * 64, "Content-Type": "application/json"},
+        )
+        if stream:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                wire_body = response.read()
+            chunks = [json.loads(line[6:]) for line in wire_body.splitlines() if line.startswith(b"data: {")]
+            errors = [chunk["error"] for chunk in chunks if "error" in chunk]
+            assert len(errors) == 1
+            error = errors[0]
+            assert not any(
+                choice["delta"].get("tool_calls") for chunk in chunks for choice in chunk.get("choices", [])
+            )
+        else:
+            with pytest.raises(urllib.error.HTTPError) as failure:
+                urllib.request.urlopen(request, timeout=3)
+            assert failure.value.code == 502
+            error = json.loads(failure.value.read())["error"]
+        assert error["code"] == "invalid_tool_call" and f"[{tag}]" in error["message"]
+        assert body not in error["message"] and "lookup" not in error["message"]
+        assert desktop.job is None and desktop.api_queue == []
+    finally:
+        api.close()
+
+
 @pytest.mark.parametrize("parser", PARSERS)
 @pytest.mark.parametrize("width", range(1, 9))
 def test_unclosed_backtick_runs_cannot_wrap_executable_calls(parser, width):

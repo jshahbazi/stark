@@ -624,6 +624,34 @@ def test_xml_ambiguous_union_values_never_become_executable_calls(schema, body, 
     with pytest.raises(APIError) as error:
         xml_output(xml_call({"key": body}), tools=[tool], parser=parser)
     assert error.value.status == 502 and error.value.code == "invalid_tool_call"
+    assert "[xml_value_ambiguous]" in error.value.message
+
+
+@pytest.mark.parametrize("parser", ["qwen38-xml-v1", "qwen35-xml-v1", "glm53-xml-v1"])
+@pytest.mark.parametrize(
+    "schema,body,category",
+    [
+        ({"type": "integer"}, "synthetic_private_value", "xml_value_json"),
+        ({"type": "integer"}, '"synthetic_private_value"', "xml_value_type"),
+        ({"type": ["string", "integer"]}, "735291", "xml_value_ambiguous"),
+    ],
+)
+def test_xml_value_diagnostics_are_fixed_categories_without_payload(schema, body, category, parser):
+    tool = xml_property_tool(schema)
+    tool["function"]["name"] = "synthetic_private_tool"
+    tool["function"]["parameters"]["properties"] = {"synthetic_private_argument": schema}
+    text = (
+        f"<tool_call>synthetic_private_tool<arg_key>synthetic_private_argument</arg_key>"
+        f"<arg_value>{body}</arg_value></tool_call>"
+        if parser == "glm53-xml-v1"
+        else xml_call({"synthetic_private_argument": body}, name="synthetic_private_tool")
+    )
+    with pytest.raises(APIError) as error:
+        xml_output(text, tools=[tool], parser=parser)
+    assert error.value.status == 502 and error.value.code == "invalid_tool_call"
+    assert error.value.message == REJECTED + api_tools_module._INVALID_CALL_REASONS[category] + "."
+    secrets = (body, "synthetic_private_tool", "synthetic_private_argument")
+    assert all(secret not in error.value.message for secret in secrets)
 
 
 def test_xml_bounded_local_schema_references_and_nested_json():
@@ -880,6 +908,7 @@ TRAILING = "text follows the call."
 UNOFFERED = "the call names a tool that this request does not offer or allow."
 ARGUMENT = "the call uses an argument that the tool does not define, or repeats one."
 VALUE = "an argument value does not match the tool's schema."
+XML_VALUE_JSON = "[xml_value_json] a non-string XML argument is not valid unambiguous JSON."
 LIMITS = "the call's arguments exceed the size or nesting limits."
 COUNT = "the reply has more tool calls than this request allows."
 
@@ -931,7 +960,7 @@ def test_hermes_rejections_report_a_fixed_reason(text, extra, reason):
         (xml_call(name="invented_tool"), TOOL, UNOFFERED),
         (xml_call({"invented_argument": "a"}), TOOL, ARGUMENT),
         (xml_call().replace("</function>", "<parameter=key>\nb\n</parameter>\n</function>"), TOOL, ARGUMENT),
-        (xml_call({"key": "not json"}), xml_property_tool({"type": "integer"}), VALUE),
+        (xml_call({"key": "not json"}), xml_property_tool({"type": "integer"}), XML_VALUE_JSON),
         (xml_call({"key": "a" * (MAX_ARGUMENT_BYTES + 1)}), TOOL, LIMITS),
         ("\n".join([xml_call()] * 17), TOOL, COUNT),
     ],
