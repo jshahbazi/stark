@@ -291,6 +291,11 @@ def installed_qwen38_candidate(path):
             "context_tokens": context_tokens,
             "runtime_memory": runtime_memory,
             "gpu_runtime_memory": gpu_runtime_memory,
+            # The PLE table stays in evictable file-backed pages. Its full
+            # extent belongs in the physical envelope, not the fresh allocation
+            # requirement. The resident plan already includes CPU row staging
+            # and workspace, live/snapshot state and optional draft buffers.
+            "startup_memory": gpu_runtime_memory,
             "paged_table_bytes": paged_table_bytes,
             "logical_parameters": logical_parameters,
             "logical_parameters_basis": "lower bound: routed expert gate/up/down matrices only",

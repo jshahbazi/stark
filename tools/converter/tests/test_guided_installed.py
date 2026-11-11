@@ -90,6 +90,8 @@ def test_pinned_installed_candidate_returns_conservative_capacity_record(candida
     assert item["context_tokens"] == 32768
     assert item["runtime_memory"] == 112 * guided.GIB
     assert item["gpu_runtime_memory"] == 83 * guided.GIB
+    assert item["startup_memory"] == 83 * guided.GIB
+    assert item["startup_memory"] < item["runtime_memory"]
     assert item["paged_table_bytes"] == 32_000_153_600
     assert item["runtime_memory"] > item["weight_bytes"]
     assert item["logical_parameters"] == 120_795_955_200

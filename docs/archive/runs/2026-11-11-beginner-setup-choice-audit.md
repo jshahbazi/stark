@@ -148,3 +148,44 @@ Follow-up source begins at `9c9388a8` with these changed-file identities:
 Follow-up checks: **140 controller tests**, **13 beginner tests** and **7 window
 tests** passed. Recommendation/backend code and inference state paths did not
 change in this transport fix.
+
+## Follow-up: paged-model startup memory rejection
+
+The guide selected the installed Flash Next artifact but rejected **Start**
+because `run_guided_worker` compared current available RAM with the full
+112 GiB physical envelope. That envelope includes the complete 32,000,153,600-byte
+disk-backed PLE table. Native `NgramStorage::Paged` keeps that table in evictable
+file-backed pages and stages selected rows, so its entire extent is not a fresh
+resident allocation required before loading.
+
+The exact checked artifact now provides a separate **83 GiB startup working-set
+requirement**, including its conservative resident allocations and workspace.
+The static 112 GiB physical envelope, 2 GiB physical reserve, GPU admission cap,
+artifact revalidation and release-before-probe ordering remain in place. Layouts
+without an explicit startup working-set plan retain their full runtime gate.
+Recommendation memory hints use the same requirement as startup.
+
+An actual load through the production guided-start path and the installed signed
+native worker passed, with no generation requested:
+
+| Check | Result |
+| --- | --- |
+| Source artifact | Same pinned Lily q4-xl revision and configuration identified above |
+| Available RAM before load | 104,736,374,784 bytes |
+| Physical planning envelope | 120,259,084,288 bytes |
+| Required startup working set | 89,120,571,392 bytes |
+| Ready received | 11.8 seconds, including local planning and loading |
+| Chat / API context | 32,768 / 32,768 tokens |
+| Highest sampled GPU allocation during this startup | 73,979,084,800 bytes |
+
+The isolated worker was stopped after readiness. This is startup evidence, not
+full-window inference, output quality, generation speed or an allocation peak
+qualification. Tests cover available memory between the resident requirement
+and physical envelope, low/unknown memory rejection, unchanged static physical
+and GPU limits, prior-worker release, plan identity and consistent guidance.
+
+Startup implementation identity: `11bbda35a26c6dff81ac80539d6f1a279ce126e3b60f19cc30a38275c05e9af8`
+(SHA-256 of sorted-key JSON mapping converter `desktop.py`, `guided_models.py`
+and `guided_installed.py` repository-relative paths to their SHA-256 values).
+The tested signed native worker SHA-256 was
+`c711ad2327bd3c65611174a080f3ec147973afce9e433858333f04133d61984c`.

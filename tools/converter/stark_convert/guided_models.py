@@ -67,6 +67,7 @@ class Recipe:
     installed_config_sha256: str | None = None
     estimated_runtime_bytes: int | None = None
     estimated_gpu_runtime_bytes: int | None = None
+    estimated_startup_bytes: int | None = None
     capacity_is_lower_bound: bool = False
 
     @property
@@ -99,6 +100,10 @@ class Recipe:
     @property
     def gpu_runtime_memory(self):
         return self.runtime_memory if self.estimated_gpu_runtime_bytes is None else self.estimated_gpu_runtime_bytes
+
+    @property
+    def startup_memory(self):
+        return self.runtime_memory if self.estimated_startup_bytes is None else self.estimated_startup_bytes
 
     @property
     def runtime_memory(self):
@@ -431,6 +436,7 @@ def matches_recipe(path, recipe):
             return (
                 metadata is not None
                 and (metadata.get("gpu_runtime_memory", metadata["runtime_memory"]) == recipe.gpu_runtime_memory)
+                and (metadata.get("startup_memory", metadata["runtime_memory"]) == recipe.startup_memory)
                 and all(
                     metadata[key] == expected
                     for key, expected in (
@@ -594,7 +600,7 @@ def _recommendation_reason(recipe, host, task, preference):
             "Capacity uses a lower bound from known artifact geometry; uncounted parameter groups receive no credit."
         )
     available = host.get("available_memory_bytes")
-    if type(available) is not int or available < recipe.runtime_memory:
+    if type(available) is not int or available < recipe.startup_memory:
         reasons.append("More memory must be available when starting; switching away from a running model may free it.")
     return " ".join(reasons)
 
@@ -644,6 +650,7 @@ def recipe_from_installed(model):
         installed_config_sha256=metadata["config_sha256"],
         estimated_runtime_bytes=metadata["runtime_memory"],
         estimated_gpu_runtime_bytes=metadata.get("gpu_runtime_memory"),
+        estimated_startup_bytes=metadata.get("startup_memory"),
         capacity_is_lower_bound=metadata.get("capacity_is_lower_bound", False),
     )
 
@@ -695,6 +702,7 @@ def recommendation_report(
                 "installed_bytes_estimate": recipe.installed_bytes,
                 "setup_disk_bytes_estimate": recipe.setup_bytes,
                 "runtime_memory_bytes_estimate": recipe.runtime_memory,
+                "startup_memory_bytes_estimate": recipe.startup_memory,
                 "context_tokens": recipe.context_tokens,
                 "installed_ids": ids,
                 "license": license_name,

@@ -1097,7 +1097,7 @@ class Desktop:
             recipe is None
             or not installation_allowed(recipe, resources, installed=True)
             or type(available) is not int
-            or available < recipe.runtime_memory
+            or available < recipe.startup_memory
         ):
             raise DesktopError("Not enough memory is available to start this model. Close other apps and try again.")
         self.run(epoch, identifier, "chat", guided_context=recipe.context_tokens, guided_request_id=request_id)

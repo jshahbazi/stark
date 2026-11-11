@@ -285,7 +285,11 @@ Every plan must leave 2 GiB of physical
 memory and use no more than 85% of Metal's recommended working-set budget.
 New downloads also need 2 GiB currently available memory and enough space for
 source and converted copies plus setup reserves. Starting rechecks available
-memory after releasing the previous worker. A running model's memory is never
+memory after releasing the previous worker. For the planned paged Flash Next
+artifact, this check uses the resident working-set requirement rather than the
+full disk-backed table extent. The complete table remains included in the static
+physical-memory envelope; other layouts retain their full runtime requirement.
+A running model's memory is never
 assumed to be reclaimable during recommendations.
 
 Ranking first prefers comfortable memory headroom. **Balanced** then uses

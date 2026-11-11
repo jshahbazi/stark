@@ -468,6 +468,96 @@ def test_paged_weights_have_separate_physical_and_gpu_memory_admission():
     assert not guided.installation_allowed(recipe, host, installed=True)
 
 
+def paged_start_recipe(*, startup_gib=83):
+    return replace(
+        guided.RECIPES[0],
+        installed_only=True,
+        minimum_memory=114 * guided.GIB,
+        estimated_runtime_bytes=112 * guided.GIB,
+        estimated_gpu_runtime_bytes=83 * guided.GIB,
+        estimated_startup_bytes=None if startup_gib is None else startup_gib * guided.GIB,
+    )
+
+
+def start_resources(*, available_gib=98, physical_gib=128, gpu_gib=107):
+    return resources(
+        physical_memory_bytes=physical_gib * guided.GIB,
+        available_memory_bytes=None if available_gib is None else available_gib * guided.GIB,
+        gpu_available=True,
+        unified_memory=True,
+        gpu_memory_budget_bytes=gpu_gib * guided.GIB,
+    )
+
+
+@pytest.mark.parametrize(
+    "startup_gib,available_gib,allowed",
+    [(83, 98, True), (83, 82, False), (83, None, False), (None, 98, False)],
+)
+def test_start_rechecks_resident_working_set_after_releasing_previous_worker(
+    host, monkeypatch, startup_gib, available_gib, allowed
+):
+    recipe = paged_start_recipe(startup_gib=startup_gib)
+    old_worker = host.worker = ExistingWorker()
+    calls = []
+
+    def probe(_hardware):
+        assert old_worker.closed and host.worker is None
+        return start_resources(available_gib=available_gib)
+
+    monkeypatch.setattr(host, "guided_resources", probe)
+    monkeypatch.setattr(host, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    if allowed:
+        host.run_guided_worker(host.epoch, "installed-flash", recipe, {}, "start-request")
+        assert calls == [
+            ((host.epoch, "installed-flash", "chat"), {"guided_context": 32768, "guided_request_id": "start-request"})
+        ]
+        assert recipe.startup_memory == 83 * guided.GIB
+        assert recipe.runtime_memory == 112 * guided.GIB
+    else:
+        with pytest.raises(module.DesktopError, match="Not enough memory"):
+            host.run_guided_worker(host.epoch, "installed-flash", recipe, {}, "start-request")
+        assert not calls
+        if startup_gib is None:
+            # Dense and other layouts without a separate working-set plan keep
+            # the full runtime requirement; GPU bytes are not a blanket bypass.
+            assert recipe.startup_memory == recipe.runtime_memory
+
+
+@pytest.mark.parametrize("physical_gib,gpu_gib", [(96, 107), (128, 32)])
+def test_resident_start_plan_does_not_relax_physical_or_gpu_fit(host, monkeypatch, physical_gib, gpu_gib):
+    monkeypatch.setattr(
+        host,
+        "guided_resources",
+        lambda _hardware: start_resources(available_gib=200, physical_gib=physical_gib, gpu_gib=gpu_gib),
+    )
+    monkeypatch.setattr(host, "run", lambda *_args, **_kwargs: pytest.fail("must preserve static resource limits"))
+    with pytest.raises(module.DesktopError, match="Not enough memory"):
+        host.run_guided_worker(host.epoch, "installed-flash", paged_start_recipe(), {}, "start-request")
+
+
+@pytest.mark.parametrize("available_gib,requires_more", [(98, False), (82, True)])
+def test_paged_model_memory_hint_matches_the_startup_working_set(available_gib, requires_more):
+    recipe = paged_start_recipe()
+    report = guided.recommendation_report(
+        start_resources(available_gib=available_gib), {recipe.id: ["installed"]}, candidates=[recipe]
+    )
+    item = report["items"][0]
+    assert ("More memory must be available" in item["recommendation_reason"]) is requires_more
+    assert item["runtime_memory_bytes_estimate"] == 112 * guided.GIB
+
+
+def test_installed_start_working_set_is_bound_to_the_checked_artifact(monkeypatch):
+    from stark_convert import guided_installed
+
+    metadata = {**installed_metadata(), "gpu_runtime_memory": 83 * guided.GIB, "startup_memory": 83 * guided.GIB}
+    monkeypatch.setattr(guided_installed, "inspect_installed", lambda _path: dict(metadata))
+    recipe = guided.recipe_from_installed({"id": "local-flash", "name": "Flash", "path": "/unused"})
+    assert recipe.startup_memory == 83 * guided.GIB
+    assert guided.matches_recipe("/unused", recipe)
+    metadata["startup_memory"] = 84 * guided.GIB
+    assert not guided.matches_recipe("/unused", recipe)
+
+
 def test_current_worker_memory_pressure_does_not_remove_static_fit():
     candidate = guided.recipe_from_catalog(catalog_candidate())
     host = gpu_resources()
