@@ -77,3 +77,23 @@ The worker came from the user's installed app. This run exercised the converter
 output with that binary. Subsequent catalogue recovery and inspection-budget
 changes passed the final focused tests. The full 4.7 bpw checkpoint was assessed
 through its headers during this work.
+
+## Pre-PR review follow-up
+
+Attempt `20261110-CATALOG-01` is indexed in the
+[model experiment ledger](../../model-experiments/2026-11-10-catalog-family-admission.md).
+Review of implementation `e527dd5c` found that an admitted image source could
+fall back to a downloadable text-only row after its vision header plan failed.
+The new end-to-end composition regression reproduced both missing and malformed
+vision tensors as two failing cases, with the intact source passing.
+
+The correction preserves the admitted artifact modes and makes the row
+unavailable when any offered mode fails tensor admission. The final catalogue,
+HTTP header, planner, native identity, desktop browser and guided discovery
+checks passed with 302 tests. Ruff lint, formatting and whitespace checks passed.
+The corrected converter source hash is
+`62a6a77c6fd1646a55a7d11338625b83a346f3989fa689158e707cc4c9e2200e`.
+
+The ten-second family discovery budget is cooperative between network calls.
+The desktop host owns the hard child-process deadline and cancellation. This
+review made no additional performance or full-model execution claim.

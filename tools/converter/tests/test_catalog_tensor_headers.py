@@ -4,6 +4,7 @@ import json
 
 import pytest
 from test_mlx_qwen35 import mlx_qwen35_fixture
+from test_qwen35_vision import vision_fixture
 from test_qwen38_external import RangeHub
 from test_streaming import qwen_fixture, save_tensors
 
@@ -136,3 +137,31 @@ def test_oversized_header_has_a_permanent_budget_reason_without_reading_its_body
     assert item["downloadable"] is False
     assert "verification limit" in item["unavailable_reason"]
     assert len([event for event in hub.events if event[0] == "range"]) == 1
+
+
+@pytest.mark.parametrize("vision_layout", ["valid", "missing", "wrong_shape"])
+def test_image_header_failure_cannot_offer_a_text_only_download(tmp_path, monkeypatch, vision_layout):
+    source = tmp_path / "source"
+    _, tensors, _ = vision_fixture(source)
+    name = "model.visual.patch_embed.proj.bias"
+    if vision_layout == "missing":
+        del tensors[name]
+    elif vision_layout == "wrong_shape":
+        dtype, values = tensors[name]
+        tensors[name] = dtype, values.reshape(2, 2)
+    save_tensors(source / "model.safetensors", tensors)
+    hub, _, _ = add_checkpoint(tmp_path, source, family="qwen3_5")
+    monkeypatch.setattr(vision_family, "_DELTA_HEAD_DIM", 2)
+    # Processing admission is exercised separately. This test composes the real
+    # text and vision tensor planners after the source has passed that gate.
+    monkeypatch.setattr(catalog, "_catalog_image_metadata", lambda *args: True)
+
+    result = catalog.family_catalog("qwen3_5", hub=hub)
+
+    assert result["status"] == "ready" and len(result["items"]) == 1
+    item = result["items"][0]
+    assert item["artifact_modes"] == ["text", "vision-language"]
+    assert item["default_artifact_mode"] == "vision-language"
+    assert item["downloadable"] is (vision_layout == "valid")
+    if vision_layout != "valid":
+        assert "tensor" in item["unavailable_reason"]

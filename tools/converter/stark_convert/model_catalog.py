@@ -1029,12 +1029,7 @@ def family_catalog(
                     layout = _verify_hub_layout(
                         family, hub, repo, revision, config, selected, index, sizes, remaining, modes
                     )
-                    supported_modes = [mode for mode in modes if layout[mode] is None]
-                    if supported_modes:
-                        modes = supported_modes
-                        base_mode = modes[0]
-                    else:
-                        unavailable_reason = layout[base_mode]
+                    unavailable_reason = next((layout[mode] for mode in modes if layout[mode] is not None), None)
                 extra_weights = any(name.endswith(".safetensors") and name not in selected for name in names)
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
                 chat_template, chat_template_blocker = (None, None)

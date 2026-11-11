@@ -194,7 +194,8 @@ as logical parameter counts. Missing metadata can leave a size unknown or omit
 a candidate. Offline and failed discovery have fixed messages and can be retried.
 Guided setup continues past pages with no downloadable entries within a shared
 10-second budget and a maximum of ten pages per family. It reports when discovery
-remains incomplete.
+remains incomplete. Family budgets are checked between network operations.
+The desktop host enforces cancellation and the overall child-process deadline.
 
 **Installed** groups saved versions by their bound,
 unambiguous source repository; local or incomplete metadata falls back to a
