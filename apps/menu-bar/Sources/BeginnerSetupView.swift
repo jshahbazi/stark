@@ -6,7 +6,7 @@ struct BeginnerSetupView: View {
     var actions: BeginnerSetupActions
     @State private var showAlternatives = false
 
-    private let steps = ["Choose a model", "Set up model", "Get OpenWork", "Connect", "Ready"]
+    private let steps = ["Choose a model", "Set up model", "Get OpenWork", "Connect", "Open OpenWork", "Ready"]
     private var choice: BeginnerModelChoice? { session.choice(in: snapshot) }
     private var ownInstallation: Bool {
         guard let identifier = snapshot.installChoiceID else { return false }
@@ -86,6 +86,7 @@ struct BeginnerSetupView: View {
         case .installation: installationStep
         case .openWork: openWorkStep
         case .connection: connectionStep
+        case .openOpenWork: openOpenWorkStep
         case .ready:
             if session.canFinish(snapshot: snapshot) || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot) { readyStep }
             else { connectionStep }
@@ -234,31 +235,13 @@ struct BeginnerSetupView: View {
 
     private var openWorkStep: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading(snapshot.openWorkInstalled ? "Open OpenWork." : "Get OpenWork.",
+            heading("Get OpenWork.",
                     detail: "OpenWork gives your local model a workspace and tools. Stark supplies the model.")
-            modelIdentity("OpenWork", detail: snapshot.openWorkInstalled ? "Installed on this Mac" : "Install the official macOS app")
-            if !snapshot.openWorkInstalled {
-                Text("Download OpenWork, move it to Applications, and open it. Return here to continue.")
-                    .foregroundStyle(.secondary)
-                Button("Download OpenWork", action: actions.downloadOpenWork).buttonStyle(.borderedProminent)
-                Button("Check installation", action: actions.checkConnection)
-            } else {
-                Text("In OpenWork, choose a local workspace folder you’re comfortable letting it access. Review folder and tool permissions there.")
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Button("Open OpenWork", action: actions.openOpenWork).buttonStyle(.borderedProminent)
-                    Button("I’ve chosen a workspace in OpenWork") {
-                        session.confirmWorkspace()
-                        session.stage = .connection
-                    }.disabled(!snapshot.openWorkRunning)
-                }
-                if snapshot.openWorkApproved { reconnectOpenWorkButton }
-                if session.workspaceConfirmed {
-                    Label("Workspace choice confirmed by you", systemImage: "checkmark.circle")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Text("Stark does not choose or inspect your OpenWork folder.").font(.caption).foregroundStyle(.secondary)
+            modelIdentity("OpenWork", detail: "Install the official macOS app")
+            Text("Download OpenWork and move it to Applications. Stark will take you to the connection step when it detects the installed app.")
+                .foregroundStyle(.secondary)
+            Button("Download OpenWork", action: actions.downloadOpenWork).buttonStyle(.borderedProminent)
+            Button("Check installation", action: actions.checkConnection)
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.caption).foregroundStyle(.secondary) }
             Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
         }
@@ -294,6 +277,22 @@ struct BeginnerSetupView: View {
                 Button("Chat in Stark instead", action: actions.openChat)
             }
         } else {
+            checkRow("Connection allowed", detail: "Allow OpenWork to send requests to this model.", checked: snapshot.openWorkApproved)
+            if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
+            Button(snapshot.openWorkBusy ? "Connecting…" : "Allow and connect", action: actions.connectOpenWork)
+                .buttonStyle(.borderedProminent).disabled(snapshot.openWorkBusy || !snapshot.openWorkInstalled)
+            Text("Stark opens OpenWork to configure the connection. If asked, choose a local workspace there, then connect again. You can revoke this connection in Stark’s Connections window.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
+        }
+    }
+
+    private var openOpenWorkStep: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            heading("Open OpenWork.", detail: "Your connection is allowed. Choose a workspace and select Stark’s running model in OpenWork.")
+            modelIdentity("OpenWork", detail: "Installed on this Mac")
+            Text("Choose a local workspace folder you’re comfortable letting OpenWork access. Review folder and tool permissions there.")
+                .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 14) {
                 checkRow("Connection allowed", detail: snapshot.openWorkApproved ? "OpenWork is authorized to use Stark." : "Allow OpenWork to send requests to this model.", checked: snapshot.openWorkApproved)
                 checkRow("OpenWork checked this model", detail: snapshot.openWorkClientActive ? "Its verified connector requested this model’s current settings." : "Waiting for OpenWork to refresh its model list.", checked: snapshot.openWorkClientActive)
@@ -301,28 +300,23 @@ struct BeginnerSetupView: View {
                 checkRow("Running model selected", detail: "Confirmed by you for \(snapshot.runningModelName).", checked: session.confirmedOpenWorkModelID == snapshot.runningModelID)
             }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
-            if snapshot.openWorkApproved {
-                Text("If OpenWork asks, quit it completely and reopen it. Select Stark and \(snapshot.runningModelName) in OpenWork’s model picker.")
-                    .font(.callout).foregroundStyle(.secondary)
-                HStack {
-                    Button("Open OpenWork", action: actions.openOpenWork)
-                    reconnectOpenWorkButton
-                    Button("Check connection", action: actions.checkConnection).disabled(snapshot.openWorkBusy)
-                }
-                if !session.workspaceConfirmed {
-                    Button("I’ve chosen a workspace in OpenWork") { session.confirmWorkspace() }
-                        .disabled(!snapshot.openWorkRunning)
-                }
-                Button("I selected this model in OpenWork") { session.confirmModelSelection(snapshot: snapshot) }
-                    .disabled(!snapshot.openWorkRunning || snapshot.openWorkBusy)
-                Button("Finish setup") { session.finish(snapshot: snapshot) }.buttonStyle(.borderedProminent)
-                    .disabled(!session.canFinish(snapshot: snapshot))
-            } else {
-                Button(snapshot.openWorkBusy ? "Connecting…" : "Allow and connect", action: actions.connectOpenWork)
-                    .buttonStyle(.borderedProminent).disabled(snapshot.openWorkBusy || !snapshot.openWorkInstalled)
-                Text("OpenWork can send requests to this model. Review file and tool access in OpenWork. You can revoke this connection in Stark’s Connections window.")
-                    .font(.caption).foregroundStyle(.secondary)
+            Text("If OpenWork asks, quit it completely and reopen it. Select Stark and \(snapshot.runningModelName) in OpenWork’s model picker.")
+                .font(.callout).foregroundStyle(.secondary)
+            HStack {
+                Button("Open OpenWork", action: actions.openOpenWork).buttonStyle(.borderedProminent)
+                reconnectOpenWorkButton
+                Button("Check connection", action: actions.checkConnection).disabled(snapshot.openWorkBusy)
             }
+            if !session.workspaceConfirmed {
+                Button("I’ve chosen a workspace in OpenWork") { session.confirmWorkspace() }
+                    .disabled(!snapshot.openWorkRunning)
+            }
+            Button("I selected this model in OpenWork") { session.confirmModelSelection(snapshot: snapshot) }
+                .disabled(!snapshot.openWorkRunning || snapshot.openWorkBusy)
+            Button("Finish setup") { session.finish(snapshot: snapshot) }.buttonStyle(.borderedProminent)
+                .disabled(!session.canFinish(snapshot: snapshot))
+            Text("Stark does not choose or inspect your OpenWork folder.").font(.caption).foregroundStyle(.secondary)
+            Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
         }
     }
 
@@ -402,6 +396,7 @@ struct BeginnerSetupView: View {
         case 1: return .installation
         case 2: return .openWork
         case 3: return .connection
+        case 4: return .openOpenWork
         default: return .ready
         }
     }
@@ -417,6 +412,8 @@ struct BeginnerSetupView: View {
         case .installation:
             return snapshot.installChoiceID != nil || snapshot.installedResultID != nil || session.selectedChoiceID != nil
                 ? "Review the selected model setup." : "Choose a model first."
+        case .openOpenWork:
+            return snapshot.openWorkApproved ? "Choose a workspace and select the running model in OpenWork." : "Connect OpenWork first."
         case .openWork, .connection:
             return snapshot.modelReady || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot)
                 ? "Continue OpenWork setup." : "Start a model first."

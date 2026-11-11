@@ -57,7 +57,7 @@ You may need one access approval and to update copied API keys in connected apps
 Open **Connections → Apps**, choose **Manage** for OpenWork, then **Reconnect** to
 repair the Stark-owned public connection entry. If the app is not set up, choose
 **Connect** instead. Quit OpenWork completely and reopen it when instructed.
-Guided Setup also offers **Reconnect** on the OpenWork, Connect and Ready steps
+Guided Setup also offers **Reconnect** on the Open OpenWork and Ready steps
 for an authorized connection, including when OpenWork reports a rejected API key.
 It refreshes the managed connector settings and saves approval again. Quit
 OpenWork completely and reopen it after reconnecting, even if its saved settings
@@ -396,10 +396,12 @@ general OpenWork competence still require artifact-specific validation.
 
 After the model is running, Beginner can guide setup of the official OpenWork
 app. **Download OpenWork** opens its official download page in a browser; the
-user installs and opens the app, chooses a local workspace, and confirms that
-choice in Stark. Stark does not select or inspect the folder. The flow then
-offers the existing managed connection authorization, asks the user to select
-Stark and the running model in OpenWork, and checks that OpenWork's connector
+user installs the app in Applications. Detection advances **Get OpenWork** to
+**Connect**, which offers the existing managed connection authorization. Connecting
+may open OpenWork and ask for a workspace if its engine needs one. Once authorized,
+the separate **Open OpenWork** step asks the user to choose and confirm a local
+workspace and select Stark and the running model. Stark does not select or inspect
+the folder. The flow checks that OpenWork's connector
 is active before enabling **Finish setup**. Connector authorization, an active
 connector, and the user's workspace/model confirmations are separate checks.
 Stark does not automatically grant folder access, restart OpenWork, select a

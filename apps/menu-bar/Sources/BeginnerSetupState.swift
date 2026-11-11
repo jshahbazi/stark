@@ -70,7 +70,7 @@ enum BeginnerModelPriority: String, CaseIterable, Identifiable {
 }
 
 enum BeginnerSetupStage: String, CaseIterable {
-    case task, recommendation, installation, openWork, connection, ready, retry
+    case task, recommendation, installation, openWork, connection, openOpenWork, ready, retry
 
     var step: Int {
         switch self {
@@ -78,7 +78,8 @@ enum BeginnerSetupStage: String, CaseIterable {
         case .installation: return 1
         case .openWork: return 2
         case .connection: return 3
-        case .ready: return 4
+        case .openOpenWork: return 4
+        case .ready: return 5
         }
     }
 }
@@ -299,7 +300,9 @@ final class BeginnerSetupSession: ObservableObject {
             return snapshot.installChoiceID != nil || snapshot.installedResultID != nil
                 || selectedChoiceID != nil || canFinish(snapshot: snapshot)
         }
-        if target == .openWork || target == .connection {
+        if target == .openWork || target == .connection || target == .openOpenWork {
+            if target != .openWork && !snapshot.openWorkInstalled { return false }
+            if target == .openOpenWork && (!snapshot.openWorkApproved || snapshot.openWorkBusy) { return false }
             return (snapshot.modelReady || keepsCompletedSetupWhileGenerating(snapshot: snapshot))
                 && !snapshot.runningModelID.isEmpty
         }
@@ -309,6 +312,7 @@ final class BeginnerSetupSession: ObservableObject {
     func navigate(to target: BeginnerSetupStage, snapshot: BeginnerSetupSnapshot) {
         guard canNavigate(to: target, snapshot: snapshot) else { return }
         stage = target
+        synchronize(with: snapshot)
     }
 
     func continueAfterModel(snapshot: BeginnerSetupSnapshot) {
@@ -317,7 +321,8 @@ final class BeginnerSetupSession: ObservableObject {
         choosingAnotherModel = false
         excludedModelID = nil
         retryPreference = nil
-        stage = snapshot.openWorkInstalled && workspaceConfirmed ? .connection : .openWork
+        stage = snapshot.openWorkInstalled ? .connection : .openWork
+        synchronize(with: snapshot)
     }
 
     func synchronize(with snapshot: BeginnerSetupSnapshot) {
@@ -334,7 +339,19 @@ final class BeginnerSetupSession: ObservableObject {
         observedModelID = snapshot.runningModelID
         if !snapshot.openWorkApproved { confirmedOpenWorkModelID = nil }
         if stage == .ready, !canFinish(snapshot: snapshot), !keepsCompletedSetupWhileGenerating(snapshot: snapshot) {
-            stage = snapshot.openWorkInstalled && workspaceConfirmed ? .connection : .openWork
+            stage = snapshot.openWorkInstalled ? .connection : .openWork
+        }
+        // Installation and authorization are separate milestones. Neither proves
+        // that the user has chosen a workspace or selected the running model.
+        if stage == .openWork, snapshot.openWorkInstalled { stage = .connection }
+        if stage == .connection, snapshot.openWorkInstalled, snapshot.openWorkApproved,
+           !snapshot.openWorkBusy, snapshot.canUseOpenWork { stage = .openOpenWork }
+        if stage == .connection || stage == .openOpenWork {
+            if !snapshot.openWorkInstalled { stage = .openWork }
+            else if stage == .openOpenWork,
+                    !snapshot.openWorkApproved || (!snapshot.canUseOpenWork && !keepsCompletedSetupWhileGenerating(snapshot: snapshot)) {
+                stage = .connection
+            }
         }
         if let pending = installingChoiceID, pending == snapshot.installChoiceID,
            [.ready, .cancelled, .failed].contains(snapshot.installPhase) {
