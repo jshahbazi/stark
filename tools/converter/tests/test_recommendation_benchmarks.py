@@ -281,7 +281,9 @@ def test_optional_evidence_respects_swift_display_bounds_and_keeps_selected_coho
 def test_packaged_scores_keep_sources_variants_and_reference_limits():
     scores = module.load_registry()
     assert {value.benchmark for value in scores.cohorts} == module.BENCHMARKS
-    assert len(scores.bindings) == 4
+    assert len(scores.bindings) == 5
+    assert scores.model_id(guided.RECIPES[0]) == "Qwen/Qwen3-4B"
+    assert scores.model_id(replace(guided.RECIPES[0], revision="f" * 40)) == guided.RECIPES[0].repo
     bfcl = next(value for value in scores.cohorts if value.id == "bfcl-v4-2026-04-12-fc")
     assert bfcl.results["Qwen/Qwen3-8B"][0] == module.Decimal("42.57")
     assert "Qwen/Qwen3-4B" not in bfcl.results

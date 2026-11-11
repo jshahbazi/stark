@@ -382,7 +382,7 @@ def test_every_task_respects_explicit_model_priority(task, preference):
     elif preference == "answers":
         assert report["items"][0]["id"] == large.id
     else:
-        assert report["items"][0]["id"] == (coding.id if task == "code" else large.id)
+        assert report["items"][0]["id"] == (coding.id if task in {"code", "coding"} else large.id)
     assert len(report["items"]) == 3
 
 

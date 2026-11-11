@@ -13,7 +13,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Model image status](MODEL_IMAGE_STATUS.md) | All registered families and pinned checkpoint entries, image implementation/validation status, text optimization gaps and remaining work |
 | [Default-image text parity worklist](IMAGE_DEFAULT_PARITY_PLAN.md) | Prioritized family/artifact work and mandatory future-model gates for cache correctness, text performance and supported text MTP with images loaded |
 | [Tool-calling coverage](TOOL_CALLING.md) | Supported tool formats, checkpoint evidence, import status and remaining parser work |
-| [Model recommendations](MODEL_RECOMMENDATIONS.md) | Beginner's native/hybrid planning coverage, resource assumptions, ranking evidence and proposed task benchmarks |
+| [Model recommendations](MODEL_RECOMMENDATIONS.md) | Beginner's native/hybrid planning coverage, resource assumptions, offline RAM/task leaderboards and manual refresh workflow |
 | [Native hybrid models](NATIVE_HYBRID_MODELS.md) | GLM-5.3-Flash GGUF, Qwen3.8-Flash-Next native-source preparation and typed Uzu text artifacts, execution and validation |
 | [Experimental GLM wide prefill](validation/GLM_WIDE_PREFILL.md) | Wider token scheduling, batched controls, register KDA, memory admission and qualification requirements |
 | [Experimental GLM batched matrices](validation/GLM_BATCHED_MATRICES.md) | Dense-wide, grouped expert and MLA matrix batching selectors and qualification requirements |

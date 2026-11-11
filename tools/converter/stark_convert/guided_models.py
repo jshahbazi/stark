@@ -32,14 +32,15 @@ from .guided_memory import config_identity, native_request_bytes
 from .guided_memory_profiles import ResidentProfile, qualified_profile, source_profile
 from .model_inventory import MAX_HEADER_BYTES, _weights
 from .recommendation_benchmarks import load_registry
+from .recommendation_leaderboard import load_snapshot
 from .registry import get_model
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, read_safetensors_header
 
 GIB = 1024**3
 MIB = 1024**2
-TASKS = frozenset({"everyday", "text", "files", "code", "unsure"})
+TASKS = frozenset({"general", "coding", "everyday", "text", "files", "code", "unsure"})
 MAX_EXCLUSIONS = 64
-PREFERENCES = frozenset({"balanced", "speed", "answers", "task", "unsure"})
+PREFERENCES = frozenset({"quality", "balanced", "speed", "answers", "task", "unsure"})
 DENSE_ARCHITECTURES = frozenset(
     {"qwen3", "qwen2", "llama", "mistral", "phi3", "granite", "gemma2", "gemma3_text", "smollm3"}
 )
@@ -881,11 +882,17 @@ def _license_label(value):
 
 
 def recommendation_report(
-    host, installed, excluded_recipe_ids=(), *, task="unsure", preference="balanced", candidates=None, benchmarks=None
+    host, installed, excluded_recipe_ids=(), *, task="general", preference="quality", candidates=None,
+    benchmarks=None, leaderboard=None,
 ):
     candidates = tuple(RECIPES if candidates is None else candidates)
-    task = task if task in TASKS else "unsure"
-    preference = preference if preference in PREFERENCES else "balanced"
+    task = task if task in TASKS else "general"
+    preference = preference if preference in PREFERENCES else "quality"
+    guide_task, guide_preference = task, preference
+    # Older command clients retain their existing cohort semantics. The two
+    # new guide paths use the cached leaderboard after the same hard admission.
+    task = {"general": "everyday", "coding": "code"}.get(task, task)
+    preference = "balanced" if preference == "quality" else preference
     eligible = [
         recipe
         for recipe in candidates
@@ -898,9 +905,35 @@ def recommendation_report(
     eligible, cohort, benchmark_used = benchmarks.rank(
         eligible, task, preference, lambda recipe: _fit_tier(recipe, host)
     )
+    leaderboard = load_snapshot() if leaderboard is None else leaderboard
+    eligible, bucket, records, leaderboard_used = leaderboard.rank(
+        eligible, guide_task, guide_preference, host.get("physical_memory_bytes"), benchmarks.model_id
+    )
+    if leaderboard_used:
+        # Historical benchmark evidence stays visible as reference information;
+        # it cannot claim to have determined a different final ordering.
+        benchmark_used = set()
     items = []
     for recipe in eligible[:3]:
         evidence, benchmark_details = benchmarks.evidence(recipe, task, cohort, benchmark_used)
+        cached_evidence, cached_details = leaderboard.evidence(
+            recipe, benchmarks.model_id(recipe), guide_task, bucket, records, leaderboard_used
+        )
+        evidence = cached_evidence + evidence
+        benchmark_details = (cached_details + benchmark_details)[:16]
+        reason = _recommendation_reason(
+            recipe, host, task, preference, benchmark_used=recipe.id in benchmark_used,
+            coding_evidence_available=bool(benchmark_used),
+        )
+        if leaderboard_used:
+            reason = (
+                "Selected using the cached whatmodel.sh " + ("Coding" if guide_task == "coding" else "General Work")
+                + " leaderboard among models admitted by Stark's RAM, GPU, current memory and disk checks. "
+                + ("This model has a published parent-model score; this Stark artifact has not been benchmarked."
+                   if recipe.id in leaderboard_used else
+                   "No matching cached score is recorded for this model; it follows scored options. "
+                   "Its quality is unknown.")
+            )
         ids = list(installed.get(recipe.id, ()))
         license_name = (
             recipe.native_profile.get("license")
@@ -937,14 +970,8 @@ def recommendation_report(
                 "installed_ids": ids,
                 "license": license_name,
                 "qualification": recipe.qualification,
-                "recommendation_reason": _recommendation_reason(
-                    recipe,
-                    host,
-                    task,
-                    preference,
-                    benchmark_used=recipe.id in benchmark_used,
-                    coding_evidence_available=bool(benchmark_used),
-                ),
+                "recommendation_reason": reason,
+                "selection_preference": guide_preference,
                 "benchmarks": evidence,
                 "benchmark_details": benchmark_details,
                 "evidence": (
@@ -969,7 +996,12 @@ def recommendation_report(
     native = [recipe for recipe in candidates if recipe.native_choice is not None]
     if native:
         message += " Native hybrid models were also checked for memory and setup storage."
-    if items and task == "code" and preference not in {"speed", "answers"}:
+    if items and leaderboard_used:
+        message += (
+            f" Quality uses the offline whatmodel.sh {guide_task} snapshot captured {leaderboard.captured}; "
+            "missing scores remain unknown."
+        )
+    elif items and task == "code" and preference not in {"speed", "answers"}:
         message += (
             " Coding choices prioritize published benchmark references; missing scores remain unknown."
             if benchmark_used
@@ -985,7 +1017,7 @@ def recommendation_report(
             and physical < min(recipe.minimum_memory for recipe in RECIPES)
         ):
             message = (
-                "This guided OpenWork setup currently needs at least 16 GB of memory. "
+                "These guided starting models currently need at least 16 GB of memory. "
                 "You can browse smaller chat models in Advanced."
             )
     return {
@@ -994,6 +1026,14 @@ def recommendation_report(
         "message": message,
         "host": dict(host),
         "items": items,
+        "leaderboard_ranking": {
+            "captured": leaderboard.captured,
+            "task": guide_task,
+            "ram_gb": bucket["ram_gb"] if bucket else None,
+            "applied": bool(leaderboard_used),
+            "source": bucket["url"] if bucket else None,
+            "evidence_kind": "upstream_reference",
+        },
         "benchmark_ranking": {
             "cohort": cohort.id if cohort is not None else None,
             "applied": bool(benchmark_used),

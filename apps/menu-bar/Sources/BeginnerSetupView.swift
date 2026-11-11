@@ -7,7 +7,7 @@ struct BeginnerSetupView: View {
     @State private var showAlternatives = false
 
     private var steps: [String] {
-        ["Choose an app", "Choose a model", "Set up model", "Get \(session.client.name)", "Connect", "Open \(session.client.name)", "Ready"]
+        ["Choose your work", "Choose a model", "Set up model", session.task == nil ? "Get app" : "Get \(session.client.name)", "Connect", session.task == nil ? "Open app" : "Open \(session.client.name)", "Ready"]
     }
     private var choice: BeginnerModelChoice? { session.choice(in: snapshot) }
     private var ownInstallation: Bool {
@@ -86,8 +86,8 @@ struct BeginnerSetupView: View {
 
     @ViewBuilder private var content: some View {
         switch session.stage {
-        case .clientChoice: clientChoiceStep
         case .task: taskStep
+        case .priority: priorityStep
         case .recommendation: recommendationStep
         case .installation: installationStep
         case .openWork: openWorkStep
@@ -96,47 +96,47 @@ struct BeginnerSetupView: View {
         case .ready:
             if session.canFinish(snapshot: snapshot) || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot) { readyStep }
             else { connectionStep }
-        case .retry: retryStep
-        }
-    }
-
-    private var clientChoiceStep: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            heading("Which app would you like to set up?", detail: "Choose one guided path. Stark will supply the local model.")
-            ForEach(BeginnerClient.allCases) { client in
-                selection(title: client.name, detail: client.detail, symbol: client == .openWork ? "folder" : "chevron.left.forwardslash.chevron.right", selected: session.client == client) {
-                    session.selectClient(client)
-                }
-            }
-            Button("Continue with \(session.client.name)") { session.stage = .task }
-                .buttonStyle(.borderedProminent)
+        case .retry: taskStep
         }
     }
 
     private var taskStep: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading("What would you like help with?", detail: "Pick a starting point. Stark will choose the download settings for you.")
+            heading("What would you like help with?", detail: "Choose a guided setup. Stark will choose the model settings for you.")
             ForEach(BeginnerTask.allCases) { task in
                 selection(title: task.title, detail: task.detail, symbol: task.symbol, selected: session.task == task) {
                     session.selectTask(task)
                 }
             }
-            Picker("Model priority", selection: Binding(get: { session.modelPriority }, set: session.selectModelPriority)) {
-                ForEach(BeginnerModelPriority.allCases) { priority in
-                    Text(priority.title).tag(priority)
+            HStack {
+                Button("Continue") { session.stage = .priority }
+                    .buttonStyle(.borderedProminent).disabled(session.task == nil)
+                if session.choosingAnotherModel { keepCurrentButton }
+            }
+            if session.choosingAnotherModel {
+                Text("Your current model stays installed while you choose and prepare another model.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var priorityStep: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            heading("Speed or quality?", detail: "Stark will recommend a suitable model for \(session.task?.title ?? "your work") on this Mac.")
+            ForEach(BeginnerModelPriority.allCases) { priority in
+                selection(title: priority.title, detail: priority.detail,
+                          symbol: priority == .speed ? "hare" : "sparkles", selected: session.modelPriority == priority) {
+                    session.selectModelPriority(priority)
                 }
-            }.pickerStyle(.menu)
-            Text("Stark estimates memory needs and model capacity. Speed and answer quality depend on the model and your task.")
+            }
+            Text("Speed and answer quality depend on the model and your task.")
                 .font(.caption).foregroundStyle(.secondary)
             deviceSummary
             HStack {
                 Button(session.choosingAnotherModel ? "See another model" : "Find a model") { requestChoices() }
                     .buttonStyle(.borderedProminent).disabled(session.task == nil || snapshot.choicesLoading)
+                Button("Back") { session.stage = .task }
                 if session.choosingAnotherModel { keepCurrentButton }
-            }
-            if session.choosingAnotherModel {
-                Text("Your current model stays installed while you choose. Your \(session.client.name) setup is kept.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
@@ -392,25 +392,6 @@ struct BeginnerSetupView: View {
         }
     }
 
-    private var retryStep: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            heading("What would you like to change?", detail: "We’ll walk through model choice again. Your \(session.client.name) connection and workspace choice are kept.")
-            ForEach(BeginnerRetryPreference.allCases) { preference in
-                selection(title: preference.title, detail: preference.detail, symbol: "arrow.triangle.2.circlepath", selected: session.retryPreference == preference) {
-                    session.retryPreference = preference
-                }
-            }
-            notice("Currently using \(snapshot.runningModelName). It stays installed while you choose and prepare another model.", symbol: "checkmark.circle")
-            HStack {
-                Button("Continue") {
-                    if session.retryPreference == .task { session.stage = .task }
-                    else { requestChoices() }
-                }.buttonStyle(.borderedProminent).disabled(session.retryPreference == nil)
-                keepCurrentButton
-            }
-        }
-    }
-
     private var keepCurrentButton: some View {
         Button("Keep current model") {
             session.keepCurrentModel()
@@ -432,8 +413,8 @@ struct BeginnerSetupView: View {
 
     private func navigationTarget(for index: Int) -> BeginnerSetupStage {
         switch index {
-        case 0: return .clientChoice
-        case 1: return .task
+        case 0: return .task
+        case 1: return .priority
         case 2: return .installation
         case 3: return .openWork
         case 4: return .connection
@@ -447,9 +428,8 @@ struct BeginnerSetupView: View {
             return "Wait for the current model setup or startup to finish."
         }
         switch target {
-        case .clientChoice: return "Choose OpenWork or OpenCode for this guide."
         case .task: return "Choose or change the kind of help you need."
-        case .recommendation, .retry:
+        case .priority, .recommendation, .retry:
             return session.task == nil ? "Choose a task first." : "Review model choices for your selected task."
         case .installation:
             return snapshot.installChoiceID != nil || snapshot.installedResultID != nil || session.selectedChoiceID != nil

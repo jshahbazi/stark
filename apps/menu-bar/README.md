@@ -275,9 +275,9 @@ The Playground omits the Beginner/Advanced picker; use the main menu to change i
 Advanced retains the existing Manage Models, Model Catalog, Add from Source,
 Playground, Connections and chat controls.
 
-Beginner's **Guided Steps** flow asks what you want help with and whether to
-prioritize a balance of capacity and memory, a lighter model, or more model
-capacity. Recommendations show a simple model name with the specific installed
+Beginner’s **Guided Steps** flow offers **General Work** or **Coding**, then
+**Speed** or **Quality**, with Quality selected by default.
+Recommendations show a simple model name with the specific installed
 or source variant underneath, and a **View on Hugging Face** link to the source
 repository. The same identity remains visible during setup and connection.
 It reads the native Metal device name, unified-memory support and
@@ -285,9 +285,11 @@ recommended working-set budget, plus CPU count, physical and available memory,
 and free space in the library and download cache. GPU and system memory share
 the same physical memory; the algorithm never adds their budgets together.
 
-**Explain text** covers summaries, notes and explanations. **Work with files**
-is a separate task for reading or editing a folder through OpenWork, allowing
-the guide to apply its tool-use benchmark references to that choice.
+Quality uses bundled, dated whatmodel.sh General Work/Coding rankings for
+11 RAM sizes from 8–512 GB, after Stark’s compatibility and resource checks.
+No recommendation click requests the leaderboard. Speed favors lighter models;
+actual response speed varies. See the [recommendation policy and monthly refresh
+workflow](../../docs/MODEL_RECOMMENDATIONS.md).
 
 The guide checks a bounded window of candidates in each supported catalog
 family using metadata only. Every candidate retains its exact source revision
@@ -412,10 +414,9 @@ budget, Beginner offers the existing model browser in Advanced.
 Recommendations are conservative planning estimates; task quality, speed and
 general OpenWork competence still require artifact-specific validation.
 
-Beginner starts with a choice of **OpenWork** or **OpenCode**, then shows only
-that app's guided path through model selection, installation, connection and
-readiness. The chosen app is retained while trying a different model. Return to
-**Choose an app** to switch guides; each app keeps its own connection approval.
+**General Work** leads into OpenWork; **Coding** leads into OpenCode. Only
+that app’s installation and connection steps are shown. **Try a different model**
+reuses the same work and Speed/Quality screens.
 
 After the model is running, the OpenWork guide sets up the official OpenWork
 app. **Download OpenWork** opens its official download page in a browser; the

@@ -366,6 +366,18 @@
         "revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
         "sha256": "585396fde4a2c02a5dc480eec01c51ae85c999d62565491b02508e47aa04f113"
       }
+    },
+    {
+      "repo": "mlx-community/Qwen3-4B-4bit",
+      "revision": "4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25",
+      "model_id": "Qwen/Qwen3-4B",
+      "relationship": "reviewed_quantized_export_reference_only",
+      "source": {
+        "url": "https://huggingface.co/mlx-community/Qwen3-4B-4bit/resolve/4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25/README.md",
+        "publisher": "mlx-community",
+        "revision": "4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25",
+        "sha256": "ebb2aa24b01914a5eb2e04bbd7395cb6e740df6adc413047f83d9c01ca273ec3"
+      }
     }
   ]
 }

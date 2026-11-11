@@ -29,18 +29,25 @@ extension BeginnerSetupView {
             && view.setupSpaceDescription(fresh)?.hasPrefix("Free space needed:") == true
     }
 
-    @MainActor static func checkFilesTaskSelection() -> Bool {
+    @MainActor static func checkWorkSelection() -> Bool {
         let session = BeginnerSetupSession()
-        session.task = .files
-        var received: [(BeginnerTask, String?, String)] = []
-        var actions = BeginnerSetupActions()
-        actions.refreshChoices = { received.append(($0, $1, $2)) }
-        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
-        guard BeginnerTask.allCases.contains(.files), BeginnerTask.files.rawValue == "files",
-              BeginnerTask.files.title == "Work with files",
-              BeginnerTask.files.detail == "Read or edit a folder in your assistant app" else { return false }
-        view.requestChoices()
-        return received.count == 1 && received[0].0 == .files && received[0].0.rawValue == "files"
+        guard BeginnerTask.allCases == [.general, .coding],
+              BeginnerModelPriority.allCases == [.speed, .quality],
+              session.stage == .task, session.task == nil, session.modelPriority == .quality,
+              !session.canNavigate(to: .priority, snapshot: BeginnerSetupSnapshot()) else { return false }
+        for task in BeginnerTask.allCases {
+            session.selectTask(task)
+            guard session.client == task.client,
+                  session.canNavigate(to: .priority, snapshot: BeginnerSetupSnapshot()) else { return false }
+            var received: [(BeginnerTask, String?, String)] = []
+            var actions = BeginnerSetupActions()
+            actions.refreshChoices = { received.append(($0, $1, $2)) }
+            let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+            view.requestChoices()
+            guard received.count == 1, received[0].0 == task, received[0].2 == "quality" else { return false }
+        }
+        return BeginnerTask.general.title == "General Work" && BeginnerTask.coding.title == "Coding"
+            && BeginnerTask.general.client == .openWork && BeginnerTask.coding.client == .openCode
     }
 
     @MainActor static func checkRecommendationPreferences() -> Bool {
@@ -56,18 +63,9 @@ extension BeginnerSetupView {
                 view.requestChoices()
                 guard received.count == 1, received[0].0 == task, received[0].2 == priority.rawValue,
                       session.stage == .recommendation else { return false }
-                for retry in BeginnerRetryPreference.allCases {
-                    session.selectModelPriority(priority)
-                    session.retryPreference = retry
-                    view.requestChoices()
-                    let expected = retry == .speed ? "speed" : retry == .answers ? "answers" : priority.rawValue
-                    guard received.last?.0 == task, received.last?.2 == expected,
-                          session.modelPriority.rawValue == expected, session.retryPreference == nil else { return false }
-                    // Returning to the visible picker must override the previous retry.
-                    session.selectModelPriority(.balanced)
-                    view.requestChoices()
-                    guard received.last?.2 == "balanced" else { return false }
-                }
+                session.selectModelPriority(.quality)
+                view.requestChoices()
+                guard received.last?.2 == "quality" else { return false }
             }
         }
         return true
@@ -75,6 +73,7 @@ extension BeginnerSetupView {
 
     @MainActor static func checkStartPolicy(restart: Bool, accepted: Bool = true) -> Bool {
         let session = BeginnerSetupSession()
+        session.selectTask(.general)
         session.stage = .recommendation
         let choice = BeginnerModelChoice(id: "recipe-a", name: "Fixture model", summary: "Fixture",
                                          installedModelID: "installed-a")
@@ -119,7 +118,7 @@ extension BeginnerSetupView {
 
     @MainActor static func checkRemovedInstalledCopy() -> Bool {
         let session = BeginnerSetupSession()
-        session.selectTask(.code)
+        session.selectTask(.coding)
         let source = BeginnerModelChoice(id: "installed-source", name: "Fixture model", summary: "Fixture", downloadBytes: 0)
         let existing = source.resolvingInstalledCopy(as: "installed-a")
         guard existing.installedModelID == "installed-a", existing.availabilityMessage == nil else { return false }
@@ -145,7 +144,7 @@ import Foundation
 struct BeginnerChecks {
     @MainActor static func ready() -> (BeginnerSetupSession, BeginnerSetupSnapshot) {
         let session = BeginnerSetupSession()
-        session.task = .text
+        session.selectTask(.general)
         var snapshot = BeginnerSetupSnapshot()
         snapshot.choices = [
             BeginnerModelChoice(id: "recipe-a", name: "Current model", summary: "Fixture",
@@ -172,10 +171,13 @@ struct BeginnerChecks {
         switch scenario {
         case "client-guides":
             let session = BeginnerSetupSession()
-            guard session.stage == .clientChoice else { return false }
+            guard session.stage == .task else { return false }
             let (_, base) = ready()
             var snapshot = base
-            session.selectClient(.openCode)
+            guard !session.canFinish(snapshot: base), !session.canNavigate(to: .openWork, snapshot: base) else { return false }
+            session.continueAfterModel(snapshot: base)
+            guard session.stage == .task else { return false }
+            session.selectTask(.coding)
             snapshot.client = .openCode
             // OpenWork handoff evidence cannot complete an OpenCode guide.
             session.continueAfterModel(snapshot: snapshot)
@@ -212,13 +214,14 @@ struct BeginnerChecks {
                 session.confirmOpenCodeModel(snapshot: snapshot)
                 guard session.canFinish(snapshot: snapshot) else { return false }
             }
-            session.selectClient(.openWork)
+            session.selectTask(.general)
             guard !session.canFinish(snapshot: snapshot), session.confirmedOpenCodeScope == nil else { return false }
             guard session.canFinish(snapshot: base) else { return false }
-            session.selectClient(.openCode)
+            session.selectTask(.coding)
             return !session.canFinish(snapshot: snapshot)
         case "openwork-step-order":
             let session = BeginnerSetupSession()
+            session.selectTask(.general)
             let (_, base) = ready()
             var snapshot = base
             snapshot.openWorkInstalled = false
@@ -261,6 +264,7 @@ struct BeginnerChecks {
             snapshot.openWorkApproved = false
             snapshot.openWorkPreparedModelID = nil
             let session = BeginnerSetupSession()
+            session.selectTask(.general)
             session.continueAfterModel(snapshot: snapshot)
             guard session.stage == .connection else { return false }
             snapshot.openWorkApproved = true
@@ -287,7 +291,7 @@ struct BeginnerChecks {
                 guard session.canNavigate(to: target, snapshot: base) else { return false }
             }
             session.navigate(to: .task, snapshot: base)
-            guard session.task == .text, session.selectedChoiceID == "recipe-b" else { return false }
+            guard session.task == .general, session.selectedChoiceID == "recipe-b" else { return false }
             session.navigate(to: .ready, snapshot: base)
             guard session.stage == .ready else { return false }
             var blocked = base
@@ -296,7 +300,7 @@ struct BeginnerChecks {
             session.requestStart(modelID: "installed-b")
             guard !session.canNavigate(to: .task, snapshot: base) else { return false }
             let incomplete = BeginnerSetupSession()
-            incomplete.task = .code
+            incomplete.selectTask(.coding)
             guard !incomplete.canNavigate(to: .openWork, snapshot: BeginnerSetupSnapshot())
                 && !incomplete.canNavigate(to: .ready, snapshot: BeginnerSetupSnapshot()) else { return false }
             return true
@@ -325,23 +329,23 @@ struct BeginnerChecks {
                   session.excludedModelID == "installed-a",
                   session.choices(in: snapshot).map(\.id) == ["recipe-b"],
                   snapshot.openWorkPreparedModelID == "installed-a" else { return false }
-            session.task = .code
-            session.modelPriority = .answers
+            session.selectTask(.coding)
+            session.modelPriority = .quality
             session.keepCurrentModel()
             session.synchronize(with: snapshot)
-            return session.stage == .ready && session.task == .text && session.modelPriority == .speed && !session.choosingAnotherModel
+            return session.stage == .ready && session.task == .general && session.modelPriority == .speed && !session.choosingAnotherModel
                 && session.canFinish(snapshot: snapshot) && snapshot == unchanged
         case "changed-preferences-invalidate-offers":
             let (session, base) = ready()
             _ = session.requestRecommendations()
             session.selectedChoiceID = "recipe-b"
             guard session.choice(in: base)?.id == "recipe-b" else { return false }
-            session.selectTask(.code)
+            session.selectTask(.coding)
             guard session.selectedChoiceID == nil, session.choices(in: base).isEmpty,
                   !session.canNavigate(to: .installation, snapshot: base) else { return false }
             _ = session.requestRecommendations()
             guard !session.choices(in: base).isEmpty else { return false }
-            session.selectModelPriority(.answers)
+            session.selectModelPriority(.speed)
             guard session.choices(in: base).isEmpty,
                   !session.canNavigate(to: .installation, snapshot: base) else { return false }
             _ = session.requestRecommendations()
@@ -351,7 +355,7 @@ struct BeginnerChecks {
             let session = BeginnerSetupSession()
             session.synchronize(with: snapshot)
             session.beginAnotherModel(snapshot: snapshot)
-            return session.stage == .retry && session.task == .unsure
+            return session.stage == .retry && session.task == .general
                 && session.excludedModelID == "installed-a"
         case "start-exact-readiness":
             let (session, base) = ready()
@@ -397,6 +401,7 @@ struct BeginnerChecks {
                 && session.choices(in: snapshot).contains(where: { $0.installedModelID == "installed-a" })
         case "automatic-handoff-and-facts":
             let session = BeginnerSetupSession()
+            session.selectTask(.general)
             let (_, base) = ready()
             var snapshot = base
             snapshot.openWorkPreparedModelID = nil
@@ -417,6 +422,7 @@ struct BeginnerChecks {
             return session.stage == .openOpenWork && !session.canFinish(snapshot: snapshot)
         case "approval-awaits-handoff":
             let session = BeginnerSetupSession()
+            session.selectTask(.general)
             let (_, base) = ready()
             var snapshot = base
             snapshot.openWorkApproved = false
@@ -510,7 +516,7 @@ struct BeginnerChecks {
             preferences.select(.beginner)
             preferences.resolveInitialMode(hasInstalledModels: true)
             return preferences.mode == .beginner
-        case "files-task-selection": return BeginnerSetupView.checkFilesTaskSelection()
+        case "work-selection": return BeginnerSetupView.checkWorkSelection()
         case "start-reuses-current": return BeginnerSetupView.checkStartPolicy(restart: false)
         case "recommendation-preferences": return BeginnerSetupView.checkRecommendationPreferences()
         case "start-applies-restart-policy": return BeginnerSetupView.checkStartPolicy(restart: true)
@@ -598,6 +604,23 @@ struct BeginnerChecks {
                 var invalid = benchmark; invalid["model_id"] = model
                 guard let reference = BeginnerModelReport.BenchmarkReference(invalid), reference.sourceURL == nil else { return false }
             }
+            var cached = benchmark
+            cached["benchmark"] = "whatmodel_coding"
+            cached["score"] = "-2.5"
+            cached["captured"] = "2026-11-11"
+            cached["source_url"] = "https://whatmodel.sh/model/fixture-model"
+            guard let reference = BeginnerModelReport.BenchmarkReference(cached),
+                  reference.score == "-2.5", reference.capturedDate == "2026-11-11",
+                  reference.sourceURL?.absoluteString == "https://whatmodel.sh/model/fixture-model",
+                  reference.recommendation.contains("cached Coding leaderboard") else { return false }
+            var cachedRaw = raw
+            cachedRaw["benchmarks"] = [cached]
+            guard let cachedItem = BeginnerModelReport.Item(cachedRaw),
+                  cachedItem.beginnerDetails.contains("Cached 2026-11-11"),
+                  !cachedItem.beginnerDetails.contains("/100") else { return false }
+            cachedRaw["selection_preference"] = "speed"
+            guard let speedItem = BeginnerModelReport.Item(cachedRaw),
+                  speedItem.beginnerSummary(availableMemoryBytes: nil).contains("lighter model selected for speed") else { return false }
             return true
         case "installed-space-presentation": return BeginnerSetupView.checkInstalledSpacePresentation()
         default: return false
@@ -699,8 +722,8 @@ class BeginnerSetupTests(unittest.TestCase):
 
     def test_removed_installed_only_copy_refreshes_instead_of_downloading(self):
         self.run_check("removed-installed-copy-refreshes")
-    def test_files_task_is_visible_and_reaches_recommendation_action(self):
-        self.run_check("files-task-selection")
+    def test_two_work_choices_map_to_apps_and_quality_is_default(self):
+        self.run_check("work-selection")
 
     def test_beginner_display_keeps_short_benchmark_evidence_and_omits_technical_metadata(self):
         self.run_check("beginner-presentation")

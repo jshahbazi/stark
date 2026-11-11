@@ -415,11 +415,11 @@ extension AppDelegate {
         // engine changes. It cannot replace a verified current-model handshake.
         engine.switchConnectionFixtureToOtherModel()
         let snapshot = host.snapshot
-        session.selectClient(.openCode)
+        session.selectTask(.coding)
         let codeSnapshot = host.snapshot
         guard codeSnapshot.client == .openCode, !codeSnapshot.openWorkRunning,
               !codeSnapshot.openWorkClientActive, codeSnapshot.openWorkPreparedModelID == nil else { return false }
-        session.selectClient(.openWork)
+        session.selectTask(.general)
         guard host.snapshot.openWorkRunning else { return false }
         engine.desktopConnections.shutdown()
         return observation.running && observation.liveConnection && snapshot.openWorkRunning

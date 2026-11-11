@@ -2200,9 +2200,9 @@ final class EngineController: ObservableObject {
         if !send(payload) { pendingSupportRequestID = nil; activeInstallRequestID = nil; endInstallProgress("failed") }
     }
 
-    func requestBeginnerModels(task: String, excludingModelID: String? = nil, preference: String = "balanced") {
-        guard ["everyday", "text", "files", "code", "unsure"].contains(task) else { return }
-        guard ["balanced", "speed", "answers"].contains(preference) else { return }
+    func requestBeginnerModels(task: String, excludingModelID: String? = nil, preference: String = "quality") {
+        guard ["general", "coding"].contains(task) else { return }
+        guard ["speed", "quality"].contains(preference) else { return }
         let requestID = UUID().uuidString.lowercased()
         beginnerRequestID = requestID; beginnerChoicesLoading = true; beginnerChoicesError = nil
         beginnerReport = nil
@@ -3852,7 +3852,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let origin = navigationSource
         if interface.mode == .beginner {
             beginnerOpenWork.refresh(engine: engine)
-            if beginnerSession.stage == .task, engine.modelReady, engine.loadedMode == .chat {
+            if beginnerSession.stage == .task, beginnerSession.task != nil, engine.modelReady, engine.loadedMode == .chat {
                 beginnerSession.continueAfterModel(snapshot: beginnerHost.snapshot)
             }
             showBeginner(parent: origin)
