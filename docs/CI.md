@@ -1,6 +1,6 @@
 # Continuous integration and security checks
 
-CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and manual dispatches; Security and CodeQL also run weekly. To check a branch before opening a pull request, choose the branch under **Actions > CI > Run workflow**. The pull-request `CI completed` gate requires the `engine-unit` job as well as the other required CI jobs. All CI inputs are synthetic: no workflow downloads a model, and private validation artifacts never enter hosted runners.
+CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and manual dispatches; Security and CodeQL also run weekly. To check a branch before opening a pull request, choose the branch under **Actions > CI > Run workflow**. The pull-request `CI completed` gate requires the `engine-unit` job as well as the other required CI jobs, except that the macOS Rust jobs are skipped for changes that cannot affect them; see [skipped Rust jobs](#skipped-rust-jobs). All CI inputs are synthetic: no workflow downloads a model, and private validation artifacts never enter hosted runners.
 
 | Workflow | Coverage |
 | --- | --- |
@@ -28,6 +28,21 @@ Hosted macOS jobs share five concurrent runners across the whole repository, and
 
 Pull-request CI and branch builds from other branches still occupy runners. Dispatch a release before updating other open branches to avoid queueing behind them. When adding a macOS job, keep the peak for one CI run at four.
 
+### Skipped Rust jobs
+
+The `scoring`, `cxx` and `engine-unit` jobs account for most macOS runner time. The `changes` job skips all three when every changed path is on a short list of paths those jobs never read (`scripts/ci/rust-jobs-needed.sh`):
+
+- `docs/`, `website/`, `apps/` and `provenance/`;
+- top-level Markdown, `LICENSE*` and `install.sh`;
+- `scripts/`, except `scripts/ci/` and `scripts/test_generation_process.py`;
+- Python sources, Markdown, `pyproject.toml` and `uv.lock` under `tools/`.
+
+Any other path runs the jobs, including a new top-level directory, workflow files, and data files under `tools/` because Rust sources include converter fixtures and memory profiles. A manual dispatch always runs them. The `lifecycle` job always runs because it tests the installer and app scripts, and the Linux `quality` job always runs its Rust formatting, dependency and template evaluator checks.
+
+A pull request is compared with the tip of `main` it would merge into. A push to `main` is compared with the last commit whose CI run on `main` succeeded, not with the previous push, so a Rust change whose run was cancelled by a later merge is still built by the run that replaced it. If no base can be found the jobs run.
+
+The `CI completed` gate accepts the three jobs as skipped only when `changes` succeeded and reported that they are not needed; otherwise each must succeed. Before a Rust job starts reading a file on the list, remove that path from the script. `scripts/ci/test_rust_jobs_needed.py` fails when a crate includes a file from outside `crates/` and `vendor/` that the list would skip.
+
 ## What CI does and does not cover
 
 **Product code.** Both inference workers are built, linted with Clippy at `-D warnings`, and tested with synthetic inputs; the generation worker's process isolation is checked by a Python harness. The portable `stark-template` evaluator is built, unit-tested and checked with Clippy in the Linux repository job before the converter suite. Converter tests use the native evaluator and Hugging Face offline mode; installed-package checks copy the release helper beside the temporary environment's Python executable. Standalone and app builds include the helper, verify its fixed self-test protocol and render synthetic data after relocation. Installer, app builder, signer, updater and release-version scripts run their unit tests. The C process reaper is compiled with warnings as errors and exercised on Linux and macOS.
@@ -44,7 +59,7 @@ OSV Scanner downloads the public advisory databases and matches the seven tracke
 
 ## Rust build caches
 
-Rust jobs use `.github/actions/rust-cache`, a thin wrapper over the pinned `actions/cache`. Each job and configuration has its own cache of registry sources, Git dependencies and `target` output, keyed by runner image, compiler and Xcode identity, Cargo manifests and lockfiles, build scripts and native sources (`scripts/ci/rust-cache-key.sh`). Incremental compilation is off so no per-checkout incremental state is stored. Every build, Clippy and test step still runs after a restore; caches are saved only when the job succeeds. Pull requests can restore `main` caches, but caches saved on a merge ref do not populate `main`. Increment the `stark-rust-v1` namespace in the key script to force a fresh cache. The Build workflow does not use the cache and compiles from scratch each run.
+Rust jobs use `.github/actions/rust-cache`, a thin wrapper over the pinned `actions/cache`. Each job and configuration has its own cache of registry sources, Git dependencies and `target` output, keyed by runner image, compiler and Xcode identity, Cargo manifests and lockfiles, build scripts and native sources (`scripts/ci/rust-cache-key.sh`). Incremental compilation is off so no per-checkout incremental state is stored. Every build, Clippy and test step still runs after a restore; caches are saved only when the job succeeds. Pull requests can restore `main` caches, but caches saved on a merge ref do not populate `main`. A push to `main` that skips the Rust jobs saves no cache; none of the skippable paths is part of a cache key, so the existing `main` caches still match. Increment the `stark-rust-v1` namespace in the key script to force a fresh cache. The Build workflow does not use the cache and compiles from scratch each run.
 
 ## Download a development build
 
