@@ -110,7 +110,7 @@ def tensor_files(config, *, expert_bits=4):
 def tensor_bytes(tensors):
     header, offset = {}, 0
     for name, (dtype, shape) in tensors.items():
-        width = math.prod(shape) * {"U32": 4, "BF16": 2, "I64": 8}[dtype]
+        width = math.prod(shape) * {"U32": 4, "BF16": 2, "F32": 4, "I64": 8}[dtype]
         header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + width]}
         offset += width
     payload = json.dumps(header).encode()
@@ -156,13 +156,23 @@ class RangeHub(Hub):
             )
 
 
-@pytest.mark.parametrize("case", ["compatible", "three_bit", "missing_table", "ignored_range", "wrong_index"])
+@pytest.mark.parametrize(
+    "case", ["compatible", "three_bit", "missing_table", "ignored_range", "wrong_index", "bad_vision", "bad_seed"]
+)
 def test_catalog_checks_pinned_tensor_headers(tmp_path, monkeypatch, external_config, case):
     monkeypatch.setattr(model_catalog, "_catalog_seeds", lambda _family: [])
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     hub = RangeHub()
     repo = "example/weighted-export"
     tensors, table = tensor_files(external_config, expert_bits=3 if case == "three_bit" else 4)
+    if case == "compatible":
+        tensors["model.language_model.layers.0.linear_attn.A_log"] = ("F32", (2,))
+        del external_config["text_config"]["ple_embed_dim"]
+        del external_config["text_config"]["ple_conv_kernel_size"]
+    elif case == "bad_seed":
+        external_config["text_config"]["ngram_seed"] = 0
+    elif case == "bad_vision":
+        external_config["vision_config"] = {"depth": 0}
     files = {"model.safetensors": tensor_bytes(tensors), "tokenizer.json": {}, "tokenizer_config.json": {}}
     if case != "missing_table":
         files["ngram_table.bin"] = tensor_bytes(table)
@@ -193,7 +203,38 @@ def test_catalog_checks_pinned_tensor_headers(tmp_path, monkeypatch, external_co
         assert item["unavailable_reason"] == qwen38_external.UNVERIFIED
     if case == "wrong_index":
         assert "shard index" in item["unavailable_reason"]
+    if case == "bad_vision":
+        assert "declared vision configuration" in item["unavailable_reason"]
+    if case == "bad_seed":
+        assert "n-gram table configuration" in item["unavailable_reason"]
     assert not any(event[0] == "download" and event[-1].endswith((".bin", ".safetensors")) for event in hub.events)
+
+
+def test_invalid_tensor_header_does_not_displace_valid_candidate(tmp_path, monkeypatch, external_config):
+    monkeypatch.setattr(model_catalog, "_catalog_seeds", lambda _family: [])
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    hub = RangeHub()
+    tensors, table = tensor_files(external_config)
+    valid_shard = tensor_bytes(tensors)
+    invalid_shard = valid_shard[:9] + b"!" + valid_shard[10:]
+    for name, shard in (("valid", valid_shard), ("invalid", invalid_shard)):
+        repo = f"example/{name}"
+        sidecars = {
+            "model.safetensors": shard,
+            "ngram_table.bin": tensor_bytes(table),
+            "tokenizer.json": {},
+            "tokenizer_config.json": {},
+        }
+        sizes = {name: len(data) if isinstance(data, bytes) else 20 for name, data in sidecars.items()}
+        hub.add(tmp_path, repo, external_config, names={**sizes, "config.json": 100}, sidecars=sidecars)
+    hub.discovered["qwen4_exp"] = ["example/invalid", "example/valid"]
+
+    report = model_catalog.family_catalog("qwen4_exp", hub=hub)
+    assert report["status"] == "ready"
+    items = {item["repo"]: item for item in report["items"]}
+    assert items["example/valid"]["downloadable"]
+    assert not items["example/invalid"]["downloadable"]
+    assert items["example/invalid"]["unavailable_reason"] == qwen38_external.UNSUPPORTED
 
 
 @pytest.mark.parametrize("remote", [False, True])

@@ -55,3 +55,8 @@ It leaves 4.7 bpw downloadable and lists 3.3 bpw as unavailable with the
 packing mismatch. Remote preparation repeats the check before bulk downloads,
 and local preparation rechecks the staged headers. These checks cover
 structure and leave native execution and vision qualification open.
+
+The follow-up audit aligned preflight with the loader’s accepted BF16 and F32
+Gated DeltaNet control storage and external n-gram defaults. It also checks the
+declared vision configuration because the native loader parses it for text
+sessions. A malformed shard header remains isolated to its own catalog row.

@@ -113,7 +113,19 @@ def supported_shards(shards, indexed):
 def _architecture(config):
     text = config["text_config"]
     architecture = text_architecture(
-        {**config, "text_config": {"heads_per_ngram": 8, "ngram_size": 3, **text, "split_ngram_parts": 1}}
+        {
+            **config,
+            "text_config": {
+                "heads_per_ngram": 8,
+                "ngram_size": 3,
+                "ple_conv_kernel_size": 4,
+                **text,
+                "ple_embed_dim": text.get("hidden_size")
+                if text.get("ple_embed_dim") is None
+                else text["ple_embed_dim"],
+                "split_ngram_parts": 1,
+            },
+        }
     )
     layers = architecture["layer_types"]
     if (
@@ -127,7 +139,15 @@ def _architecture(config):
         raise LayoutError("The checkpoint geometry is outside Stark’s Qwen3.8 Flash Next loader.")
     base = text.get("ngram_vocab_size_base", 20_000_000)
     divisor = text.get("make_ngram_vocab_size_divisible_by", 128)
-    if type(base) is not int or not 0 < base <= 1_000_000_000 or type(divisor) is not int or not 0 < divisor <= 65536:
+    seed = text.get("ngram_seed", 1234)
+    if (
+        type(base) is not int
+        or not 0 < base <= 1_000_000_000
+        or type(divisor) is not int
+        or not 0 < divisor <= 65536
+        or type(seed) is not int
+        or not 0 < seed <= 2**64 - 1
+    ):
         raise LayoutError("The checkpoint’s n-gram table configuration is unsupported.")
 
     def prime(value):
@@ -148,6 +168,62 @@ def _architecture(config):
     return architecture
 
 
+def _validate_vision_metadata(config, architecture):
+    # Qwen4ExpConfig::from_json checks declared vision geometry even for text.
+    vision = config.get("vision_config")
+    if vision is None:
+        return
+    bounds = (
+        ("hidden_size", 4096),
+        ("intermediate_size", 32768),
+        ("num_heads", 64),
+        ("depth", 64),
+        ("num_position_embeddings", 16384),
+    )
+    reason = "The declared vision configuration is incompatible with Stark’s Qwen3.8 loader."
+    if not isinstance(vision, dict) or any(
+        type(vision.get(key)) is not int or not 0 < vision[key] <= maximum for key, maximum in bounds
+    ):
+        raise LayoutError(reason)
+    h, intermediate, heads, depth, positions = (vision[key] for key, _ in bounds)
+    merger = architecture["hidden_size"]
+    elements = (
+        h * 1536
+        + positions * h
+        + depth * (4 * h * h + 2 * h * intermediate + 9 * h + intermediate)
+        + 16 * h * h
+        + 4 * h * merger
+        + 6 * h
+        + merger
+    )
+    rope = architecture["rope_parameters"]
+    if (
+        any(
+            type(vision.get(key)) is not int or vision[key] != expected
+            for key, expected in (
+                ("patch_size", 16),
+                ("in_channels", 3),
+                ("out_hidden_size", merger),
+                ("temporal_patch_size", 2),
+                ("spatial_merge_size", 2),
+            )
+        )
+        or elements * 2 > 4 * 1024**3
+        or h % (2 * heads)
+        or math.isqrt(positions) ** 2 != positions
+        or vision.get("hidden_act") != "gelu_pytorch_tanh"
+        or vision.get("deepstack_visual_indexes", []) != []
+        or rope["mrope_section"] != [11, 11, 10]
+        or any(type(value) is not int for value in rope["mrope_section"])
+        or rope["mrope_interleaved"] is not True
+        or any(
+            type(config.get(key)) is not int or not 0 <= config[key] <= 2**32 - 1
+            for key in ("image_token_id", "video_token_id", "vision_start_token_id", "vision_end_token_id")
+        )
+    ):
+        raise LayoutError(reason)
+
+
 def _alias(name):
     for source, native in (
         ("language_model.model.", "model.language_model."),
@@ -164,6 +240,7 @@ def _alias(name):
 def validate_layout(config, tensors, table):
     """Check the complete text and declared draft tensor layouts, without payloads."""
     architecture = _architecture(config)
+    _validate_vision_metadata(config, architecture)
     if set(table) != {"weight", "scales", "biases"}:
         raise LayoutError("The external n-gram table must contain weight, scale, and bias planes.")
     canonical = {}
@@ -181,9 +258,12 @@ def validate_layout(config, tensors, table):
         if actual is None:
             raise LayoutError("The checkpoint is missing required Qwen3.8 tensors.")
         dtype, actual_shape = actual
-        allowed = (
-            {"I64", "U64"} if integers else {"BF16", "F32"} if name.endswith(".linear_attn.norm.weight") else {"BF16"}
-        )
+        if integers:
+            allowed = {"I64", "U64"}
+        elif name.endswith((".linear_attn.norm.weight", ".linear_attn.A_log")):
+            allowed = {"BF16", "F32"}
+        else:
+            allowed = {"BF16"}
         transposed = name.endswith(".conv1d.weight") and actual_shape == (shape[0], shape[2], shape[1])
         if dtype not in allowed or (actual_shape != shape and not transposed):
             raise LayoutError(UNSUPPORTED)
