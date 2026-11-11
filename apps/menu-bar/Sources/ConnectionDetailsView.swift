@@ -97,13 +97,17 @@ struct ConnectionDetailsView: View {
                         Text(engine.supportsTools ? "Chat mode · Tool use available" : "Chat mode · Text chat available")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Text("Model is not running - will not show up in OpenWork")
-                            .font(.headline).fixedSize(horizontal: false, vertical: true)
-                            .phaseAnimator(reduceMotion ? [false] : [false, true]) { content, dimmed in
-                                content.opacity(dimmed ? 0.75 : 1)
-                            } animation: { _ in
-                                .easeInOut(duration: 1.8)
-                            }
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: "circle.fill")
+                                .font(.system(size: 8)).foregroundStyle(.red).accessibilityHidden(true)
+                            Text("Model is not running - will not show up in OpenWork")
+                                .font(.headline).fixedSize(horizontal: false, vertical: true)
+                        }
+                        .phaseAnimator(reduceMotion ? [false] : [false, true]) { content, dimmed in
+                            content.opacity(dimmed ? 0.4 : 1)
+                        } animation: { _ in
+                            .easeInOut(duration: 1.2)
+                        }
                     }
                 }
                 Spacer(minLength: 8)
