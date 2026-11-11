@@ -310,7 +310,7 @@ struct DesktopConnectionsTests {
     }
 
     private static func controllerModelDiscovery() throws {
-        let model: [String: Any] = ["id": "fixture/model", "context_length": 4096, "tool_calling": true]
+        let model: [String: Any] = ["id": "fixture/model", "context_length": 4096, "context_capacity_known": true, "max_output_tokens": 4095, "tool_calling": true]
         try withController(models: [model]) { controller, packets, clock, advance in
             let current = try peer()
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
@@ -338,9 +338,16 @@ struct DesktopConnectionsTests {
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
             try check(controller.discoveryScope != previousScope)
         }
-        try withController(models: [["id": "fixture/model", "context_length": 4096, "tool_calling": false]]) { controller, _, _, _ in
+        try withController(models: [["id": "fixture/model", "context_length": 4096, "context_capacity_known": true, "max_output_tokens": 4095, "tool_calling": false]]) { controller, _, _, _ in
             controller.handle("status", peer: try peer()) { _ in }
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+        }
+        for output in [0, 4097] {
+            try withController(models: [["id": "fixture/model", "context_length": 4096,
+                "context_capacity_known": true, "max_output_tokens": output, "tool_calling": true]]) { controller, _, _, _ in
+                controller.handle("status", peer: try peer()) { _ in }
+                try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            }
         }
     }
 
@@ -723,8 +730,10 @@ struct DesktopConnectionsTests {
         let mock = openCodeStorage(enabled: true, engines: [current.instanceID])
         var now: TimeInterval = 1000
         let models: [[String: Any]] = [
-            ["id": "fixture/model", "context_length": 4096, "tool_calling": true],
-            ["id": "fixture/chat", "context_length": 4096, "tool_calling": false],
+            ["id": "fixture/model", "context_length": 4096, "context_capacity_known": true, "max_output_tokens": 4095, "tool_calling": true],
+            ["id": "fixture/chat", "context_length": 4096, "context_capacity_known": true, "max_output_tokens": 4095, "tool_calling": false],
+            ["id": "fixture/oversized-output", "context_length": 4096,
+             "context_capacity_known": true, "max_output_tokens": 262143, "tool_calling": true],
         ]
         try withOpenCode(mock, models: models, clock: { now }) { controller, packets in
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
@@ -733,6 +742,7 @@ struct DesktopConnectionsTests {
             try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 8192))
             try check(!controller.hasDiscoveredModel(apiID: "fixture/chat", contextTokens: 4096))
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/oversized-output", contextTokens: 4096))
             now += 30
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
             controller.handle("status", peer: current) { _ in }

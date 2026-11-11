@@ -885,7 +885,7 @@ def test_candidate_failure_preserves_loaded_worker(host, exception):
     assert events(host)[-1]["state"] == "ready"
 
 
-@pytest.mark.parametrize("maximum,known", [(40960, True), (0xFFFFFFFF, False)])
+@pytest.mark.parametrize("maximum,known", [(40960, True), (262144, True), (0xFFFFFFFF, False)])
 def test_guided_context_applies_to_playground_and_api_without_leaking_to_advanced(host, monkeypatch, maximum, known):
     recipe = guided.RECIPES[0]
     model = add_model(host, recipe)
@@ -900,7 +900,8 @@ def test_guided_context_applies_to_playground_and_api_without_leaking_to_advance
             self.closed = False
 
         def read(self):
-            return {"ready": True, "mode": "text-generation-v1", "max_context_tokens": maximum, "max_new_tokens": 8192}
+            return {"ready": True, "mode": "text-generation-v1", "max_context_tokens": maximum,
+                    "max_new_tokens": maximum - 1}
 
         def close(self):
             self.closed = True
@@ -925,6 +926,9 @@ def test_guided_context_applies_to_playground_and_api_without_leaking_to_advance
     ready = [event for event in events(host) if event["event"] == "ready"][-1]
     assert ready["request_id"] == "start" and ready["model_id"] == model["id"]
     assert ready["api_context_tokens"] == recipe.context_tokens and ready["max_context_tokens"] == maximum
+    assert ready["max_output_tokens"] == maximum - 1
+    assert ready["api_max_output_tokens"] == recipe.context_tokens - 1
+    assert ready["api_max_output_tokens"] == host.api_models()[0]["max_output_tokens"]
     if known:
         host.dispatch(
             {

@@ -439,10 +439,17 @@ extension EngineController {
                   !BeginnerContextPolicy.requiresRestart(expected: 32768, local: 32768, api: 32768) else { return false }
             engine.mode = .chat; engine.loadedMode = .chat
             engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
-                          "max_context_tokens": 40960, "context_tokens": 32768,
-                          "api_context_tokens": 32768, "max_output_tokens": 4096, "tools": true])
-            guard engine.contextLimit == 40960, engine.contextCapacityKnown,
+                          "max_context_tokens": 262144, "context_tokens": 32768,
+                          "api_context_tokens": 32768, "max_output_tokens": 262143,
+                          "api_max_output_tokens": 32767, "tools": true])
+            guard engine.contextLimit == 262144, engine.contextCapacityKnown,
+                  engine.outputLimit == 262143, engine.apiMaxNewTokens == 32767,
                   engine.apiContextTokens == 32768, engine.options.contextTokens == 32768 else { return false }
+            // A backend without the additive API field still needs a safe cap.
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
+                          "max_context_tokens": 262144, "context_tokens": 32768,
+                          "api_context_tokens": 32768, "max_output_tokens": 262143, "tools": true])
+            guard engine.outputLimit == 262143, engine.apiMaxNewTokens == 32767 else { return false }
             engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
                           "max_context_tokens": Int(UInt32.max), "context_capacity_known": false,
                           "context_tokens": 32768, "api_context_tokens": 32768, "max_output_tokens": 4096])

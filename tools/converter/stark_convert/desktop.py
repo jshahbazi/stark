@@ -2216,6 +2216,7 @@ class Desktop:
             "resource_budget": self.resource_budget_summary(),
             "context_tokens": self.context,
             "api_context_tokens": self.api_context,
+            "api_max_output_tokens": self.api_maximum,
             "max_new_tokens": self.maximum,
             "max_context_tokens": self.context_limit,
             "context_capacity_known": self.context_capacity_known,

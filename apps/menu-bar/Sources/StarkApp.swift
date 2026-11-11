@@ -1658,7 +1658,10 @@ final class EngineController: ObservableObject {
             }
             loadedID = event["model_id"] as? String ?? selectedID
             apiContextTokens = event["api_context_tokens"] as? Int ?? event["max_context_tokens"] as? Int ?? 0
-            apiMaxNewTokens = event["max_output_tokens"] as? Int ?? 0
+            // The worker's native output ceiling can exceed the guide's API
+            // context. Connector metadata must advertise the API-specific cap.
+            let apiOutput = event["api_max_output_tokens"] as? Int ?? event["max_output_tokens"] as? Int ?? 0
+            apiMaxNewTokens = max(0, min(apiOutput, apiContextTokens > 0 ? apiContextTokens - 1 : 0))
             loadedMode = readyMode
             applyLimits(event)
             applyImageCapabilities(event)

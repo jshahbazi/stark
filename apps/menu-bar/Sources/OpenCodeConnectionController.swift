@@ -41,9 +41,14 @@ final class OpenCodeConnectionController: ObservableObject {
         observedModels.removeAll()
         for model in value["models"] as? [[String: Any]] ?? [] {
             if let id = model["id"] as? String, let context = model["context_length"] as? Int,
-               context > 0, model["tool_calling"] as? Bool == true {
+               context > 0, model["context_capacity_known"] as? Bool == true,
+               let output = model["max_output_tokens"] as? Int, output > 0, output <= context,
+               model["tool_calling"] as? Bool == true {
                 observedModels[id] = context
             }
+        }
+        if !observedModels.isEmpty, message == Self.engineStoppedMessage {
+            message = "OpenCode received Stark's running model. Select Stark in OpenCode's model picker."
         }
     }
 
@@ -342,9 +347,11 @@ final class OpenCodeConnectionController: ObservableObject {
                 if checks > 1 { self.watch(engine, reported: reported, operation: operation, checks: checks - 1) }
                 return
             }
-            self.message = "OpenCode's background engine stopped after connecting. Reopen OpenCode, then choose Allow when Stark asks about the new engine."
+            self.message = Self.engineStoppedMessage
         }
     }
+
+    private static let engineStoppedMessage = "OpenCode's background engine stopped after connecting. Reopen OpenCode, then choose Allow when Stark asks about the new engine."
 
     func disconnect() {
         guard !busy, !closing else { return }
