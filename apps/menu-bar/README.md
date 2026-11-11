@@ -1,8 +1,16 @@
 # Stark menu bar app
 
+Converter failures report fixed recovery guidance for insufficient disk space,
+file permissions, unsupported formats/configurations and invalid checkpoints.
+Unknown failures retain a generic message. These categories travel over the
+private installation progress pipe; exception text and file paths are not
+displayed or logged. Cancelling an installation discards its pending failure.
+
 A native macOS menu bar application for installing, running and chatting with converted models. Stark starts in the menu bar without restoring windows. Reopening the app shows its main menu when no window is visible; **Connections** and **Open Playground** open only through their named controls. Click the cat icon and **Manage Models** to run or stop a saved model. **Open Playground** opens a window with a **Chat** mode and a **Decision** mode. Status and the last request's input and output token rates appear in the menu and the playground window.
 
 The status dot is red when idle or in error, orange during work, and green when ready.
+
+The main menu and playground model headings show the readable model name. Hover over the running model name for its quantization and file size.
 
 The menu offers **Guided setup** in Beginner mode or **Manage Models** in Advanced mode, plus a **Start model** action when a model can be started and a **Stop model** action while one is starting or running. Beginner setup can be reopened from the menu; **Adjust Setup** returns to its choices so you can revisit earlier steps. Guide steps explain their prerequisites, and returning to a parent window preserves the guide for later.
 
@@ -73,7 +81,7 @@ versions for the [release workflow](../../docs/RELEASING.md).
 
 Stark checks stable release metadata automatically at launch and about once an hour while it runs. Opening the menu also checks when the last metadata check was more than 15 minutes ago. These background checks stay quiet when the network is unavailable. When it discovers a newer release, Stark automatically downloads and verifies the DMG in the background, then shows that the update is ready. Choose **Upgrade to VERSION** to install it: Stark stages the replacement, quits, stops active requests, clears the in-memory conversation, swaps the bundles and relaunches. Installation and restart always wait for this click. Models, preferences and the Keychain API credential are kept, while the active chat ends. The CLI is not updated by the app.
 
-The verified candidate is reused for matching release metadata during the current app session. A changed or withdrawn release discards the previous candidate. Download or verification failures appear in the menu; choosing **Upgrade to VERSION** retries preparation before installing. Restarting Stark downloads an available update again.
+The verified candidate is reused for matching release metadata during the current app session. A changed or withdrawn release discards the previous candidate. A temporary metadata-check failure keeps the previously verified download available. Download or verification failures appear in the menu; choosing **Upgrade to VERSION** retries preparation before installing. Missing temporary files also trigger a fresh download. Normal quit removes an unused prepared candidate; restarting Stark downloads an available update again.
 
 Development builds always offer the latest compatible stable release, including
 when their archive identifier or old local version is numerically higher. Build
@@ -82,7 +90,7 @@ continue to offer only newer release versions. The release signing path sets the
 published app's version and stable channel; signing a local app with
 `--sign-only` retains its development identity.
 
-Before anything is installed, the updater requires: the release's versioned Apple silicon DMG with a SHA-256 digest published by GitHub, a `codesign` verification of the disk image and the complete app against Stark's Developer ID team (`S5BT2PRN5B`), a passing Gatekeeper assessment, and a matching bundle identifier, version, architecture and minimum macOS. A private helper runs from the verified candidate's bundled Python, locks the destination, waits for the old app to exit, re-verifies the staged copy, exchanges the bundles atomically and relaunches. Detected failures restore the old app. Background check failures remain quiet; errors from a requested upgrade appear in the dropdown with a retry action.
+Before anything is installed, the updater requires: the release's versioned Apple silicon DMG with a SHA-256 digest published by GitHub, a `codesign` verification of the disk image and the complete app against Stark's Developer ID team (`S5BT2PRN5B`), a passing Gatekeeper assessment, and a matching bundle identifier, version, architecture and minimum macOS. The candidate's signature and metadata are checked again when Upgrade is chosen, before executing its bundled Python. A private helper runs from the verified candidate's bundled Python, locks the destination, waits for the old app to exit, re-verifies the staged copy, exchanges the bundles atomically and relaunches. Detected failures restore the old app. Background check failures remain quiet; errors from a requested upgrade appear in the dropdown with a retry action.
 
 The destination must be a writable `Stark.app` outside a mounted disk image. CLI-managed installations keep their ownership records synchronized, including custom prefixes; an older custom-prefix installation needs one CLI upgrade before app-only updates are available, and the updater refuses it before quitting. DMG drag-and-drop and local builds have no CLI ownership record and update independently.
 
@@ -127,8 +135,14 @@ not fetch from Hugging Face again while you type. Search text stays within the
 current browsing session. Sort choices are remembered between app launches.
 The family overview uses compact, full-width rows in a single column.
 
-**Installed** shows compact rows with the saved name, quantization, file size,
-repo link, **Run** or **Stop**, and removal button on one line. **Run** selects
+**Installed** shows compact rows with a readable model name, quantization, file size,
+repo link, **Run** or **Stop**, and removal button. Names may wrap. Recognized
+variants such as **Lily q4** and **MLX-Serve** appear below the name.
+Recognized generated revision suffixes and packaging labels are omitted from the displayed
+name; known precision remains in its own column. Verified source names are used
+when they match the saved name after removing packaging and revision suffixes.
+Custom aliases retain their words. Hover a row for the full saved name;
+search accepts both the readable and saved names. **Run** selects
 that exact saved version and loads it in the current Chat or Decision mode while
 keeping management open. The active model's button becomes **Stop**; starting a
 different model moves Stop to that row. Loading and stopping progress appears
@@ -157,6 +171,7 @@ preparation. The mixed source preserves its original quantized storage and uses
 the same preparation and source-identity checks as the native GLM download.
 Inside a family, the tabs at the top switch between **All models** and each
 available quantization or precision, such as **4-bit**, **8-bit** and **BF16**.
+When the labels exceed the available width, a dropdown offers the same filters.
 Floating-point badges describe the app's output weight precision: supported
 FP16 and FP32 source checkpoints appear as **BF16** because the app converts
 their weights to BF16. Qwen3.8 Flash Next currently offers the implemented
@@ -225,20 +240,27 @@ Passing host evidence enables **Attach Image** in Chat mode. The composer and Co
 
 Images briefly use opaque files in per-process owner-only temporary directories; claimed files are unlinked before decoding and normal completion/Stop/quit cleans unused files. Image bytes, paths and filenames are never included in the control messages or logs. Hard-killing both processes before a file is claimed can leave a private file.
 
-**Advanced Options** in the playground window sets the system prompt, context size, output limit and thinking mode. Context defaults to the loaded model's configured maximum, including contexts above 16,384 tokens, and follows that maximum when switching models. Output defaults to automatic: after tokenization, generation may use the remaining finite context until EOS or another termination condition. An explicit output limit must fit beside the actual input. Thinking is off by default. A custom context remains in memory for the app session and is bounded by each loaded model; returning to a larger model restores that custom value. **Apply and New Chat** starts a fresh conversation with the model loaded; **Restore Defaults** fills in the model's maximum context and the other defaults for review. Applying that maximum returns context to following the model. Settings carry across New Chat and Stop and Run. When the backend declares no finite maximum, Advanced Options identifies the value as a protocol conversation budget. Auto asks the native worker for a memory-bounded execution allowance after tokenization; no additional setting is required. A custom conversation budget remains an upper bound. Connections shows the model context as not declared; text requests allocate only their input plus the chosen output budget.
+The retained Qwen3.8 Flash Next (Lily) processor accepts up to 32 million source pixels, with each side at most 16,384 pixels, and processes up to 16,777,216 pixels (65,536 patches / 16,384 image tokens). Larger source images are resized by the original model processor. Actual execution also requires enough available memory and context for the image, conversation and output. Other model families retain their own limits. This ceiling does not establish visual accuracy or latency at the maximum resolution.
 
-When a reply exhausts an explicit output limit, the Playground points to **Auto** in Advanced Options. When automatic generation exhausts the remaining finite context, it suggests a new chat. Models without a declared context maximum report when the available execution budget is reached.
+**Advanced Options** in the playground window sets the system prompt, context size, output limit and thinking mode. Context defaults to the loaded model's configured maximum, including contexts above 16,384 tokens, and follows that maximum when switching models. Output defaults to automatic: after tokenization, generation may use the remaining finite context within available memory until EOS or another termination condition. An explicit output limit must fit beside the actual input. Thinking is off by default. A custom context remains in memory for the app session and is bounded by each loaded model; returning to a larger model restores that custom value. **Apply and New Chat** starts a fresh conversation with the model loaded; **Restore Defaults** fills in the model's maximum context and the other defaults for review. Applying that maximum returns context to following the model. Settings carry across New Chat and Stop and Run. When the backend declares no finite maximum, Advanced Options identifies the value as a protocol conversation budget. Auto asks the native worker for a memory-bounded execution allowance after tokenization; no additional setting is required. A custom conversation budget remains an upper bound. Connections shows the model context as not declared; text requests allocate only their input plus the chosen output budget.
+
+For GLM-5.3, **Maximum reasoning effort** selects Low effort when off and Max effort when on; the model's reviewed template always reasons. The API also accepts an explicit Low, High or Max `reasoning_effort`. For boolean templates such as Qwen, Thinking controls `enable_thinking`. Replies retain the raw Playground display, while assistant history stores reasoning separately from the visible answer for subsequent turns.
+
+When a reply exhausts an explicit output limit, the Playground points to **Auto** in Advanced Options. A context termination points to the current context setting and a new chat. Automatic generation can stop at the available context or execution budget, including memory-based allowances for models with a declared context maximum; the notice does not claim that clearing the conversation is always required.
 
 The readout box below **Manage Models** and at the top of the playground shows input and output throughput, the first-token time, the prompt token count and the generation time. While a request runs, from the playground or a connected application such as OpenWork, the box shows that request; afterwards it keeps the last request's values. Input throughput is a first-token wall-clock proxy that includes native setup; output throughput counts sampling after the first token, and short replies may not produce an output rate. When the worker reports a reused prompt prefix, the prompt line also shows how many tokens were reused rather than processed again. A dash means no measurement is available. Every row stays in place, so the menu keeps its size as requests start and finish. See the [timing contract](../../docs/GENERATION.md#generate).
 
 While a request runs, the time row shows elapsed time against an estimated total, such as `1.3 s of ~8.7 s`, with a progress bar. The estimate is the middle of a range that updates from live token timings and recent successful requests for the same model session and options. A new session first learns its speed and shows elapsed time alone, as does a request that runs past its estimate. Response length and system load can change the estimate. These timings start when the worker begins generation; loading, queueing and prompt preparation are separate. Live values contain counts and timings only, never request or response content. Estimates and calibration counts stay in memory, and replies still appear when generation finishes.
 
 Supported models also show **Multi-token prediction (MTP)** in **Advanced
-Options**. It defaults on and uses the running model's recommended draft count.
+Options**. Gemma and full-BF16 Qwen3.5-0.8B default off because MTP was slower
+in the measured runs. Other supported models retain their existing default on.
+Turning it on uses the running model's recommended draft count.
 **Apply and New Chat** saves the on/off choice separately for that model across
 stops, model switches and app restarts. Existing models with no saved choice
-default on; a saved off choice stays off. **Restore Defaults** selects MTP on for
-review. Image requests keep MTP off while preserving the text preference.
+use the model-specific default; an explicit saved choice is preserved.
+**Restore Defaults** selects that model's default for review. Image requests
+keep MTP off while preserving the text preference.
 Connected apps inherit this setting unless they override `mtp` for a request.
 
 ## Beginner and Advanced setup
@@ -263,59 +285,99 @@ recommended working-set budget, plus CPU count, physical and available memory,
 and free space in the library and download cache. GPU and system memory share
 the same physical memory; the algorithm never adds their budgets together.
 
+**Explain text** covers summaries, notes and explanations. **Work with files**
+is a separate task for reading or editing a folder through OpenWork, allowing
+the guide to apply its tool-use benchmark references to that choice.
+
 The guide checks a bounded window of candidates in each supported catalog
 family using metadata only. Every candidate retains its exact source revision
-and quantization. A new catalog choice needs complete dense attention geometry,
-at least 32,768 tokens of published context, a usable chat template and a
+and quantization. A new catalog choice needs a complete memory plan for its
+attention or recurrent layout, at least 32,768 tokens of published context, a usable chat template and a
 supported tool parser for OpenWork. These are separate capabilities: conversion
 handles recognized architecture/configuration and weight layouts; chat requires
 a template Stark can load and render; tool calling additionally requires a
 reviewed template wire format with a matching parser. Tool capability comes from
 the loaded artifact's template/parser check. Converting a model does not add a
-parser or enable tools. Candidates with unknown memory layouts remain available
-through Advanced. Installed dense text artifacts with supported attention
-geometry and the pinned Lily q4-xl Qwen3.8 Flash Next artifact have separate
-local planners. They enter the comparison even when online discovery fails or
-misses their source revision. Other hybrid and expert routes still require
-their own planner and remain available in Advanced. Catalog compatibility describes metadata
+parser or enable tools. The official Qwen2.5-Coder base checkpoints are excluded
+from Guided Setup: their tokenizers include chat templates, but their
+[source cards](https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B) identify pretrained completion models and advise against conversation
+without post-training. Their Instruct variants remain eligible. This exclusion
+does not establish instruction tuning or task competence for every other source.
+The catalog planner covers dense attention and Qwen3.5-family DeltaNet layouts,
+including their recurrent state and declared MTP head. Fixed native profiles
+cover Flint INT4, GLM Flash UD-Q2_K_XL and the three supported Qwen Flash Next
+exports. They retain separate source, quantization, template and preparation
+bindings. Other layouts remain available through Advanced. Catalog compatibility describes metadata
 support; it does not inherit another model's native qualification.
 
-New dense downloads budget weights, both full-context BF16 KV buffers, attention
-score scratch and a workspace allowance. Local dense planning conservatively
-charges F32 caches and scratch. The Flash Next planner includes recurrent state,
-prefix snapshots, draft buffers and paged table storage; paged CPU table bytes
-count toward physical memory without being charged as resident GPU allocations.
-Every plan must leave 2 GiB of physical
+Installed dense text artifacts with supported attention geometry and the pinned
+Lily q4-xl Qwen3.8 Flash Next artifact also have local planners. They enter the
+comparison even when online discovery fails or misses their source revision.
+
+Dense memory plans include weights, both full-context BF16 KV buffers, attention
+score scratch and a workspace allowance. DeltaNet also includes F32 recurrent,
+convolution, prefix-snapshot and MTP verification allowances. Native profiles
+use their backend's request inventory and a loading/workspace allowance. All
+plans must leave 2 GiB of physical
 memory and use no more than 85% of Metal's recommended working-set budget.
-New downloads also need 2 GiB currently available memory and enough space for
-source and converted copies plus setup reserves. Starting rechecks available
-memory after releasing the previous worker. For the planned paged Flash Next
-artifact, this check uses the resident working-set requirement rather than the
-full disk-backed table extent. The complete table remains included in the static
-physical-memory envelope; other layouts retain their full runtime requirement.
-A running model's memory is never
+For the pinned Lily and MLX-Serve text preparations, the system plan
+uses nonpaged payload, the full request inventory, 1 GiB active paging and an
+8 GiB host reserve: 87 GiB for Lily and 88 GiB for Serve at 32K context. Other artifacts retain full-payload
+accounting. The recipe-bound estimate applies before download on a fresh Mac;
+installed copies additionally require exact artifact validation. A changed
+local copy falls back to conservative accounting in both recommendations and
+startup. The GPU estimate includes row staging rather than the entire
+n-gram table. Full accounting and its bounds are documented in
+[recommendation evidence](../../docs/MODEL_RECOMMENDATIONS.md). GLM and the
+original mixed export use conservative full-weight GPU estimates, which can
+exclude them from the guide on a 128 GiB Mac despite their Advanced load path.
+Recommendations and startup share the current available-memory check; new
+downloads additionally need enough space for
+source and converted copies plus setup reserves. Native preparation downloads
+into the library volume and publishes by rename, so it needs one weight copy
+plus metadata and the preparation helper's 4 GiB reserve. It does not require a
+second weight-sized copy in the Hugging Face cache. Starting rechecks available
+memory after releasing the previous worker. A running model's memory is never
 assumed to be reclaimable during recommendations.
 
-Ranking first prefers comfortable memory headroom. **Balanced** then uses
-explicit source task tags followed by parameter capacity divided by squared
-estimated runtime memory. **Lighter model** prioritizes lower weight traffic;
-**More model capacity** prioritizes higher known parameter counts. Coding tags
-break ties for these explicit priorities instead of overriding the selection.
-These are documented
-heuristics, with no measured tokens-per-second or answer-quality score. Unknown
-parameter counts receive no capacity credit. Supported quantized dense sources
-can derive counts from complete configuration geometry. Local matrix and expert
-counts use lower bounds when not all parameter groups are counted.
-Installed copies break otherwise
+Fallback ranking first prefers comfortable memory headroom. **Balanced** next
+prefers source task tags when available, then scales its memory penalty to this Mac: its
+target is half the smaller of physical memory minus 2 GiB and 85% of Metal's
+budget. It ranks parameter capacity divided by
+`1 + (estimated runtime memory / target)^2`, so unused memory on a larger Mac
+reduces the penalty on larger candidates. **Lighter model** prefers lower weight
+traffic; and
+**More model capacity** prefers higher parameter counts. Source task tags break
+otherwise equal weight/capacity comparisons for these explicit priorities. These
+are documented fallback heuristics, with no measured tokens-per-second or Stark artifact quality score. Unknown
+parameter counts receive no capacity credit. Installed copies break otherwise
 equal ties. The guide offers up to three choices and explains each choice's
 resource fit and evidence. CPU count and GPU name describe the machine; core
 count alone does not establish inference speed.
 
-Task selection records the intended use. **Help with code** uses explicit source
-coding tags where available. The other tasks share the general resource ranking;
-the guide has no validated task-specific quality scores. Changing the task or
-priority invalidates the previous recommendation. A retry updates the visible
-priority, and keeping the current model restores the previous selection.
+Native parameter counts are source-card architecture metadata, not packed
+tensor slot counts. MoE total parameter count does not describe active compute,
+memory fit or task quality. Balanced also compares published task references:
+LiveCodeBench for coding, BFCL for file/tool tasks, and IFEval for instruction
+following in text/everyday/unsure. For Coding + Balanced, models covered by one
+selected coding cohort come first after hard resource admission, ordered by
+score; models without that comparable evidence follow in fallback order. One
+eligible scored parent is enough, so an unscored model cannot retain first
+place through the memory heuristic. Missing scores remain unknown. Other
+tasks reorder scored slots within each memory-headroom tier and preserve
+unknown positions. Lighter model and More model capacity preserve their explicit
+resource priorities. Beginner details show estimated memory, a short benchmark
+score with a published-model caveat, and a link to the evaluated model's Hugging Face page. Technical provenance,
+revisions, harness settings and validation notes remain in backend reports and
+evidence records. Existing models show no new setup-space requirement.
+Public parent scores do not qualify Stark exports.
+The [recommendation evidence policy](../../docs/MODEL_RECOMMENDATIONS.md) describes
+the imported coverage, exact comparison policy and future artifact evaluation
+requirements. MaxxBench remains deferred until model-specific runs exist.
+
+Changing the task or priority invalidates the previous recommendation. A retry
+updates the visible priority, and keeping the current model restores the
+previous selection.
 
 Discovery runs separately from generation, with three concurrent family lookups
 and a 65-second overall process limit. Successful nonempty catalog scans are
@@ -424,7 +486,7 @@ The key is for native applications on this Mac; browser-origin requests are reje
 
 The API offers authenticated health, capability, model listing and chat completion endpoints with streaming, temperature, top-p, top-k, min-p, seed and up to four stop strings. Workers with active passing image evidence accept inline PNG/JPEG image data URLs; the status document reports `image_verification`. Omitting an output limit uses the remaining finite context after tokenization, stopping on EOS or another termination condition. Explicit limits are honored; there is no separate 4,096-token ceiling or 512-token default. Context follows a declared finite model maximum, reported as `context_length` in `/v1/models`. Models without a declared finite maximum report `null` and `context_capacity_known: false`; automatic output uses a finite allowance selected from the loaded model’s state requirements and current memory headroom.
 
-The shared resource budget automatically selects 16–64 MiB of logical content from available RAM at startup, allowing 98–386 MiB of encoded text JSON. Image requests have 6 MiB of additional encoded-body allowance; compressed images remain limited to 4 MiB. Tool results use the aggregate content budget without a separate 256 KiB result cap. Normal app use requires no budget configuration. A developer can override the process-start budget with `STARK_REQUEST_BUDGET_MIB` for controlled runtime testing; the [budget contract](../../docs/WORKER_PROTOCOLS.md#resource-budget) describes that override and the framing, pending-body and sandbox allocation limits. Available memory, deadlines, sandbox protections and actual model context still apply; byte admission does not guarantee every encoding of a full token window or qualify full-window execution. Up to eight requests queue behind the active one for at most 30 seconds. Routes, parameters, error codes and limits are in the [local API contract](../../docs/LOCAL_API.md).
+The shared resource budget automatically selects logical content admission from available RAM at startup with a 16 MiB floor and no fixed content ceiling. Encoded text JSON permits six times the content budget plus 2 MiB for framing. Image requests have 6 MiB of additional encoded-body allowance; compressed images remain limited to 4 MiB. Tool results use the aggregate content budget without a separate 256 KiB result cap. Normal app use requires no budget configuration. A developer can override the process-start budget with `STARK_REQUEST_BUDGET_MIB` for controlled runtime testing; the [budget contract](../../docs/WORKER_PROTOCOLS.md#resource-budget) describes that override and the framing, pending-body and sandbox allocation limits. Available memory, deadlines, sandbox protections and actual model context still apply; byte admission does not guarantee every encoding of a full token window or qualify full-window execution. Up to eight requests queue behind the active one for at most 30 seconds. Routes, parameters, error codes and limits are in the [local API contract](../../docs/LOCAL_API.md).
 
 ## Where the app keeps state
 

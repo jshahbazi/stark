@@ -104,6 +104,10 @@ impl<B: Backend> MixerStateSnapshot<B> for DeltaNetPrefix<B> {
 }
 
 impl<B: Backend> MixerState<B> for DeltaNetState<B> {
+    fn resident_payload_bytes(&self) -> Option<usize> {
+        self.conv_state.size().checked_add(self.ssm_state.size())
+    }
+
     fn capture_prefix(
         &self,
         _position: u32,
@@ -751,6 +755,12 @@ impl<B: Backend> DeltaNet<B> {
 }
 
 impl<B: Backend> Mixer<B> for DeltaNet<B> {
+    fn prefix_snapshot_supported(&self) -> bool {
+        // DeltaNetPrefix preserves both convolution history and recurrent
+        // state after encode_accept has committed the complete flat chunk.
+        true
+    }
+
     fn speculation_supported(&self) -> bool {
         self.tree_verify.is_some()
     }

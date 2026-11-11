@@ -57,6 +57,11 @@ impl<T> BumpAllocator<T> {
     pub fn is_done(&self) -> bool {
         self.pages.iter().all(|page| Arc::strong_count(&page.page) == 1)
     }
+
+    #[cfg(test)]
+    pub(crate) fn reserved_bytes(&self) -> usize {
+        self.pages.iter().map(|page| page.size).sum()
+    }
 }
 
 pub struct BumpAllocation<T> {
@@ -71,5 +76,28 @@ impl<T> BumpAllocation<T> {
 
     pub fn range(&self) -> Range<usize> {
         self.range
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stark_engine_macros::stark_test;
+
+    use super::BumpAllocator;
+
+    #[stark_test]
+    fn reserved_bytes_count_pages_and_exclude_failed_upstream_allocations() {
+        let mut allocator = BumpAllocator::new(256);
+        assert_eq!(allocator.reserved_bytes(), 0);
+        let first = allocator.allocate(16, |size| Ok::<_, ()>(size)).unwrap();
+        let second = allocator.allocate(16, |size| Ok::<_, ()>(size)).unwrap();
+        assert_eq!(allocator.reserved_bytes(), 256);
+        let large = allocator.allocate(512, |size| Ok::<_, ()>(size)).unwrap();
+        assert_eq!(allocator.reserved_bytes(), 768);
+        assert!(allocator.allocate(1024, |_| Err::<usize, _>(())).is_err());
+        assert_eq!(allocator.reserved_bytes(), 768);
+        assert!(!allocator.is_done());
+        drop((first, second, large));
+        assert!(allocator.is_done());
     }
 }

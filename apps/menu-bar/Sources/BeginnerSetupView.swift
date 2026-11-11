@@ -28,6 +28,8 @@ struct BeginnerSetupView: View {
                 .padding(28)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Keep controls clear of the window edge even while content is scrolled.
+            .padding(.bottom, 20)
         }
         .frame(minWidth: 700, minHeight: 600)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -173,7 +175,7 @@ struct BeginnerSetupView: View {
                     }.padding(.top, 8)
                 }.font(.caption)
             }
-            Text("Download once. The model runs on this Mac. Downloads contact the model host; OpenWork tools may contact other services.")
+            Text("Runs locally on your Mac.")
                 .font(.caption).foregroundStyle(.secondary)
         } else {
             heading("No suitable starting model is available.", detail: snapshot.choicesError ?? "Stark could not establish a memory plan for another supported model on this Mac. Your current setup is kept.")
@@ -508,20 +510,22 @@ struct BeginnerSetupView: View {
             } else if let bytes = choice.downloadBytes, bytes > 0 {
                 Text("\(Self.bytes(bytes)) download").font(.callout)
             }
-            if let bytes = choice.installedBytes { Text("Estimated installed storage: \(Self.bytes(bytes))").font(.caption).foregroundStyle(.secondary) }
-            if session.installedID(for: choice, in: snapshot) == nil, let bytes = choice.setupBytes {
-                Text("Estimated free space needed during setup: \(Self.bytes(bytes))").font(.caption).foregroundStyle(.secondary)
-            }
-            DisclosureGroup("Model and download details") {
+            if let space = setupSpaceDescription(choice) { Text(space).font(.caption).foregroundStyle(.secondary) }
+            DisclosureGroup("Model details") {
                 VStack(alignment: .leading, spacing: 8) {
-                    if !choice.source.isEmpty { Text("Source: \(choice.source)").textSelection(.enabled) }
-                    if !choice.revision.isEmpty { Text("Revision: \(choice.revision)").textSelection(.enabled) }
-                    if choice.contextTokens > 0 { Text("Starting conversation limit: \(choice.contextTokens) tokens") }
                     if !choice.qualification.isEmpty { Text(choice.qualification) }
+                    if let url = choice.benchmarkSourceURL {
+                        Link(destination: url) { Text("Benchmark source").underline() }.foregroundStyle(.tint)
+                    }
                 }.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.top, 8)
             }.font(.caption)
         }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func setupSpaceDescription(_ choice: BeginnerModelChoice) -> String? {
+        guard session.installedID(for: choice, in: snapshot) == nil, let bytes = choice.setupBytes else { return nil }
+        return "Free space needed: \(Self.bytes(bytes))"
     }
 
     private func notice(_ text: String, symbol: String, color: Color = .secondary) -> some View {

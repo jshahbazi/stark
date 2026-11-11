@@ -13,7 +13,9 @@ import math
 from dataclasses import replace
 from pathlib import Path
 
-from ..compressed import MLXMatrixSource, MLXQuantization, parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
+from ..compressed import MLXMatrixSource, MLXQuantization, plan_mlx_matrix, read_mlx_matrix
+from ..family_quantization import qwen35_quantization
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -22,7 +24,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
 )
 from .dense import _COMMON_KEYS, _DTYPES, _bool, _positive_float, _positive_int
 from .qwen35_vision import build_qwen35_vision_plan
@@ -55,6 +56,8 @@ _KEYS = _COMMON_KEYS | {
     "partial_rotary_factor",
     "language_model_only",
     "output_gate_type",
+    "shared_expert_intermediate_size",
+    "norm_topk_prob",
 }
 
 
@@ -90,33 +93,52 @@ def _matrix_row_range(info: TensorInfo | MLXMatrixSource, start: int, count: int
     return _row_range(info, start, count)
 
 
-def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: bool = False) -> ConversionPlan:
+def build_qwen35_plan(
+    source: Path,
+    *,
+    dtype: str = "bfloat16",
+    include_vision: bool = False,
+    checkpoint_metadata: CheckpointMetadata | None = None,
+) -> ConversionPlan:
     """Plan dense or existing affine MLX text weights from checkpoint dimensions.
 
     Split, directly fused and group-interleaved DeltaNet projections share this
     adapter. Vision weights are omitted only from an explicitly declared wrapper;
     every original file remains in the final signature/content verification set.
     """
-    outer = read_json(source / "config.json")
+    outer = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
     text = outer.get("text_config", {})
     config = normalize_qwen35_config(outer)
-    if text and text.get("model_type", "qwen3_5_text") not in {"qwen3_5", "qwen3_5_text"}:
+    moe = config.get("model_type") == "qwen3_5_moe"
+    nested_types = {"qwen3_5_moe", "qwen3_5_moe_text"} if moe else {"qwen3_5", "qwen3_5_text"}
+    if text and text.get("model_type", next(iter(nested_types))) not in nested_types:
         raise UnsupportedConversion("Qwen3.5 dense adapter does not support a different nested text architecture")
-    if config.get("model_type") != "qwen3_5":
+    if config.get("model_type") not in {"qwen3_5", "qwen3_5_moe"}:
         raise UnsupportedConversion("Qwen3.5 dense adapter requires model_type qwen3_5")
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Qwen3.5 supports BF16, F16 and F32 output")
     if include_vision and dtype != "bfloat16":
         raise UnsupportedConversion("Qwen3.5 vision exports require BF16 output")
     target = _DTYPES[dtype]
-    # The pinned Qwen importer uses this specific field to select baked norms.
-    # An alias-only description cannot safely establish that interpretation.
-    if config.get("quantization_config") is not None and config.get("quantization") is None:
-        raise UnsupportedConversion("Qwen3.5 MLX requires the quantization field for baked normalization weights")
-    quantization = parse_mlx_quantization(config, allow_mixed=True)
+    # Preserve the existing packed-checkpoint gate. Unquantized MLX exports
+    # also contain baked normalization gains; their saved convolution layout
+    # is inspected below instead of assuming unquantized means Hugging Face.
+    quantization = qwen35_quantization(config)
     unsupported: list[str] = []
     dim = _positive_int(config, "hidden_size")
-    hidden = _positive_int(config, "intermediate_size")
+    hidden = _positive_int(config, "shared_expert_intermediate_size" if moe else "intermediate_size")
+    if moe:
+        experts = _positive_int(config, "num_experts")
+        active = _positive_int(config, "num_experts_per_tok")
+        expert_hidden = _positive_int(config, "moe_intermediate_size")
+        if experts > 1024 or active > min(experts, 32) or expert_hidden > 131072:
+            raise UnsupportedConversion("Qwen3.5 MoE requires bounded expert banks")
+        if quantization is None and not include_vision:
+            raise UnsupportedConversion("Qwen3.5 BF16 MoE requires the image artifact reference policy")
+        if not _bool(config, "norm_topk_prob", True):
+            raise UnsupportedConversion("Qwen3.5 MoE requires normalized selected expert probabilities")
+        if target != "BF16":
+            raise UnsupportedConversion("Qwen3.5 MoE currently requires BF16 activations")
     count = _positive_int(config, "num_hidden_layers")
     vocab = _positive_int(config, "vocab_size")
     heads = _positive_int(config, "num_attention_heads")
@@ -185,6 +207,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     architectures = (
         (["Qwen3_5ForCausalLM"],) if text_only else (["Qwen3_5ForConditionalGeneration"], ["Qwen3_5ForCausalLM"])
     )
+    if moe:
+        architectures = (["Qwen3_5MoeForConditionalGeneration"], ["Qwen3_5MoeForCausalLM"])
     if config.get("architectures", architectures[0]) not in architectures:
         unsupported.append("Qwen3.5 architecture is outside implemented text coverage")
     if config.get("hidden_act", "silu") != "silu" or _bool(config, "mlp_bias", False):
@@ -222,8 +246,10 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     if config.get("rope_scaling") is not None:
         unsupported.append("Qwen3.5 scaled RoPE is outside implemented coverage")
     for field in ("num_experts", "num_experts_per_tok", "moe_intermediate_size"):
-        if config.get(field) not in (None, 0):
+        if not moe and config.get(field) not in (None, 0):
             unsupported.append("Qwen3.5 MoE/MTP variants are outside implemented dense coverage")
+    if not moe and any(field in config for field in ("shared_expert_intermediate_size", "norm_topk_prob")):
+        unsupported.append("Qwen3.5 routed expert options require the MoE architecture wrapper")
     if "mtp_num_hidden_layers" in config and (
         type(config["mtp_num_hidden_layers"]) is not int or config["mtp_num_hidden_layers"] < 0
     ):
@@ -232,7 +258,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     for field in ("is_encoder_decoder", "add_cross_attention", "tie_encoder_decoder"):
         if _bool(config, field, False):
             unsupported.append("Qwen3.5 encoder/cross-attention variants are unsupported")
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     prefixes = [
         prefix
         for prefix in ("model.language_model", "language_model.model", "model")
@@ -245,6 +271,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     operations: list[TensorOperation] = []
     metadata: dict[str, str] = {}
     used_mlx = False
+    baked_norms = quantization is not None
+    conv_layouts: set[bool] = set()
 
     def tensor(name: str, shape: tuple[int, ...]) -> TensorInfo:
         expected.add(name)
@@ -280,6 +308,27 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
             expected.update((name, prefix + ".scales", prefix + ".biases"))
             return info
         return tensor(name, shape)
+
+    def expert_source(name: str, rows: int, columns: int):
+        """Flatten only the declared stacked expert axis; retain byte identity."""
+        module = name.removesuffix(".weight")
+        quant = quantization.for_module(module) if quantization is not None else None
+        names = (name, module + ".scales", module + ".biases")
+        packed = any(key in tensors for key in names[1:])
+        if packed:
+            if quant is None:
+                raise ConversionError("MoE expert plane contradicts its quantization description")
+            shapes = ((experts, rows, columns * quant.bits // 32), (experts, rows, columns // quant.group_size))
+            flattened = {}
+            for key, shape in zip(names, (shapes[0], shapes[1], shapes[1]), strict=True):
+                info = tensors.get(key)
+                if info is None or info.shape != shape:
+                    raise ConversionError("MoE stacked expert planes disagree with the declared geometry")
+                expected.add(key)
+                flattened[key] = replace(info, shape=(experts * rows, shape[-1]))
+            return read_mlx_matrix(flattened, name, (experts * rows, columns), quant)
+        info = tensor(name, (experts, rows, columns))
+        return replace(info, shape=(experts * rows, columns))
 
     def matrix(out: str, sources, shape: tuple[int, ...], layout="output_input"):
         nonlocal used_mlx
@@ -364,7 +413,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
             head_planes = head.planes if isinstance(head, MLXMatrixSource) else (head,)
             embed_planes = embed.planes if isinstance(embed, MLXMatrixSource) else (embed,)
             if any(
-                left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                not tensor_aliases_equal(left, right, header_only=checkpoint_metadata is not None)
                 for left, right in zip(head_planes, embed_planes, strict=True)
             ):
                 raise ConversionError("Qwen3.5 tied lm_head differs from its embedding")
@@ -462,6 +511,17 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
             shape = tensors[conv_name].shape
             if shape not in ((conv_width, 1, kernel), (conv_width, kernel), (conv_width, kernel, 1)):
                 raise ConversionError("Qwen3.5 convolution shape disagrees with its config")
+            if quantization is None:
+                # MLX-LM sanitize moves HF [C,1,K] to saved [C,K,1] and
+                # adds one to the zero-centered norms in that same operation.
+                # This marker applies to full-precision exports too. A flat
+                # custom convolution loses the marker, so do not guess.
+                if len(shape) != 3 or kernel == 1:
+                    raise UnsupportedConversion("Qwen3.5 unquantized convolution has ambiguous normalization storage")
+                conv_layouts.add(shape[-1] == 1)
+                if len(conv_layouts) != 1:
+                    raise UnsupportedConversion("Qwen3.5 checkpoint mixes normalization storage conventions")
+                baked_norms = shape[-1] == 1
             conv = tensor(conv_name, shape)
             operations.append(
                 TensorOperation(out + ".mixer.conv.weights", (conv,), "F32", (conv_width, kernel), "cast_f32")
@@ -477,14 +537,53 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
                 operations.append(
                     TensorOperation(out + ".mixer." + output_name, (info,), "F32", (linear_heads,), "cast_f32")
                 )
+        if moe:
+            if quantization is None:
+                # Official Transformers v5.8.0 stores [expert, gate+up, input].
+                # Native dense experts consume [expert, up+gate, input]. Each
+                # row view retains the source file, byte range and signature.
+                bank = src + ".mlp.experts"
+                fused = expert_source(bank + ".gate_up_proj", 2 * expert_hidden, dim)
+                interleaved = tuple(
+                    _matrix_row_range(fused, (2 * expert + branch) * expert_hidden, expert_hidden)
+                    for expert in range(experts)
+                    for branch in (1, 0)
+                )
+                down_name = bank + ".down_proj"
+            else:
+                bank = src + ".mlp.switch_mlp"
+                up = expert_source(bank + ".up_proj.weight", expert_hidden, dim)
+                gate = expert_source(bank + ".gate_proj.weight", expert_hidden, dim)
+                interleaved = tuple(
+                    _matrix_row_range(value, expert * expert_hidden, expert_hidden)
+                    for expert in range(experts)
+                    for value in (up, gate)
+                )
+                down_name = bank + ".down_proj.weight"
+            matrix(out + ".mlp.experts.up_projection.weights", interleaved, (experts * 2 * expert_hidden, dim))
+            matrix(
+                out + ".mlp.experts.down_projection.weights",
+                (expert_source(down_name, dim, expert_hidden),),
+                (experts * dim, expert_hidden),
+            )
+            matrix(
+                out + ".mlp.router.weights", (matrix_source(src + ".mlp.gate.weight", (experts, dim)),), (experts, dim)
+            )
+            matrix(
+                out + ".mlp.shared_gate.weights",
+                (matrix_source(src + ".mlp.shared_expert_gate.weight", (1, dim)),),
+                (1, dim),
+            )
+        dense_source = src + (".mlp.shared_expert" if moe else ".mlp")
+        dense_output = out + (".mlp.shared_expert" if moe else ".mlp")
         matrix(
-            out + ".mlp.up_projection.weights",
-            tuple(matrix_source(src + f".mlp.{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
+            dense_output + ".up_projection.weights",
+            tuple(matrix_source(dense_source + f".{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
             (2 * hidden, dim),
         )
         matrix(
-            out + ".mlp.down_projection.weights",
-            (matrix_source(src + ".mlp.down_proj.weight", (dim, hidden)),),
+            dense_output + ".down_projection.weights",
+            (matrix_source(dense_source + ".down_proj.weight", (dim, hidden)),),
             (dim, hidden),
         )
     norm("decoder.transformer.output_norm", prefix + ".norm.weight", dim)
@@ -496,11 +595,14 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     # another wrapper's visual alias to hide an otherwise unconsumed tensor.
     ignored = set()
     if include_vision:
-        if not (vision and prefix == "model.language_model"):
-            raise UnsupportedConversion(
-                "Qwen3.5 vision requires the official model.language_model/model.visual wrapper"
-            )
-        vision_ops, vision_expected = build_qwen35_vision_plan(vision, tensors, dim)
+        if not (vision and prefix in {"model.language_model", "language_model.model"}):
+            raise UnsupportedConversion("Qwen3.5 vision requires a complete HF or MLX vision-language wrapper")
+        vision_ops, vision_expected = build_qwen35_vision_plan(
+            vision,
+            tensors,
+            dim,
+            source_prefix="vision_tower." if prefix == "language_model.model" else "model.visual.",
+        )
         operations.extend(vision_ops)
         expected.update(vision_expected)
     else:
@@ -509,14 +611,20 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     # The reference text loader also omits the declared auxiliary MTP decoder.
     # Untrusted prefixes alone never authorize dropping source tensors.
     if config.get("mtp_num_hidden_layers", 0) > 0:
-        ignored.update(name for name in tensors if name.startswith("mtp."))
+        ignored.update(
+            name
+            for name in tensors
+            if name.startswith(
+                ("mtp.", "language_model.mtp.", "model.language_model.mtp.") if include_vision else "mtp."
+            )
+        )
     if quantization is not None and not used_mlx:
         raise ConversionError("Qwen3.5 MLX quantization configuration has no packed checkpoint matrices")
     if unsupported:
         raise UnsupportedConversion(unsupported[0])
     norm_config = {
         "epsilon": epsilon,
-        "scale_offset": None if quantization is not None else 1.0,
+        "scale_offset": None if baked_norms else 1.0,
         # Qwen3.5 keeps zero-centered RMS normalization and its gain in FP32
         # through one final activation cast. Preserve the existing text export
         # profile while qualifying the exact full-vision artifact separately.
@@ -536,6 +644,19 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
         "up_clipping": None,
         "gate_clipping": None,
     }
+    if moe:
+        mlp = {
+            "type": "MixtureOfExpertsConfig",
+            "expert_config": mlp,
+            "router_config": {},
+            "routing_function": {"type": "SoftmaxRouting"},
+            "num_routed_experts": experts,
+            "num_active_routed_experts": active,
+            "router_has_biases": False,
+            "num_shared_experts": 1,
+            "expert_hidden_dim": expert_hidden,
+            "gate_config": {},
+        }
     rope = {"type": "UnscaledRoPEConfig", "base": base, "max_sequence_length": context, "head_dim": rotary}
     layer_configs = []
     for layer in layers:
@@ -631,9 +752,17 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
         row_range=_matrix_row_range,
         include_vision=include_vision,
         quantization=quantization,
+        moe=moe,
+        experts=experts if moe else None,
+        expert_hidden=expert_hidden if moe else None,
+        dedicated_embeddings=_bool(config, "mtp_use_dedicated_embeddings", False),
     )
     if mtp_config is not None:
-        ignored = {name for name in ignored if not name.startswith("mtp.")}
+        ignored = {
+            name
+            for name in ignored
+            if not name.startswith(("mtp.", "language_model.mtp.", "model.language_model.mtp."))
+        }
     if set(tensors) != expected | ignored:
         raise ConversionError("Qwen3.5 checkpoint has unexpected tensors")
     return ConversionPlan(

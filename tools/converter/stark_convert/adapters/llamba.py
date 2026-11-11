@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import MLXQuantization, parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
@@ -20,7 +21,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
 )
 from .dense import _DTYPES, _bool, _positive_float, _positive_int
 from .mamba import mamba2_config, plan_mamba2
@@ -68,9 +68,11 @@ def build_llamba_plan(
     dtype: str = "bfloat16",
     config: dict | None = None,
     expected_mlx_bits: int | None = None,
+    checkpoint_metadata: CheckpointMetadata | None = None,
 ) -> ConversionPlan:
     """Plan every declared layer and preserve the complete source tensor set."""
-    config = read_json(source / "config.json") if config is None else config
+    if config is None:
+        config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
     if not isinstance(config, dict):
         raise ConversionError("LLaMBA model config must be an object")
     if config.get("model_type") != "llamba":
@@ -113,7 +115,7 @@ def build_llamba_plan(
     if architectures is not None and architectures != ["LlambaForCausalLM"]:
         unsupported.append("LLaMBA architectures annotation is outside implemented coverage")
     target_dtype = _DTYPES[dtype]
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     expected: set[str] = set()
     operations: list[TensorOperation] = []
     metadata: dict[str, str] = {}
@@ -208,7 +210,7 @@ def build_llamba_plan(
             if packed(embedding_name):
                 inputs = mlx(embedding_name, (vocab, model_dim))
                 if any(
-                    left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                    not tensor_aliases_equal(left, right, header_only=checkpoint_metadata is not None)
                     for left, right in zip(head.planes, inputs.planes, strict=True)
                 ):
                     raise ConversionError("Tied MLX LLaMBA output head differs from the input embedding")
@@ -222,7 +224,7 @@ def build_llamba_plan(
         elif head_name in tensors:
             head = tensor(head_name, (vocab, model_dim))
             inputs = tensors[embedding_name]
-            if head.dtype != inputs.dtype or tensor_sha256(head) != tensor_sha256(inputs):
+            if not tensor_aliases_equal(head, inputs, header_only=checkpoint_metadata is not None):
                 raise ConversionError("Tied LLaMBA output head differs from the input embedding")
     else:
         matrix("decoder.embedding.output_embedding", (head_name,), ((vocab, model_dim),), (vocab, model_dim))

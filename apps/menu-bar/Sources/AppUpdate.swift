@@ -271,9 +271,16 @@ struct AppUpdateOperations {
             let app = try await Task.detached {
                 try AppUpdateFiles.prepare(file, release: release, workspace: root)
             }.value
+            try Task.checkCancellation()
             prepared = true
             return PreparedAppUpdate(workspace: root, app: app)
         }, install: { prepared, release in
+            // A prepared app can wait for hours before the user upgrades.
+            // Recheck its trust before executing its bundled Python helper.
+            try await Task.detached {
+                try AppUpdateFiles.verifySignature(prepared.app, app: true)
+                try AppUpdateFiles.verifyMetadata(prepared.app, version: release.version)
+            }.value
             guard let resources = Bundle.main.resourceURL else { throw AppUpdateError.helper }
             let workspace = prepared.workspace
             for name in ["update_app.py", "install_app.py"] {
@@ -403,6 +410,12 @@ final class AppUpdateController: ObservableObject {
         automaticChecks = nil
     }
 
+    func prepareForTermination() {
+        stopAutomaticChecks()
+        task?.cancel()
+        discardPreparedUpdate()
+    }
+
     func checkIfNeeded() {
         guard lastCheck.map({ now().timeIntervalSince($0) >= Self.backgroundCheckInterval }) ?? true else { return }
         check(background: true)
@@ -417,6 +430,8 @@ final class AppUpdateController: ObservableObject {
         if !background { message = "Checking for updates…" }
         task = Task {
             var preparing = false
+            let previousFailure = background && installFailed ? message : nil
+            defer { if let previousFailure { message = previousFailure } }
             do {
                 let release = try await operations.fetch(installedBuild.updateComparisonVersion)
                 if release != available {
@@ -427,7 +442,7 @@ final class AppUpdateController: ObservableObject {
                     message = available == nil ? (background ? "" : "Stark is up to date.") : "A new version is available."
                     installFailed = false
                 }
-                if let release, preparedUpdate == nil {
+                if let release, !hasPreparedUpdate {
                     preparing = true
                     try await prepare(release)
                 } else if let release, !installFailed {
@@ -450,6 +465,15 @@ final class AppUpdateController: ObservableObject {
         preparedUpdate = nil
     }
 
+    private var hasPreparedUpdate: Bool {
+        guard let preparedUpdate else { return false }
+        guard FileManager.default.fileExists(atPath: preparedUpdate.app.path) else {
+            discardPreparedUpdate()
+            return false
+        }
+        return true
+    }
+
     private func prepare(_ release: AppUpdateDownload) async throws {
         message = "Downloading Stark \(release.version)…"
         preparedUpdate = try await operations.prepare(release) { [weak self] status in self?.message = status }
@@ -462,7 +486,7 @@ final class AppUpdateController: ObservableObject {
         task = Task {
             var installing = false
             do {
-                if preparedUpdate == nil { try await prepare(release) }
+                if !hasPreparedUpdate { try await prepare(release) }
                 guard let update = preparedUpdate else { throw AppUpdateError.helper }
                 // The helper owns this workspace from here, including any
                 // recovery backup. Never discard it after an install failure.

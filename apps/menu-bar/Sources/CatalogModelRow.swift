@@ -14,21 +14,27 @@ struct CatalogModelRow: View {
     }
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                metadata
-                Spacer(minLength: 0)
-                controls
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                ViewThatFits(in: .horizontal) {
+        VStack(alignment: .leading, spacing: 6) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
                     metadata
-                    VStack(alignment: .leading, spacing: 6) {
-                        quantizationBadge
-                        sizeMetadata
-                    }
+                    Spacer(minLength: 0)
+                    controls
                 }
-                HStack { Spacer(minLength: 0); controls }
+                VStack(alignment: .leading, spacing: 8) {
+                    ViewThatFits(in: .horizontal) {
+                        metadata
+                        VStack(alignment: .leading, spacing: 6) {
+                            quantizationBadge
+                            sizeMetadata
+                        }
+                    }
+                    HStack { Spacer(minLength: 0); controls }
+                }
+            }
+            if let reason = item.unavailableReason {
+                Text(reason).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .help(item.repo + "\nVersion " + item.revision)
@@ -76,9 +82,11 @@ struct CatalogModelRow: View {
                 if downloaded {
                     Label("Downloaded", systemImage: "checkmark.circle.fill")
                         .font(.caption).foregroundStyle(.secondary)
+                } else if !item.downloadable {
+                    Text("Unavailable").font(.caption).foregroundStyle(.secondary)
                 } else {
                     Button("Download", action: download).controlSize(.small)
-                        .disabled(busy || !item.downloadable)
+                        .disabled(busy)
                         .accessibilityLabel("Download " + item.name + " " + item.quantization)
                 }
             }.frame(minWidth: 88, alignment: .trailing)

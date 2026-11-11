@@ -12,10 +12,12 @@ Its helper pins native-source downloads for local import. **Model Catalog →
 GLM-5.3 Flash** offers the pinned `UD-Q2_K_XL` checkpoint through that same
 preparation path. GLM is a separate native family in the inventory; arbitrary
 GLM repositories remain outside generic converter preflight. The registry also
-includes a `qwen4_exp` converter for Lily-format Qwen3.8 text models. It writes
-a self-contained typed `Qwen38LanguageModelConfig` artifact with canonical
-MLX storage and unchanged mixed quantization, sharing the existing specialized
-Qwen kernels. Vision and MTP tensors are omitted from this converter path. The
+supports two `qwen4_exp` text import paths. Lily-format sources can be
+converted to a typed `Qwen38LanguageModelConfig` artifact with canonical MLX
+storage and unchanged mixed quantization. This conversion omits vision and MTP
+tensors. Compatible external-table MLX-Serve sources are prepared for the
+native loader with their original weight shards, index, and n-gram table.
+The pinned native image routes have separate artifact checks. The
 ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
 backend has an unchanged `headless-reference` default and a separately staged
 `--profile bf16-native-experimental` profile that includes the BF16 draft head,
@@ -62,11 +64,37 @@ load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
 
+Qwen3.5 MoE image conversion has two schema-3 profiles: affine-quantized source
+weights use `qwen35-moe-affine-merged-v4`, while complete BF16 source weights
+use `qwen35-moe-bf16-merged-v5`. Both produce BF16 artifacts; the BF16-source
+route is image-only. Catalog discovery requires the source's
+supported processor and reviewed template before offering that mode; BF16 MoE
+text/Decision conversion remains unsupported. This is structural implementation
+coverage. Full official 35B execution and reference parity are unverified; each
+artifact still needs native admission and local image checks. The
+[vision family contract](VISION_FAMILY_CONTRACT.md) records the numerical policy,
+source layout, limits and disabled prefix-reuse disposition.
+
 New model and inference paths follow the [model onboarding workflow](MODEL_ONBOARDING.md),
 including generation prefix-reuse implementation where exact restoration is
 possible and a recorded blocker where it is unavailable. The family registry
 does not grant this runtime capability or transfer qualification between
 checkpoints and quantizations.
+[OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) use the ordinary native Metal text path.
+OLMo 3 adds whole-projection Q/K normalization and post-norm residual branches.
+Gemma 4 text paths include dense PLE E2B/E4B and bounded no-PLE 31B layouts.
+Pinned schema-4 BF16 image profiles cover E2B, E4B, 12B unified, 26B-A4B and
+31B. Audio and video execution remain unsupported. E2B has a canonical HF CPU
+image-feature comparison within the 2% gate on three fixtures plus bounded
+worker and chat-client lifecycle checks; E4B has separate source and execution
+validation. The 12B embedder and 26B MoE paths have component checks. The pinned
+31B tower/projector passes all three unchanged canonical feature gates, with
+relative RMS at most 0.00110689. Full 12B/26B/31B checkpoint generation is
+unqualified. Installed desktop UI execution and image performance are
+unmeasured. Exact checkpoint evidence remains tied to its reference profile and
+engine build. See the
+[original E2B validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md)
+and [31B vision component record](archive/runs/2026-11-07-gemma4-larger-vision-qualified-component.md).
 
 ## Browsing and removing models
 
@@ -87,10 +115,10 @@ in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
 Conversion-only families are omitted. Cards show whether each model supports
 text or text and images. Downloads automatically include image support when
-available for that artifact. Currently,
-this requires the full Qwen3.5 BF16 model's vision configuration and processing
-metadata to pass inspection. Image support still needs the normal installation
-and local runtime checks.
+available for that artifact. This requires metadata confirming a supported
+Qwen3.5 vision wrapper, BF16 vision tower and reviewed processor; decoder weights
+may use a supported affine profile. Image support still needs the normal
+installation and local runtime checks.
 The download and preparation progress remain in the browser. Completion adds
 the model to the library without selecting it for use.
 
@@ -111,34 +139,65 @@ metadata and does not change the immutable source entry ID. Family-size sorting
 uses the minimum or maximum known model size among the visible versions. Counts
 are never inferred from model names or quantized packed tensors.
 
-The download catalogue combines registered reference sources with a bounded live
-Hugging Face search. Parsed configuration identifies the family; repository
-names alone do not establish compatibility. Each page inspects up to 30 distinct
-candidates and returns compatible choices. **Load more models** follows the remaining
-pages automatically, preserving results already loaded. Failed pages can be retried
-at the same offset. Generic discovery offers supported floating Safetensors and implemented MLX 4-bit/8-bit
-paths. GLM instead has one fixed `UD-Q2_K_XL` GGUF entry, with its source
-revisions, four shards and 108,720,071,552 stored weight bytes owned by the native
-preparation helper. Browsing that entry uses bundled metadata and makes no Hub
-requests. Download uses the pinned weight and tokenizer repositories, preserves
-quantized bytes and validates the completed prepared identity before library
-registration. Download progress remains indeterminate until the stored byte
-total is verified. GLM image input and Decision mode are unavailable.
-Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
-its fixed Q8 control projections. Embedding/reranking tasks, known internal test
-models, quantized vision, unsupported MoE families, adapter-only and unsupported
-packed formats are excluded. The implemented Qwen3.8 text path includes its
-MoE graph.
-An uncatalogued compatible fine-tune can appear. This is
-a metadata-filtered list of compatible candidates; gated, inaccessible or unsupported
-repositories may be omitted.
+The download catalogue combines registered reference sources with bounded live
+Hugging Face searches. Architecture tags and model-name searches are interleaved
+so a large tag cannot delay every other export type. Parsed configuration
+identifies the family. Each page inspects up to 30 distinct candidates and
+retains unsupported family variants with an **Unavailable** reason.
+**Load more models** follows the remaining pages automatically, preserving
+results already loaded. Failed pages can be retried at the same offset.
 
-Discovery reads bounded metadata and repository file information, without
-requesting weight payloads or executing repository code. Parameter counts and
+Before enabling Download for a generic Safetensors source, the catalogue reads
+the pinned tensor headers with exact HTTP byte ranges and runs the same tensor
+planner used by conversion. Names, shapes, dtypes, affine packing and shard-index
+membership must match the importer. Header requests never consume weight payloads
+and reject servers that ignore the requested range. A header exceeding the
+catalogue's 4 MiB inspection limit remains unavailable with an explanation.
+Duplicate tied-tensor payload equality is checked during full conversion.
+Native loading and model execution remain separate checks.
+
+GLM and Flint searches also display other family exports with their import
+limitations. Their supported native installers currently bind exact artifacts.
+GLM's downloadable `UD-Q2_K_XL` GGUF entry keeps its source revisions, four
+shards and 108,720,071,552 stored weight bytes owned by the preparation helper.
+Flint keeps its pinned MLX affine INT4 checkpoint. These entries use bundled
+metadata, while discovery of other variants uses the Hub. Download preserves
+quantized bytes and validates the prepared identity before library registration.
+Download progress remains indeterminate until the stored byte total is verified.
+GLM image input and Decision mode are unavailable.
+Known Gemma 4 image choices use the immutable revisions bound by their image
+import profiles. Later repository revisions require their own image admission.
+Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
+its fixed Q8 control projections. The Qwen3.8 catalog also discovers compatible
+MLX-Serve external-table exports by config and file inventory, including
+importance-calibrated exports using the supported affine layout. Their download
+size includes the external n-gram table. The catalog checks the pinned shard
+headers, index, and n-gram table layout before enabling Download. Incompatible
+external-table candidates display an explanation in their catalog row.
+Embedding/reranking tasks, known internal test models and adapter-only
+repositories are excluded. Family variants with unsupported decoder geometry,
+quantization or containers retain their rejection reason. For example, Gemma 4
+quantized no-PLE global K=V exports explain their BF16 import requirement, and
+per-module affine formats explain the importer's quantization limit.
+Qwen image profiles can retain supported packed decoder matrices
+alongside a complete BF16 vision tower. The
+implemented Qwen3.8 text path includes its MoE graph; Qwen3.5 BF16 MoE image
+conversion is a separate image-only path.
+An uncatalogued compatible fine-tune can appear through its architecture tag or
+model name. Gated, inaccessible and malformed repositories may be omitted.
+An untagged repository whose name has no family search term can still require
+direct import.
+
+Discovery reads bounded metadata, tensor headers and repository file information.
+Parameter counts and
 download bytes appear only when usable metadata supplies them. Floating sources
 are shown as BF16, the native output format; packed tensor counts are not shown
 as logical parameter counts. Missing metadata can leave a size unknown or omit
 a candidate. Offline and failed discovery have fixed messages and can be retried.
+Guided setup continues past pages with no downloadable entries within a shared
+10-second budget and a maximum of ten pages per family. It reports when discovery
+remains incomplete. Family budgets are checked between network operations.
+The desktop host enforces cancellation and the overall child-process deadline.
 
 **Installed** groups saved versions by their bound,
 unambiguous source repository; local or incomplete metadata falls back to a
@@ -182,7 +241,7 @@ The registry uses these mode identifiers:
 | --- | --- |
 | `text` | Text chat through a converted language artifact and the generation worker. |
 | `decision` | Generic answer-choice scoring through a text artifact, compatible template/tokenizer and scoring worker. |
-| `vision-language` | Image chat through the supported full vision artifact and local image checks. |
+| `vision-language` | Image chat through supported full vision artifacts and model-specific host checks. Current paths include the Qwen3.5 schemas and Gemma 4 E2B BF16 schema 4. |
 
 Decision scoring uses temperature 1 and produces a comparative distribution over
 the supplied choices. A compatible family does not establish calibration or

@@ -21,6 +21,120 @@ from pathlib import Path
 REFERENCE_REVISION = "831accb8252a6b6606c378048caeb44178f1a050"
 QWEN38_DISTILL_REPO = "empero-ai/Qwen3.8-4B-Distill"
 QWEN38_DISTILL_REVISION = "c83cb7aa2999d2f35c43e9ae0634a30eb8985a1e"
+OLMO3_REPO = "allenai/Olmo-3-7B-Instruct"
+OLMO3_REVISION = "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc"
+GEMMA4_REPO = "google/gemma-4-E2B-it"
+GEMMA4_REVISION = "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
+GEMMA4_E4B_REPO = "google/gemma-4-E4B-it"
+GEMMA4_E4B_REVISION = "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"
+GEMMA4_E4B_HASHES = {
+    "config.json": "33b10c02df3c2e8536cf323d29d53262aaa2f4d11dbe19bc729373fbe90295d4",
+    "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+    "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+    "tokenizer.json": "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc",
+    "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+    "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+}
+
+GEMMA4_31B_REPO = "google/gemma-4-31B-it"
+GEMMA4_31B_REVISION = "842da3794eaa0b77d5f08bae87a17459d91ff475"
+GEMMA4_31B_HASHES = {
+    "config.json": "e967dd38bc5cfd38bd09a995a7bf4a754075df2b46aba68f7fbb5a791e6d8dd1",
+    "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+    "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+    "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+    "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+    "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+}
+
+GEMMA4_ADDITIONAL_PROFILES = [
+    {
+        "repo": "google/gemma-4-12B-it",
+        "revision": "43c9d014b231474fa7212dbb48a762566c2b255d",
+        "hashes": {
+            "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+            "config.json": "478c46e8d2c52d5c2d85bf67e3b3e8c90e7c9d91086cee27e3c267907e936bd9",
+            "generation_config.json": "a8349d9bd64cc5841297fcb5002f0fdc4749c473c8f1b10ea337f9ce4ee7014e",
+            "processor_config.json": "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9",
+            "tokenizer.json": "9788bdb6a021b3170357cd3587b5d622b1177561ad3c5bf43d73728fd71aeacb",
+            "tokenizer_config.json": "a62f4e85a47c0c136edaaa3a4f591fd6783717299a9def47e5ad03a49f6a5eb9",
+        },
+        "size": "12B",
+    },
+    {
+        "repo": "google/gemma-4-26B-A4B-it",
+        "revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+        "hashes": {
+            "chat_template.jinja": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+            "config.json": "ed0c1eb3633de771906e9ba004a44cc5635bcc06ee2062077c3d2e88a50707d3",
+            "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+            "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+            "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+            "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+        },
+        "size": "26B-A4B",
+    },
+]
+
+
+def profile_extension(
+    entries: list[dict],
+    *,
+    repo: str,
+    revision: str,
+    reference_repo: str,
+    config_class: str,
+    adapter: str,
+    family: str,
+    size: str,
+    vendor: str,
+    file_hashes: dict[str, str],
+) -> dict:
+    """Create an explicit Stark text-adapter profile for a pinned HF source."""
+    entry = copy.deepcopy(next(entry for entry in entries if entry["repo"] == reference_repo))
+    entry.update(
+        repo=repo,
+        catalog_origin="stark_extension",
+        profile_reference=reference_repo,
+        family=family,
+        vendor=vendor,
+        name=repo.split("/")[1],
+        size=size,
+        config_class=config_class,
+        adapter=adapter,
+        metadata_profile=adapter,
+        profile_source={"repo": repo, "revision": revision, "files_sha256": file_hashes},
+    )
+    entry["files"] = {
+        role: {"repo": repo, "filename": filename}
+        for role, filename in {
+            "model_config": "config.json",
+            "tokenizer": "tokenizer.json",
+            "tokenizer_config": "tokenizer_config.json",
+            "generation_config": "generation_config.json",
+            "chat_template": "chat_template.jinja",
+        }.items()
+    }
+    if adapter == "gemma4_text":
+        entry["files"]["processor_config"] = {"repo": repo, "filename": "processor_config.json"}
+    entry["metadata"] = {
+        "parser_id": None,
+        "reasoning_id": None,
+        "end_of_thinking_id": None,
+        "generation_config": None,
+        "generation_params_overrides": None,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": _digest([]),
+        "inline_sources": {},
+        "roles": {"system": "system", "user": "user", "assistant": "assistant"},
+    }
+    entry["status"] = {
+        "conversion": "implemented",
+        "runtime": "not_assessed",
+        "access": "not_assessed",
+        "qualification": "pending",
+    }
+    return entry
 
 
 def qwen38_distill_extension(entries: list[dict]) -> dict:
@@ -189,6 +303,16 @@ def export(reference: Path) -> dict:
             "trymirai/health-related-router",
         }:
             adapter = None
+        # These reference rows use YaRN variants whose attention/extrapolation
+        # controls cannot be represented by the current Stark RoPE schema.
+        if repo in {"EssentialAI/rnj-1-instruct", "POLARIS-Project/Polaris-4B-Preview"}:
+            adapter = None
+        # Correct the reference's 2B Q4 copy of the 0.8B temperature override;
+        # use the same reviewed scalar profile as the 2B BF16 and Q8 rows.
+        if repo == "mlx-community/Qwen3.5-2B-MLX-4bit":
+            inline["generation_params_overrides"] = {
+                "sha256": "1e9d0c7d3febdfaeef2b3c552a742aa9b5431b564c1b818b30c6ba1a3a95b26b"
+            }
         metadata = {
             "parser_id": parser_id,
             "reasoning_id": reasoning_id,
@@ -230,7 +354,73 @@ def export(reference: Path) -> dict:
                 },
             }
         )
-    extensions = []
+    # Gemma-4 E2B already exists in the pinned registry as a planned row. Bind
+    # the new text adapter to that identity without duplicating the repository
+    # or changing the source-bound builtin denominator.
+    gemma4 = profile_extension(
+        entries,
+        repo=GEMMA4_REPO,
+        revision=GEMMA4_REVISION,
+        reference_repo="google/gemma-3-4b-it",
+        config_class="HFGemma4TextConfig",
+        adapter="gemma4_text",
+        family="Gemma-4",
+        vendor="Google",
+        size="E2B",
+        file_hashes={
+            "config.json": "1b28f3d2c3100f6c594754b81107428bd7b822a7f48272ca681dae9d2ec38330",
+            "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de",
+            "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+            "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+            "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+            "processor_config.json": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+        },
+    )
+    gemma4["catalog_origin"] = "pinned_builtin"
+    entries[:] = [gemma4 if entry["repo"] == GEMMA4_REPO else entry for entry in entries]
+    gemma4_e4b = profile_extension(
+        entries,
+        repo=GEMMA4_E4B_REPO,
+        revision=GEMMA4_E4B_REVISION,
+        reference_repo="google/gemma-3-4b-it",
+        config_class="HFGemma4TextConfig",
+        adapter="gemma4_text",
+        family="Gemma-4",
+        vendor="Google",
+        size="E4B",
+        file_hashes=GEMMA4_E4B_HASHES,
+    )
+    gemma4_e4b["catalog_origin"] = "pinned_builtin"
+    entries[:] = [gemma4_e4b if entry["repo"] == GEMMA4_E4B_REPO else entry for entry in entries]
+
+    gemma4_31b = profile_extension(
+        entries,
+        repo=GEMMA4_31B_REPO,
+        revision=GEMMA4_31B_REVISION,
+        reference_repo="google/gemma-3-4b-it",
+        config_class="HFGemma4TextConfig",
+        adapter="gemma4_text",
+        family="Gemma-4",
+        vendor="Google",
+        size="31B",
+        file_hashes=GEMMA4_31B_HASHES,
+    )
+    extensions = [gemma4_31b]
+    for profile in GEMMA4_ADDITIONAL_PROFILES:
+        extensions.append(
+            profile_extension(
+                entries,
+                repo=profile["repo"],
+                revision=profile["revision"],
+                reference_repo="google/gemma-3-4b-it",
+                config_class="HFGemma4TextConfig",
+                adapter="gemma4_text",
+                family="Gemma-4",
+                vendor="Google",
+                size=profile["size"],
+                file_hashes=profile["hashes"],
+            )
+        )
     for repository, reference_repo, family in (
         ("unsloth/Llama-3.2-1B-Instruct", "meta-llama/Llama-3.2-1B-Instruct", "Llama-3.2"),
         ("mistralai/Mistral-7B-Instruct-v0.2", "mistralai/Codestral-22B-v0.1", "Mistral-7B"),
@@ -266,6 +456,26 @@ def export(reference: Path) -> dict:
         file["repo"] = gemma2["repo"]
     extensions.append(gemma2)
     extensions.append(qwen38_distill_extension(entries))
+    extensions.append(
+        profile_extension(
+            entries,
+            repo=OLMO3_REPO,
+            revision=OLMO3_REVISION,
+            reference_repo="Qwen/Qwen3-8B",
+            config_class="HFOlmo3Config",
+            adapter="olmo3",
+            family="OLMo-3",
+            vendor="AllenAI",
+            size="7B",
+            file_hashes={
+                "config.json": "6282ae812f9e494bd212e9a3233d68dc4d5f1e2569642423d2b79a3e80373ef8",
+                "generation_config.json": "745e78c16cc40cbb08827f7b7c9d5a888f7cb908236d4ca0443ff47f43a9d5af",
+                "tokenizer_config.json": "f7a2753a4ff30657e452c8fef02b9a99a3b900ceb4c65a1e3fbea6a3bfab07a6",
+                "tokenizer.json": "7738a25c46a6043a0e2e605138851baa450269ce9d800af6ca9bf6192e45510c",
+                "chat_template.jinja": "f5186d42d99c8a0445d37fd8a6c7ccf07fe3e24a29ce622d8bd245da9507b12b",
+            },
+        )
+    )
     return {
         "schema_version": 1,
         "reference": {

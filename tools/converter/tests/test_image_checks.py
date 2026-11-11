@@ -644,6 +644,21 @@ def test_configured_memory_budget_includes_geometry_dependent_state_and_scratch(
     image_checks.preflight_family_memory(worker.model_path, config)
 
 
+def test_unified_vision_memory_estimate_accepts_encoder_free_geometry_and_rejects_drift():
+    config = configured_model()
+    config["artifact_contract"]["vision_config"] = {
+        "model_type": "gemma4_unified_vision",
+        "model_patch_size": 48,
+        "mm_embed_dim": 3840,
+        "mm_posemb_size": 1120,
+        "num_soft_tokens": 280,
+    }
+    assert image_checks._configured_check_memory(config) > 512 * 1024 * 1024
+    config["artifact_contract"]["vision_config"]["mm_embed_dim"] = 3841
+    with pytest.raises(image_checks.ImageCheckError, match="memory requirements"):
+        image_checks._configured_check_memory(config)
+
+
 @pytest.mark.parametrize("value", [None, True, [], {}, 0, -1, 2**100, 2560.0])
 def test_malformed_configured_memory_geometry_has_fixed_error(value):
     config = configured_model()

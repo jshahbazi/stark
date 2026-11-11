@@ -14,6 +14,7 @@ import math
 from dataclasses import replace
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -22,7 +23,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
 )
 
 _DTYPES = {"bfloat16": "BF16", "float16": "F16", "float32": "F32"}
@@ -114,14 +114,16 @@ def _row_slice(tensor: TensorInfo, start: int, stop: int) -> TensorInfo:
     )
 
 
-def build_phi_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_phi_plan(
+    source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
     """Validate the complete tied Phi3 checkpoint and plan Phi-4-mini output.
 
     HF stores MLP rows as gate then up. The target stores up then gate; two
     contiguous row views implement that reorder with the shared bounded writer.
     Q/K/V rows already have the required order and need no materialization.
     """
-    config = read_json(source / "config.json")
+    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
     if config.get("model_type") != "phi3":
         raise UnsupportedConversion("Checkpoint model_type does not match the Phi adapter")
     if dtype not in _DTYPES:
@@ -226,7 +228,7 @@ def build_phi_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
         "original_context_length": original_length,
         "scaling_factor": sequence_length / original_length,
     }
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     for key in ("quantization", "quantization_config"):
         if config.get(key) is not None:
             if not isinstance(config[key], dict) or not config[key]:
@@ -262,7 +264,7 @@ def build_phi_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
     matrix("decoder.embedding.embedding", (embedding,), (vocab, model_dim), "input_output")
     if "lm_head.weight" in tensors:
         head = tensor("lm_head.weight", (vocab, model_dim))
-        if tied and (head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding)):
+        if tied and (not tensor_aliases_equal(head, embedding, header_only=checkpoint_metadata is not None)):
             raise ConversionError("Tied lm_head differs from the input embedding")
     elif not tied:
         tensor("lm_head.weight", (vocab, model_dim))

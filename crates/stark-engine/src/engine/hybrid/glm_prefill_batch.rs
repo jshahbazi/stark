@@ -67,72 +67,13 @@ struct WideGroup {
     external: usize,
 }
 
-/// Conservative upper bounds, independent of environment-selected operator
-/// schedules. Every allocation is charged 256 bytes of padding; arena backing
-/// is bounded by twice the charged payload plus its initial one-MiB slab.
-/// External MLA scores/masks and immutable per-row norm uploads are charged
-/// separately. Cache growth is already in encoder_state_allowance's two-copy
-/// context inventory, including intermediate doubling allocations.
 fn layer_workspace(
     c: &Config,
     layer: usize,
     tokens: usize,
     end: usize,
 ) -> Result<(usize, usize)> {
-    let (h, s, t) = (c.hidden as u128, c.hc as u128, tokens as u128);
-    let inner = c.kda_heads as u128 * c.kda_dim as u128;
-    // Two controls, both fallback row scratch and the fully batched controls.
-    let controls = 4 * h * s + 6 * h + 80 * s * (s + 2);
-    let attention = if c.layer_types[layer] {
-        // Projection concatenation and its T8 temporary results, optional
-        // register-prefill prep/finish and the recurrent output projection.
-        18 * inner + 4 * h + 8 * c.kda_dim as u128 + 8 * c.kda_heads as u128
-    } else {
-        4 * c.q_rank as u128
-            + 4 * c.kv_rank as u128
-            + 8 * c.index_dim as u128
-            + 4 * c.heads as u128 * (c.qk_dim + c.kv_rank + c.value_dim) as u128
-            + 4 * c.index_heads as u128 * c.index_dim as u128
-            + 4 * c.index_heads as u128
-            + 2 * h
-            + c.heads as u128 * end as u128
-            + 4 * end.div_ceil(c.index_pool).next_power_of_two() as u128
-    };
-    let ffn = if layer < c.dense_layers {
-        5 * c.intermediate as u128 + 2 * h
-    } else {
-        5 * c.shared_experts as u128 * c.expert_intermediate as u128
-            + c.active_experts as u128 * (3 * c.expert_intermediate as u128 + h)
-            + 4 * h
-            + 5 * c.experts as u128
-            + 4 * c.active_experts as u128
-            // Optional grouping lists, jobs, flat route copies, indirect
-            // arguments and input-bound flags. Charge every schedule.
-            + c.experts as u128 * c.active_experts as u128
-            + 8 * c.active_experts as u128
-            + c.experts as u128
-            + 16
-    };
-    // Fewer than 128 graph scratch allocations per token in every schedule,
-    // including T8 projection concatenation and legacy one-row controls.
-    let payload = t * (controls + attention + ffn) * 4 + t * 128 * 256;
-    let scratch = 2 * payload + MIB as u128;
-    let external = if c.layer_types[layer] {
-        0
-    } else {
-        // Scores are charged here even when they fit in graph scratch. This
-        // bounds the >8M-element separately allocated attention score path.
-        t * 4
-            * (c.heads as u128 * end as u128
-                + end.div_ceil(c.index_pool) as u128
-                + c.q_rank as u128
-                + c.kv_rank as u128
-                + 2 * c.index_dim as u128)
-    };
-    Ok((
-        usize::try_from(scratch).map_err(|_| Error::Invalid("GLM wide workspace overflow"))?,
-        usize::try_from(external).map_err(|_| Error::Invalid("GLM wide workspace overflow"))?,
-    ))
+    layer_workspace_bytes(c, layer, tokens, end).ok_or(Error::Invalid("GLM wide workspace overflow"))
 }
 
 fn wide_groups(

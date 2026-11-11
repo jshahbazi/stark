@@ -4,9 +4,11 @@ import hashlib
 import json
 from dataclasses import replace
 
+import numpy as np
 import pytest
 from test_cli import source_tooling  # noqa: F401
 from test_qwen35_vision import vision_fixture
+from test_streaming import save_tensors, tensor_bytes
 from tokenizers import Tokenizer, models
 
 from stark_convert import cli, vision_contract
@@ -123,6 +125,69 @@ def test_vision_conversion_publishes_complete_runtime_supported_artifact(
     assert json.loads((output / "conversion.json").read_text()) == receipt
 
 
+def test_pinned_bf16_predictor_conversion_binds_schema3_components(vision_source, tmp_path, monkeypatch):
+    # Eight-wide synthetic tensors exercise the official-source orchestration;
+    # their reduced geometry cannot qualify the actual checkpoint or runtime.
+    config_path = vision_source / "config.json"
+    config = json.loads(config_path.read_text())
+    config["text_config"]["mtp_num_hidden_layers"] = 1
+    config_path.write_text(json.dumps(config))
+    weights = vision_source / "model.safetensors"
+    _, infos = read_safetensors_header(weights)
+    tensors = {
+        name: (info.dtype, np.frombuffer(tensor_bytes(info), dtype="<u2").copy().reshape(info.shape))
+        for name, info in infos.items()
+    }
+    for name, value in list(tensors.items()):
+        if name.startswith("model.language_model.layers.1."):
+            tensors[name.replace("model.language_model.layers.1.", "mtp.layers.0.")] = value
+    for name in ("pre_fc_norm_embedding", "pre_fc_norm_hidden", "norm"):
+        tensors[f"mtp.{name}.weight"] = tensors["model.language_model.norm.weight"]
+    tensors["mtp.fc.weight"] = "BF16", np.zeros((8, 16), dtype="<u2")
+    save_tensors(weights, tensors)
+    monkeypatch.setitem(vision_contract._HASHES, "config.json", hashlib.sha256(config_path.read_bytes()).hexdigest())
+    monkeypatch.setattr(
+        vision_contract,
+        "_WEIGHT_FILES",
+        {weights.name: ("weights", weights.stat().st_size, hashlib.sha256(weights.read_bytes()).hexdigest())},
+    )
+    # The synthetic tokenizer must meet the same normalized-output allowlist
+    # boundary without pretending to have the production tokenizer identity.
+    from stark_convert.metadata import _add_tokens
+
+    tokenizer = Tokenizer.from_file(str(vision_source / "tokenizer.json"))
+    _add_tokens(tokenizer, json.loads((vision_source / "tokenizer_config.json").read_text()))
+    expected_tokenizer = tmp_path / "normalized-tokenizer.json"
+    tokenizer.save(str(expected_tokenizer))
+    monkeypatch.setattr(cli, "OUTPUT_TOKENIZER_SHA256", hashlib.sha256(expected_tokenizer.read_bytes()).hexdigest())
+
+    output = tmp_path / "output"
+    receipt = cli.convert(vision_source, output, repo=REPO, artifact_mode="vision-language", chunk_bytes=4096)
+    converted = json.loads((output / "config.json").read_text())
+    contract = converted["artifact_contract"]
+    assert contract == receipt["artifact_contract"]
+    assert contract["schema_version"] == 3
+    assert contract["family"] == {"profile": "qwen35-dense-bf16-merged-v2", "version": 2}
+    assert contract["source"]["repo"] == REPO and contract["source"]["revision"] == REVISION
+    assert contract["source"]["hashes"] == vision_contract._HASHES
+    assert contract["component_hashes"] == {
+        name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in cli.COMPONENT_FILES
+    }
+    assert receipt["native_qualification"] is None
+    assert contract["qualification"] == "unverified"
+    assert converted["mtp_config"]["input_norm_config"]["scale_offset"] == 1.0
+    assert converted["decoder_config"]["transformer_config"]["layer_configs"][1]["rope_config"]["type"] == (
+        "Qwen35MRoPEConfig"
+    )
+    assert converted["mtp_config"]["transformer_config"]["layer_configs"][0]["rope_config"]["type"] == (
+        "UnscaledRoPEConfig"
+    )
+    metadata, written = read_safetensors_header(output / "model.safetensors")
+    assert len([name for name in written if name.startswith("mtp.")]) == 12
+    assert any(name.startswith("vision.") for name in written)
+    assert json.loads(metadata["mtp.fusion.weights.spec"]) == {"type": "FullPrecisionSpec", "layout": "output_input"}
+
+
 def test_vision_source_manifest_replay_preserves_mode_and_all_metadata(vision_source, tmp_path):
     snapshot = resolve_source(vision_source, repo=REPO, artifact_mode="vision-language")
     assert snapshot.revision == REVISION
@@ -229,7 +294,7 @@ def test_cli_native_vision_without_records_fails_before_source_resolution(tmp_pa
     assert cli.main() == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert json.loads(captured.err) == {"status": "error", "error_category": "UnsupportedConversion"}
+    assert json.loads(captured.err) == {"status": "error", "error_category": "unsupported_format_or_config"}
     assert not (tmp_path / "output").exists()
 
 

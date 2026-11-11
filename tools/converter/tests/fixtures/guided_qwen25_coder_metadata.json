@@ -1,0 +1,281 @@
+{
+  "provenance": {
+    "captured": "2026-11-08",
+    "source": "Hugging Face immutable revision metadata via family_catalog(qwen2, planning=True)",
+    "contents": "Metadata only; no weights, prompts, responses or native qualification."
+  },
+  "items": [
+    {
+      "id": "95428ed88aabc7185c5d3a5f28302490",
+      "repo": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+      "revision": "ea3f2471cf1b1f0db85067f1ef93848e38e88c25",
+      "name": "Qwen2.5-Coder-0.5B-Instruct",
+      "parameter_count": 494032768,
+      "size_label": "0.5B",
+      "weight_bytes": 988097824,
+      "quantization": "BF16",
+      "artifact_modes": [
+        "text"
+      ],
+      "downloadable": true,
+      "planning": {
+        "status": "available",
+        "architecture": "qwen2",
+        "context_limit": 32768,
+        "attention_layers": 24,
+        "query_heads": 14,
+        "kv_heads": 2,
+        "head_dim": 64,
+        "hidden_size": 896,
+        "download_bytes": 999604233,
+        "task_tags": [
+          "code"
+        ],
+        "license": null,
+        "chat_template_available": true,
+        "supports_tools": true,
+        "tool_parser": "qwen3-hermes-v1",
+        "blockers": []
+      },
+      "license": null
+    },
+    {
+      "id": "320a87cc423b34ed8bb26502dbc503d1",
+      "repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+      "revision": "2e1fd397ee46e1388853d2af2c993145b0f1098a",
+      "name": "Qwen2.5-Coder-1.5B-Instruct",
+      "parameter_count": 1543714304,
+      "size_label": "1.5B",
+      "weight_bytes": 3087467144,
+      "quantization": "BF16",
+      "artifact_modes": [
+        "text"
+      ],
+      "downloadable": true,
+      "planning": {
+        "status": "available",
+        "architecture": "qwen2",
+        "context_limit": 32768,
+        "attention_layers": 28,
+        "query_heads": 12,
+        "kv_heads": 2,
+        "head_dim": 128,
+        "hidden_size": 1536,
+        "download_bytes": 3098973788,
+        "task_tags": [
+          "code"
+        ],
+        "license": null,
+        "chat_template_available": true,
+        "supports_tools": true,
+        "tool_parser": "qwen3-hermes-v1",
+        "blockers": []
+      },
+      "license": null
+    },
+    {
+      "id": "dacbc899ae25c3cad072bd0879597927",
+      "repo": "Qwen/Qwen2.5-Coder-1.5B",
+      "revision": "df3ce67c0e24480f20468b6ef2894622d69eb73b",
+      "name": "Qwen2.5-Coder-1.5B",
+      "parameter_count": 1543714304,
+      "size_label": "1.54B",
+      "weight_bytes": 3087467144,
+      "quantization": "BF16",
+      "artifact_modes": [
+        "text"
+      ],
+      "downloadable": true,
+      "planning": {
+        "status": "available",
+        "architecture": "qwen2",
+        "context_limit": 32768,
+        "attention_layers": 28,
+        "query_heads": 12,
+        "kv_heads": 2,
+        "head_dim": 128,
+        "hidden_size": 1536,
+        "download_bytes": 3098972461,
+        "task_tags": [
+          "code"
+        ],
+        "license": null,
+        "chat_template_available": true,
+        "supports_tools": true,
+        "tool_parser": "qwen3-hermes-v1",
+        "blockers": []
+      },
+      "license": null
+    },
+    {
+      "id": "26d9c2788552ac1d860166482f5f92ba",
+      "repo": "Qwen/Qwen2.5-Coder-3B-Instruct",
+      "revision": "488639f1ff808d1d3d0ba301aef8c11461451ec5",
+      "name": "Qwen2.5-Coder-3B-Instruct",
+      "parameter_count": 3085938688,
+      "size_label": "3B",
+      "weight_bytes": 6171927000,
+      "quantization": "BF16",
+      "artifact_modes": [
+        "text"
+      ],
+      "downloadable": true,
+      "planning": {
+        "status": "available",
+        "architecture": "qwen2",
+        "context_limit": 32768,
+        "attention_layers": 36,
+        "query_heads": 16,
+        "kv_heads": 2,
+        "head_dim": 128,
+        "hidden_size": 2048,
+        "download_bytes": 6183465285,
+        "task_tags": [
+          "code"
+        ],
+        "license": null,
+        "chat_template_available": true,
+        "supports_tools": true,
+        "tool_parser": "qwen3-hermes-v1",
+        "blockers": []
+      },
+      "license": null
+    },
+    {
+      "id": "385ca36aefe881f927b591321a0dded8",
+      "repo": "Qwen/Qwen2.5-Coder-7B-Instruct",
+      "revision": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+      "name": "Qwen2.5-Coder-7B-Instruct",
+      "parameter_count": 7615616512,
+      "size_label": "7B",
+      "weight_bytes": 15231271864,
+      "quantization": "BF16",
+      "artifact_modes": [
+        "text"
+      ],
+      "downloadable": true,
+      "planning": {
+        "status": "available",
+        "architecture": "qwen2",
+        "context_limit": 32768,
+        "attention_layers": 28,
+        "query_heads": 28,
+        "kv_heads": 4,
+        "head_dim": 128,
+        "hidden_size": 3584,
+        "download_bytes": 15242807397,
+        "task_tags": [
+          "code"
+        ],
+        "license": null,
+        "chat_template_available": true,
+        "supports_tools": true,
+        "tool_parser": "qwen3-hermes-v1",
+        "blockers": []
+      },
+      "license": null
+    },
+    {
+      "id": "0e5ced4553675097b24d0f58a3711972",
+      "repo": "Qwen/Qwen2.5-Coder-7B",
+      "revision": "0396a76181e127dfc13e5c5ec48a8cee09938b02",
+      "name": "Qwen2.5-Coder-7B",
+      "parameter_count": 7615616512,
+      "size_label": "7.62B",
+      "weight_bytes": 15231271864,
+      "quantization": "BF16",
+      "artifact_modes": [
+        "text"
+      ],
+      "downloadable": true,
+      "planning": {
+        "status": "available",
+        "architecture": "qwen2",
+        "context_limit": 32768,
+        "attention_layers": 28,
+        "query_heads": 28,
+        "kv_heads": 4,
+        "head_dim": 128,
+        "hidden_size": 3584,
+        "download_bytes": 15242806082,
+        "task_tags": [
+          "code"
+        ],
+        "license": null,
+        "chat_template_available": true,
+        "supports_tools": true,
+        "tool_parser": "qwen3-hermes-v1",
+        "blockers": []
+      },
+      "license": null
+    },
+    {
+      "id": "270762716e84b90cfe3aa02cada49bd9",
+      "repo": "Qwen/Qwen2.5-Coder-14B-Instruct",
+      "revision": "aedcc2d42b622764e023cf882b6652e646b95671",
+      "name": "Qwen2.5-Coder-14B-Instruct",
+      "parameter_count": 14770033664,
+      "size_label": "14B",
+      "weight_bytes": 29540133960,
+      "quantization": "BF16",
+      "artifact_modes": [
+        "text"
+      ],
+      "downloadable": true,
+      "planning": {
+        "status": "available",
+        "architecture": "qwen2",
+        "context_limit": 32768,
+        "attention_layers": 48,
+        "query_heads": 40,
+        "kv_heads": 8,
+        "head_dim": 128,
+        "hidden_size": 5120,
+        "download_bytes": 29551689219,
+        "task_tags": [
+          "code"
+        ],
+        "license": null,
+        "chat_template_available": true,
+        "supports_tools": true,
+        "tool_parser": "qwen3-hermes-v1",
+        "blockers": []
+      },
+      "license": null
+    },
+    {
+      "id": "b3d994c0f1f44225f022e39cc8b1f82e",
+      "repo": "Qwen/Qwen2.5-Coder-32B-Instruct",
+      "revision": "381fc969f78efac66bc87ff7ddeadb7e73c218a7",
+      "name": "Qwen2.5-Coder-32B-Instruct",
+      "parameter_count": 32763876352,
+      "size_label": "32B",
+      "weight_bytes": 65527841688,
+      "quantization": "BF16",
+      "artifact_modes": [
+        "text"
+      ],
+      "downloadable": true,
+      "planning": {
+        "status": "available",
+        "architecture": "qwen2",
+        "context_limit": 32768,
+        "attention_layers": 64,
+        "query_heads": 40,
+        "kv_heads": 8,
+        "head_dim": 128,
+        "hidden_size": 5120,
+        "download_bytes": 65539412723,
+        "task_tags": [
+          "code"
+        ],
+        "license": null,
+        "chat_template_available": true,
+        "supports_tools": true,
+        "tool_parser": "qwen3-hermes-v1",
+        "blockers": []
+      },
+      "license": null
+    }
+  ]
+}

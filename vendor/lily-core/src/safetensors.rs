@@ -116,6 +116,8 @@ impl Checkpoint {
                 format!("lm_head.{tail}")
             } else if let Some(tail) = name.strip_prefix("language_model.mtp.") {
                 format!("mtp.{tail}")
+            } else if let Some(tail) = name.strip_prefix("vision_tower.") {
+                format!("model.visual.{tail}")
             } else {
                 name
             };

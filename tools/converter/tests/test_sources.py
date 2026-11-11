@@ -86,6 +86,61 @@ def test_manifest_replays_without_network_and_is_private(tmp_path):
         snapshot.write_manifest(manifest)
 
 
+@pytest.mark.parametrize(
+    "repo,dim,layers",
+    [
+        ("google/gemma-4-E2B-it", 1536, 35),
+        ("google/gemma-4-E4B-it", 2560, 42),
+    ],
+)
+def test_registered_gemma_image_manifests_replay_offline_and_keep_pin_binding(
+    tmp_path, monkeypatch, repo, dim, layers
+):
+    import copy
+
+    from stark_convert.adapters.gemma4_vision import GEOMETRY, PROFILES, TOKENS
+    from stark_convert.registry import get_model
+
+    root = files(tmp_path / "source")
+    config = {
+        "model_type": "gemma4",
+        "text_config": {
+            "model_type": "gemma4_text",
+            "hidden_size": dim,
+            "num_hidden_layers": layers,
+            "hidden_size_per_layer_input": 256,
+        },
+        "vision_config": dict(GEOMETRY),
+        "image_token_id": TOKENS["image"],
+        "boi_token_id": TOKENS["vision_start"],
+        "eoi_token_id": TOKENS["vision_end"],
+        "video_token_id": TOKENS["video"],
+        "audio_token_id": TOKENS["audio"],
+    }
+    (root / "config.json").write_text(json.dumps(config))
+    (root / "processor_config.json").write_text("{}")
+    (root / "chat_template.jinja").write_text("synthetic template")
+    entry = copy.deepcopy(get_model(repo))
+    entry.pop("profile_source", None)
+    original = sources.get_model
+    monkeypatch.setattr(sources, "get_model", lambda value: entry if value == repo else original(value))
+    snapshot = resolve_source(root, repo=repo, revision=PROFILES[repo]["revision"], artifact_mode="vision-language")
+    path = tmp_path / "manifest.json"
+    snapshot.write_manifest(path)
+    replay = resolve_source(repo, source_manifest=path, offline=True, hub=object(), artifact_mode="vision-language")
+    assert replay.receipt() == snapshot.receipt()
+    changed = json.loads(path.read_text())
+    changed["primary_revision"] = "0" * 40
+    for source in changed["sources"]:
+        source["revision"] = "0" * 40
+    for record in changed["files"]:
+        record["revision"] = "0" * 40
+    invalid = tmp_path / "wrong-pin.json"
+    invalid.write_text(json.dumps(changed))
+    with pytest.raises(ConversionError, match="offline source manifest"):
+        resolve_source(repo, source_manifest=invalid, offline=True, hub=object(), artifact_mode="vision-language")
+
+
 def test_canonical_weights_skip_unrelated_containers_and_extra_tensors(tmp_path):
     root = files(tmp_path / "source")
     (root / "unrelated.safetensors").write_bytes(b"not used")

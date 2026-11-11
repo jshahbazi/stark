@@ -9,10 +9,6 @@ use crate::tensor::{DType, Tensor};
 use crate::weights::QuantWeights;
 
 const SOURCE: &str = include_str!("metal/moe.metal");
-
-#[cfg(test)]
-#[path = "moe_specialization_tests.rs"]
-mod specialization_tests;
 const DECODE_ROWS_SOURCE: &str = concat!(
     include_str!("metal/moe.metal"),
     "\n",
@@ -382,15 +378,7 @@ pub fn moe_gather_gemv_gate_up(
     moe_gather_gemv_gate_up_named(
         ctx,
         pass,
-        if gate.in_features() == 2560
-            && n_per_expert == 640
-            && gate.group_size == 64
-            && up.group_size == 64
-        {
-            "stark_moe_gate_up_h2560_i640_g64"
-        } else {
-            "moe_gather_gemv_q4_gate_up"
-        },
+        "moe_gather_gemv_q4_gate_up",
         gate,
         up,
         n_per_expert,
@@ -421,12 +409,6 @@ pub fn moe_gather_gemv_gate_up_named(
         "expert gate/up shapes or group sizes differ"
     );
     let (rows, k_in) = (gate.out_features(), gate.in_features());
-    if name == "stark_moe_gate_up_h2560_i640_g64" {
-        ensure!(
-            k_in == 2560 && n_per_expert == 640 && gate.group_size == 64,
-            "specialized gate/up geometry"
-        );
-    }
     ensure!(rows.is_multiple_of(n_per_expert), "bad stacked expert rows");
     ensure!(
         k_in.is_multiple_of(gate.group_size) && gate.group_size.is_multiple_of(32),

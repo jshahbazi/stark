@@ -10,6 +10,15 @@ import pytest
 from stark_convert import hybrid_prepare as hybrid
 
 
+@pytest.fixture(autouse=True)
+def synthetic_download_disk_headroom(monkeypatch, tmp_path):
+    # Download tests use byte-sized local stand-ins. Their admission must not
+    # depend on how much disk happens to be free on the test host. Individual
+    # disk-rejection cases can override this fixture's probe.
+    usage = hybrid.shutil.disk_usage(tmp_path)
+    monkeypatch.setattr(hybrid.shutil, "disk_usage", lambda _: usage._replace(free=16 * 1024**3))
+
+
 def metadata(root: Path, architecture="glm5_next"):
     (root / "config.json").write_text(
         json.dumps(
@@ -414,12 +423,13 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
     output = tmp_path / "prepared"
     try:
         controller.begin_install_progress(controller.epoch, "native")
-        result = controller.run_converter(
+        result, failure_category = controller.run_converter(
             [sys.executable, "-I", "-B", "-c", bootstrap, str(output), str(weight_bytes)],
             dict(os.environ, HF_HUB_OFFLINE="1"),
             controller.epoch,
         )
         assert controller.converter is None
+        assert failure_category is None
         assert controller.models == [] and controller.worker is None
         events = [json.loads(line) for line in controller.output.getvalue().splitlines()]
         assert all(event["event"] == "progress" for event in events)

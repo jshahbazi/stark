@@ -4,7 +4,8 @@ use thiserror::Error;
 use crate::{
     array::size_for_shape,
     backends::common::{
-        Backend, CommandBuffer, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context, Kernels,
+        Backend, Buffer, CommandBuffer, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context,
+        Kernels,
         gpu_types::ActivationType,
         kernel::{
             Conv1dDecodeKernel, Conv1dPackKernel, Conv1dScanKernel, SSDPrefill64Kernel, SSDPrefillKernel,
@@ -31,6 +32,10 @@ pub struct Mamba2State<B: Backend> {
 }
 
 impl<B: Backend> MixerState<B> for Mamba2State<B> {
+    fn resident_payload_bytes(&self) -> Option<usize> {
+        self.conv_state.size().checked_add(self.ssm_state.size())
+    }
+
     fn prepare(
         &mut self,
         _context_length: u32,

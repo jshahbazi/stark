@@ -151,23 +151,22 @@ struct BeginnerSetupHost: View {
         var result = BeginnerSetupSnapshot()
         result.choices = (engine.beginnerReport?.items ?? []).map { item in
             BeginnerModelChoice(id: item.id, name: item.displayName,
-                summary: item.recommendationReason,
+                summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
-                contextTokens: item.contextTokens,
-                source: item.source, revision: item.revision,
-                qualification: ([item.qualification, "License: " + item.license,
-                    "Estimated runtime memory: " + ByteCountFormatter.string(fromByteCount: item.runtimeBytes, countStyle: .memory)] + item.caveats).joined(separator: "\n"),
+                contextTokens: item.contextTokens, source: item.source, revision: item.revision,
+                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL,
                 variantName: item.variantName)
                 .resolvingInstalledCopy(as: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) })
         }
-        // Keep the exact operation choice available if another surface refreshes recommendations.
         if let item = engine.beginnerInstallChoice,
            !result.choices.contains(where: { $0.id == item.id }),
            engine.beginnerInstallState != "idle", (session.installingChoiceID == item.id || session.selectedChoiceID == item.id) {
-            result.choices.append(BeginnerModelChoice(id: item.id, name: item.displayName, summary: "Your selected starting model.",
+            result.choices.append(BeginnerModelChoice(id: item.id, name: item.displayName,
+                summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens, source: item.source, revision: item.revision,
-                qualification: item.qualification, variantName: item.variantName))
+                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL,
+                variantName: item.variantName))
         }
         result.choicesLoading = engine.beginnerChoicesLoading
         result.choicesError = engine.beginnerChoicesError
@@ -182,8 +181,8 @@ struct BeginnerSetupHost: View {
         result.canInstall = !engine.busy && !engine.beginnerChoicesLoading
         result.canStartModel = !engine.busy
         result.runningModelID = engine.loadedID
-        result.runningModelName = engine.activeModel?.beginnerDisplayName ?? ""
-        result.runningModelVariantName = engine.activeModel?.beginnerVersion ?? ""
+        result.runningModelName = engine.activeModel?.displayName ?? ""
+        result.runningModelVariantName = engine.activeModel?.display?.quantization ?? ""
         result.runningModelRepositoryURL = engine.activeModel?.display?.repositoryURL
         let runningChoiceID = engine.beginnerReport?.items.first { $0.installedIDs.contains(engine.loadedID) }?.id
         if let running = result.choices.first(where: {
@@ -281,13 +280,20 @@ struct BeginnerChatView: View {
     let tryAnotherModel: () -> Void
 
     var body: some View {
-        // Status and attachment rows can exceed the available window height.
-        // Keep the footer and its padding reachable when the chat cannot fit.
-        ViewThatFits(in: .vertical) {
-            content
-            ScrollView { content }
-        }
-        .frame(minWidth: 520, minHeight: 600)
+        VStack(alignment: .leading, spacing: 14) {
+            GeometryReader { viewport in
+                ScrollView {
+                    content.frame(minHeight: viewport.size.height, alignment: .topLeading)
+                }
+            }
+            if engine.loadedMode == .chat, !engine.loadedID.isEmpty {
+                HStack {
+                    Button("Guided setup", action: setup).buttonStyle(.link)
+                    Spacer()
+                    Button("Try a different model", action: tryAnotherModel).disabled(!engine.modelReady)
+                }.font(.caption)
+            }
+        }.padding(20).frame(minWidth: 520, minHeight: 600)
     }
 
     private var content: some View {
@@ -301,17 +307,12 @@ struct BeginnerChatView: View {
                 RunningModelLabel(engine: engine).font(.callout.weight(.medium))
                 if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
                 ChatContentView(engine: engine)
-                HStack {
-                    Button("Guided setup", action: setup).buttonStyle(.link)
-                    Spacer()
-                    Button("Try a different model", action: tryAnotherModel).disabled(!engine.modelReady)
-                }.font(.caption)
             } else {
                 Text("Start a model with guided setup, then come back for your first chat.").foregroundStyle(.secondary)
                 Button("Continue setup", action: setup).buttonStyle(.borderedProminent)
                 Spacer()
             }
-        }.padding(20)
+        }
     }
 }
 

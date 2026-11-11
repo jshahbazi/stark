@@ -215,7 +215,7 @@ extension EngineController {
         switch scenario {
         case "worker-pipe-small-guided-reply":
             let replies = Pipe()
-            engine.observeWorkerOutput(replies.fileHandleForReading)
+            engine.observeBackendOutput(replies.fileHandleForReading)
             defer {
                 replies.fileHandleForReading.readabilityHandler = nil
                 try? replies.fileHandleForWriting.close()
@@ -237,7 +237,7 @@ extension EngineController {
                 replies.fileHandleForReading.readabilityHandler != nil
         case "worker-pipe-fragmented-and-coalesced-events":
             let replies = Pipe()
-            engine.observeWorkerOutput(replies.fileHandleForReading)
+            engine.observeBackendOutput(replies.fileHandleForReading)
             defer {
                 replies.fileHandleForReading.readabilityHandler = nil
                 try? replies.fileHandleForWriting.close()
@@ -263,7 +263,7 @@ extension EngineController {
             return pump({ engine.gpuMemoryBytes == 333 }) && engine.reader.sync { engine.pending.isEmpty }
         case "worker-pipe-eof-clears-handler":
             let replies = Pipe()
-            engine.observeWorkerOutput(replies.fileHandleForReading)
+            engine.observeBackendOutput(replies.fileHandleForReading)
             defer {
                 replies.fileHandleForReading.readabilityHandler = nil
                 try? replies.fileHandleForReading.close()
@@ -271,6 +271,47 @@ extension EngineController {
             guard replies.fileHandleForReading.readabilityHandler != nil else { return false }
             try? replies.fileHandleForWriting.close()
             return pump({ replies.fileHandleForReading.readabilityHandler == nil })
+        case "resource-budget-memory-derived":
+            for mib in [16, 64, 65, 256, 1024] {
+                let input = mib * 1024 * 1024
+                let wire = 6 * input + 2 * 1024 * 1024
+                guard engine.applyResourceBudget(["resource_budget": [
+                    "request_budget_mib": mib, "input_bytes": input, "max_request_bytes": wire
+                ]]), engine.workerWireLimit() == wire else { return false }
+            }
+            let prior = engine.workerWireLimit()
+            for invalid: [String: Any] in [
+                ["request_budget_mib": Int.max, "input_bytes": Int.max, "max_request_bytes": Int.max],
+                ["request_budget_mib": 0, "input_bytes": 0, "max_request_bytes": 2 * 1024 * 1024],
+                ["request_budget_mib": 256, "input_bytes": 1, "max_request_bytes": 1]
+            ] {
+                guard !engine.applyResourceBudget(["resource_budget": invalid]),
+                      engine.workerWireLimit() == prior else { return false }
+            }
+            return true
+        case "backend-short-replies":
+            let backend = Pipe()
+            engine.observeBackendOutput(backend.fileHandleForReading)
+            defer {
+                backend.fileHandleForReading.readabilityHandler = nil
+                try? backend.fileHandleForWriting.close()
+                try? backend.fileHandleForReading.close()
+            }
+            engine.state = "starting"
+            for message in ["Fixture backend ready", "Fixture next reply"] {
+                let event = ["event": "status", "state": "idle", "message": message]
+                var bytes = try! JSONSerialization.data(withJSONObject: event)
+                bytes.append(10)
+                backend.fileHandleForWriting.write(bytes)
+                // The writer deliberately remains open, as in the real app.
+                guard pump({ engine.state == "idle" && engine.message == message }) else { return false }
+            }
+            return true
+        case "beginner-files-task-transport":
+            engine.requestBeginnerModels(task: "files")
+            let request = command()
+            return engine.beginnerChoicesLoading && request["command"] as? String == "guided_models"
+                && request["task"] as? String == "files"
         case "beginner-recommendation-fences":
             engine.requestBeginnerModels(task: "unsure")
             let request = command()
@@ -678,7 +719,37 @@ extension EngineController {
                 "max_context_tokens": 8192, "context_tokens": 8192, "max_output_tokens": 4096,
                 "max_new_tokens": 512, "mtp": capability, "mtp_enabled": true]
             engine.apply(ready)
-            guard engine.supportsMTP, engine.mtpEnabled else { return false }
+            guard engine.supportsMTP, engine.mtpEnabled, engine.defaultMTPEnabled else { return false }
+            var gemmaReady = ready
+            var gemmaCapability = capability
+            gemmaCapability["verification"] = "gemma4-e2b-target-verify-v1"
+            gemmaReady["mtp"] = gemmaCapability; gemmaReady["mtp_enabled"] = false
+            engine.apply(gemmaReady)
+            guard engine.supportsMTP, !engine.mtpEnabled, !engine.defaultMTPEnabled else { return false }
+            engine.apply(ready)
+            guard engine.defaultMTPEnabled else { return false }
+            let originalModels = engine.models
+            for (group, family, precision, enabled) in [
+                ("repo:google/gemma-4-E2B-it", "gemma4_text", "BF16", false),
+                ("repo:Qwen/Qwen3.5-0.8B", "qwen3_5", "BF16", false),
+                ("repo:Qwen/Qwen3.5-0.8B", "qwen3_5", "4-bit", true),
+                ("repo:Qwen/Qwen3.5-4B", "qwen3_5", "BF16", true),
+            ] {
+                guard let display = InstalledModelDisplay(["schema_version": 1, "group_id": group,
+                    "group_name": "Fixture", "family_id": family, "quantization": precision]) else { return false }
+                engine.models = [InstalledModel(id: "fixture-model", name: "Fixture", path: "/fixture",
+                    apiID: "fixture", display: display)]
+                guard engine.defaultMTPEnabled == enabled else { return false }
+            }
+            guard let unverifiedBF16 = InstalledModelDisplay(["schema_version": 1,
+                "group_id": "installed:fixture-model", "group_name": "Fixture", "quantization": "BF16"]) else { return false }
+            engine.models = [InstalledModel(id: "fixture-model", name: "Fixture", path: "/fixture",
+                apiID: "Qwen/Qwen3.5-0.8B", display: unverifiedBF16, source: "huggingface:Qwen/Qwen3.5-0.8B")]
+            guard !engine.defaultMTPEnabled else { return false }
+            engine.models = [InstalledModel(id: "fixture-model", name: "Qwen/Qwen3.5-0.8B", path: "/fixture",
+                apiID: "Qwen/Qwen3.5-0.8B", display: unverifiedBF16, source: "local:/fixture")]
+            guard engine.defaultMTPEnabled else { return false }
+            engine.models = originalModels
             let options = engine.options
             guard !engine.configure(options, mtpEnabled: false, modelID: "stale"), noCommandSent(),
                   engine.configure(options, mtpEnabled: false, modelID: "fixture-model") else { return false }
@@ -925,7 +996,8 @@ extension EngineController {
             guard let payload = try? JSONSerialization.jsonObject(with: Data(backendError.utf8)) as? [String: Any],
                   let registry = payload["registry"] as? [String: Any], let report = payload["report"] as? [String: Any] else { return false }
             engine.apply(["event": "model_families", "report": registry])
-            guard let families = engine.modelFamilies?.families, families.count == 15,
+            guard let families = engine.modelFamilies?.families,
+                  let declared = registry["families"] as? [[String: Any]], families.count == declared.count,
                   let classifier = families.first(where: { $0.modelKind == "classifier" }),
                   classifier.modes.values.allSatisfy({ $0.status == .unsupported }),
                   let qwen3 = families.first(where: { $0.id == "qwen3" }),
@@ -984,8 +1056,8 @@ extension EngineController {
             raw["families"] = Array(families.reversed())
             guard let registry = ModelFamilyRegistry(raw),
                   let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
-            return rows.map(\.name) == ["Gemma 2", "Gemma 3", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
-                "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.8 Flash Next", "SmolLM3"] &&
+            return rows.map(\.name) == ["Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
+                "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
             engine.apply(["event": "models", "models": [
@@ -1004,6 +1076,31 @@ extension EngineController {
             for key in ["family_id", "quantization", "weight_bytes", "source_revision"] { unknown[key] = NSNull() }
             guard let descriptor = InstalledModelDisplay(unknown) else { return false }
             return descriptor.familyID == nil && descriptor.quantization == nil && descriptor.weightBytes == nil && descriptor.sourceRevision == nil
+        case "models-display-native-families":
+            for (familyID, familyName, repository) in [
+                ("olmo3", "OLMo 3", "allenai/Olmo-3-7B-Instruct"),
+                ("gemma3", "Gemma 3 images", "google/gemma-3-4b-it"),
+                ("qwen3_5_moe", "Qwen3.5 MoE", "mlx-community/Qwen3.5-35B-A3B-4bit"),
+                ("gemma4_text", "Gemma 4", "google/gemma-4-E2B-it")
+            ] {
+                var raw = modelDisplay("repo:" + repository, name: repository.split(separator: "/").last.map(String.init) ?? repository)
+                raw["family_id"] = familyID
+                guard ModelFamily.displayName(for: familyID) == familyName,
+                      let display = InstalledModelDisplay(raw),
+                      display.repositoryURL?.absoluteString == "https://huggingface.co/" + repository,
+                      display.familyID == familyID, display.quantization == "BF16",
+                      display.weightBytes == 1_190_000_000,
+                      display.sourceRevision == String(repeating: "a", count: 40) else { return false }
+                let inventory = ModelsInventory(
+                    models: [InstalledModel(id: familyID, name: repository, path: "/private/" + familyID,
+                                            apiID: familyID, display: display)],
+                    loadedID: "", registry: nil
+                )
+                guard inventory.groups.count == 1,
+                      inventory.groups[0].family == familyName,
+                      inventory.groups[0].name == repository.split(separator: "/").last.map(String.init) else { return false }
+            }
+            return true
         case "models-display-malformed":
             let mutations: [(String, Any)] = [
                 ("schema_version", 2), ("schema_version", true), ("group_id", ""),
@@ -1307,6 +1404,45 @@ extension EngineController {
             return !inventory.groups[0].models[0].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models[1].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models.filter(\.isRunning).map(\.id) == ["text"]
+        case "models-readable-names":
+            var lily = modelDisplay("repo:owner/Qwen3.8-Flash-Next-lily-q4-xl", name: "Qwen3.8-Flash-Next-lily-q4-xl")
+            lily["quantization"] = "Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)"
+            var mlxServe = modelDisplay("repo:owner/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit", name: "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit")
+            mlxServe["quantization"] = "MLX-Serve mixed 4/8-bit"
+            var mlx = modelDisplay("repo:owner/Qwen3.8-Flash-Next-MLX-mixed-4_8bit", name: "Qwen3.8-Flash-Next-MLX-mixed-4_8bit")
+            mlx["quantization"] = "MLX mixed 4/8-bit"
+            var compact = modelDisplay("repo:owner/Qwen3-4B-4bit", name: "Qwen3-4B-4bit")
+            compact["quantization"] = "4-bit"
+            let saved = "qwen38-flash-next-lily-q4-xl-0f94842e"
+            let dense = modelDisplay("repo:owner/Qwen3-0.6B", name: "Qwen3-0.6B")
+            let fixtures = [variant("lily", name: saved, display: lily),
+                            variant("mlx-serve", name: "qwen38-flash-next-mixed-4-8bit-788c07a8", display: mlxServe),
+                            variant("mlx", name: "qwen38-flash-next-mixed-4-8bit-b2c422f3", display: mlx),
+                            variant("mixed", name: "qwen38-flash-next-mixed-4-8bit-788c07a8", display: nil),
+                            variant("small", name: "qwen3-4b-4bit", display: compact),
+                            variant("dense", name: "qwen3-dense", display: dense),
+                            variant("custom", name: "JevK5", display: nil)]
+            let inventory = ModelsInventory(models: fixtures, loadedID: "lily", registry: nil)
+            let rows = Dictionary(uniqueKeysWithValues: inventory.models.map { ($0.id, $0) })
+            guard rows["lily"]?.displayName == "Qwen3.8 Flash Next", rows["lily"]?.name == saved,
+                  rows["lily"]?.quantization == lily["quantization"] as? String,
+                  rows["lily"]?.variantLabel == "Lily q4",
+                  rows["mlx-serve"]?.displayName == "Qwen3.8 Flash Next", rows["mlx-serve"]?.variantLabel == "MLX-Serve",
+                  rows["mlx"]?.displayName == "Qwen3.8 Flash Next", rows["mlx"]?.variantLabel == "MLX",
+                  rows["mixed"]?.displayName == "Qwen3.8 Flash Next (Mixed 4/8-bit)",
+                  rows["small"]?.displayName == "Qwen3 4B", rows["custom"]?.displayName == "JevK5",
+                  rows["dense"]?.displayName == "Qwen3 Dense",
+                  ["mixed", "small", "custom", "dense"].allSatisfy({ rows[$0]?.variantLabel == nil }),
+                  inventory.runningGroup?.models.first?.variantLabel == "Lily q4" else { return false }
+            for query in [saved, "0f94842e", "Qwen3.8 Flash Next", "Lily q4"] {
+                guard ModelsInventory(models: fixtures, loadedID: "", registry: nil, query: query).models.contains(where: { $0.id == "lily" }) else { return false }
+            }
+            let serveResults = ModelsInventory(models: fixtures, loadedID: "", registry: nil, query: "MLX-Serve")
+            guard serveResults.models.map(\.id) == ["mlx-serve"] else { return false }
+            return ModelsInventory.readableName("My preferred model", display: InstalledModelDisplay(lily)) == "My preferred model"
+                && ModelsInventory.readableName("my-favorite-model", display: InstalledModelDisplay(lily)) == "My Favorite Model"
+                && ModelsInventory.readableName("experiment-deadbeef", display: nil) == "Experiment Deadbeef"
+                && ModelsInventory.readableName("---", display: nil) == "---"
         case "models-visible-row-name-sort":
             let aliases = [
                 variant("zeta", name: "Zeta", display: modelDisplay("owner/first", name: "Alpha")),
@@ -1536,6 +1672,19 @@ extension EngineController {
             var raw = future["report"] as! [String: Any]; raw["schema_version"] = 2; future["report"] = raw
             engine.apply(future)
             return engine.catalog == nil && engine.catalogLoading && !engine.supportsImages && engine.modelReady
+        case "catalog-unavailable-row":
+            var item = catalogItem("unsupported")
+            item["downloadable"] = false
+            guard FamilyModelCatalog(catalogReport("qwen3", items: [item])) == nil else { return false }
+            let reason = "Expert weights use 3-bit packing with groups of 128."
+            item["unavailable_reason"] = reason
+            engine.requestModelCatalog(familyID: "qwen3")
+            let request = command()
+            engine.apply(catalogReply(request, items: [item]))
+            guard let row = engine.catalog?.items.first, row.unavailableReason == reason,
+                  !row.downloadable else { return false }
+            engine.installCatalogItem(id: row.id)
+            return noCommandSent()
         case "catalog-provider-order":
             var small4 = catalogItem("small4"); small4["parameter_count"] = NSNull(); small4["quantization"] = "4-bit"
             var small8 = catalogItem("small8"); small8["parameter_count"] = NSNull(); small8["quantization"] = "8-bit"
@@ -2117,13 +2266,31 @@ extension EngineController {
             engine.apply(imageReady)
             engine.selectedID = "different-fixture"
             return engine.supportsImages && !engine.canAttachImage
+        case "image-limits-follow-model":
+            var retained = imageReady
+            retained["image_limits"] = ["max_source_pixels": 32_000_000,
+                "max_processed_pixels": 16_777_216, "max_image_tokens": 16_384]
+            engine.apply(retained)
+            guard engine.imageLimits?.processedPixels == 16_777_216,
+                  engine.imageLimits?.imageTokens == 16_384 else { return false }
+            var gemma = imageReady
+            gemma["image_limits"] = ["max_source_pixels": 32_000_000,
+                "max_processed_pixels": 645_120, "max_image_tokens": 280]
+            engine.apply(gemma)
+            guard engine.imageLimits?.processedPixels == 645_120,
+                  engine.imageLimits?.imageTokens == 280 else { return false }
+            engine.apply(imageReady)
+            guard engine.imageLimits == nil else { return false }
+            engine.apply(retained)
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            return !engine.supportsImages && engine.imageLimits == nil &&
+                ModelImageLimits(["max_source_pixels": true,
+                    "max_processed_pixels": 16_777_216, "max_image_tokens": 16_384]) == nil
         case "image-local-evidence":
             var verified = imageReady
             verified["image_verification"] = "locally_tested"
             engine.apply(verified)
-            guard engine.supportsImages, engine.imageVerification == "locally_tested",
-                  engine.imageVerificationNote.contains("Reference parity is unverified"),
-                  !engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            guard engine.supportsImages, engine.imageVerification == "locally_tested" else { return false }
             engine.pendingOptions = engine.options
             engine.pendingOptionsModelID = engine.loadedID
             engine.state = "configuring"
@@ -2134,18 +2301,15 @@ extension EngineController {
             var verified = imageReady
             verified["image_verification"] = "reference_verified"
             engine.apply(verified)
-            guard engine.supportsImages, engine.imageVerification == "reference_verified",
-                  engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            guard engine.supportsImages, engine.imageVerification == "reference_verified" else { return false }
             verified["images"] = false
             engine.apply(verified)
-            return !engine.supportsImages && engine.imageVerification == "unverified" &&
-                !engine.imageVerificationNote.contains("has reference-parity verification")
+            return !engine.supportsImages && engine.imageVerification == "unverified"
         case "image-unknown-evidence":
             var unsupported = imageReady
             unsupported["image_verification"] = "self-declared-reference-pass"
             engine.apply(unsupported)
-            guard engine.imageVerification == "unverified",
-                  !engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            guard engine.imageVerification == "unverified" else { return false }
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
             return !engine.supportsImages && engine.imageVerification == "unverified"
         case "image-install-check-clears":
@@ -2163,7 +2327,7 @@ extension EngineController {
                 engine.gpuMemoryBytes == nil && engine.gpuMemoryText == "GPU memory —" &&
                 !engine.supportsImages && engine.imageVerification == "unverified" &&
                 engine.messages.isEmpty && engine.draftImage == nil && engine.conversationImage == nil &&
-                staged().isEmpty && engine.message == "Checking image support on this Mac…"
+                staged().isEmpty && engine.message == "Loading model…"
         case "image-install-check-state-guard":
             try! engine.attachImage(bytes: imageBytes)
             engine.apply(["event": "image_check", "state": "checking"])
@@ -2415,6 +2579,8 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_worker_pipe_eof_removes_readability_handler(self):
         self.exercise("worker-pipe-eof-clears-handler")
+    def test_small_backend_replies_do_not_wait_for_pipe_close(self):
+        self.exercise("backend-short-replies")
 
     def test_connected_application_activity_does_not_show_playground_timing(self):
         self.exercise("generation-progress-external-activity")
@@ -2483,6 +2649,8 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_beginner_install_rejection_does_not_start_an_operation(self):
         self.exercise("beginner-rejected-install-does-not-start")
+    def test_beginner_files_task_reaches_guided_model_backend(self):
+        self.exercise("beginner-files-task-transport")
 
     def test_beginner_cancellation_preserves_the_current_worker_and_history(self):
         self.exercise("beginner-cancel-preserves-current")
@@ -2606,6 +2774,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_image_capability_requires_complete_negotiation(self):
         self.exercise("image-capability")
 
+    def test_image_limits_follow_loaded_model_and_clear_on_stop(self):
+        self.exercise("image-limits-follow-model")
+
     def test_vision_install_is_explicit_opt_in(self):
         self.exercise("vision-install-opt-in")
 
@@ -2651,7 +2822,12 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_model_display_metadata_cannot_change_runtime_capabilities(self):
         self.exercise("models-display-event")
 
-    def test_tool_labels_distinguish_protocol_support_and_never_grant_live_capabilities(self):
+    def test_installed_model_display_accepts_olmo3_and_gemma4_families(self):
+        self.exercise("models-display-native-families")
+
+    def test_tool_labels_distinguish_protocol_support_and_never_grant_live_capabilities(
+        self,
+    ):
         self.exercise("models-tool-support-labels")
 
     def test_malformed_display_keeps_exact_model_name_without_guessed_badges(self):
@@ -2724,7 +2900,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_restart_controls_stop_exact_model_and_restart_in_stopped_mode(self):
         self.exercise("restart-controls-stop-and-start")
 
-    def test_explicit_failed_start_retries_selected_model_without_clearing_on_busy_run(self):
+    def test_explicit_failed_start_retries_selected_model_without_clearing_on_busy_run(
+        self,
+    ):
         self.exercise("restart-controls-explicit-target-after-failed-start")
 
     def test_restart_controls_reject_running_busy_and_deleted_targets(self):
@@ -2735,6 +2913,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_grouped_text_and_image_variants_have_distinct_stored_mode_label(self):
         self.exercise("models-artifact-mode-label")
+
+    def test_readable_model_names_preserve_saved_identity_precision_and_search(self):
+        self.exercise("models-readable-names")
 
     def test_catalog_family_changes_and_close_fence_late_results(self):
         self.exercise("image-catalog-stale-family")
@@ -2748,11 +2929,18 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_catalog_pagination_failure_retry_preserves_loaded_rows(self):
         self.exercise("catalog-pagination-failure-retry-preserves-rows")
 
-    def test_catalog_pagination_single_click_drains_pages_and_ignores_duplicate_clicks(self):
-        self.exercise("catalog-pagination-auto-drains-positive-empty-and-duplicate-pages")
+    def test_catalog_pagination_single_click_drains_pages_and_ignores_duplicate_clicks(
+        self,
+    ):
+        self.exercise(
+            "catalog-pagination-auto-drains-positive-empty-and-duplicate-pages"
+        )
 
     def test_catalog_schema_and_item_bounds_are_enforced(self):
         self.exercise("catalog-schema-bounds")
+
+    def test_catalog_unavailable_row_retains_reason_and_cannot_install(self):
+        self.exercise("catalog-unavailable-row")
 
     def test_catalog_preserves_provider_order_for_size_and_quantized_variants(self):
         self.exercise("catalog-provider-order")
@@ -2861,6 +3049,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_source_or_install_reset_clears_only_previous_install_error(self):
         self.exercise("install-error-reset")
+
+    def test_resource_budget_follows_runtime_memory_and_rejects_overflow(self):
+        self.exercise("resource-budget-memory-derived")
 
     def test_install_reset_preserves_later_runtime_or_attachment_errors(self):
         self.exercise("install-error-runtime-retained")

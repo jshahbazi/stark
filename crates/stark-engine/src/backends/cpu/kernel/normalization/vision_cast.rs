@@ -1,6 +1,18 @@
 use half::bf16;
 use stark_engine_macros::kernel;
 
+/// Keep the BF16 router-logit boundary in an F32 buffer consumed by routing.
+#[kernel(ReferenceRoundBF16F32)]
+pub fn reference_round_bf16_f32(
+    input: *const f32,
+    output: *mut f32,
+    length: u32,
+) {
+    for index in 0..length as usize {
+        unsafe { *output.add(index) = bf16::from_f32(*input.add(index)).to_f32() };
+    }
+}
+
 /// Preserve the vision LayerNorm's FP32 affine+bias result until its final cast.
 #[kernel(VisionCastBF16)]
 pub fn vision_cast_bf16(

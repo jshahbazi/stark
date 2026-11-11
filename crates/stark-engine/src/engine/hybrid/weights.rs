@@ -812,7 +812,12 @@ impl Weights {
         } else {
             vec![path.to_path_buf()]
         };
-        paths.retain(|path| matches!(path.extension().and_then(|v| v.to_str()), Some("gguf" | "safetensors")));
+        paths.retain(|path| {
+            // Finder writes AppleDouble metadata beside shards on exFAT and
+            // network volumes. These companions are not weight containers.
+            !path.file_name().is_some_and(|name| name.as_encoded_bytes().starts_with(b"._"))
+                && matches!(path.extension().and_then(|v| v.to_str()), Some("gguf" | "safetensors"))
+        });
         paths.sort();
         if paths.is_empty() || paths.len() > 512 {
             return Err(Error::Invalid("missing or excessive weight shards"));
@@ -3058,6 +3063,21 @@ mod tests {
         bytes.extend(header);
         bytes.extend(data);
         fs::write(path, bytes).unwrap();
+    }
+
+    #[stark_test]
+    fn appledouble_companions_are_not_weight_shards() {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        safetensors(&fixture.0.join("model.safetensors"), &[("value", "F32", vec![1], 2.0f32.to_le_bytes().to_vec())]);
+        // Include a companion with the other container extension: it must
+        // neither be parsed nor cause mixed-container rejection.
+        fs::write(fixture.0.join("._model.safetensors"), b"AppleDouble metadata").unwrap();
+        fs::write(fixture.0.join("._model.gguf"), b"AppleDouble metadata").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        assert_eq!(weights.files.len(), 1);
+        assert_eq!(weights.vector("value").unwrap(), vec![2.0]);
+        assert!(Weights::open(&fixture.0.join("._model.safetensors")).is_err());
     }
 
     #[cfg(feature = "metal")]
