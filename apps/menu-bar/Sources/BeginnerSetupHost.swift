@@ -140,7 +140,7 @@ struct BeginnerSetupHost: View {
             BeginnerSetupView(session: session, snapshot: snapshot, actions: actions)
         }
         // The minimum includes the interface header and the setup content.
-        .frame(minWidth: 700, idealWidth: 700, minHeight: 600, idealHeight: 650)
+        .frame(minWidth: 700, minHeight: 600)
         .onAppear { refreshOpenWork() }
         .onReceive(refresh) { _ in refreshOpenWork() }
         .onChange(of: openWork.approved) { _, _ in refreshOpenWork(force: true) }
