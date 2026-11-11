@@ -198,6 +198,12 @@ struct BeginnerSetupView: View {
             deviceSummary
             HStack {
                 Button("Check again") { requestChoices() }.buttonStyle(.borderedProminent)
+                if session.modelPriority == .speed {
+                    Button("Choose Quality") {
+                        session.selectModelPriority(.quality)
+                        requestChoices()
+                    }
+                }
                 Button("Browse models in Advanced", action: actions.showAdvanced)
                 if session.choosingAnotherModel { keepCurrentButton }
                 else { Button("Change task") { session.stage = .task } }

@@ -29,7 +29,7 @@ enum BeginnerModelPriority: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String { self == .speed ? "Speed" : "Quality" }
     var detail: String {
-        self == .speed ? "Favor a lighter model that may respond faster" : "Favor answer quality within this Mac’s limits"
+        self == .speed ? "Balance model quality with a speed budget for this Mac" : "Favor answer quality within this Mac’s limits"
     }
 }
 

@@ -92,18 +92,135 @@ def test_quality_uses_the_selected_tasks_scores_after_admission(task, expected):
 
 
 @pytest.mark.parametrize("task", ["general", "coding"])
-def test_speed_keeps_lighter_weights_despite_better_score_and_source_speed(task):
+def test_speed_selects_score_within_payload_budget_without_using_source_speed(task):
     candidates = [recipe("large", 10, weights=2 * guided.GIB), recipe("small", 1)]
     speeds = {
-        "large": {"value": 9999, "unit": "tok/s", "how": "elsewhere", "on": "Other runtime"},
-        "small": {"value": 1, "unit": "tok/s", "how": "elsewhere", "on": "Other runtime"},
+        "large": {"value": 1, "unit": "tok/s", "how": "elsewhere", "on": "Other runtime"},
+        "small": {"value": 9999, "unit": "tok/s", "how": "elsewhere", "on": "Other runtime"},
     }
-    result = report(candidates, snapshot({"large": 100, "small": 0}, speed=speeds), task=task, preference="speed")
-    assert [item["id"] for item in result["items"]] == ["small", "large"]
-    assert not result["leaderboard_ranking"]["applied"]
-    assert not any(item["benchmarks"][0]["used_for_ranking"] for item in result["items"])
-    assert result["items"][1]["benchmarks"][0]["source_speed"] == speeds["large"]
-    assert "response speed has not been measured" in result["items"][0]["recommendation_reason"]
+    result = report(candidates, snapshot({"large": 90, "small": 50}, speed=speeds), task=task, preference="speed")
+    assert [item["id"] for item in result["items"]] == ["large", "small"]
+    assert result["leaderboard_ranking"]["applied"]
+    assert all(item["benchmarks"][0]["used_for_ranking"] for item in result["items"])
+    assert result["items"][0]["benchmarks"][0]["source_speed"] == speeds["large"]
+    assert result["speed_policy"]["applied"]
+    assert result["speed_policy"]["weight_budget_bytes"] == 32 * guided.GIB
+
+
+@pytest.mark.parametrize("task, floor", [("general", 40), ("coding", 35)])
+def test_speed_requires_task_floor_for_every_recommended_alternative(task, floor):
+    candidates = [recipe(name, 1) for name in ("below", "edge", "above", "unknown")]
+    cached = snapshot({"below": floor - 0.1, "edge": floor, "above": floor + 1, "unknown": None})
+    result = report(candidates, cached, task=task, preference="speed")
+    assert [item["id"] for item in result["items"]] == ["above", "edge"]
+    assert result["speed_policy"]["minimum_score"] == floor
+    assert all(float(item["benchmarks"][0]["score"]) >= floor for item in result["items"])
+
+
+def test_speed_applies_different_general_and_coding_floors_to_the_same_score():
+    cached = snapshot({"small": 37})
+    candidate = recipe("small", 1)
+    general = report([candidate], cached, preference="speed")
+    coding = report([candidate], cached, task="coding", preference="speed")
+    assert general["status"] == "unavailable" and general["items"] == []
+    assert [item["id"] for item in coding["items"]] == [candidate.id]
+
+
+@pytest.mark.parametrize("ram, expected", [(16, "medium"), (32, "large"), (64, "largest")])
+def test_speed_payload_budget_scales_model_selection_with_ram(ram, expected):
+    candidates = [
+        recipe("small", 1),
+        recipe("medium", 4, weights=4 * guided.GIB),
+        recipe("large", 8, weights=8 * guided.GIB),
+        recipe("largest", 16, weights=16 * guided.GIB),
+    ]
+    cached = snapshot({"small": 50, "medium": 60, "large": 70, "largest": 80}, sizes=(8, 16, 32, 64, 128))
+    machine = host(physical_memory_bytes=ram * guided.GIB, available_memory_bytes=(ram - 2) * guided.GIB)
+    result = report(candidates, cached, preference="speed", machine=machine)
+    assert result["items"][0]["id"] == expected
+    assert result["speed_policy"]["weight_budget_bytes"] == ram * guided.GIB // 4
+
+
+def test_speed_payload_boundary_is_inclusive_and_quality_can_use_larger_model():
+    edge = recipe("edge", 8, weights=8 * guided.GIB)
+    over = recipe("over", 9, weights=8 * guided.GIB + 1)
+    cached = snapshot({"edge": 50, "over": 99})
+    machine = host(physical_memory_bytes=32 * guided.GIB, available_memory_bytes=30 * guided.GIB)
+    speed = report([over, edge], cached, preference="speed", machine=machine)
+    quality = report([over, edge], cached, preference="quality", machine=machine)
+    assert [item["id"] for item in speed["items"]] == [edge.id]
+    assert quality["items"][0]["id"] == over.id
+    assert not quality["speed_policy"]["applied"]
+
+
+def test_speed_budgets_actual_export_weights_without_claiming_quantized_artifact_quality():
+    parent = "example/parent"
+    quantized = replace(recipe("quantized", 8_000_000_000, weights=4 * guided.GIB), quantization="4-bit")
+    bf16 = replace(recipe("bf16", 8_000_000_000, weights=16 * guided.GIB), quantization="BF16")
+    bindings = [
+        {
+            "repo": candidate.repo,
+            "revision": candidate.revision,
+            "model_id": parent,
+            "source": {
+                "url": "https://example.com/source",
+                "publisher": "Synthetic fixture",
+                "revision": "fixture",
+                "sha256": "a" * 64,
+            },
+            "relationship": "reviewed_quantized_export_reference_only",
+        }
+        for candidate in (quantized, bf16)
+    ]
+    cached = snapshot({"parent": 70})
+    machine = host(physical_memory_bytes=32 * guided.GIB, available_memory_bytes=30 * guided.GIB)
+    result = report(
+        [bf16, quantized], cached, preference="speed", machine=machine, benchmarks=registry(bindings=bindings)
+    )
+    assert [item["id"] for item in result["items"]] == [quantized.id]
+    assert result["items"][0]["quantization"] == "4-bit"
+    evidence = result["items"][0]["benchmarks"][0]
+    assert evidence["model_id"] == parent
+    assert evidence["candidate_repo"] == quantized.repo
+    assert evidence["quantization_quality_evaluated"] is False
+    assert evidence["relationship"] == "parent_model_reference_only"
+
+
+def test_speed_score_ties_prefer_lower_runtime_then_lighter_weights_deterministically():
+    high_runtime = replace(recipe("high-runtime", 1), estimated_runtime_bytes=20 * guided.GIB)
+    heavier = replace(recipe("heavier", 2, weights=2 * guided.GIB), estimated_runtime_bytes=10 * guided.GIB)
+    lighter = replace(recipe("lighter", 1), estimated_runtime_bytes=10 * guided.GIB)
+    cached = snapshot({"high-runtime": 70, "heavier": 70, "lighter": 70})
+    for candidates in ([high_runtime, heavier, lighter], [lighter, heavier, high_runtime]):
+        result = report(candidates, cached, preference="speed")
+        assert [item["id"] for item in result["items"]] == [lighter.id, heavier.id, high_runtime.id]
+
+
+@pytest.mark.parametrize("task, tiny_score", [("general", 38.4), ("coding", 32.8)])
+def test_speed_does_not_recommend_below_floor_half_billion_model_on_high_ram(task, tiny_score):
+    tiny = recipe("tiny", 500_000_000, weights=guided.GIB // 2)
+    useful = recipe("useful", 8_000_000_000, weights=8 * guided.GIB)
+    cached = snapshot({"tiny": tiny_score, "useful": 60}, sizes=(8, 128, 512))
+    result = report(
+        [tiny, useful], cached, task=task, preference="speed",
+        machine=host(physical_memory_bytes=512 * guided.GIB, available_memory_bytes=500 * guided.GIB),
+    )
+    assert [item["id"] for item in result["items"]] == [useful.id]
+
+
+def test_speed_quality_floor_and_payload_budget_do_not_bypass_current_memory_admission():
+    blocked = replace(recipe("blocked", 16, weights=16 * guided.GIB), estimated_runtime_bytes=101 * guided.GIB)
+    small = recipe("small", 1)
+    result = report([blocked, small], snapshot({"blocked": 99, "small": 50}), preference="speed")
+    assert [item["id"] for item in result["items"]] == [small.id]
+
+
+@pytest.mark.parametrize("scores", [{"small": None}, {"small": 34}])
+def test_speed_without_qualifying_evidence_is_unavailable_with_recovery_guidance(scores):
+    result = report([recipe("small", 1)], snapshot(scores), preference="speed")
+    assert result["status"] == "unavailable" and result["items"] == []
+    assert "quality" in result["message"].lower()
+    assert "advanced" in result["message"].lower()
 
 
 def test_high_source_score_and_tiny_source_plan_cannot_override_stark_memory_exclusion():
@@ -213,5 +330,8 @@ def test_malformed_optional_snapshot_falls_back_without_network_or_disabling_adm
         assert result["status"] == "ready"
         assert not result["leaderboard_ranking"]["applied"]
         assert [item["id"] for item in result["items"]] == ["small"]
+        speed = report([recipe("small", 1)], cached, preference="speed")
+        assert speed["status"] == "unavailable" and speed["items"] == []
+        assert "quality" in speed["message"].lower()
     finally:
         module.load_snapshot.cache_clear()

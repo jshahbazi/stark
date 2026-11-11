@@ -133,7 +133,7 @@ struct BeginnerModelReport {
 
         func beginnerSummary(availableMemoryBytes: Int64?) -> String {
             var summary = "Selected to fit your Mac."
-            if prefersSpeed { summary = "A lighter model selected for speed. Actual speed varies." }
+            if prefersSpeed { summary = "Selected within a speed budget for your Mac using published model scores. Actual speed varies." }
             else if let reference = benchmarkReference, reference.usedForRanking { summary = reference.recommendation }
             if benchmarkReference == nil { summary += " No benchmark result is recorded." }
             if let availableMemoryBytes, availableMemoryBytes < runtimeBytes {
@@ -149,7 +149,9 @@ struct BeginnerModelReport {
                              + (benchmarkReference.name.hasPrefix("whatmodel.sh") ? "" : "/100"))
                 lines.append(benchmarkReference.usedForRanking
                     ? (benchmarkReference.capturedDate.map { "Cached \($0). " } ?? "")
-                        + "Published model score; local results may vary."
+                        + (benchmarkReference.name.hasPrefix("whatmodel.sh")
+                           ? "Parent-model score; this quantization was not evaluated by this ranking."
+                           : "Published model score; local results may vary.")
                     : "Reference only; it did not determine this choice.")
             }
             return lines.joined(separator: "\n")

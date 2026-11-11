@@ -15,6 +15,20 @@ from pathlib import Path
 GIB = 1024**3
 MODEL_ID = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+# Product cutoffs on the two separate cached score scales, not accuracy
+# percentages or measured quality guarantees for quantized Stark artifacts.
+SPEED_MINIMUM_SCORE = {"general": 40, "coding": 35}
+SPEED_WEIGHT_BUDGET_DIVISOR = 4
+
+
+def speed_policy(task, preference, physical_bytes):
+    return {
+        "applied": preference == "speed" and task in SPEED_MINIMUM_SCORE,
+        "minimum_score": SPEED_MINIMUM_SCORE.get(task),
+        "weight_budget_bytes": physical_bytes // SPEED_WEIGHT_BUDGET_DIVISOR
+        if type(physical_bytes) is int and physical_bytes > 0 else 0,
+        "evidence_kind": "upstream_parent_reference",
+    }
 
 
 def _number(value):
@@ -79,6 +93,17 @@ class LeaderboardSnapshot:
             scored.sort(key=lambda recipe: -records[model_id(recipe)]["score"])
             used = {recipe.id for recipe in scored}
             ordered = scored + [recipe for recipe in ordered if recipe.id not in used]
+        elif preference == "speed" and task in SPEED_MINIMUM_SCORE:
+            policy = speed_policy(task, preference, physical_bytes)
+            # All offers, including alternatives, must meet both limits. Missing
+            # evidence cannot silently reinstate the old smallest-model rule.
+            ordered = [recipe for recipe in ordered if model_id(recipe) in records
+                       and records[model_id(recipe)]["score"] >= policy["minimum_score"]
+                       and recipe.weight_bytes <= policy["weight_budget_bytes"]]
+            ordered.sort(key=lambda recipe: (
+                -records[model_id(recipe)]["score"], recipe.runtime_memory, recipe.weight_bytes,
+            ))
+            used = {recipe.id for recipe in ordered}
         return ordered, bucket, records, used
 
     def evidence(self, recipe, parent, task, bucket, records, used):
@@ -99,6 +124,8 @@ class LeaderboardSnapshot:
             "source_url": "https://whatmodel.sh/model/" + row["id"],
             "uncertainty": row.get("uncertainty"),
             "source_speed": row.get("speed"),
+            "relationship": "parent_model_reference_only",
+            "quantization_quality_evaluated": False,
         }
         details = [
             f"whatmodel.sh {task} reference score: {row['score']}; cached {self.captured}, "

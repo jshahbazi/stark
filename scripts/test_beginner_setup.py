@@ -620,7 +620,8 @@ struct BeginnerChecks {
                   !cachedItem.beginnerDetails.contains("/100") else { return false }
             cachedRaw["selection_preference"] = "speed"
             guard let speedItem = BeginnerModelReport.Item(cachedRaw),
-                  speedItem.beginnerSummary(availableMemoryBytes: nil).contains("lighter model selected for speed") else { return false }
+                  speedItem.beginnerSummary(availableMemoryBytes: nil).contains("speed budget for your Mac"),
+                  speedItem.beginnerDetails.contains("this quantization was not evaluated") else { return false }
             return true
         case "installed-space-presentation": return BeginnerSetupView.checkInstalledSpacePresentation()
         default: return false

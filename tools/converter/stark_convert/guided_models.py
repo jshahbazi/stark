@@ -32,7 +32,7 @@ from .guided_memory import config_identity, native_request_bytes
 from .guided_memory_profiles import ResidentProfile, qualified_profile, source_profile
 from .model_inventory import MAX_HEADER_BYTES, _weights
 from .recommendation_benchmarks import load_registry
-from .recommendation_leaderboard import load_snapshot
+from .recommendation_leaderboard import load_snapshot, speed_policy
 from .registry import get_model
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, read_safetensors_header
 
@@ -906,6 +906,7 @@ def recommendation_report(
         eligible, task, preference, lambda recipe: _fit_tier(recipe, host)
     )
     leaderboard = load_snapshot() if leaderboard is None else leaderboard
+    speed_limits = speed_policy(guide_task, guide_preference, host.get("physical_memory_bytes"))
     eligible, bucket, records, leaderboard_used = leaderboard.rank(
         eligible, guide_task, guide_preference, host.get("physical_memory_bytes"), benchmarks.model_id
     )
@@ -933,6 +934,13 @@ def recommendation_report(
                    if recipe.id in leaderboard_used else
                    "No matching cached score is recorded for this model; it follows scored options. "
                    "Its quality is unknown.")
+            )
+        if speed_limits["applied"]:
+            reason = (
+                "Selected by cached task score within a weight budget of 25% of this Mac's RAM, "
+                f"with a minimum parent-model reference score of {speed_limits['minimum_score']}. "
+                "Exact export weights determine the budget; quantized answer quality and response speed "
+                "have not been measured by this ranking. Stark's RAM, GPU, current memory and disk checks also pass."
             )
         ids = list(installed.get(recipe.id, ()))
         license_name = (
@@ -972,6 +980,7 @@ def recommendation_report(
                 "qualification": recipe.qualification,
                 "recommendation_reason": reason,
                 "selection_preference": guide_preference,
+                "speed_policy": speed_limits,
                 "benchmarks": evidence,
                 "benchmark_details": benchmark_details,
                 "evidence": (
@@ -996,7 +1005,12 @@ def recommendation_report(
     native = [recipe for recipe in candidates if recipe.native_choice is not None]
     if native:
         message += " Native hybrid models were also checked for memory and setup storage."
-    if items and leaderboard_used:
+    if items and speed_limits["applied"]:
+        message += (
+            " Speed selects the highest cached task score within a RAM-scaled weight budget and "
+            "parent-model score floor. Quantized quality and Stark speed remain unmeasured by this ranking."
+        )
+    elif items and leaderboard_used:
         message += (
             f" Quality uses the offline whatmodel.sh {guide_task} snapshot captured {leaderboard.captured}; "
             "missing scores remain unknown."
@@ -1020,12 +1034,18 @@ def recommendation_report(
                 "These guided starting models currently need at least 16 GB of memory. "
                 "You can browse smaller chat models in Advanced."
             )
+        if speed_limits["applied"]:
+            message = (
+                "No supported model meets Speed's cached task-score floor and 25%-of-RAM weight budget "
+                "within this Mac's current resources. Choose Quality or browse models in Advanced."
+            )
     return {
         "schema_version": 1,
         "status": "ready" if items else "unavailable",
         "message": message,
         "host": dict(host),
         "items": items,
+        "speed_policy": speed_limits,
         "leaderboard_ranking": {
             "captured": leaderboard.captured,
             "task": guide_task,

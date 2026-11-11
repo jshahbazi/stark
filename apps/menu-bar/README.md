@@ -287,8 +287,11 @@ the same physical memory; the algorithm never adds their budgets together.
 
 Quality uses bundled, dated whatmodel.sh General Work/Coding rankings for
 11 RAM sizes from 8–512 GB, after Stark’s compatibility and resource checks.
-No recommendation click requests the leaderboard. Speed favors lighter models;
-actual response speed varies. See the [recommendation policy and monthly refresh
+No recommendation click requests the leaderboard. Speed selects the highest
+cached task score above its reference floor within an export-weight budget of
+25% of physical RAM, after the normal resource checks. A missing qualifying
+option offers **Choose Quality**. Scores describe parent models; quantized
+quality and actual response speed are not measured by this ranking. See the [recommendation policy and monthly refresh
 workflow](../../docs/MODEL_RECOMMENDATIONS.md).
 
 The guide checks a bounded window of candidates in each supported catalog
