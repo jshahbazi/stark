@@ -5,7 +5,7 @@ CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and ma
 | Workflow | Coverage |
 | --- | --- |
 | CI | Repository policy, Rust formatting, locked dependency resolution, workflow syntax, native template evaluator build and tests, converter tests and lint, installer and app script tests, process lifecycle tests on Linux and macOS, Apple silicon builds, Clippy and tests of both inference workers in the default and `optimized` configurations, the CPU/grammar engine suite and compilation of Metal kernel tests on the pinned nightly compiler, and the vendored cxx panic-safety test with the engine's `grammar` feature. |
-| Build | Builds an unsigned development bundle on pushes to `main` or `codex/**` that touch source or build inputs, verifies it, and uploads it as a seven-day artifact. |
+| Build | Builds an unsigned development bundle on pushes to `codex/**` that touch source or build inputs, and on manual dispatch, verifies it, and uploads it as a seven-day artifact. Pushes to `main` do not build; see [macOS runner budget](#macos-runner-budget). |
 | Security | cargo-deny advisories, soundness, licenses and sources across all Cargo features; OSV scans of the seven tracked lockfiles; dependency review on pull requests. |
 | CodeQL | Rust, C/C++, Python, JavaScript/TypeScript and GitHub Actions in build mode `none`. Metal kernels and Swift are not analyzed. |
 | Prebuilt release | Manual; builds an unsigned archive from an existing version tag and uploads a draft. See [releasing](RELEASING.md). |
@@ -18,6 +18,15 @@ The obsolete inherited `Tests` workflow was removed. The remaining inherited `Re
 - Rust code builds with Rust 1.98.1 on the `macos-26` Apple silicon runner, whose Xcode must support the engine's Metal 4 / macOS 26.4 target. Formatting uses `nightly-2026-10-01` rustfmt because the inherited rustfmt configuration needs nightly options, and the engine unit suite builds with the same nightly compiler because it uses `custom_test_frameworks`.
 - Python checks use uv 0.12.24. Repository policy scripts run on Python 3.12.13 with an adjacent script lockfile; the converter and the installer tests run on Python 3.13.13.
 - actionlint, cargo-deny and OSV Scanner downloads are verified against pinned hashes. External Actions are pinned to full commit SHAs, checkout does not persist credentials, build jobs hold read-only tokens, and no job uses `pull_request_target` or a self-hosted runner.
+
+## macOS runner budget
+
+Hosted macOS jobs share five concurrent runners across the whole repository, and queued jobs start in order with no priority. A Signed release dispatched after a merge therefore waits behind every macOS job already queued. Two rules keep one runner free for it when no other branch is building:
+
+- Build does not run on pushes to `main`. The branch build covers the merged tree before the merge and the Signed release rebuilds and verifies the same commit. Dispatch Build on `main` under **Actions > Build > Run workflow** when a development bundle of `main` is needed.
+- The CI `cxx` job starts after `lifecycle`, so a CI run holds at most four macOS runners at once. The dependency is scheduling only: `cxx` still runs when `lifecycle` fails.
+
+Pull-request CI and branch builds from other branches still occupy runners. Dispatch a release before updating other open branches to avoid queueing behind them. When adding a macOS job, keep the peak for one CI run at four.
 
 ## What CI does and does not cover
 
