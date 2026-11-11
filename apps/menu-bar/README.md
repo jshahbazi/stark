@@ -267,35 +267,58 @@ handles recognized architecture/configuration and weight layouts; chat requires
 a template Stark can load and render; tool calling additionally requires a
 reviewed template wire format with a matching parser. Tool capability comes from
 the loaded artifact's template/parser check. Converting a model does not add a
-parser or enable tools. Candidates with unknown memory layouts,
-including recurrent/hybrid and native expert routes without a guide planner,
-remain available through Advanced. Catalog compatibility describes metadata
+parser or enable tools. Candidates with unknown memory layouts remain available
+through Advanced. Installed dense text artifacts with supported attention
+geometry and the pinned Lily q4-xl Qwen3.8 Flash Next artifact have separate
+local planners. They enter the comparison even when online discovery fails or
+misses their source revision. Other hybrid and expert routes still require
+their own planner; the guide reports how many installed models it could not
+assess. Catalog compatibility describes metadata
 support; it does not inherit another model's native qualification.
 
-The memory plan includes weights, both full-context BF16 KV buffers, attention
-score scratch and a workspace allowance. It must leave 2 GiB of physical
+New dense downloads budget weights, both full-context BF16 KV buffers, attention
+score scratch and a workspace allowance. Local dense planning conservatively
+charges F32 caches and scratch. The Flash Next planner includes recurrent state,
+prefix snapshots, draft buffers and paged table storage; paged CPU table bytes
+count toward physical memory without being charged as resident GPU allocations.
+Every plan must leave 2 GiB of physical
 memory and use no more than 85% of Metal's recommended working-set budget.
 New downloads also need 2 GiB currently available memory and enough space for
 source and converted copies plus setup reserves. Starting rechecks available
 memory after releasing the previous worker. A running model's memory is never
 assumed to be reclaimable during recommendations.
 
-Ranking first prefers comfortable memory headroom, then explicit source task
-tags when available. **Balanced** uses parameter capacity divided by squared
-estimated runtime memory; **Lighter model** prefers lower weight traffic; and
-**More model capacity** prefers higher parameter counts. These are documented
+Ranking first prefers comfortable memory headroom. **Balanced** then uses
+explicit source task tags followed by parameter capacity divided by squared
+estimated runtime memory. **Lighter model** prioritizes lower weight traffic;
+**More model capacity** prioritizes higher known parameter counts. Coding tags
+break ties for these explicit priorities instead of overriding the selection.
+These are documented
 heuristics, with no measured tokens-per-second or answer-quality score. Unknown
-parameter counts receive no capacity credit. Installed copies break otherwise
+parameter counts receive no capacity credit. Supported quantized dense sources
+can derive counts from complete configuration geometry. Local matrix and expert
+counts are identified as lower bounds when not all parameter groups are counted.
+Installed copies break otherwise
 equal ties. The guide offers up to three choices and explains each choice's
 resource fit and evidence. CPU count and GPU name describe the machine; core
 count alone does not establish inference speed.
 
+Task selection records the intended use. **Help with code** uses explicit source
+coding tags where available. The other tasks share the general resource ranking;
+the guide has no validated task-specific quality scores. Changing the task or
+priority invalidates the previous recommendation. A retry updates the visible
+priority, and keeping the current model restores the previous selection.
+
 Discovery runs separately from generation, with three concurrent family lookups
 and a 65-second overall process limit. Successful nonempty catalog scans are
-cached only in memory for ten minutes; failed family lookups retry immediately.
+cached only in memory for ten minutes; partial and failed family lookups retry
+on the next check. A failed source lookup preserves successful candidates while
+marking the search incomplete.
 Resource checks are fresh on every recommendation,
-installation and start. A failed search offers only the recorded starter
-recipes that still meet the hardware checks and identifies the limited search.
+installation and start. A failed search compares locally planned installed
+models and recorded starter recipes that still meet the hardware checks and
+identifies the limited search. Identical installed artifacts share one offer;
+choosing another model excludes every registered copy of the current artifact.
 
 The flow shows download and preparation as separate stages. After
 installation, you must explicitly start the model; when another model is

@@ -103,6 +103,16 @@ struct BeginnerModelChoice: Identifiable, Equatable {
     func installed(as modelID: String) -> BeginnerModelChoice {
         var result = self
         result.installedModelID = modelID
+        result.availabilityMessage = nil
+        return result
+    }
+
+    func resolvingInstalledCopy(as modelID: String?) -> BeginnerModelChoice {
+        var result = self
+        result.installedModelID = modelID
+        if downloadBytes == 0 && modelID == nil {
+            result.availabilityMessage = "This installed model is no longer available. Check models again to refresh your choices."
+        }
         return result
     }
 }
@@ -151,7 +161,7 @@ struct BeginnerSetupSnapshot: Equatable {
 
 struct BeginnerSetupActions {
     var refreshChoices: (BeginnerTask, String?, String) -> Void = { _, _, _ in }
-    var install: (BeginnerModelChoice) -> Void = { _ in }
+    var install: (BeginnerModelChoice) -> Bool = { _ in false }
     var cancelInstall: () -> Void = {}
     var startModel: (BeginnerModelChoice) -> Bool = { _ in false }
     var openOpenWork: () -> Void = {}
@@ -178,12 +188,46 @@ final class BeginnerSetupSession: ObservableObject {
     @Published private(set) var installingChoiceID: String?
 
     private var previousTask: BeginnerTask?
+    private var previousPriority: BeginnerModelPriority = .balanced
     private var previousStage: BeginnerSetupStage = .ready
     private var observedModelID: String?
     private var connectionScope: String?
+    private var recommendationTask: BeginnerTask?
+    private var recommendationPriority: BeginnerModelPriority?
+
+    var recommendationsMatchSelection: Bool {
+        recommendationTask == nil || (recommendationTask == task && recommendationPriority == modelPriority)
+    }
+
+    func selectTask(_ value: BeginnerTask) {
+        guard task != value else { return }
+        task = value
+        selectedChoiceID = nil
+        retryPreference = nil
+    }
+
+    func selectModelPriority(_ value: BeginnerModelPriority) {
+        modelPriority = value
+        selectedChoiceID = nil
+        retryPreference = nil
+    }
+
+    /// Retry intent becomes the visible priority, so returning to the task
+    /// picker cannot leave an invisible override of the user's next choice.
+    func requestRecommendations() -> String {
+        if retryPreference == .speed { modelPriority = .speed }
+        if retryPreference == .answers { modelPriority = .answers }
+        retryPreference = nil
+        recommendationTask = task
+        recommendationPriority = modelPriority
+        selectedChoiceID = nil
+        stage = .recommendation
+        return modelPriority.rawValue
+    }
 
     func choices(in snapshot: BeginnerSetupSnapshot) -> [BeginnerModelChoice] {
-        snapshot.choices.filter { choice in
+        guard recommendationsMatchSelection else { return [] }
+        return snapshot.choices.filter { choice in
             !choosingAnotherModel || excludedModelID == nil || choice.installedModelID != excludedModelID
         }
     }
@@ -207,6 +251,7 @@ final class BeginnerSetupSession: ObservableObject {
             return
         }
         previousTask = task
+        previousPriority = modelPriority
         previousStage = stage
         task = task ?? .unsure
         choosingAnotherModel = true
@@ -220,6 +265,7 @@ final class BeginnerSetupSession: ObservableObject {
     func keepCurrentModel() {
         choosingAnotherModel = false
         task = previousTask ?? task
+        modelPriority = previousPriority
         selectedChoiceID = nil
         excludedModelID = nil
         retryPreference = nil
@@ -292,6 +338,7 @@ final class BeginnerSetupSession: ObservableObject {
         if target == .task { return true }
         if target == .recommendation || target == .retry { return task != nil }
         if target == .installation {
+            guard recommendationsMatchSelection else { return false }
             return snapshot.installChoiceID != nil || snapshot.installedResultID != nil
                 || selectedChoiceID != nil || canFinish(snapshot: snapshot)
         }

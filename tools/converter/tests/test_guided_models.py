@@ -324,6 +324,150 @@ def test_installed_copy_does_not_override_hardware_or_capacity_ranking():
     assert [item["id"] for item in report["items"]] == [small.id]
 
 
+@pytest.mark.parametrize("task", sorted(guided.TASKS))
+@pytest.mark.parametrize("preference", ["balanced", "speed", "answers"])
+def test_every_task_respects_explicit_model_priority(task, preference):
+    small = guided.recipe_from_catalog(catalog_candidate(1, weights=guided.GIB, parameters=1_000_000_000))
+    coding = guided.recipe_from_catalog(
+        catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000, tags=("code",))
+    )
+    large = guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=32_000_000_000))
+    report = guided.recommendation_report(
+        gpu_resources(), {}, task=task, preference=preference, candidates=[coding, large, small]
+    )
+    if preference == "speed":
+        assert report["items"][0]["id"] == small.id
+    elif preference == "answers":
+        assert report["items"][0]["id"] == large.id
+    else:
+        assert report["items"][0]["id"] == coding.id
+    assert len(report["items"]) == 3
+
+
+def installed_metadata():
+    return {
+        "repo": "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+        "revision": "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+        "architecture": "qwen4_exp",
+        "weight_bytes": 106_905_155_192,
+        "quantization": "Lily q4-xl",
+        "context_tokens": 32768,
+        "runtime_memory": 116 * guided.GIB,
+        "logical_parameters": 120_795_955_200,
+        "capacity_is_lower_bound": True,
+        "config_sha256": "a" * 64,
+    }
+
+
+def test_installed_display_name_cannot_invalidate_the_native_report(monkeypatch):
+    from stark_convert import guided_installed
+
+    monkeypatch.setattr(guided_installed, "inspect_installed", lambda _path: installed_metadata())
+    model = {"id": "local", "name": "x" * 201, "path": "/unused"}
+    recipe = guided.recipe_from_installed(model)
+    assert recipe.name == "Qwen3.8-Flash-Next-lily-q4-xl"
+    model["name"] = "Custom installed name"
+    assert guided.recipe_from_installed(model).name == model["name"]
+
+
+def test_installed_flash_next_is_ranked_offline_and_reused_without_download(host, monkeypatch):
+    from stark_convert import guided_installed
+
+    path = host.model_dir / "local-flash"
+    path.mkdir()
+    (path / "config.json").write_text("{}")
+    model = {"id": "local-flash", "name": "Qwen3.8 Flash Next", "path": str(path), "source": "local:flash"}
+    host.models.append(model)
+    monkeypatch.setattr(guided_installed, "inspect_installed", lambda _path: installed_metadata())
+    monkeypatch.setattr(
+        module,
+        "host_resources",
+        lambda _path: resources(
+            physical_memory_bytes=256 * guided.GIB,
+            available_memory_bytes=200 * guided.GIB,
+            free_disk_bytes=1,
+            download_free_disk_bytes=1,
+        ),
+    )
+    report = offer(host, preference="answers")
+    item = report["items"][0]
+    assert item["name"] == model["name"]
+    assert item["installed_ids"] == [model["id"]]
+    assert item["download_bytes"] == 0
+    assert item["evidence"] == "installed_metadata"
+    assert "lower bound" in item["recommendation_reason"]
+    recipe = host.guided_reports["offer"][item["id"]]
+    assert not guided.installation_allowed(recipe, resources(physical_memory_bytes=256 * guided.GIB))
+    monkeypatch.setattr(host, "start", lambda *_args, **_kwargs: pytest.fail("must reuse local install"))
+    host.install_guided(install_command(recipe))
+    assert (
+        next(event for event in reversed(events(host)) if event["event"] == "installed")["model"]["id"] == model["id"]
+    )
+    excluded = offer(host, request_id="exclude", preference="answers", excluded_model_ids=[model["id"]])
+    assert excluded["items"] == []
+    monkeypatch.setattr(guided_installed, "inspect_installed", lambda _path: None)
+    assert not guided.matches_recipe(path, recipe)
+    with pytest.raises(module.DesktopError, match="changed"):
+        host.run_guided(
+            {
+                "command": "run_guided",
+                "request_id": "start",
+                "recommendation_request_id": "offer",
+                "recipe_id": recipe.id,
+                "model_id": model["id"],
+            }
+        )
+
+
+def test_unplanned_installed_models_are_disclosed_in_the_guide(host, monkeypatch):
+    from stark_convert import guided_installed
+
+    path = host.model_dir / "unplanned"
+    path.mkdir()
+    (path / "config.json").write_text("{}")
+    host.models.append({"id": "unplanned", "name": "Unplanned", "path": str(path)})
+    monkeypatch.setattr(guided_installed, "inspect_installed", lambda _path: None)
+    assert "1 installed model(s) could not be assessed" in offer(host)["message"]
+
+
+def test_identical_local_imports_share_one_offer_and_different_model_exclusion(host, monkeypatch):
+    from stark_convert import guided_installed
+
+    for identifier in ("first-copy", "second-copy"):
+        path = host.model_dir / identifier
+        path.mkdir()
+        (path / "config.json").write_text("{}")
+        host.models.append({"id": identifier, "name": "Same source", "path": str(path), "source": "local:copy"})
+    monkeypatch.setattr(guided_installed, "inspect_installed", lambda _path: installed_metadata())
+    monkeypatch.setattr(module, "host_resources", lambda _path: resources(physical_memory_bytes=256 * guided.GIB))
+    report = offer(host, preference="answers")
+    item = report["items"][0]
+    assert item["installed_ids"] == ["first-copy", "second-copy"]
+    assert len([item for item in report["items"] if item["evidence"] == "installed_metadata"]) == 1
+    excluded = offer(host, request_id="different", preference="answers", excluded_model_ids=["second-copy"])
+    assert all("first-copy" not in item["installed_ids"] for item in excluded["items"])
+
+
+def test_paged_weights_have_separate_physical_and_gpu_memory_admission():
+    recipe = replace(
+        guided.RECIPES[0],
+        installed_only=True,
+        minimum_memory=114 * guided.GIB,
+        estimated_runtime_bytes=112 * guided.GIB,
+        estimated_gpu_runtime_bytes=40 * guided.GIB,
+    )
+    host = gpu_resources()
+    host["physical_memory_bytes"] = 128 * guided.GIB
+    host["gpu_memory_budget_bytes"] = 107 * guided.GIB
+    assert guided.installation_allowed(recipe, host, installed=True)
+    assert guided._fit_tier(recipe, host) == 1
+    host["physical_memory_bytes"] = 96 * guided.GIB
+    assert not guided.installation_allowed(recipe, host, installed=True)
+    host["physical_memory_bytes"] = 128 * guided.GIB
+    host["gpu_memory_budget_bytes"] = 32 * guided.GIB
+    assert not guided.installation_allowed(recipe, host, installed=True)
+
+
 def test_current_worker_memory_pressure_does_not_remove_static_fit():
     candidate = guided.recipe_from_catalog(catalog_candidate())
     host = gpu_resources()

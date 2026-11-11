@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
+from test_dense_adapters import dense_fixture
+from test_streaming import qwen_fixture
 from test_vision_family_geometry import geometry
 
 from stark_convert import model_catalog as catalog
@@ -418,6 +420,145 @@ def test_mlx_quantization_uses_metadata_and_does_not_call_packed_slots_parameter
     assert item["parameter_count"] is None and item["size_label"] is None
 
 
+@pytest.mark.parametrize("family", ["qwen3", "qwen2", "llama", "mistral"])
+@pytest.mark.parametrize("tied", [False, True])
+def test_quantized_capacity_matches_independent_float_tensor_inventory(tmp_path, family, tied):
+    if family == "qwen3":
+        config, tensors = qwen_fixture(tmp_path / "reference", tied=tied, attention_bias=True)
+    else:
+        config, tensors = dense_fixture(tmp_path / "reference", family, tied=tied)
+    # Count the reference float checkpoint's independent tensor inventory,
+    # counting the tied embedding once even when its alias is serialized twice.
+    expected = sum(
+        values.size for name, (_dtype, values) in tensors.items() if not (tied and name == "lm_head.weight")
+    )
+    assert catalog._dense_config_parameters(config, family) == expected
+    if family in {"qwen2", "mistral"}:
+        # Their config shapes are covered, but catalog preflight still excludes
+        # these quantized routes. Capacity inference must not expand admission.
+        return
+    hub = Hub()
+    hub.discovered[family] = []
+    for bits in (4, 8):
+        repo = f"someone/Anonymous-export-{bits}"
+        hub.add(
+            tmp_path,
+            repo,
+            {**config, "quantization": {"bits": bits, "group_size": 64}},
+            parameters={"U32": 1234567, "BF16": 89},
+        )
+        hub.discovered[family].append(repo)
+    items = catalog.family_catalog(family, hub=hub)["items"]
+    assert len(items) == 2
+    assert {item["parameter_count"] for item in items} == {expected}
+    assert all(item["size_label"] for item in items)
+    assert not any(event[0] == "download" and event[2].endswith(".safetensors") for event in hub.events)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"intermediate_size": None},
+        {"hidden_size": True},
+        {"num_hidden_layers": 1000000},
+        {"num_key_value_heads": 3},
+        {"head_dim": 3},
+        {"tie_word_embeddings": "false"},
+        {"attention_bias": "false"},
+        {"qkv_bias": True},
+        {"use_qk_norm": False},
+        {"mlp_bias": True},
+        {"num_experts": 8},
+        {"add_cross_attention": True},
+        {"pruned_heads": {"0": [1]}},
+    ],
+)
+def test_incomplete_or_unsupported_capacity_geometry_remains_unknown(tmp_path, changes):
+    config, _ = qwen_fixture(tmp_path / "reference")
+    assert catalog._dense_config_parameters({**config, **changes}, "qwen3") is None
+    assert catalog._dense_config_parameters(config, "qwen3_moe") is None
+
+
+def test_more_capacity_can_choose_unregistered_quantized_model_from_catalog_metadata(tmp_path):
+    from stark_convert import guided_models as guided
+
+    hub = Hub()
+    template = (Path(__file__).parent / "fixtures" / "qwen3_4b_chat_template.jinja").read_text()
+    common = {
+        "model_type": "qwen3",
+        "max_position_embeddings": 32768,
+        "num_hidden_layers": 28,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 4,
+        "hidden_size": 2048,
+        "intermediate_size": 8192,
+        "vocab_size": 151936,
+    }
+    names = {"model.safetensors": 2 * guided.GIB, "config.json": 100, "tokenizer_config.json": 100}
+    sidecars = {"tokenizer_config.json": {"chat_template": template}}
+    hub.add(
+        tmp_path,
+        "someone/Anonymous-quantized",
+        {**common, "quantization": {"bits": 4, "group_size": 64}},
+        names=names,
+        parameters={"U32": 100000000},
+        sidecars=sidecars,
+    )
+    hub.add(
+        tmp_path,
+        "someone/Small-floating",
+        common,
+        names=names,
+        parameters={"BF16": 600000000},
+        sidecars=sidecars,
+    )
+    hub.discovered["qwen3"] = ["someone/Small-floating", "someone/Anonymous-quantized"]
+    items = catalog.family_catalog("qwen3", hub=hub, planning=True)["items"]
+    candidates = [guided.recipe_from_catalog(item) for item in items]
+    assert all(candidate is not None for candidate in candidates)
+    host = {
+        "supported": True,
+        "physical_memory_bytes": 64 * guided.GIB,
+        "available_memory_bytes": 48 * guided.GIB,
+        "free_disk_bytes": 100 * guided.GIB,
+        "download_free_disk_bytes": 100 * guided.GIB,
+        "gpu_available": True,
+        "unified_memory": True,
+        "gpu_memory_budget_bytes": 48 * guided.GIB,
+    }
+    report = guided.recommendation_report(host, {}, preference="answers", candidates=candidates)
+    assert report["items"][0]["repo"] == "someone/Anonymous-quantized"
+
+
+@pytest.mark.parametrize(
+    "tag", ["code", "coding", "programming", "coder", "code-generation", "code_generation", "code-completion"]
+)
+def test_catalog_coding_aliases_reach_guided_ranking(tmp_path, tag):
+    from stark_convert.guided_models import recipe_from_catalog
+
+    hub = Hub()
+    template = (Path(__file__).parent / "fixtures" / "qwen3_4b_chat_template.jinja").read_text()
+    hub.add(
+        tmp_path,
+        "someone/Coder",
+        {
+            "model_type": "qwen3",
+            "max_position_embeddings": 32768,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "hidden_size": 2048,
+        },
+        names={"model.safetensors": 123456, "config.json": 100, "tokenizer_config.json": 100},
+        sidecars={"tokenizer_config.json": {"chat_template": template}},
+        tags=[tag.upper()],
+    )
+    hub.discovered["qwen3"] = ["someone/Coder"]
+    item = catalog.family_catalog("qwen3", hub=hub, planning=True)["items"][0]
+    assert item["planning"]["task_tags"] == [tag]
+    assert recipe_from_catalog(item).task_tags == ("code",)
+
+
 def test_qwen35_mixed_mlx_quantization_badge_lists_declared_widths():
     config = {
         "model_type": "qwen3_5",
@@ -826,7 +967,8 @@ def test_inaccessible_full_page_advances_to_later_compatible_models(tmp_path, mo
     assert second["next_offset"] is None
 
 
-def test_partial_transient_failure_retries_whole_page_without_advancing(tmp_path, monkeypatch):
+@pytest.mark.parametrize("planning", [False, True])
+def test_partial_transient_failure_retries_whole_page_without_advancing(tmp_path, monkeypatch, planning):
     hub = Hub()
     flaky, stable = "someone/Flaky", "someone/Stable"
     hub.add(tmp_path, flaky, {"model_type": "qwen3"})
@@ -843,12 +985,39 @@ def test_partial_transient_failure_retries_whole_page_without_advancing(tmp_path
         return model_info(repo_id=repo_id, **kwargs)
 
     monkeypatch.setattr(hub, "model_info", transient_once)
-    first = catalog.family_catalog("qwen3", hub=hub)
-    assert first["status"] == "error" and first["items"] == []
-    assert first["offset"] == 0 and first["next_offset"] is None
-    retried = catalog.family_catalog("qwen3", hub=hub, offset=first["offset"])
+    first = catalog.family_catalog("qwen3", hub=hub, planning=planning)
+    if planning:
+        assert first["status"] == "ready"
+        assert [item["repo"] for item in first["items"]] == [stable]
+        assert first["incomplete"] is True and first["partial_failure"] is True
+        assert first["offset"] == 0 and first["next_offset"] == 0
+        assert "temporary Hub failure" not in json.dumps(first)
+    else:
+        assert first["status"] == "error" and first["items"] == []
+        assert first["offset"] == 0 and first["next_offset"] is None
+    retried = catalog.family_catalog("qwen3", hub=hub, offset=first["offset"], planning=planning)
     assert retried["status"] == "ready"
     assert {item["repo"] for item in retried["items"]} == {flaky, stable}
+    if planning:
+        assert retried["incomplete"] is False and retried["partial_failure"] is False
+
+
+def test_guided_planning_preserves_seed_when_source_discovery_fails(tmp_path, monkeypatch):
+    hub = Hub()
+    repo = "someone/Stable-seed"
+    hub.add(tmp_path, repo, {"model_type": "qwen3"})
+    monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: [repo])
+
+    def unavailable(**_kwargs):
+        raise RuntimeError("private Hub error")
+
+    monkeypatch.setattr(hub, "list_models", unavailable)
+    report = catalog.family_catalog("qwen3", hub=hub, planning=True)
+    assert report["status"] == "ready"
+    assert [item["repo"] for item in report["items"]] == [repo]
+    assert report["incomplete"] is True and report["partial_failure"] is True
+    assert report["next_offset"] == report["offset"] == 0
+    assert "private Hub error" not in json.dumps(report)
 
 
 @pytest.mark.parametrize("method", ["get_hf_file_metadata", "hf_hub_download"])

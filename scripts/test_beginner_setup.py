@@ -18,18 +18,33 @@ ROOT = Path(__file__).resolve().parent.parent
 VIEW_CHECK = r"""
 extension BeginnerSetupView {
     @MainActor static func checkRecommendationPreferences() -> Bool {
-        let session = BeginnerSetupSession()
-        session.task = .code
-        session.modelPriority = .speed
-        var received: [(BeginnerTask, String?, String)] = []
-        var actions = BeginnerSetupActions()
-        actions.refreshChoices = { received.append(($0, $1, $2)) }
-        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
-        view.requestChoices()
-        session.retryPreference = .answers
-        view.requestChoices()
-        return received.count == 2 && received[0].0 == .code && received[0].2 == "speed"
-            && received[1].2 == "answers" && session.stage == .recommendation
+        for task in BeginnerTask.allCases {
+            for priority in BeginnerModelPriority.allCases {
+                let session = BeginnerSetupSession()
+                session.selectTask(task)
+                session.selectModelPriority(priority)
+                var received: [(BeginnerTask, String?, String)] = []
+                var actions = BeginnerSetupActions()
+                actions.refreshChoices = { received.append(($0, $1, $2)) }
+                let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+                view.requestChoices()
+                guard received.count == 1, received[0].0 == task, received[0].2 == priority.rawValue,
+                      session.stage == .recommendation else { return false }
+                for retry in BeginnerRetryPreference.allCases {
+                    session.selectModelPriority(priority)
+                    session.retryPreference = retry
+                    view.requestChoices()
+                    let expected = retry == .speed ? "speed" : retry == .answers ? "answers" : priority.rawValue
+                    guard received.last?.0 == task, received.last?.2 == expected,
+                          session.modelPriority.rawValue == expected, session.retryPreference == nil else { return false }
+                    // Returning to the visible picker must override the previous retry.
+                    session.selectModelPriority(.balanced)
+                    view.requestChoices()
+                    guard received.last?.2 == "balanced" else { return false }
+                }
+            }
+        }
+        return true
     }
 
     @MainActor static func checkStartPolicy(restart: Bool, accepted: Bool = true) -> Bool {
@@ -57,6 +72,42 @@ extension BeginnerSetupView {
         return restart
             ? calls == 1 && session.startRequestedModelID == "installed-a" && session.stage == .installation
             : calls == 0 && session.startRequestedModelID == nil && session.stage == .openWork
+    }
+
+    @MainActor static func checkInstallPolicy(accepted: Bool) -> Bool {
+        let session = BeginnerSetupSession()
+        session.stage = .recommendation
+        let choice = BeginnerModelChoice(id: "recipe-a", name: "Fixture model", summary: "Fixture")
+        var actions = BeginnerSetupActions()
+        var calls = 0
+        actions.install = { received in
+            if received.id == choice.id { calls += 1 }
+            return accepted
+        }
+        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+        view.install(choice)
+        return calls == 1 && (accepted
+            ? session.installingChoiceID == choice.id && session.stage == .installation
+            : session.installingChoiceID == nil && session.stage == .recommendation)
+    }
+
+    @MainActor static func checkRemovedInstalledCopy() -> Bool {
+        let session = BeginnerSetupSession()
+        session.selectTask(.code)
+        let source = BeginnerModelChoice(id: "installed-source", name: "Fixture model", summary: "Fixture", downloadBytes: 0)
+        let existing = source.resolvingInstalledCopy(as: "installed-a")
+        guard existing.installedModelID == "installed-a", existing.availabilityMessage == nil else { return false }
+        let removed = source.resolvingInstalledCopy(as: nil)
+        guard removed.installedModelID == nil, removed.availabilityMessage != nil else { return false }
+        var calls = 0, refreshes = 0
+        var actions = BeginnerSetupActions()
+        actions.install = { _ in calls += 1; return true }
+        actions.refreshChoices = { _, _, _ in refreshes += 1 }
+        let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
+        view.install(removed)
+        let downloadable = BeginnerModelChoice(id: "downloadable", name: "Fixture", summary: "Fixture", downloadBytes: 100)
+        return calls == 0 && refreshes == 1 && session.installingChoiceID == nil
+            && downloadable.resolvingInstalledCopy(as: nil).availabilityMessage == nil
     }
 }
 """
@@ -146,6 +197,7 @@ struct BeginnerChecks {
                 && snapshot.runningModelID == "installed-a" && snapshot.modelReady
         case "retry-preserves-current":
             let (session, snapshot) = ready()
+            session.modelPriority = .speed
             let unchanged = snapshot
             session.beginAnotherModel(snapshot: snapshot)
             guard session.stage == .retry, session.choosingAnotherModel,
@@ -154,10 +206,26 @@ struct BeginnerChecks {
                   session.workspaceConfirmed,
                   session.confirmedOpenWorkModelID == "installed-a" else { return false }
             session.task = .code
+            session.modelPriority = .answers
             session.keepCurrentModel()
             session.synchronize(with: snapshot)
-            return session.stage == .ready && session.task == .text && !session.choosingAnotherModel
+            return session.stage == .ready && session.task == .text && session.modelPriority == .speed && !session.choosingAnotherModel
                 && session.canFinish(snapshot: snapshot) && snapshot == unchanged
+        case "changed-preferences-invalidate-offers":
+            let (session, base) = ready()
+            _ = session.requestRecommendations()
+            session.selectedChoiceID = "recipe-b"
+            guard session.choice(in: base)?.id == "recipe-b" else { return false }
+            session.selectTask(.code)
+            guard session.selectedChoiceID == nil, session.choices(in: base).isEmpty,
+                  !session.canNavigate(to: .installation, snapshot: base) else { return false }
+            _ = session.requestRecommendations()
+            guard !session.choices(in: base).isEmpty else { return false }
+            session.selectModelPriority(.answers)
+            guard session.choices(in: base).isEmpty,
+                  !session.canNavigate(to: .installation, snapshot: base) else { return false }
+            _ = session.requestRecommendations()
+            return !session.choices(in: base).isEmpty && session.recommendationsMatchSelection
         case "retry-before-first-guide":
             let (_, snapshot) = ready()
             let session = BeginnerSetupSession()
@@ -328,6 +396,9 @@ struct BeginnerChecks {
         case "recommendation-preferences": return BeginnerSetupView.checkRecommendationPreferences()
         case "start-applies-restart-policy": return BeginnerSetupView.checkStartPolicy(restart: true)
         case "start-rejection-does-not-wait": return BeginnerSetupView.checkStartPolicy(restart: true, accepted: false)
+        case "install-accepted-waits": return BeginnerSetupView.checkInstallPolicy(accepted: true)
+        case "install-rejection-does-not-wait": return BeginnerSetupView.checkInstallPolicy(accepted: false)
+        case "removed-installed-copy-refreshes": return BeginnerSetupView.checkRemovedInstalledCopy()
         default: return false
         }
     }
@@ -404,6 +475,17 @@ class BeginnerSetupTests(unittest.TestCase):
 
     def test_model_priority_and_retry_preference_reach_recommendations(self):
         self.run_check("recommendation-preferences")
+
+    def test_changed_task_or_priority_requires_new_recommendations(self):
+        self.run_check("changed-preferences-invalidate-offers")
+
+    def test_installation_waits_only_for_an_accepted_request(self):
+        for scenario in ["install-accepted-waits", "install-rejection-does-not-wait"]:
+            with self.subTest(scenario=scenario):
+                self.run_check(scenario)
+
+    def test_removed_installed_only_copy_refreshes_instead_of_downloading(self):
+        self.run_check("removed-installed-copy-refreshes")
 
     def test_failed_start_can_be_retried(self):
         for scenario in ["failed-start-can-retry", "failed-switch-can-choose-again"]:

@@ -57,6 +57,7 @@ from .guided_models import (
     installation_allowed,
     matches_recipe,
     recipe_from_catalog,
+    recipe_from_installed,
     recommendation_report,
 )
 from .hybrid_prepare import SOURCES as NATIVE_SOURCES
@@ -929,6 +930,19 @@ class Desktop:
             if excluded["excluded_model_ids"].intersection(ids):
                 excluded_recipes.add(recipe.id)
             installed[recipe.id] = ids
+        matched_ids = {identifier for ids in installed.values() for identifier in ids}
+        unassessed = len(models) - len(valid_models)
+        for model, _display in valid_models:
+            if model["id"] in matched_ids:
+                continue
+            recipe = recipe_from_installed(model)
+            if recipe is None:
+                unassessed += 1
+                continue
+            candidates[recipe.id] = recipe
+            installed.setdefault(recipe.id, []).append(model["id"])
+            if model["id"] in excluded["excluded_model_ids"]:
+                excluded_recipes.add(recipe.id)
         report = recommendation_report(
             self.guided_resources(hardware),
             installed,
@@ -937,6 +951,10 @@ class Desktop:
             preference=preference,
             candidates=tuple(candidates.values()),
         )
+        if unassessed:
+            report["message"] += (
+                f" {unassessed} installed model(s) could not be assessed by this guide; review them in Advanced."
+            )
         if discovery is not None:
             report["catalog_search"] = {
                 "bounded": True,
@@ -946,7 +964,7 @@ class Desktop:
             search_note = (
                 "The search checked a bounded window of the supported catalog. "
                 if discovery["items"]
-                else "Catalog discovery is unavailable; only recorded starter choices were checked. "
+                else "Catalog discovery is unavailable; installed models and recorded starter choices were checked. "
             )
             if discovery.get("failed_families", 0):
                 search_note += "Some families could not be checked; Check again retries the search. "

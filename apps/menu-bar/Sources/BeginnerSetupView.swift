@@ -96,10 +96,10 @@ struct BeginnerSetupView: View {
             heading("What would you like help with?", detail: "Pick a starting point. Stark will choose the download settings for you.")
             ForEach(BeginnerTask.allCases) { task in
                 selection(title: task.title, detail: task.detail, symbol: task.symbol, selected: session.task == task) {
-                    session.task = task
+                    session.selectTask(task)
                 }
             }
-            Picker("Model priority", selection: $session.modelPriority) {
+            Picker("Model priority", selection: Binding(get: { session.modelPriority }, set: session.selectModelPriority)) {
                 ForEach(BeginnerModelPriority.allCases) { priority in
                     Text(priority.title).tag(priority)
                 }
@@ -125,8 +125,8 @@ struct BeginnerSetupView: View {
             ProgressView().controlSize(.small)
         } else if let choice {
             let installed = session.installedID(for: choice, in: snapshot)
-            heading(session.choosingAnotherModel ? "Try another starting model." : installed == nil ? "Start with this model." : "Use the model already on your Mac.",
-                    detail: installed == nil ? "You can change models later." : "No new download is needed.")
+            heading(choice.availabilityMessage != nil ? "Check this model again." : session.choosingAnotherModel ? "Try another starting model." : installed == nil ? "Start with this model." : "Use the model already on your Mac.",
+                    detail: choice.availabilityMessage != nil ? "The saved model inventory changed." : installed == nil ? "You can change models later." : "No new download is needed.")
             modelCard(choice)
             deviceSummary
             if !snapshot.recommendationMessage.isEmpty {
@@ -139,13 +139,14 @@ struct BeginnerSetupView: View {
                 notice("\(snapshot.runningModelName) stays installed while you prepare this model. You’ll choose when to switch.", symbol: "checkmark.circle")
             }
             HStack {
-                if installed != nil {
+                if choice.availabilityMessage != nil {
+                    Button("Check models again") { requestChoices() }.buttonStyle(.borderedProminent)
+                } else if installed != nil {
                     Button(startLabel(choice)) { start(choice) }.buttonStyle(.borderedProminent)
                         .disabled(!snapshot.canStartModel || choice.availabilityMessage != nil)
                 } else {
                     Button(downloadLabel(choice)) {
-                        session.requestInstall(choiceID: choice.id)
-                        actions.install(choice)
+                        install(choice)
                     }.buttonStyle(.borderedProminent).disabled(!snapshot.canInstall || choice.availabilityMessage != nil)
                 }
                 if session.choosingAnotherModel { keepCurrentButton }
@@ -190,6 +191,9 @@ struct BeginnerSetupView: View {
                     detail: starting ? "Waiting for the selected model to be ready before moving on."
                         : installed != nil ? "Start it when you’re ready." : "Downloading and preparing are separate steps.")
             modelIdentity(choice.name)
+            if let unavailable = choice.availabilityMessage {
+                notice(unavailable, symbol: "exclamationmark.triangle", color: .orange)
+            }
             if ownInstallation {
                 if snapshot.installPhase == .downloading { progress(snapshot.downloadFraction, label: "Downloading model") }
                 if snapshot.installPhase == .preparing { progress(snapshot.preparationFraction, label: "Preparing for your Mac") }
@@ -204,14 +208,16 @@ struct BeginnerSetupView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
-                if installed != nil {
+                if choice.availabilityMessage != nil {
+                    Button("Check models again") { requestChoices() }.buttonStyle(.borderedProminent)
+                } else if installed != nil {
                     Button(starting ? "Starting…" : startLabel(choice)) { start(choice) }
                         .buttonStyle(.borderedProminent).disabled(starting || !snapshot.canStartModel)
                 } else if installInProgress {
                     Button(snapshot.installPhase == .cancelling ? "Canceling…" : "Cancel new setup", action: actions.cancelInstall)
                         .disabled(snapshot.installPhase == .cancelling)
                 } else {
-                    Button("Try setup again") { session.requestInstall(choiceID: choice.id); actions.install(choice) }
+                    Button("Try setup again") { install(choice) }
                         .buttonStyle(.borderedProminent).disabled(!snapshot.canInstall || choice.availabilityMessage != nil)
                 }
                 if session.choosingAnotherModel {
@@ -388,9 +394,7 @@ struct BeginnerSetupView: View {
 
     private func requestChoices() {
         guard let task = session.task else { return }
-        session.stage = .recommendation
-        session.selectedChoiceID = nil
-        let preference = session.retryPreference == .speed ? "speed" : session.retryPreference == .answers ? "answers" : session.modelPriority.rawValue
+        let preference = session.requestRecommendations()
         actions.refreshChoices(task, session.excludedModelID, preference)
     }
 
@@ -432,6 +436,11 @@ struct BeginnerSetupView: View {
         } else if actions.startModel(choice.installed(as: identifier)) {
             session.requestStart(modelID: identifier)
         }
+    }
+
+    private func install(_ choice: BeginnerModelChoice) {
+        if choice.availabilityMessage != nil { requestChoices(); return }
+        if actions.install(choice) { session.requestInstall(choiceID: choice.id) }
     }
 
     private func startLabel(_ choice: BeginnerModelChoice) -> String {
@@ -486,11 +495,13 @@ struct BeginnerSetupView: View {
             modelIdentity(choice.name, detail: choice.summary)
             if session.installedID(for: choice, in: snapshot) != nil {
                 Label("Already on your Mac", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
-            } else if let bytes = choice.downloadBytes {
+            } else if let bytes = choice.downloadBytes, bytes > 0 {
                 Text("\(Self.bytes(bytes)) download").font(.callout)
             }
             if let bytes = choice.installedBytes { Text("Estimated installed storage: \(Self.bytes(bytes))").font(.caption).foregroundStyle(.secondary) }
-            if let bytes = choice.setupBytes { Text("Estimated free space needed during setup: \(Self.bytes(bytes))").font(.caption).foregroundStyle(.secondary) }
+            if session.installedID(for: choice, in: snapshot) == nil, let bytes = choice.setupBytes {
+                Text("Estimated free space needed during setup: \(Self.bytes(bytes))").font(.caption).foregroundStyle(.secondary)
+            }
             DisclosureGroup("Model and download details") {
                 VStack(alignment: .leading, spacing: 8) {
                     if !choice.source.isEmpty { Text("Source: \(choice.source)").textSelection(.enabled) }

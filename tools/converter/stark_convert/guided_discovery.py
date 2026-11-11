@@ -26,8 +26,14 @@ def discover(*, catalog=family_catalog):
             try:
                 report = future.result()
                 checked += 1
-                failed += int(report["status"] != "ready")
-                incomplete |= report["status"] != "ready" or report.get("has_more", False)
+                partial_failure = bool(report.get("partial_failure", False))
+                failed += int(report["status"] != "ready" or partial_failure)
+                incomplete |= (
+                    report["status"] != "ready"
+                    or partial_failure
+                    or report.get("incomplete", False)
+                    or report.get("has_more", False)
+                )
                 for item in report["items"]:
                     if isinstance(item, dict) and isinstance(item.get("id"), str):
                         items[item["id"]] = item

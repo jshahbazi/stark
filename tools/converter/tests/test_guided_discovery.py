@@ -154,6 +154,32 @@ def test_catalog_recipe_binds_dynamic_revision_and_rejects_forged_or_unplannable
     assert guided.recipe_from_catalog({**item, "planning": {**item["planning"], "status": "unavailable"}}) is None
 
 
+@pytest.mark.parametrize("partial_failure", [False, True])
+def test_discovery_keeps_partial_family_candidates_and_marks_failures_for_retry(monkeypatch, partial_failure):
+    monkeypatch.setattr(
+        guided_discovery,
+        "support_matrix",
+        lambda: {"families": [{"family_id": "qwen3", "modes": {"text": {"status": "conditional"}}}]},
+    )
+    candidate = catalog_item()
+
+    def partial_catalog(_family, **_kwargs):
+        return {
+            "status": "ready",
+            "items": [candidate],
+            "has_more": True,
+            "incomplete": True,
+            "partial_failure": partial_failure,
+        }
+
+    report = guided_discovery.discover(catalog=partial_catalog)
+    assert report["items"] == [candidate]
+    assert report["incomplete"] is True
+    # Normal bounded windows may be cached. Failed metadata within that window
+    # must set failed_families so the desktop's next Check again retries it.
+    assert report["failed_families"] == int(partial_failure)
+
+
 def test_dynamic_install_uses_bound_revision_and_rejects_forged_offer(desktop, monkeypatch):
     item = catalog_item(revision="d" * 40, repo="another-org/private-name")
     desktop.publish_guided_models(

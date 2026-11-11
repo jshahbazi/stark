@@ -1535,6 +1535,8 @@ final class EngineController: ObservableObject {
             guard applyResourceBudget(event) else {
                 state = "error"
                 message = "The runtime reported an invalid request budget. Quit and reopen Stark."
+                errorMessage = message
+                beginnerRunRequestID = nil; beginnerRunBackup = nil
                 return
             }
             if beginnerRunRequestID != nil {
@@ -2105,10 +2107,18 @@ final class EngineController: ObservableObject {
         }
     }
 
-    func installBeginnerModel(recipeID: String) {
-        guard !busy, let recommendation = beginnerRequestID,
+    @discardableResult
+    func installBeginnerModel(recipeID: String) -> Bool {
+        guard !busy else {
+            errorMessage = "Wait for the current request to finish, then try setting up this model again."
+            return false
+        }
+        guard let recommendation = beginnerRequestID,
               let choice = beginnerReport?.items.first(where: { $0.id == recipeID }),
-              choice.installedIDs.allSatisfy({ id in !models.contains(where: { $0.id == id }) }) else { return }
+              choice.installedIDs.allSatisfy({ id in !models.contains(where: { $0.id == id }) }) else {
+            errorMessage = "This starting choice changed. Check the recommendation again before downloading it."
+            return false
+        }
         resetInstallProgress(kind: "huggingface")
         errorMessage = nil; beginnerInstallError = nil; beginnerCancelPending = false
         let requestID = UUID().uuidString.lowercased()
@@ -2122,7 +2132,9 @@ final class EngineController: ObservableObject {
             beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
             endInstallProgress("failed")
             state = loadedID.isEmpty ? "idle" : "ready"
+            return false
         }
+        return true
     }
 
     func cancelBeginnerInstallation() {

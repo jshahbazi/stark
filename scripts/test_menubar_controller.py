@@ -240,6 +240,23 @@ extension EngineController {
             let preference = retry["preference"] as? String
             return engine.beginnerChoicesLoading && engine.beginnerReport == nil &&
                 excluded == ["fixture-model"] && engine.loadedID == "fixture-model" && preference == "speed"
+        case "beginner-installed-only-report":
+            var report = beginnerReport(["fixture-model"])
+            var items = report["items"] as! [[String: Any]]
+            items[0]["download_bytes"] = 0; report["items"] = items
+            guard BeginnerModelReport(report)?.items.first?.downloadBytes == 0 else { return false }
+            items[0]["installed_ids"] = [String](); report["items"] = items
+            guard BeginnerModelReport(report) == nil else { return false }
+            items[0]["installed_ids"] = ["fixture-model"]
+            items[0]["download_bytes"] = -1; report["items"] = items
+            return BeginnerModelReport(report) == nil
+        case "beginner-rejected-install-does-not-start":
+            engine.models = [variant("fixture-model", name: "Current", display: nil)]
+            _ = prepareBeginnerReport(["fixture-model"])
+            guard !engine.installBeginnerModel(recipeID: "fixture-recipe"),
+                  engine.beginnerInstallRequestID == nil, noCommandSent() else { return false }
+            return !engine.installBeginnerModel(recipeID: "stale-recipe") &&
+                engine.beginnerInstallRequestID == nil && engine.errorMessage != nil && noCommandSent()
         case "beginner-cancel-preserves-current":
             engine.models = [variant("fixture-model", name: "Current", display: nil)]
             engine.messages = [ChatMessage(text: "synthetic history", isUser: true)]
@@ -307,6 +324,15 @@ extension EngineController {
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             return engine.modelReady && engine.selectedID == "fixture-model" && engine.loadedID == "fixture-model" &&
                 engine.messages.count == 1 && engine.supportsTools && engine.toolParser == "fixture"
+        case "beginner-invalid-ready-settles-start":
+            engine.models = [variant("fixture-model", name: "Current", display: nil), variant("new-model", name: "New", display: nil)]
+            _ = prepareBeginnerReport(["new-model"])
+            guard engine.startBeginnerModel(recipeID: "fixture-recipe", modelID: "new-model") else { return false }
+            let id = command()["request_id"] as! String
+            engine.apply(["event": "ready", "request_id": id, "mode": "chat", "model_id": "new-model",
+                          "resource_budget": ["schema_version": 999]])
+            return engine.state == "error" && engine.errorMessage != nil &&
+                engine.beginnerRunRequestID == nil && engine.beginnerRunBackup == nil && !engine.modelReady
         case "beginner-api-budget-keeps-native-capacity":
             guard BeginnerContextPolicy.requiresRestart(expected: 32768, local: 4096, api: 4096),
                   BeginnerContextPolicy.requiresRestart(expected: 32768, local: 32768, api: 4096),
@@ -2385,6 +2411,12 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_beginner_recommendations_reject_stale_or_invalid_reports(self):
         self.exercise("beginner-recommendation-fences")
 
+    def test_beginner_zero_download_requires_an_installed_model(self):
+        self.exercise("beginner-installed-only-report")
+
+    def test_beginner_install_rejection_does_not_start_an_operation(self):
+        self.exercise("beginner-rejected-install-does-not-start")
+
     def test_beginner_cancellation_preserves_the_current_worker_and_history(self):
         self.exercise("beginner-cancel-preserves-current")
 
@@ -2393,6 +2425,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_beginner_rejected_start_preserves_the_current_chat(self):
         self.exercise("beginner-load-rejection-preserves-history")
+
+    def test_beginner_invalid_ready_budget_finishes_pending_start(self):
+        self.exercise("beginner-invalid-ready-settles-start")
 
     def test_beginner_api_budget_does_not_replace_native_model_capacity(self):
         self.exercise("beginner-api-budget-keeps-native-capacity")

@@ -154,10 +154,10 @@ struct BeginnerSetupHost: View {
                 summary: item.recommendationReason,
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens,
-                installedModelID: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) },
                 source: item.source, revision: item.revision,
                 qualification: ([item.qualification, "License: " + item.license,
                     "Estimated runtime memory: " + ByteCountFormatter.string(fromByteCount: item.runtimeBytes, countStyle: .memory)] + item.caveats).joined(separator: "\n"))
+                .resolvingInstalledCopy(as: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) })
         }
         // Keep the exact operation choice available if another surface refreshes recommendations.
         if let item = engine.beginnerInstallChoice,
