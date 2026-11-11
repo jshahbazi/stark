@@ -267,6 +267,23 @@ struct BeginnerChatView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            GeometryReader { viewport in
+                ScrollView {
+                    content.frame(minHeight: viewport.size.height, alignment: .topLeading)
+                }
+            }
+            if engine.loadedMode == .chat, !engine.loadedID.isEmpty {
+                HStack {
+                    Button("Guided setup", action: setup).buttonStyle(.link)
+                    Spacer()
+                    Button("Try a different model", action: tryAnotherModel).disabled(!engine.modelReady)
+                }.font(.caption)
+            }
+        }.padding(20).frame(minWidth: 520, minHeight: 600)
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 14) {
             ZStack {
                 StarkInterfacePicker(preferences: interface, selected: selectInterface)
                 HStack { Text("Stark").font(.title3.weight(.semibold)); Spacer() }
@@ -276,17 +293,12 @@ struct BeginnerChatView: View {
                 RunningModelLabel(engine: engine).font(.callout.weight(.medium))
                 if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
                 ChatContentView(engine: engine)
-                HStack {
-                    Button("Guided setup", action: setup).buttonStyle(.link)
-                    Spacer()
-                    Button("Try a different model", action: tryAnotherModel).disabled(!engine.modelReady)
-                }.font(.caption)
             } else {
                 Text("Start a model with guided setup, then come back for your first chat.").foregroundStyle(.secondary)
                 Button("Continue setup", action: setup).buttonStyle(.borderedProminent)
                 Spacer()
             }
-        }.padding(20).frame(minWidth: 520, minHeight: 600)
+        }
     }
 }
 
