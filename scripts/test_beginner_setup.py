@@ -38,7 +38,7 @@ extension BeginnerSetupView {
         let view = BeginnerSetupView(session: session, snapshot: BeginnerSetupSnapshot(), actions: actions)
         guard BeginnerTask.allCases.contains(.files), BeginnerTask.files.rawValue == "files",
               BeginnerTask.files.title == "Work with files",
-              BeginnerTask.files.detail == "Read or edit a folder in OpenWork" else { return false }
+              BeginnerTask.files.detail == "Read or edit a folder in your assistant app" else { return false }
         view.requestChoices()
         return received.count == 1 && received[0].0 == .files && received[0].0.rawValue == "files"
     }
@@ -170,6 +170,53 @@ struct BeginnerChecks {
 
     @MainActor static func check(_ scenario: String) -> Bool {
         switch scenario {
+        case "client-guides":
+            let session = BeginnerSetupSession()
+            guard session.stage == .clientChoice else { return false }
+            let (_, base) = ready()
+            var snapshot = base
+            session.selectClient(.openCode)
+            snapshot.client = .openCode
+            // OpenWork handoff evidence cannot complete an OpenCode guide.
+            session.continueAfterModel(snapshot: snapshot)
+            guard session.stage == .openOpenWork, !session.canFinish(snapshot: snapshot) else { return false }
+            session.confirmOpenCodeModel(snapshot: base)
+            guard !session.canFinish(snapshot: snapshot) else { return false }
+            var stale = snapshot
+            stale.openWorkClientActive = false
+            session.confirmOpenCodeModel(snapshot: stale)
+            guard !session.canFinish(snapshot: snapshot) else { return false }
+            session.confirmOpenCodeModel(snapshot: snapshot)
+            guard session.stage == .ready, session.canFinish(snapshot: snapshot) else { return false }
+            snapshot.modelReady = false; snapshot.modelGenerating = true
+            session.synchronize(with: snapshot)
+            guard session.stage == .ready, session.keepsCompletedSetupWhileGenerating(snapshot: snapshot) else { return false }
+            snapshot.modelReady = true; snapshot.modelGenerating = false
+            for changed in ["model", "scope", "approval", "discovery", "running"] {
+                var next = snapshot
+                switch changed {
+                case "model": next.runningModelID = "another-model"
+                case "scope": next.openWorkScope = "another-engine-context-or-session"
+                case "approval": next.openWorkApproved = false
+                case "discovery": next.openWorkClientActive = false
+                default: next.openWorkRunning = false
+                }
+                guard !session.canFinish(snapshot: next) else { return false }
+                session.synchronize(with: next)
+                guard session.stage != .ready else { return false }
+                session.synchronize(with: snapshot)
+                // A lost process/approval/discovery requires a new confirmation.
+                if ["approval", "discovery", "running"].contains(changed) {
+                    guard !session.canFinish(snapshot: snapshot) else { return false }
+                }
+                session.confirmOpenCodeModel(snapshot: snapshot)
+                guard session.canFinish(snapshot: snapshot) else { return false }
+            }
+            session.selectClient(.openWork)
+            guard !session.canFinish(snapshot: snapshot), session.confirmedOpenCodeScope == nil else { return false }
+            guard session.canFinish(snapshot: base) else { return false }
+            session.selectClient(.openCode)
+            return !session.canFinish(snapshot: snapshot)
         case "openwork-step-order":
             let session = BeginnerSetupSession()
             let (_, base) = ready()
@@ -611,6 +658,9 @@ class BeginnerSetupTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, f"beginner_{scenario}_check_failed")
+
+    def test_client_choice_and_opencode_readiness_are_isolated(self):
+        self.run_check("client-guides")
 
     def test_openwork_install_connect_and_open_are_separate_steps(self):
         for scenario in ["openwork-step-order", "openwork-already-installed"]:

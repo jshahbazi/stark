@@ -3619,6 +3619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let interface: StarkInterfacePreferences
     private let beginnerSession = BeginnerSetupSession()
     private let beginnerOpenWork = BeginnerOpenWorkStatus()
+    private let beginnerOpenCode = BeginnerOpenWorkStatus(client: .openCode)
     private let modelManagement = ModelManagementState()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
@@ -3872,8 +3873,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private var beginnerHost: BeginnerSetupHost {
-        BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
-            session: beginnerSession, interface: interface, observation: beginnerOpenWork,
+        BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork, openCode: engine.desktopConnections.openCode,
+            session: beginnerSession, interface: interface, observation: beginnerOpenWork, openCodeObservation: beginnerOpenCode,
             selectInterface: { [weak self] in self?.selectInterface($0) },
             openChat: { [weak self] in self?.showBeginnerChat() })
     }

@@ -3,6 +3,8 @@ import SwiftUI
 
 @MainActor
 final class BeginnerOpenWorkStatus: ObservableObject {
+    private let client: DesktopClient
+    init(client: DesktopClient = .openWork) { self.client = client }
     @Published private(set) var applicationURL: URL?
     @Published private(set) var running = false
     @Published private(set) var liveConnection = false
@@ -17,6 +19,7 @@ final class BeginnerOpenWorkStatus: ObservableObject {
     private var pendingRefresh: (input: ScanInput, completions: [(Bool) -> Void])?
 
     private struct ScanInput: Sendable {
+        var client: DesktopClient = .openWork
         var previousURL: URL?
         var shouldResolveApplication: Bool
         var profile: URL?
@@ -38,18 +41,22 @@ final class BeginnerOpenWorkStatus: ObservableObject {
 
     func refresh(engine: EngineController, force: Bool = false, completion: ((Bool) -> Void)? = nil) {
         if refreshInFlight && !force { return }
-        let connection = engine.desktopConnections.openWork
-        if wasApproved && !connection.approved { scope = UUID().uuidString }
-        wasApproved = connection.approved
+        let openWork = engine.desktopConnections.openWork
+        let openCode = engine.desktopConnections.openCode
+        let approved = client == .openWork ? openWork.approved : openCode.approved
+        if wasApproved && !approved { scope = UUID().uuidString }
+        wasApproved = approved
         let previousURL = applicationURL
         let shouldResolveApplication = force || !applicationChecked || previousURL.map { !FileManager.default.fileExists(atPath: $0.path) } == true
         let apiID = engine.activeModel?.apiID ?? ""
         let contextTokens = engine.apiContextTokens
-        let input = ScanInput(previousURL: previousURL, shouldResolveApplication: shouldResolveApplication,
+        let input = ScanInput(client: client, previousURL: previousURL, shouldResolveApplication: shouldResolveApplication,
             profile: DesktopConnectionTesting.profile,
-            candidates: DesktopApplicationIdentity.candidates(.openWork),
-            hasDiscoveredModel: connection.hasDiscoveredModel(apiID: apiID, contextTokens: contextTokens),
-            discoveryScope: connection.discoveryScope, brokerPath: engine.desktopConnections.brokerPath ?? "",
+            candidates: DesktopApplicationIdentity.candidates(client),
+            hasDiscoveredModel: client == .openWork ? openWork.hasDiscoveredModel(apiID: apiID, contextTokens: contextTokens)
+                : openCode.hasDiscoveredModel(apiID: apiID, contextTokens: contextTokens),
+            discoveryScope: client == .openWork ? openWork.discoveryScope : openCode.discoveryScope,
+            brokerPath: engine.desktopConnections.brokerPath ?? "",
             apiBaseURL: engine.apiBaseURL)
 
         if refreshInFlight {
@@ -73,13 +80,13 @@ final class BeginnerOpenWorkStatus: ObservableObject {
         Task.detached(priority: .utility) { [weak self] in
             let url: URL?
             if input.shouldResolveApplication {
-                let candidate = DesktopConnectionTesting.application(.openWork)
-                    ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: DesktopClient.openWork.bundleID)
-                url = candidate.flatMap { DesktopClientPeer.verifyApplication($0, client: .openWork) ? $0 : nil }
+                let candidate = DesktopConnectionTesting.application(input.client)
+                    ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: input.client.bundleID)
+                url = candidate.flatMap { DesktopClientPeer.verifyApplication($0, client: input.client) ? $0 : nil }
             } else {
                 url = input.previousURL
             }
-            let application = DesktopApplicationIdentity.running(.openWork,
+            let application = DesktopApplicationIdentity.running(input.client,
                 configurationRoot: input.profile, candidates: input.candidates)
             let running = application != nil
             let verified = application.map { $0.process.instanceID + "|" + ($0.profile?.path ?? "") } ?? ""
@@ -122,9 +129,14 @@ final class BeginnerOpenWorkStatus: ObservableObject {
 struct BeginnerSetupHost: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var openWork: OpenWorkConnectionController
+    @ObservedObject var openCode: OpenCodeConnectionController
     @ObservedObject var session: BeginnerSetupSession
     @ObservedObject var interface: StarkInterfacePreferences
     @ObservedObject var observation: BeginnerOpenWorkStatus
+    @ObservedObject var openCodeObservation: BeginnerOpenWorkStatus
+    private var selectedObservation: BeginnerOpenWorkStatus {
+        session.client == .openWork ? observation : openCodeObservation
+    }
     let selectInterface: (StarkInterfaceMode) -> Void
     let openChat: () -> Void
 
@@ -142,6 +154,8 @@ struct BeginnerSetupHost: View {
         .onAppear { refreshOpenWork() }
         .onReceive(refresh) { _ in refreshOpenWork() }
         .onChange(of: openWork.approved) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: openCode.approved) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: session.client) { _, _ in refreshOpenWork(force: true) }
         .onChange(of: engine.apiBaseURL) { _, _ in refreshOpenWork(force: true) }
         .onChange(of: engine.activeModel?.apiID) { _, _ in refreshOpenWork(force: true) }
         .onChange(of: engine.apiContextTokens) { _, _ in refreshOpenWork(force: true) }
@@ -149,6 +163,7 @@ struct BeginnerSetupHost: View {
 
     var snapshot: BeginnerSetupSnapshot {
         var result = BeginnerSetupSnapshot()
+        result.client = session.client
         result.choices = (engine.beginnerReport?.items ?? []).map { item in
             BeginnerModelChoice(id: item.id, name: item.displayName,
                 summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
@@ -199,18 +214,32 @@ struct BeginnerSetupHost: View {
         result.runningSupportsTools = engine.supportsTools
         result.runningContextKnown = engine.contextCapacityKnown
         result.engineBusy = engine.busy; result.engineMessage = engine.message; result.engineError = engine.errorMessage
+        let observation = selectedObservation
         result.openWorkInstalled = observation.applicationURL != nil; result.openWorkRunning = observation.running
-        result.openWorkApproved = openWork.approved
-        // Query against this snapshot's model and budget. The application scan
-        // is periodic; its cached connection result may belong to a prior model.
-        result.openWorkClientActive = observation.running && openWork.hasDiscoveredModel(
-            apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
-        result.openWorkBusy = openWork.busy
-        result.openWorkPreparing = openWork.beginnerPreparing
-        result.openWorkPreparedModelID = openWork.beginnerIsPrepared(
-            apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens) ? engine.loadedID : nil
-        result.openWorkMessage = engine.apiBaseURL.isEmpty ? engine.apiMessage : (observation.message ?? openWork.message)
         result.openWorkScope = observation.scope
+        if session.client == .openWork {
+            result.openWorkApproved = openWork.approved
+            // Query against this snapshot's model and budget. The application scan
+            // is periodic; its cached connection result may belong to a prior model.
+            result.openWorkClientActive = observation.running && openWork.hasDiscoveredModel(
+                apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
+            result.openWorkBusy = openWork.busy
+            result.openWorkPreparing = openWork.beginnerPreparing
+            result.openWorkPreparedModelID = openWork.beginnerIsPrepared(
+                apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens) ? engine.loadedID : nil
+            result.openWorkMessage = engine.apiBaseURL.isEmpty ? engine.apiMessage : (observation.message ?? openWork.message)
+        } else {
+            result.openWorkApproved = openCode.approved
+            result.openCodeApprovalPending = openCode.pendingEngine != nil
+            result.openWorkBusy = openCode.busy
+            result.openWorkPreparing = false
+            result.openWorkPreparedModelID = nil
+            result.openWorkClientActive = observation.running && openCode.hasDiscoveredModel(
+                apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
+            result.openWorkMessage = engine.apiBaseURL.isEmpty ? engine.apiMessage : (observation.message ?? openCode.message)
+            // Scope confirmation to the API session, engine, model and context.
+            result.openWorkScope += "|" + openCode.discoveryScope + "|" + engine.apiBaseURL + "|" + String(engine.apiContextTokens)
+        }
         let choice = session.choice(in: result)
         if let choice, session.installedID(for: choice, in: result) == engine.loadedID {
             result.choiceRequiresRestart = BeginnerContextPolicy.requiresRestart(expected: choice.contextTokens,
@@ -245,30 +274,44 @@ struct BeginnerSetupHost: View {
                 return engine.startBeginnerModel(recipeID: choice.id, modelID: id)
             },
             openOpenWork: openOpenWork,
-            downloadOpenWork: { NSWorkspace.shared.open(URL(string: "https://openworklabs.com/download")!) },
-            connectOpenWork: { observation.message = nil; openWork.connectBeginner() },
+            downloadOpenWork: {
+                NSWorkspace.shared.open(URL(string: session.client == .openWork
+                    ? "https://openworklabs.com/download" : "https://opencode.ai/download")!)
+            },
+            connectOpenWork: {
+                selectedObservation.message = nil
+                if session.client == .openWork { openWork.connectBeginner() }
+                else { openCode.connect() }
+            },
+            allowOpenCodeEngine: openCode.allow,
+            denyOpenCodeEngine: openCode.deny,
             checkConnection: {
-                observation.message = nil
-                openWork.prepareBeginnerModel(apiID: engine.activeModel?.apiID ?? "",
-                    contextTokens: engine.apiContextTokens, retry: true)
-                observation.refresh(engine: engine, force: true)
+                selectedObservation.message = nil
+                if session.client == .openWork {
+                    openWork.prepareBeginnerModel(apiID: engine.activeModel?.apiID ?? "",
+                        contextTokens: engine.apiContextTokens, retry: true)
+                }
+                selectedObservation.refresh(engine: engine, force: true)
             },
             openChat: openChat,
             showAdvanced: { selectInterface(.advanced) },
-            retryLocalAPI: { observation.message = nil; engine.retryAPI() })
+            retryLocalAPI: { selectedObservation.message = nil; engine.retryAPI() })
     }
 
     private func refreshOpenWork(force: Bool = false) {
-        observation.refresh(engine: engine, force: force)
-        if session.stage == .openOpenWork, snapshot.canUseOpenWork {
+        selectedObservation.refresh(engine: engine, force: force)
+        if session.client == .openWork, session.stage == .openOpenWork, snapshot.canUseOpenWork {
             openWork.prepareBeginnerModel(apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
         }
     }
 
     private func openOpenWork() {
-        observation.refresh(engine: engine, force: true)
-        observation.message = nil
-        openWork.openApplication()
+        selectedObservation.refresh(engine: engine, force: true)
+        selectedObservation.message = nil
+        if session.client == .openWork { openWork.openApplication() }
+        else if let url = selectedObservation.applicationURL {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        }
     }
 }
 

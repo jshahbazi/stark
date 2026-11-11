@@ -407,13 +407,20 @@ extension AppDelegate {
         let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults)
         engine.configureConnectionFixture(state: "ready", loadedMode: .chat, apiAvailable: true, hasModels: true)
         let observation = BeginnerOpenWorkStatus.staleWindowFixture()
-        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
-            session: BeginnerSetupSession(), interface: StarkInterfacePreferences(defaults: defaults),
-            observation: observation, selectInterface: { _ in }, openChat: {})
+        let session = BeginnerSetupSession()
+        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork, openCode: engine.desktopConnections.openCode,
+            session: session, interface: StarkInterfacePreferences(defaults: defaults),
+            observation: observation, openCodeObservation: BeginnerOpenWorkStatus(client: .openCode), selectInterface: { _ in }, openChat: {})
         // A periodic observation from a previous model is still true while the
         // engine changes. It cannot replace a verified current-model handshake.
         engine.switchConnectionFixtureToOtherModel()
         let snapshot = host.snapshot
+        session.selectClient(.openCode)
+        let codeSnapshot = host.snapshot
+        guard codeSnapshot.client == .openCode, !codeSnapshot.openWorkRunning,
+              !codeSnapshot.openWorkClientActive, codeSnapshot.openWorkPreparedModelID == nil else { return false }
+        session.selectClient(.openWork)
+        guard host.snapshot.openWorkRunning else { return false }
         engine.desktopConnections.shutdown()
         return observation.running && observation.liveConnection && snapshot.openWorkRunning
             && snapshot.runningModelID == "window-fixture-other" && !snapshot.openWorkClientActive
@@ -426,9 +433,9 @@ extension AppDelegate {
         let engine = EngineController(apiCredentials: APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage()),
                                       apiDefaults: defaults)
         engine.configureConnectionFixture(state: "ready", loadedMode: .chat, apiAvailable: true, hasModels: true)
-        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
+        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork, openCode: engine.desktopConnections.openCode,
             session: BeginnerSetupSession(), interface: StarkInterfacePreferences(defaults: defaults),
-            observation: BeginnerOpenWorkStatus(), selectInterface: { _ in }, openChat: {})
+            observation: BeginnerOpenWorkStatus(), openCodeObservation: BeginnerOpenWorkStatus(client: .openCode), selectInterface: { _ in }, openChat: {})
         defer { engine.desktopConnections.shutdown() }
         // Reopening setup has no temporary recommendation report to supply a name.
         guard engine.beginnerReport == nil else { return false }

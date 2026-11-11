@@ -1,6 +1,16 @@
 import Combine
 import Foundation
 
+enum BeginnerClient: String, CaseIterable, Identifiable {
+    case openWork, openCode
+
+    var id: String { rawValue }
+    var name: String { self == .openWork ? "OpenWork" : "OpenCode" }
+    var detail: String {
+        self == .openWork ? "A workspace for everyday tasks and files" : "A workspace for coding and projects"
+    }
+}
+
 enum BeginnerTask: String, CaseIterable, Identifiable {
     case everyday, text, files, code, unsure
 
@@ -18,7 +28,7 @@ enum BeginnerTask: String, CaseIterable, Identifiable {
         switch self {
         case .everyday: return "Emails, ideas, and questions"
         case .text: return "Summaries, notes, and explanations"
-        case .files: return "Read or edit a folder in OpenWork"
+        case .files: return "Read or edit a folder in your assistant app"
         case .code: return "Understand an error or a small project"
         case .unsure: return "Choose a starting point for me"
         }
@@ -70,16 +80,17 @@ enum BeginnerModelPriority: String, CaseIterable, Identifiable {
 }
 
 enum BeginnerSetupStage: String, CaseIterable {
-    case task, recommendation, installation, openWork, connection, openOpenWork, ready, retry
+    case clientChoice, task, recommendation, installation, openWork, connection, openOpenWork, ready, retry
 
     var step: Int {
         switch self {
-        case .task, .recommendation, .retry: return 0
-        case .installation: return 1
-        case .openWork: return 2
-        case .connection: return 3
-        case .openOpenWork: return 4
-        case .ready: return 5
+        case .clientChoice: return 0
+        case .task, .recommendation, .retry: return 1
+        case .installation: return 2
+        case .openWork: return 3
+        case .connection: return 4
+        case .openOpenWork: return 5
+        case .ready: return 6
         }
     }
 }
@@ -130,6 +141,8 @@ struct BeginnerModelChoice: Identifiable, Equatable {
 }
 
 struct BeginnerSetupSnapshot: Equatable {
+    // The connection fields describe only the selected guide's client.
+    var client: BeginnerClient = .openWork
     var choices: [BeginnerModelChoice] = []
     var choicesLoading = false
     var choicesError: String? = nil
@@ -160,6 +173,7 @@ struct BeginnerSetupSnapshot: Equatable {
     var openWorkInstalled = false
     var openWorkRunning = false
     var openWorkApproved = false
+    var openCodeApprovalPending = false
     var openWorkClientActive = false
     var openWorkPreparedModelID: String? = nil
     var openWorkPreparing = false
@@ -182,6 +196,8 @@ struct BeginnerSetupActions {
     var openOpenWork: () -> Void = {}
     var downloadOpenWork: () -> Void = {}
     var connectOpenWork: () -> Void = {}
+    var allowOpenCodeEngine: () -> Void = {}
+    var denyOpenCodeEngine: () -> Void = {}
     var checkConnection: () -> Void = {}
     var openChat: () -> Void = {}
     var showAdvanced: () -> Void = {}
@@ -190,7 +206,9 @@ struct BeginnerSetupActions {
 
 @MainActor
 final class BeginnerSetupSession: ObservableObject {
-    @Published var stage: BeginnerSetupStage = .task
+    @Published var stage: BeginnerSetupStage = .clientChoice
+    @Published private(set) var client: BeginnerClient = .openWork
+    @Published private(set) var confirmedOpenCodeScope: String?
     @Published var task: BeginnerTask?
     @Published var modelPriority: BeginnerModelPriority = .balanced
     @Published var selectedChoiceID: String?
@@ -207,6 +225,30 @@ final class BeginnerSetupSession: ObservableObject {
     private var connectionScope: String?
     private var recommendationTask: BeginnerTask?
     private var recommendationPriority: BeginnerModelPriority?
+
+    func selectClient(_ value: BeginnerClient) {
+        guard client != value else { return }
+        client = value
+        confirmedOpenCodeScope = nil
+        connectionScope = nil
+    }
+
+    private func confirmationBasis(_ snapshot: BeginnerSetupSnapshot) -> String {
+        [snapshot.openWorkScope, snapshot.runningModelID].joined(separator: "|")
+    }
+
+    func confirmOpenCodeModel(snapshot: BeginnerSetupSnapshot) {
+        guard client == .openCode, snapshot.client == client, snapshot.canUseOpenWork,
+              snapshot.openWorkRunning, snapshot.openWorkApproved, snapshot.openWorkClientActive else { return }
+        confirmedOpenCodeScope = confirmationBasis(snapshot)
+        finish(snapshot: snapshot)
+    }
+
+    private func modelSelected(snapshot: BeginnerSetupSnapshot) -> Bool {
+        guard snapshot.client == client else { return false }
+        return client == .openWork ? snapshot.openWorkPreparedModelID == snapshot.runningModelID
+            : confirmedOpenCodeScope == confirmationBasis(snapshot)
+    }
 
     var recommendationsMatchSelection: Bool {
         recommendationTask == nil || (recommendationTask == task && recommendationPriority == modelPriority)
@@ -312,7 +354,7 @@ final class BeginnerSetupSession: ObservableObject {
 
     func canFinish(snapshot: BeginnerSetupSnapshot) -> Bool {
         snapshot.canUseOpenWork && snapshot.openWorkRunning && snapshot.openWorkApproved &&
-            snapshot.openWorkClientActive && snapshot.openWorkPreparedModelID == snapshot.runningModelID
+            snapshot.openWorkClientActive && modelSelected(snapshot: snapshot)
     }
 
     // A request temporarily makes the worker unavailable for a model switch;
@@ -321,7 +363,7 @@ final class BeginnerSetupSession: ObservableObject {
         snapshot.modelGenerating && !snapshot.runningModelID.isEmpty &&
             snapshot.runningSupportsTools && snapshot.runningContextKnown && snapshot.localAPIAvailable &&
             snapshot.openWorkRunning && snapshot.openWorkApproved && snapshot.openWorkClientActive &&
-            snapshot.openWorkPreparedModelID == snapshot.runningModelID
+            modelSelected(snapshot: snapshot)
     }
 
     func finish(snapshot: BeginnerSetupSnapshot) {
@@ -339,7 +381,7 @@ final class BeginnerSetupSession: ObservableObject {
         if target == .ready {
             return canFinish(snapshot: snapshot) || keepsCompletedSetupWhileGenerating(snapshot: snapshot)
         }
-        if target == .task { return true }
+        if target == .clientChoice || target == .task { return true }
         if target == .recommendation || target == .retry { return task != nil }
         if target == .installation {
             guard recommendationsMatchSelection else { return false }
@@ -372,11 +414,17 @@ final class BeginnerSetupSession: ObservableObject {
     }
 
     func synchronize(with snapshot: BeginnerSetupSnapshot) {
+        if client == .openCode,
+           !snapshot.openWorkRunning || !snapshot.openWorkApproved || !snapshot.openWorkClientActive {
+            confirmedOpenCodeScope = nil
+        }
         if let scope = connectionScope, scope != snapshot.openWorkScope {
+            confirmedOpenCodeScope = nil
             if stage == .ready { stage = .openWork }
         }
         connectionScope = snapshot.openWorkScope
         if let previous = observedModelID, previous != snapshot.runningModelID {
+            confirmedOpenCodeScope = nil
             if stage == .ready { stage = .connection }
         }
         observedModelID = snapshot.runningModelID

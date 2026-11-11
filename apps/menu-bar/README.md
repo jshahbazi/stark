@@ -412,7 +412,12 @@ budget, Beginner offers the existing model browser in Advanced.
 Recommendations are conservative planning estimates; task quality, speed and
 general OpenWork competence still require artifact-specific validation.
 
-After the model is running, Beginner can guide setup of the official OpenWork
+Beginner starts with a choice of **OpenWork** or **OpenCode**, then shows only
+that app's guided path through model selection, installation, connection and
+readiness. The chosen app is retained while trying a different model. Return to
+**Choose an app** to switch guides; each app keeps its own connection approval.
+
+After the model is running, the OpenWork guide sets up the official OpenWork
 app. **Download OpenWork** opens its official download page in a browser; the
 user installs the app in Applications. Detection advances **Get OpenWork** to
 **Connect**, which offers the existing managed connection authorization. Beginner connection setup gracefully reopens OpenWork to load the managed
@@ -435,6 +440,17 @@ is reused on retry to avoid duplicate tasks after a binding failure. The bridge
 must support discovery version 2, `models.list`, `session.create_task` and
 `session.set_model` (present in the inspected official OpenWork 0.18.66 release).
 Older or incompatible clients remain in setup with recovery guidance.
+
+The OpenCode guide opens the official OpenCode Desktop download page, detects
+the signed app and uses the existing managed connection. The final step asks
+the user to open a project, start a new session and select **Stark** and the
+running model in OpenCode's model picker, then confirm the selection in Stark.
+Confirmation is enabled only after the approved, verified OpenCode engine has
+recently received metadata for that exact model and context budget. Restarts,
+revocation, loss of discovery, API session changes and model/context changes
+invalidate completion. A replacement engine can be allowed or denied directly
+in the guide. OpenCode has no qualified desktop UI handoff here: Stark does not
+claim to have verified its visible model selection or alter global model defaults.
 
 The ready check verifies configuration and connector metadata; it does not prove
 that OpenWork can perform a task or that the selected model will perform it well.

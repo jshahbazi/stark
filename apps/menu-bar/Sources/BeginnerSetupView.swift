@@ -6,7 +6,9 @@ struct BeginnerSetupView: View {
     var actions: BeginnerSetupActions
     @State private var showAlternatives = false
 
-    private let steps = ["Choose a model", "Set up model", "Get OpenWork", "Connect", "Open OpenWork", "Ready"]
+    private var steps: [String] {
+        ["Choose an app", "Choose a model", "Set up model", "Get \(session.client.name)", "Connect", "Open \(session.client.name)", "Ready"]
+    }
     private var choice: BeginnerModelChoice? { session.choice(in: snapshot) }
     private var ownInstallation: Bool {
         guard let identifier = snapshot.installChoiceID else { return false }
@@ -84,6 +86,7 @@ struct BeginnerSetupView: View {
 
     @ViewBuilder private var content: some View {
         switch session.stage {
+        case .clientChoice: clientChoiceStep
         case .task: taskStep
         case .recommendation: recommendationStep
         case .installation: installationStep
@@ -94,6 +97,19 @@ struct BeginnerSetupView: View {
             if session.canFinish(snapshot: snapshot) || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot) { readyStep }
             else { connectionStep }
         case .retry: retryStep
+        }
+    }
+
+    private var clientChoiceStep: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            heading("Which app would you like to set up?", detail: "Choose one guided path. Stark will supply the local model.")
+            ForEach(BeginnerClient.allCases) { client in
+                selection(title: client.name, detail: client.detail, symbol: client == .openWork ? "folder" : "chevron.left.forwardslash.chevron.right", selected: session.client == client) {
+                    session.selectClient(client)
+                }
+            }
+            Button("Continue with \(session.client.name)") { session.stage = .task }
+                .buttonStyle(.borderedProminent)
         }
     }
 
@@ -119,7 +135,7 @@ struct BeginnerSetupView: View {
                 if session.choosingAnotherModel { keepCurrentButton }
             }
             if session.choosingAnotherModel {
-                Text("Your current model stays installed while you choose. Your OpenWork setup is kept.")
+                Text("Your current model stays installed while you choose. Your \(session.client.name) setup is kept.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -244,12 +260,12 @@ struct BeginnerSetupView: View {
 
     private var openWorkStep: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading("Get OpenWork.",
-                    detail: "OpenWork gives your local model a workspace and tools. Stark supplies the model.")
-            modelIdentity("OpenWork", detail: "Install the official macOS app")
-            Text("Download OpenWork and move it to Applications. Stark will take you to the connection step when it detects the installed app.")
+            heading("Get \(session.client.name).",
+                    detail: "\(session.client.name) gives your local model a workspace and tools. Stark supplies the model.")
+            modelIdentity("\(session.client.name)", detail: "Install the official macOS app")
+            Text("Download \(session.client.name) and move it to Applications. Stark will take you to the connection step when it detects the installed app.")
                 .foregroundStyle(.secondary)
-            Button("Download OpenWork", action: actions.downloadOpenWork).buttonStyle(.borderedProminent)
+            Button("Download \(session.client.name)", action: actions.downloadOpenWork).buttonStyle(.borderedProminent)
             Button("Check installation", action: actions.checkConnection)
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.caption).foregroundStyle(.secondary) }
             Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
@@ -259,11 +275,13 @@ struct BeginnerSetupView: View {
     private var reconnectOpenWorkButton: some View {
         Button(snapshot.openWorkBusy ? "Reconnecting…" : "Reconnect", action: actions.connectOpenWork)
             .disabled(snapshot.openWorkBusy || snapshot.openWorkPreparing || !snapshot.localAPIAvailable || !snapshot.openWorkInstalled)
-            .help("Refresh the connection and reopen OpenWork automatically to apply its settings.")
+            .help(session.client == .openWork
+                ? "Refresh the connection and reopen OpenWork automatically to apply its settings."
+                : "Refresh the connection to OpenCode’s current background engine.")
     }
 
     @ViewBuilder private var connectionStep: some View {
-        heading("Connect OpenWork to Stark.", detail: "Use the model running on this Mac. Your saved connection can be reused when you change models.")
+        heading("Connect \(session.client.name) to Stark.", detail: "Use the model running on this Mac. Your saved connection can be reused when you change models.")
         modelIdentity(snapshot.runningModelName.isEmpty ? "No model running" : snapshot.runningModelName,
                       variant: snapshot.runningModelVariantName)
         modelRepositoryLink(snapshot.runningModelRepositoryURL)
@@ -277,8 +295,8 @@ struct BeginnerSetupView: View {
             Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
         } else if !snapshot.canUseOpenWork {
             notice(!snapshot.modelReady ? "Start a Chat-mode model before connecting."
-                : !snapshot.runningContextKnown ? "This model has no declared conversation limit. Choose another checked model to use OpenWork."
-                : "This model is available for chat, but Stark has not enabled tool use for it. Choose another model for OpenWork.",
+                : !snapshot.runningContextKnown ? "This model has no declared conversation limit. Choose another checked model to use \(session.client.name)."
+                : "This model is available for chat, but Stark has not enabled tool use for it. Choose another model for \(session.client.name).",
                    symbol: "exclamationmark.triangle", color: .orange)
             HStack {
                 Button(snapshot.modelReady ? "Choose another model" : "Choose a starting model") {
@@ -288,11 +306,13 @@ struct BeginnerSetupView: View {
                 Button("Chat in Stark instead", action: actions.openChat)
             }
         } else {
-            checkRow("Connection allowed", detail: "Allow OpenWork to send requests to this model.", checked: snapshot.openWorkApproved)
+            checkRow("Connection allowed", detail: "Allow \(session.client.name) to send requests to this model.", checked: snapshot.openWorkApproved)
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
             Button(snapshot.openWorkBusy ? "Connecting…" : "Allow and connect", action: actions.connectOpenWork)
                 .buttonStyle(.borderedProminent).disabled(snapshot.openWorkBusy || !snapshot.openWorkInstalled)
-            Text("Stark uses OpenWork’s existing workspace and opens a new task with the running model selected. OpenWork may reopen to apply connection settings. You can revoke access in Stark’s Connections window.")
+            Text(session.client == .openWork
+                ? "Stark uses OpenWork’s existing workspace and opens a new task with the running model selected. OpenWork may reopen to apply connection settings. You can revoke access in Stark’s Connections window."
+                : "Stark adds its models to OpenCode. Next, we’ll guide you to select your running model. You can revoke access in Stark’s Connections window.")
                 .font(.caption).foregroundStyle(.secondary)
             Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
         }
@@ -300,21 +320,37 @@ struct BeginnerSetupView: View {
 
     private var openOpenWorkStep: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading("Getting OpenWork ready…", detail: "Stark uses OpenWork’s current workspace and selects your running model in a new task.")
-            modelIdentity("OpenWork", detail: "Installed on this Mac")
+            heading("Getting \(session.client.name) ready…", detail: session.client == .openWork
+                ? "Stark uses OpenWork’s current workspace and selects your running model in a new task."
+                : "In OpenCode, open a project, start a new session, and select Stark → \(snapshot.runningModelName) in the model picker.")
+            modelIdentity("\(session.client.name)", detail: "Installed on this Mac")
             VStack(alignment: .leading, spacing: 14) {
-                checkRow("Connection allowed", detail: "OpenWork is authorized to use Stark.", checked: snapshot.openWorkApproved)
-                checkRow("OpenWork checked this model", detail: "Waiting for its verified connector to refresh.", checked: snapshot.openWorkClientActive)
-                checkRow("Task configured", detail: "Stark and \(snapshot.runningModelName) selected automatically.", checked: snapshot.openWorkPreparedModelID == snapshot.runningModelID)
+                checkRow("Connection allowed", detail: "\(session.client.name) is authorized to use Stark.", checked: snapshot.openWorkApproved)
+                checkRow("\(session.client.name) checked this model", detail: "Waiting for its verified connector to refresh.", checked: snapshot.openWorkClientActive)
+                if session.client == .openWork {
+                    checkRow("Task configured", detail: "Stark and \(snapshot.runningModelName) selected automatically.", checked: snapshot.openWorkPreparedModelID == snapshot.runningModelID)
+                }
             }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
             if snapshot.openWorkPreparing { ProgressView("Selecting your model…") }
+            if snapshot.openCodeApprovalPending {
+                Text("OpenCode restarted its background engine. Allow it to continue setup.").font(.callout)
+                HStack {
+                    Button("Allow this OpenCode engine", action: actions.allowOpenCodeEngine)
+                    Button("Deny", action: actions.denyOpenCodeEngine)
+                }.disabled(snapshot.openWorkBusy)
+            }
             HStack {
-                Button("Open OpenWork", action: actions.openOpenWork).buttonStyle(.borderedProminent)
+                Button("Open \(session.client.name)", action: actions.openOpenWork).buttonStyle(.borderedProminent)
                 reconnectOpenWorkButton
                 Button("Try again", action: actions.checkConnection).disabled(snapshot.openWorkBusy || snapshot.openWorkPreparing)
             }
-            Text("Review file and tool permissions in OpenWork before starting a task.").font(.caption).foregroundStyle(.secondary)
+            if session.client == .openCode {
+                Button("I selected Stark and this model") { session.confirmOpenCodeModel(snapshot: snapshot) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!snapshot.canUseOpenWork || !snapshot.openWorkRunning || !snapshot.openWorkApproved || !snapshot.openWorkClientActive)
+            }
+            Text("Review file and tool permissions in \(session.client.name) before starting a task.").font(.caption).foregroundStyle(.secondary)
             Button("Chat in Stark instead", action: actions.openChat).buttonStyle(.link)
         }
     }
@@ -322,22 +358,26 @@ struct BeginnerSetupView: View {
     private var readyStep: some View {
         VStack(alignment: .leading, spacing: 20) {
             Image(systemName: "checkmark.circle.fill").font(.largeTitle).foregroundStyle(.green).accessibilityHidden(true)
-            heading("OpenWork is ready.", detail: "Your local model is selected in a new OpenWork task, using its existing workspace.")
+            heading("\(session.client.name) is ready.", detail: session.client == .openWork
+                ? "Your local model is selected in a new OpenWork task, using its existing workspace."
+                : "OpenCode has checked your running model, and you confirmed its selection.")
             VStack(alignment: .leading, spacing: 15) {
                 checkRow(snapshot.runningModelName,
                          detail: [snapshot.runningModelVariantName, "Running on this Mac."].filter { !$0.isEmpty }.joined(separator: "\n"),
                          checked: snapshot.modelReady || snapshot.modelGenerating)
                 modelRepositoryLink(snapshot.runningModelRepositoryURL)
-                checkRow("OpenWork checked this model", detail: "Recent connector check detected by Stark.", checked: snapshot.openWorkClientActive)
-                checkRow("Task configured automatically", detail: "Stark and your running model are selected.", checked: snapshot.openWorkPreparedModelID == snapshot.runningModelID)
+                checkRow("\(session.client.name) checked this model", detail: "Recent connector check detected by Stark.", checked: snapshot.openWorkClientActive)
+                if session.client == .openWork {
+                    checkRow("Task configured automatically", detail: "Stark and your running model are selected.", checked: snapshot.openWorkPreparedModelID == snapshot.runningModelID)
+                }
             }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
             HStack {
-                Button("Open OpenWork", action: actions.openOpenWork).buttonStyle(.borderedProminent)
+                Button("Open \(session.client.name)", action: actions.openOpenWork).buttonStyle(.borderedProminent)
                 reconnectOpenWorkButton
                 Button("Chat in Stark instead", action: actions.openChat)
             }
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
-            Text("Start with one small task. Models can make mistakes; review file and tool actions in OpenWork.")
+            Text("Start with one small task. Models can make mistakes; review file and tool actions in \(session.client.name).")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             HStack {
@@ -354,7 +394,7 @@ struct BeginnerSetupView: View {
 
     private var retryStep: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading("What would you like to change?", detail: "We’ll walk through model choice again. Your OpenWork connection and workspace choice are kept.")
+            heading("What would you like to change?", detail: "We’ll walk through model choice again. Your \(session.client.name) connection and workspace choice are kept.")
             ForEach(BeginnerRetryPreference.allCases) { preference in
                 selection(title: preference.title, detail: preference.detail, symbol: "arrow.triangle.2.circlepath", selected: session.retryPreference == preference) {
                     session.retryPreference = preference
@@ -392,11 +432,12 @@ struct BeginnerSetupView: View {
 
     private func navigationTarget(for index: Int) -> BeginnerSetupStage {
         switch index {
-        case 0: return .task
-        case 1: return .installation
-        case 2: return .openWork
-        case 3: return .connection
-        case 4: return .openOpenWork
+        case 0: return .clientChoice
+        case 1: return .task
+        case 2: return .installation
+        case 3: return .openWork
+        case 4: return .connection
+        case 5: return .openOpenWork
         default: return .ready
         }
     }
@@ -406,6 +447,7 @@ struct BeginnerSetupView: View {
             return "Wait for the current model setup or startup to finish."
         }
         switch target {
+        case .clientChoice: return "Choose OpenWork or OpenCode for this guide."
         case .task: return "Choose or change the kind of help you need."
         case .recommendation, .retry:
             return session.task == nil ? "Choose a task first." : "Review model choices for your selected task."
@@ -413,13 +455,13 @@ struct BeginnerSetupView: View {
             return snapshot.installChoiceID != nil || snapshot.installedResultID != nil || session.selectedChoiceID != nil
                 ? "Review the selected model setup." : "Choose a model first."
         case .openOpenWork:
-            return snapshot.openWorkApproved ? "Prepare an OpenWork task with your running model automatically." : "Connect OpenWork first."
+            return snapshot.openWorkApproved ? "Select your running model in \(session.client.name)." : "Connect \(session.client.name) first."
         case .openWork, .connection:
             return snapshot.modelReady || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot)
-                ? "Continue OpenWork setup." : "Start a model first."
+                ? "Continue \(session.client.name) setup." : "Start a model first."
         case .ready:
             return session.canFinish(snapshot: snapshot) || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot)
-                ? "Review completed setup." : "Wait for automatic OpenWork setup to finish."
+                ? "Review completed setup." : "Finish \(session.client.name) setup first."
         }
     }
 
@@ -441,7 +483,7 @@ struct BeginnerSetupView: View {
     private func startLabel(_ choice: BeginnerModelChoice) -> String {
         let identifier = session.installedID(for: choice, in: snapshot)
         if snapshot.modelReady && snapshot.runningModelID == identifier {
-            return snapshot.choiceRequiresRestart ? "Apply setup settings and restart" : "Continue to OpenWork"
+            return snapshot.choiceRequiresRestart ? "Apply setup settings and restart" : "Continue to \(session.client.name)"
         }
         if snapshot.modelReady { return "Switch to \(choice.name)" }
         return "Start \(choice.name)"

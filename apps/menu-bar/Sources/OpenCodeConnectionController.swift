@@ -15,6 +15,38 @@ final class OpenCodeConnectionController: ObservableObject {
     /// A verified engine that asked for Stark and is not yet allowed or denied.
     @Published private(set) var pendingEngine: DesktopProcessIdentity?
 
+    @Published private(set) var discoveryScope = UUID().uuidString
+    private let observationClock: () -> TimeInterval
+    private var observedPeer: DesktopProcessIdentity?
+    private var observedSession = ""
+    private var observedAt: TimeInterval?
+    private var observedModels: [String: Int] = [:]
+
+    /// A verified status handshake advertises model metadata without issuing
+    /// an API capability. The connector polls every five seconds, even idle.
+    func hasDiscoveredModel(apiID: String, contextTokens: Int) -> Bool {
+        guard approved, !closing, !disconnectPending, !apiSession.isEmpty,
+              pendingEngine == nil, observedSession == apiSession,
+              let observedPeer, observedPeer.isCurrent, isApproved(observedPeer),
+              let observedAt, observationClock() >= observedAt,
+              observationClock() - observedAt < 30, contextTokens > 0 else { return false }
+        return observedModels[apiID] == contextTokens
+    }
+
+    private func observeStatus(_ value: [String: Any], peer: DesktopProcessIdentity) {
+        if observedPeer != nil && (observedPeer != peer || observedSession != apiSession) {
+            discoveryScope = UUID().uuidString
+        }
+        observedPeer = peer; observedSession = apiSession; observedAt = observationClock()
+        observedModels.removeAll()
+        for model in value["models"] as? [[String: Any]] ?? [] {
+            if let id = model["id"] as? String, let context = model["context_length"] as? Int,
+               context > 0, model["tool_calling"] as? Bool == true {
+                observedModels[id] = context
+            }
+        }
+    }
+
     private let storage: OpenCodeEngineApprovalStore
     private let capabilities: DesktopClientCapabilities
     private let snapshot: () -> [String: Any]
@@ -33,6 +65,7 @@ final class OpenCodeConnectionController: ObservableObject {
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          send: @escaping ([String: Any]) -> Bool, snapshot: @escaping () -> [String: Any],
          brokerPath: @escaping () -> String?) {
+        self.observationClock = clock
         self.storage = storage ?? OpenCodeEngineApprovalStore(service: service)
         self.capabilities = DesktopClientCapabilities(client: .openCode, limit: OpenCodeEngineApprovalStore.limit,
                                                       clock: clock, send: send)
@@ -43,6 +76,7 @@ final class OpenCodeConnectionController: ObservableObject {
     func receiveConnection(_ event: [String: Any]) {
         guard !closing, let session = event["api_session"] as? String, session.count == 32,
               event["base_url"] as? String != nil else { return }
+        if apiSession != session { discoveryScope = UUID().uuidString }
         capabilities.update(session: session)
         let baseURL = event["base_url"] as? String ?? ""
         if !lastBaseURL.isEmpty, lastBaseURL != baseURL, approved {
@@ -111,7 +145,13 @@ final class OpenCodeConnectionController: ObservableObject {
             return
         }
         guard !apiSession.isEmpty, snapshot()["api_base_url"] as? String != "" else { reply(.failure(.backend)); return }
-        if method == "status" { reply(.success(status())); return }
+        if method == "status" {
+            guard peer.isCurrent else { reply(.failure(.identity)); return }
+            let value = status()
+            observeStatus(value, peer: peer)
+            reply(.success(value))
+            return
+        }
         guard method == "connection", peer.isCurrent else { reply(.failure(.identity)); return }
         capabilities.issue(to: peer, approved: { [weak self] in self?.isApproved(peer) == true }) { [weak self] result in
             guard let self else { reply(.failure(.unavailable)); return }
@@ -120,6 +160,7 @@ final class OpenCodeConnectionController: ObservableObject {
                 self.clientActive = true
                 self.message = "Connected to OpenCode."
                 var value = self.status()
+                self.observeStatus(value, peer: peer)
                 value["api_key"] = token
                 reply(.success(value))
             case .failure(let error): reply(.failure(error))
@@ -135,6 +176,8 @@ final class OpenCodeConnectionController: ObservableObject {
         if let pending = pendingEngine, pending == peer
             || (pending.isCurrent && (peer.seconds, peer.microseconds) <= (pending.seconds, pending.microseconds)) { return }
         pendingEngine = peer
+        discoveryScope = UUID().uuidString
+        observedModels.removeAll()
         message = "A new OpenCode engine is asking to use Stark. Allow it if you opened or restarted OpenCode."
     }
 
@@ -305,6 +348,10 @@ final class OpenCodeConnectionController: ObservableObject {
 
     func disconnect() {
         guard !busy, !closing else { return }
+        discoveryScope = UUID().uuidString
+        observedModels.removeAll()
+        observedPeer = nil
+        observedAt = nil
         busy = true
         approved = false
         disconnectPending = true
@@ -347,6 +394,7 @@ final class OpenCodeConnectionController: ObservableObject {
 
     func shutdown() {
         closing = true
+        discoveryScope = UUID().uuidString
         operation = UUID()
         capabilities.shutdown()
     }
