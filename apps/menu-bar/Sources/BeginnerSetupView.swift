@@ -28,6 +28,8 @@ struct BeginnerSetupView: View {
                 .padding(28)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Keep controls clear of the window edge even while content is scrolled.
+            .padding(.bottom, 20)
         }
         .frame(minWidth: 700, minHeight: 600)
         .background(Color(nsColor: .windowBackgroundColor))
