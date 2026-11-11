@@ -124,3 +124,25 @@ Official GDN ValueKey decode activation boundaries adapt MLX-Serve
 Copyright (c) 2026 David Dalcu, MIT. See LICENSE.mlx-serve. The production
 implementation is in src/kernels/metal/gdn.metal; the separately named
 official_gdn_k1_helper.metal is test-only.
+
+Retained vision source-compatible arithmetic
+============================================
+
+src/qwen4exp/vision_math.rs and the independent test-only
+vision_math_reference.rs adapt SLEEF ADVSIMD sinf/cosf u10 and double-float
+helpers at revision 5a1d179df9cf652951b59010a2d2075372d67f68.
+Copyright Naoki Shibata and contributors 2010 - 2024.
+Distributed under the Boost Software License, Version 1.0; the full text is
+retained in LICENSE.sleef and the source attribution in ATTRIBUTION.sleef.
+
+The vision-only contraction, Welford/affine, GELU and independent witness
+sources also preserve the main engine's PyTorch BSD, embedded GGML MIT,
+SLEEF Boost and Arm Optimized Routines notices. Exact source revisions,
+file hashes and full distribution notices are recorded in UPSTREAM.md and
+the repository's scripts/licenses/distribution manifest and license files.
+
+The vision-only streaming attention and independent order controls retain
+the same pinned PyTorch contraction/softmax schedules and SLEEF expf_u10
+source lineage. The SLEEF copyright, LICENSE.sleef and ATTRIBUTION.sleef
+above also apply to those exponential helpers; the distribution manifest
+records the PyTorch BSD and embedded GGML MIT notices for the reductions.

@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
@@ -20,7 +21,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
     validate_planning_layers,
 )
 from .dense import _COMMON_KEYS
@@ -117,7 +117,9 @@ def _global_rope(config: dict, head_dim: int, sequence_length: int, unsupported:
     return rope
 
 
-def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> ConversionPlan:
+def build_gemma_plan(
+    source: Path, *, family: str, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
     """Validate the complete recognized text layout before transformation.
 
     Embedding and norm scale offsets remain runtime config semantics. The planner
@@ -126,7 +128,32 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     """
     if family not in _ARCHITECTURES:
         raise UnsupportedConversion("Gemma generation has no text decoder adapter")
-    config = read_json(source / "config.json")
+    return build_gemma_text_plan(
+        (read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config),
+        None if checkpoint_metadata is None else checkpoint_metadata.tensors,
+        family=family,
+        dtype=dtype,
+        _source=source,
+        header_only=checkpoint_metadata is not None,
+    )
+
+
+def build_gemma_text_plan(
+    config: dict,
+    tensors: dict | None,
+    *,
+    family: str,
+    dtype: str = "bfloat16",
+    _source: Path | None = None,
+    header_only: bool = False,
+) -> ConversionPlan:
+    """Plan an already selected decoder inventory without copying checkpoint data.
+
+    Multimodal adapters validate their complete wrapper and provide only the
+    decoder namespace here. TensorInfo retains the original source descriptors.
+    """
+    if family not in _ARCHITECTURES:
+        raise UnsupportedConversion("Gemma generation has no text decoder adapter")
     if config.get("model_type") != family:
         raise UnsupportedConversion("Checkpoint model_type does not match the Gemma text adapter")
     if dtype not in _DTYPES:
@@ -182,7 +209,12 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         if not isinstance(config["rope_parameters"], dict):
             raise ConversionError("Gemma config has malformed rope_parameters")
         unsupported.append("New Gemma RoPE parameters require a separate adapter")
-    tensors = load_checkpoint(source)
+    # Keep topology/operation admission ahead of checkpoint parsing for the
+    # public text adapter. Multimodal adapters pass their selected inventory.
+    if tensors is None:
+        if _source is None:
+            raise ConversionError("Gemma decoder tensor selection is missing")
+        tensors = load_checkpoint(_source)
     validate_planning_layers(layers, tensors)
     window = _integer(config, "sliding_window")
     if family == "gemma2":
@@ -316,14 +348,14 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
             embedding = read_mlx_matrix(tensors, "model.embed_tokens.weight", (vocab, model_dim), quantization)
             expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
             if any(
-                left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                not tensor_aliases_equal(left, right, header_only=header_only)
                 for left, right in zip(head.planes, embedding.planes, strict=True)
             ):
                 raise ConversionError("Tied MLX Gemma lm_head differs from the input embedding")
         else:
             head = tensor("lm_head.weight", (vocab, model_dim))
             embedding = tensors["model.embed_tokens.weight"]
-            if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
+            if not tensor_aliases_equal(head, embedding, header_only=header_only):
                 raise ConversionError("Tied Gemma lm_head differs from the input embedding")
     norm("decoder.transformer.output_norm", "model.norm.weight", model_dim)
     q_width, kv_width = heads * head_dim, groups * head_dim

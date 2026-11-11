@@ -3,7 +3,8 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{
-        Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, kernel::ActivationTransform,
+        Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding,
+        kernel::{ActivationTransform, Kernels, MaterializedBF16AddScaleKernel, TensorAddScaleKernel},
     },
     config::transformer_layer::{TransformerLayerConfig, TransformerLayerConvConfig},
     data_type::DataType,
@@ -67,6 +68,10 @@ pub struct TransformerLayer<B: Backend> {
     pub mlp: Box<dyn Mlp<B>>,
     pub post_mlp_norm: Option<Normalization<B>>,
     pub ple_projection: Option<PerLayerEmbeddingProjection<B>>,
+    post_norm_add: Option<<B::Kernels as Kernels>::TensorAddScaleKernel>,
+    reference_ple_residual_add: Option<<B::Kernels as Kernels>::TensorAddScaleKernel>,
+    materialized_post_layer_scalar: Option<(<B::Kernels as Kernels>::MaterializedBF16AddScaleKernel, f32)>,
+    model_dim: u32,
     memory_hidden_dim: u32,
 }
 
@@ -196,10 +201,27 @@ impl<B: Backend> TransformerLayer<B> {
 
         // When a PLE projection is present it owns the post-layer scalar (applied
         // to the combined residual), so the norms must not also apply it.
-        let (residual_sum_scalar, output_scalar) = match (post_layer_scalar, layer_config.ple_config.is_none()) {
-            (Some(scalar), true) => (PostLayerScalar::ScaleResidualSum(scalar), PostLayerScalar::ScaleOutput(scalar)),
-            _ => (PostLayerScalar::None, PostLayerScalar::None),
-        };
+        if layer_config.materialize_post_layer_scalar
+            && (data_type != DataType::BF16
+                || layer_config.ple_config.is_some()
+                || post_layer_scalar.is_none()
+                || layer_config.post_norm)
+        {
+            return Err(TransformerLayerError::Backend(
+                crate::backends::common::InvalidInput(
+                    "materialized layer scalar requires a BF16 no-PLE residual layer",
+                )
+                .into(),
+            ));
+        }
+        let (residual_sum_scalar, output_scalar) =
+            match (post_layer_scalar, layer_config.ple_config.is_none() && !layer_config.materialize_post_layer_scalar)
+            {
+                (Some(scalar), true) => {
+                    (PostLayerScalar::ScaleResidualSum(scalar), PostLayerScalar::ScaleOutput(scalar))
+                },
+                _ => (PostLayerScalar::None, PostLayerScalar::None),
+            };
 
         let (mixer, mixer_hadamard_factors) = <dyn Mixer<B>>::new(
             model_dim,
@@ -241,7 +263,7 @@ impl<B: Backend> TransformerLayer<B> {
                 context,
             )?)
         } else {
-            if layer_index != 0 || mixer_hadamard_factors.is_some() {
+            if (layer_index != 0 && !layer_config.post_norm) || mixer_hadamard_factors.is_some() {
                 return Err(TransformerLayerError::MissingPreMixerNormConfig);
             }
             None
@@ -286,10 +308,24 @@ impl<B: Backend> TransformerLayer<B> {
             None => (None, mlp_input_hadamard_factors),
         };
 
+        // Post-norm models have no pre-MLP transform to absorb an input RHT.
+        if layer_config.post_norm && mlp_input_hadamard_factors.is_some() {
+            return Err(TransformerLayerError::MissingPreMixerNormConfig);
+        }
+
+        let reference_ple_bf16 = layer_config.ple_config.as_ref().is_some_and(|config| config.reference_bf16);
+        // The explicit source RMS path materializes each residual sum as BF16
+        // before statistics, so it can absorb the Gemma PLE residual addition.
+        let source_ple_residual =
+            reference_ple_bf16 && data_type == DataType::BF16 && layer_config.pre_mlp_norm_config.mlx_bf16_reduction;
         let pre_mlp_norm = Normalization::new(
             model_dim,
             mlp_input_hadamard_factors,
-            ShortcutMode::Add,
+            if (reference_ple_bf16 || layer_config.materialize_post_layer_scalar) && !source_ple_residual {
+                ShortcutMode::Copy
+            } else {
+                ShortcutMode::Add
+            },
             residual_sum_scalar,
             data_type,
             &layer_config.pre_mlp_norm_config,
@@ -338,18 +374,66 @@ impl<B: Backend> TransformerLayer<B> {
             mlp,
             post_mlp_norm,
             ple_projection,
+            post_norm_add: layer_config
+                .post_norm
+                .then(|| <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, false))
+                .transpose()
+                .map_err(TransformerLayerError::Backend)?,
+            reference_ple_residual_add: ((reference_ple_bf16 || layer_config.materialize_post_layer_scalar)
+                && !source_ple_residual)
+                .then(|| <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, false))
+                .transpose()
+                .map_err(TransformerLayerError::Backend)?,
+            materialized_post_layer_scalar: if layer_config.materialize_post_layer_scalar {
+                Some((
+                    <B::Kernels as Kernels>::MaterializedBF16AddScaleKernel::new(context, false)
+                        .map_err(TransformerLayerError::Backend)?,
+                    post_layer_scalar.expect("validated layer scalar"),
+                ))
+            } else {
+                None
+            },
+            model_dim,
             memory_hidden_dim: layer_config.hidden_dim.unwrap_or(hidden_dim),
         })
     }
 
-    pub(crate) fn memory_estimate(
+    /// Combine the pending branch with its residual, retaining the ordinary
+    /// transformer invariant: `shortcut` owns the residual and the returned
+    /// hidden buffer contains the next branch output. No normalization occurs.
+    fn add_post_norm_residual(
+        &self,
+        input: B::ScratchBuffer,
+        mut shortcut: impl BufferMut<Backend = B>,
+        batch_size: u32,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        let mut output = command_buffer.allocate_scratch(input.size())?;
+        let elements = batch_size * self.model_dim;
+        self.post_norm_add.as_ref().expect("post-norm residual kernel").encode(
+            Some(shortcut.as_ref()),
+            &input,
+            &mut output,
+            elements,
+            elements,
+            1.0,
+            command_buffer,
+        );
+        command_buffer.encode_copy(&output, shortcut.reborrow());
+        Ok(output)
+    }
+
+    pub(crate) fn memory_estimate_with_prefix(
         &self,
         context_tokens: u32,
         input_tokens: u32,
+        sequence_tokens: u32,
+        irregular_prefill: bool,
         model_dim: u32,
     ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
         use crate::encodable_block::memory::MemoryEstimate;
-        let mut estimate = self.mixer.memory_estimate(context_tokens, input_tokens)?;
+        let mut estimate =
+            self.mixer.memory_estimate_with_prefix(context_tokens, input_tokens, sequence_tokens, irregular_prefill)?;
         if self.kv_source_layer_index.is_some() {
             estimate = estimate.without_state();
         }
@@ -443,6 +527,8 @@ impl<B: Backend> TransformerLayer<B> {
         });
         let hidden = if let Some(pre_mixer_norm) = &self.pre_mixer_norm {
             pre_mixer_norm.encode(&input, 0, batch_dim.size(), Some(shortcut.reborrow()), command_buffer)?
+        } else if self.post_norm_add.is_some() && self.layer_index > 0 {
+            self.add_post_norm_residual(input, shortcut.reborrow(), batch_dim.size(), command_buffer)?
         } else {
             assert_eq!(self.layer_index, 0);
             command_buffer.encode_copy(&input, shortcut.reborrow());
@@ -474,6 +560,8 @@ impl<B: Backend> TransformerLayer<B> {
 
         let mut hidden = if let Some(pre_mixer_norm) = &self.pre_mixer_norm {
             pre_mixer_norm.encode(&input, 0, batch_dim.size(), Some(shortcut.reborrow()), command_buffer)?
+        } else if self.post_norm_add.is_some() && self.layer_index > 0 {
+            self.add_post_norm_residual(input, shortcut.reborrow(), batch_dim.size(), command_buffer)?
         } else {
             assert!(self.layer_index == 0);
             command_buffer.encode_copy(&input, shortcut.reborrow());
@@ -502,7 +590,19 @@ impl<B: Backend> TransformerLayer<B> {
                 post_mixer_norm.encode(&hidden, 0, batch_dim.size(), None::<&mut B::ScratchBuffer>, command_buffer)?;
         }
 
-        hidden = self.pre_mlp_norm.encode(&hidden, 0, batch_dim.size(), Some(shortcut.reborrow()), command_buffer)?;
+        hidden = if self.post_norm_add.is_some() {
+            self.add_post_norm_residual(hidden, shortcut.reborrow(), batch_dim.size(), command_buffer)?
+        } else if let Some(add) = &self.reference_ple_residual_add {
+            // Gemma 4 materializes its post-attention residual before the
+            // pre-FFN RMSNorm. Preserve that BF16 sum instead of normalizing a
+            // higher-precision fused sum inside ShortcutMode::Add.
+            let mut combined = command_buffer.allocate_scratch(hidden.size())?;
+            let length = batch_dim.size() * self.model_dim;
+            add.encode(Some(&hidden), shortcut.as_ref(), &mut combined, length, length, 1.0, command_buffer);
+            self.pre_mlp_norm.encode(&combined, 0, batch_dim.size(), Some(shortcut.reborrow()), command_buffer)?
+        } else {
+            self.pre_mlp_norm.encode(&hidden, 0, batch_dim.size(), Some(shortcut.reborrow()), command_buffer)?
+        };
 
         let mlp_coefficients = if let Some(convolution) = &self.mlp_conv {
             let (output, coefficients) =
@@ -513,7 +613,14 @@ impl<B: Backend> TransformerLayer<B> {
             None
         };
 
-        hidden = self.mlp.encode(hidden, batch_dim.size(), command_buffer)?;
+        let residual = if self.mlp.requires_residual_input() {
+            let mut copy = command_buffer.allocate_scratch(shortcut.size())?;
+            command_buffer.encode_copy(shortcut.as_ref(), &mut copy);
+            Some(copy)
+        } else {
+            None
+        };
+        hidden = self.mlp.encode_with_residual(hidden, residual, batch_dim.size(), command_buffer)?;
 
         if let Some(coefficients) = mlp_coefficients {
             let convolution = self.mlp_conv.as_ref().expect("mlp convolution required");
@@ -523,6 +630,14 @@ impl<B: Backend> TransformerLayer<B> {
         if let Some(post_mlp_norm) = &self.post_mlp_norm {
             hidden =
                 post_mlp_norm.encode(&hidden, 0, batch_dim.size(), None::<&mut B::ScratchBuffer>, command_buffer)?;
+        }
+
+        if let Some((combine, scalar)) = &self.materialized_post_layer_scalar {
+            let length = batch_dim.size() * self.model_dim;
+            let mut combined = command_buffer.allocate_scratch(hidden.size())?;
+            combine.encode(Some(&hidden), shortcut.as_ref(), &mut combined, length, length, *scalar, command_buffer);
+            command_buffer.encode_copy(&combined, shortcut.reborrow());
+            command_buffer.encode_fill(&mut hidden, 0);
         }
 
         if let Some(ple_projection) = &self.ple_projection {

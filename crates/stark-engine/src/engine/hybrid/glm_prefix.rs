@@ -44,6 +44,41 @@ impl PrefixSnapshot {
     }
 }
 
+/// One new snapshot may coexist with the previous request's already-resident
+/// snapshot. Only the new payload is charged against current headroom.
+pub(super) fn snapshot_memory_bytes(
+    c: &Config,
+    boundary: usize,
+    metal: bool,
+    graph: bool,
+) -> Option<usize> {
+    let inner = c.kda_heads.checked_mul(c.kda_dim)?;
+    let recurrent =
+        inner.checked_mul(c.kda_dim)?.checked_add(inner.checked_mul(3)?.checked_mul(c.conv_kernel.checked_sub(1)?)?)?;
+    let kda = c.layer_types.iter().filter(|&&value| value).count();
+    let attention = c.layer_types.len().checked_sub(kda)?;
+    let host_attention = if graph {
+        0
+    } else {
+        host_attention_bytes(c, boundary, false)?
+    };
+    let device_tail = if metal && graph {
+        super::super::memory::bytes(&[2, boundary % c.index_pool, c.index_dim], 4)?
+    } else {
+        0
+    };
+    super::super::memory::sum(&[
+        super::super::memory::bytes(&[kda, recurrent], 4)?,
+        attention.checked_mul(host_attention.checked_add(device_tail)?)?,
+        super::super::memory::bytes(&[c.layer_types.len()], size_of::<LayerSnapshot>())?,
+        #[cfg(feature = "metal")]
+        super::super::memory::bytes(
+            &[c.layer_types.len()],
+            size_of::<Option<super::super::glm_metal::AttentionSnapshot>>(),
+        )?,
+    ])
+}
+
 impl GlmModel {
     /// A reuse grid independent of scalar or qualified 4/8-token prefill.
     pub fn prefill_chunk_tokens(&self) -> usize {

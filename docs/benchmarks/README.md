@@ -2,7 +2,98 @@
 
 Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Earlier archived comparison artifacts are under [archive/experiments](../archive/experiments/). Each report states where its source-bound aggregates are retained.
 
+Track each proposed optimization, failed approach and promotion decision in the
+[model experiment ledger](../model-experiments/README.md), using its
+[attempt template](../model-experiments/TEMPLATE.md). Keep the source-bound
+measurements and current/superseded benchmark status here; ledger entries link
+to them and must not broaden their claims. New studies need an attempt ID and
+linked source-bound evidence. Existing reports retain their original
+qualification; the ledger is not a completed historical backfill.
+
 ## Current result
+
+**Retained Lily image startup (2026-11-09).** The
+[startup/Playground record](2026-11-09-lily-image-startup.md) preserves a canceled
+baseline, a functionally passing but latency-rejected full-scan candidate, and
+the subsequent unchanged-file digest reuse. The installed follow-up reached
+native vision readiness in 11.875 and 10.478 seconds; the final full-app routine
+restart was still loading at 5.098 seconds and Ready by 14.774 seconds. These
+unscreened observations have different boundaries. Playground attachment,
+bounded shape recognition and both UI-message removals passed. This does not
+supersede generation-throughput studies or establish an exact full-app duration.
+
+**Gemma 4 warmed cache correction (2026-11-09).** Alternating controls expose
+full-prompt replay after restoration in the original worker. The suffix fix
+passes nonperiodic near-capacity/image controls and improves measured hit
+first-token latency by 43.2–50.2% on the named retained E2B/E4B workloads.
+See the [corrected source-bound controls](2026-11-09-gemma4-warmed-cache.md).
+The [earlier short image-loading measurements](2026-11-09-gemma4-image-text-parity.md)
+retain their own scope; their original worker cache qualification is withdrawn.
+Gemma assistant components remain outside serving qualification.
+
+**Remaining Qwen headless image-loaded text controls (2026-11-09).**
+The [bounded comparison](2026-11-09-qwen-remaining-image-text-parity.md)
+extends immutable shared fast text storage to BF16 0.8B, affine 0.8B and affine
+MoE 35B. Matched MTP0 decode, first-token and request medians pass the registered
+five-percent bound. Complete cache/lifecycle matrices, BF16 source heads, other
+artifacts and retained ddalcu remain separate open gates.
+
+**Qwen dense image-default parity (2026-11-09).** The complete 27B image artifact
+now preserves its ordinary optimized text graph and batched MTP while the image
+tower stays loaded. The [QDIP-07 comparison](2026-11-09-qwen-dense-image-text-parity.md)
+measures 48.309 versus 48.315 decode tok/s at MTP3 on a matched 64-token workload;
+MTP0 also shows no observed regression. Output hashes and all 14 nonperiodic
+near-capacity cache/lifecycle controls pass. The earlier 94.44% regression is
+preserved as a failed predecessor. This is bounded Jundot artifact evidence;
+startup, broader workloads, other models and installed-release behavior remain
+separate qualifications.
+
+**Retained Lily vision-loaded text MTP (2026-11-08).** A
+[short paired check](2026-11-08-lily-vision-text-mtp.md) observes 104.71 tok/s
+on the previous text-only worker and 105.49 tok/s with vision and text MTP
+loaded, identical outputs, zero image drafts and correct post-image text/cache
+recovery. Two warm observations per arm; no host/thermal screening. This does
+not supersede the longer Lily studies below.
+
+**Qwen vision artifact text prefix reuse (2026-11-08).** On the official
+Qwen3.5-0.8B BF16 artifact, 32 exactness cases pass and cached follow-ups reuse
+1,024 tokens. Four observations per timing arm show follow-up first-token
+medians of 0.93–1.20 seconds against 2.25–2.54 seconds fresh. Cache-cold medians
+are 2.11 and 2.10 seconds. This is a bounded synthetic observation without
+thermal/background-load screening. See the [paired timing and limits](2026-11-08-qwen35-vision-text-prefix.md).
+
+**Cross-backend idle wake follow-up (2026-11-08).** Extends queue maintenance
+to official mixed-affine Flash-Next generation, native Flash-Next scoring and
+converted text generation on Metal4. The
+[matched study](2026-11-08-cross-backend-idle-wake.md) binds separate artifacts,
+baseline/candidate/candidate/baseline controls, score-cache and full-vocabulary
+hash checks, prefix restoration, lifecycle and idle-resource results. This
+extends the original Lily-generation study below; its source-bound results
+remain unchanged.
+Official first-sample latency falls from 1.12–1.13 to 0.31–0.32 seconds;
+the fully screened dense repeat falls from 0.71–0.75 to about 0.62 seconds.
+Fresh scoring is observed at about 0.30 seconds, with a documented host-coverage
+gap in one primary candidate call.
+
+**Flash-Next idle wake fix (2026-11-07).** The native Lily-policy generation
+worker now signals its otherwise empty GPU queue every 500 ms while waiting
+for a new request. It retains prefix state and its original expiry deadline.
+Matched post-idle first-sample latency falls from 1.07–1.09 seconds to
+0.30–0.31 seconds, with 16/16 host screens passing and matching seeded outputs.
+Observed idle worker CPU is 0.033% of one core.
+See the [matched latency and idle-resource validation](2026-11-07-flashnext-idle-wake-fix.md)
+and [source archive](../archive/experiments/2026-11-07-flashnext-idle-wake/README.md).
+
+**Flash-Next sustained throughput diagnosis (2026-11-07).** The unchanged
+baseline reproduces a fall from 95.46 to 82.20 decode tok/s; about 98% of added
+verification elapsed time is inside GPU command spans, with contemporaneous
+clock reductions. An idle queue control separately avoids about 0.7 seconds
+before the first sample. A single-model crossover establishes no reliable
+projection gain; the original projection dispatch is restored. All 128
+diagnostic arms are retained, 125 pass host screens, and timing remains
+unqualified. See the [diagnosis](2026-11-07-flashnext-sustained-diagnosis.md),
+[aggregates](data/flashnext-sustained-diagnosis-2026-11-07.json) and
+[source archive](../archive/experiments/2026-11-07-flashnext-moe/README.md).
 
 **Qwen3.8-Flash-Next MoE projection experiment (2026-11-07).** Fixed-geometry
 expert gate/up and shared-first dispatch pass bounded numerical, scoring and
@@ -147,6 +238,8 @@ source hashes. The [initial Python baseline](CHAT_TEMPLATE_ISOLATION_2026_11_03.
 is retained unchanged. End-to-end inference latency was not measured; earlier
 engine throughput results remain bound to their original timing windows.
 
+**Source-qualified OLMo 3 and Gemma 4 Q4 text (2026-11-02).** On Apple M5 Max, Gemma's source fusions improve median paired combined-work rate 2.57% over C3 and reach MLX parity (measured paired rate 0.44% above MLX). OLMo shows no material change from C3 (-0.05%) and measures 2.31% above MLX. Four loads per engine, three measured requests per load, all guards passing and matching 128-token hashes accompany the numerical qualification. Rates cover the complete 512-input/128-return request. See the [source fusion comparison](OLMO3_GEMMA4_SOURCE_FUSIONS_2026_11_02.md) and [aggregate results](olmo3-gemma4-source-fusions-2026-11-02.json). The [2026-10-29 C3 results](OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) remain historical.
+
 ## Engine comparison history
 
 | Study | Date | Status |
@@ -161,6 +254,10 @@ engine throughput results remain bound to their original timing windows.
 | [Qwen3.5 MLX quiet-window comparison](QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md) | 2026-10-20 | Reported 7.36% over MLX-LM; superseded by the 2026-10-22 comparison |
 | [Benchmark brief](STARK_BENCHMARK_BRIEF_2026_10_21.md) | 2026-10-21 | Summary of the 7.36% result; superseded |
 | [Inference comparison evidence inventory](INFERENCE_COMPARISON_EVIDENCE.md) | rolling | Inventory of every recorded engine, reference and conversion result up to 2026-10-21 |
+| [OLMo 3 and Gemma 4 Mac engine evidence](OLMO3_GEMMA4_MAC_ENGINES.md) | 2026-10-28 | Published benchmark evidence, comparison limits, source licensing and native implementation techniques |
+| [OLMo 3 and Gemma 4 source fusion comparison](OLMO3_GEMMA4_SOURCE_FUSIONS_2026_11_02.md) | 2026-11-02 | Current for these pinned Q4 sources: Gemma +2.57% over C3 and at MLX parity; OLMo unchanged from C3; all guards and output hashes pass |
+| [Repaired OLMo 3 and Gemma 4 Q4 comparison](OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) | 2026-10-29 | Superseded timing by the 2026-11-02 source fusion comparison; original qualification and paired Stark/MLX rates 1.0155 and 0.9785 preserved |
+| [Matched native OLMo 3 and Gemma 4 comparison](OLMO3_GEMMA4_NATIVE_MATCHED.md) | 2026-10-28 | Historical diagnostic: original failed numerical qualification and timings preserved; superseded for these checkpoints by the repaired 2026-10-29 comparison |
 
 ## Optimization records
 

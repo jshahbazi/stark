@@ -6,7 +6,7 @@ import pytest
 
 from stark_convert import vision_contract
 from stark_convert.streaming import ConversionError
-from stark_convert.vision_contract import REPO, REVISION, source_rules, validate_vision_source
+from stark_convert.vision_contract import REPO, REVISION, source_rules, validate_vision_source, vision_output_contract
 
 
 def test_source_rules_text_preserves_catalog_and_vision_is_pinned():
@@ -133,3 +133,39 @@ def test_validate_rejects_non_bfloat16(dtype, tmp_path):
     )
     with pytest.raises(ConversionError, match="pinned artifact"):
         validate_vision_source(snapshot, dtype)
+
+
+def test_retained_pinned_predictor_selects_versioned_family_without_changing_source_contract():
+    contract = {
+        "type": "Qwen35VisionLanguageArtifact",
+        "schema_version": 2,
+        "dtype": "bfloat16",
+        "source": {"repo": REPO, "revision": REVISION, "hashes": {"config.json": "a" * 64}},
+        "qualification": "unverified",
+    }
+    output = vision_output_contract(contract, {"model_dim": 1024})
+    assert output == {
+        **contract,
+        "schema_version": 3,
+        "family": {"profile": "qwen35-dense-bf16-merged-v2", "version": 2},
+    }
+    assert contract["schema_version"] == 2 and "family" not in contract
+    assert vision_output_contract(contract, None) is contract
+
+
+@pytest.mark.parametrize("schema_version", [3, 4, 5])
+def test_predictor_contract_selection_preserves_other_versioned_profiles(schema_version):
+    contract = {"schema_version": schema_version, "family": {"profile": "existing", "version": 5}}
+    assert vision_output_contract(contract, {"model_dim": 1024}) is contract
+
+
+@pytest.mark.parametrize("change", [{"repo": "other/model"}, {"revision": "0" * 40}])
+def test_pinned_predictor_output_cannot_inherit_another_source_identity(change):
+    contract = {
+        "type": "Qwen35VisionLanguageArtifact",
+        "schema_version": 2,
+        "dtype": "bfloat16",
+        "source": {"repo": REPO, "revision": REVISION, **change},
+    }
+    with pytest.raises(ConversionError, match="pinned artifact"):
+        vision_output_contract(contract, {"model_dim": 1024})

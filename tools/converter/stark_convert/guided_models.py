@@ -1,10 +1,12 @@
 """Source-bound starting choices for the optional beginner guide.
 
 Pinned starters have recorded native chat evidence. Additional candidates come
-from metadata-preflighted catalogue revisions with complete dense memory plans.
-Ranking is an explainable resource/capacity heuristic, not measured answer
-quality or proof of OpenWork task competence. The converter and worker still
-validate every artifact.
+from metadata-preflighted catalogue revisions and pinned native source profiles
+with complete route-specific memory plans.
+Ranking combines resource/capacity heuristics with comparable, attributed
+upstream benchmark references. These are not measurements of Stark artifacts
+or proof of OpenWork task competence. The converter and worker still validate
+every artifact.
 """
 
 from __future__ import annotations
@@ -26,7 +28,10 @@ import psutil
 
 from ._build_metadata import _signature, open_regular
 from .api_tools import TOOL_PARSERS
+from .guided_memory import config_identity, native_request_bytes
+from .guided_memory_profiles import ResidentProfile, qualified_profile, source_profile
 from .model_inventory import MAX_HEADER_BYTES, _weights
+from .recommendation_benchmarks import load_registry
 from .registry import get_model
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, read_safetensors_header
 
@@ -40,6 +45,11 @@ DENSE_ARCHITECTURES = frozenset(
 )
 # FunctionGemma requires a task-specific workflow and native loading qualification.
 GUIDED_TOOL_PARSERS = TOOL_PARSERS - {"functiongemma-v1"}
+# These official checkpoints are pretrained completion models even though their
+# tokenizers contain a chat/tool template. Qwen recommends post-training before
+# conversational use: https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B
+# Keep them in Advanced; a template alone does not establish assistant suitability.
+GUIDED_NON_CHAT_SOURCES = frozenset(f"Qwen/Qwen2.5-Coder-{size}B" for size in ("0.5", "1.5", "3", "7", "14", "32"))
 
 
 @dataclass(frozen=True)
@@ -70,6 +80,11 @@ class Recipe:
     estimated_startup_bytes: int | None = None
     capacity_is_lower_bound: bool = False
     display_name: str | None = None
+    native_choice: str | None = None
+    native_profile: dict | None = None
+    recurrent_state_bytes: int = 0
+    recurrent_workspace_bytes: int = 0
+    resident_profile: ResidentProfile | None = None
 
     @property
     def weight_bytes(self):
@@ -81,6 +96,8 @@ class Recipe:
     def download_bytes(self):
         if self.installed_only:
             return 0
+        if self.native_choice is not None:
+            return self.native_profile["download_bytes"]
         if self.catalog_item is not None:
             return self.catalog_item["planning"]["download_bytes"]
         return sum(size for _name, size, _digest in self.files)
@@ -95,12 +112,11 @@ class Recipe:
     def setup_bytes(self):
         if self.installed_only:
             return self.installed_bytes
+        if self.native_choice is not None:
+            # Native preparation publishes downloaded weights by rename.
+            return self.installed_bytes + 4 * GIB
         # Keep source and converted copies, plus a 512 MiB setup reserve.
         return self.download_bytes + self.installed_bytes + 512 * MIB
-
-    @property
-    def gpu_runtime_memory(self):
-        return self.runtime_memory if self.estimated_gpu_runtime_bytes is None else self.estimated_gpu_runtime_bytes
 
     @property
     def startup_memory(self):
@@ -110,6 +126,15 @@ class Recipe:
     def runtime_memory(self):
         if self.estimated_runtime_bytes is not None:
             return self.estimated_runtime_bytes
+        if self.native_profile is not None:
+            state = native_request_bytes(self.native_choice, self.native_profile["geometry"], self.context_tokens)
+            if self.resident_profile is not None:
+                policy = self.resident_profile
+                resident = self.installed_bytes - policy.paged_weight_bytes
+                total = resident + state * policy.request_headroom_divisor
+                total += policy.paged_working_set_bytes + policy.host_reserve_bytes
+                return ((total + GIB - 1) // GIB) * GIB
+            return ((self.installed_bytes + state + 3 * GIB + GIB - 1) // GIB) * GIB
         # Guided installs use the converter's BF16 default (cli.py), matching
         # the dense generation route's activation/KV state policy.
         # Budget both full-context KV buffers, the 1024-row attention suffix,
@@ -124,7 +149,37 @@ class Recipe:
             heads = self.query_heads
             scores = 1024 * (self.context_tokens + 1024) * (heads + heads // self.kv_heads) * 2
             workspace = max(workspace, scores + GIB)
-        return ((self.installed_bytes + cache + workspace + GIB - 1) // GIB) * GIB
+        workspace += self.recurrent_workspace_bytes
+        return ((self.installed_bytes + cache + workspace + self.recurrent_state_bytes + GIB - 1) // GIB) * GIB
+
+    @property
+    def gpu_runtime_memory(self):
+        if self.estimated_gpu_runtime_bytes is not None:
+            return self.estimated_gpu_runtime_bytes
+        # GPU planning is independent of qualified resident-system accounting.
+        # Only the admitted Lily/MLX-Serve paths stage selected rows on the GPU.
+        paged = self.native_profile["paged_weight_bytes"] if self.native_profile is not None else 0
+        if self.native_profile is not None:
+            state = native_request_bytes(self.native_choice, self.native_profile["geometry"], self.context_tokens)
+            return ((self.installed_bytes + state + 3 * GIB - paged + GIB - 1) // GIB) * GIB
+        return self.runtime_memory
+
+
+def with_resident_profile(recipe, model):
+    # Always revalidate; an offer does not authorize a changed artifact at start.
+    base = replace(recipe, resident_profile=None)
+    profile = qualified_profile(model, recipe.native_choice) if recipe.native_choice is not None else None
+    if (
+        profile is None
+        or profile != source_profile(recipe.native_choice, recipe.native_profile)
+        or recipe.context_tokens > profile.maximum_context_tokens
+        or profile.paged_weight_bytes != recipe.native_profile["paged_weight_bytes"]
+        or (recipe.repo, recipe.revision, recipe.weight_bytes)
+        != (profile.repo, profile.revision, profile.weight_bytes)
+    ):
+        return replace(base, minimum_memory=base.runtime_memory + 2 * GIB) if recipe.native_choice else base
+    planned = replace(base, resident_profile=profile)
+    return replace(planned, minimum_memory=planned.runtime_memory + 2 * GIB)
 
 
 # Metadata checked without downloading weights on 2026-11-04 against the named
@@ -201,11 +256,63 @@ def recipe_for(identifier):
     return next((recipe for recipe in RECIPES if recipe.id == identifier), None)
 
 
-def recipe_from_catalog(item):
-    """Snapshot a pinned dense candidate only when its full memory plan is known.
+def native_recipes():
+    """Fixed native routes with revision-bound geometry, template and storage plans."""
+    from .hybrid_prepare import SOURCES
+    from .native_catalog import allowed_choice, catalog_item
 
-    A conditional metadata preflight is not native qualification. Hybrid routes
-    need their own recurrent/expert workspace planner before entering this flow.
+    profiles = json.loads(Path(__file__).with_name("guided_native_profiles.json").read_bytes())
+    recipes = []
+    for choice, profile in profiles["sources"].items():
+        source = SOURCES.get(choice)
+        if (
+            not allowed_choice(choice)
+            or source is None
+            or profile["weights_source"] != {"repo": source["weights_repo"], "revision": source["weights_revision"]}
+            or profile["metadata_source"] != {"repo": source["metadata_repo"], "revision": source["metadata_revision"]}
+            or profile["weight_bytes"] != source["weight_bytes"]
+            or profile["tool_parser"] not in GUIDED_TOOL_PARSERS
+        ):
+            continue
+        item = catalog_item(choice)
+        recipe = Recipe(
+            id=item["id"],
+            name=item["name"],
+            repo=item["repo"],
+            revision=item["revision"],
+            architecture=source["architecture"],
+            metadata_profile=None,
+            quantization=item["quantization"],
+            minimum_memory=0,
+            context_tokens=profile["context_tokens"],
+            attention_layers=0,
+            kv_heads=0,
+            head_dim=0,
+            qualification=(
+                "This exact native artifact has recorded bounded chat/tool workflow checks; "
+                "coding benchmark performance on Stark has not been measured."
+                if profile["native_workflow_checked"]
+                else "This pinned source uses an implemented native preparation/load route. "
+                "Its task quality and tool workflow still need exact-artifact evaluation."
+            ),
+            files=(),
+            estimated_weight_bytes=item["weight_bytes"],
+            logical_parameters=profile["parameter_count"],
+            task_tags=tuple(profile["task_tags"]),
+            native_choice=choice,
+            native_profile=deepcopy(profile),
+        )
+        planned = replace(recipe, resident_profile=source_profile(choice, profile))
+        recipes.append(replace(planned, minimum_memory=planned.runtime_memory + 2 * GIB))
+    return tuple(recipes)
+
+
+def recipe_from_catalog(item):
+    """Snapshot a catalogue candidate only when its complete memory plan is known.
+
+    A conditional metadata preflight is not native qualification. Dense and
+    Qwen3.5 DeltaNet layouts have planners here; fixed native routes use their
+    separately source-bound profiles in native_recipes().
     """
     try:
         return _recipe_from_catalog(item)
@@ -224,13 +331,14 @@ def _recipe_from_catalog(item):
     if (
         plan.get("status") != "available"
         or not isinstance(architecture, str)
-        or architecture not in DENSE_ARCHITECTURES
+        or architecture not in DENSE_ARCHITECTURES | {"qwen3_5"}
         or item.get("downloadable") is not True
         or not isinstance(modes, (list, tuple))
         or "text" not in modes
         or plan.get("chat_template_available") is not True
         or plan.get("supports_tools") is not True
         or plan.get("tool_parser") not in GUIDED_TOOL_PARSERS
+        or item.get("repo") in GUIDED_NON_CHAT_SOURCES
     ):
         return None
     bounds = {
@@ -245,6 +353,14 @@ def _recipe_from_catalog(item):
     if any(type(plan.get(key)) is not int or not low <= plan[key] <= high for key, (low, high) in bounds.items()):
         return None
     if plan["query_heads"] % plan["kv_heads"]:
+        return None
+    recurrent = plan.get("recurrent_memory") if architecture == "qwen3_5" else None
+    if architecture == "qwen3_5" and (
+        not isinstance(recurrent, dict)
+        or set(recurrent) != {"attention_layers", "recurrent_state_bytes", "recurrent_workspace_bytes"}
+        or any(type(value) is not int or not 0 < value < 2**63 for value in recurrent.values())
+        or recurrent["attention_layers"] != plan["attention_layers"]
+    ):
         return None
     weights = item.get("weight_bytes")
     if type(weights) is not int or not 0 < weights <= plan["download_bytes"]:
@@ -313,6 +429,8 @@ def _recipe_from_catalog(item):
         logical_parameters=parameters,
         task_tags=tuple(sorted(tags)),
         query_heads=plan["query_heads"],
+        recurrent_state_bytes=recurrent["recurrent_state_bytes"] if recurrent else 0,
+        recurrent_workspace_bytes=recurrent["recurrent_workspace_bytes"] if recurrent else 0,
     )
     return replace(recipe, minimum_memory=recipe.runtime_memory + 2 * GIB)
 
@@ -409,7 +527,19 @@ def _artifact_precision_matches(root, recipe, receipt):
             quantized.update(f"{prefix}.segment_{index}" for index in range(len(segments)))
     for name, tensor in tensors.items():
         base, _, plane = name.rpartition(".")
-        normalization = plane == "scales" and base.rsplit(".", 1)[-1].endswith("_norm")
+        delta_control = recipe.architecture == "qwen3_5" and re.fullmatch(
+            r"decoder\.transformer\.layers\.[0-9]+\.mixer\.(?:a_log|dt_bias|conv\.weights)", name
+        )
+        if delta_control:
+            expected_dimensions = 2 if name.endswith(".conv.weights") else 1
+            if tensor.dtype != "F32" or len(tensor.shape) != expected_dimensions:
+                return False
+            continue
+        normalization = plane == "scales" and (
+            base.rsplit(".", 1)[-1].endswith("_norm")
+            or recipe.architecture == "qwen3_5"
+            and base.endswith(".mixer.norm")
+        )
         if normalization:
             if tensor.dtype != "F32" or len(tensor.shape) != 1:
                 return False
@@ -451,6 +581,34 @@ def matches_recipe(path, recipe):
                 )
             )
         config = _small_file(root, "config.json")
+        if recipe.native_choice is not None:
+            from .api_tools import tool_parser_for
+            from .hybrid_prepare import prepared_identity
+            from .vision_runtime import model_image_family
+
+            profile = recipe.native_profile
+            receipt = json.loads(_small_file(root, "native-source.json"))
+            parsed = json.loads(config)
+            template = parsed.get("token_codec_config", {}).get("prompt_template")
+            return (
+                model_image_family(parsed, root) is None
+                and prepared_identity(root)
+                == {
+                    "repo": recipe.repo,
+                    "revision": recipe.revision,
+                    "architecture": recipe.architecture,
+                    "weight_bytes": recipe.weight_bytes,
+                    "quantization": recipe.quantization,
+                }
+                and receipt.get("metadata_source") == profile["metadata_source"]
+                and receipt.get("quantization") == recipe.quantization
+                and config_identity(parsed) == profile["config_identity_sha256"]
+                and hashlib.sha256(json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                == profile["prepared_config_sha256"]
+                and isinstance(template, str)
+                and hashlib.sha256(template.encode()).hexdigest() == profile["template_sha256"]
+                and tool_parser_for({"prompt_template": template}) == profile["tool_parser"]
+            )
         receipt = json.loads(_small_file(root, "conversion.json"))
         sources = [{"repo": recipe.repo, "revision": recipe.revision}]
         profile = (
@@ -510,6 +668,14 @@ def matches_recipe(path, recipe):
         return False
 
 
+def setup_credit(recipe, host):
+    values = host.get("native_setup_credit_bytes")
+    value = values.get(recipe.native_choice, 0) if isinstance(values, dict) else 0
+    return (
+        min(value, recipe.weight_bytes) if recipe.native_choice is not None and type(value) is int and value > 0 else 0
+    )
+
+
 def installation_allowed(recipe, host, *, installed=False):
     if recipe.installed_only and not installed:
         return False
@@ -517,6 +683,8 @@ def installation_allowed(recipe, host, *, installed=False):
         return False
     physical = host.get("physical_memory_bytes")
     if type(physical) is not int or physical < recipe.minimum_memory:
+        return False
+    if recipe.native_choice is not None and "gpu_available" not in host:
         return False
     if "gpu_available" in host or "gpu_memory_budget_bytes" in host:
         budget = host.get("gpu_memory_budget_bytes")
@@ -537,9 +705,26 @@ def installation_allowed(recipe, host, *, installed=False):
         type(available) is int
         and available >= 2 * GIB
         and type(space) is int
-        and space >= recipe.setup_bytes
-        and type(download_space) is int
-        and download_space >= recipe.download_bytes
+        and space + setup_credit(recipe, host) >= recipe.setup_bytes
+        and (
+            recipe.native_choice is not None or type(download_space) is int and download_space >= recipe.download_bytes
+        )
+    )
+
+
+def _planning_budget(host):
+    physical = host["physical_memory_bytes"] - 2 * GIB
+    budget = host.get("gpu_memory_budget_bytes")
+    return min(physical, budget * 85 // 100) if type(budget) is int and budget > 0 else physical
+
+
+def execution_allowed(recipe, host):
+    """Shared current-memory gate for recommendations and fresh worker starts."""
+    available = host.get("available_memory_bytes")
+    return (
+        installation_allowed(recipe, host, installed=True)
+        and type(available) is int
+        and available >= recipe.startup_memory
     )
 
 
@@ -560,9 +745,13 @@ def _ranking_key(recipe, host, installed, task, preference):
     elif preference == "answers":
         objective = (-(recipe.logical_parameters or 0), task_match, recipe.runtime_memory)
     else:
-        # A memory-cost knee keeps balanced from always choosing the largest
-        # fitting checkpoint. This policy is a heuristic, not a quality score.
-        capacity_per_cost = Fraction((recipe.logical_parameters or 0) * GIB**2, recipe.runtime_memory**2)
+        # Below half the host planning budget, prioritize capacity with a
+        # modest memory penalty; above it the penalty grows quadratically.
+        # Published comparable evidence is applied after this fallback order.
+        target = _planning_budget(host) // 2
+        capacity_per_cost = Fraction(
+            (recipe.logical_parameters or 0) * target**2, target**2 + recipe.runtime_memory**2
+        )
         objective = (task_match, -capacity_per_cost, recipe.runtime_memory)
     return (
         *common,
@@ -574,7 +763,7 @@ def _ranking_key(recipe, host, installed, task, preference):
     )
 
 
-def _recommendation_reason(recipe, host, task, preference):
+def _recommendation_reason(recipe, host, task, preference, *, benchmark_used=False, coding_evidence_available=False):
     reasons = [
         "The memory plan fits this Mac's RAM and GPU budget."
         if "gpu_available" in host
@@ -586,13 +775,38 @@ def _recommendation_reason(recipe, host, task, preference):
             if task == "code"
             else "The source identifies your selected task as an intended use."
         )
-    if preference == "speed":
+    if task == "code" and preference not in {"speed", "answers"}:
+        if benchmark_used:
+            reasons.append(
+                "Prioritizes published coding benchmark evidence among models that fit; "
+                "this Stark artifact has not been benchmarked."
+            )
+        elif coding_evidence_available:
+            reasons.append(
+                "No result in the selected coding benchmark cohort is recorded for this model. "
+                "It follows models with that evidence; its coding quality is unknown."
+            )
+        else:
+            reasons.append(
+                "No eligible coding benchmark references are available. "
+                "This is a resource-based fallback; coding quality is unknown."
+            )
+    elif benchmark_used:
+        evaluation = {
+            "code": "coding benchmark",
+            "files": "tool-use benchmark",
+        }.get(task, "instruction-following benchmark")
+        reasons.append(
+            f"Published upstream {evaluation} results informed comparison with other scored models; "
+            "this Stark artifact has not been benchmarked."
+        )
+    elif preference == "speed":
         reasons.append("Favors a model with less weight data to read; response speed has not been measured.")
     elif recipe.logical_parameters:
         reasons.append(
             "Favors a larger model among options that leave memory headroom; answer quality has not been measured."
             if preference == "answers"
-            else "Balances model size with estimated memory use; answer quality has not been measured."
+            else "Balances model size with this Mac's memory budget; answer quality has not been measured."
         )
     else:
         reasons.append("Parameter capacity is unknown, so the choice uses resource fit and deterministic tie-breaks.")
@@ -667,7 +881,7 @@ def _license_label(value):
 
 
 def recommendation_report(
-    host, installed, excluded_recipe_ids=(), *, task="unsure", preference="balanced", candidates=None
+    host, installed, excluded_recipe_ids=(), *, task="unsure", preference="balanced", candidates=None, benchmarks=None
 ):
     candidates = tuple(RECIPES if candidates is None else candidates)
     task = task if task in TASKS else "unsure"
@@ -677,13 +891,21 @@ def recommendation_report(
         for recipe in candidates
         if recipe.id not in excluded_recipe_ids
         and installation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
+        and execution_allowed(recipe, host)
     ]
     eligible.sort(key=lambda recipe: _ranking_key(recipe, host, installed, task, preference))
+    benchmarks = load_registry() if benchmarks is None else benchmarks
+    eligible, cohort, benchmark_used = benchmarks.rank(
+        eligible, task, preference, lambda recipe: _fit_tier(recipe, host)
+    )
     items = []
     for recipe in eligible[:3]:
+        evidence, benchmark_details = benchmarks.evidence(recipe, task, cohort, benchmark_used)
         ids = list(installed.get(recipe.id, ()))
         license_name = (
-            recipe.catalog_item.get("license")
+            recipe.native_profile.get("license")
+            if recipe.native_profile is not None
+            else recipe.catalog_item.get("license")
             if recipe.catalog_item is not None
             else ("Review the installed source license" if recipe.installed_only else "Apache-2.0")
         )
@@ -706,16 +928,35 @@ def recommendation_report(
                 "download_bytes": recipe.download_bytes,
                 "installed_bytes_estimate": recipe.installed_bytes,
                 "setup_disk_bytes_estimate": recipe.setup_bytes,
+                "setup_disk_bytes_remaining_estimate": recipe.setup_bytes - setup_credit(recipe, host),
                 "runtime_memory_bytes_estimate": recipe.runtime_memory,
                 "startup_memory_bytes_estimate": recipe.startup_memory,
+                "gpu_memory_bytes_estimate": recipe.gpu_runtime_memory,
                 "context_tokens": recipe.context_tokens,
                 "installed_ids": ids,
                 "license": license_name,
                 "qualification": recipe.qualification,
-                "recommendation_reason": _recommendation_reason(recipe, host, task, preference),
-                "evidence": "installed_metadata"
-                if recipe.installed_only
-                else ("catalogue_metadata" if recipe.catalog_item is not None else "recorded_native_checks"),
+                "recommendation_reason": _recommendation_reason(
+                    recipe,
+                    host,
+                    task,
+                    preference,
+                    benchmark_used=recipe.id in benchmark_used,
+                    coding_evidence_available=bool(benchmark_used),
+                ),
+                "benchmarks": evidence,
+                "benchmark_details": benchmark_details,
+                "evidence": (
+                    "installed_metadata"
+                    if recipe.installed_only
+                    else "recorded_native_checks"
+                    if recipe.native_profile is not None and recipe.native_profile["native_workflow_checked"]
+                    else "native_source_metadata"
+                    if recipe.native_choice is not None
+                    else "catalogue_metadata"
+                    if recipe.catalog_item is not None
+                    else "recorded_native_checks"
+                ),
                 "caveats": [
                     "Memory and setup storage are conservative planning estimates, not measured fit guarantees.",
                     "Start the model to check it on this Mac. Speed, answer quality, and OpenWork task success vary.",
@@ -724,6 +965,15 @@ def recommendation_report(
         )
     physical = host.get("physical_memory_bytes")
     message = "Choose a model selected for this Mac's resources and your preferences."
+    native = [recipe for recipe in candidates if recipe.native_choice is not None]
+    if native:
+        message += " Native hybrid models were also checked for memory and setup storage."
+    if items and task == "code" and preference not in {"speed", "answers"}:
+        message += (
+            " Coding choices prioritize published benchmark references; missing scores remain unknown."
+            if benchmark_used
+            else " No eligible coding benchmark references are available; these choices use resource fit."
+        )
     if not items:
         message = (
             "No model with a complete memory plan fits these resources. Check again or browse models in Advanced."
@@ -743,4 +993,9 @@ def recommendation_report(
         "message": message,
         "host": dict(host),
         "items": items,
+        "benchmark_ranking": {
+            "cohort": cohort.id if cohort is not None else None,
+            "applied": bool(benchmark_used),
+            "evidence_kind": "upstream_reference",
+        },
     }

@@ -19,6 +19,64 @@ entries do not enable reuse; the loaded worker's readiness contract remains the
 runtime authority. Follow the [model-family support contract](MODEL_SUPPORT.md),
 [generation contract](GENERATION.md#prefix-reuse) and [repository rules](../AGENTS.md).
 
+## Default images must preserve text behavior
+
+Image support is the default for an image-capable model. New families,
+checkpoints/fine-tunes, sizes, quantizations, formats, backends and state-affecting
+options must complete the applicable acceptance matrix in the
+[default-image parity worklist](IMAGE_DEFAULT_PARITY_PLAN.md). This requirement
+also applies when extending an existing family; shared implementation is not
+artifact qualification.
+
+- Verify the normal catalog/preparation/load route retains image support and
+  honest live capabilities after local checks. Missing implementation or failed
+  qualification stays visible; a text-only default is not a parity fix.
+- Establish exact text cache restoration on the image-loaded worker. Include
+  scope/context/MTP keys, shrinking/divergent/chunk-edge prompts and all required
+  invalidations. Keep incomplete restoration disabled and the work item open.
+- Compare qualified prior text execution, candidate text-only loading and the
+  candidate default image-loaded worker with matching weights, precision,
+  sampling/seed, context, output/stop budget, MTP policy and dispatch options.
+  Measure cache-cold text and reused follow-ups separately. Predeclare the
+  regression bound from repeated baseline variability; a short or inconclusive
+  observation cannot close broad performance qualification.
+- Where the model has a compatible supported text MTP path, retain its declared
+  head/config and user/model opt-in policy with images loaded. Verify actual
+  drafts and matched-mode output controls. Inspect the real source inventory;
+  neither arbitrary auxiliary tensors nor a converter that dropped the head
+  establish a valid N/A disposition.
+- Exercise text MTP/cache → real image → text MTP/cache, including failures and
+  cancellation. Image requests have zero drafts/proposals/reuse; following text
+  starts fresh, resumes its selected MTP policy and can subsequently reuse state.
+- Charge resident tower/head weights, predictor and snapshot state, verification
+  and prefill scratch, staging and allocation margins even while image MTP is
+  off. Report load cost and memory separately from inference performance.
+
+For a genuinely text-only source, record why image on/off comparisons are N/A;
+the normal text cache/performance/MTP gates remain. For a model without a
+compatible MTP head, record the actual absence or unsupported architecture and
+its disposition. An image-capable source with no Stark bridge is an unfinished
+image implementation, not a text-only source. Compare stochastic outputs only
+under matching algorithms/options; different valid MTP sampling policies need
+their own stated correctness criteria.
+
+Completion must distinguish implementation, artifact proof, measured speed,
+review/CI, merge, release and installed behavior. Keep failed, deferred and
+untested scopes explicit. The worklist does not schedule model runs by itself.
+
+## Record changes and experiments
+
+Create or extend a [model experiment record](model-experiments/README.md) for
+each compatibility, correctness, memory, precision, state or performance attempt.
+Use the [template](model-experiments/TEMPLATE.md) to bind the hypothesis,
+baseline, candidate and fixed gates before running it. Record failed and
+inconclusive, abandoned and resource-deferred attempts as well as passes, and separate the observed result
+from the decision to enable or ship it. Link the attempt ID from the PR.
+The ledger points to canonical run and benchmark evidence; it does not replace
+that evidence or qualify other checkpoints. Keep implemented support, numerical
+qualification, measured speed and deployment as separate outcomes; preserve
+older source-bound records when an attempt changes.
+
 ## Bind the implementation and artifact
 
 Record the source repository and immutable revision, weight/configuration/
@@ -148,6 +206,13 @@ allocator overhead and transient copies. Record observed peak memory when
 available. Keep timing observations separate
 from correctness results. A successful restore does not establish a speedup.
 
+Choose the model's MTP default by measured speed: use whichever supported
+setting is faster, MTP on or off, in a matched comparison on representative text
+requests. Record the artifact, backend, draft depth and timing evidence for that
+choice. Supporting an MTP head does not by itself justify enabling it by
+default. Preserve an explicit user override and keep image support enabled by
+default independently of this choice.
+
 Update the current support documentation with one of these dispositions:
 
 | Disposition | Required evidence |
@@ -191,9 +256,12 @@ For each new template:
    checkpoint or training/evaluation work; adding instructions or a template
    does not establish that capability.
 4. Run a model-bound workflow on the actual checkpoint/quantization and worker.
-   At minimum check correct call selection/arguments, returned-result use and
-   ordinary chat. Check buffered/streamed API behavior and cancellation with a
-   real client before claiming an agent integration. Record failures honestly.
+   At minimum check correct call selection/arguments, returned-result use,
+   autonomous continuation after a tool result with tools still available,
+   and ordinary chat. A fresh user instruction or disabling tools does not
+   qualify autonomous completion. Check buffered/streamed API behavior and
+   cancellation with a real client before claiming an agent integration.
+   Record failures honestly.
 
 The bounded native smoke command below runs synthetic requests serially, returns
 a synthetic tool result without executing external tools, and writes only
@@ -213,8 +281,11 @@ uv run --project tools/converter --locked --python 3.13.13 python \
   --output runtime/model-tools-validation.json
 ```
 
-A passing run qualifies only those three bounded checks for those sealed bytes,
-budgets and sampling settings. It does not establish broad task competence.
+A schema-version-2 run includes a separate autonomous continuation check, in
+addition to the original three checks. Earlier receipts retain their original
+scope and do not inherit that coverage. A passing run qualifies only those
+bounded checks for those sealed bytes, budgets and sampling settings. It does
+not establish broad task competence.
 Store a separate dated record with the source/build identity, device/OS, parser,
 template and artifact hashes, aggregate outcomes and remaining limitations.
 Record protocol support and native model-loading results separately. A parser

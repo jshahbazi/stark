@@ -26,6 +26,12 @@ pub mod mamba2;
 pub mod short_conv;
 
 pub trait MixerState<B: Backend>: Any + Send {
+    /// Resident payload owned by this state, excluding transient execution
+    /// scratch. Unknown mixers receive no credit against request admission.
+    fn resident_payload_bytes(&self) -> Option<usize> {
+        Some(0)
+    }
+
     /// The coordinator fences before publishing device-owned snapshot payloads.
     fn capture_prefix(
         &self,
@@ -123,10 +129,38 @@ pub trait Mixer<B: Backend>: Any + Send + Sync {
         None
     }
 
+    /// Prefill query rows can be a short suffix while attention still reads
+    /// the full retained sequence. Non-attention mixers use suffix rows only.
+    fn memory_estimate_with_prefix(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        _sequence_tokens: u32,
+        _irregular_prefill: bool,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        self.memory_estimate(context_tokens, input_tokens)
+    }
+
+    /// Largest individual cache address reservation that scales with context.
+    /// Recurrent mixers have constant state, already covered by their profile.
+    fn context_cache_buffer_bytes(
+        &self,
+        _context_tokens: u32,
+    ) -> Option<usize> {
+        Some(0)
+    }
+
     /// Whether every state this mixer creates can be rewound to a shorter
     /// prefix. Only full, non-ring attention caches qualify.
     fn prefix_reuse_supported(&self) -> bool {
         false
+    }
+
+    /// Whether accepted state can be captured and restored at a prefill
+    /// boundary. Full attention retains its KV prefix; recurrent mixers must
+    /// implement an explicit snapshot of every state buffer.
+    fn prefix_snapshot_supported(&self) -> bool {
+        self.prefix_reuse_supported()
     }
 
     fn create_empty_state(

@@ -15,12 +15,19 @@ from test_sources import PIN, PRIMARY, Hub, files
 from test_streaming import save_tensors
 
 from stark_convert import cli, sources
-from stark_convert.progress import DownloadProgress, FDProgressSink, ProgressReporter
+from stark_convert.progress import (
+    CONVERTER_FAILURE_CATEGORIES,
+    DownloadProgress,
+    FDProgressSink,
+    ProgressReporter,
+    converter_failure_category,
+)
 from stark_convert.sources import resolve_source
 from stark_convert.streaming import (
     ConversionError,
     ConversionPlan,
     TensorOperation,
+    UnsupportedConversion,
     read_safetensors_header,
     write_plan,
 )
@@ -81,6 +88,27 @@ def test_fd_sink_is_private_owns_duplicate_and_tolerates_closed_reader(capsys):
     os.close(write_fd)
     sink(events[-1])
     assert sink.descriptor is None
+
+
+def test_converter_failure_categories_are_fixed_and_content_free():
+    errors = (
+        (OSError(28, "private path"), "disk_full"),
+        (PermissionError(13, "private path"), "permission_denied"),
+        (UnsupportedConversion("private config"), "unsupported_format_or_config"),
+        (ConversionError("private checkpoint"), "invalid_checkpoint"),
+        (RuntimeError("private details"), "conversion_failed"),
+    )
+    assert {converter_failure_category(error) for error, _ in errors} <= CONVERTER_FAILURE_CATEGORIES
+    assert [converter_failure_category(error) for error, _ in errors] == [category for _, category in errors]
+
+
+def test_progress_failure_event_is_allowlisted_and_content_free():
+    events = []
+    progress = ProgressReporter(events.append)
+    progress.failure("invalid_checkpoint")
+    assert events == [{"phase": "failure", "category": "invalid_checkpoint"}]
+    with pytest.raises(ValueError, match="invalid_converter_failure_category"):
+        progress.failure("private exception text")
 
 
 class ProgressHub(Hub):
