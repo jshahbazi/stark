@@ -145,6 +145,53 @@ struct BeginnerChecks {
 
     @MainActor static func check(_ scenario: String) -> Bool {
         switch scenario {
+        case "openwork-step-order":
+            let session = BeginnerSetupSession()
+            let (_, base) = ready()
+            var snapshot = base
+            snapshot.openWorkInstalled = false
+            snapshot.openWorkRunning = false
+            snapshot.openWorkApproved = false
+            snapshot.openWorkClientActive = false
+            session.continueAfterModel(snapshot: snapshot)
+            guard session.stage == .openWork,
+                  !session.canNavigate(to: .connection, snapshot: snapshot),
+                  !session.canNavigate(to: .openOpenWork, snapshot: snapshot) else { return false }
+            snapshot.openWorkInstalled = true
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection, !session.workspaceConfirmed,
+                  !session.canNavigate(to: .openOpenWork, snapshot: snapshot) else { return false }
+            // A pending or failed connection must leave authorization visible.
+            snapshot.openWorkBusy = true
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkBusy = false
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkApproved = true
+            snapshot.openWorkBusy = true
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkBusy = false
+            session.synchronize(with: snapshot)
+            guard session.stage == .openOpenWork, !session.workspaceConfirmed,
+                  !session.canFinish(snapshot: snapshot) else { return false }
+            snapshot.openWorkApproved = false
+            session.synchronize(with: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkInstalled = false
+            session.synchronize(with: snapshot)
+            return session.stage == .openWork
+        case "openwork-already-installed":
+            let (_, base) = ready()
+            var snapshot = base
+            snapshot.openWorkApproved = false
+            let session = BeginnerSetupSession()
+            session.continueAfterModel(snapshot: snapshot)
+            guard session.stage == .connection else { return false }
+            snapshot.openWorkApproved = true
+            session.continueAfterModel(snapshot: snapshot)
+            return session.stage == .openOpenWork && !session.canFinish(snapshot: snapshot)
         case "installation-identity":
             let (session, base) = ready()
             var snapshot = base
@@ -251,7 +298,7 @@ struct BeginnerChecks {
             snapshot.modelReady = true
             snapshot.modelStarting = false
             session.synchronize(with: snapshot)
-            return session.stage == .connection && session.startRequestedModelID == nil
+            return session.stage == .openOpenWork && session.startRequestedModelID == nil
                 && !session.choosingAnotherModel && session.workspaceConfirmed
                 && session.confirmedOpenWorkModelID == nil
         case "failed-start-can-retry":
@@ -294,7 +341,7 @@ struct BeginnerChecks {
             snapshot.openWorkScope = "connection-b"
             session.synchronize(with: snapshot)
             return !session.workspaceConfirmed && session.confirmedOpenWorkModelID == nil
-                && session.stage == .openWork && !session.canFinish(snapshot: snapshot)
+                && session.stage == .openOpenWork && !session.canFinish(snapshot: snapshot)
         case "first-approval-preserves-workspace":
             let session = BeginnerSetupSession()
             let (_, base) = ready()
@@ -310,7 +357,7 @@ struct BeginnerChecks {
             var snapshot = base
             snapshot.runningModelID = "installed-b"
             session.synchronize(with: snapshot)
-            guard session.stage == .connection, session.workspaceConfirmed,
+            guard session.stage == .openOpenWork, session.workspaceConfirmed,
                   session.confirmedOpenWorkModelID == nil,
                   !session.canFinish(snapshot: snapshot) else { return false }
             session.confirmModelSelection(snapshot: snapshot)
@@ -456,6 +503,11 @@ class BeginnerSetupTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, f"beginner_{scenario}_check_failed")
+
+    def test_openwork_install_connect_and_open_are_separate_steps(self):
+        for scenario in ["openwork-step-order", "openwork-already-installed"]:
+            with self.subTest(scenario=scenario):
+                self.run_check(scenario)
 
     def test_installation_identity_and_cancellation(self):
         for scenario in ["installation-identity", "installation-cancel-fence"]:
