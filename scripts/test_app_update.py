@@ -983,6 +983,62 @@ func waitFor(_ condition: () -> Bool) async {
 struct ControllerChecks {
     @MainActor
     static func main() async {
+        // A click before discovery carries through fetch, preparation and install.
+        let manual = Scenario()
+        manual.blockFetch = true
+        manual.blockPrepare = true
+        manual.blockInstall = true
+        let manualController = manual.controller()
+        manual.assertBusy = { precondition(manualController.busy) }
+        manualController.performAction()
+        await waitFor { manual.fetchGate != nil }
+        precondition(manualController.message == "Checking for updates…")
+        manualController.performAction()
+        manualController.checkIfNeeded()
+        precondition(manual.fetchCount == 1 && manualController.busy)
+        manual.fetchGate?.resume()
+        await waitFor { manual.prepareGate != nil }
+        manualController.performAction()
+        precondition(manual.events == ["fetch", "download"] && manualController.busy)
+        manual.prepareGate?.resume()
+        await waitFor { manual.installGate != nil }
+        manualController.performAction()
+        precondition(manual.events == ["fetch", "download", "verify", "install"])
+        manual.installGate?.resume()
+        await waitFor { manual.events.last == "quit" }
+        precondition(manualController.busy)
+        manual.cleanup()
+
+        // No newer release finishes without downloading or restarting.
+        let current = Scenario()
+        current.latest = nil
+        let currentController = current.controller()
+        currentController.performAction()
+        await waitFor { !currentController.busy }
+        precondition(currentController.message == "Stark is up to date.")
+        precondition(currentController.available == nil && current.events == ["fetch"])
+        currentController.checkIfNeeded()
+        precondition(current.fetchCount == 1)
+
+        // Failed discovery or verification stays retryable and never installs.
+        for failure in [AppUpdateError.download, .checksum] {
+            let retry = Scenario()
+            if failure == .download { retry.fetchFailure = failure }
+            else { retry.prepareFailure = failure }
+            let retryController = retry.controller()
+            retryController.performAction()
+            await waitFor { !retryController.busy }
+            precondition(retryController.message == failure.localizedDescription)
+            precondition(!retry.events.contains("install"))
+            retry.fetchFailure = nil
+            retry.prepareFailure = nil
+            retryController.performAction()
+            await waitFor { retry.events.last == "quit" }
+            precondition(retryController.busy)
+            precondition(retry.events.filter { $0 == "install" }.count == 1)
+            retry.cleanup()
+        }
+
         // Automatic discovery downloads and verifies, but never installs.
         let discovery = Scenario()
         discovery.blockFetch = true

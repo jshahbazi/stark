@@ -384,8 +384,7 @@ final class AppUpdateController: ObservableObject {
 
     func performAction() {
         guard !busy else { return }
-        if let available { upgrade(available); return }
-        check()
+        upgrade(available)
     }
 
     func startAutomaticChecks() {
@@ -480,12 +479,29 @@ final class AppUpdateController: ObservableObject {
         message = "Stark \(release.version) is ready to upgrade."
     }
 
-    private func upgrade(_ release: AppUpdateDownload) {
+    private func upgrade(_ selectedRelease: AppUpdateDownload?) {
         busy = true
         installFailed = false
+        if selectedRelease == nil { message = "Checking for updates…" }
         task = Task {
+            defer { task = nil }
             var installing = false
             do {
+                let release: AppUpdateDownload
+                if let selectedRelease {
+                    release = selectedRelease
+                } else {
+                    lastCheck = now()
+                    let latest = try await operations.fetch(installedBuild.updateComparisonVersion)
+                    if latest != available { discardPreparedUpdate() }
+                    available = latest
+                    guard let latest else {
+                        message = "Stark is up to date."
+                        busy = false
+                        return
+                    }
+                    release = latest
+                }
                 if !hasPreparedUpdate { try await prepare(release) }
                 guard let update = preparedUpdate else { throw AppUpdateError.helper }
                 // The helper owns this workspace from here, including any
@@ -504,7 +520,6 @@ final class AppUpdateController: ObservableObject {
                 installFailed = true
                 busy = false
             }
-            task = nil
         }
     }
 }
@@ -528,7 +543,7 @@ struct AppUpdateView: View {
                 Text(updater.message).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if updater.available != nil && !updater.busy {
+            if !updater.busy {
                 Text("Upgrading restarts Stark and clears the current conversation.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
