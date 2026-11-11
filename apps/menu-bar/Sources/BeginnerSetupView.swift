@@ -162,6 +162,9 @@ struct BeginnerSetupView: View {
                             } label: {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(alternative.name)
+                                    if !alternative.variantName.isEmpty, alternative.variantName != alternative.name {
+                                        Text(alternative.variantName).font(.caption).foregroundStyle(.secondary)
+                                    }
                                     Text(alternative.summary).font(.caption).foregroundStyle(.secondary)
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                             }.buttonStyle(.bordered).disabled(installInProgress)
@@ -190,7 +193,7 @@ struct BeginnerSetupView: View {
             heading(starting ? "Starting your model…" : installed != nil ? "Your model is installed." : "Set up your model.",
                     detail: starting ? "Waiting for the selected model to be ready before moving on."
                         : installed != nil ? "Start it when you’re ready." : "Downloading and preparing are separate steps.")
-            modelIdentity(choice.name)
+            modelIdentity(choice)
             if let unavailable = choice.availabilityMessage {
                 notice(unavailable, symbol: "exclamationmark.triangle", color: .orange)
             }
@@ -276,7 +279,9 @@ struct BeginnerSetupView: View {
 
     @ViewBuilder private var connectionStep: some View {
         heading("Connect OpenWork to Stark.", detail: "Use the model running on this Mac. Your saved connection can be reused when you change models.")
-        modelIdentity(snapshot.runningModelName.isEmpty ? "No model running" : snapshot.runningModelName)
+        modelIdentity(snapshot.runningModelName.isEmpty ? "No model running" : snapshot.runningModelName,
+                      variant: snapshot.runningModelVariantName)
+        modelRepositoryLink(snapshot.runningModelRepositoryURL)
         if !snapshot.localAPIAvailable {
             notice("Stark’s local connection is unavailable.", symbol: "exclamationmark.triangle", color: .orange)
             if !snapshot.openWorkMessage.isEmpty { Text(snapshot.openWorkMessage).font(.callout).foregroundStyle(.secondary) }
@@ -335,7 +340,10 @@ struct BeginnerSetupView: View {
             Image(systemName: "checkmark.circle.fill").font(.largeTitle).foregroundStyle(.green).accessibilityHidden(true)
             heading("OpenWork is ready.", detail: "Your local model is running. OpenWork’s connector has checked its current settings.")
             VStack(alignment: .leading, spacing: 15) {
-                checkRow(snapshot.runningModelName, detail: "Running on this Mac.", checked: snapshot.modelReady || snapshot.modelGenerating)
+                checkRow(snapshot.runningModelName,
+                         detail: [snapshot.runningModelVariantName, "Running on this Mac."].filter { !$0.isEmpty }.joined(separator: "\n"),
+                         checked: snapshot.modelReady || snapshot.modelGenerating)
+                modelRepositoryLink(snapshot.runningModelRepositoryURL)
                 checkRow("OpenWork checked this model", detail: "Recent connector check detected by Stark.", checked: snapshot.openWorkClientActive)
                 checkRow("Workspace and model selected", detail: "Confirmed by you in OpenWork.", checked: session.workspaceConfirmed && session.confirmedOpenWorkModelID == snapshot.runningModelID)
             }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
@@ -480,19 +488,36 @@ struct BeginnerSetupView: View {
         }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    private func modelIdentity(_ name: String, detail: String = "") -> some View {
+    private func modelIdentity(_ name: String, variant: String = "", detail: String = "") -> some View {
         HStack(spacing: 12) {
             Image(systemName: "shippingbox").font(.title2).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 4) {
                 Text(name).font(.headline).fixedSize(horizontal: false, vertical: true)
+                if !variant.isEmpty, variant != name {
+                    Text(variant).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
                 if !detail.isEmpty { Text(detail).font(.caption).foregroundStyle(.secondary) }
             }
         }
     }
 
+    private func modelIdentity(_ choice: BeginnerModelChoice, detail: String = "") -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            modelIdentity(choice.name, variant: choice.variantName, detail: detail)
+            modelRepositoryLink(choice.repositoryURL)
+        }
+    }
+
+    @ViewBuilder private func modelRepositoryLink(_ url: URL?) -> some View {
+        if let url {
+            Link("View on Hugging Face", destination: url).font(.caption).help(url.absoluteString)
+        }
+    }
+
     private func modelCard(_ choice: BeginnerModelChoice) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            modelIdentity(choice.name, detail: choice.summary)
+            modelIdentity(choice, detail: choice.summary)
             if session.installedID(for: choice, in: snapshot) != nil {
                 Label("Already on your Mac", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
             } else if let bytes = choice.downloadBytes, bytes > 0 {

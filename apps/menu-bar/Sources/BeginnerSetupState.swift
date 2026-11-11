@@ -99,6 +99,13 @@ struct BeginnerModelChoice: Identifiable, Equatable {
     var revision = ""
     var qualification = ""
     var availabilityMessage: String? = nil
+    var variantName = ""
+
+    var repositoryURL: URL? {
+        guard source.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$",
+                           options: .regularExpression) != nil else { return nil }
+        return URL(string: "https://huggingface.co/" + source)
+    }
 
     func installed(as modelID: String) -> BeginnerModelChoice {
         var result = self
@@ -135,6 +142,8 @@ struct BeginnerSetupSnapshot: Equatable {
     var choiceRequiresRestart = false
     var runningModelID = ""
     var runningModelName = ""
+    var runningModelVariantName = ""
+    var runningModelRepositoryURL: URL? = nil
     var modelReady = false
     var modelStarting = false
     var modelGenerating = false

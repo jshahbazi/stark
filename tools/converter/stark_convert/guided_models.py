@@ -69,6 +69,7 @@ class Recipe:
     estimated_gpu_runtime_bytes: int | None = None
     estimated_startup_bytes: int | None = None
     capacity_is_lower_bound: bool = False
+    display_name: str | None = None
 
     @property
     def weight_bytes(self):
@@ -652,6 +653,7 @@ def recipe_from_installed(model):
         estimated_gpu_runtime_bytes=metadata.get("gpu_runtime_memory"),
         estimated_startup_bytes=metadata.get("startup_memory"),
         capacity_is_lower_bound=metadata.get("capacity_is_lower_bound", False),
+        display_name=metadata.get("display_name"),
     )
 
 
@@ -694,6 +696,12 @@ def recommendation_report(
             {
                 "id": recipe.id,
                 "name": recipe.name,
+                "display_name": recipe.display_name or (
+                    recipe.catalog_item.get("model_group", {}).get("name", recipe.name)
+                    if isinstance(recipe.catalog_item, dict)
+                    and isinstance(recipe.catalog_item.get("model_group"), dict)
+                    else recipe.name
+                ),
                 "repo": recipe.repo,
                 "revision": recipe.revision,
                 "artifact_mode": "text",

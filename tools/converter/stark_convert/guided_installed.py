@@ -283,6 +283,7 @@ def installed_qwen38_candidate(path):
             gpu_weight_bytes=identity["weight_bytes"] - paged_table_bytes,
         )
         return {
+            "display_name": "Qwen3.8 Flash Next",
             "repo": identity["repo"],
             "revision": identity["revision"],
             "architecture": identity["architecture"],

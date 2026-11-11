@@ -28,6 +28,8 @@ def inspect_dense(root: Path):
     """Return a conservative local plan, or None for an unknown layout."""
     try:
         from .guided_models import DENSE_ARCHITECTURES, GUIDED_TOOL_PARSERS
+        from .model_catalog import _model_group
+        from .registry import get_model
 
         raw = _small_file(root, "config.json")
         config = json.loads(raw)
@@ -115,8 +117,11 @@ def inspect_dense(root: Path):
         scores = sum(score_classes)
         workspace = max(8 * GIB, scores + 1024 * (model_dim + hidden_dim) * 4 * 12)
         runtime = ((weight_bytes + 128 * 1024**2 + cache + workspace + GIB - 1) // GIB) * GIB
+        repo = display["group_id"].removeprefix("repo:")
+        group = _model_group(display["family_id"], repo, repo.split("/")[-1], quantization, get_model(repo))
         return {
-            "repo": display["group_id"].removeprefix("repo:"),
+            "display_name": group["name"],
+            "repo": repo,
             "revision": display["source_revision"],
             "architecture": display["family_id"],
             "weight_bytes": weight_bytes,

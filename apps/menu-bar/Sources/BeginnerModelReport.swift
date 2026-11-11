@@ -11,6 +11,7 @@ struct BeginnerModelReport {
     struct Item: Identifiable, Equatable {
         let id: String
         let name: String
+        let displayName: String
         let source: String
         let revision: String
         let quantization: String
@@ -24,6 +25,10 @@ struct BeginnerModelReport {
         let qualification: String
         let caveats: [String]
         let recommendationReason: String
+
+        var variantName: String {
+            name == displayName ? String(source.split(separator: "/").last ?? Substring(name)) : name
+        }
 
         init?(_ raw: [String: Any]) {
             guard let id = BeginnerMetadata.string(raw["id"], limit: 128),
@@ -44,6 +49,7 @@ struct BeginnerModelReport {
                   let qualification = BeginnerMetadata.string(raw["qualification"], limit: 2_000),
                   let caveats = BeginnerMetadata.strings(raw["caveats"], count: 16, length: 2_000) else { return nil }
             self.id = id; self.name = name; self.source = source; self.revision = revision
+            displayName = BeginnerMetadata.string(raw["display_name"], limit: 256) ?? name
             self.quantization = quantization; downloadBytes = download; installedBytes = installed
             setupBytes = setup; runtimeBytes = runtime; contextTokens = Int(context)
             installedIDs = ids; self.license = license; self.qualification = qualification; self.caveats = caveats

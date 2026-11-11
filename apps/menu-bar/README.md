@@ -253,7 +253,10 @@ Playground, Connections and chat controls.
 
 Beginner's **Guided Steps** flow asks what you want help with and whether to
 prioritize a balance of capacity and memory, a lighter model, or more model
-capacity. It reads the native Metal device name, unified-memory support and
+capacity. Recommendations show a simple model name with the specific installed
+or source variant underneath, and a **View on Hugging Face** link to the source
+repository. The same identity remains visible during setup and connection.
+It reads the native Metal device name, unified-memory support and
 recommended working-set budget, plus CPU count, physical and available memory,
 and free space in the library and download cache. GPU and system memory share
 the same physical memory; the algorithm never adds their budgets together.

@@ -150,23 +150,24 @@ struct BeginnerSetupHost: View {
     var snapshot: BeginnerSetupSnapshot {
         var result = BeginnerSetupSnapshot()
         result.choices = (engine.beginnerReport?.items ?? []).map { item in
-            BeginnerModelChoice(id: item.id, name: item.name,
+            BeginnerModelChoice(id: item.id, name: item.displayName,
                 summary: item.recommendationReason,
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens,
                 source: item.source, revision: item.revision,
                 qualification: ([item.qualification, "License: " + item.license,
-                    "Estimated runtime memory: " + ByteCountFormatter.string(fromByteCount: item.runtimeBytes, countStyle: .memory)] + item.caveats).joined(separator: "\n"))
+                    "Estimated runtime memory: " + ByteCountFormatter.string(fromByteCount: item.runtimeBytes, countStyle: .memory)] + item.caveats).joined(separator: "\n"),
+                variantName: item.variantName)
                 .resolvingInstalledCopy(as: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) })
         }
         // Keep the exact operation choice available if another surface refreshes recommendations.
         if let item = engine.beginnerInstallChoice,
            !result.choices.contains(where: { $0.id == item.id }),
            engine.beginnerInstallState != "idle", (session.installingChoiceID == item.id || session.selectedChoiceID == item.id) {
-            result.choices.append(BeginnerModelChoice(id: item.id, name: item.name, summary: "Your selected starting model.",
+            result.choices.append(BeginnerModelChoice(id: item.id, name: item.displayName, summary: "Your selected starting model.",
                 downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
                 contextTokens: item.contextTokens, source: item.source, revision: item.revision,
-                qualification: item.qualification))
+                qualification: item.qualification, variantName: item.variantName))
         }
         result.choicesLoading = engine.beginnerChoicesLoading
         result.choicesError = engine.beginnerChoicesError
@@ -182,6 +183,15 @@ struct BeginnerSetupHost: View {
         result.canInstall = !engine.busy && !engine.beginnerChoicesLoading
         result.canStartModel = !engine.busy
         result.runningModelID = engine.loadedID; result.runningModelName = engine.activeModel?.name ?? ""
+        result.runningModelRepositoryURL = engine.activeModel?.display?.repositoryURL
+        let runningChoiceID = engine.beginnerReport?.items.first { $0.installedIDs.contains(engine.loadedID) }?.id
+        if let running = result.choices.first(where: {
+            session.installedID(for: $0, in: result) == engine.loadedID || $0.id == runningChoiceID
+        }) {
+            result.runningModelName = running.name
+            result.runningModelVariantName = running.variantName
+            result.runningModelRepositoryURL = running.repositoryURL
+        }
         result.modelReady = engine.modelReady && engine.loadedMode == .chat
         result.modelStarting = engine.state == "loading"
         result.modelGenerating = engine.state == "generating"
