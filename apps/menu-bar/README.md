@@ -79,7 +79,9 @@ versions for the [release workflow](../../docs/RELEASING.md).
 
 ## App updates
 
-Stark checks stable release metadata automatically at launch and about once an hour while it runs. Opening the menu also checks when the last metadata check was more than 15 minutes ago. These background checks stay quiet when the network is unavailable. A newer release is shown with one **Upgrade to VERSION** button; choosing it downloads, verifies and stages the DMG, then quits Stark, stops active requests, clears the in-memory conversation, swaps the bundles and relaunches. No release DMG is downloaded or installed before that button is chosen. Models, preferences and the Keychain API credential are kept, while the active chat ends. The CLI is not updated by the app.
+Stark checks stable release metadata automatically at launch and about once an hour while it runs. Opening the menu also checks when the last metadata check was more than 15 minutes ago. These background checks stay quiet when the network is unavailable. When it discovers a newer release, Stark automatically downloads and verifies the DMG in the background, then shows that the update is ready. Choose **Upgrade to VERSION** to install it: Stark stages the replacement, quits, stops active requests, clears the in-memory conversation, swaps the bundles and relaunches. Installation and restart always wait for this click. Models, preferences and the Keychain API credential are kept, while the active chat ends. The CLI is not updated by the app.
+
+The verified candidate is reused for matching release metadata during the current app session. A changed or withdrawn release discards the previous candidate. Download or verification failures appear in the menu; choosing **Upgrade to VERSION** retries preparation before installing. Restarting Stark downloads an available update again.
 
 Development builds always offer the latest compatible stable release, including
 when their archive identifier or old local version is numerically higher. Build
