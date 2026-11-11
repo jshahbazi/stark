@@ -275,6 +275,16 @@ struct BeginnerChatView: View {
     let tryAnotherModel: () -> Void
 
     var body: some View {
+        // Status and attachment rows can exceed the available window height.
+        // Keep the footer and its padding reachable when the chat cannot fit.
+        ViewThatFits(in: .vertical) {
+            content
+            ScrollView { content }
+        }
+        .frame(minWidth: 520, minHeight: 600)
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 14) {
             ZStack {
                 StarkInterfacePicker(preferences: interface, selected: selectInterface)
@@ -295,7 +305,7 @@ struct BeginnerChatView: View {
                 Button("Continue setup", action: setup).buttonStyle(.borderedProminent)
                 Spacer()
             }
-        }.padding(20).frame(minWidth: 520, minHeight: 600)
+        }.padding(20)
     }
 }
 
