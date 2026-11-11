@@ -5,6 +5,7 @@ struct ConnectionDetailsView: View {
     @ObservedObject var engine: EngineController
     let manage: () -> Void
     let close: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var section = Section.apps
     @State private var revealKey = false
     @State private var copied = ""
@@ -55,7 +56,7 @@ struct ConnectionDetailsView: View {
                         Text("Use your local model in the apps you love.").font(.callout).foregroundStyle(.secondary)
                     }
                     modelSummary
-                    apiStatus
+                    if engine.apiMessage != "Local API is available on this Mac." { apiStatus }
                     OpenCodeEngineApprovalView(connection: engine.desktopConnections.openCode)
                     Picker("Connection type", selection: $section) {
                         ForEach(Section.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -90,13 +91,19 @@ struct ConnectionDetailsView: View {
                 Image(systemName: "cpu").font(.title3).foregroundStyle(.secondary)
                     .frame(width: 32, height: 32).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(!modelID.isEmpty ? engine.activeName : "No chat model available")
-                        .font(.headline).fixedSize(horizontal: false, vertical: true)
                     if !modelID.isEmpty {
+                        Text(engine.activeName)
+                            .font(.headline).fixedSize(horizontal: false, vertical: true)
                         Text(engine.supportsTools ? "Chat mode · Tool use available" : "Chat mode · Text chat available")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        StatusLine(engine: engine).font(.caption)
+                        Text("Model is not running - will not show up in OpenWork")
+                            .font(.headline).fixedSize(horizontal: false, vertical: true)
+                            .phaseAnimator(reduceMotion ? [false] : [false, true]) { content, dimmed in
+                                content.opacity(dimmed ? 0.75 : 1)
+                            } animation: { _ in
+                                .easeInOut(duration: 1.8)
+                            }
                     }
                 }
                 Spacer(minLength: 8)
@@ -104,10 +111,6 @@ struct ConnectionDetailsView: View {
                     Label(engine.state == "generating" ? "In use" : engine.busy ? "Busy" : "Running", systemImage: "circle.fill")
                         .font(.caption).foregroundStyle(engine.busy ? .orange : .green)
                 }
-            }
-            if modelID.isEmpty {
-                Text("Choose Chat mode in Playground, then run a model in Manage Models. You can set up your app connections now.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let error = engine.errorMessage {
                 Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
