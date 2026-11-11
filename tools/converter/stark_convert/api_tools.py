@@ -18,6 +18,7 @@ from .json_budget import check_json_structure
 from .local_api import APIError
 from .resource_budget import INPUT_BYTES
 from .template_compat import MAX_TEMPLATE_BYTES, template_program_sha256
+from .tool_diagnostics import record_xml_rejection
 from .tool_protocols import (
     FORMATS,
     TEMPLATE_HASHES,
@@ -1100,6 +1101,11 @@ def parse_tool_output(
 
     def invalid(category):
         # Clients see which rule rejected the call, never what the model wrote.
+        try:
+            record_xml_rejection(category)
+        except Exception:
+            # Diagnostic failures must never replace the original API error.
+            pass
         return APIError(
             502,
             "The model produced an incomplete, invalid or unavailable tool call: "
