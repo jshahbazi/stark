@@ -130,7 +130,7 @@ jobs:
         run: uv run --no-project --python 3.12.13 python -m unittest scripts/test_colgrep_generation_validation.py
       - name: Test installer and menu bar contracts
         if: matrix.os == 'macos-26'
-        run: uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_install_app.py scripts/test_stark_cli.py scripts/test_build_menubar.py scripts/test_app_update.py scripts/test_beginner_setup.py
+        run: uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_install_app.py scripts/test_stark_cli.py scripts/test_build_menubar.py scripts/test_app_update.py scripts/test_beginner_setup.py scripts/test_openwork_beginner_handoff.py
 
   scoring:
     name: Scorer (${{ matrix.configuration }})

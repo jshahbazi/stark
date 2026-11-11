@@ -22,7 +22,7 @@ Run commands from the repository root. Keep dependencies locked: `Cargo.lock`, `
 | Workers | `crates/stark-generate/src`, `crates/stark-score/src` | Unit tests inside each module; `scripts/test_generation_process.py`, `scripts/test_scoring_process.py` |
 | Template evaluator | `crates/stark-template/src` | Rust unit tests and `tools/converter/tests/test_template_runtime.py` |
 | Converter, chat, API, app backend | `tools/converter/stark_convert` | `tools/converter/tests` (pytest, model-free, fixtures with recorded provenance) |
-| Menu bar app | `apps/menu-bar/Sources` | `scripts/test_build_menubar.py`, `scripts/test_app_update.py`, `scripts/test_menubar_controller.py`, `scripts/test_menubar_windows.py`, `scripts/test_desktop_connections.py`, `scripts/test_openwork_connector_installer.py`, `DesktopConnectionsTests`, `OpenWorkConnectorInstallerTests` (some need Xcode, not run in CI) |
+| Menu bar app | `apps/menu-bar/Sources` | `scripts/test_build_menubar.py`, `scripts/test_app_update.py`, `scripts/test_menubar_controller.py`, `scripts/test_menubar_windows.py`, `scripts/test_desktop_connections.py`, `scripts/test_openwork_connector_installer.py`, `scripts/test_openwork_beginner_handoff.py`, `DesktopConnectionsTests`, `OpenWorkConnectorInstallerTests` (some need Xcode, not run in CI) |
 | Installer and release | `install.sh`, `scripts/stark`, `scripts/*.py`, `.github/workflows` | `scripts/test_*.py`, `scripts/ci/test_*.py` |
 
 `tools/data_exporter`, `tools/gpu_trace` and `tools/model_compare` are inherited from Uzu and are not part of the product.

@@ -137,8 +137,7 @@ struct BeginnerChecks {
         snapshot.openWorkClientActive = true
         snapshot.openWorkScope = "connection-a"
         session.synchronize(with: snapshot)
-        session.confirmWorkspace()
-        session.confirmModelSelection(snapshot: snapshot)
+        snapshot.openWorkPreparedModelID = snapshot.runningModelID
         session.finish(snapshot: snapshot)
         return (session, snapshot)
     }
@@ -153,13 +152,14 @@ struct BeginnerChecks {
             snapshot.openWorkRunning = false
             snapshot.openWorkApproved = false
             snapshot.openWorkClientActive = false
+            snapshot.openWorkPreparedModelID = nil
             session.continueAfterModel(snapshot: snapshot)
             guard session.stage == .openWork,
                   !session.canNavigate(to: .connection, snapshot: snapshot),
                   !session.canNavigate(to: .openOpenWork, snapshot: snapshot) else { return false }
             snapshot.openWorkInstalled = true
             session.synchronize(with: snapshot)
-            guard session.stage == .connection, !session.workspaceConfirmed,
+            guard session.stage == .connection, snapshot.openWorkPreparedModelID == nil,
                   !session.canNavigate(to: .openOpenWork, snapshot: snapshot) else { return false }
             // A pending or failed connection must leave authorization visible.
             snapshot.openWorkBusy = true
@@ -174,7 +174,7 @@ struct BeginnerChecks {
             guard session.stage == .connection else { return false }
             snapshot.openWorkBusy = false
             session.synchronize(with: snapshot)
-            guard session.stage == .openOpenWork, !session.workspaceConfirmed,
+            guard session.stage == .openOpenWork, snapshot.openWorkPreparedModelID == nil,
                   !session.canFinish(snapshot: snapshot) else { return false }
             snapshot.openWorkApproved = false
             session.synchronize(with: snapshot)
@@ -186,6 +186,7 @@ struct BeginnerChecks {
             let (_, base) = ready()
             var snapshot = base
             snapshot.openWorkApproved = false
+            snapshot.openWorkPreparedModelID = nil
             let session = BeginnerSetupSession()
             session.continueAfterModel(snapshot: snapshot)
             guard session.stage == .connection else { return false }
@@ -250,8 +251,7 @@ struct BeginnerChecks {
             guard session.stage == .retry, session.choosingAnotherModel,
                   session.excludedModelID == "installed-a",
                   session.choices(in: snapshot).map(\.id) == ["recipe-b"],
-                  session.workspaceConfirmed,
-                  session.confirmedOpenWorkModelID == "installed-a" else { return false }
+                  snapshot.openWorkPreparedModelID == "installed-a" else { return false }
             session.task = .code
             session.modelPriority = .answers
             session.keepCurrentModel()
@@ -299,8 +299,7 @@ struct BeginnerChecks {
             snapshot.modelStarting = false
             session.synchronize(with: snapshot)
             return session.stage == .openOpenWork && session.startRequestedModelID == nil
-                && !session.choosingAnotherModel && session.workspaceConfirmed
-                && session.confirmedOpenWorkModelID == nil
+                && !session.choosingAnotherModel && !session.canFinish(snapshot: snapshot)
         case "failed-start-can-retry":
             let (session, base) = ready()
             var snapshot = base
@@ -323,52 +322,51 @@ struct BeginnerChecks {
                 && session.excludedModelID == nil && session.selectedChoiceID == nil
                 && session.startRequestedModelID == nil && snapshot.runningModelID.isEmpty
                 && session.choices(in: snapshot).contains(where: { $0.installedModelID == "installed-a" })
-        case "confirmations-and-facts":
+        case "automatic-handoff-and-facts":
             let session = BeginnerSetupSession()
-            let (_, snapshot) = ready()
+            let (_, base) = ready()
+            var snapshot = base
+            snapshot.openWorkPreparedModelID = nil
             session.synchronize(with: snapshot)
             guard !session.canFinish(snapshot: snapshot) else { return false }
-            session.confirmWorkspace()
-            guard !session.canFinish(snapshot: snapshot) else { return false }
-            session.confirmModelSelection(snapshot: snapshot)
-            var noClient = snapshot
-            noClient.openWorkClientActive = false
-            guard !session.canFinish(snapshot: noClient) else { return false }
-            return session.canFinish(snapshot: snapshot)
+            snapshot.openWorkPreparedModelID = snapshot.runningModelID
+            session.stage = .openOpenWork
+            session.synchronize(with: snapshot)
+            guard session.stage == .ready else { return false }
+            snapshot.openWorkClientActive = false
+            return !session.canFinish(snapshot: snapshot)
         case "scope-invalidation":
             let (session, base) = ready()
             var snapshot = base
             snapshot.openWorkScope = "connection-b"
+            snapshot.openWorkPreparedModelID = nil
             session.synchronize(with: snapshot)
-            return !session.workspaceConfirmed && session.confirmedOpenWorkModelID == nil
-                && session.stage == .openOpenWork && !session.canFinish(snapshot: snapshot)
-        case "first-approval-preserves-workspace":
+            return session.stage == .openOpenWork && !session.canFinish(snapshot: snapshot)
+        case "approval-awaits-handoff":
             let session = BeginnerSetupSession()
             let (_, base) = ready()
             var snapshot = base
             snapshot.openWorkApproved = false
+            snapshot.openWorkPreparedModelID = nil
             session.synchronize(with: snapshot)
-            session.confirmWorkspace()
             snapshot.openWorkApproved = true
             session.synchronize(with: snapshot)
-            return session.workspaceConfirmed && session.confirmedOpenWorkModelID == nil
-        case "model-confirmation-scoped":
+            return !session.canFinish(snapshot: snapshot)
+        case "model-handoff-scoped":
             let (session, base) = ready()
             var snapshot = base
             snapshot.runningModelID = "installed-b"
             session.synchronize(with: snapshot)
-            guard session.stage == .openOpenWork, session.workspaceConfirmed,
-                  session.confirmedOpenWorkModelID == nil,
-                  !session.canFinish(snapshot: snapshot) else { return false }
-            session.confirmModelSelection(snapshot: snapshot)
-            session.finish(snapshot: snapshot)
+            guard session.stage == .openOpenWork, !session.canFinish(snapshot: snapshot) else { return false }
+            snapshot.openWorkPreparedModelID = snapshot.runningModelID
+            session.synchronize(with: snapshot)
             return session.stage == .ready && session.canFinish(snapshot: snapshot)
         case "ready-regresses":
             let mutations: [(inout BeginnerSetupSnapshot) -> Void] = [
                 { $0.modelReady = false }, { $0.runningSupportsTools = false },
                 { $0.runningContextKnown = false }, { $0.openWorkRunning = false },
                 { $0.openWorkApproved = false }, { $0.openWorkClientActive = false },
-                { $0.localAPIAvailable = false }
+                { $0.localAPIAvailable = false }, { $0.openWorkPreparedModelID = nil }
             ]
             for mutate in mutations {
                 let (session, base) = ready()
@@ -395,9 +393,9 @@ struct BeginnerChecks {
             let mutations: [(inout BeginnerSetupSnapshot) -> Void] = [
                 { $0.runningModelID = "" }, { $0.runningModelID = "different-model" },
                 { $0.runningSupportsTools = false }, { $0.runningContextKnown = false },
-                { $0.localAPIAvailable = false }, { $0.openWorkRunning = false },
+                { $0.localAPIAvailable = false }, { $0.openWorkPreparedModelID = nil }, { $0.openWorkRunning = false },
                 { $0.openWorkApproved = false }, { $0.openWorkClientActive = false },
-                { $0.openWorkScope = "another-client" }, { $0.modelGenerating = false }
+                { $0.openWorkScope = "another-client"; $0.openWorkPreparedModelID = nil }, { $0.modelGenerating = false }
             ]
             for mutate in mutations {
                 let (session, base) = ready()
@@ -544,14 +542,14 @@ class BeginnerSetupTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.run_check(scenario)
 
-    def test_readiness_requires_detected_facts_and_user_confirmations(self):
-        self.run_check("confirmations-and-facts")
+    def test_readiness_requires_verified_automatic_handoff(self):
+        self.run_check("automatic-handoff-and-facts")
 
-    def test_confirmation_scopes_and_ready_regression(self):
+    def test_handoff_scopes_and_ready_regression(self):
         for scenario in [
             "scope-invalidation",
-            "first-approval-preserves-workspace",
-            "model-confirmation-scoped",
+            "approval-awaits-handoff",
+            "model-handoff-scoped",
             "ready-regresses",
             "completed-setup-survives-generation",
             "generation-cannot-hide-invalidated-setup",

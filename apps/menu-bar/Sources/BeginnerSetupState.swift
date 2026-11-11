@@ -157,10 +157,12 @@ struct BeginnerSetupSnapshot: Equatable {
     var openWorkRunning = false
     var openWorkApproved = false
     var openWorkClientActive = false
+    var openWorkPreparedModelID: String? = nil
+    var openWorkPreparing = false
     var openWorkBusy = false
     var openWorkMessage = ""
     // An adapter-owned identity for the connection/profile. Revocation or a
-    // different client must change this value to invalidate local confirmations.
+    // different client must change this value to invalidate the automatic handoff.
     var openWorkScope = ""
 
     var canUseOpenWork: Bool {
@@ -191,8 +193,6 @@ final class BeginnerSetupSession: ObservableObject {
     @Published var retryPreference: BeginnerRetryPreference?
     @Published private(set) var choosingAnotherModel = false
     @Published private(set) var excludedModelID: String?
-    @Published private(set) var workspaceConfirmed = false
-    @Published private(set) var confirmedOpenWorkModelID: String?
     @Published private(set) var startRequestedModelID: String?
     @Published private(set) var installingChoiceID: String?
 
@@ -306,18 +306,9 @@ final class BeginnerSetupSession: ObservableObject {
         stage = .installation
     }
 
-    func confirmWorkspace() { workspaceConfirmed = true }
-
-    func confirmModelSelection(snapshot: BeginnerSetupSnapshot) {
-        guard snapshot.canUseOpenWork, snapshot.openWorkApproved,
-              snapshot.openWorkRunning else { return }
-        confirmedOpenWorkModelID = snapshot.runningModelID
-    }
-
     func canFinish(snapshot: BeginnerSetupSnapshot) -> Bool {
         snapshot.canUseOpenWork && snapshot.openWorkRunning && snapshot.openWorkApproved &&
-            snapshot.openWorkClientActive && workspaceConfirmed &&
-            confirmedOpenWorkModelID == snapshot.runningModelID
+            snapshot.openWorkClientActive && snapshot.openWorkPreparedModelID == snapshot.runningModelID
     }
 
     // A request temporarily makes the worker unavailable for a model switch;
@@ -326,7 +317,7 @@ final class BeginnerSetupSession: ObservableObject {
         snapshot.modelGenerating && !snapshot.runningModelID.isEmpty &&
             snapshot.runningSupportsTools && snapshot.runningContextKnown && snapshot.localAPIAvailable &&
             snapshot.openWorkRunning && snapshot.openWorkApproved && snapshot.openWorkClientActive &&
-            workspaceConfirmed && confirmedOpenWorkModelID == snapshot.runningModelID
+            snapshot.openWorkPreparedModelID == snapshot.runningModelID
     }
 
     func finish(snapshot: BeginnerSetupSnapshot) {
@@ -378,22 +369,18 @@ final class BeginnerSetupSession: ObservableObject {
 
     func synchronize(with snapshot: BeginnerSetupSnapshot) {
         if let scope = connectionScope, scope != snapshot.openWorkScope {
-            workspaceConfirmed = false
-            confirmedOpenWorkModelID = nil
             if stage == .ready { stage = .openWork }
         }
         connectionScope = snapshot.openWorkScope
         if let previous = observedModelID, previous != snapshot.runningModelID {
-            confirmedOpenWorkModelID = nil
             if stage == .ready { stage = .connection }
         }
         observedModelID = snapshot.runningModelID
-        if !snapshot.openWorkApproved { confirmedOpenWorkModelID = nil }
         if stage == .ready, !canFinish(snapshot: snapshot), !keepsCompletedSetupWhileGenerating(snapshot: snapshot) {
             stage = snapshot.openWorkInstalled ? .connection : .openWork
         }
-        // Installation and authorization are separate milestones. Neither proves
-        // that the user has chosen a workspace or selected the running model.
+        // Authorization and discovery do not prove that the automatic model
+        // binding was saved and displayed in OpenWork.
         if stage == .openWork, snapshot.openWorkInstalled { stage = .connection }
         if stage == .connection, snapshot.openWorkInstalled, snapshot.openWorkApproved,
            !snapshot.openWorkBusy, snapshot.canUseOpenWork { stage = .openOpenWork }
@@ -404,6 +391,7 @@ final class BeginnerSetupSession: ObservableObject {
                 stage = .connection
             }
         }
+        if stage == .openOpenWork, canFinish(snapshot: snapshot) { finish(snapshot: snapshot) }
         if let pending = installingChoiceID, pending == snapshot.installChoiceID,
            [.ready, .cancelled, .failed].contains(snapshot.installPhase) {
             installingChoiceID = nil

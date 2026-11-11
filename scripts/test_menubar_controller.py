@@ -2531,6 +2531,7 @@ class ControllerLifecycleTests(unittest.TestCase):
                     str(ROOT / "apps/menu-bar/Sources/DesktopClientPeer.swift"),
                     str(ROOT / "apps/menu-bar/Sources/DesktopConnectionApproval.swift"),
                     str(ROOT / "apps/menu-bar/Sources/DesktopConnectionBroker.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/OpenWorkBeginnerHandoff.swift"),
                     str(
                         ROOT / "apps/menu-bar/Sources/OpenWorkConnectorInstaller.swift"
                     ),

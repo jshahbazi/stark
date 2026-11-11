@@ -10,6 +10,68 @@ final class OpenWorkConnectionController: ObservableObject {
     @Published private(set) var clientActive = false
     @Published private(set) var disconnectPending = false
     @Published private(set) var discoveryScope = UUID().uuidString
+    @Published private(set) var beginnerPreparing = false
+    @Published private(set) var beginnerPreparedBasis = ""
+    private var beginnerAttemptBasis = ""
+    private var beginnerAttempts = 0
+    private var beginnerHandoff: OpenWorkBeginnerHandoff?
+    private var beginnerConnect = false
+
+    private func beginnerBasis(apiID: String, contextTokens: Int) -> String {
+        guard approved, !closing, !disconnectPending,
+              let app = DesktopApplicationIdentity.running(.openWork, configurationRoot: testProfileDirectory) else { return "" }
+        return [apiSession, discoveryScope, app.process.instanceID, apiID, String(contextTokens)].joined(separator: "|")
+    }
+
+    func beginnerIsPrepared(apiID: String, contextTokens: Int) -> Bool {
+        let basis = beginnerBasis(apiID: apiID, contextTokens: contextTokens)
+        return !basis.isEmpty && beginnerPreparedBasis == basis
+    }
+
+    /// Called only by the beginner guide, after the verified connector has
+    /// advertised this exact model and context. Repeated timer ticks are inert.
+    func prepareBeginnerModel(apiID: String, contextTokens: Int, retry: Bool = false) {
+        guard !busy, !beginnerPreparing, hasDiscoveredModel(apiID: apiID, contextTokens: contextTokens) else { return }
+        let basis = beginnerBasis(apiID: apiID, contextTokens: contextTokens)
+        guard !basis.isEmpty, beginnerPreparedBasis != basis,
+              retry || beginnerAttemptBasis != basis || beginnerAttempts < 10 else { return }
+        if beginnerAttemptBasis != basis { beginnerHandoff = nil; beginnerAttempts = 0 }
+        if retry { beginnerAttempts = 0 }
+        beginnerAttemptBasis = basis
+        beginnerAttempts += 1
+        beginnerPreparing = true
+        message = "Opening a task in OpenWork’s current workspace and selecting Stark’s running model…"
+        let discovery = testProfileDirectory?.appendingPathComponent("electron/user-data/openwork-ui-control.json")
+            ?? DesktopClientPeer.userHome()?.appendingPathComponent("Library/Application Support/com.differentai.openwork/openwork-ui-control.json")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.beginnerPreparing = false }
+            do {
+                guard let discovery else { throw OpenWorkBeginnerHandoff.Failure.unavailable }
+                let handoff = try self.beginnerHandoff ?? OpenWorkBeginnerHandoff(discoveryURL: discovery)
+                self.beginnerHandoff = handoff
+                try await handoff.prepare(modelID: apiID) {
+                    self.beginnerBasis(apiID: apiID, contextTokens: contextTokens) == basis
+                        && self.hasDiscoveredModel(apiID: apiID, contextTokens: contextTokens)
+                }
+                guard self.beginnerBasis(apiID: apiID, contextTokens: contextTokens) == basis else { return }
+                self.beginnerPreparedBasis = basis
+                self.message = "OpenWork is ready with Stark’s running model in a new task."
+            } catch {
+                guard self.beginnerBasis(apiID: apiID, contextTokens: contextTokens) == basis else { return }
+                self.message = self.beginnerAttempts < 10
+                    ? "Waiting for OpenWork’s workspace and model list…"
+                    : "OpenWork could not finish automatic setup. Keep its main window open, update to the latest official OpenWork release, then choose Try again."
+            }
+        }
+    }
+
+    func connectBeginner() {
+        guard !busy, !beginnerPreparing else { return }
+        beginnerAttemptBasis = ""
+        beginnerPreparedBasis = ""
+        connect(beginner: true)
+    }
 
     /// A verified status handshake advertises model metadata without issuing
     /// an API capability. The connector polls every five seconds, even idle.
@@ -86,7 +148,7 @@ final class OpenWorkConnectionController: ObservableObject {
                 switch result {
                 case .success(let allowed):
                     self.approved = allowed
-                    self.message = allowed ? "OpenWork is authorized. Select Stark in OpenWork." : "OpenWork is not connected."
+                    self.message = allowed ? "OpenWork is authorized." : "OpenWork is not connected."
                 case .failure(let error): self.message = Self.storageMessage(error)
                 }
                 if self.brokerPath() == nil {
@@ -183,7 +245,9 @@ final class OpenWorkConnectionController: ObservableObject {
         return configuration
     }
 
-    func connect() {
+    func connect() { connect(beginner: false) }
+
+    private func connect(beginner: Bool) {
         guard !busy, !closing, !disconnectPending, brokerPath() != nil, !apiSession.isEmpty,
               let base = snapshot()["api_base_url"] as? String, !base.isEmpty else {
             message = "Start Stark's local API with Retry API, then connect OpenWork."
@@ -191,6 +255,7 @@ final class OpenWorkConnectionController: ObservableObject {
         }
         guard connectorDirectory != nil else { message = "This Stark build is missing its OpenWork connector. Reinstall Stark."; return }
         busy = true
+        beginnerConnect = beginner
         operation = UUID()
         message = "Waiting for OpenWork."
         let identifier = operation
@@ -260,6 +325,10 @@ final class OpenWorkConnectionController: ObservableObject {
                         // Matching disk settings do not prove the running engine
                         // has reloaded its connector or discarded stale auth state.
                         self.message = "Connection settings refreshed. Quit and reopen OpenWork to finish connecting, then select Stark and the running model. Closing its window is not enough."
+                        if self.beginnerConnect {
+                            self.beginnerConnect = false
+                            self.reopenForBeginner(application, attempt: 0)
+                        }
                         if let models = self.snapshot()["models"] as? [[String: Any]],
                            models.contains(where: { $0["context_capacity_known"] as? Bool == false }) {
                             self.message = "This model has no declared context limit. Run a model with a known context limit to use it in OpenWork."
@@ -277,6 +346,27 @@ final class OpenWorkConnectionController: ObservableObject {
                     self.message = "Open a local workspace in OpenWork, then choose Connect again."
                 }
             }
+        }
+    }
+
+    private func reopenForBeginner(_ application: DesktopApplicationIdentity, attempt: Int) {
+        guard !closing, approved else { busy = false; return }
+        busy = true
+        message = "Reopening OpenWork to apply its connection settings…"
+        if application.process.isCurrent {
+            if attempt == 0 { _ = NSRunningApplication(processIdentifier: application.process.pid)?.terminate() }
+            guard attempt < 40 else {
+                busy = false
+                message = "OpenWork is waiting to close. Finish any dialog in OpenWork, then choose Reconnect."
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.reopenForBeginner(application, attempt: attempt + 1)
+            }
+        } else {
+            busy = false
+            openApplication()
+            message = "Waiting for OpenWork to reconnect…"
         }
     }
 

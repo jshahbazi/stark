@@ -351,17 +351,29 @@ general OpenWork competence still require artifact-specific validation.
 After the model is running, Beginner can guide setup of the official OpenWork
 app. **Download OpenWork** opens its official download page in a browser; the
 user installs the app in Applications. Detection advances **Get OpenWork** to
-**Connect**, which offers the existing managed connection authorization. Connecting
-may open OpenWork and ask for a workspace if its engine needs one. Once authorized,
-the separate **Open OpenWork** step asks the user to choose and confirm a local
-workspace and select Stark and the running model. Stark does not select or inspect
-the folder. The flow checks that OpenWork's connector
-is active before enabling **Finish setup**. Connector authorization, an active
-connector, and the user's workspace/model confirmations are separate checks.
-Stark does not automatically grant folder access, restart OpenWork, select a
-model in OpenWork, or execute its tools. The ready check confirms connector
-metadata and the user's workspace/model confirmations; it does not prove that
-OpenWork can perform a task or that the selected model will perform it well.
+**Connect**, which offers the existing managed connection authorization. Beginner connection setup gracefully reopens OpenWork to load the managed
+connector, then uses its authenticated loopback UI-control bridge to prepare a
+new empty task in the workspace OpenWork already selected (its default or last
+workspace). No folder picker or workspace/model confirmation is required in Stark.
+The handoff checks the workspace catalog for the exact running Stark API model,
+creates a task, binds it with `session.set_model`, and verifies the saved binding
+and displayed task before advancing automatically to **Ready**. It never sends a
+prompt or runs tools. OpenWork retains its folder and tool permission controls.
+
+The handoff targets the newly prepared task; it does not change OpenWork’s global
+or workspace defaults for later tasks or rebind existing conversations. Switching
+models through Beginner prepares another task. Readiness is scoped to the Stark
+API session, verified OpenWork process, connector identity, model and context
+budget. Cancellation, revocation, model changes and process restarts invalidate
+stale handoff results. Transient startup failures retry up to ten times; **Try
+again** retries setup without asking the user to confirm choices. A created task
+is reused on retry to avoid duplicate tasks after a binding failure. The bridge
+must support discovery version 2, `models.list`, `session.create_task` and
+`session.set_model` (present in the inspected official OpenWork 0.18.66 release).
+Older or incompatible clients remain in setup with recovery guidance.
+
+The ready check verifies configuration and connector metadata; it does not prove
+that OpenWork can perform a task or that the selected model will perform it well.
 
 After setup, **Try a different model** is available from Beginner chat and the
 ready step. Choosing or preparing an alternative keeps the current running

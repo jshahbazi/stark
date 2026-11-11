@@ -205,6 +205,9 @@ struct BeginnerSetupHost: View {
         result.openWorkClientActive = observation.running && openWork.hasDiscoveredModel(
             apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
         result.openWorkBusy = openWork.busy
+        result.openWorkPreparing = openWork.beginnerPreparing
+        result.openWorkPreparedModelID = openWork.beginnerIsPrepared(
+            apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens) ? engine.loadedID : nil
         result.openWorkMessage = engine.apiBaseURL.isEmpty ? engine.apiMessage : (observation.message ?? openWork.message)
         result.openWorkScope = observation.scope
         let choice = session.choice(in: result)
@@ -242,14 +245,12 @@ struct BeginnerSetupHost: View {
             },
             openOpenWork: openOpenWork,
             downloadOpenWork: { NSWorkspace.shared.open(URL(string: "https://openworklabs.com/download")!) },
-            connectOpenWork: { observation.message = nil; openWork.connect() },
+            connectOpenWork: { observation.message = nil; openWork.connectBeginner() },
             checkConnection: {
-                observation.message = "Checking OpenWork’s connection…"
-                observation.refresh(engine: engine, force: true) { connected in
-                    observation.message = connected
-                        ? "OpenWork’s verified connector has requested this model’s settings. Confirm the workspace and model you selected there."
-                        : "Open OpenWork with a local workspace, then select Stark and the running model. Quit and reopen OpenWork if its connection settings changed."
-                }
+                observation.message = nil
+                openWork.prepareBeginnerModel(apiID: engine.activeModel?.apiID ?? "",
+                    contextTokens: engine.apiContextTokens, retry: true)
+                observation.refresh(engine: engine, force: true)
             },
             openChat: openChat,
             showAdvanced: { selectInterface(.advanced) },
@@ -258,6 +259,9 @@ struct BeginnerSetupHost: View {
 
     private func refreshOpenWork(force: Bool = false) {
         observation.refresh(engine: engine, force: force)
+        if session.stage == .openOpenWork, snapshot.canUseOpenWork {
+            openWork.prepareBeginnerModel(apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
+        }
     }
 
     private func openOpenWork() {
