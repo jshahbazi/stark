@@ -251,6 +251,36 @@ extension AppDelegate {
             && snapshot.runningModelID == "window-fixture-other" && !snapshot.openWorkClientActive
     }
 
+    static func exerciseBeginnerInstalledModelIdentity() -> Bool {
+        let suite = "stark.beginner-identity-test." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let engine = EngineController(apiCredentials: APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage()),
+                                      apiDefaults: defaults)
+        engine.configureConnectionFixture(state: "ready", loadedMode: .chat, apiAvailable: true, hasModels: true)
+        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
+            session: BeginnerSetupSession(), interface: StarkInterfacePreferences(defaults: defaults),
+            observation: BeginnerOpenWorkStatus(), selectInterface: { _ in }, openChat: {})
+        defer { engine.desktopConnections.shutdown() }
+        // Reopening setup has no temporary recommendation report to supply a name.
+        guard engine.beginnerReport == nil else { return false }
+        for (family, group, expected) in [("qwen4_exp", "Qwen3.8-Flash-Next-lily-q4-xl", "Qwen3.8 Flash Next"),
+                                          ("glm5_next", "GLM-5.3-Flash-GGUF", "GLM-5.3 Flash"),
+                                          ("qwen3", "Qwen3-4B", "Qwen3-4B")] {
+            let display = InstalledModelDisplay(["schema_version": 1, "group_id": "repo:fixture/Model",
+                "group_name": group, "family_id": family, "quantization": "Fixture version"])
+            guard let display else { return false }
+            engine.models = [InstalledModel(id: "window-fixture", name: "long-installed-model-identifier-with-hash",
+                path: "/window-fixture", apiID: "fixture/chat-model", display: display)]
+            let snapshot = host.snapshot
+            guard snapshot.runningModelName == expected, snapshot.runningModelVariantName == "Fixture version",
+                  snapshot.runningModelID == "window-fixture", engine.activeModel?.apiID == "fixture/chat-model",
+                  snapshot.runningModelRepositoryURL?.absoluteString == "https://huggingface.co/fixture/Model" else { return false }
+        }
+        engine.configureConnectionFixture(state: "ready", loadedMode: .chat, apiAvailable: true, hasModels: true)
+        return host.snapshot.runningModelName == "Window fixture chat model" && host.snapshot.runningModelVariantName.isEmpty
+    }
+
     static func exerciseApplicationScanThreading() -> Bool {
         _ = DesktopApplicationIdentity.candidates(.openWork)
         let finished = DispatchSemaphore(value: 0)
@@ -270,6 +300,7 @@ struct WindowChecks {
         case "lifecycle": exit(AppDelegate.exerciseWindowLifecycle() ? 0 : 1)
         case "connections": exit(AppDelegate.exerciseConnectionLayouts() ? 0 : 1)
         case "beginner-discovery": exit(AppDelegate.exerciseCurrentModelDiscovery() ? 0 : 1)
+        case "beginner-identity": exit(AppDelegate.exerciseBeginnerInstalledModelIdentity() ? 0 : 1)
         case "beginner-queued-scan": exit(BeginnerOpenWorkStatus.queuedScanFixture() ? 0 : 1)
         case "application-scan-threading": exit(AppDelegate.exerciseApplicationScanThreading() ? 0 : 1)
         case "advanced-options": exit(AppDelegate.exerciseAdvancedOptionsLayouts() ? 0 : 1)
@@ -459,6 +490,9 @@ class WindowLifecycleTests(unittest.TestCase):
 
     def test_beginner_snapshot_rejects_cached_discovery_after_model_switch(self):
         self.run_check("beginner-discovery")
+
+    def test_reopened_beginner_guide_uses_installed_name_and_version(self):
+        self.run_check("beginner-identity")
 
     def test_forced_scan_queues_callbacks_and_discards_stale_result(self):
         self.run_check("beginner-queued-scan")

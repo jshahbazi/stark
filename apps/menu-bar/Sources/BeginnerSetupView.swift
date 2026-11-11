@@ -70,6 +70,9 @@ struct BeginnerSetupView: View {
                 Label(snapshot.modelGenerating ? "Model working" : snapshot.modelReady ? "Model running" : snapshot.modelStarting ? "Starting model" : !snapshot.runningModelID.isEmpty ? "Model loaded" : "No model running",
                       systemImage: snapshot.modelReady || snapshot.modelGenerating ? "checkmark.circle" : "circle")
                 if !snapshot.runningModelName.isEmpty { Text(snapshot.runningModelName) }
+                if !snapshot.runningModelVariantName.isEmpty, snapshot.runningModelVariantName != snapshot.runningModelName {
+                    Text(snapshot.runningModelVariantName).font(.caption2)
+                }
             }.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
@@ -254,7 +257,7 @@ struct BeginnerSetupView: View {
     private var reconnectOpenWorkButton: some View {
         Button(snapshot.openWorkBusy ? "Reconnecting…" : "Reconnect", action: actions.connectOpenWork)
             .disabled(snapshot.openWorkBusy || snapshot.openWorkPreparing || !snapshot.localAPIAvailable || !snapshot.openWorkInstalled)
-            .help("Refresh Stark’s managed connection settings. Quit and reopen OpenWork afterward if its settings changed.")
+            .help("Refresh the connection and reopen OpenWork automatically to apply its settings.")
     }
 
     @ViewBuilder private var connectionStep: some View {
@@ -408,13 +411,13 @@ struct BeginnerSetupView: View {
             return snapshot.installChoiceID != nil || snapshot.installedResultID != nil || session.selectedChoiceID != nil
                 ? "Review the selected model setup." : "Choose a model first."
         case .openOpenWork:
-            return snapshot.openWorkApproved ? "Choose a workspace and select the running model in OpenWork." : "Connect OpenWork first."
+            return snapshot.openWorkApproved ? "Prepare an OpenWork task with your running model automatically." : "Connect OpenWork first."
         case .openWork, .connection:
             return snapshot.modelReady || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot)
                 ? "Continue OpenWork setup." : "Start a model first."
         case .ready:
             return session.canFinish(snapshot: snapshot) || session.keepsCompletedSetupWhileGenerating(snapshot: snapshot)
-                ? "Review completed setup." : "Complete and confirm OpenWork setup first."
+                ? "Review completed setup." : "Wait for automatic OpenWork setup to finish."
         }
     }
 

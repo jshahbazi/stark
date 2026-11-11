@@ -278,6 +278,19 @@ struct InstalledModel: Identifiable, Equatable {
     let artifactMode: ModelArtifactMode?
     let removal: InstalledModelRemoval?
 
+    var beginnerDisplayName: String {
+        guard let display else { return name }
+        // These native families identify a complete model, including its size.
+        // Other families contain multiple sizes, so retain their source group.
+        switch display.familyID {
+        case "qwen4_exp", "glm5_next":
+            return display.familyID.flatMap(ModelFamily.displayName(for:)) ?? display.groupName
+        default: return display.groupName
+        }
+    }
+
+    var beginnerVersion: String { display?.quantization ?? "" }
+
     init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil,
          artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil) {
         self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.display = display

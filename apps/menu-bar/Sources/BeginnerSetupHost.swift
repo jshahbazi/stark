@@ -181,14 +181,16 @@ struct BeginnerSetupHost: View {
         result.installError = engine.beginnerInstallError
         result.canInstall = !engine.busy && !engine.beginnerChoicesLoading
         result.canStartModel = !engine.busy
-        result.runningModelID = engine.loadedID; result.runningModelName = engine.activeModel?.name ?? ""
+        result.runningModelID = engine.loadedID
+        result.runningModelName = engine.activeModel?.beginnerDisplayName ?? ""
+        result.runningModelVariantName = engine.activeModel?.beginnerVersion ?? ""
         result.runningModelRepositoryURL = engine.activeModel?.display?.repositoryURL
         let runningChoiceID = engine.beginnerReport?.items.first { $0.installedIDs.contains(engine.loadedID) }?.id
         if let running = result.choices.first(where: {
             session.installedID(for: $0, in: result) == engine.loadedID || $0.id == runningChoiceID
         }) {
             result.runningModelName = running.name
-            result.runningModelVariantName = running.variantName
+            if result.runningModelVariantName.isEmpty { result.runningModelVariantName = running.variantName }
             result.runningModelRepositoryURL = running.repositoryURL
         }
         result.modelReady = engine.modelReady && engine.loadedMode == .chat
