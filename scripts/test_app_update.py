@@ -947,6 +947,7 @@ final class Scenario {
             let workspace = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
                 .appendingPathComponent("stark-controller-test-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false)
+            try FileManager.default.createDirectory(at: workspace.appendingPathComponent("Stark.app"), withIntermediateDirectories: false)
             workspaces.append(workspace)
             return PreparedAppUpdate(workspace: workspace, app: workspace.appendingPathComponent("Stark.app"))
         }, install: { [self] _, _ in
@@ -1099,12 +1100,64 @@ struct ControllerChecks {
         precondition(second.message == AppUpdateError.helper.localizedDescription)
         precondition(second.available?.version == "0.4.0")
         let recoveryWorkspace = throttle.workspaces.last!
+        let installFailureMessage = second.message
+        throttle.date += 900
+        second.checkIfNeeded()
+        await waitFor { !second.busy }
+        precondition(second.message == installFailureMessage)
+        precondition(throttle.events.last == "verify")
         throttle.installFailure = nil
         second.performAction()
         await waitFor { throttle.events.last == "quit" }
         precondition(second.busy && throttle.events.filter { $0 == "install" }.count == 2)
         precondition(FileManager.default.fileExists(atPath: recoveryWorkspace.path))
+        second.prepareForTermination()
+        precondition(FileManager.default.fileExists(atPath: recoveryWorkspace.path))
         throttle.cleanup()
+
+        // Lost temporary files trigger a fresh download on the Upgrade click.
+        let missing = Scenario()
+        let missingController = missing.controller()
+        missingController.check()
+        await waitFor { !missingController.busy }
+        try! FileManager.default.removeItem(at: missing.workspaces.last!)
+        missingController.performAction()
+        await waitFor { missing.events.last == "quit" }
+        precondition(missing.events.filter { $0 == "download" }.count == 2)
+        missing.cleanup()
+
+        // Changed metadata for the same version also invalidates the cache.
+        let republished = Scenario()
+        let republishedController = republished.controller()
+        republishedController.check()
+        await waitFor { !republishedController.busy }
+        let originalWorkspace = republished.workspaces.last!
+        republished.latest = AppUpdateDownload(
+            version: "0.4.0", url: republished.latest!.url,
+            sha256: String(repeating: "c", count: 64), size: 200)
+        republishedController.check()
+        await waitFor { !republishedController.busy }
+        precondition(republished.events.filter { $0 == "download" }.count == 2)
+        precondition(!FileManager.default.fileExists(atPath: originalWorkspace.path))
+        // A transient metadata failure keeps the verified download usable.
+        republished.fetchFailure = .download
+        republished.date += 900
+        republishedController.checkIfNeeded()
+        await waitFor { !republishedController.busy }
+        republishedController.performAction()
+        await waitFor { republished.events.last == "quit" }
+        precondition(republished.events.filter { $0 == "download" }.count == 2)
+        republished.cleanup()
+
+        // Normal quit removes a ready candidate without invoking installation.
+        let quitting = Scenario()
+        let quittingController = quitting.controller()
+        quittingController.check()
+        await waitFor { !quittingController.busy }
+        let quittingWorkspace = quitting.workspaces.last!
+        quittingController.prepareForTermination()
+        precondition(!FileManager.default.fileExists(atPath: quittingWorkspace.path))
+        precondition(!quitting.events.contains("install"))
 
         // Withdrawn releases remove the prepared candidate without installing.
         let withdrawn = Scenario()

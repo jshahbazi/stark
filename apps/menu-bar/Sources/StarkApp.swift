@@ -3937,7 +3937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return .terminateNow
     }
     func applicationWillTerminate(_ notification: Notification) {
-        updater.stopAutomaticChecks()
+        updater.prepareForTermination()
         engine.shutdown()
     }
 }
