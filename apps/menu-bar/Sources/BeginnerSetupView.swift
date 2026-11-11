@@ -129,9 +129,6 @@ struct BeginnerSetupView: View {
                     detail: choice.availabilityMessage != nil ? "The saved model inventory changed." : installed == nil ? "You can change models later." : "No new download is needed.")
             modelCard(choice)
             deviceSummary
-            if !snapshot.recommendationMessage.isEmpty {
-                Text(snapshot.recommendationMessage).font(.caption).foregroundStyle(.secondary)
-            }
             if let unavailable = choice.availabilityMessage {
                 notice(unavailable, symbol: "exclamationmark.triangle", color: .orange)
             }

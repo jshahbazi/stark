@@ -596,10 +596,6 @@ def _recommendation_reason(recipe, host, task, preference):
         )
     else:
         reasons.append("Parameter capacity is unknown, so the choice uses resource fit and deterministic tie-breaks.")
-    if recipe.capacity_is_lower_bound:
-        reasons.append(
-            "Capacity uses a lower bound from known artifact geometry; uncounted parameter groups receive no credit."
-        )
     available = host.get("available_memory_bytes")
     if type(available) is not int or available < recipe.startup_memory:
         reasons.append("More memory must be available when starting; switching away from a running model may free it.")
@@ -696,6 +692,7 @@ def recommendation_report(
             {
                 "id": recipe.id,
                 "name": recipe.name,
+                "capacity_is_lower_bound": recipe.capacity_is_lower_bound,
                 "display_name": recipe.display_name or (
                     recipe.catalog_item.get("model_group", {}).get("name", recipe.name)
                     if isinstance(recipe.catalog_item, dict)

@@ -129,7 +129,6 @@ struct BeginnerSetupSnapshot: Equatable {
     var choicesLoading = false
     var choicesError: String? = nil
     var deviceSummary = ""
-    var recommendationMessage = ""
     var installChoiceID: String? = nil
     var installedResultID: String? = nil
     var installPhase: BeginnerInstallPhase = .idle

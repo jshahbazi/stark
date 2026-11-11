@@ -395,7 +395,7 @@ def test_installed_flash_next_is_ranked_offline_and_reused_without_download(host
     assert item["installed_ids"] == [model["id"]]
     assert item["download_bytes"] == 0
     assert item["evidence"] == "installed_metadata"
-    assert "lower bound" in item["recommendation_reason"]
+    assert item["capacity_is_lower_bound"] is True
     recipe = host.guided_reports["offer"][item["id"]]
     assert not guided.installation_allowed(recipe, resources(physical_memory_bytes=256 * guided.GIB))
     monkeypatch.setattr(host, "start", lambda *_args, **_kwargs: pytest.fail("must reuse local install"))
