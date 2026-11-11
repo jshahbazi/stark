@@ -18,7 +18,7 @@ from .json_budget import check_json_structure
 from .local_api import APIError
 from .resource_budget import INPUT_BYTES
 from .template_compat import MAX_TEMPLATE_BYTES, template_program_sha256
-from .tool_diagnostics import record_xml_rejection
+from .tool_diagnostics import record_xml_argument, record_xml_rejection
 from .tool_protocols import (
     FORMATS,
     TEMPLATE_HASHES,
@@ -635,6 +635,13 @@ def _tool_prefix_safe(prefix, *, initial_thinking=False):
 
 
 def _xml_parameter_value(body, types, invalid, parser):
+    def rejected_value(category):
+        try:
+            record_xml_argument(category, body, types, parser)
+        except Exception:
+            pass
+        return invalid(category)
+
     reserved = _XML_RESERVED + (
         ("<arg_key", "</arg_key", "<arg_value", "</arg_value") if parser == _GLM_PARSER else ()
     )
@@ -657,7 +664,7 @@ def _xml_parameter_value(body, types, invalid, parser):
         except (ValueError, RecursionError):
             if "string" in types:
                 return body
-            raise invalid("xml_value_json") from None
+            raise rejected_value("xml_value_json") from None
     kind = (
         "null"
         if value is None
@@ -676,10 +683,10 @@ def _xml_parameter_value(body, types, invalid, parser):
     matches = kind in types or (kind == "integer" and "number" in types)
     if "string" in types:
         if matches and kind != "string":
-            raise invalid("xml_value_ambiguous")  # Both representations fit: no guessed coercion.
+            raise rejected_value("xml_value_ambiguous")  # Both representations fit: no guessed coercion.
         return body
     if not matches:
-        raise invalid("xml_value_type")
+        raise rejected_value("xml_value_type")
     bounded_json(value, MAX_ARGUMENT_BYTES, label="Function arguments")
     return value
 

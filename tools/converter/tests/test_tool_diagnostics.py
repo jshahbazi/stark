@@ -1,4 +1,4 @@
-"""Only fixed diagnostic categories and timestamps may reach disk."""
+"""Category-only records stay separate from authorized argument capture."""
 
 import json
 import stat
@@ -31,11 +31,30 @@ def test_actual_parser_rejection_persists_only_timestamp_and_category(schema, bo
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert body not in path.read_text()
+    captured = json.loads((path.parent / "tool-arguments.jsonl").read_text())
+    assert captured["argument"] == body and captured["truncated"] is False
+    expected_types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+    assert captured["expected_types"] == sorted(expected_types)
+    assert captured["parser"] == "qwen38-xml-v1" and captured["category"] == category
+    assert set(captured) == {"timestamp", "category", "argument", "truncated", "expected_types", "parser"}
 
 
 def test_unknown_categories_cannot_write_payloads():
     tool_diagnostics.record_xml_rejection("synthetic private text")
+    tool_diagnostics.record_xml_argument("unknown", "synthetic private text", frozenset({"integer"}), "qwen38-xml-v1")
     assert not tool_diagnostics._log_directory().exists()
+
+
+def test_authorized_argument_capture_is_bounded_and_private(monkeypatch):
+    monkeypatch.setattr(tool_diagnostics, "_MAX_CAPTURE_CHARACTERS", 8192)
+    monkeypatch.setattr(tool_diagnostics, "_MAX_ARGUMENT_LOG_BYTES", 512 * 1024)
+    body = "x" * 9000
+    for _ in range(80):
+        tool_diagnostics.record_xml_argument("xml_value_json", body, frozenset({"object"}), "qwen38-xml-v1")
+    path = tool_diagnostics._log_directory() / "tool-arguments.jsonl"
+    assert path.stat().st_size <= 512 * 1024 and stat.S_IMODE(path.stat().st_mode) == 0o600
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records and all(record["argument"] == body[:8192] and record["truncated"] for record in records)
 
 
 def test_unexpected_logger_failure_preserves_original_rejection(monkeypatch):
@@ -43,6 +62,7 @@ def test_unexpected_logger_failure_preserves_original_rejection(monkeypatch):
         raise RuntimeError("synthetic private exception")
 
     monkeypatch.setattr(api_tools, "record_xml_rejection", fail)
+    monkeypatch.setattr(api_tools, "record_xml_argument", lambda *args: fail(None))
     with pytest.raises(APIError) as error:
         xml_output(xml_call({"key": "bad"}), tools=[xml_property_tool({"type": "integer"})])
     assert error.value.code == "invalid_tool_call" and "[xml_value_json]" in error.value.message
