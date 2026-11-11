@@ -165,6 +165,8 @@ metadata, while discovery of other variants uses the Hub. Download preserves
 quantized bytes and validates the prepared identity before library registration.
 Download progress remains indeterminate until the stored byte total is verified.
 GLM image input and Decision mode are unavailable.
+Known Gemma 4 image choices use the immutable revisions bound by their image
+import profiles. Later repository revisions require their own image admission.
 Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
 its fixed Q8 control projections. The Qwen3.8 catalog also discovers compatible
 MLX-Serve external-table exports by config and file inventory, including

@@ -667,6 +667,10 @@ def _quantization(config, info, entry, family=None):
 
 
 def _catalog_pins(family):
+    if family == "gemma4_text":
+        from .adapters.gemma4_vision import PROFILES
+
+        return {repo: profile["revision"] for repo, profile in PROFILES.items()}
     if family == "qwen4_exp":
         from .hybrid_prepare import SOURCES
 

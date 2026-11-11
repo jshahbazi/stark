@@ -97,3 +97,19 @@ The corrected converter source hash is
 The ten-second family discovery budget is cooperative between network calls.
 The desktop host owns the hard child-process deadline and cancellation. This
 review made no additional performance or full-model execution claim.
+
+### Revision binding follow-up
+
+Follow-up `20261110-CATALOG-01-R2` found a live revision mismatch for
+`google/gemma-4-E2B-it`. The current Hub revision
+`4adf15748de9e1a0097b6274cee9c15836c41c37` produced a text-only row because the
+image importer binds `3e22461f65e89153144f8adb70e3b8c2cc9845a7`. The live image
+mode assertion failed and identified this mismatch.
+
+The catalogue now pins known Gemma image choices to the image profiles' supported
+revisions. A new regression verifies that a moved latest revision is never used
+for those choices. Final focused checks passed with 303 tests. The repeated live
+check returned downloadable image-capable rows for the pinned E2B and E4B
+sources, while the 12B MLX 4-bit export retained its BF16 requirement.
+The follow-up converter source hash is
+`73200a85f5051a2e14d39a186c0a4797575d89e0c746c47011777c9f615ee244`.

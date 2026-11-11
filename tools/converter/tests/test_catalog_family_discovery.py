@@ -127,3 +127,31 @@ def test_native_pinned_download_survives_discovery_service_failure():
     assert result["status"] == "ready"
     assert result["items"] == native_catalog.catalog_items(native_catalog.FLINT_FAMILY_ID)
     assert result["has_more"] is True
+
+
+def test_known_gemma_image_source_uses_the_supported_revision_after_upstream_moves(tmp_path, monkeypatch):
+    from stark_convert.adapters.gemma4_vision import PROFILES
+
+    hub = Hub()
+    repo = "google/gemma-4-E2B-it"
+    pinned = PROFILES[repo]["revision"]
+    hub.add(tmp_path, repo, {"model_type": "gemma4_text"}, revision=pinned)
+    hub.discovered["gemma4_text"] = [repo]
+    model_info = hub.model_info
+
+    def moved_head(*, repo_id, revision=None, **kwargs):
+        if revision is None:
+            raise AssertionError("The latest repository revision has no bound image import contract")
+        assert revision == pinned
+        return model_info(repo_id=repo_id, revision=revision, **kwargs)
+
+    monkeypatch.setattr(hub, "model_info", moved_head)
+    monkeypatch.setattr(catalog, "_catalog_image_metadata", lambda *args: True)
+
+    result = catalog.family_catalog("gemma4_text", hub=hub)
+
+    assert result["status"] == "ready" and len(result["items"]) == 1
+    item = result["items"][0]
+    assert item["revision"] == pinned
+    assert item["artifact_modes"] == ["text", "vision-language"]
+    assert item["downloadable"] is True

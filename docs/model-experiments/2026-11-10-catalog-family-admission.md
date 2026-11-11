@@ -49,3 +49,13 @@ importers own precision and state policies. Cache, image-loaded text performance
 and MTP numerical qualification are outside this catalogue-only run. Performance
 was not measured. Full execution of the 4.7 bpw artifact is unverified. GLM and
 Flint alternative artifacts require supported import paths before downloading.
+
+## Revision binding follow-up
+
+Follow-up `20261110-CATALOG-01-R2` reproduced a live E2B row using a newer
+upstream revision than its supported image profile, causing the image assertion
+to fail. Known Gemma image choices now bind their profiles' immutable revisions.
+The canonical run records both revisions and the failed check. The final 303
+focused tests and repeated live E2B/E4B image-mode checks passed. The follow-up
+converter source hash is
+`73200a85f5051a2e14d39a186c0a4797575d89e0c746c47011777c9f615ee244`.
