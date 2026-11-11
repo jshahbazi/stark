@@ -8,8 +8,11 @@ requested or executed. Native load and execution remain separate checks.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
+import os
 import shutil
 import struct
 import sys
@@ -17,8 +20,11 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
+from . import qwen38_external
 from .cli import _publish
 from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
+from .sources import SourceSnapshot, _verified_hashes, huggingface_repository
+from .streaming import ConversionError, load_checkpoint, read_safetensors_header
 
 SOURCES = {
     "flint-int4": {
@@ -116,13 +122,20 @@ def _ids(value):
 
 def finish_metadata(directory: Path, choice: str) -> dict:
     """Bind the preserved architecture and tokenizer template for CLI chat."""
-    source = SOURCES[choice]
+    receipt = _finish_metadata(directory, SOURCES[choice])
+    (directory / "native-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    return receipt
+
+
+def _finish_metadata(directory: Path, source: dict) -> dict:
     config = _json(directory / "config.json")
     if config.get("model_type") != source["architecture"]:
         raise ValueError("source architecture changed")
     text = config.get("text_config", config)
     tokenizer = _json(directory / "tokenizer_config.json", 2 * 1024 * 1024)
     template_file = directory / "chat_template.jinja"
+    if template_file.is_file() and template_file.stat().st_size > 256 * 1024:
+        raise ValueError("excessive chat template")
     template = template_file.read_text() if template_file.is_file() else tokenizer.get("chat_template")
     if isinstance(template, list):
         template = next((item.get("template") for item in template if item.get("name") == "default"), None)
@@ -157,7 +170,7 @@ def finish_metadata(directory: Path, choice: str) -> dict:
     }
     encoded = (json.dumps(config, indent=2, ensure_ascii=False) + "\n").encode()
     (directory / "config.json").write_bytes(encoded)
-    receipt = {
+    return {
         "schema_version": 1,
         "artifact_mode": "text",
         "architecture": source["architecture"],
@@ -172,7 +185,72 @@ def finish_metadata(directory: Path, choice: str) -> dict:
         )
         + (source.get("ngram_bytes", 0) if source.get("ngram_in_weight_bytes") else 0),
     }
-    (directory / "native-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+_EXTERNAL_LAYOUT = "qwen38-external-affine"
+
+
+def _copy_snapshot_file(source: Path, target: Path) -> None:
+    # A same-volume APFS clone isolates the installed bytes from the source
+    # without requiring a second allocation for a hundred-gigabyte checkpoint.
+    if sys.platform == "darwin":
+        clone = ctypes.CDLL(None, use_errno=True).clonefile
+        clone.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int)
+        if clone(os.fsencode(source), os.fsencode(target), 0) == 0:
+            return
+        code = ctypes.get_errno()
+        if code not in {errno.EXDEV, errno.ENOTSUP, errno.ENOSYS}:
+            raise OSError(code, "Cannot clone model file")
+    shutil.copyfile(source, target)
+
+
+def stage_external_qwen(snapshot: SourceSnapshot, staging: Path) -> dict:
+    """Prepare an independently owned native artifact from a bound source."""
+    snapshot.assert_unchanged(verify_content=False)
+    records = snapshot.manifest["files"]
+    targets = []
+    for record in records:
+        name = record["filename"]
+        target = staging / name
+        _copy_snapshot_file(snapshot.resolve_file(name), target)
+        target.chmod(0o600)
+        targets.append(target)
+    _, hashes = _verified_hashes(targets)
+    if hashes != [record["sha256"] for record in records]:
+        raise ConversionError("External Qwen3.8 source changed during preparation")
+    snapshot.assert_unchanged(verify_content=False)
+    tensors = load_checkpoint(staging)
+    table = staging / qwen38_external.NGRAM_TABLE
+    _, planes = read_safetensors_header(table)
+    qwen38_external.validate_layout(
+        _json(staging / "config.json"),
+        {name: (info.dtype, info.shape) for name, info in tensors.items()},
+        {name: (info.dtype, info.shape) for name, info in planes.items()},
+    )
+    source = {
+        "architecture": "qwen4_exp",
+        "weights_repo": snapshot.repo,
+        "weights_revision": snapshot.revision,
+        "metadata_repo": snapshot.repo,
+        "metadata_revision": snapshot.revision,
+        "quantization": qwen38_external.QUANTIZATION,
+        "ngram_bytes": table.stat().st_size,
+        "ngram_in_weight_bytes": True,
+    }
+    receipt = {
+        **_finish_metadata(staging, source),
+        **snapshot.receipt(),
+        "layout": _EXTERNAL_LAYOUT,
+        "weight_files": {
+            record["filename"]: {"size": record["size"], "sha256": record["sha256"]}
+            for record in records
+            if record["role"] in {"weights", "weight_index", "ngram_table"}
+        },
+        "status": "prepared",
+    }
+    (staging / "native-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    if prepared_identity(staging) is None:
+        raise ConversionError("External Qwen3.8 prepared identity could not be verified")
     return receipt
 
 
@@ -297,6 +375,8 @@ def prepared_identity(directory: Path) -> dict | None:
         marker = config.get("stark_native_hybrid")
         if not isinstance(marker, dict) or marker.get("schema_version") != 1:
             return None
+        if receipt.get("layout") == _EXTERNAL_LAYOUT:
+            return _external_identity(directory, config, receipt, marker)
         source = next(
             (
                 value
@@ -354,6 +434,74 @@ def prepared_identity(directory: Path) -> dict | None:
         }
     except (OSError, ValueError, TypeError, AttributeError, RecursionError):
         return None
+
+
+def _external_identity(directory: Path, config: dict, receipt: dict, marker: dict) -> dict | None:
+    repo, revision = marker.get("source"), marker.get("revision")
+    identity = {"repo": repo, "revision": revision}
+    codec = config.get("token_codec_config")
+    if (
+        not qwen38_external.is_external_affine(config)
+        or receipt.get("schema_version") != 1
+        or receipt.get("artifact_mode") != "text"
+        or receipt.get("architecture") != "qwen4_exp"
+        or receipt.get("quantization") != qwen38_external.QUANTIZATION
+        or receipt.get("config_sha256") != hashlib.sha256((directory / "config.json").read_bytes()).hexdigest()
+        or receipt.get("weights_source") != identity
+        or receipt.get("metadata_source") != identity
+        or repo is not None
+        and huggingface_repository(repo) != repo
+        or revision is not None
+        and (
+            not isinstance(revision, str)
+            or len(revision) != 40
+            or any(character not in "0123456789abcdef" for character in revision)
+        )
+        or not isinstance(codec, dict)
+        or codec.get("type") != "ChatCodecConfig"
+        or not isinstance(codec.get("prompt_template"), str)
+        or not codec["prompt_template"]
+        or (directory / "tokenizer.json").is_symlink()
+        or not (directory / "tokenizer.json").is_file()
+    ):
+        return None
+    records = receipt.get("weight_files")
+    shards = sorted(path.name for path in directory.glob("*.safetensors"))
+    index = directory / qwen38_external.INDEX
+    indexed = index.exists() or index.is_symlink()
+    names = {*shards, qwen38_external.NGRAM_TABLE}
+    if indexed:
+        names.add(index.name)
+    if not qwen38_external.supported_shards(shards, indexed) or not isinstance(records, dict) or set(records) != names:
+        return None
+    total = 0
+    for name, record in records.items():
+        path = directory / name
+        if (
+            not isinstance(record, dict)
+            or not _sha256_text(record.get("sha256"))
+            or type(record.get("size")) is not int
+            or record["size"] <= 0
+            or path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size != record["size"]
+        ):
+            return None
+        if name != qwen38_external.INDEX:
+            total += record["size"]
+    if indexed and (
+        index.stat().st_size > 1024 * 1024
+        or hashlib.sha256(index.read_bytes()).hexdigest() != records[index.name]["sha256"]
+    ):
+        return None
+    if total != receipt.get("weight_bytes"):
+        return None
+    return {
+        **identity,
+        "architecture": "qwen4_exp",
+        "weight_bytes": total,
+        "quantization": qwen38_external.QUANTIZATION,
+    }
 
 
 def prepare(

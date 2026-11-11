@@ -12,12 +12,12 @@ Its helper pins native-source downloads for local import. **Model Catalog →
 GLM-5.3 Flash** offers the pinned `UD-Q2_K_XL` checkpoint through that same
 preparation path. GLM is a separate native family in the inventory; arbitrary
 GLM repositories remain outside generic converter preflight. The registry also
-includes a `qwen4_exp` converter for Lily-format Qwen3.8 text models. It writes
-a self-contained typed `Qwen38LanguageModelConfig` artifact with canonical
-MLX storage and unchanged mixed quantization, sharing the existing specialized
-Qwen kernels. Vision and MTP tensors are omitted from this typed text-converter
-path. Retained Lily checkpoints have a separate pinned native image path; that
-image support does not come from the `qwen4_exp` text artifact. The
+supports two `qwen4_exp` text import paths. Lily-format sources can be
+converted to a typed `Qwen38LanguageModelConfig` artifact with canonical MLX
+storage and unchanged mixed quantization. This conversion omits vision and MTP
+tensors. Compatible external-table MLX-Serve sources are prepared for the
+native loader with their original weight shards, index, and n-gram table.
+The pinned native image routes have separate artifact checks. The
 ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
 backend has an unchanged `headless-reference` default and a separately staged
 `--profile bf16-native-experimental` profile that includes the BF16 draft head,
@@ -153,8 +153,14 @@ quantized bytes and validates the completed prepared identity before library
 registration. Download progress remains indeterminate until the stored byte
 total is verified. GLM image input and Decision mode are unavailable.
 Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
-its fixed Q8 control projections. Embedding/reranking tasks, known internal test
-models, quantized vision towers, MoE architectures outside the implemented
+its fixed Q8 control projections. The Qwen3.8 catalog also discovers compatible
+MLX-Serve external-table exports by config and file inventory, including
+importance-calibrated exports using the supported affine layout. Their download
+size includes the external n-gram table. The catalog checks the pinned shard
+headers, index, and n-gram table layout before enabling Download. Incompatible
+external-table candidates display an explanation in their catalog row.
+Embedding/reranking tasks, known
+internal test models, quantized vision towers, MoE architectures outside the implemented
 Qwen3.5 and Qwen3.8 paths, adapter-only and unsupported packed formats are
 excluded. Qwen image profiles can retain supported packed decoder matrices
 alongside a complete BF16 vision tower. The

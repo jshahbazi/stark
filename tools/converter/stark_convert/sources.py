@@ -13,12 +13,14 @@ import json
 import os
 import re
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import qwen38_external
 from .gemma3_contract import gemma3_source_files, normalize_processor
 from .model_support import (
     check_hub_metadata_size,
@@ -217,6 +219,7 @@ class SourceSnapshot:
             sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*") if path.is_file())
         )
         profile = self.conversion_profile
+        external_qwen = False
         if profile is not None:
             if (
                 entry is not None
@@ -231,6 +234,11 @@ class SourceSnapshot:
                 != profile["architecture"]
             ):
                 raise ConversionError("Generic source profile disagrees with its checkpoint")
+            external_qwen = (
+                self.artifact_mode == "text"
+                and profile["architecture"] == "qwen4_exp"
+                and qwen38_external.is_external_affine(read_support_config(self.config_path, root=self.root))
+            )
             rules = (
                 (
                     gemma3_source_files(self.repo, names)
@@ -238,11 +246,15 @@ class SourceSnapshot:
                     else family_source_files(self.repo, names)
                 )
                 if self.artifact_mode == "vision-language"
+                else qwen38_external.external_files(self.repo, names)
+                if external_qwen
                 else generic_files(self.repo, names)
             )
             roles = set(GENERIC_REQUIRED) | set(GENERIC_OPTIONAL)
             if self.artifact_mode == "vision-language":
                 roles.add("processor_config")
+            if external_qwen:
+                roles.update(("ngram_table", "source_notice"))
             actual = {
                 (record["role"], record["filename"]) for record in self.manifest["files"] if record["role"] in roles
             }
@@ -257,6 +269,8 @@ class SourceSnapshot:
         selected, index_name = _weights(
             names, entry["container"] if entry else ".safetensors", lambda filename: self.root / _relative(filename)
         )
+        if external_qwen and not qwen38_external.supported_shards(selected, index_name is not None):
+            raise UnsupportedConversion("External Qwen3.8 requires flat native checkpoint shards")
         expected_weights = tuple(
             sorted(
                 record["filename"]
@@ -692,7 +706,9 @@ def resolve_source(
             metadata_root = metadata_root.parent
     # Reject metadata-proven exclusions before selecting or opening any primary
     # weight payload, including catalog profiles with external model configs.
-    admit(read_support_config(metadata_path, root=metadata_root), entry=entry)
+    config = read_support_config(metadata_path, root=metadata_root)
+    admit(config, entry=entry)
+    external_qwen = metadata_profile == GENERIC_PROFILE and qwen38_external.is_external_affine(config)
     selected = None
     if local:
         root = path.resolve()
@@ -741,6 +757,8 @@ def resolve_source(
         rules = (
             (gemma3_source_files(repo, names) if detected == "gemma3" else family_source_files(repo, names))
             if artifact_mode == "vision-language"
+            else qwen38_external.external_files(repo, names)
+            if external_qwen
             else generic_files(repo, names)
         )
         profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
@@ -755,8 +773,26 @@ def resolve_source(
                 normalize_processor(json.loads(inspect_sidecar("preprocessor_config.json", 65536)))
             else:
                 check_vision_processing_metadata(names, inspect_sidecar)
+    if external_qwen and not local and qwen38_external.INDEX in names:
+        check_hub_metadata_size(hub, repo, qwen38_external.INDEX, revisions[repo], 1024 * 1024)
     if selected is None:
         selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
+    if external_qwen and not qwen38_external.supported_shards(selected, index_name is not None):
+        raise UnsupportedConversion("External Qwen3.8 requires flat native checkpoint shards")
+    if external_qwen and not local:
+        index = read_json(loader(index_name))["weight_map"] if index_name is not None else None
+        deadline = time.monotonic() + 80
+
+        def check_header_deadline():
+            if time.monotonic() >= deadline:
+                raise qwen38_external.HeaderAccessError()
+
+        try:
+            qwen38_external.verify_hub_layout(
+                hub, repo, revisions[repo], config, selected, index, check_header_deadline
+            )
+        except qwen38_external.HeaderAccessError:
+            raise ConversionError("Cannot verify the pinned Qwen3.8 tensor headers") from None
     descriptors = list(rules)
     if index_name:
         descriptors.append({"role": "weight_index", "repo": repo, "filename": index_name})

@@ -470,6 +470,21 @@ def convert(
         os.chmod(staging, 0o700)
         if progress is not None:
             progress.emit("conversion", "running", force=True)
+        if snapshot.conversion_profile is not None and snapshot.conversion_profile["architecture"] == "qwen4_exp":
+            from . import qwen38_external
+            from .model_support import read_support_config
+
+            if qwen38_external.is_external_affine(read_support_config(snapshot.config_path, root=snapshot.root)):
+                from .hybrid_prepare import stage_external_qwen
+
+                if dtype != "bfloat16" or artifact_mode != "text" or snapshot.artifact_mode != "text":
+                    raise UnsupportedConversion("External Qwen3.8 preparation requires native text mode")
+                receipt = stage_external_qwen(snapshot, staging)
+                _publish(staging, output)
+                if progress is not None:
+                    weight_bytes = receipt["weight_bytes"]
+                    progress.emit("conversion", "complete", weight_bytes, weight_bytes, force=True)
+                return receipt
         provenance = toolchain_provenance()
         planned = plan_conversion(snapshot, request)
         entry = get_model(repo)

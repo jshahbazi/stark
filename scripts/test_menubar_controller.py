@@ -1588,6 +1588,19 @@ extension EngineController {
             var raw = future["report"] as! [String: Any]; raw["schema_version"] = 2; future["report"] = raw
             engine.apply(future)
             return engine.catalog == nil && engine.catalogLoading && !engine.supportsImages && engine.modelReady
+        case "catalog-unavailable-row":
+            var item = catalogItem("unsupported")
+            item["downloadable"] = false
+            guard FamilyModelCatalog(catalogReport("qwen3", items: [item])) == nil else { return false }
+            let reason = "Expert weights use 3-bit packing with groups of 128."
+            item["unavailable_reason"] = reason
+            engine.requestModelCatalog(familyID: "qwen3")
+            let request = command()
+            engine.apply(catalogReply(request, items: [item]))
+            guard let row = engine.catalog?.items.first, row.unavailableReason == reason,
+                  !row.downloadable else { return false }
+            engine.installCatalogItem(id: row.id)
+            return noCommandSent()
         case "catalog-provider-order":
             var small4 = catalogItem("small4"); small4["parameter_count"] = NSNull(); small4["quantization"] = "4-bit"
             var small8 = catalogItem("small8"); small8["parameter_count"] = NSNull(); small8["quantization"] = "8-bit"
@@ -2824,6 +2837,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_catalog_schema_and_item_bounds_are_enforced(self):
         self.exercise("catalog-schema-bounds")
+
+    def test_catalog_unavailable_row_retains_reason_and_cannot_install(self):
+        self.exercise("catalog-unavailable-row")
 
     def test_catalog_preserves_provider_order_for_size_and_quantized_variants(self):
         self.exercise("catalog-provider-order")

@@ -82,12 +82,14 @@ func exerciseCatalogFamilyLayout() -> Bool {
     let credentials = APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage())
     let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults)
     let labels = ["Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)", "MLX mixed 4/8-bit", "MLX-Serve mixed 4/8-bit"]
-    let items: [[String: Any]] = labels.enumerated().map { index, label in
+    var items: [[String: Any]] = labels.enumerated().map { index, label in
         ["id": "fixture-\(index)", "repo": "fixture/Qwen3.8-Flash-Next-\(index)",
          "revision": String(repeating: "a", count: 40), "name": "Qwen3.8-Flash-Next-\(index)",
          "quantization": label, "artifact_modes": ["text", "vision-language"], "default_artifact_mode": "text",
          "weight_bytes": Int64(106_910_000_000), "downloadable": true, "installed_ids": [String]()]
     }
+    items[2]["downloadable"] = false
+    items[2]["unavailable_reason"] = "Expert weights use 3-bit packing with groups of 128. Stark’s loader requires 4-bit packing with groups of 64 for these weights."
     let report: [String: Any] = ["schema_version": 1, "family_id": "qwen3_8", "status": "ready",
         "message": "", "items": items, "has_more": true, "offset": 0, "next_offset": 3]
     let navigation = ModelManagementState()

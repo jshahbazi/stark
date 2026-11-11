@@ -102,6 +102,8 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         formats.extend(["mlx-affine-4bit", "mlx-affine-8bit"])
     if architecture in {"qwen3_5", "qwen3_5_moe"}:
         formats.append("mlx-affine-mixed")
+    if architecture == "qwen4_exp":
+        formats.append("mlx-serve-external-affine")
     return {
         "family_id": architecture,
         "name": name,
@@ -303,11 +305,29 @@ def preflight_model(
             "This family currently implements tied embeddings only.",
         )
     if architecture == "qwen4_exp":
+        from .qwen38_external import is_external_affine
+
+        if is_external_affine(config):
+            if mode in {"decision", "vision-language"}:
+                return _report(
+                    family,
+                    mode,
+                    "unsupported",
+                    "unsupported_mode",
+                    "Generic external-table Qwen3.8 import supports text generation.",
+                )
+            return _report(
+                family,
+                mode,
+                "conditional",
+                "checkpoint_validation_required",
+                "Stark can prepare this external-table affine layout for native text generation.",
+            )
         if mode == "vision-language":
             return _report(family, mode, "unsupported", "unsupported_mode", "Qwen3.8 conversion implements text only.")
         # A bare family probe describes implemented coverage. Real nested
         # checkpoints receive the typed metadata validation before weight I/O.
-        if "text_config" in config or "lily" in config:
+        if any(key in config for key in ("text_config", "lily", "ngram_table")):
             try:
                 from .adapters.qwen38 import architecture_config
 
@@ -318,7 +338,7 @@ def preflight_model(
                     mode,
                     "unsupported",
                     "unsupported_qwen38_metadata",
-                    "Qwen3.8 metadata is outside the implemented Lily text contract.",
+                    "Qwen3.8 metadata is outside the supported affine checkpoint layouts.",
                 )
         return _report(
             family,
@@ -971,6 +991,17 @@ def preflight_source(
             report = inconclusive(
                 "checkpoint_inventory_incomplete", "Metadata does not list a supported checkpoint container."
             )
+        if report["status"] == "conditional" and report["family_id"] == "qwen4_exp":
+            from .qwen38_external import external_files, is_external_affine
+
+            if is_external_affine(config):
+                try:
+                    external_files(repo, names)
+                except (ConversionError, UnsupportedConversion):
+                    report = inconclusive(
+                        "checkpoint_inventory_incomplete",
+                        "The external-table Qwen3.8 source is missing required model or tokenizer files.",
+                    )
         if report["status"] == "conditional" and mode == "vision-language":
             if report["family_id"] == "gemma4_text":
                 from .adapters.gemma4_vision import PROFILES as gemma_profiles

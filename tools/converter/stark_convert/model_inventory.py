@@ -359,8 +359,8 @@ def model_display(model):
     if hybrid is not None:
         repo = hybrid["repo"]
         result.update(
-            group_id="repo:" + repo,
-            group_name=repo.split("/")[-1],
+            group_id="repo:" + repo if repo else "model:" + model["id"],
+            group_name=repo.split("/")[-1] if repo else model["name"],
             family_id=hybrid["architecture"],
             quantization=hybrid["quantization"],
             weight_bytes=hybrid["weight_bytes"],
