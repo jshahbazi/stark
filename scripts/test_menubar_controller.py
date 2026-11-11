@@ -213,6 +213,64 @@ extension EngineController {
         }
         let apiFirst = String(repeating: "a", count: 32), apiSecond = String(repeating: "b", count: 32)
         switch scenario {
+        case "worker-pipe-small-guided-reply":
+            let replies = Pipe()
+            engine.observeWorkerOutput(replies.fileHandleForReading)
+            defer {
+                replies.fileHandleForReading.readabilityHandler = nil
+                try? replies.fileHandleForWriting.close()
+                try? replies.fileHandleForReading.close()
+            }
+            engine.requestBeginnerModels(task: "code", preference: "answers")
+            let requestID = command()["request_id"] as! String
+            guard engine.beginnerChoicesLoading else { return false }
+            var bytes = try! JSONSerialization.data(withJSONObject: [
+                "event": "guided_models", "request_id": requestID, "report": beginnerReport(["fixture-model"])
+            ])
+            bytes.append(10)
+            guard bytes.count < 65_536 else { return false }
+            replies.fileHandleForWriting.write(bytes)
+            // The writer stays open throughout the wait, just like the desktop
+            // backend. Filling a 64 KiB buffer or reaching EOF cannot unblock it.
+            return pump({ !engine.beginnerChoicesLoading }) &&
+                engine.beginnerReport?.items.first?.installedIDs == ["fixture-model"] &&
+                replies.fileHandleForReading.readabilityHandler != nil
+        case "worker-pipe-fragmented-and-coalesced-events":
+            let replies = Pipe()
+            engine.observeWorkerOutput(replies.fileHandleForReading)
+            defer {
+                replies.fileHandleForReading.readabilityHandler = nil
+                try? replies.fileHandleForWriting.close()
+                try? replies.fileHandleForReading.close()
+            }
+            func frame(_ memory: Int) -> Data {
+                var bytes = try! JSONSerialization.data(withJSONObject: [
+                    "event": "gpu_memory", "model_id": "fixture-model", "mode": "decision",
+                    "gpu_memory_bytes": memory
+                ])
+                bytes.append(10)
+                return bytes
+            }
+            let first = frame(111), second = frame(222), third = frame(333)
+            let firstSplit = first.count / 2, thirdSplit = third.count / 2
+            replies.fileHandleForWriting.write(first.prefix(firstSplit))
+            guard pump({ engine.reader.sync { engine.pending.count == firstSplit } }),
+                  engine.gpuMemoryBytes == nil else { return false }
+            replies.fileHandleForWriting.write(first.suffix(from: firstSplit) + second + third.prefix(thirdSplit))
+            guard pump({ engine.gpuMemoryBytes == 222 && engine.reader.sync { engine.pending.count == thirdSplit } })
+            else { return false }
+            replies.fileHandleForWriting.write(third.suffix(from: thirdSplit))
+            return pump({ engine.gpuMemoryBytes == 333 }) && engine.reader.sync { engine.pending.isEmpty }
+        case "worker-pipe-eof-clears-handler":
+            let replies = Pipe()
+            engine.observeWorkerOutput(replies.fileHandleForReading)
+            defer {
+                replies.fileHandleForReading.readabilityHandler = nil
+                try? replies.fileHandleForReading.close()
+            }
+            guard replies.fileHandleForReading.readabilityHandler != nil else { return false }
+            try? replies.fileHandleForWriting.close()
+            return pump({ replies.fileHandleForReading.readabilityHandler == nil })
         case "beginner-recommendation-fences":
             engine.requestBeginnerModels(task: "unsure")
             let request = command()
@@ -2349,6 +2407,15 @@ exit(EngineController.exercise(scenario, backendError: backendError) ? 0 : 1)
     "Apple silicon macOS required",
 )
 class ControllerLifecycleTests(unittest.TestCase):
+    def test_small_guided_reply_arrives_while_worker_pipe_stays_open(self):
+        self.exercise("worker-pipe-small-guided-reply")
+
+    def test_worker_pipe_delivers_fragmented_and_coalesced_events(self):
+        self.exercise("worker-pipe-fragmented-and-coalesced-events")
+
+    def test_worker_pipe_eof_removes_readability_handler(self):
+        self.exercise("worker-pipe-eof-clears-handler")
+
     def test_connected_application_activity_does_not_show_playground_timing(self):
         self.exercise("generation-progress-external-activity")
 

@@ -5,6 +5,24 @@ import Metal
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum WorkerPipeReader {
+    /// Read one currently available chunk. FileHandle.readData(ofLength:) can
+    /// wait for the entire requested length while a persistent worker is alive.
+    static func readChunk(from handle: FileHandle) -> Data? {
+        var bytes = Data(count: 65_536)
+        let amount = bytes.withUnsafeMutableBytes { buffer -> Int in
+            while true {
+                let count = Darwin.read(handle.fileDescriptor, buffer.baseAddress!, buffer.count)
+                if count < 0 && errno == EINTR { continue }
+                return count
+            }
+        }
+        guard amount >= 0 else { return nil }
+        bytes.count = amount
+        return bytes
+    }
+}
+
 enum ImageAttachmentError: Error {
     case invalid, tooLarge, unavailable
 
@@ -1386,12 +1404,7 @@ final class EngineController: ObservableObject {
                 self.attachmentStaging = nil
             }
         }
-        output = outgoing.fileHandleForReading
-        output?.readabilityHandler = { [weak self] handle in
-            let bytes = handle.readData(ofLength: 65_536)
-            guard !bytes.isEmpty else { handle.readabilityHandler = nil; return }
-            self?.reader.async { [weak self] in self?.receive(bytes) }
-        }
+        observeWorkerOutput(outgoing.fileHandleForReading)
         do {
             try child.run()
             process = child
@@ -1403,6 +1416,17 @@ final class EngineController: ObservableObject {
             state = "error"
             message = "Cannot start the bundled runtime. Reinstall Stark."
             attachmentStaging = nil
+        }
+    }
+
+    private func observeWorkerOutput(_ handle: FileHandle) {
+        output = handle
+        handle.readabilityHandler = { [weak self] handle in
+            guard let bytes = WorkerPipeReader.readChunk(from: handle), !bytes.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            self?.reader.async { [weak self] in self?.receive(bytes) }
         }
     }
 

@@ -116,3 +116,35 @@ failure without production changes. No LocalAPI code or tests were changed.
 No app was installed or relaunched during this audit. Model loading, measured
 memory peaks and a fresh interactive OpenWork session remain separate runtime
 validation.
+
+## Follow-up: persistent backend pipe stall
+
+After installing the app, the guide stayed on **Checking models** for several
+minutes. The earlier controller tests injected decoded events and the packaged
+replay exercised Python directly; neither checked delivery through the live
+Swift pipe reader.
+
+The production readability handler used
+`FileHandle.readData(ofLength: 65_536)`. On this platform that call waits for
+the requested byte count or EOF. A recommendation response smaller than 64 KiB
+could remain unread while the persistent backend stayed alive. A live packaged
+backend check with the registered library delivered its 4,563-byte report in
+5.36 seconds, selecting the installed Flash Next, while its stdin/stdout stayed
+open. The native reader prevented that completed result from reaching the view.
+
+The handler now uses one bounded `Darwin.read` call, retrying interrupted reads,
+and feeds the existing framed-event receiver immediately. Tests exercise the
+production handler through real persistent pipes: a small recommendation clears
+the spinner before writer closure, fragmented/coalesced events retain correct
+framing, and EOF removes the handler.
+
+Follow-up source begins at `9c9388a8` with these changed-file identities:
+
+| File | SHA-256 |
+| --- | --- |
+| `apps/menu-bar/Sources/StarkApp.swift` | `1dadd0db9e5065cd7a124f7f6ff2b15ba67b0826f1b7e249bbd27335ecb551f3` |
+| `scripts/test_menubar_controller.py` | `94b5949184bcfd8ebc551b0829b767c646e9f32991423f63a44265fd935295bc` |
+
+Follow-up checks: **140 controller tests**, **13 beginner tests** and **7 window
+tests** passed. Recommendation/backend code and inference state paths did not
+change in this transport fix.
