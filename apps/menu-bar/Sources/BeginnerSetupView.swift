@@ -18,20 +18,25 @@ struct BeginnerSetupView: View {
         HStack(spacing: 0) {
             sidebar.frame(width: 180)
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    content
-                    if let error = snapshot.engineError, session.stage != .installation {
-                        notice(error, symbol: "exclamationmark.triangle", color: .red)
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        content
+                        if let error = snapshot.engineError, session.stage != .installation {
+                            notice(error, symbol: "exclamationmark.triangle", color: .red)
+                        }
                     }
+                    .padding(28)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(28)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, session.stage == .task ? 0 : 20)
+                if session.stage == .task {
+                    Divider()
+                    taskActions.padding(28)
+                }
             }
-            // Keep controls clear of the window edge even while content is scrolled.
-            .padding(.bottom, 20)
         }
-        .frame(minWidth: 700, minHeight: 600)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { session.synchronize(with: snapshot) }
         .onChange(of: snapshot) { _, value in session.synchronize(with: value) }
@@ -113,15 +118,20 @@ struct BeginnerSetupView: View {
             Text("Stark estimates memory needs and model capacity. Speed and answer quality depend on the model and your task.")
                 .font(.caption).foregroundStyle(.secondary)
             deviceSummary
-            HStack {
-                Button(session.choosingAnotherModel ? "See another model" : "Find a model") { requestChoices() }
-                    .buttonStyle(.borderedProminent).disabled(session.task == nil || snapshot.choicesLoading)
-                if session.choosingAnotherModel { keepCurrentButton }
-            }
             if session.choosingAnotherModel {
                 Text("Your current model stays installed while you choose. Your OpenWork setup is kept.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+        }
+    }
+
+    // Keep the next step visible while the task choices scroll independently.
+    private var taskActions: some View {
+        HStack {
+            if session.choosingAnotherModel { keepCurrentButton }
+            Spacer(minLength: 12)
+            Button(session.choosingAnotherModel ? "See another model" : "Find a model") { requestChoices() }
+                .buttonStyle(.borderedProminent).disabled(session.task == nil || snapshot.choicesLoading)
         }
     }
 

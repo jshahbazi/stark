@@ -14,6 +14,8 @@ The main menu and playground model headings show the readable model name. Hover 
 
 The menu offers **Guided setup** in Beginner mode or **Manage Models** in Advanced mode, plus a **Start model** action when a model can be started and a **Stop model** action while one is starting or running. Beginner setup can be reopened from the menu; **Adjust Setup** returns to its choices so you can revisit earlier steps. Guide steps explain their prerequisites, and returning to a parent window preserves the guide for later.
 
+The guide's task choices scroll independently of the **Find a model** action, which stays in a fixed footer at the bottom right. When choosing another model, **Keep current model** remains in the same footer.
+
 The main menu and playground show **GPU memory** as a percentage and compact usage bar beside the status in both modes. Green indicates usage below 75% of Metal's recommended memory budget, orange starts at 75%, and red starts at 90%. Whole percentages round down so the label agrees with the color thresholds. Hover for the allocated bytes and budget. It refreshes about once a second, including during model loading and requests. Apple silicon uses shared memory; the percentage measures the model worker's Metal resource allocation against the device's recommended working-set size, excluding CPU-only allocations and other applications. This budget is a performance guideline. The bar fills at 100%; percentages above the budget remain visible. If the budget is unavailable, the readout shows allocated bytes with an empty neutral bar. A dash means no measurement is available. Stop clears the readout.
 
 ## Build and install
