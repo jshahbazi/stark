@@ -13,6 +13,20 @@ The scope is all 18 generic converter families plus the two additional native fa
 
 ## Image-capable models and artifact paths
 
+2026-11-12 update: Add Source now uses repository-independent retained-image
+admission for supported Flash Next Lily, external-table affine and indexed PLE
+layouts. The actual `nace-ai/Qwen3.8-Flash-Next-MLX-KQuant` artifact passed the
+Add Source controller's installation and local image checks, plus 14 explicit
+image/text/MTP/prefix lifecycle controls. This adds evidence for that exact
+artifact; older rows retain their original checkpoint-specific evidence.
+The follow-up review added strict Lily draft/control admission, selected-dialect
+sidecar checks and derived processor provenance. Complete pinned headers pass
+for the Lily, MLX-Serve and nace exports. Four additional actual nace color
+fixtures pass square/portrait/landscape PNG and square JPEG checks. Official
+FP8 and legacy PipeNetwork/F32 exports remain outside this image route;
+whole-family execution and general visual quality are unqualified.
+See the [implementation and qualification record](archive/runs/2026-11-12-flashnext-general-images.md).
+
 | Model / artifact | Images added in Stark? | Verified evidence and limits | Text optimizations with images loaded | Remaining action |
 | --- | --- | --- | --- | --- |
 | Qwen3.5 dense BF16, official 0.8B | Yes: native image conversion, tower, fusion and serving | Source-bound numerical/image-worker baseline exists. Small image-answer checks are bounded evidence, not general quality proof. [Qwen ledger][qwen] | Prefix snapshots implemented in open PR #110; 32 exact cases and CPU/Metal checks pass for this artifact at context 8,192. Vision MTP unavailable. | Merge/ship the reviewed caching change after checks; retain artifact-specific qualification. |
@@ -23,6 +37,7 @@ The scope is all 18 generic converter families plus the two additional native fa
 | Qwen3.5 35B-A3B, BF16-source MoE profile v5 | Structural conversion/admission and operators added | Router/expert/scratch component controls exist. Complete official checkpoint image execution and parity are unverified. [Vision contract][vision] | Eligible snapshot primitives alone do not establish full-model restoration. | Run full artifact admission, image execution, decoder parity, memory and caching checks. This is unfinished qualification. |
 | Qwen3.8 Flash Next, retained `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, schema 6 | Yes: explicit retained image preparation/upgrade | All 27 vision-tower layers exact on two source fixtures; actual image-worker lifecycle passes. Full retained-decoder parity and image throughput remain unverified. [Retained images][retained] | Engine already supports a 4,096-token text snapshot when no image transaction is active. PR #110 makes the host request this capability for vision workers. Loading in image mode disables MTP heads even for ordinary text. | Qualify text reuse and speed with the tower loaded; separately enable/qualify text-only MTP on image-loaded instances. |
 | Qwen3.8 Flash Next, retained `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, schema 6 | Explicit preparation and retained image path added | This distinct complete artifact lacks image execution qualification in the cited work. [Retained images][retained] | Lily-backed retained state has text snapshot support; host enablement is in PR #110. Actual artifact/readiness and performance need checking. Image-mode MTP disabled. | Qualify actual image execution, text caching, speed and memory before treating it like the pinned Lily result. |
+| Qwen3.8 Flash Next, indexed affine `nace-ai/Qwen3.8-Flash-Next-MLX-KQuant`, revision `05cb5c56` | Yes: shared Add Source preparation, preserving BF16 tower, PLE ranges and MTP | Complete real-source header admission, actual controller install, automatic image checks and 14 bounded lifecycle controls pass. Full source-reference decoder parity and general image quality remain unassessed. [Run record](archive/runs/2026-11-12-flashnext-general-images.md) | Actual MTP0/MTP2 text equality, proposal counters and exact 4,096-token restoration pass with images loaded. Short paired timing meets the 5% bounds but fails the strict clean-endpoint screen; no general speed claim. Images use zero drafts/reuse and clear text prefixes. | Qualify MTP1/MTP3, broader workloads, sustained performance and other artifacts separately. |
 | Qwen3.8 Flash Next, typed Uzu `qwen4_exp` text conversion | No image components in this artifact | Separate implemented text route; converter intentionally omits vision and MTP. [Native reference][native] | Existing typed-text reuse qualification is separate from retained images. | Use the explicit retained image route for images. Adding images to this typed format would require new implementation and qualification. |
 | Qwen3.8 Flash Next, original PipeNetwork/F32 text route | No image-fusion bridge | Text implementation exists; retained vision payload alone does not enable images. [Native reference][native] | F32 graph keeps prefix capability disabled. | Implement a bridge and exact state restoration if this route is to support them; use retained image preparation where applicable. |
 | Gemma 3 4B BF16, `google/gemma-3-4b-it` | Yes | Exact processor patches; canonical feature/logit limits, greedy trajectories and worker/API lifecycle pass. Full-model logits are within fixed tolerances, not universally bit-exact. [Gemma ledger][gemma] | Physical-ring snapshot/restore and scoped cache lifecycle pass for the pinned 4B artifact. [Continuation][gemma-next] | Larger/quantized artifacts and installed UI execution remain separate; prior-text baseline timing is ineligible. |

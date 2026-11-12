@@ -36,14 +36,11 @@ def prepared_image_identity(directory: Path) -> dict | None:
     bounded host inspection binds metadata and checks the on-disk inventory;
     it never hashes a hundred-gigabyte checkpoint during model-list refreshes.
     """
-    from .hybrid_prepare import SOURCES, prepared_identity
+    from .hybrid_prepare import prepared_identity
 
     try:
         base = prepared_identity(directory)
-        if base is None or not any(
-            base["repo"] == SOURCES[choice]["weights_repo"] and base["revision"] == SOURCES[choice]["weights_revision"]
-            for choice in ("qwen38-lily-q4-xl", "qwen38-mlx-serve-mixed")
-        ):
+        if base is None or base["architecture"] != "qwen4_exp" or not _remote_identity(base):
             return None
         value = json.loads(_read(directory / MANIFEST, 262144), object_pairs_hook=_unique_object)
         hashes = {
@@ -144,6 +141,22 @@ def _read(path: Path, maximum: int) -> bytes:
         return data
 
 
+def _remote_identity(identity: dict) -> bool:
+    """Image schema 6 records immutable remote provenance; local imports keep it."""
+    from .sources import huggingface_repository
+
+    try:
+        return (
+            isinstance(identity.get("repo"), str)
+            and huggingface_repository(identity["repo"]) == identity["repo"]
+            and isinstance(identity.get("revision"), str)
+            and len(identity["revision"]) == 40
+            and all(character in "0123456789abcdef" for character in identity["revision"])
+        )
+    except ValueError:
+        return False
+
+
 def _signature(stream) -> list[int]:
     stat = os.fstat(stream.fileno())
     return [
@@ -201,23 +214,30 @@ def _save_hash_cache(directory: Path, manifest_sha256: str, records: dict, signa
             pass
 
 
-def prepare_image_artifact(directory: Path, choice: str) -> dict:
-    """Hash a complete pinned native folder; add no weights or execution claims."""
+def prepare_image_artifact(directory: Path, choice: str | None = None) -> dict:
+    """Bind a complete compatible native folder without granting execution claims."""
     from .hybrid_prepare import SOURCES, prepared_identity
 
-    if choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}:
+    if choice is not None and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}:
         raise ValueError("native image upgrade requires a supported Qwen checkpoint")
     identity = prepared_identity(directory)
-    source = SOURCES[choice]
-    if (
-        identity is None
-        or identity["repo"] != source["weights_repo"]
-        or identity["revision"] != source["weights_revision"]
-    ):
-        raise ValueError("native image upgrade requires its complete pinned source receipt")
+    if identity is None or identity["architecture"] != "qwen4_exp" or not _remote_identity(identity):
+        raise ValueError("native image upgrade requires its complete immutable source receipt")
+    if choice is not None:
+        source = SOURCES[choice]
+        if identity["repo"] != source["weights_repo"] or identity["revision"] != source["weights_revision"]:
+            raise ValueError("native image upgrade requires its complete pinned source receipt")
     config = json.loads(_read(directory / "config.json", 1024 * 1024))
     if not isinstance(config.get("vision_config"), dict):
         raise ValueError("native checkpoint does not declare a vision tower")
+    if choice is None:
+        from .qwen38_retained import validate_processing_metadata, validate_vision_layout
+        from .streaming import load_checkpoint
+
+        validate_processing_metadata(
+            [path.name for path in directory.iterdir()], lambda name, maximum: _read(directory / name, maximum)
+        )
+        validate_vision_layout(config, load_checkpoint(directory))
     # Header admission independently verifies every visual shape and BF16
     # payload before the native runtime publishes capability.
     index = json.loads(_read(directory / "model.safetensors.index.json", 16 * 1024 * 1024))

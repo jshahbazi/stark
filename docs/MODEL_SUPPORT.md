@@ -17,8 +17,20 @@ converted to a typed `Qwen38LanguageModelConfig` artifact with canonical MLX
 storage and unchanged mixed quantization. This conversion omits vision and MTP
 tensors. Compatible external-table MLX-Serve sources are prepared for the
 native loader with their original weight shards, index, and n-gram table.
-The pinned native image routes have separate artifact checks. The
-ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
+With **Enable images** selected, Add Source prepares compatible retained
+Flash Next affine checkpoints through the shared native image backend. Admission
+uses the declared architecture, actual tensor packing, complete BF16 tower and
+supported processor/template programs. It does not require a repository entry
+in the catalog. Immutable source provenance and content hashes remain bound to
+each installed artifact; automatic local image execution checks must pass before
+registration. See [retained image preparation](NATIVE_HYBRID_MODELS.md#retained-lily-image-artifacts).
+Sources without a processor sidecar use the validated standard family recipe;
+generated processor provenance is recorded separately. Explicit unsupported
+processing programs, other weight formats and quantized towers remain outside
+this contract. Family recognition alone does not establish execution or image
+quality for an arbitrary export.
+
+The ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
 backend has an unchanged `headless-reference` default and a separately staged
 `--profile bf16-native-experimental` profile that includes the BF16 draft head,
 native MTP, and prefix support. Only that profile defaults to three drafts; requests

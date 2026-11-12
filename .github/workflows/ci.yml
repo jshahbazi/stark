@@ -94,7 +94,7 @@ jobs:
           HF_HUB_OFFLINE: '1'
           TOKENIZERS_PARALLELISM: 'false'
         run: uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
-      - name: Test model-free benchmark contracts
+      - name: Test model-free benchmark and qualification contracts
         run: >-
           uv run --project tools/converter --locked --python 3.13.13 pytest -q
           scripts/test_benchmark_qwen38_moe_crossover.py
@@ -107,6 +107,7 @@ jobs:
           scripts/test_benchmark_qwen38_mtp.py
           scripts/test_benchmark_qwen38_pilot.py
           scripts/test_benchmark_hybrid_context.py
+          scripts/test_qualify_flashnext_images.py
       - name: Lint converter source and tests
         run: |
           uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter
@@ -123,6 +124,8 @@ jobs:
           uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/build_dmg.py scripts/test_build_dmg.py
           uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/update_app.py scripts/test_app_update.py
           uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/update_app.py scripts/test_app_update.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/qualify_flashnext_images.py scripts/test_qualify_flashnext_images.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/qualify_flashnext_images.py scripts/test_qualify_flashnext_images.py
       - name: Check installed converter outside the checkout
         env:
           HF_HUB_OFFLINE: '1'

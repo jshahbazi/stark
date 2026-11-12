@@ -199,7 +199,7 @@ fn expected_bits(storage: StoragePolicy, bases: &[&str]) -> usize {
     if storage.external_mlx()
         && bases.len() == 1
         && (bases[0].ends_with(".block_inject_weight")
-            || bases[0].ends_with(".mlp.shared_expert_gate"))
+            || !storage.indexed_mlx() && bases[0].ends_with(".mlp.shared_expert_gate"))
     {
         return 16;
     }
@@ -340,13 +340,20 @@ fn load_mlp(
     prefix: &str,
     h: usize,
     i: usize,
+    storage: StoragePolicy,
 ) -> Result<MlpWeights> {
-    let gate_up_proj = loader
-        .linear(&[&format!("{prefix}gate_proj"), &format!("{prefix}up_proj")], h)?;
+    let group_size =
+        if storage.indexed_mlx() && prefix.starts_with(PREFIX) { 128 } else { 64 };
+    let gate_up_proj = loader.linear_grouped(
+        &[&format!("{prefix}gate_proj"), &format!("{prefix}up_proj")],
+        h,
+        group_size,
+    )?;
     gate_up_proj.expect_features(2 * i, h, "shared gate_up_proj")?;
     let gate_proj = gate_up_proj.view_rows(0, i)?;
     let up_proj = gate_up_proj.view_rows(i, i)?;
-    let down_proj = loader.linear(&[&format!("{prefix}down_proj")], i)?;
+    let down_proj =
+        loader.linear_grouped(&[&format!("{prefix}down_proj")], i, group_size)?;
     down_proj.expect_features(h, i, "shared down_proj")?;
     Ok(MlpWeights { gate_up_proj, gate_proj, up_proj, down_proj })
 }
@@ -371,6 +378,7 @@ fn load_ffn(
         &format!("{p}mlp.shared_expert."),
         h,
         config.shared_expert_intermediate_size,
+        config.storage,
     )?;
     let shared_gate = loader.linear(&[&format!("{p}mlp.shared_expert_gate")], h)?;
     shared_gate.expect_features(1, h, "shared_expert_gate")?;
@@ -590,7 +598,10 @@ pub fn load(
     expert_usage_out: Option<PathBuf>,
     session_context: Option<SessionContext>,
 ) -> Result<ModelWeights> {
-    ensure!(!with_vision || config.vision.is_some(), "checkpoint has no retained vision tower");
+    ensure!(
+        !with_vision || config.vision.is_some(),
+        "checkpoint has no retained vision tower"
+    );
     ensure!(!with_mtp || config.mtp.is_some(), "checkpoint has no MTP head");
     ensure!(
         expert_slots.is_none()
@@ -600,7 +611,9 @@ pub fn load(
             && session_context.is_none(),
         "vendored Lily core requires resident experts and has no session persistence"
     );
-    let ckpt = if config.storage.external_mlx() {
+    let ckpt = if config.storage.indexed_mlx() {
+        Checkpoint::open_qwen_indexed_mlx(&dir)?
+    } else if config.storage.external_mlx() {
         Checkpoint::open_qwen_external_mlx(&dir)?
     } else {
         Checkpoint::open(&dir)?
@@ -620,7 +633,10 @@ pub fn load_checkpoint(
     with_vision: bool,
     machine_memory: Option<u64>,
 ) -> Result<ModelWeights> {
-    ensure!(!with_vision || config.vision.is_some(), "checkpoint has no retained vision tower");
+    ensure!(
+        !with_vision || config.vision.is_some(),
+        "checkpoint has no retained vision tower"
+    );
     ensure!(!with_mtp || config.mtp.is_some(), "checkpoint has no MTP head");
     // Every buffer allocated from here on that is still alive at the end is
     // a weight, or the expert cache's (filtered out below).
@@ -731,7 +747,11 @@ pub fn load_checkpoint(
         _ => None,
     };
     let vision = match (&config.vision, load_vision) {
-        (Some(v), true) => Some(Box::new(vision_weights::load(&loader, v)?)),
+        (Some(v), true) => Some(Box::new(vision_weights::load(
+            &loader,
+            v,
+            config.storage.indexed_mlx(),
+        )?)),
         _ => None,
     };
 

@@ -272,10 +272,9 @@ def load_template(model, *, expected_hashes=None):
             elif config.get("type") == "Gemma3VisionLanguageModelConfig":
                 template_hashes = {"7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"}
             elif image_family == {"profile": LILY_FAMILY_PROFILE, "version": 1}:
-                template_hashes = {
-                    "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
-                    "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
-                }
+                from . import qwen38_retained
+
+                template_hashes = qwen38_retained.SUPPORTED_TEMPLATE_HASHES
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
             if (
