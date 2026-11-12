@@ -32,8 +32,8 @@ changing the pages. Run the repository policy check before committing.
   in the linked documents under `docs/`. The setup guide explains RAM-aware
   recommendations, manually refreshed offline rankings and the distinction
   between parent-model scores and quantized-export quality. Label the new flow
-  as development work until a release contains it; the existing setup screenshot
-  depicts the earlier interface.
+  as development work until a release contains it. The owner-supplied setup
+  screenshot shows the new flow; it does not establish release availability.
 - The Images panel retains existing dense Qwen3.5 BF16 guidance and links to a
   development update for the added Qwen dense/MoE, retained Lily and Gemma paths.
   The on-site image coverage section distinguishes recorded complete-artifact
@@ -57,7 +57,7 @@ together.
 
 The owner-supplied logo and screenshots retain their original bytes. See
 [brand provenance](../docs/brand/README.md) and the
-[screenshot replacement record](../docs/archive/runs/2026-11-06-website-screenshot-replacements.md).
+[latest screenshot replacement record](../docs/archive/runs/2026-11-11-website-screenshot-replacements.md).
 Keyboard-operable tabs, focus indicators, reduced-motion handling and the skip
 link remain part of the site. `robots.txt`, `sitemap.xml` and `404.html` ship
 alongside the three pages.

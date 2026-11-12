@@ -1879,9 +1879,9 @@ code {
   aspect-ratio:var(--crop-width) / var(--crop-height);
   border-radius:10px
 }
-.product-shot:nth-child(1) { --source-width:1624; --crop-width:1400; --crop-height:1370 }
+.product-shot:nth-child(1) { --source-width:1624; --crop-width:1400; --crop-height:1664 }
 .product-shot:nth-child(2) { --source-width:1504; --crop-width:1280; --crop-height:1322 }
-.product-shot:nth-child(3) { --source-width:1224; --crop-width:1000; --crop-height:1362 }
+.product-shot:nth-child(3) { --source-width:1364; --crop-width:1140; --crop-height:1424 }
 .product-shot img {
   position:absolute;
   display:block;
