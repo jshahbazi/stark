@@ -257,16 +257,20 @@ class SnapshotDownloadProgress:
     Reconstruction bytes are capped by the caller's independently pinned
     maximum. Transfer bytes count positive received-byte updates, including
     retransmissions, and have no source-size cap or denominator.
+    With a completed-files reader, its count replaces reconstruction progress
+    and the pinned maximum becomes the fixed completion denominator.
     """
 
     BAR_NAME = "huggingface_hub.snapshot_download"
     TRANSFER_BAR_NAME = "huggingface_hub.snapshot_download.transfer"
 
-    def __init__(self, progress: ProgressReporter, max_bytes: int):
+    def __init__(self, progress: ProgressReporter, max_bytes: int, *, completed_files=None):
         if type(max_bytes) is not int or max_bytes < 0:
             raise ValueError("invalid_snapshot_progress_limit")
         self.progress = progress
         self.max_bytes = max_bytes
+        self.completed_files = completed_files
+        self.completed_file_bytes = 0
         self.completed_bytes = 0
         self._reconstruction_raw_bytes = 0
         self.transferred_bytes = 0
@@ -292,11 +296,14 @@ class SnapshotDownloadProgress:
 
     def _emit(self, *, force: bool = False) -> None:
         with self.lock:
+            if self.completed_files is not None:
+                self.completed_file_bytes = min(self.max_bytes, max(self.completed_file_bytes, self.completed_files()))
+                self.completed_bytes = self.completed_file_bytes
             self.progress.emit(
                 "download",
                 "running",
                 self.completed_bytes,
-                None,
+                self.max_bytes if self.completed_files is not None else None,
                 transferred_bytes=self.transferred_bytes,
                 force=force,
             )
@@ -325,7 +332,11 @@ class SnapshotDownloadProgress:
                 # only live updates establish bytes received in this attempt.
 
             def update(self, amount=1):
-                if not (self._capture_reconstruction or self._capture_transfer) or type(amount) is not int:
+                if not (self._capture_reconstruction or self._capture_transfer):
+                    if owner.completed_files is not None:
+                        owner._emit(force=True)
+                    return
+                if type(amount) is not int:
                     return
                 with self._last_n_lock:
                     before = self._last_n

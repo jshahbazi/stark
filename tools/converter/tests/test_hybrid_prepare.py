@@ -10,6 +10,43 @@ import pytest
 from stark_convert import hybrid_prepare as hybrid
 
 
+def test_completed_model_bytes_excludes_partial_stale_and_unreceipted_files(tmp_path):
+    source = {"weights_revision": "a" * 40, "weight_bytes": 100}
+    records = tmp_path / ".cache/huggingface/download"
+    records.mkdir(parents=True)
+
+    def complete(name, size, revision=source["weights_revision"]):
+        path = tmp_path / name
+        path.write_bytes(b"x" * size)
+        (records / (name + ".metadata")).write_text(f"{revision}\netag\n{path.stat().st_mtime + 1}\n")
+
+    complete("a.safetensors", 25)
+    complete("b.safetensors", 30, "b" * 40)
+    (tmp_path / "c.safetensors").write_bytes(b"x" * 40)
+    (tmp_path / "d.incomplete").write_bytes(b"x" * 200)
+    assert hybrid.completed_model_bytes(tmp_path, source) == 25
+    complete("b.safetensors", 30)
+    assert hybrid.completed_model_bytes(tmp_path, source) == 55
+
+
+def test_completed_bytes_matches_real_hub_receipt_timestamp_tolerance(tmp_path):
+    from huggingface_hub._local_folder import read_download_metadata, write_download_metadata
+
+    revision = "a" * 40
+    path = tmp_path / "model.safetensors"
+    path.write_bytes(b"complete")
+    write_download_metadata(tmp_path, path.name, revision, "etag")
+    receipt = read_download_metadata(tmp_path, path.name)
+    assert receipt is not None
+    source = {"weights_revision": revision, "weight_bytes": path.stat().st_size}
+    os.utime(path, (receipt.timestamp + 0.5, receipt.timestamp + 0.5))
+    assert read_download_metadata(tmp_path, path.name) is not None
+    assert hybrid.completed_model_bytes(tmp_path, source) == source["weight_bytes"]
+    os.utime(path, (receipt.timestamp + 2, receipt.timestamp + 2))
+    assert read_download_metadata(tmp_path, path.name) is None
+    assert hybrid.completed_model_bytes(tmp_path, source) == 0
+
+
 @pytest.fixture(autouse=True)
 def synthetic_download_disk_headroom(monkeypatch, tmp_path):
     # Download tests use byte-sized local stand-ins. Their admission must not
@@ -99,7 +136,14 @@ def test_pinned_download_publishes_only_complete_original_format(tmp_path, monke
     assert progress[-3] == {"phase": "download", "state": "complete", "completed_bytes": 4, "total_bytes": 4}
     assert progress[-2]["phase"] == "conversion" and progress[-2]["state"] == "running"
     assert progress[-1]["phase"] == "conversion" and progress[-1]["state"] == "complete"
-    assert all(set(event) == {"phase", "state", "completed_bytes", "total_bytes"} for event in progress)
+    assert all(
+        set(event)
+        in (
+            {"phase", "state", "completed_bytes", "total_bytes"},
+            {"phase", "state", "completed_bytes", "total_bytes", "transferred_bytes"},
+        )
+        for event in progress
+    )
     assert len(list(output.glob("*.gguf"))) == 4
     assert not (output / "stark-download.json").exists()
     assert calls[0][1]["revision"] == source["weights_revision"]
@@ -447,7 +491,7 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
             event["event"] == "progress"
             and event.get("phase") == "download"
             and event.get("state") == "running"
-            and event.get("completed_bytes") == 2
+            and event.get("completed_bytes") == 0
             and event.get("transferred_bytes") == 8
             for event in events
         )

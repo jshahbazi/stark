@@ -12,6 +12,7 @@ import ctypes
 import errno
 import hashlib
 import json
+import math
 import os
 import shutil
 import struct
@@ -610,6 +611,35 @@ def _external_identity(directory: Path, config: dict, receipt: dict, marker: dic
     }
 
 
+def completed_model_bytes(stage: Path, source: dict) -> int:
+    """Count completed Hub files at the pinned revision, never incomplete allocations."""
+    completed = 0
+    for path in stage.rglob("*"):
+        if path.suffix not in {".safetensors", ".gguf"} and not (
+            path.name == "ngram_table.bin" and source.get("ngram_in_weight_bytes")
+        ):
+            continue
+        if path.is_symlink() or not path.is_file():
+            continue
+        relative = path.relative_to(stage)
+        metadata = stage / ".cache/huggingface/download" / (str(relative) + ".metadata")
+        try:
+            if metadata.is_symlink() or metadata.stat().st_size > 4096:
+                continue
+            lines = metadata.read_text().splitlines()
+            if len(lines) != 3 or lines[0] != source["weights_revision"] or not lines[1]:
+                continue
+            info = path.stat()
+            timestamp = float(lines[2])
+            # Match the Hub's tolerance for filesystem timestamp precision.
+            if not math.isfinite(timestamp) or timestamp < info.st_mtime - 1:
+                continue
+            completed += info.st_size
+        except (OSError, ValueError, UnicodeError):
+            continue
+    return min(completed, source["weight_bytes"])
+
+
 def prepare(
     choice: str,
     output: Path,
@@ -673,7 +703,13 @@ def prepare(
         # preallocated incomplete-file sizes are not evidence of progress.
         progress.emit("download", "running", force=True)
         progress.emit("conversion", "waiting", force=True)
-        download_options["tqdm_class"] = SnapshotDownloadProgress(progress, source["weight_bytes"]).bar_class()
+        capture = SnapshotDownloadProgress(
+            progress,
+            source["weight_bytes"],
+            completed_files=lambda: source["weight_bytes"] if gguf_complete else completed_model_bytes(stage, source),
+        )
+        capture.close()
+        download_options["tqdm_class"] = capture.bar_class()
     if not gguf_complete:
         snapshot_download(
             source["weights_repo"],

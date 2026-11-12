@@ -334,6 +334,28 @@ def test_snapshot_resume_reset_does_not_double_count_discarded_partial_bytes():
     assert_private(events)
 
 
+def test_completed_files_progress_has_fixed_total_and_separate_network_bytes():
+    events, completed = [], [25]
+    capture = SnapshotDownloadProgress(
+        ProgressReporter(events.append, interval=0), 100, completed_files=lambda: completed[0]
+    )
+    bars = capture.bar_class()
+    capture.close()
+    assert events[-1]["completed_bytes"] == 25 and events[-1]["total_bytes"] == 100
+    with bars(name=capture.BAR_NAME) as reconstruction:
+        reconstruction.update(70)  # Buffered/partial file is not complete.
+    assert events[-1]["completed_bytes"] == 25
+    with bars(name=capture.TRANSFER_BAR_NAME) as transfer:
+        transfer.update(200)
+    assert events[-1]["transferred_bytes"] == 200
+    assert events[-1]["completed_bytes"] == 25
+    completed[0] = 75
+    with bars(total=3) as files:
+        files.update(1)  # Hub completed-file callback also covers cache hits.
+    assert events[-1]["completed_bytes"] == 75
+    assert events[-1]["total_bytes"] == 100
+
+
 def test_locked_hub_snapshot_routes_live_bytes_to_private_progress(tmp_path, monkeypatch, capsys):
     from huggingface_hub import _snapshot_download as snapshot
     from huggingface_hub.utils._xet_progress_reporting import XetDownloadProgressReporter
