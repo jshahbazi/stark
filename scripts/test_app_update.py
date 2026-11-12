@@ -994,7 +994,8 @@ struct ControllerChecks {
         precondition(nativeScheduler.repeats && nativeScheduler.qualityOfService == .utility)
         background.latest = Scenario().latest
         background.blockPrepare = true
-        background.date += 900
+        // macOS may fire a minute early within the tolerance window.
+        background.date += 840
         var completed = false
         nativeScheduler.callback? { result in
             precondition(result == .finished)

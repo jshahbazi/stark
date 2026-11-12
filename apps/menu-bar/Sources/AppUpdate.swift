@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Darwin
+import OSLog
 import SwiftUI
 
 struct ReleaseVersion: Comparable, Equatable {
@@ -362,6 +363,7 @@ final class AppUpdateController: ObservableObject {
     private let automaticCheckInterval: TimeInterval
     private let schedule: AppUpdateSchedule
     private static let backgroundCheckInterval: TimeInterval = 15 * 60
+    private static let logger = Logger(subsystem: "com.starkengine.menubar", category: "AppUpdate")
 
     var actionTitle: String {
         if downloading { return "Downloading..." }
@@ -420,8 +422,12 @@ final class AppUpdateController: ObservableObject {
         schedule.start(automaticCheckInterval) { [weak self] in
             // Invalidation can race with an already queued scheduler callback.
             guard let self, self.automaticChecks == identity else { return }
-            self.checkIfNeeded()
+            Self.logger.notice("Scheduled background update activity started.")
+            // macOS may deliver within the scheduler's early tolerance window.
+            // The menu cooldown must not skip an otherwise due scheduled check.
+            self.check(background: true)
             await self.task?.value
+            Self.logger.notice("Scheduled background update activity finished.")
         }
     }
 
@@ -445,6 +451,7 @@ final class AppUpdateController: ObservableObject {
 
     private func check(background: Bool) {
         guard !busy else { return }
+        if background { Self.logger.notice("Background update metadata check started.") }
         lastCheck = now()
         busy = true
         if !background { message = "Checking for updates…" }
@@ -456,6 +463,7 @@ final class AppUpdateController: ObservableObject {
                 try Task.checkCancellation()
                 let release = try await operations.fetch(installedBuild.updateComparisonVersion)
                 try Task.checkCancellation()
+                Self.logger.notice("Update metadata check completed.")
                 if release != available {
                     discardPreparedUpdate()
                 }
@@ -471,6 +479,7 @@ final class AppUpdateController: ObservableObject {
                     message = "Stark \(release.version) is ready to upgrade."
                 }
             } catch {
+                Self.logger.notice("Update check or preparation did not complete.")
                 if !background || preparing && !installFailed {
                     message = (error as? AppUpdateError)?.localizedDescription ?? AppUpdateError.download.localizedDescription
                 }
@@ -499,6 +508,7 @@ final class AppUpdateController: ObservableObject {
     private func prepare(_ release: AppUpdateDownload) async throws {
         downloading = true
         defer { downloading = false }
+        Self.logger.notice("Update download and verification started.")
         message = "Downloading Stark \(release.version)…"
         let update = try await operations.prepare(release) { [weak self] status in self?.message = status }
         // Preparation may finish after quit cancelled this task (for example,
@@ -508,6 +518,7 @@ final class AppUpdateController: ObservableObject {
             throw CancellationError()
         }
         preparedUpdate = update
+        Self.logger.notice("Update download and verification completed; ready to upgrade.")
         message = "Stark \(release.version) is ready to upgrade."
     }
 
