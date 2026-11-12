@@ -165,8 +165,8 @@ then choose a row and **Download**.
 **GLM-5.3 Flash** offers the pinned `UD-Q2_K_XL` GGUF checkpoint (108.72 GB of
 weights). Its download uses native preparation, preserves quantization and checks
 the prepared source before adding it to **Installed**. It supports text chat;
-image input and Decision mode are unavailable. Download progress remains
-indeterminate until the stored weight total is verified.
+image input and Decision mode are unavailable. The download shows received bytes
+without a percentage until the stored weight total is verified.
 **Qwen3.8 Flash Next** includes the pinned Lily Q4-XL source through the typed
 text converter and the pinned `pipenetwork` mixed 4/8-bit source through native
 preparation. The mixed source preserves its original quantized storage and uses
@@ -196,10 +196,13 @@ selecting it; choose it and **Run** when ready. Some image installations stop
 the running model for their required local checks.
 
 Native downloads show **Downloading model files** while fetching the checkpoint,
-then **Preparing model**. Their byte counter tracks file reconstruction reported
-by Hugging Face, including resumed bytes when reported; files already cached may
-be skipped. The indicator stays indeterminate until the pinned weight total is
-verified. Incomplete-file sizes are never used to estimate download progress.
+then **Preparing model**. Their **received** counter tracks network bytes reported
+by Hugging Face, so it updates even when Xet buffers file reconstruction. Received
+bytes are separate from the model's size and can differ due to compression,
+deduplication and retries; cached files may be skipped. A progress bar appears only
+when a completion total is known. Phases without a reliable total show status and
+byte counts without an animated indicator. Incomplete-file sizes are never used
+to estimate download progress.
 
 The catalogue starts with known sources, then follows the family's Hugging Face
 architecture search through successive pages. Each request checks up to 30

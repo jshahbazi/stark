@@ -84,7 +84,16 @@ class ProgressReporter:
         self.lock = threading.RLock()
         self.last: dict[str, tuple[float, dict]] = {}
 
-    def emit(self, phase: str, state: str, completed: int = 0, total: int | None = None, *, force=False) -> None:
+    def emit(
+        self,
+        phase: str,
+        state: str,
+        completed: int = 0,
+        total: int | None = None,
+        *,
+        transferred_bytes: int | None = None,
+        force=False,
+    ) -> None:
         if phase not in {"download", "conversion"} or state not in {"waiting", "running", "complete", "skipped"}:
             raise ValueError("invalid_progress_state")
         if type(completed) is not int or completed < 0 or total is not None and (type(total) is not int or total < 0):
@@ -92,10 +101,19 @@ class ProgressReporter:
         if total is not None and completed > total:
             raise ValueError("invalid_progress_counts")
         event = {"phase": phase, "state": state, "completed_bytes": completed, "total_bytes": total}
+        if transferred_bytes is not None:
+            if phase != "download" or type(transferred_bytes) is not int or not 0 <= transferred_bytes <= 2**63 - 1:
+                raise ValueError("invalid_progress_counts")
+            event["transferred_bytes"] = transferred_bytes
         with self.lock:
             now = self.clock()
             previous = self.last.get(phase)
             changed = previous is None or any(previous[1][key] != event[key] for key in ("state", "total_bytes"))
+            changed = (
+                changed
+                or previous is not None
+                and ("transferred_bytes" in previous[1]) != ("transferred_bytes" in event)
+            )
             if force or changed or now - previous[0] >= self.interval:
                 self.callback(event)
                 self.last[phase] = (now, event)
@@ -236,12 +254,13 @@ class SnapshotDownloadProgress:
 
     ``snapshot_download`` uses its aggregate reconstruction bar for bytes made
     available locally, and distinct bars for network transfer and file counts.
-    Only the reconstruction bar is reported here. Its total can grow as files
-    are discovered, so events remain indeterminate and are capped by the
-    caller's independently pinned maximum.
+    Reconstruction bytes are capped by the caller's independently pinned
+    maximum. Transfer bytes count positive received-byte updates, including
+    retransmissions, and have no source-size cap or denominator.
     """
 
     BAR_NAME = "huggingface_hub.snapshot_download"
+    TRANSFER_BAR_NAME = "huggingface_hub.snapshot_download.transfer"
 
     def __init__(self, progress: ProgressReporter, max_bytes: int):
         if type(max_bytes) is not int or max_bytes < 0:
@@ -249,21 +268,46 @@ class SnapshotDownloadProgress:
         self.progress = progress
         self.max_bytes = max_bytes
         self.completed_bytes = 0
+        self._reconstruction_raw_bytes = 0
+        self.transferred_bytes = 0
         self.lock = threading.RLock()
 
-    def _count(self, amount: int, *, force: bool = False) -> None:
-        if type(amount) is not int or amount < 0:
+    def _count_reconstruction(self, amount: int, *, force: bool = False) -> None:
+        if type(amount) is not int:
             return
         with self.lock:
-            self.completed_bytes = min(self.max_bytes, max(0, self.completed_bytes + amount))
-            self.progress.emit("download", "running", self.completed_bytes, None, force=force)
+            self._reconstruction_raw_bytes = max(0, self._reconstruction_raw_bytes + amount)
+            self.completed_bytes = min(
+                self.max_bytes,
+                max(self.completed_bytes, self._reconstruction_raw_bytes),
+            )
+            self._emit(force=force)
+
+    def _count_transfer(self, amount: int, *, force: bool = False) -> None:
+        if type(amount) is not int or amount <= 0:
+            return
+        with self.lock:
+            self.transferred_bytes += amount
+            self._emit(force=force)
+
+    def _emit(self, *, force: bool = False) -> None:
+        with self.lock:
+            self.progress.emit(
+                "download",
+                "running",
+                self.completed_bytes,
+                None,
+                transferred_bytes=self.transferred_bytes,
+                force=force,
+            )
 
     def bar_class(self):
         owner = self
 
         class SilentSnapshotProgressBar(hf_tqdm):
             def __init__(self, *args, **kwargs):
-                self._capture = False
+                self._capture_reconstruction = False
+                self._capture_transfer = False
                 self._closed = False
                 name = kwargs.get("name")
                 initial = kwargs.get("initial", 0)
@@ -271,22 +315,27 @@ class SnapshotDownloadProgress:
                 # Force silence independently of environment and TTY settings.
                 kwargs["disable"] = True
                 super().__init__(*args, **kwargs)
-                self._capture = name == owner.BAR_NAME
+                self._capture_reconstruction = name == owner.BAR_NAME
+                self._capture_transfer = name == owner.TRANSFER_BAR_NAME
                 self._last_n = initial if type(initial) is int and initial >= 0 else 0
                 self._last_n_lock = threading.Lock()
-                if self._capture and self._last_n:
-                    owner._count(self._last_n)
+                if self._capture_reconstruction and self._last_n:
+                    owner._count_reconstruction(self._last_n)
+                # Initial transfer counts may describe a resumed file's bytes;
+                # only live updates establish bytes received in this attempt.
 
             def update(self, amount=1):
-                if not self._capture or type(amount) is not int or amount < 0:
+                if not (self._capture_reconstruction or self._capture_transfer) or type(amount) is not int:
                     return
                 with self._last_n_lock:
                     before = self._last_n
                     self._last_n = max(0, before + amount)
                     self.n = self._last_n
                     delta = self._last_n - before
-                if delta:
-                    owner._count(delta)
+                    if self._capture_reconstruction and delta:
+                        owner._count_reconstruction(delta)
+                    elif self._capture_transfer and delta > 0:
+                        owner._count_transfer(delta)
 
             def update_transfer(self, _amount=1):
                 # Network bytes can differ from reconstructed source bytes.
@@ -297,13 +346,13 @@ class SnapshotDownloadProgress:
 
             def close(self):
                 super().close()
-                if self._capture and not self._closed:
+                if (self._capture_reconstruction or self._capture_transfer) and not self._closed:
                     self._closed = True
-                    owner._count(0, force=True)
+                    owner._emit(force=True)
 
         return SilentSnapshotProgressBar
 
     def close(self) -> None:
         """Force the latest indeterminate count after a snapshot call returns."""
         with self.lock:
-            self.progress.emit("download", "running", self.completed_bytes, None, force=True)
+            self._emit(force=True)

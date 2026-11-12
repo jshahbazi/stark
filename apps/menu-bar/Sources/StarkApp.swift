@@ -348,6 +348,9 @@ struct InstallProgress {
     var state = "waiting"
     var completedBytes: Int64 = 0
     var totalBytes: Int64?
+    var transferredBytes: Int64?
+
+    var showsProgressBar: Bool { (totalBytes ?? 0) > 0 }
 
     var fraction: Double {
         if state == "complete" || state == "skipped" { return 1 }
@@ -363,6 +366,11 @@ struct InstallProgress {
         case "failed": return "Failed"
         case "waiting": return "Waiting"
         default:
+            if phase == "download", let received = transferredBytes {
+                return received > 0
+                    ? ByteCountFormatter.string(fromByteCount: received, countStyle: .file) + " received"
+                    : "Downloading…"
+            }
             guard let total = totalBytes, total > 0 else {
                 if phase == "download" {
                     if completedBytes > 0 {
@@ -1848,7 +1856,12 @@ final class EngineController: ObservableObject {
                   let completed = event["completed_bytes"] as? Int64, completed >= 0 else { return }
             let total = event["total_bytes"] as? Int64
             guard total == nil || (total! >= 0 && completed <= total!) else { return }
-            let progress = InstallProgress(state: progressState, completedBytes: completed, totalBytes: total)
+            let transferred = SupportMetadata.integer(event["transferred_bytes"])
+            if event["transferred_bytes"] != nil {
+                guard phase == "download", let transferred, transferred >= 0 else { return }
+            }
+            let progress = InstallProgress(state: progressState, completedBytes: completed, totalBytes: total,
+                                           transferredBytes: transferred)
             if phase == "download" { downloadProgress = progress } else { conversionProgress = progress }
         default: break
         }
@@ -2678,17 +2691,13 @@ struct InstallStageView: View {
                 Text(progress.detail(for: phase)).font(.caption.monospacedDigit())
                     .foregroundStyle(progress.state == "failed" ? Color.red : .secondary)
             }
-            Group {
-                if progress.state == "running" && progress.totalBytes == nil {
-                    ProgressView()
-                } else {
-                    ProgressView(value: progress.fraction)
-                }
+            if progress.showsProgressBar {
+                ProgressView(value: progress.fraction)
+                    .progressViewStyle(.linear)
+                    .tint(progress.state == "failed" ? .red : .accentColor)
+                    .accessibilityLabel("\(title) progress")
+                    .accessibilityValue(progress.detail(for: phase))
             }
-            .progressViewStyle(.linear)
-            .tint(progress.state == "failed" ? .red : .accentColor)
-            .accessibilityLabel("\(title) progress")
-            .accessibilityValue(progress.detail(for: phase))
             if let total = progress.totalBytes, total > 0 {
                 Text("\(bytes(progress.completedBytes)) of \(bytes(total))")
                     .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)

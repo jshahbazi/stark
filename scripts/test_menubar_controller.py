@@ -1934,6 +1934,21 @@ extension EngineController {
                   engine.downloadProgress.detail(for: "download") == "2 MB",
                   InstallProgress(state: "running").detail(for: "download") == "Downloading…",
                   InstallProgress(state: "running").detail(for: "conversion") == "Preparing…" else { return false }
+            let received: [String: Any] = ["event": "progress", "request_id": install["support_request_id"]!,
+                "phase": "download", "state": "running", "completed_bytes": Int64(78_000),
+                "transferred_bytes": Int64(2_000_000_000)]
+            engine.apply(received)
+            guard engine.downloadProgress.completedBytes == 78_000,
+                  engine.downloadProgress.detail(for: "download") == "2 GB received",
+                  !engine.downloadProgress.showsProgressBar,
+                  InstallProgress(state: "running", completedBytes: 25, totalBytes: 100).showsProgressBar,
+                  InstallProgress(state: "running", completedBytes: 25, totalBytes: 100).fraction == 0.25 else { return false }
+            engine.apply(received.merging(["transferred_bytes": Int64(3_000_000_000)]) { _, new in new })
+            guard engine.downloadProgress.detail(for: "download") == "3 GB received" else { return false }
+            for bad: Any in [true, -1, 1.5, "100"] {
+                engine.apply(received.merging(["transferred_bytes": bad]) { _, new in new })
+                guard engine.downloadProgress.transferredBytes == 3_000_000_000 else { return false }
+            }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             guard engine.busy, engine.catalogInstallation != nil else { return false }
             engine.apply(["event": "models", "models": [
