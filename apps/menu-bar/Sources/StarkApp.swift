@@ -2484,6 +2484,7 @@ final class EngineController: ObservableObject {
     }
 
     func stop() {
+        let browsingFamilyID = catalogFamilyID
         if let model = models.first(where: { $0.id == modelControlID }) {
             stoppedModel = (model.id, loadedMode ?? mode)
         }
@@ -2497,7 +2498,11 @@ final class EngineController: ObservableObject {
         supportsImages = false
         imageVerification = "unverified"
         state = "stopping"; message = "Stopping…"
-        send(["command": "stop"])
+        if send(["command": "stop"]), let familyID = browsingFamilyID {
+            // Stop invalidates the backend catalogue session too. Reopen the
+            // selected family with a new request so stale replies stay fenced.
+            requestModelCatalog(familyID: familyID)
+        }
     }
 
     func resetInstallProgress(kind: String) {
