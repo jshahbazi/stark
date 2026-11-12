@@ -305,6 +305,19 @@ def preflight_model(
             "unsupported_embedding_layout",
             "This family currently implements tied embeddings only.",
         )
+    if architecture == "phi3":
+        # Metal attention kernels are compiled for these head widths only;
+        # Phi-3/Phi-3.5 mini (3072 / 32 = 96) would download and then fail.
+        width, heads = config.get("hidden_size"), config.get("num_attention_heads")
+        if type(width) is int and type(heads) is int and heads > 0 and width % heads == 0:
+            if width // heads not in {64, 128, 256, 512}:
+                return _report(
+                    family,
+                    mode,
+                    "unsupported",
+                    "unsupported_native_geometry",
+                    "This attention head dimension has no native Metal attention kernel.",
+                )
     if architecture == "qwen4_exp":
         from .adapters.qwen38 import architecture_config
         from .qwen38_external import is_external_affine

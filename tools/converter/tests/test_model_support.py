@@ -256,6 +256,18 @@ def test_phi3_embedding_layout_is_left_to_the_tensor_planner(tied):
     assert all("tied_embeddings_required" not in mode["caveats"] for mode in phi["modes"].values())
 
 
+@pytest.mark.parametrize(
+    "width,heads,supported", [(3072, 24, True), (5120, 40, True), (3072, 32, False), (2560, 32, False)]
+)
+def test_phi3_head_dimension_without_a_metal_kernel_is_unsupported(width, heads, supported):
+    config = {"model_type": "phi3", "tie_word_embeddings": False, "hidden_size": width, "num_attention_heads": heads}
+    report = preflight_model(config, mode="text")
+    if supported:
+        assert report["status"] == "conditional"
+    else:
+        assert report["status"] == "unsupported" and report["reasons"] == ["unsupported_native_geometry"]
+
+
 def test_unknown_metadata_is_inconclusive_in_every_mode():
     for config in (None, {}):
         report = preflight_model(config, mode="vision-language")

@@ -13,12 +13,25 @@ from stark_convert.streaming import ConversionError, UnsupportedConversion, read
 BASELINES = json.loads((Path(__file__).parent / "fixtures" / "phi_decoder_configs.json").read_text())
 
 
-def phi_fixture(path: Path, *, dtype="BF16", sharded=False, partial_factor=0.75, duplicate_head=False, untied=False):
+def phi_fixture(
+    path: Path,
+    *,
+    dtype="BF16",
+    sharded=False,
+    partial_factor=0.75,
+    duplicate_head=False,
+    untied=False,
+    model_dim=16,
+):
+    # Two query heads and one KV group; the default 16 keeps the original
+    # payloads. CLI preflight needs a native head width, for example 128.
     path.mkdir()
+    head_dim = model_dim // 2
+    pairs = int(head_dim * partial_factor) // 2
     config = {
         "model_type": "phi3",
         "architectures": ["Phi3ForCausalLM"],
-        "hidden_size": 16,
+        "hidden_size": model_dim,
         "intermediate_size": 12,
         "num_hidden_layers": 2,
         "num_attention_heads": 2,
@@ -31,8 +44,8 @@ def phi_fixture(path: Path, *, dtype="BF16", sharded=False, partial_factor=0.75,
         "partial_rotary_factor": partial_factor,
         "rope_scaling": {
             "type": "longrope",
-            "short_factor": [1.0] * (int(8 * partial_factor) // 2),
-            "long_factor": [2.0 + pair / 4 for pair in range(int(8 * partial_factor) // 2)],
+            "short_factor": [1.0] * pairs,
+            "long_factor": [2.0 + pair / 4 for pair in range(pairs)],
         },
         "tie_word_embeddings": not untied,
         "hidden_act": "silu",
@@ -69,20 +82,20 @@ def phi_fixture(path: Path, *, dtype="BF16", sharded=False, partial_factor=0.75,
         }[dtype](values)
         tensors[name] = (dtype, raw)
 
-    add("model.embed_tokens.weight", (32, 16))
+    add("model.embed_tokens.weight", (32, model_dim))
     if duplicate_head:
         tensors["lm_head.weight"] = tensors["model.embed_tokens.weight"]
     if untied:
-        add("lm_head.weight", (32, 16))
-    add("model.norm.weight", (16,))
+        add("lm_head.weight", (32, model_dim))
+    add("model.norm.weight", (model_dim,))
     for layer in range(2):
         src = f"model.layers.{layer}"
-        add(src + ".input_layernorm.weight", (16,))
-        add(src + ".post_attention_layernorm.weight", (16,))
-        add(src + ".self_attn.qkv_proj.weight", (32, 16))
-        add(src + ".self_attn.o_proj.weight", (16, 16))
-        add(src + ".mlp.gate_up_proj.weight", (24, 16))
-        add(src + ".mlp.down_proj.weight", (16, 12))
+        add(src + ".input_layernorm.weight", (model_dim,))
+        add(src + ".post_attention_layernorm.weight", (model_dim,))
+        add(src + ".self_attn.qkv_proj.weight", (model_dim + 2 * head_dim, model_dim))
+        add(src + ".self_attn.o_proj.weight", (model_dim, model_dim))
+        add(src + ".mlp.gate_up_proj.weight", (24, model_dim))
+        add(src + ".mlp.down_proj.weight", (model_dim, 12))
     if sharded:
         weights = {}
         for shard in range(3):
