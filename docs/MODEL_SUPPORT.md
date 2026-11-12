@@ -76,6 +76,18 @@ load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
 
+The family registry lists uniform MLX affine 4-bit and 8-bit sources, imported
+without requantization, for Qwen3, Qwen2, Llama, Mistral, Gemma 3 text, Gemma 4
+text, OLMo 3, SmolLM3, Qwen3.5, Qwen3.5 MoE, Qwen3.8 Flash Next, LFM2 and
+LLaMBA. Each family's tensor planner still applies its own layout limits.
+Per-module overrides and five/six-bit widths remain limited to the families
+that document them.
+Qwen2 attention biases stay separate full-precision vectors beside the packed
+projection. Granite, Gemma 2 and Phi-3 reject quantized sources. The Qwen2 and
+Mistral MLX paths are structural only: header planning and code review, with no
+native load, reference comparison or speed measurement
+([20261112-DENSE-MLX-01](archive/runs/2026-11-12-dense-mlx-qwen2-mistral.md)).
+
 Qwen3.5 MoE image conversion has two schema-3 profiles: affine-quantized source
 weights use `qwen35-moe-affine-merged-v4`, while complete BF16 source weights
 use `qwen35-moe-bf16-merged-v5`. Both produce BF16 artifacts; the BF16-source

@@ -227,7 +227,7 @@ def test_mlx_text_representation_is_implemented_but_unqualified(bits):
             {"model_type": "llama", "quantization_config": {"quant_method": "gptq", "bits": 4}},
             "unsupported_weight_format",
         ),
-        ({"model_type": "qwen2", "quantization": {"bits": 4, "group_size": 64}}, "unsupported_weight_format"),
+        ({"model_type": "granite", "quantization": {"bits": 4, "group_size": 64}}, "unsupported_weight_format"),
     ],
 )
 def test_explicit_unsupported_metadata_has_a_fixed_reason(config, reason):

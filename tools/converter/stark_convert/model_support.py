@@ -22,7 +22,9 @@ _QUALIFICATION = {"status": "not_assessed", "scope": "checkpoint_and_build", "ca
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _MLX = {
     "qwen3",
+    "qwen2",
     "llama",
+    "mistral",
     "gemma3_text",
     "gemma4_text",
     "olmo3",
