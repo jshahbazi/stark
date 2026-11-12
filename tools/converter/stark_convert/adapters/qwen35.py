@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import MLXMatrixSource, MLXQuantization, plan_mlx_matrix, read_mlx_matrix
+from ..config_normalization import normalize_config
 from ..family_quantization import qwen35_quantization
 from ..streaming import (
     ConversionError,
@@ -106,7 +107,9 @@ def build_qwen35_plan(
     adapter. Vision weights are omitted only from an explicitly declared wrapper;
     every original file remains in the final signature/content verification set.
     """
-    outer = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    outer = normalize_config(
+        "qwen3_5", read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     text = outer.get("text_config", {})
     config = normalize_qwen35_config(outer)
     moe = config.get("model_type") == "qwen3_5_moe"

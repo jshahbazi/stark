@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from ..config_normalization import normalize_config
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -129,7 +130,9 @@ def build_gemma_plan(
     if family not in _ARCHITECTURES:
         raise UnsupportedConversion("Gemma generation has no text decoder adapter")
     return build_gemma_text_plan(
-        (read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config),
+        normalize_config(
+            family, read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+        )[0],
         None if checkpoint_metadata is None else checkpoint_metadata.tensors,
         family=family,
         dtype=dtype,

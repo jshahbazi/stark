@@ -215,6 +215,47 @@ catalogue's 4 MiB inspection limit remains unavailable with an explanation.
 Duplicate tied-tensor payload equality is checked during full conversion.
 Native loading and model execution remain separate checks.
 
+Each family planner admits an explicit set of `config.json` keys. Before a
+planner validates a configuration, one shared pass
+(`stark_convert/config_normalization.py`) rewrites a small set of reviewed
+forms that do not change the model. The planner applies it on the line that
+reads its configuration, so catalogue admission and the source-backed
+conversion that installs the model always judge the same normalized
+configuration. The source `config.json` is never modified. The pass:
+
+- drops publisher annotations and sampling defaults when their value has the
+  expected shape: `unsloth_fixed`, `unsloth_version`, `transformers.js_config`,
+  `model_name`, `generation_config`, `do_sample`, `top_p`, `top_k`,
+  `temperature`, `is_llama_config` and `init_method`. A malformed value is
+  refused rather than dropped;
+- drops `rope_interleaved` only when it is `false` and `rope_scaling` only
+  when it is `null`;
+- renames `dtype` to `torch_dtype` when `torch_dtype` is absent;
+- sets a nonzero `attention_dropout` within (0, 1] to 0.0. Dropout is inactive
+  at inference. This is a separate judgement call that
+  `ZERO_INACTIVE_ATTENTION_DROPOUT` turns off on its own;
+- for planners that read a single flat `rope_theta` and reject a nested
+  declaration (Qwen2, Mistral, Gemma 2, OLMo 3, Phi-3, Granite and SmolLM3),
+  flattens a plain `rope_parameters` object holding only `rope_theta` and an
+  absent or default `rope_type`. Qwen3, Llama and LFM2 already validate that
+  plain form themselves and see it unchanged;
+- for Gemma 2 and Gemma 3 text, drops `sliding_window_size` when it is an
+  integer equal to the required `sliding_window` the planner uses;
+- for LFM2, drops `tie_word_embeddings: true` unless `tie_embedding` is
+  `false` (the planner reads `tie_embedding`, default tied), and sets an absent
+  `block_ff_dim` from a positive integer `intermediate_size` (the Transformers
+  `Lfm2Config` stores one as the other).
+
+Gemma 4 and Qwen3.5 also apply the generic rules to their nested
+`text_config`. Everything else still fails closed in the planner: unknown keys,
+two differing declared RoPE bases, a plain `rope_parameters` beside a non-null
+`rope_scaling`, scaled, YaRN, linear, partial-rotary or per-attention-type RoPE
+forms, `rope_interleaved: true`, both `dtype` and `torch_dtype` declared, and
+dropout outside its valid range. The Gemma 3 image wrapper, the external
+Qwen3.8 profiles, LLaMBA and ModernBERT keep their configurations unchanged.
+Image-mode contract validators that read the configuration separately are not
+affected by this pass.
+
 An **Unavailable** row states one reason, chosen in this order:
 
 - **GPU-server quantization.** A `quantization_config` whose `quant_method` is

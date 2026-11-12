@@ -58,7 +58,9 @@ def plan_from_headers(family: str, metadata: CheckpointMetadata, *, mode: str = 
 
     Paths in the supplied TensorInfo records identify remote shards and are
     never opened. Processing metadata and artifact identity are checked by the
-    catalogue before this tensor-storage check grants a download.
+    catalogue before this tensor-storage check grants a download. Each planner
+    applies ``config_normalization.normalize_config`` where it reads its
+    config, so this path and source-backed conversion judge the same config.
     """
     if family == "modernbert":
         raise UnsupportedConversion("The app has no download workflow for classifier models")

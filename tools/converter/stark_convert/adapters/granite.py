@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from ..config_normalization import normalize_config
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -37,7 +38,9 @@ _SMOLLM3_KEYS = {
 def _build_plan(
     source: Path, *, family: str, dtype: str, checkpoint_metadata: CheckpointMetadata | None = None
 ) -> ConversionPlan:
-    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    config = normalize_config(
+        family, read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     if config.get("model_type") != family:
         raise UnsupportedConversion("Checkpoint model_type does not match selected adapter")
     if dtype not in _DTYPES:
