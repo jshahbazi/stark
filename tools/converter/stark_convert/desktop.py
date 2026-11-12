@@ -901,8 +901,8 @@ class Desktop:
             or payload["task"] not in TASKS
         ):
             raise DesktopError("Choose a task and check the starting models again.")
-        preference = payload.get("preference", "balanced")
-        if not isinstance(preference, str) or preference not in {"balanced", "speed", "answers"}:
+        preference = payload.get("preference", "quality")
+        if not isinstance(preference, str) or preference not in {"quality", "balanced", "speed", "answers"}:
             raise DesktopError("Choose a model preference and check models again.")
         hardware = self.guided_device(payload.get("hardware"))
         excluded = {}
@@ -2216,6 +2216,7 @@ class Desktop:
             "resource_budget": self.resource_budget_summary(),
             "context_tokens": self.context,
             "api_context_tokens": self.api_context,
+            "api_max_output_tokens": self.api_maximum,
             "max_new_tokens": self.maximum,
             "max_context_tokens": self.context_limit,
             "context_capacity_known": self.context_capacity_known,

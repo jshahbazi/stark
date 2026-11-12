@@ -43,6 +43,15 @@ Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except t
 
 Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length`, `context_capacity_known`, `max_output_tokens`, `tool_calling`, `capabilities.mtp` and `defaults.mtp`. Embeddings, the Responses API, structured output and batching are not available. Function tools require the supported template/parser below.
 
+Managed OpenWork and OpenCode discovery uses the same API-specific output cap.
+For a model with a 262,144-token native capacity running with the guide's
+32,768-token API context, the connector advertises at most 32,767 output tokens.
+The desktop control protocol exposes this as `api_max_output_tokens`, separately
+from the native `max_output_tokens` ceiling. Native model capacity and Advanced
+playground limits remain separate. A connector observation with zero output
+capacity or output capacity greater than its context does not complete the
+guide's model-discovery check.
+
 When a supported template/parser produces function calls, Stark validates and returns them in the completion response. The API does not execute the named functions. The client decides whether to execute a returned call, applies its own approval policy, and sends any result back as conversation history. Treat returned calls and arguments as model output, not as trusted instructions.
 
 Public model IDs use the full Hugging Face repository ID (`owner/model`) for models installed from Hugging Face, or the installed model name for local folders. The connection modal, model listing, completion responses and streamed chunks use these readable IDs. Model detail routes accept percent-encoded IDs, including encoded slashes and spaces. Private library IDs and managed model paths remain stable; existing installations require no registry migration. Only the running model is exposed, so installations sharing a public name refer to whichever copy is running.

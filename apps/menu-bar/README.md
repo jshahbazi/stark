@@ -14,7 +14,7 @@ The main menu and playground model headings show the readable model name. Hover 
 
 The menu offers **Guided setup** in Beginner mode or **Manage Models** in Advanced mode, plus a **Start model** action when a model can be started and a **Stop model** action while one is starting or running. Beginner setup can be reopened from the menu; **Adjust Setup** returns to its choices so you can revisit earlier steps. Guide steps explain their prerequisites, and returning to a parent window preserves the guide for later.
 
-Guided setup opens at 700 × 800 points, capped to the available screen, so the task choices and **Find a model** action fit together on larger displays. The action stays in a fixed footer at the bottom right when the window is shortened. When choosing another model, **Keep current model** remains in the same footer.
+Guided setup opens at 700 × 800 points, capped to the available screen, so the work choices and **Continue** action fit together on larger displays. The preference step uses the same footer for **Find a model**. Each action stays in a fixed footer at the bottom right when the window is shortened. When choosing another model, **Keep current model** remains in the same footer.
 
 The main menu and playground show **GPU memory** as a percentage and compact usage bar beside the status in both modes. Green indicates usage below 75% of Metal's recommended memory budget, orange starts at 75%, and red starts at 90%. Whole percentages round down so the label agrees with the color thresholds. Hover for the allocated bytes and budget. It refreshes about once a second, including during model loading and requests. Apple silicon uses shared memory; the percentage measures the model worker's Metal resource allocation against the device's recommended working-set size, excluding CPU-only allocations and other applications. This budget is a performance guideline. The bar fills at 100%; percentages above the budget remain visible. If the budget is unavailable, the readout shows allocated bytes with an empty neutral bar. A dash means no measurement is available. Stop clears the readout.
 
@@ -277,9 +277,9 @@ The Playground omits the Beginner/Advanced picker; use the main menu to change i
 Advanced retains the existing Manage Models, Model Catalog, Add from Source,
 Playground, Connections and chat controls.
 
-Beginner's **Guided Steps** flow asks what you want help with and whether to
-prioritize a balance of capacity and memory, a lighter model, or more model
-capacity. Recommendations show a simple model name with the specific installed
+Beginner’s **Guided Steps** flow offers **General Work** or **Coding**, then
+**Speed** or **Quality**, with Quality selected by default.
+Recommendations show a simple model name with the specific installed
 or source variant underneath, and a **View on Hugging Face** link to the source
 repository. The same identity remains visible during setup and connection.
 It reads the native Metal device name, unified-memory support and
@@ -287,9 +287,14 @@ recommended working-set budget, plus CPU count, physical and available memory,
 and free space in the library and download cache. GPU and system memory share
 the same physical memory; the algorithm never adds their budgets together.
 
-**Explain text** covers summaries, notes and explanations. **Work with files**
-is a separate task for reading or editing a folder through OpenWork, allowing
-the guide to apply its tool-use benchmark references to that choice.
+Quality uses bundled, dated whatmodel.sh General Work/Coding rankings for
+11 RAM sizes from 8–512 GB, after Stark’s compatibility and resource checks.
+No recommendation click requests the leaderboard. Speed selects the highest
+cached task score above its reference floor within an export-weight budget of
+25% of physical RAM, after the normal resource checks. A missing qualifying
+option offers **Choose Quality**. Scores describe parent models; quantized
+quality and actual response speed are not measured by this ranking. See the [recommendation policy and monthly refresh
+workflow](../../docs/MODEL_RECOMMENDATIONS.md).
 
 The guide checks a bounded window of candidates in each supported catalog
 family using metadata only. Every candidate retains its exact source revision
@@ -414,7 +419,11 @@ budget, Beginner offers the existing model browser in Advanced.
 Recommendations are conservative planning estimates; task quality, speed and
 general OpenWork competence still require artifact-specific validation.
 
-After the model is running, Beginner can guide setup of the official OpenWork
+**General Work** leads into OpenWork; **Coding** leads into OpenCode. Only
+that app’s installation and connection steps are shown. **Try a different model**
+reuses the same work and Speed/Quality screens.
+
+After the model is running, the OpenWork guide sets up the official OpenWork
 app. **Download OpenWork** opens its official download page in a browser; the
 user installs the app in Applications. Detection advances **Get OpenWork** to
 **Connect**, which offers the existing managed connection authorization. Beginner connection setup gracefully reopens OpenWork to load the managed
@@ -437,6 +446,17 @@ is reused on retry to avoid duplicate tasks after a binding failure. The bridge
 must support discovery version 2, `models.list`, `session.create_task` and
 `session.set_model` (present in the inspected official OpenWork 0.18.66 release).
 Older or incompatible clients remain in setup with recovery guidance.
+
+The OpenCode guide opens the official OpenCode Desktop download page, detects
+the signed app and uses the existing managed connection. The final step asks
+the user to open a project, start a new session and select **Stark** and the
+running model in OpenCode's model picker, then confirm the selection in Stark.
+Confirmation is enabled only after the approved, verified OpenCode engine has
+recently received metadata for that exact model and context budget. Restarts,
+revocation, loss of discovery, API session changes and model/context changes
+invalidate completion. A replacement engine can be allowed or denied directly
+in the guide. OpenCode has no qualified desktop UI handoff here: Stark does not
+claim to have verified its visible model selection or alter global model defaults.
 
 The ready check verifies configuration and connector metadata; it does not prove
 that OpenWork can perform a task or that the selected model will perform it well.

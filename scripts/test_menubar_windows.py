@@ -46,7 +46,7 @@ extension AppDelegate {
         let engine = EngineController(apiCredentials: APICredentialStore(service: suite,
             storage: ForbiddenWindowCredentialStorage()), apiDefaults: defaults)
         let delegate = AppDelegate(engine: engine)
-        delegate.beginnerSession.selectTask(.code)
+        delegate.beginnerSession.selectTask(.coding)
         let window = delegate.makeBeginnerWindow()
         defer { window.close(); engine.desktopConnections.shutdown() }
         guard let content = window.contentView, let screen = window.screen ?? NSScreen.main else { return false }
@@ -86,37 +86,40 @@ extension AppDelegate {
             engine.configureConnectionFixture(state: anotherModel ? "ready" : "idle",
                 loadedMode: anotherModel ? .chat : nil, apiAvailable: false, hasModels: anotherModel)
             let session = BeginnerSetupSession()
-            session.selectTask(.code)
+            session.selectTask(.coding)
             if anotherModel {
                 var snapshot = BeginnerSetupSnapshot()
                 snapshot.modelReady = true; snapshot.runningModelID = "window-fixture"
                 session.beginAnotherModel(snapshot: snapshot)
                 session.stage = .task
             }
-            let view = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
-                session: session, interface: StarkInterfacePreferences(defaults: defaults),
-                observation: BeginnerOpenWorkStatus(), selectInterface: { _ in }, openChat: {})
-            let window = delegate.window(title: "Setup footer fixture", view: view, resizable: true)
-            // Resize the same retained window down, up, then back to the reported size.
-            for size in [NSSize(width: 700, height: 650), NSSize(width: 700, height: 600),
-                         NSSize(width: 900, height: 850), NSSize(width: 700, height: 650)] {
-                window.setContentSize(size)
-                guard let content = window.contentView else { return false }
-                for _ in 0..<3 {
-                    content.layoutSubtreeIfNeeded()
-                    RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            for stage in [BeginnerSetupStage.task, .priority, .retry] {
+                session.stage = stage
+                let view = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork, openCode: engine.desktopConnections.openCode,
+                    session: session, interface: StarkInterfacePreferences(defaults: defaults),
+                    observation: BeginnerOpenWorkStatus(), openCodeObservation: BeginnerOpenWorkStatus(client: .openCode), selectInterface: { _ in }, openChat: {})
+                let window = delegate.window(title: "Setup footer fixture", view: view, resizable: true)
+                // Resize the same retained window down, up, then back to the reported size.
+                for size in [NSSize(width: 700, height: 650), NSSize(width: 700, height: 600),
+                             NSSize(width: 900, height: 850), NSSize(width: 700, height: 650)] {
+                    window.setContentSize(size)
+                    guard let content = window.contentView else { return false }
+                    for _ in 0..<3 {
+                        content.layoutSubtreeIfNeeded()
+                        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+                    }
+                    let probe = SetupLayoutProbes.action
+                    guard probe.window === window else { return false }
+                    let bounds = probe.convert(probe.bounds, to: content)
+                    let bottomGap = content.isFlipped ? content.bounds.maxY - bounds.maxY : bounds.minY - content.bounds.minY
+                    guard abs(bottomGap - 28) < 1, bounds.height >= 20,
+                          bounds.minX >= 208, abs(content.bounds.maxX - bounds.maxX - 28) < 1,
+                          abs(content.bounds.width - size.width) < 1,
+                          abs(content.bounds.height - size.height) < 1,
+                          content.bounds.contains(bounds), !window.isVisible else { return false }
                 }
-                let probe = SetupLayoutProbes.action
-                guard probe.window === window else { return false }
-                let bounds = probe.convert(probe.bounds, to: content)
-                let bottomGap = content.isFlipped ? content.bounds.maxY - bounds.maxY : bounds.minY - content.bounds.minY
-                guard abs(bottomGap - 28) < 1, bounds.height >= 20,
-                      bounds.minX >= 208, abs(content.bounds.maxX - bounds.maxX - 28) < 1,
-                      abs(content.bounds.width - size.width) < 1,
-                      abs(content.bounds.height - size.height) < 1,
-                      content.bounds.contains(bounds), !window.isVisible else { return false }
+                window.close()
             }
-            window.close()
         }
         return true
     }
@@ -496,13 +499,20 @@ extension AppDelegate {
         let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults)
         engine.configureConnectionFixture(state: "ready", loadedMode: .chat, apiAvailable: true, hasModels: true)
         let observation = BeginnerOpenWorkStatus.staleWindowFixture()
-        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
-            session: BeginnerSetupSession(), interface: StarkInterfacePreferences(defaults: defaults),
-            observation: observation, selectInterface: { _ in }, openChat: {})
+        let session = BeginnerSetupSession()
+        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork, openCode: engine.desktopConnections.openCode,
+            session: session, interface: StarkInterfacePreferences(defaults: defaults),
+            observation: observation, openCodeObservation: BeginnerOpenWorkStatus(client: .openCode), selectInterface: { _ in }, openChat: {})
         // A periodic observation from a previous model is still true while the
         // engine changes. It cannot replace a verified current-model handshake.
         engine.switchConnectionFixtureToOtherModel()
         let snapshot = host.snapshot
+        session.selectTask(.coding)
+        let codeSnapshot = host.snapshot
+        guard codeSnapshot.client == .openCode, !codeSnapshot.openWorkRunning,
+              !codeSnapshot.openWorkClientActive, codeSnapshot.openWorkPreparedModelID == nil else { return false }
+        session.selectTask(.general)
+        guard host.snapshot.openWorkRunning else { return false }
         engine.desktopConnections.shutdown()
         return observation.running && observation.liveConnection && snapshot.openWorkRunning
             && snapshot.runningModelID == "window-fixture-other" && !snapshot.openWorkClientActive
@@ -515,9 +525,9 @@ extension AppDelegate {
         let engine = EngineController(apiCredentials: APICredentialStore(service: suite, storage: ForbiddenWindowCredentialStorage()),
                                       apiDefaults: defaults)
         engine.configureConnectionFixture(state: "ready", loadedMode: .chat, apiAvailable: true, hasModels: true)
-        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
+        let host = BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork, openCode: engine.desktopConnections.openCode,
             session: BeginnerSetupSession(), interface: StarkInterfacePreferences(defaults: defaults),
-            observation: BeginnerOpenWorkStatus(), selectInterface: { _ in }, openChat: {})
+            observation: BeginnerOpenWorkStatus(), openCodeObservation: BeginnerOpenWorkStatus(client: .openCode), selectInterface: { _ in }, openChat: {})
         defer { engine.desktopConnections.shutdown() }
         // Reopening setup has no temporary recommendation report to supply a name.
         guard engine.beginnerReport == nil else { return false }
@@ -718,16 +728,17 @@ class WindowLifecycleTests(unittest.TestCase):
         )
         setup_view = directory / "BeginnerSetupView.swift"
         setup_source = (sources / "BeginnerSetupView.swift").read_text()
-        action_end = ".buttonStyle(.borderedProminent).disabled(session.task == nil || snapshot.choicesLoading)"
+        for boundary in ["    private var priorityStep: some View {", "    // Keep the next step visible"]:
+            form_end = "        }\n    }\n\n" + boundary
+            if setup_source.count(form_end) != 1:
+                raise RuntimeError("setup_form_fixture_source_boundary_invalid")
+            setup_source = setup_source.replace(form_end,
+                "        }.background(CatalogPickerBoundsProbe(view: SetupLayoutProbes.form))\n    }\n\n" + boundary)
+        action_end = "        }\n    }\n\n    @ViewBuilder private var recommendationStep"
         if setup_source.count(action_end) != 1:
             raise RuntimeError("setup_footer_fixture_source_boundary_invalid")
-        form_end = "        }\n    }\n\n    // Keep the next step visible"
-        if setup_source.count(form_end) != 1:
-            raise RuntimeError("setup_form_fixture_source_boundary_invalid")
-        setup_source = setup_source.replace(form_end,
-            "        }.background(CatalogPickerBoundsProbe(view: SetupLayoutProbes.form))\n    }\n\n    // Keep the next step visible")
         setup_view.write_text(setup_source.replace(action_end,
-            action_end + ".background(CatalogPickerBoundsProbe(view: SetupLayoutProbes.action))"))
+            "        }.background(CatalogPickerBoundsProbe(view: SetupLayoutProbes.action))\n    }\n\n    @ViewBuilder private var recommendationStep"))
         cls.executable = directory / "window-checks"
         compiled = subprocess.run(
             [

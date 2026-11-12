@@ -1,85 +1,50 @@
 import Combine
 import Foundation
 
-enum BeginnerTask: String, CaseIterable, Identifiable {
-    case everyday, text, files, code, unsure
+enum BeginnerClient: String, CaseIterable, Identifiable {
+    case openWork, openCode
 
     var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .everyday: return "Writing and everyday help"
-        case .text: return "Explain text"
-        case .files: return "Work with files"
-        case .code: return "Help with code"
-        case .unsure: return "I’m not sure"
-        }
-    }
+    var name: String { self == .openWork ? "OpenWork" : "OpenCode" }
     var detail: String {
-        switch self {
-        case .everyday: return "Emails, ideas, and questions"
-        case .text: return "Summaries, notes, and explanations"
-        case .files: return "Read or edit a folder in OpenWork"
-        case .code: return "Understand an error or a small project"
-        case .unsure: return "Choose a starting point for me"
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .everyday: return "pencil.line"
-        case .text: return "doc.text"
-        case .files: return "folder"
-        case .code: return "chevron.left.forwardslash.chevron.right"
-        case .unsure: return "questionmark.circle"
-        }
+        self == .openWork ? "A workspace for everyday tasks and files" : "A workspace for coding and projects"
     }
 }
 
-enum BeginnerRetryPreference: String, CaseIterable, Identifiable {
-    case speed, answers, task, unsure
+enum BeginnerTask: String, CaseIterable, Identifiable {
+    case general, coding
 
     var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .speed: return "Quicker responses"
-        case .answers: return "Different answers"
-        case .task: return "A different task"
-        case .unsure: return "Help me choose again"
-        }
-    }
+    var title: String { self == .general ? "General Work" : "Coding" }
     var detail: String {
-        switch self {
-        case .speed: return "Look at another available starting model"
-        case .answers: return "Compare a different model on my task"
-        case .task: return "Change what I need help with"
-        case .unsure: return "Review the other starting options"
-        }
+        self == .general ? "Writing, questions, and files with OpenWork" : "Code and projects with OpenCode"
     }
+    var symbol: String { self == .general ? "folder" : "chevron.left.forwardslash.chevron.right" }
+    var client: BeginnerClient { self == .general ? .openWork : .openCode }
 }
 
 enum BeginnerModelPriority: String, CaseIterable, Identifiable {
-    case balanced, speed, answers
+    case speed, quality
 
     var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .balanced: return "Balanced"
-        case .speed: return "Lighter model"
-        case .answers: return "More model capacity"
-        }
+    var title: String { self == .speed ? "Speed" : "Quality" }
+    var detail: String {
+        self == .speed ? "Balance model quality with a speed budget for this Mac" : "Favor answer quality within this Mac’s limits"
     }
 }
 
 enum BeginnerSetupStage: String, CaseIterable {
-    case task, recommendation, installation, openWork, connection, openOpenWork, ready, retry
+    case task, priority, recommendation, installation, openWork, connection, openOpenWork, ready, retry
 
     var step: Int {
         switch self {
-        case .task, .recommendation, .retry: return 0
-        case .installation: return 1
-        case .openWork: return 2
-        case .connection: return 3
-        case .openOpenWork: return 4
-        case .ready: return 5
+        case .task, .retry: return 0
+        case .priority, .recommendation: return 1
+        case .installation: return 2
+        case .openWork: return 3
+        case .connection: return 4
+        case .openOpenWork: return 5
+        case .ready: return 6
         }
     }
 }
@@ -130,6 +95,8 @@ struct BeginnerModelChoice: Identifiable, Equatable {
 }
 
 struct BeginnerSetupSnapshot: Equatable {
+    // The connection fields describe only the selected guide's client.
+    var client: BeginnerClient = .openWork
     var choices: [BeginnerModelChoice] = []
     var choicesLoading = false
     var choicesError: String? = nil
@@ -160,6 +127,7 @@ struct BeginnerSetupSnapshot: Equatable {
     var openWorkInstalled = false
     var openWorkRunning = false
     var openWorkApproved = false
+    var openCodeApprovalPending = false
     var openWorkClientActive = false
     var openWorkPreparedModelID: String? = nil
     var openWorkPreparing = false
@@ -182,6 +150,8 @@ struct BeginnerSetupActions {
     var openOpenWork: () -> Void = {}
     var downloadOpenWork: () -> Void = {}
     var connectOpenWork: () -> Void = {}
+    var allowOpenCodeEngine: () -> Void = {}
+    var denyOpenCodeEngine: () -> Void = {}
     var checkConnection: () -> Void = {}
     var openChat: () -> Void = {}
     var showAdvanced: () -> Void = {}
@@ -191,22 +161,40 @@ struct BeginnerSetupActions {
 @MainActor
 final class BeginnerSetupSession: ObservableObject {
     @Published var stage: BeginnerSetupStage = .task
-    @Published var task: BeginnerTask?
-    @Published var modelPriority: BeginnerModelPriority = .balanced
+    var client: BeginnerClient { task?.client ?? .openWork }
+    @Published private(set) var confirmedOpenCodeScope: String?
+    @Published private(set) var task: BeginnerTask?
+    @Published var modelPriority: BeginnerModelPriority = .quality
     @Published var selectedChoiceID: String?
-    @Published var retryPreference: BeginnerRetryPreference?
     @Published private(set) var choosingAnotherModel = false
     @Published private(set) var excludedModelID: String?
     @Published private(set) var startRequestedModelID: String?
     @Published private(set) var installingChoiceID: String?
 
     private var previousTask: BeginnerTask?
-    private var previousPriority: BeginnerModelPriority = .balanced
+    private var previousPriority: BeginnerModelPriority = .quality
     private var previousStage: BeginnerSetupStage = .ready
     private var observedModelID: String?
     private var connectionScope: String?
     private var recommendationTask: BeginnerTask?
     private var recommendationPriority: BeginnerModelPriority?
+
+    private func confirmationBasis(_ snapshot: BeginnerSetupSnapshot) -> String {
+        [snapshot.openWorkScope, snapshot.runningModelID].joined(separator: "|")
+    }
+
+    func confirmOpenCodeModel(snapshot: BeginnerSetupSnapshot) {
+        guard client == .openCode, snapshot.client == client, snapshot.canUseOpenWork,
+              snapshot.openWorkRunning, snapshot.openWorkApproved, snapshot.openWorkClientActive else { return }
+        confirmedOpenCodeScope = confirmationBasis(snapshot)
+        finish(snapshot: snapshot)
+    }
+
+    private func modelSelected(snapshot: BeginnerSetupSnapshot) -> Bool {
+        guard snapshot.client == client else { return false }
+        return client == .openWork ? snapshot.openWorkPreparedModelID == snapshot.runningModelID
+            : confirmedOpenCodeScope == confirmationBasis(snapshot)
+    }
 
     var recommendationsMatchSelection: Bool {
         recommendationTask == nil || (recommendationTask == task && recommendationPriority == modelPriority)
@@ -214,23 +202,20 @@ final class BeginnerSetupSession: ObservableObject {
 
     func selectTask(_ value: BeginnerTask) {
         guard task != value else { return }
+        if client != value.client {
+            confirmedOpenCodeScope = nil
+            connectionScope = nil
+        }
         task = value
         selectedChoiceID = nil
-        retryPreference = nil
     }
 
     func selectModelPriority(_ value: BeginnerModelPriority) {
         modelPriority = value
         selectedChoiceID = nil
-        retryPreference = nil
     }
 
-    /// Retry intent becomes the visible priority, so returning to the task
-    /// picker cannot leave an invisible override of the user's next choice.
     func requestRecommendations() -> String {
-        if retryPreference == .speed { modelPriority = .speed }
-        if retryPreference == .answers { modelPriority = .answers }
-        retryPreference = nil
         recommendationTask = task
         recommendationPriority = modelPriority
         selectedChoiceID = nil
@@ -266,11 +251,10 @@ final class BeginnerSetupSession: ObservableObject {
         previousTask = task
         previousPriority = modelPriority
         previousStage = stage
-        task = task ?? .unsure
+        task = task ?? (snapshot.client == .openCode ? .coding : .general)
         choosingAnotherModel = true
         excludedModelID = snapshot.runningModelID
         selectedChoiceID = nil
-        retryPreference = nil
         startRequestedModelID = nil
         stage = .retry
     }
@@ -281,7 +265,6 @@ final class BeginnerSetupSession: ObservableObject {
         modelPriority = previousPriority
         selectedChoiceID = nil
         excludedModelID = nil
-        retryPreference = nil
         startRequestedModelID = nil
         stage = previousStage == .retry ? .ready : previousStage
     }
@@ -296,11 +279,10 @@ final class BeginnerSetupSession: ObservableObject {
     func chooseAgain() {
         choosingAnotherModel = false
         excludedModelID = nil
-        retryPreference = nil
         selectedChoiceID = nil
         startRequestedModelID = nil
         installingChoiceID = nil
-        task = task ?? .unsure
+        task = task ?? .general
         stage = .task
     }
 
@@ -311,24 +293,23 @@ final class BeginnerSetupSession: ObservableObject {
     }
 
     func canFinish(snapshot: BeginnerSetupSnapshot) -> Bool {
-        snapshot.canUseOpenWork && snapshot.openWorkRunning && snapshot.openWorkApproved &&
-            snapshot.openWorkClientActive && snapshot.openWorkPreparedModelID == snapshot.runningModelID
+        task != nil && snapshot.canUseOpenWork && snapshot.openWorkRunning && snapshot.openWorkApproved &&
+            snapshot.openWorkClientActive && modelSelected(snapshot: snapshot)
     }
 
     // A request temporarily makes the worker unavailable for a model switch;
     // it does not undo a completed setup for the same verified connection.
     func keepsCompletedSetupWhileGenerating(snapshot: BeginnerSetupSnapshot) -> Bool {
-        snapshot.modelGenerating && !snapshot.runningModelID.isEmpty &&
+        task != nil && snapshot.modelGenerating && !snapshot.runningModelID.isEmpty &&
             snapshot.runningSupportsTools && snapshot.runningContextKnown && snapshot.localAPIAvailable &&
             snapshot.openWorkRunning && snapshot.openWorkApproved && snapshot.openWorkClientActive &&
-            snapshot.openWorkPreparedModelID == snapshot.runningModelID
+            modelSelected(snapshot: snapshot)
     }
 
     func finish(snapshot: BeginnerSetupSnapshot) {
         guard canFinish(snapshot: snapshot) else { return }
         choosingAnotherModel = false
         excludedModelID = nil
-        retryPreference = nil
         startRequestedModelID = nil
         stage = .ready
     }
@@ -340,6 +321,7 @@ final class BeginnerSetupSession: ObservableObject {
             return canFinish(snapshot: snapshot) || keepsCompletedSetupWhileGenerating(snapshot: snapshot)
         }
         if target == .task { return true }
+        if target == .priority { return task != nil }
         if target == .recommendation || target == .retry { return task != nil }
         if target == .installation {
             guard recommendationsMatchSelection else { return false }
@@ -347,6 +329,7 @@ final class BeginnerSetupSession: ObservableObject {
                 || selectedChoiceID != nil || canFinish(snapshot: snapshot)
         }
         if target == .openWork || target == .connection || target == .openOpenWork {
+            guard task != nil, snapshot.client == client else { return false }
             if target != .openWork && !snapshot.openWorkInstalled { return false }
             if target == .openOpenWork && (!snapshot.openWorkApproved || snapshot.openWorkBusy) { return false }
             return (snapshot.modelReady || keepsCompletedSetupWhileGenerating(snapshot: snapshot))
@@ -362,21 +345,26 @@ final class BeginnerSetupSession: ObservableObject {
     }
 
     func continueAfterModel(snapshot: BeginnerSetupSnapshot) {
-        guard snapshot.modelReady, !snapshot.runningModelID.isEmpty else { return }
+        guard task != nil, snapshot.client == client, snapshot.modelReady, !snapshot.runningModelID.isEmpty else { return }
         startRequestedModelID = nil
         choosingAnotherModel = false
         excludedModelID = nil
-        retryPreference = nil
         stage = snapshot.openWorkInstalled ? .connection : .openWork
         synchronize(with: snapshot)
     }
 
     func synchronize(with snapshot: BeginnerSetupSnapshot) {
+        if client == .openCode,
+           !snapshot.openWorkRunning || !snapshot.openWorkApproved || !snapshot.openWorkClientActive {
+            confirmedOpenCodeScope = nil
+        }
         if let scope = connectionScope, scope != snapshot.openWorkScope {
+            confirmedOpenCodeScope = nil
             if stage == .ready { stage = .openWork }
         }
         connectionScope = snapshot.openWorkScope
         if let previous = observedModelID, previous != snapshot.runningModelID {
+            confirmedOpenCodeScope = nil
             if stage == .ready { stage = .connection }
         }
         observedModelID = snapshot.runningModelID

@@ -285,7 +285,9 @@ def test_preferences_and_explicit_task_metadata_change_order():
     candidates = [small, large, coding]
     balanced = guided.recommendation_report(gpu_resources(), {}, candidates=candidates)
     assert balanced["items"][0]["id"] == large.id
-    speed = guided.recommendation_report(gpu_resources(), {}, preference="speed", candidates=candidates)
+    speed = guided.recommendation_report(
+        gpu_resources(), {}, task="everyday", preference="speed", candidates=candidates
+    )
     assert speed["items"][0]["id"] == small.id
     assert "has not been measured" in speed["items"][0]["recommendation_reason"]
     code = guided.recommendation_report(gpu_resources(), {}, task="code", candidates=candidates)
@@ -299,7 +301,9 @@ def test_balanced_penalizes_memory_cost_without_always_choosing_largest_checkpoi
     large = guided.recipe_from_catalog(catalog_candidate(3, weights=20 * guided.GIB, parameters=12_000_000_000))
     candidates = [small, medium, large]
     for preference, expected in (("balanced", medium), ("speed", small), ("answers", large)):
-        report = guided.recommendation_report(gpu_resources(), {}, preference=preference, candidates=candidates)
+        report = guided.recommendation_report(
+            gpu_resources(), {}, task="everyday", preference=preference, candidates=candidates
+        )
         assert report["items"][0]["id"] == expected.id
 
 
@@ -366,9 +370,9 @@ def test_installed_copy_does_not_override_hardware_or_capacity_ranking():
     assert [item["id"] for item in report["items"]] == [small.id]
 
 
-@pytest.mark.parametrize("task", sorted(guided.TASKS))
+@pytest.mark.parametrize("task", sorted(guided.TASKS - {"general", "coding"}))
 @pytest.mark.parametrize("preference", ["balanced", "speed", "answers"])
-def test_every_task_respects_explicit_model_priority(task, preference):
+def test_legacy_tasks_respect_explicit_model_priority(task, preference):
     small = guided.recipe_from_catalog(catalog_candidate(1, weights=guided.GIB, parameters=1_000_000_000))
     coding = guided.recipe_from_catalog(
         catalog_candidate(2, weights=6 * guided.GIB, parameters=8_000_000_000, tags=("code",))
@@ -382,7 +386,7 @@ def test_every_task_respects_explicit_model_priority(task, preference):
     elif preference == "answers":
         assert report["items"][0]["id"] == large.id
     else:
-        assert report["items"][0]["id"] == (coding.id if task == "code" else large.id)
+        assert report["items"][0]["id"] == (coding.id if task in {"code", "coding"} else large.id)
     assert len(report["items"]) == 3
 
 
@@ -881,7 +885,7 @@ def test_candidate_failure_preserves_loaded_worker(host, exception):
     assert events(host)[-1]["state"] == "ready"
 
 
-@pytest.mark.parametrize("maximum,known", [(40960, True), (0xFFFFFFFF, False)])
+@pytest.mark.parametrize("maximum,known", [(40960, True), (262144, True), (0xFFFFFFFF, False)])
 def test_guided_context_applies_to_playground_and_api_without_leaking_to_advanced(host, monkeypatch, maximum, known):
     recipe = guided.RECIPES[0]
     model = add_model(host, recipe)
@@ -896,7 +900,12 @@ def test_guided_context_applies_to_playground_and_api_without_leaking_to_advance
             self.closed = False
 
         def read(self):
-            return {"ready": True, "mode": "text-generation-v1", "max_context_tokens": maximum, "max_new_tokens": 8192}
+            return {
+                "ready": True,
+                "mode": "text-generation-v1",
+                "max_context_tokens": maximum,
+                "max_new_tokens": maximum - 1,
+            }
 
         def close(self):
             self.closed = True
@@ -921,6 +930,9 @@ def test_guided_context_applies_to_playground_and_api_without_leaking_to_advance
     ready = [event for event in events(host) if event["event"] == "ready"][-1]
     assert ready["request_id"] == "start" and ready["model_id"] == model["id"]
     assert ready["api_context_tokens"] == recipe.context_tokens and ready["max_context_tokens"] == maximum
+    assert ready["max_output_tokens"] == maximum - 1
+    assert ready["api_max_output_tokens"] == recipe.context_tokens - 1
+    assert ready["api_max_output_tokens"] == host.api_models()[0]["max_output_tokens"]
     if known:
         host.dispatch(
             {

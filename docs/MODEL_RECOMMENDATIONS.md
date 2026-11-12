@@ -1,12 +1,10 @@
 # Beginner recommendation evidence
 
-Beginner checks resource fit before ranking a bounded set of choices. Its
-fallback uses resource/capacity heuristics and explicit task metadata. Coding
-with Balanced prioritizes published benchmark evidence among admitted models.
-Other tasks use bounded comparisons of scored options. All scores come from an
-offline snapshot of published upstream benchmarks; they do not measure Stark's quantized exports.
-Native tool workflow checks establish specific protocol/lifecycle behavior;
-they do not establish general coding-agent competence.
+Beginner asks for **General Work** or **Coding**, followed by **Speed** or
+**Quality** with Quality selected by default. General Work continues into the
+OpenWork guide; Coding continues into OpenCode. Recommendations first check
+resource fit, then use the offline evidence policy below. Parent-model scores
+do not measure Stark exports or tool workflows.
 
 ## Current native and recurrent coverage
 
@@ -74,77 +72,38 @@ reports remaining setup space and rereads this credit before installation.
 Text recipes do not enable image input or add a backend. Existing native prefix
 reuse and its artifact-specific qualification remain unchanged.
 
-## Published task references
+## Offline leaderboard references
 
-Beginner separates **Explain text** (summaries, notes and explanations) from
-**Work with files** (reading or editing a folder through OpenWork). The files
-choice requests the `files` task cohort, which uses BFCL only as a tool-use
-reference; it does not claim file-task performance.
+`recommendation_leaderboard.json` bundles a dated [whatmodel.sh](https://whatmodel.sh/) snapshot with separate [General Work](https://whatmodel.sh/?gpu=apple&max=0) and [Coding](https://whatmodel.sh/?gpu=apple&max=0&task=coding) rankings. General Work uses the requested all-task configuration. Both lists select Apple Silicon and local models only. Full lists cover 8, 16, 24, 32, 48, 64, 96, 128, 192, 256 and 512 GB RAM. Exact query URLs, response SHA-256 values, update times, source revision and model-catalogue hash remain in the snapshot. The [November capture](archive/runs/2026-11-11-whatmodel-recommendations.md) records the top three models per RAM/task list, including models Stark cannot run.
 
-`recommendation_benchmarks.json` contains aggregate scores, source URLs,
-immutable source revisions where available, content hashes, settings and
-explicit coverage gaps. There is no runtime leaderboard fetch or automatic
-name matching. `recommendation_benchmarks.py` validates this optional snapshot;
-an invalid snapshot falls back to resource ranking without disabling setup.
+The recommendation path never requests whatmodel.sh. Hardware checks and supported-model discovery remain fresh; existing Hugging Face metadata lookups are separate. Clicking a source link intentionally opens the browser.
 
-| Beginner task | Current reference | Limits |
-| --- | --- | --- |
-| Coding | LiveCodeBench v6, the same comparison table in the official Qwen3.8-Flash-Next and Qwen3.8-27B cards | Developer-reported reference scores for two parent models. Window, pass@k, sampling, execution policy and aggregation are undisclosed. Never combine this table with another publisher or leaderboard window. It does not measure repository issue resolution. |
-| Files | [BFCL v4](https://gorilla.cs.berkeley.edu/leaderboard.html), official 2026-04-12 overall CSV | Tool-use proxy under BFCL's harness. FC, Prompt and FC-thinking remain separate cohorts. This does not establish file-task completion or OpenWork integration. |
-| Text, everyday and unsure | [IFEval](https://github.com/google-research/google-research/tree/master/instruction_following_eval), published HF Open LLM Leaderboard BF16 chat results for seven Qwen2.5-Instruct models | Narrow instruction-following signal. The snapshot's generic score column does not identify the strict prompt/instruction aggregation, so its metric stays labeled as published. It does not measure prose quality, factuality or overall usefulness. |
+### Selection policy
 
-The registry captured on 2026-11-08 contains 33 BFCL FC results, 11 Prompt
-results, one FC-thinking result, seven IFEval results and two developer-reported
-LiveCodeBench results. Inclusion in the score registry does not add engine or
-catalog support. Coverage is incomplete, particularly for newer native models.
-IFBench and Toolathlon are separate benchmarks and are not relabeled as IFEval
-or BFCL.
+1. Exclude candidates without a complete supported conversion/native route, usable chat template, tool parser, 32K context and adequate current RAM, GPU budget and disk. Leaderboard rank never grants compatibility.
+2. Select the largest cached RAM bucket no greater than this Mac's physical RAM in GiB. Below the smallest bucket, cached coverage is unavailable; above the largest, use the largest bucket with actual resource checks.
+3. Match exact parent repositories from the pinned source catalogue. Reviewed export-to-parent bindings also require the exact export repository and revision. No fuzzy names, quantization labels or mutable commands establish identity. Ambiguous parents have no automatic score. A changed export revision requires another review.
+4. **Quality** puts covered candidates first by descending task score. Equal scores retain deterministic fallback order. Missing scores stay unknown and follow scored candidates. Signed relative scores are not percentages or native artifact accuracy measurements. Parent scores do not establish export equivalence.
+5. **Speed** admits only candidates with a cached parent-model task score of at least **40 for General Work** or **35 for Coding**, and exact export weights no larger than **25% of physical RAM**. All normal runtime, GPU, free-memory and disk checks still apply. Within that pool, select descending task score; ties prefer a smaller runtime plan, then smaller weight payload, then deterministic fallback order. The increasing payload allowance lets larger Macs select stronger models without always choosing the smallest eligible checkpoint. Unknown scores, candidates below the floor and exports over the budget are excluded from all Speed alternatives. These are editorial product thresholds on separate relative score scales; review them when refreshing the leaderboard. They do not certify quantized task quality or measured response speed. Source speeds retain their provenance but do not rank these candidates.
+6. Offer one primary recommendation with up to two alternatives behind a disclosure. Historical benchmark results remain reference information when the cached leaderboard determines ordering.
 
-### Comparison policy
+The site's memory/variant estimates use an 8K conversation allowance. Stark's 32K model-specific plan remains authoritative, including actual export weights and state. The captured site's ranking applies the same parent score across quantized variants; it does not benchmark each quantization separately. Speed's budget uses actual export weight bytes, so a quantized export may fit while its BF16 counterpart does not. Its parent score does not establish that the export preserves quality. The guide labels this limitation, and structured evidence explicitly marks quantization quality as unevaluated by this ranking. No generic bit-width quality penalty is invented. Site quantizations remain provenance and are not automatically installed. Snapshot inclusion adds no backend, conversion route or native qualification.
 
-1. Apply the existing RAM, GPU, disk, chat-template and route checks first.
-2. Build the deterministic fallback order from comfortable memory headroom,
-   task tags and the selected capacity/memory preference.
-3. For Coding with Balanced, select one coding cohort with at least one
-   eligible covered parent. Prefer greater distinct-parent coverage across all
-   admitted models, then benchmark-publisher evidence, then cohort ID. Put
-   covered models first, in descending score order. Uncovered models follow in
-   fallback order; a missing score cannot retain first place above recorded
-   evidence. A valid zero score is evidence, not a missing score. This policy
-   prioritizes evidence availability; it does not prove that an unscored model
-   has lower coding quality. Soft memory-headroom tiers and task tags cannot
-   override coding scores after hard admission. Equal scores use fallback order.
-4. For other tasks with Balanced, select one task cohort with at least two
-   distinct covered parents in the same memory-headroom tier. Prefer greater
-   comparable-parent coverage across those tiers, then publisher authority,
-   then cohort ID. Reorder only scored slots within each tier by descending
-   score, retaining unknown positions and equal-score fallback order.
-   Repeated quantizations count as one parent for cohort selection in every
-   task. Never merge FC/Prompt, versions, publishers or metrics. Results from
-   nonselected cohorts remain reference information. Lighter model and More
-   model capacity retain their explicit resource objectives.
-5. Select up to three choices. Beginner shows a short recommendation reason,
-   estimated memory, a compact benchmark score, a brief published-model caveat
-   and a link to the evaluated model's Hugging Face page. It retains actionable memory-pressure notices.
-   Full revisions, settings, qualification text and caveats remain in the
-   structured backend report and evidence records. They are not concatenated
-   into Beginner's details. Existing copies do not show a new setup-space need.
+If the snapshot is unavailable, malformed or covers none of the eligible models, **Quality** retains its offline benchmark/resource fallback. **Speed** reports no qualifying recommendation, with a direct **Choose Quality** action and Advanced browsing; it never waives the score floor or weight budget. `recommendation_benchmarks.json` retains its source-bound IFEval, BFCL and LiveCodeBench records separately. General Work's Quality fallback uses instruction-following references; Coding uses the published coding cohort. Former task/preference API values retain their legacy behavior for older clients. New guides send `general`/`coding` and `quality`/`speed`.
 
-If no eligible coding reference exists, the report explicitly identifies the
-resource-based fallback and unknown coding quality. A lone covered parent can
-be prioritized over unknowns; it is not presented as a pairwise benchmark win.
+The [RAM-scaled Speed check](archive/runs/2026-11-11-speed-recommendation-policy.md) records the current primary choices, exact source identities, hardware assumptions and model-free regression results.
 
-Repository identity admits a model-level public reference even when the
-evaluated weights revision is unknown or differs from the candidate. This is
-reported as `model_repository_reference_only`. Evaluated revisions are retained
-when published; matching a repository never establishes artifact equivalence.
+### Manual refresh
 
-Quantized exports can reference a parent's results only through a reviewed
-repository/revision binding whose pinned source card identifies that parent.
-The four initial bindings cover the Jundot Qwen3.8-27B export and three native
-Qwen3.8-Flash-Next exports. Changed revisions need review. Finetunes, Coder vs
-general Instruct variants and similarly named checkpoints do not inherit scores.
-The report retains both candidate identity and evaluated-parent identity.
+There is no scheduled refresh. A maintainer reviews and commits a snapshot about monthly. The utility accesses the network only with explicit `--fetch`. Start from a reviewed upstream source checkout and record its commit. From the Stark repository root:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python tools/converter/scripts/refresh_recommendation_leaderboard.py --fetch --raw-dir /tmp/whatmodel-new-capture --source-dir /path/to/whatmodel --source-revision REVIEWED_COMMIT --captured-date YYYY-MM-DD --report docs/archive/runs/YYYY-MM-DD-whatmodel-recommendations.md
+```
+
+The utility requests both configurations for each RAM bucket, with `format=json&n=1000` to avoid default truncation. Omit `--fetch` to rebuild from saved responses and their hash manifest. Review changed identities, scores, coverage and notices; retain earlier dated reports. Run recommendation, native setup and packaging checks before pushing. Leaderboard changes do not qualify a model or supersede earlier native validation.
+
+The numerical compilation and derived scores retain whatmodel.sh / Merlinsbeard Pty Ltd's CC BY-SA 4.0 terms. Changes here select fields and RAM/task lists and map explicit parent repositories. Source-specific attributions and full notices ship in `stark_convert/_third_party/whatmodel/`. Those data terms do not relicense Stark application code, model weights or trademarks. Sources do not endorse Stark.
 
 ## Score admission policy
 

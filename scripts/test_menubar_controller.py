@@ -206,7 +206,7 @@ extension EngineController {
                     "host": host, "items": [item]]
         }
         func prepareBeginnerReport(_ installed: [String] = []) -> String {
-            engine.requestBeginnerModels(task: "unsure")
+            engine.requestBeginnerModels(task: "general")
             let id = command()["request_id"] as! String
             engine.apply(["event": "guided_models", "request_id": id, "report": beginnerReport(installed)])
             return id
@@ -221,7 +221,7 @@ extension EngineController {
                 try? replies.fileHandleForWriting.close()
                 try? replies.fileHandleForReading.close()
             }
-            engine.requestBeginnerModels(task: "code", preference: "answers")
+            engine.requestBeginnerModels(task: "coding", preference: "quality")
             let requestID = command()["request_id"] as! String
             guard engine.beginnerChoicesLoading else { return false }
             var bytes = try! JSONSerialization.data(withJSONObject: [
@@ -307,16 +307,16 @@ extension EngineController {
                 guard pump({ engine.state == "idle" && engine.message == message }) else { return false }
             }
             return true
-        case "beginner-files-task-transport":
-            engine.requestBeginnerModels(task: "files")
+        case "beginner-general-task-transport":
+            engine.requestBeginnerModels(task: "general")
             let request = command()
             return engine.beginnerChoicesLoading && request["command"] as? String == "guided_models"
-                && request["task"] as? String == "files"
+                && request["task"] as? String == "general"
         case "beginner-recommendation-fences":
-            engine.requestBeginnerModels(task: "unsure")
+            engine.requestBeginnerModels(task: "general")
             let request = command()
             let id = request["request_id"] as! String
-            guard request["preference"] as? String == "balanced",
+            guard request["preference"] as? String == "quality",
                   let hardware = request["hardware"] as? [String: Any],
                   hardware["gpu_available"] is Bool, hardware["gpu_name"] is String,
                   hardware["gpu_memory_budget_bytes"] != nil, hardware["cpu_cores"] != nil else { return false }
@@ -332,7 +332,7 @@ extension EngineController {
             _ = prepareBeginnerReport()
             guard engine.beginnerReport?.deviceSummary.contains("Fixture GPU") == true,
                   engine.beginnerReport?.items.first?.recommendationReason == "Fits the fixture GPU budget" else { return false }
-            engine.requestBeginnerModels(task: "code", excludingModelID: "fixture-model", preference: "speed")
+            engine.requestBeginnerModels(task: "coding", excludingModelID: "fixture-model", preference: "speed")
             let retry = command()
             engine.apply(["event": "guided_models", "request_id": id, "report": beginnerReport()])
             let excluded = retry["excluded_model_ids"] as? [String]
@@ -439,10 +439,17 @@ extension EngineController {
                   !BeginnerContextPolicy.requiresRestart(expected: 32768, local: 32768, api: 32768) else { return false }
             engine.mode = .chat; engine.loadedMode = .chat
             engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
-                          "max_context_tokens": 40960, "context_tokens": 32768,
-                          "api_context_tokens": 32768, "max_output_tokens": 4096, "tools": true])
-            guard engine.contextLimit == 40960, engine.contextCapacityKnown,
+                          "max_context_tokens": 262144, "context_tokens": 32768,
+                          "api_context_tokens": 32768, "max_output_tokens": 262143,
+                          "api_max_output_tokens": 32767, "tools": true])
+            guard engine.contextLimit == 262144, engine.contextCapacityKnown,
+                  engine.outputLimit == 262143, engine.apiMaxNewTokens == 32767,
                   engine.apiContextTokens == 32768, engine.options.contextTokens == 32768 else { return false }
+            // A backend without the additive API field still needs a safe cap.
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
+                          "max_context_tokens": 262144, "context_tokens": 32768,
+                          "api_context_tokens": 32768, "max_output_tokens": 262143, "tools": true])
+            guard engine.outputLimit == 262143, engine.apiMaxNewTokens == 32767 else { return false }
             engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
                           "max_context_tokens": Int(UInt32.max), "context_capacity_known": false,
                           "context_tokens": 32768, "api_context_tokens": 32768, "max_output_tokens": 4096])
@@ -2649,8 +2656,8 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_beginner_install_rejection_does_not_start_an_operation(self):
         self.exercise("beginner-rejected-install-does-not-start")
-    def test_beginner_files_task_reaches_guided_model_backend(self):
-        self.exercise("beginner-files-task-transport")
+    def test_beginner_general_task_reaches_guided_model_backend(self):
+        self.exercise("beginner-general-task-transport")
 
     def test_beginner_cancellation_preserves_the_current_worker_and_history(self):
         self.exercise("beginner-cancel-preserves-current")

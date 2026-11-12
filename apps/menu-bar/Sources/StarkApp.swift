@@ -1658,7 +1658,10 @@ final class EngineController: ObservableObject {
             }
             loadedID = event["model_id"] as? String ?? selectedID
             apiContextTokens = event["api_context_tokens"] as? Int ?? event["max_context_tokens"] as? Int ?? 0
-            apiMaxNewTokens = event["max_output_tokens"] as? Int ?? 0
+            // The worker's native output ceiling can exceed the guide's API
+            // context. Connector metadata must advertise the API-specific cap.
+            let apiOutput = event["api_max_output_tokens"] as? Int ?? event["max_output_tokens"] as? Int ?? 0
+            apiMaxNewTokens = max(0, min(apiOutput, apiContextTokens > 0 ? apiContextTokens - 1 : 0))
             loadedMode = readyMode
             applyLimits(event)
             applyImageCapabilities(event)
@@ -2200,9 +2203,9 @@ final class EngineController: ObservableObject {
         if !send(payload) { pendingSupportRequestID = nil; activeInstallRequestID = nil; endInstallProgress("failed") }
     }
 
-    func requestBeginnerModels(task: String, excludingModelID: String? = nil, preference: String = "balanced") {
-        guard ["everyday", "text", "files", "code", "unsure"].contains(task) else { return }
-        guard ["balanced", "speed", "answers"].contains(preference) else { return }
+    func requestBeginnerModels(task: String, excludingModelID: String? = nil, preference: String = "quality") {
+        guard ["general", "coding"].contains(task) else { return }
+        guard ["speed", "quality"].contains(preference) else { return }
         let requestID = UUID().uuidString.lowercased()
         beginnerRequestID = requestID; beginnerChoicesLoading = true; beginnerChoicesError = nil
         beginnerReport = nil
@@ -3619,6 +3622,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let interface: StarkInterfacePreferences
     private let beginnerSession = BeginnerSetupSession()
     private let beginnerOpenWork = BeginnerOpenWorkStatus()
+    private let beginnerOpenCode = BeginnerOpenWorkStatus(client: .openCode)
     private let modelManagement = ModelManagementState()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
@@ -3851,7 +3855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let origin = navigationSource
         if interface.mode == .beginner {
             beginnerOpenWork.refresh(engine: engine)
-            if beginnerSession.stage == .task, engine.modelReady, engine.loadedMode == .chat {
+            if beginnerSession.stage == .task, beginnerSession.task != nil, engine.modelReady, engine.loadedMode == .chat {
                 beginnerSession.continueAfterModel(snapshot: beginnerHost.snapshot)
             }
             showBeginner(parent: origin)
@@ -3872,8 +3876,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private var beginnerHost: BeginnerSetupHost {
-        BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork,
-            session: beginnerSession, interface: interface, observation: beginnerOpenWork,
+        BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork, openCode: engine.desktopConnections.openCode,
+            session: beginnerSession, interface: interface, observation: beginnerOpenWork, openCodeObservation: beginnerOpenCode,
             selectInterface: { [weak self] in self?.selectInterface($0) },
             openChat: { [weak self] in self?.showBeginnerChat() })
     }
