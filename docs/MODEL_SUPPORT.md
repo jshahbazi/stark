@@ -113,6 +113,20 @@ family overview sorts by name A–Z or Z–A; family detail sorts by name in eit
 direction or model size ascending or descending. Unknown numeric values sort last
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
+
+Family detail opens on **Top rated (general)**, with **Top rated (coding)**
+beside it. Both use the bundled whatmodel.sh reference scores described in
+[Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
+Rows that can be downloaded and whose weights fit this Mac's memory budget come
+first, then the higher score, then the smaller download; unscored rows follow
+scored ones, then models likely too large for this Mac, then unavailable rows.
+A group is placed by its best row. A scored row shows its score as a link to the
+source page, and its tooltip names the model the score belongs to. A row whose
+weights exceed 85% of physical memory less 2 GiB is marked as likely too large;
+that is a coarse check on weights alone, not a runtime plan. The catalogue also
+inspects sources with a reference score before the rest of the first 300
+listing positions, preferring models from the RAM list this Mac can use, so the
+first pages hold the best-rated candidates. A saved sort choice is kept.
 Conversion-only families are omitted. Cards show whether each model supports
 text or text and images. Downloads automatically include image support when
 available for that artifact. This requires metadata confirming a supported

@@ -36,6 +36,7 @@ from .api_tools import (
     tool_parser_for,
     validate_parser_tools,
 )
+from .catalog_ranking import RELATIONSHIPS as REFERENCE_RELATIONSHIPS
 from .chat import (
     ChatBudgetUnavailable,
     ChatCancelled,
@@ -793,6 +794,27 @@ class Desktop:
                 not isinstance(item["size_label"], str) or not 0 < len(item["size_label"]) <= 64
             ):
                 raise ValueError()
+            reference = item.get("reference_score")
+            if reference is not None:
+                scores = [reference.get(task) for task in ("general", "coding")] if isinstance(reference, dict) else []
+                if (
+                    not isinstance(reference, dict)
+                    or set(reference) != {"model_id", "relationship", "general", "coding", "source_url", "captured"}
+                    or not isinstance(reference["model_id"], str)
+                    or huggingface_repository(reference["model_id"]) != reference["model_id"]
+                    or reference["relationship"] not in REFERENCE_RELATIONSHIPS
+                    or any(
+                        score is not None
+                        and (type(score) not in (int, float) or not math.isfinite(score) or not -1000 <= score <= 1000)
+                        for score in scores
+                    )
+                    or all(score is None for score in scores)
+                    or not isinstance(reference["source_url"], str)
+                    or re.fullmatch(r"https://whatmodel\.sh/model/[a-z0-9-]{1,200}", reference["source_url"]) is None
+                    or not isinstance(reference["captured"], str)
+                    or re.fullmatch(r"\d{4}-\d{2}-\d{2}", reference["captured"]) is None
+                ):
+                    raise ValueError()
             ids.add(item["id"])
         return {
             **value,

@@ -76,7 +76,7 @@ described in [native hybrid models](NATIVE_HYBRID_MODELS.md).
 
 | Role | Modules |
 | --- | --- |
-| Converter | `cli.py`, `sources.py` (source resolution, hashing, manifests), `model_support.py` (shared family/mode registry and bounded metadata preflight), `model_catalog.py` (paginated metadata-only family discovery), `catalog_cache.py` (catalogue verdicts kept per repository revision), `hub_headers.py` (pinned tensor headers from the Hub API or exact byte ranges), `native_catalog.py` (pinned native preparation choices), `streaming.py` (safetensors planning and bounded tensor streaming), `compressed.py` (MLX repacking), `metadata.py`, `profiles.py`, `registry.py`, `qualifications.py`, `provenance.py`, `classifier_metadata.py`, `adapters/` (one planner per architecture), `gguf_import.py`, `benchmark.py`, `progress.py` |
+| Converter | `cli.py`, `sources.py` (source resolution, hashing, manifests), `model_support.py` (shared family/mode registry and bounded metadata preflight), `model_catalog.py` (paginated metadata-only family discovery), `catalog_cache.py` (catalogue verdicts kept per repository revision), `catalog_ranking.py` (parent-model reference scores that order a family's rows), `hub_headers.py` (pinned tensor headers from the Hub API or exact byte ranges), `native_catalog.py` (pinned native preparation choices), `streaming.py` (safetensors planning and bounded tensor streaming), `compressed.py` (MLX repacking), `metadata.py`, `profiles.py`, `registry.py`, `qualifications.py`, `provenance.py`, `classifier_metadata.py`, `adapters/` (one planner per architecture), `gguf_import.py`, `benchmark.py`, `progress.py` |
 | Chat and workers | `chat.py` (terminal chat and the `Worker` class that owns a worker process), `decision.py` (`ScoreWorker` for Decision mode) |
 | App backend | `desktop.py` (`Desktop`: model library, catalogue requests, install and conversion jobs, worker lifecycle, request queue), `model_inventory.py` (bound saved-model display metadata), `model_removal.py` (owned-folder Trash and library-only removal), `local_api.py` (`LocalAPI`: the HTTP server), `api_request.py` (chat request validation) |
 
@@ -113,7 +113,10 @@ failure, and deduplicates accumulated items by opaque entry ID. While a page is
 pending, the backend also sends `model_catalog` events marked `partial: true`
 whose report holds the rows checked so far at that page's offset. The app shows
 them immediately, keeps the page pending and its continuation position
-unchanged, and lets the page's full report settle it. Installs echo
+unchanged, and lets the page's full report settle it. A catalogue item may carry
+`reference_score`: the scored `model_id`, its `relationship` to the row, `general`
+and `coding` scores (either may be null), the `source_url` and the snapshot's
+`captured` date. Both sides reject a malformed record. Installs echo
 `support_request_id` in `installed`; errors echo
 the matching `request_id`. Removal completes with `model_removed` or
 `model_remove_error`, carrying the removal `request_id`, `model_id` and optional

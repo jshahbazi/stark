@@ -564,11 +564,59 @@ struct CatalogModelGroup: Equatable {
     }
 }
 
+/// A published score for the model a catalogue row is, or is a quantized export of.
+/// It orders the catalogue; the row itself was not benchmarked.
+struct CatalogReferenceScore: Equatable {
+    enum Relationship: String {
+        case benchmarkedModel = "benchmarked_model", reviewedExport = "reviewed_export"
+        case declaredQuantization = "declared_quantization", namedQuantization = "named_quantization"
+    }
+    let modelID: String
+    let relationship: Relationship
+    let general: Double?
+    let coding: Double?
+    let sourceURL: URL
+    let captured: String
+
+    init?(_ value: Any?) {
+        func score(_ value: Any?) -> Double?? {
+            guard let value, !(value is NSNull) else { return .some(nil) }
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, abs(number.doubleValue) <= 1000 else { return nil }
+            return .some(number.doubleValue)
+        }
+        guard let raw = value as? [String: Any],
+              Set(raw.keys) == ["model_id", "relationship", "general", "coding", "source_url", "captured"],
+              let modelID = SupportMetadata.string(raw["model_id"], maximum: 256), modelID.split(separator: "/").count == 2,
+              let relationship = (raw["relationship"] as? String).flatMap(Relationship.init(rawValue:)),
+              let general = score(raw["general"]), let coding = score(raw["coding"]), general != nil || coding != nil,
+              let source = SupportMetadata.string(raw["source_url"], maximum: 256),
+              source.hasPrefix("https://whatmodel.sh/model/"), let sourceURL = URL(string: source),
+              let captured = SupportMetadata.string(raw["captured"], maximum: 10), captured.utf8.count == 10 else { return nil }
+        self.modelID = modelID; self.relationship = relationship; self.general = general; self.coding = coding
+        self.sourceURL = sourceURL; self.captured = captured
+    }
+
+    /// The score a sort order ranks by and shows. General and coding scores are on
+    /// separate scales, so a rating order never substitutes one for the other.
+    func score(for sort: ModelBrowserSort) -> (value: Double, task: String)? {
+        switch sort {
+        case .ratingGeneral: return general.map { ($0, "general") }
+        case .ratingCoding: return coding.map { ($0, "coding") }
+        default: return general.map { ($0, "general") } ?? coding.map { ($0, "coding") }
+        }
+    }
+}
+
 enum ModelBrowserSort: String, CaseIterable {
-    case nameAscending, nameDescending, sizeAscending, sizeDescending
+    case ratingGeneral, ratingCoding, nameAscending, nameDescending, sizeAscending, sizeDescending
+
+    var isRating: Bool { self == .ratingGeneral || self == .ratingCoding }
 
     var title: String {
         switch self {
+        case .ratingGeneral: return "Top rated (general)"
+        case .ratingCoding: return "Top rated (coding)"
         case .nameAscending: return "Name (A–Z)"
         case .nameDescending: return "Name (Z–A)"
         case .sizeAscending: return "Size (smallest first)"
@@ -596,9 +644,13 @@ enum ModelBrowserSort: String, CaseIterable {
 enum ModelBrowserScope: String, CaseIterable {
     case saved, families, catalog
     var preferenceKey: String { "modelBrowser.sort." + rawValue }
-    var defaultSort: ModelBrowserSort { self == .catalog ? .sizeAscending : .nameAscending }
+    var defaultSort: ModelBrowserSort { self == .catalog ? .ratingGeneral : .nameAscending }
     var sorts: [ModelBrowserSort] {
-        self == .families ? [.nameAscending, .nameDescending] : ModelBrowserSort.allCases
+        switch self {
+        case .families: return [.nameAscending, .nameDescending]
+        case .saved: return [.nameAscending, .nameDescending, .sizeAscending, .sizeDescending]
+        case .catalog: return ModelBrowserSort.allCases
+        }
     }
 }
 
@@ -647,6 +699,7 @@ struct FamilyModelCatalog {
         let unavailableReason: String?
         let installedIDs: [String]
         let modelGroup: CatalogModelGroup?
+        let referenceScore: CatalogReferenceScore?
 
         init?(_ raw: [String: Any]) {
             guard let id = SupportMetadata.string(raw["id"], maximum: 512),
@@ -676,6 +729,18 @@ struct FamilyModelCatalog {
             self.downloadable = downloadable; self.installedIDs = installedIDs
             self.unavailableReason = unavailableReason
             modelGroup = CatalogModelGroup(raw["model_group"])
+            if let reference = raw["reference_score"], !(reference is NSNull) {
+                guard let parsed = CatalogReferenceScore(reference) else { return nil }
+                referenceScore = parsed
+            } else { referenceScore = nil }
+        }
+
+        /// Whether the weights alone fit the guide's memory budget: 85% of physical
+        /// memory with 2 GiB held back. Context and working state need more, so
+        /// this only rules out models that are clearly too large.
+        func fits(physicalMemory: UInt64?) -> Bool {
+            guard let bytes = weightBytes, let memory = physicalMemory else { return true }
+            return UInt64(bytes) + 2 * 1024 * 1024 * 1024 <= memory / 100 * 85
         }
 
         var installationMode: ModelArtifactMode {
@@ -781,14 +846,38 @@ struct CatalogBrowserInventory {
     }
     let groups: [Group]
 
+    /// Top-rated order: rows that can be downloaded and fit this Mac first, then the
+    /// higher score, with unscored rows last and the smaller download breaking ties.
+    static func ratingPrecedes(_ first: FamilyModelCatalog.Item, _ second: FamilyModelCatalog.Item,
+                               sort: ModelBrowserSort, physicalMemory: UInt64?) -> Bool? {
+        if first.downloadable != second.downloadable { return first.downloadable }
+        let fits = (first.fits(physicalMemory: physicalMemory), second.fits(physicalMemory: physicalMemory))
+        if fits.0 != fits.1 { return fits.0 }
+        let scores = (first.referenceScore?.score(for: sort)?.value, second.referenceScore?.score(for: sort)?.value)
+        if scores.0 != scores.1 {
+            guard let firstScore = scores.0 else { return false }
+            guard let secondScore = scores.1 else { return true }
+            return firstScore > secondScore
+        }
+        if first.weightBytes != second.weightBytes {
+            guard let firstBytes = first.weightBytes else { return false }
+            guard let secondBytes = second.weightBytes else { return true }
+            return firstBytes < secondBytes
+        }
+        return nil
+    }
+
     init(items: [FamilyModelCatalog.Item], query: String = "", sort: ModelBrowserSort = .sizeAscending,
-         quantization: CatalogQuantizationFilter = .all) {
+         quantization: CatalogQuantizationFilter = .all, physicalMemory: UInt64? = nil) {
         let quantization = quantization.resolved(for: items)
         func makeGroup(id: String, name: String, publisher: String, items: [FamilyModelCatalog.Item]) -> Group? {
             let visible = items.filter {
                 quantization.matches($0) && ModelBrowserSearch.matches(query, fields: [name, publisher, $0.name, $0.repo, $0.revision,
                                                            $0.sizeLabel ?? "", $0.quantization] + $0.artifactModes.map(\.title))
             }.sorted { first, second in
+                if sort.isRating, let rated = Self.ratingPrecedes(first, second, sort: sort, physicalMemory: physicalMemory) {
+                    return rated
+                }
                 let rowSort: ModelBrowserSort = sort == .sizeDescending ? .sizeDescending : .sizeAscending
                 if first.numericSize != second.numericSize {
                     return rowSort.precedes(first.name, id: first.id, size: first.numericSize,
@@ -813,8 +902,13 @@ struct CatalogBrowserInventory {
             }
             return makeGroup(id: id, name: name, publisher: publisher, items: entries).map { [$0] } ?? []
         }.sorted { first, second in
-            sort.precedes(first.name, id: first.id, size: first.size(for: sort),
-                          second.name, id: second.id, size: second.size(for: sort))
+            // A group ranks by its best row, which sorts first within it.
+            if sort.isRating, let best = first.items.first, let other = second.items.first,
+               let rated = Self.ratingPrecedes(best, other, sort: sort, physicalMemory: physicalMemory) {
+                return rated
+            }
+            return sort.precedes(first.name, id: first.id, size: first.size(for: sort),
+                                 second.name, id: second.id, size: second.size(for: sort))
         }
     }
 }
@@ -2835,6 +2929,12 @@ struct ModelsView: View {
                 if selectedFamily == nil && navigation.tab == .download {
                     Label("Scroll to browse all model families", systemImage: "arrow.down")
                         .font(.caption).foregroundStyle(.secondary)
+                } else if selectedFamily != nil && catalogSort.isRating {
+                    HStack(spacing: 4) {
+                        Text("Models that fit this Mac come first, ranked by whatmodel.sh scores. Quantized versions show their original model's score.")
+                            .fixedSize(horizontal: false, vertical: true)
+                        Link("About scores", destination: URL(string: "https://whatmodel.sh/")!).fixedSize()
+                    }.font(.caption).foregroundStyle(.secondary)
                 }
                 ScrollView {
                     if let family = selectedFamily { catalogContent(family) }
@@ -3052,7 +3152,8 @@ struct ModelsView: View {
     private func catalogContent(_ family: ModelsInventory.Family) -> some View {
         if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
             let groups = CatalogBrowserInventory(items: catalog.items, query: catalogQuery, sort: catalogSort,
-                                                 quantization: catalogQuantization).groups
+                                                 quantization: catalogQuantization,
+                                                 physicalMemory: ProcessInfo.processInfo.physicalMemory).groups
             LazyVStack(spacing: 6) {
                 if catalog.items.isEmpty {
                     Text(catalog.nextOffset == nil ? "No compatible models found" : "No compatible models found yet")
@@ -3113,7 +3214,9 @@ struct ModelsView: View {
                 if item.id != group.items.first?.id { Divider().padding(.vertical, 6) }
                 CatalogModelRow(item: item,
                     downloaded: engine.catalogItemIsDownloaded(item, artifactMode: item.installationMode),
-                    busy: engine.busy, showsRepositoryLink: group.items.count > 1) {
+                    busy: engine.busy, showsRepositoryLink: group.items.count > 1,
+                    score: item.referenceScore?.score(for: catalogSort),
+                    exceedsMemory: !item.fits(physicalMemory: ProcessInfo.processInfo.physicalMemory)) {
                         engine.installCatalogItem(id: item.id)
                     }
             }

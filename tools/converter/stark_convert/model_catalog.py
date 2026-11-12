@@ -31,6 +31,9 @@ MAX_INVENTORY = 16384
 # Listing positions one page may pass without a per-repository request.
 MAX_SCREENED = 500
 _LISTING_STEP = 100
+# Listing positions searched for sources with a reference score, which are
+# inspected before the rest of that window.
+PRIORITY_WINDOW = 300
 _WEIGHT_SUFFIXES = (".gguf", ".safetensors", ".bin", ".exl3")
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_TOKENIZER_CONFIG_BYTES = 2 * 1024 * 1024
@@ -106,15 +109,18 @@ def _repository_search(api, definition, remaining, expected=0):
     def results(query):
         size, sent = _LISTING_STEP * max(1, -(-expected // _LISTING_STEP)), 0
         while True:
-            batch = list(
-                api.list_models(
-                    **query, sort="downloads", expand=["sha", "pipeline_tag", "tags", "siblings"], limit=size
-                )
-            )
-            yield from batch[sent:]
-            if len(batch) < size:
+            count = 0
+            # Entries are passed on as they arrive, so a listing that fails
+            # partway still contributes what it returned.
+            for entry in api.list_models(
+                **query, sort="downloads", expand=["sha", "pipeline_tag", "tags", "siblings"], limit=size
+            ):
+                count += 1
+                if count > sent:
+                    yield entry
+            if count < size:
                 return
-            sent, size = len(batch), size * 2
+            sent, size = count, size * 2
 
     streams = [iter(results(query)) for query in queries]
     while streams:
@@ -912,13 +918,18 @@ def family_catalog(
     deadline_seconds=80,
     cache_dir=None,
     on_item=None,
+    physical_memory=None,
 ):
     """Return candidate downloads; actual installation must repeat pinned preflight.
 
     ``cache_dir`` reuses verdicts for unchanged revisions. ``on_item`` receives
     each accepted row as soon as it is checked, before the sorted report.
+    Browsing rows carry a parent-model reference score when one is known, and
+    sources with one are inspected first; ``physical_memory`` (this machine's
+    by default) prefers models from a RAM list this machine can use.
     """
     from .catalog_cache import VerdictCache
+    from .catalog_ranking import host_memory, reference_scores
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
     from .native_catalog import FLINT_FAMILY_ID
     from .native_catalog import catalog_items as native_catalog_items
@@ -951,6 +962,18 @@ def family_catalog(
         hub = huggingface_hub
     deadline = time.monotonic() + deadline_seconds
     cache = VerdictCache(cache_dir, family, planning=planning) if cache_dir is not None else None
+    # Guided setup ranks its own planned recipes; only browsing is ordered here.
+    ranking = None if planning else reference_scores()
+    if ranking is not None and physical_memory is None:
+        physical_memory = host_memory()
+
+    def scored(item, tags=()):
+        """Attach the reference score a checked row may show."""
+        if ranking is None:
+            return item
+        base_name = _without_quantization_suffix(item["repo"].split("/")[-1], item["quantization"])
+        reference = ranking.reference(item["repo"], item["revision"], item["quantization"], tags, base_name)
+        return item if reference is None else {**item, "reference_score": reference}
 
     def remaining():
         if time.monotonic() >= deadline:
@@ -975,8 +998,42 @@ def family_catalog(
                 yield seed, None, None
             if api is None:
                 return
+            expected = offset + limit + 1
+            stream = _repository_search(
+                api, definition, remaining, expected if ranking is None else max(expected, PRIORITY_WINDOW)
+            )
+            window, failed = [], False
+            if ranking is not None:
+                # The first listing positions are reordered so sources with a
+                # reference score are inspected, and shown, before the rest.
+                try:
+                    for entry in stream:
+                        window.append(entry)
+                        if len(window) == PRIORITY_WINDOW:
+                            break
+                except Exception:
+                    failed = True
+
+                def placement(entry):
+                    siblings = _field(entry[2], "siblings")
+                    # A listed source without Safetensors weights cannot be
+                    # downloaded, so its score earns it no earlier inspection.
+                    importable = not isinstance(siblings, list) or any(
+                        str(_field(sibling, "rfilename")).endswith(".safetensors") for sibling in siblings
+                    )
+                    rank = (
+                        ranking.priority(entry[0], _field(entry[2], "tags"), physical_memory) if importable else None
+                    )
+                    # Scored sources from a list this machine can use, then
+                    # other scored sources, then the rest in listing order.
+                    return (2, 0) if rank is None else (0 if rank[0] else 1, -rank[1])
+
+                yield from sorted(window, key=placement)
+            if failed:
+                discovery_failed = True
+                return
             try:
-                yield from _repository_search(api, definition, remaining, offset + limit + 1)
+                yield from stream
             except Exception:
                 discovery_failed = True
                 # Retain the frontier so a retry never skips a failed search.
@@ -1027,7 +1084,7 @@ def family_catalog(
         def inspect(repo, listed_revision):
             remaining()
             if repo in native_items and repo not in pins:
-                return dict(native_items[repo])
+                return scored(dict(native_items[repo]))
             known_revision = pins.get(repo) or listed_revision
             if cache is not None:
                 # A registered source has no listed revision; its head is
@@ -1083,7 +1140,7 @@ def family_catalog(
 
                 if native_family:
                     config = _json(read_pinned("config.json", MAX_CONFIG_BYTES)) if "config.json" in names else None
-                    return native_unavailable_item(family, repo, revision, config, names, sizes)
+                    return scored(native_unavailable_item(family, repo, revision, config, names, sizes))
                 # The original registry's Gemma3 wrappers predate the native
                 # image adapter. Bind their complete, same-revision metadata
                 # through the generic vision path rather than a text recipe.
@@ -1147,7 +1204,7 @@ def family_catalog(
                     item = dict(native_items[repo])
                     if unavailable_reason is not None:
                         item.update(downloadable=False, unavailable_reason=unavailable_reason)
-                    return item
+                    return scored(item)
                 external_qwen = qwen38_external.is_external_affine(config)
                 quantization = (
                     qwen38_external.QUANTIZATION
@@ -1249,7 +1306,7 @@ def family_catalog(
                     )
                     item["task_tags"] = item["planning"]["task_tags"]
                     item["license"] = item["planning"]["license"]
-                return item
+                return scored(item, _field(info, "tags", []))
             except _Inaccessible:
                 # Gating and file availability can change without a new revision.
                 outcome["volatile"] = True

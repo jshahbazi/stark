@@ -5,12 +5,25 @@ struct CatalogModelRow: View {
     let downloaded: Bool
     let busy: Bool
     let showsRepositoryLink: Bool
+    var score: (value: Double, task: String)? = nil
+    var exceedsMemory = false
     let download: () -> Void
 
     private var parameterLabel: String? {
         if let label = item.sizeLabel { return label }
         guard let count = item.parameterCount, count > 0 else { return nil }
         return count.formatted(.number.notation(.compactName).precision(.fractionLength(0...1)))
+    }
+
+    /// States whose model the score belongs to; an export is never presented as benchmarked itself.
+    static func scoreExplanation(_ reference: CatalogReferenceScore, score: (value: Double, task: String)) -> String {
+        let value = score.value.formatted(.number.precision(.fractionLength(0...1)))
+        let subject = reference.relationship == .benchmarkedModel ? "this model" : reference.modelID
+        var text = "whatmodel.sh \(score.task) score \(value) for \(subject), from the \(reference.captured) snapshot."
+        if reference.relationship != .benchmarkedModel {
+            text += "\nThis quantized version was not benchmarked itself, and quantization can change quality."
+        }
+        return text
     }
 
     var body: some View {
@@ -35,6 +48,8 @@ struct CatalogModelRow: View {
             if let reason = item.unavailableReason {
                 Text(reason).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if exceedsMemory {
+                Text("Likely too large for this Mac's memory").font(.caption).foregroundStyle(.orange)
             }
         }
         .help(item.repo + "\nVersion " + item.revision)
@@ -66,6 +81,14 @@ struct CatalogModelRow: View {
                 Text(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1)
                     .help("Weight file size").accessibilityLabel("Weight files: " + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+            }
+            if let score, let reference = item.referenceScore {
+                let value = score.value.formatted(.number.precision(.fractionLength(0...1)))
+                Link(destination: reference.sourceURL) {
+                    Text("Score " + value).font(.caption.monospacedDigit().weight(.medium)).lineLimit(1)
+                }
+                .help(Self.scoreExplanation(reference, score: score))
+                .accessibilityLabel("whatmodel.sh \(score.task) score \(value)")
             }
         }
     }
