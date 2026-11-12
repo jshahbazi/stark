@@ -26,7 +26,8 @@ def speed_policy(task, preference, physical_bytes):
         "applied": preference == "speed" and task in SPEED_MINIMUM_SCORE,
         "minimum_score": SPEED_MINIMUM_SCORE.get(task),
         "weight_budget_bytes": physical_bytes // SPEED_WEIGHT_BUDGET_DIVISOR
-        if type(physical_bytes) is int and physical_bytes > 0 else 0,
+        if type(physical_bytes) is int and physical_bytes > 0
+        else 0,
         "evidence_kind": "upstream_parent_reference",
     }
 
@@ -65,8 +66,11 @@ class LeaderboardSnapshot:
             records, seen = {}, set()
             for row in rows:
                 identity, score = row["id"], row["score"]
-                if (not isinstance(identity, str) or not re.fullmatch(r"[a-z0-9-]{1,200}", identity)
-                        or identity in seen):
+                if (
+                    not isinstance(identity, str)
+                    or not re.fullmatch(r"[a-z0-9-]{1,200}", identity)
+                    or identity in seen
+                ):
                     raise ValueError("Invalid model identity")
                 seen.add(identity)
                 if score is not None and not _number(score):
@@ -97,12 +101,20 @@ class LeaderboardSnapshot:
             policy = speed_policy(task, preference, physical_bytes)
             # All offers, including alternatives, must meet both limits. Missing
             # evidence cannot silently reinstate the old smallest-model rule.
-            ordered = [recipe for recipe in ordered if model_id(recipe) in records
-                       and records[model_id(recipe)]["score"] >= policy["minimum_score"]
-                       and recipe.weight_bytes <= policy["weight_budget_bytes"]]
-            ordered.sort(key=lambda recipe: (
-                -records[model_id(recipe)]["score"], recipe.runtime_memory, recipe.weight_bytes,
-            ))
+            ordered = [
+                recipe
+                for recipe in ordered
+                if model_id(recipe) in records
+                and records[model_id(recipe)]["score"] >= policy["minimum_score"]
+                and recipe.weight_bytes <= policy["weight_budget_bytes"]
+            ]
+            ordered.sort(
+                key=lambda recipe: (
+                    -records[model_id(recipe)]["score"],
+                    recipe.runtime_memory,
+                    recipe.weight_bytes,
+                )
+            )
             used = {recipe.id for recipe in ordered}
         return ordered, bucket, records, used
 
@@ -147,5 +159,6 @@ def load_snapshot():
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         # Optional reference corruption must not bypass resource checks or
         # cause a runtime website request. Existing evidence is the fallback.
-        return LeaderboardSnapshot({"schema_version": 1, "captured": "2026-11-11",
-                                    "model_repositories": {}, "buckets": []})
+        return LeaderboardSnapshot(
+            {"schema_version": 1, "captured": "2026-11-11", "model_repositories": {}, "buckets": []}
+        )

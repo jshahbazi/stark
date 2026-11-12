@@ -16,24 +16,31 @@ struct BeginnerSetupView: View {
     }
     private var installInProgress: Bool { ownInstallation && snapshot.installPhase.inProgress }
 
+    private var showsTaskActions: Bool { [.task, .priority, .retry].contains(session.stage) }
+
     var body: some View {
         HStack(spacing: 0) {
             sidebar.frame(width: 180)
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    content
-                    if let error = snapshot.engineError, session.stage != .installation {
-                        notice(error, symbol: "exclamationmark.triangle", color: .red)
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        content
+                        if let error = snapshot.engineError, session.stage != .installation {
+                            notice(error, symbol: "exclamationmark.triangle", color: .red)
+                        }
                     }
+                    .padding(28)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(28)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, showsTaskActions ? 0 : 20)
+                if showsTaskActions {
+                    Divider()
+                    taskActions.padding(28)
+                }
             }
-            // Keep controls clear of the window edge even while content is scrolled.
-            .padding(.bottom, 20)
         }
-        .frame(minWidth: 700, minHeight: 600)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { session.synchronize(with: snapshot) }
         .onChange(of: snapshot) { _, value in session.synchronize(with: value) }
@@ -108,11 +115,6 @@ struct BeginnerSetupView: View {
                     session.selectTask(task)
                 }
             }
-            HStack {
-                Button("Continue") { session.stage = .priority }
-                    .buttonStyle(.borderedProminent).disabled(session.task == nil)
-                if session.choosingAnotherModel { keepCurrentButton }
-            }
             if session.choosingAnotherModel {
                 Text("Your current model stays installed while you choose and prepare another model.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -132,11 +134,21 @@ struct BeginnerSetupView: View {
             Text("Speed and answer quality depend on the model and your task.")
                 .font(.caption).foregroundStyle(.secondary)
             deviceSummary
-            HStack {
+        }
+    }
+
+    // Keep the next step visible while the task choices scroll independently.
+    private var taskActions: some View {
+        HStack {
+            if session.stage == .priority { Button("Back") { session.stage = .task } }
+            if session.choosingAnotherModel { keepCurrentButton }
+            Spacer(minLength: 12)
+            if session.stage == .priority {
                 Button(session.choosingAnotherModel ? "See another model" : "Find a model") { requestChoices() }
                     .buttonStyle(.borderedProminent).disabled(session.task == nil || snapshot.choicesLoading)
-                Button("Back") { session.stage = .task }
-                if session.choosingAnotherModel { keepCurrentButton }
+            } else {
+                Button("Continue") { session.stage = .priority }
+                    .buttonStyle(.borderedProminent).disabled(session.task == nil)
             }
         }
     }

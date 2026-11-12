@@ -900,8 +900,12 @@ def test_guided_context_applies_to_playground_and_api_without_leaking_to_advance
             self.closed = False
 
         def read(self):
-            return {"ready": True, "mode": "text-generation-v1", "max_context_tokens": maximum,
-                    "max_new_tokens": maximum - 1}
+            return {
+                "ready": True,
+                "mode": "text-generation-v1",
+                "max_context_tokens": maximum,
+                "max_new_tokens": maximum - 1,
+            }
 
         def close(self):
             self.closed = True

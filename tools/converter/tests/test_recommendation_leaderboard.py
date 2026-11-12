@@ -39,9 +39,7 @@ def registry(*, bindings=()):
 
 def snapshot(general, coding=None, *, repositories=None, sizes=(8, 24, 32, 128), speed=None):
     """Use synthetic scores and plans; these fixtures never qualify a model."""
-    repositories = repositories or {
-        name: "example/" + name for name in set(general) | set(coding or general)
-    }
+    repositories = repositories or {name: "example/" + name for name in set(general) | set(coding or general)}
     return module.LeaderboardSnapshot(
         {
             "schema_version": 1,
@@ -202,7 +200,10 @@ def test_speed_does_not_recommend_below_floor_half_billion_model_on_high_ram(tas
     useful = recipe("useful", 8_000_000_000, weights=8 * guided.GIB)
     cached = snapshot({"tiny": tiny_score, "useful": 60}, sizes=(8, 128, 512))
     result = report(
-        [tiny, useful], cached, task=task, preference="speed",
+        [tiny, useful],
+        cached,
+        task=task,
+        preference="speed",
         machine=host(physical_memory_bytes=512 * guided.GIB, available_memory_bytes=500 * guided.GIB),
     )
     assert [item["id"] for item in result["items"]] == [useful.id]

@@ -110,10 +110,7 @@ def sync_notices(source_dir: Path, notices_dir: Path, source_revision: str) -> N
             "# whatmodel.sh snapshot data notices",
             "",
             f"Source checkout revision: `{source_revision}`.",
-            (
-                "Source model catalogue: `data/models.json` "
-                f"(SHA-256 `{sha256(source_dir / 'data/models.json')}`)."
-            ),
+            (f"Source model catalogue: `data/models.json` (SHA-256 `{sha256(source_dir / 'data/models.json')}`)."),
             "",
             "## License scope",
             "",

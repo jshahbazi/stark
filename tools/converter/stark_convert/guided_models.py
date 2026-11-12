@@ -882,8 +882,15 @@ def _license_label(value):
 
 
 def recommendation_report(
-    host, installed, excluded_recipe_ids=(), *, task="general", preference="quality", candidates=None,
-    benchmarks=None, leaderboard=None,
+    host,
+    installed,
+    excluded_recipe_ids=(),
+    *,
+    task="general",
+    preference="quality",
+    candidates=None,
+    benchmarks=None,
+    leaderboard=None,
 ):
     candidates = tuple(RECIPES if candidates is None else candidates)
     task = task if task in TASKS else "general"
@@ -923,17 +930,24 @@ def recommendation_report(
         evidence = cached_evidence + evidence
         benchmark_details = (cached_details + benchmark_details)[:16]
         reason = _recommendation_reason(
-            recipe, host, task, preference, benchmark_used=recipe.id in benchmark_used,
+            recipe,
+            host,
+            task,
+            preference,
+            benchmark_used=recipe.id in benchmark_used,
             coding_evidence_available=bool(benchmark_used),
         )
         if leaderboard_used:
             reason = (
-                "Selected using the cached whatmodel.sh " + ("Coding" if guide_task == "coding" else "General Work")
+                "Selected using the cached whatmodel.sh "
+                + ("Coding" if guide_task == "coding" else "General Work")
                 + " leaderboard among models admitted by Stark's RAM, GPU, current memory and disk checks. "
-                + ("This model has a published parent-model score; this Stark artifact has not been benchmarked."
-                   if recipe.id in leaderboard_used else
-                   "No matching cached score is recorded for this model; it follows scored options. "
-                   "Its quality is unknown.")
+                + (
+                    "This model has a published parent-model score; this Stark artifact has not been benchmarked."
+                    if recipe.id in leaderboard_used
+                    else "No matching cached score is recorded for this model; it follows scored options. "
+                    "Its quality is unknown."
+                )
             )
         if speed_limits["applied"]:
             reason = (
