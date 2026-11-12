@@ -134,4 +134,203 @@ dumps and model/private evaluation files out of this document.
 
 ## Follow-up history
 
-None yet.
+- 2026-11-12: the branch merged `origin/main` (`0366d566`) as `7b395605`
+  without conflicts. A metadata-only live re-check found every recorded
+  revision still at the head. All nine repositories still pass preflight and
+  header planning, with identical config and header hashes. Successor attempts
+  `20261112-DENSE-MLX-02` and `-03` below carry the numerical runs; the
+  canonical aggregates are in the
+  [qualification run record](../archive/runs/2026-11-12-dense-mlx-qwen2-mistral-qualification.md).
+  The results above remain the structural scope of attempt `-01`.
+
+## 20261112-DENSE-MLX-02: Qwen2.5 0.5B Instruct MLX 4-bit numerical qualification
+
+### Identity and state
+
+| Field | Value |
+| --- | --- |
+| Attempt ID / registered date / executed date / owner | `20261112-DENSE-MLX-02`; registered and executed 2026-11-12; Claude agent session on branch `claude/dense-mlx-qwen2-mistral` |
+| Kind | Correctness, precision and prefix reuse |
+| Attempt state | Completed |
+| Result and acceptance criterion | **Failed** the preregistered gates. `dense_parity` `bf16-centered-logits-v3` passes 0/5 cases against stock MLX-LM on the same quantized weights. Worker greedy generation is exact on prompt A (13 tokens to EOS) and diverges at token 20 of 32 on prompt B. Scorer (max 0.547 against 0.75), replay, recovery and restart controls passed. Prefix-reuse exactness **passed** (32/32 requests, 6/6 invalidations) |
+| Evidence scope | Full-model numerical (logits, greedy, scorer) and lifecycle (prefix reuse) on Metal; no timing |
+| Promotion decision | Rejected for numerical qualification at this precision policy; awaiting a precision-matched native path |
+| Disposition | Experiment only; validation tooling change adopted on branch |
+| Predecessor / related attempts / governing issue / PR | `20261112-DENSE-MLX-01`; sibling `-03`; no PR |
+
+### Hypothesis and change
+
+- **Expected behaviour:** the BF16 Stark conversion of an MLX affine Qwen2.5
+  export reproduces stock MLX-LM's logits and greedy output within the
+  existing dense gates.
+- **Baseline and candidate:** the reference is stock MLX-LM `1f7057ca`
+  (MLX 0.32.3) on the downloaded checkpoint. The candidate is the
+  `stark-convert` BF16 output on the branch's native Metal build.
+- **Thresholds:** fixed before the run (private preregistration
+  `6a443af7...`); unchanged afterwards.
+- **Diagnostics:** an MLX reference with every parameter cast to BF16, an MLX
+  F16-versus-BF16 comparison, and an F16 Stark conversion. These diagnostics
+  do not change the verdict.
+
+### Artifact, source and environment
+
+| Field | Baseline | Candidate |
+| --- | --- | --- |
+| Model family, exact checkpoint and upstream revision | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` @ `a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3`, executed by stock MLX-LM | Same source converted with `--metadata-profile hf-generic --dtype bfloat16` |
+| Format/quantization and config/weight/tokenizer/processor/template hashes | MLX affine 4-bit, group 64, tied head; all floating tensors F16; weights `ddffab9c...`, config `b045e57e...` | Output `bd822bbb...`, config `bb3b6784...`, tokenizer `9c5ae00e...`; full hashes in the run record |
+| Backend, vendor revision and local patch provenance | MLX-LM `1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7`, MLX 0.32.3, Transformers 5.7.0; recreated lock `a98ad41b...` | Native Metal dense decoder, no Rust change |
+| Stark commit, dirty patch/runtime manifest and executable hash | Not applicable | `7b395605` plus the uncommitted validation-script change committed with this record; `stark-generate` `6eea83b4...`, `stark-score` `467a33c0...`, `dense_parity` `7fcdcb2a...` |
+| Toolchains, dependency lock hashes and build flags | Python 3.13.13 | Rust 1.98.1 release, locked; converter lock `df771172...` |
+| Weight, activation, accumulation, recurrent-state and KV precision | 4-bit codes with F16 scales and biases; F16 activations and KV | 4-bit codes with BF16-rounded scales and biases; BF16 activations and KV; no recurrent state |
+| Selected kernel and materialization policies | Stock MLX quantized matmul | Not instrumented |
+| Hardware, physical RAM, OS/driver/Metal toolchain | Apple M5 Max, 128 GiB, macOS 26.7.2 (25G332) | Same |
+| Available headroom, observed peak memory and measurement method | Not measured | Not measured |
+
+### Workload and controls
+
+- **Image capability:** N/A. The source is a text-only `Qwen2ForCausalLM`
+  with no `vision_config`, and planning accepted its complete inventory.
+- **Image-loaded cache and performance arms:** N/A.
+- **MTP:** absent. There are no draft-head tensors, and the readiness reply
+  reports `mtp.supported` false.
+- **Image and MTP transitions:** N/A. The prefix harness's synthetic image
+  operation invalidated the cache as documented.
+- **Logit cases:** five, of 1, 39, 43, 129 and 1,029 tokens; context
+  max(1,024, input + 32).
+- **Generation:** two 32-token greedy generations; MTP off.
+- **Prefix harness:** context 8,192, first turn about 3,000 tokens, one tool,
+  `--max-new 64`, seed 11, exactness mode only.
+- **Run order:** serial GPU work. Another agent's workload may have shared the
+  GPU, so no timing is used.
+
+### Attempt history and failures
+
+| Trial / source | What was attempted | Observation | Validity and disposition |
+| --- | --- | --- | --- |
+| Validation tooling | Reference refused full-attention configs | Added a 1,029-token full-attention long case with tests | Tooling change; recorded |
+| Gate run | Stock MLX F16 reference versus Stark BF16 | 0/5 logit cases; prompt B diverges at token 20 | Valid failure |
+| BF16-cast reference | MLX with BF16 parameters versus Stark BF16 | 0/5; centered rel. L2 3.00-7.15%; prompt B diverges at token 19 | Diagnostic |
+| MLX self-comparison | MLX BF16-cast versus MLX F16 | 0/5; 3.42-6.41%; KL up to 0.0129; prompt B diverges at token 19 | Diagnostic calibration |
+| F16 candidate | `--dtype float16` conversion | Converts; native load `model_load_failed` | Runtime-blocked |
+| Prefix reuse | `--prefix-cache` versus without, same sealed worker | 32/32 identical and rule-matching; 6/6 invalidations | Valid pass |
+| Determinism | Source-profile reference rerun with final script | All reference hashes and generations identical | Binding control |
+
+### Correctness and lifecycle
+
+- **Logit agreement:** centered relative L2 2.86-4.84% (budget 2%). KL at most
+  0.0076 and next-token argmax agrees in every case. Stock MLX rounding its
+  own parameters to BF16 deviates more. This failure is attributed to running
+  BF16 on an all-F16 source; no Stark defect was found.
+- **Prefix reuse:** rewind reuse is exact on this artifact (2,048 to 3,072
+  reused tokens), including restart, reset, error, cancellation, scope,
+  context and image invalidation.
+- **Tests:** `scripts/test_dense_native_validation.py` (3) and the converter
+  suite; native Metal unit tests not run (no Rust change).
+
+### Performance and memory
+
+| Metric and measurement boundary | Baseline | Candidate | Repeats/dispersion | Eligibility and conclusion |
+| --- | --- | --- | --- | --- |
+| Tokenization/rendering/planning | Not measured | Not measured | None | Not measured |
+| First token / prefill | Not measured | Not measured | None | Another workload may have shared the GPU |
+| Useful decode / end-to-end rate | Not measured | Not measured | None | Not measured |
+| Observed peak memory / retained payload | Not measured | Not measured | None | Not measured |
+
+### Evidence, decision and limits
+
+- **Evidence:** aggregates and receipt hashes are in the
+  [run record](../archive/runs/2026-11-12-dense-mlx-qwen2-mistral-qualification.md).
+- **Decision:** not qualified; do not claim numerical parity for MLX Qwen2
+  artifacts.
+- **Untested:** 8-bit exports, larger Qwen2.5/QwQ exports, the catalogue
+  install route and tool behaviour.
+- **Next action:** add native F16 (or F32) activation support for MLX
+  F16-parameter sources, or adopt a reviewed precision-specific gate
+  calibrated from the MLX F16/BF16 envelope, then rerun under a new attempt ID.
+
+## 20261112-DENSE-MLX-03: Mistral 7B Instruct v0.3 MLX 4-bit numerical qualification
+
+### Identity and state
+
+| Field | Value |
+| --- | --- |
+| Attempt ID / registered date / executed date / owner | `20261112-DENSE-MLX-03`; registered and executed 2026-11-12; Claude agent session on branch `claude/dense-mlx-qwen2-mistral` |
+| Kind | Compatibility, correctness, precision and prefix reuse |
+| Attempt state | Completed |
+| Result and acceptance criterion | Published artifact: **failed** at conversion (`UnsupportedMetadata`: named chat-template list). Diagnostic template-substituted copy with identical weights, **failed** the logit gate 4/5 (1,029-token case: RMSE 0.107, centered rel. L2 4.02%). Worker greedy and scorer checks **passed**. Prefix-reuse rows were exact, but the aggregate failed on the template-driven follow-up rule |
+| Evidence scope | Conversion; full-model numerical and lifecycle evidence on a diagnostic copy only; no timing |
+| Promotion decision | Rejected; the published revision is not importable |
+| Disposition | Experiment only |
+| Predecessor / related attempts / governing issue / PR | `20261112-DENSE-MLX-01`; sibling `-02`; no PR |
+
+### Hypothesis and change
+
+- **Expected behaviour:** the published MLX export converts and matches stock
+  MLX-LM within the dense gates.
+- **Baseline and candidate:** the same as `-02`, applied to
+  `mlx-community/Mistral-7B-Instruct-v0.3-4bit`.
+- **Thresholds:** the same preregistration as `-02`.
+- **Diagnostic copies:** they replace only `tokenizer_config.json`'s named
+  `chat_template` list with its `default` (numerics) or `tool_use` (prefix
+  harness) string. Weights are byte-identical, and these copies are not
+  qualification artifacts.
+
+### Artifact, source and environment
+
+| Field | Baseline | Candidate |
+| --- | --- | --- |
+| Model family, exact checkpoint and upstream revision | `mlx-community/Mistral-7B-Instruct-v0.3-4bit` @ `a4b8f870474b0eb527f466a03fbc187830d271f5` | Published: no artifact. Diagnostic: same weights, substituted template |
+| Format/quantization and config/weight/tokenizer/processor/template hashes | MLX affine 4-bit, group 64, untied; all floating tensors F16; weights `d7182d88...`; `tokenizer_config.json` `e8fbcfef...` | Diagnostic output `4283ec25...`, config `a8ced577...`, tokenizer `3e017710...` |
+| Backend, vendor revision and local patch provenance | As in `-02` | As in `-02` |
+| Stark commit, dirty patch/runtime manifest and executable hash | Not applicable | As in `-02` |
+| Toolchains, dependency lock hashes and build flags | As in `-02` | As in `-02` |
+| Weight, activation, accumulation, recurrent-state and KV precision | F16 scales, biases, norms and activations | BF16-rounded scales and biases; BF16 activations and KV |
+| Selected kernel and materialization policies | Stock MLX | Not instrumented |
+| Hardware, physical RAM, OS/driver/Metal toolchain | As in `-02` | As in `-02` |
+| Available headroom, observed peak memory and measurement method | Not measured | Not measured |
+
+### Workload and controls
+
+- **Image capability:** N/A. The source is a text-only `MistralForCausalLM`
+  with no `vision_config`.
+- **MTP:** absent. The complete inventory has no draft-head tensors.
+- **Image arms:** N/A.
+- **Workload:** the same cases and budgets as `-02`, with prompt lengths of 16
+  and 20 tokens. The prefix harness used the `tool_use` copy, because the
+  `default` template cannot render its tool history.
+
+### Attempt history and failures
+
+| Trial / source | What was attempted | Observation | Validity and disposition |
+| --- | --- | --- | --- |
+| Published conversion | `stark-convert` on the pinned download | `conversion_failed`; cause `UnsupportedMetadata` | Valid failure |
+| Gate run (diagnostic copy) | Stock MLX F16 versus Stark BF16 | 4/5 logit cases; 1,029-token case fails; workers pass | Diagnostic weights evidence; gate failed |
+| BF16-cast reference | MLX BF16 versus Stark BF16 | 4/5; 1,029-token case passes at 1.11%; 20-token case fails at 2.80% | Diagnostic |
+| MLX self-comparison | MLX BF16-cast versus MLX F16 | 3/5; 1,029-token case: RMSE 0.108, 4.18% | Diagnostic calibration |
+| Prefix (`default` template) | Exactness harness | `ChatError`; not run | Invalid setup |
+| Prefix (`tool_use` copy) | Exactness harness | 32/32 identical and rule-matching; `follow_up_3` reused 0 | Rows pass; aggregate fails |
+
+### Correctness and lifecycle
+
+- **Diagnostic weights:** match MLX within the gate except the 1,029-token
+  case. Stock MLX's own BF16 rounding deviates the same amount there, and
+  greedy generation is exact on both prompts.
+- **Prefix reuse:** rewind reuse is exact for every request, and all
+  invalidations reuse nothing.
+- **Template limit:** the template layout limits follow-up reuse. This is an
+  interpretation, not a reproduced engine fault.
+
+### Performance and memory
+
+Not measured, for the same reason as `-02`.
+
+### Evidence, decision and limits
+
+- **Evidence:** the
+  [run record](../archive/runs/2026-11-12-dense-mlx-qwen2-mistral-qualification.md).
+- **Decision:** not qualified, and the published revision is not importable.
+  By code reading, the catalogue still offers it for download.
+- **Next action:** decide whether named chat templates fail closed in the
+  catalogue, or are supported through the tool-template review. Then rerun on
+  the published artifact under a new ID, with the precision follow-up from
+  `-02`.

@@ -84,9 +84,11 @@ Per-module overrides and five/six-bit widths remain limited to the families
 that document them.
 Qwen2 attention biases stay separate full-precision vectors beside the packed
 projection. Granite, Gemma 2 and Phi-3 reject quantized sources. The Qwen2 and
-Mistral MLX paths are structural only: header planning and code review, with no
-native load, reference comparison or speed measurement
+Mistral MLX paths are not numerically qualified
 ([20261112-DENSE-MLX-01](archive/runs/2026-11-12-dense-mlx-qwen2-mistral.md)).
+Their F16-parameter sources run as BF16 and miss the stock-MLX logit gates, and
+a named chat-template list blocks conversion
+([20261112-DENSE-MLX-02/03](archive/runs/2026-11-12-dense-mlx-qwen2-mistral-qualification.md)).
 
 Qwen3.5 MoE image conversion has two schema-3 profiles: affine-quantized source
 weights use `qwen35-moe-affine-merged-v4`, while complete BF16 source weights
