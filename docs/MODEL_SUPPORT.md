@@ -160,6 +160,18 @@ headers could not be verified. Quantization tabs and counts follow the listed
 rows. The list states how many rows are hidden, and when every row found so far
 is hidden it offers to show them. Unchecking it lists those rows as
 **Unavailable** with their reason.
+
+A GPU-server quantization export (AWQ, GPTQ, bitsandbytes and similar) that
+declares the model it was made from is folded under that model when the model
+is a downloadable row among those loaded. A folded export is never a row of its
+own and is not counted as hidden. With **Hide Unsupported** unchecked, the
+original's group names its folded exports, each linked to its repository, up to
+six with a count of the rest. Searching for a folded export's name, repository
+or format shows the original with the same note, so a search for an AWQ build
+lands on the model Stark can import. An export whose original is not loaded, or
+is itself unavailable, stays an **Unavailable** row and links to the declared
+original on Hugging Face. Folding follows the rows loaded so far, so a row can
+fold when a later page brings in its original.
 Conversion-only families are omitted. Cards show whether each model supports
 text or text and images. Downloads automatically include image support when
 available for that artifact. This requires metadata confirming a supported
@@ -227,6 +239,86 @@ catalogue's 4 MiB inspection limit remains unavailable with an explanation.
 Duplicate tied-tensor payload equality is checked during full conversion.
 Native loading and model execution remain separate checks.
 
+Each family planner admits an explicit set of `config.json` keys. Before a
+planner validates a configuration, one shared pass
+(`stark_convert/config_normalization.py`) rewrites a small set of reviewed
+forms that do not change the model. The planner applies it on the line that
+reads its configuration, so catalogue admission and the source-backed
+conversion that installs the model always judge the same normalized
+configuration. The source `config.json` is never modified. The pass:
+
+- drops publisher annotations and sampling defaults when their value has the
+  expected shape: `unsloth_fixed`, `unsloth_version`, `transformers.js_config`,
+  `model_name`, `generation_config`, `do_sample`, `top_p`, `top_k`,
+  `temperature`, `is_llama_config` and `init_method`. A malformed value is
+  refused rather than dropped;
+- drops `rope_interleaved` only when it is `false` and `rope_scaling` only
+  when it is `null`;
+- renames `dtype` to `torch_dtype` when `torch_dtype` is absent;
+- sets a nonzero `attention_dropout` within (0, 1] to 0.0. Dropout is inactive
+  at inference. This is a separate judgement call that
+  `ZERO_INACTIVE_ATTENTION_DROPOUT` turns off on its own;
+- for planners that read a single flat `rope_theta` and reject a nested
+  declaration (Qwen2, Mistral, Gemma 2, OLMo 3, Phi-3, Granite and SmolLM3),
+  flattens a plain `rope_parameters` object holding only `rope_theta` and an
+  absent or default `rope_type`. Qwen3, Llama and LFM2 already validate that
+  plain form themselves and see it unchanged;
+- for Gemma 2 and Gemma 3 text, drops `sliding_window_size` when it is an
+  integer equal to the required `sliding_window` the planner uses;
+- for LFM2, drops `tie_word_embeddings: true` unless `tie_embedding` is
+  `false` (the planner reads `tie_embedding`, default tied), and sets an absent
+  `block_ff_dim` from a positive integer `intermediate_size` (the Transformers
+  `Lfm2Config` stores one as the other).
+
+Gemma 4 and Qwen3.5 also apply the generic rules to their nested
+`text_config`. Everything else still fails closed in the planner: unknown keys,
+two differing declared RoPE bases, a plain `rope_parameters` beside a non-null
+`rope_scaling`, scaled, YaRN, linear, partial-rotary or per-attention-type RoPE
+forms, `rope_interleaved: true`, both `dtype` and `torch_dtype` declared, and
+dropout outside its valid range. The Gemma 3 image wrapper, the external
+Qwen3.8 profiles, LLaMBA and ModernBERT keep their configurations unchanged.
+Image-mode contract validators that read the configuration separately are not
+affected by this pass.
+
+An **Unavailable** row states one reason, chosen in this order:
+
+- **GPU-server quantization.** A `quantization_config` whose `quant_method` is
+  anything other than MLX (for example AWQ, GPTQ, bitsandbytes, FP8,
+  compressed-tensors, ModelOpt or AutoRound), with no MLX `quantization` block,
+  is named as that format. The row's quantization label is the method name
+  only, never a guessed bit width, and the reason says Stark imports the
+  model's original weights or its MLX exports. This takes precedence over
+  every other check, and no tensor header is requested for such a row. The
+  rule applies only where the import-format check already rejects the source,
+  so it never changes which rows can be downloaded. An MLX export, which
+  writes a `quantization` block and usually a matching `quantization_config`,
+  is not affected. When the Hub tags of such a row carry exactly one
+  `base_model:quantized:<repository>` entry naming another valid repository,
+  the row also carries that repository as its declared original. The tag comes
+  from the export's own model card and is not verified; it is used only to
+  place the row in the browser. The named repository is never requested on
+  the export's behalf, and the pointer never selects or alters a download.
+- **Configuration or format checks.** Preflight, quantization parsing and
+  container checks report their own message, such as an unsupported MLX
+  option, untied embeddings or a missing shard index.
+- **Importer rejection.** When the tensor planner or header inventory rejects
+  the checkpoint, the row shows the importer's own message, for example
+  "RoPE scaling is outside qualified dense coverage." These are fixed
+  messages written in the importer that name config fields and rules, never
+  file paths or tensor contents. A message is cut to the 240-byte reason
+  limit; one with control characters, and any unexpected exception type,
+  falls back to the general statement that tensor names, shapes or packing do
+  not match the family's importer.
+- **Access approval.** When the Hub marks a repository as gated and its tensor
+  headers cannot be read, the row asks the user to sign in to Hugging Face,
+  accept the model's terms and refresh. Like an unverified header read, this
+  verdict is never cached, so a refresh after approval checks the source
+  again. A gated source whose configuration cannot be read is still left out
+  of the list.
+- **Header limits.** A header beyond the 4 MiB inspection limit keeps its own
+  reason, and any other header read failure on a source that is not gated
+  still asks for a refresh.
+
 GLM and Flint searches also display other family exports with their import
 limitations. Their supported native installers currently bind exact artifacts.
 GLM's downloadable `UD-Q2_K_XL` GGUF entry keeps its source revisions, four
@@ -234,7 +326,9 @@ shards and 108,720,071,552 stored weight bytes owned by the preparation helper.
 Flint keeps its pinned MLX affine INT4 checkpoint. These entries use bundled
 metadata, while discovery of other variants uses the Hub. Download preserves
 quantized bytes and validates the prepared identity before library registration.
-Download progress remains indeterminate until the stored byte total is verified.
+Native downloads show a progress bar for completed model files against the pinned
+weight total, with received network bytes separately. Partial allocations never
+advance the bar; final weight validation still gates completion.
 GLM image input and Decision mode are unavailable.
 Known Gemma 4 image choices use the immutable revisions bound by their image
 import profiles. Later repository revisions require their own image admission.

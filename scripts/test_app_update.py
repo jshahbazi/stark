@@ -889,6 +889,17 @@ print("Swift updater checks passed")
 CONTROLLER_DRIVER = r"""
 import Foundation
 
+final class RecordingScheduler: NSBackgroundActivityScheduler, @unchecked Sendable {
+    var callback: (@Sendable (@escaping NSBackgroundActivityScheduler.CompletionHandler) -> Void)?
+    var stopped = false
+
+    override func schedule(_ block: @escaping @Sendable (@escaping NSBackgroundActivityScheduler.CompletionHandler) -> Void) {
+        callback = block
+    }
+
+    override func invalidate() { stopped = true }
+}
+
 @MainActor
 final class Scenario {
     var date = Date(timeIntervalSince1970: 0)
@@ -906,30 +917,16 @@ final class Scenario {
     var fetchGate: CheckedContinuation<Void, Never>?
     var prepareGate: CheckedContinuation<Void, Never>?
     var installGate: CheckedContinuation<Void, Never>?
-    var manualAutomaticClock = false
-    var automaticClockGate: CheckedContinuation<Void, Never>?
-    var automaticClockWakeCount = 0
+    var scheduledCheck: (@MainActor () async -> Void)?
+    var scheduleStarts = 0
+    var scheduleStops = 0
+    var scheduledInterval: TimeInterval?
     var assertBusy: (() -> Void)?
     var workspaces: [URL] = []
     var expectedVersion = "0.3.0"
     var installedBuild: InstalledAppBuild?
 
-    func waitForAutomaticCheck(_ interval: TimeInterval) async throws {
-        guard manualAutomaticClock else {
-            try await Task.sleep(for: .seconds(interval))
-            return
-        }
-        automaticClockWakeCount += 1
-        await withCheckedContinuation { automaticClockGate = $0 }
-    }
-
-    func resumeAutomaticCheck() {
-        let gate = automaticClockGate
-        automaticClockGate = nil
-        gate?.resume()
-    }
-
-    func controller(interval: TimeInterval = 3600) -> AppUpdateController {
+    func controller(interval: TimeInterval = 900, schedule: AppUpdateSchedule? = nil) -> AppUpdateController {
         let effects = AppUpdateOperations(fetch: { [self] installed in
             precondition(installed == expectedVersion)
             fetchCount += 1
@@ -960,9 +957,11 @@ final class Scenario {
         return AppUpdateController(installed: installedBuild == nil ? "0.3.0" : nil,
                                    installedBuild: installedBuild, operations: effects, now: { self.date },
                                    automaticCheckInterval: interval, restorePreviousFailure: false,
-                                   waitForAutomaticCheck: { interval in
-                                       try await self.waitForAutomaticCheck(interval)
-                                   })
+                                   schedule: schedule ?? AppUpdateSchedule(start: { interval, check in
+                                       self.scheduleStarts += 1
+                                       self.scheduledInterval = interval
+                                       self.scheduledCheck = check
+                                   }, stop: { self.scheduleStops += 1 }))
     }
 
     func cleanup() {
@@ -983,6 +982,35 @@ func waitFor(_ condition: () -> Bool) async {
 struct ControllerChecks {
     @MainActor
     static func main() async {
+        // Exercise the production scheduler adapter with every window closed:
+        // completion must wait for the download and verification to finish.
+        let nativeScheduler = RecordingScheduler(identifier: "com.starkengine.updater-test")
+        let background = Scenario()
+        background.latest = nil
+        let backgroundController = background.controller(schedule: .live(scheduler: nativeScheduler))
+        backgroundController.startAutomaticChecks()
+        await waitFor { !backgroundController.busy }
+        precondition(nativeScheduler.interval == 900 && nativeScheduler.tolerance == 60)
+        precondition(nativeScheduler.repeats && nativeScheduler.qualityOfService == .utility)
+        background.latest = Scenario().latest
+        background.blockPrepare = true
+        // macOS may fire a minute early within the tolerance window.
+        background.date += 840
+        var completed = false
+        nativeScheduler.callback? { result in
+            precondition(result == .finished)
+            Task { @MainActor in completed = true }
+        }
+        await waitFor { background.prepareGate != nil }
+        precondition(!completed && backgroundController.actionTitle == "Downloading...")
+        background.prepareGate?.resume()
+        await waitFor { completed }
+        precondition(!backgroundController.busy && backgroundController.actionTitle == "Upgrade")
+        precondition(background.events == ["fetch", "fetch", "download", "verify"])
+        backgroundController.stopAutomaticChecks()
+        precondition(nativeScheduler.stopped)
+        background.cleanup()
+
         // A click before discovery carries through fetch, preparation and install.
         let manual = Scenario()
         manual.blockFetch = true
@@ -993,11 +1021,13 @@ struct ControllerChecks {
         manualController.performAction()
         await waitFor { manual.fetchGate != nil }
         precondition(manualController.message == "Checking for updates…")
+        precondition(manualController.actionTitle == "Check for Upgrades")
         manualController.performAction()
         manualController.checkIfNeeded()
         precondition(manual.fetchCount == 1 && manualController.busy)
         manual.fetchGate?.resume()
         await waitFor { manual.prepareGate != nil }
+        precondition(manualController.actionTitle == "Downloading...")
         manualController.performAction()
         precondition(manual.events == ["fetch", "download"] && manualController.busy)
         manual.prepareGate?.resume()
@@ -1084,13 +1114,14 @@ struct ControllerChecks {
         first.stopAutomaticChecks()
         discovery.fetchGate?.resume()
         await waitFor { discovery.prepareGate != nil }
+        precondition(first.actionTitle == "Downloading...")
         first.performAction()
         first.check()
         precondition(first.busy && discovery.events == ["fetch", "download"])
         discovery.prepareGate?.resume()
         await waitFor { !first.busy }
         precondition(first.available?.version == "0.4.0")
-        precondition(first.actionTitle == "Upgrade to 0.4.0")
+        precondition(first.actionTitle == "Upgrade" && !first.downloading)
         precondition(discovery.events == ["fetch", "download", "verify"])
         precondition(first.message == "Stark 0.4.0 is ready to upgrade.")
 
@@ -1161,6 +1192,7 @@ struct ControllerChecks {
         precondition(throttle.events.suffix(2) == ["download", "verify"])
         precondition(!throttle.events.contains("install"))
         precondition(second.message == AppUpdateError.checksum.localizedDescription)
+        precondition(!second.downloading && second.actionTitle == "Upgrade")
         let failure = second.message
         throttle.fetchFailure = .download
         throttle.date += 900
@@ -1177,7 +1209,7 @@ struct ControllerChecks {
         throttle.date += 900
         second.checkIfNeeded()
         await waitFor { !second.busy }
-        precondition(second.actionTitle == "Upgrade to 0.4.0" && second.message == failure)
+        precondition(second.actionTitle == "Upgrade" && second.message == failure)
 
         // Retrying after preparation failure starts fresh and reaches installation.
         throttle.prepareFailure = nil
@@ -1256,32 +1288,37 @@ struct ControllerChecks {
         withdrawnController.check()
         await waitFor { !withdrawnController.busy }
         precondition(withdrawnController.available == nil)
+        precondition(withdrawnController.actionTitle == "Check for Upgrades")
         precondition(!FileManager.default.fileExists(atPath: withdrawnWorkspace.path))
         precondition(!withdrawn.events.contains("install"))
 
         let quiet = Scenario()
         quiet.fetchFailure = .download
-        let third = quiet.controller(interval: 0.01)
-        quiet.manualAutomaticClock = true
+        let third = quiet.controller()
         third.startAutomaticChecks()
         third.startAutomaticChecks()
         await waitFor { !third.busy }
         precondition(third.message.isEmpty && third.available == nil)
-        await waitFor { quiet.automaticClockWakeCount == 1 }
+        precondition(quiet.scheduleStarts == 1 && quiet.scheduledInterval == 900)
+        precondition(third.actionTitle == "Check for Upgrades")
         quiet.fetchFailure = nil
-        quiet.date += 3600
-        quiet.resumeAutomaticCheck()
+        quiet.date += 900
+        await quiet.scheduledCheck?()
         await waitFor { quiet.fetchCount == 2 && !third.busy }
         precondition(third.available?.version == "0.4.0" && quiet.events == ["fetch", "fetch", "download", "verify"])
-        await waitFor { quiet.automaticClockWakeCount == 2 }
-        guard let automaticTask = third.automaticChecksFixtureTask else {
-            preconditionFailure("automatic check task was not retained")
-        }
+        let staleCallback = quiet.scheduledCheck
         third.stopAutomaticChecks()
-        quiet.date += 3600
-        quiet.resumeAutomaticCheck()
-        await automaticTask.value
+        precondition(quiet.scheduleStops == 1)
+        quiet.date += 900
+        await quiet.scheduledCheck?()
         precondition(quiet.fetchCount == 2 && !third.busy)
+        third.startAutomaticChecks()
+        precondition(quiet.scheduleStarts == 2)
+        await waitFor { !third.busy }
+        quiet.date += 900
+        await staleCallback?()
+        precondition(quiet.fetchCount == 3)
+        third.stopAutomaticChecks()
         quiet.cleanup()
         print("Swift updater controller checks passed")
     }
@@ -1344,9 +1381,6 @@ class SwiftUpdateTests(unittest.TestCase):
             source = root / "AppUpdate.swift"
             source.write_text(
                 (ROOT / "apps/menu-bar/Sources/AppUpdate.swift").read_text()
-                + "\nextension AppUpdateController {\n"
-                + "    var automaticChecksFixtureTask: Task<Void, Never>? { automaticChecks }\n"
-                + "}\n"
             )
             result = subprocess.run(
                 [

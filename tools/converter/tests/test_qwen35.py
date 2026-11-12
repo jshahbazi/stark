@@ -342,7 +342,10 @@ def test_malformed_tensor_layouts_fail_closed(tmp_path, case):
         ("pretraining_tp", 2, UnsupportedConversion),
     ],
 )
-def test_unsupported_and_malformed_config_variants(tmp_path, field, value, error):
+def test_unsupported_and_malformed_config_variants(tmp_path, monkeypatch, field, value, error):
+    # The planner's own dropout check stays covered; the shared normalizer's
+    # separate inactive-dropout rewrite is switched off for this test.
+    monkeypatch.setattr("stark_convert.config_normalization.ZERO_INACTIVE_ATTENTION_DROPOUT", False)
     source = tmp_path / "source"
     config, _ = qwen35_fixture(source)
     config[field] = value

@@ -164,4 +164,6 @@ def test_image_header_failure_cannot_offer_a_text_only_download(tmp_path, monkey
     assert item["default_artifact_mode"] == "vision-language"
     assert item["downloadable"] is (vision_layout == "valid")
     if vision_layout != "valid":
-        assert "tensor" in item["unavailable_reason"]
+        # The importer's own message names the rejected vision tensor.
+        assert item["unavailable_reason"].startswith("Qwen3.5 vision")
+        assert name in item["unavailable_reason"]

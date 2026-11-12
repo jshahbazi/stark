@@ -1934,6 +1934,74 @@ extension EngineController {
                 guard FamilyModelCatalog.Item(malformed) == nil else { return false }
             }
             return true
+        case "catalog-foreign-exports-fold-under-original":
+            func export(_ id: String, repo: String, group: String, quantization: String, original: String?) -> [String: Any] {
+                var item = groupedCatalogItem(id, repo: repo, name: repo.components(separatedBy: "/")[1], group: group,
+                                              groupName: "Group " + group, publisher: repo.components(separatedBy: "/")[0],
+                                              quantization: quantization)
+                item["downloadable"] = false; item["unavailable_reason"] = "Fixture reason"
+                if let original { item["original_repo"] = original }
+                return item
+            }
+            let raw = [
+                groupedCatalogItem("original", repo: "Owner/Model-7B", name: "Model-7B", group: "1", groupName: "Model 7B",
+                                   publisher: "Owner"),
+                // The declared original matches whatever its letter case.
+                export("gptq", repo: "other/Model-7B-GPTQ", group: "2", quantization: "GPTQ", original: "Owner/Model-7B"),
+                export("awq", repo: "owner/Model-7B-AWQ", group: "3", quantization: "AWQ", original: "owner/model-7b"),
+                export("orphan", repo: "other/Lost-AWQ", group: "4", quantization: "AWQ", original: "missing/Lost"),
+                export("blocked", repo: "owner/Blocked", group: "5", quantization: "BF16", original: nil),
+                export("blocked-export", repo: "other/Blocked-AWQ", group: "6", quantization: "AWQ", original: "owner/Blocked"),
+                export("dead", repo: "owner/Dead", group: "7", quantization: "BF16", original: nil)
+            ]
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
+            // Only an export whose original can be downloaded here is folded.
+            let exports = CatalogBrowserInventory.foldedExports(catalog.items)
+            guard Array(exports.keys) == ["owner/model-7b"],
+                  exports["owner/model-7b"]?.map(\.id).sorted() == ["awq", "gptq"] else { return false }
+            let supported = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: true)
+            let everything = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: false)
+            guard supported.map(\.id) == ["original"],
+                  everything.map(\.id) == ["original", "orphan", "blocked", "blocked-export", "dead"],
+                  catalog.items.count - supported.count - exports.values.reduce(0, { $0 + $1.count }) == 4,
+                  !CatalogQuantizationFilter.tabs(for: supported).contains(.quantization("GPTQ")) else { return false }
+            func groups(_ items: [FamilyModelCatalog.Item], _ query: String = "") -> [CatalogBrowserInventory.Group] {
+                CatalogBrowserInventory(items: items, query: query, exports: exports).groups
+            }
+            // The original carries its exports, ordered by format.
+            guard groups(supported).count == 1, groups(supported)[0].exports.map(\.id) == ["awq", "gptq"],
+                  !groups(supported)[0].foundByExport,
+                  groups(everything).first(where: { $0.items[0].id == "orphan" })?.exports.isEmpty == true else { return false }
+            // Searching for an export lands on its original and says why; the original's own match does not.
+            guard groups(supported, "gptq").map({ $0.items.map(\.id) }) == [["original"]],
+                  groups(supported, "gptq")[0].foundByExport,
+                  groups(supported, "model-7b-awq")[0].foundByExport,
+                  groups(supported, "model-7b")[0].foundByExport == false,
+                  groups(supported, "lost").isEmpty,
+                  groups(supported, "   ")[0].foundByExport == false,
+                  CatalogBrowserInventory(items: supported, query: "gptq").groups.isEmpty else { return false }
+            let summary = CatalogBrowserInventory.exportSummary(groups(supported)[0].exports)
+            guard String(summary.characters) == "Also published as AWQ by owner and GPTQ by other. "
+                      + "Stark cannot import those formats, so this original is listed instead.",
+                  summary.runs.compactMap(\.link).map(\.absoluteString) == [
+                      "https://huggingface.co/owner/Model-7B-AWQ", "https://huggingface.co/other/Model-7B-GPTQ"],
+                  String(CatalogBrowserInventory.exportSummary([exports["owner/model-7b"]![0]]).characters)
+                      .hasSuffix("Stark cannot import that format, so this original is listed instead.") else { return false }
+            let many = (0..<8).compactMap { index in
+                FamilyModelCatalog.Item(export("many\(index)", repo: "pub\(index)/Model-7B-AWQ", group: "8", quantization: "AWQ",
+                                               original: "Owner/Model-7B"))
+            }
+            guard many.count == 8,
+                  String(CatalogBrowserInventory.exportSummary(many).characters).contains("AWQ by pub5 and 2 more."),
+                  CatalogBrowserInventory.exportSummary(many).runs.compactMap(\.link).count == 6 else { return false }
+            // A pointer is rejected on a downloadable row, at itself, or when it is not a repository.
+            var pointed = raw[0]; pointed["original_repo"] = "other/Model-7B"
+            guard FamilyModelCatalog.Item(pointed) == nil else { return false }
+            for value in ["other/model-7b-gptq", "not a repo", "owner", "a/b/c", "https://example.com/a/b", 7] as [Any] {
+                var malformed = raw[1]; malformed["original_repo"] = value
+                guard FamilyModelCatalog.Item(malformed) == nil else { return false }
+            }
+            return catalog.items.first(where: { $0.id == "orphan" })?.originalRepo == "missing/Lost"
         case "catalog-browser-row-size-and-numeric-fallback":
             let raw = [
                 groupedCatalogItem("unknown", repo: "owner/Unknown", name: "Unknown", group: "1", groupName: "Model", publisher: "owner", size: nil),
@@ -2050,6 +2118,31 @@ extension EngineController {
             let install = command()
             guard install["command"] as? String == "install_catalog", install["catalog_request_id"] as? String == browse["request_id"] as? String,
                   install["artifact_mode"] as? String == "text", engine.busy, engine.downloadProgress.state == "waiting" else { return false }
+            engine.apply(["event": "status", "state": "installing", "message": "Downloading model files…"])
+            engine.apply(["event": "progress", "request_id": install["support_request_id"]!,
+                          "phase": "download", "state": "running", "completed_bytes": Int64(2_000_000)])
+            guard engine.message == "Downloading model files…", engine.downloadProgress.completedBytes == 2_000_000,
+                  engine.downloadProgress.detail(for: "download") == "2 MB",
+                  InstallProgress(state: "running").detail(for: "download") == "Downloading…",
+                  InstallProgress(state: "running").detail(for: "conversion") == "Preparing…" else { return false }
+            let received: [String: Any] = ["event": "progress", "request_id": install["support_request_id"]!,
+                "phase": "download", "state": "running", "completed_bytes": Int64(78_000),
+                "transferred_bytes": Int64(2_000_000_000)]
+            engine.apply(received)
+            guard engine.downloadProgress.completedBytes == 78_000,
+                  engine.downloadProgress.detail(for: "download") == "2 GB received",
+                  !engine.downloadProgress.showsProgressBar,
+                  InstallProgress(state: "running", completedBytes: 25, totalBytes: 100).showsProgressBar,
+                  InstallProgress(state: "running", completedBytes: 25, totalBytes: 100).fraction == 0.25 else { return false }
+            engine.apply(received.merging(["transferred_bytes": Int64(3_000_000_000)]) { _, new in new })
+            guard engine.downloadProgress.detail(for: "download") == "3 GB received" else { return false }
+            let known = InstallProgress(state: "running", completedBytes: 25, totalBytes: 100, transferredBytes: 200)
+            guard known.showsProgressBar, known.fraction == 0.25, known.detail(for: "download") == "25%",
+                  known.transferredBytes == 200 else { return false }
+            for bad: Any in [true, -1, 1.5, "100"] {
+                engine.apply(received.merging(["transferred_bytes": bad]) { _, new in new })
+                guard engine.downloadProgress.transferredBytes == 3_000_000_000 else { return false }
+            }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             guard engine.busy, engine.catalogInstallation != nil else { return false }
             engine.apply(["event": "models", "models": [
@@ -2149,15 +2242,29 @@ extension EngineController {
             let browse = command(); engine.apply(catalogReply(browse))
             engine.installCatalogItem(id: "entry")
             let install = command()
-            engine.stop(); _ = command()
+            engine.stop()
+            let stoppedCommands = commands()
+            guard stoppedCommands.map({ $0["command"] as! String }) == ["stop", "catalog"],
+                  let refresh = stoppedCommands.last,
+                  refresh["request_id"] as? String != browse["request_id"] as? String,
+                  engine.catalogFamilyID == "qwen3", engine.catalogLoading,
+                  engine.catalogInstallation == nil, engine.activeInstallRequestID == nil else { return false }
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
             engine.selectedID = "replacement"
             engine.apply(["event": "ready", "mode": "decision", "model_id": "replacement"])
             engine.apply(["event": "installed", "support_request_id": install["support_request_id"]!, "model": ["id": "stale-model"]])
             engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Stale failure"])
             engine.apply(catalogReply(browse))
-            return engine.selectedID == "replacement" && engine.loadedID == "replacement" && engine.modelReady &&
-                engine.catalog == nil && engine.errorMessage == nil
+            guard engine.catalog == nil, engine.catalogLoading, engine.errorMessage == nil,
+                  engine.catalogInstallMessage == nil, !engine.catalogInstallFailed else { return false }
+            engine.apply(catalogReply(refresh))
+            guard engine.selectedID == "replacement", engine.loadedID == "replacement", engine.modelReady,
+                  engine.catalog?.status == .ready, engine.catalog?.items.map(\.id) == ["entry"],
+                  !engine.catalogLoading, engine.catalogError == nil else { return false }
+            engine.installCatalogItem(id: "entry")
+            let retry = command()
+            return retry["command"] as? String == "install_catalog" &&
+                retry["catalog_request_id"] as? String == refresh["request_id"] as? String
         case "model-removal-confirmation":
             let imported = InstalledModel(id: "imported", name: "Exact imported name", path: "/private/imported", apiID: "id",
                                           removal: InstalledModelRemoval(removal("unregister")))
@@ -3106,6 +3213,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_catalog_top_rated_sort_prefers_fitting_scored_rows(self):
         self.exercise("catalog-browser-top-rated-sort")
+
+    def test_foreign_exports_fold_under_their_downloadable_original(self):
+        self.exercise("catalog-foreign-exports-fold-under-original")
 
     def test_grouped_rows_sort_numeric_sizes_with_parameter_fallback_and_bounds(self):
         self.exercise("catalog-browser-row-size-and-numeric-fallback")

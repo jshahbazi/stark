@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from .compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from .config_normalization import normalize_config
 from .streaming import (
     ConversionError,
     ConversionPlan,
@@ -133,7 +134,9 @@ def build_qwen3_plan(
     checkpoint_metadata: CheckpointMetadata | None = None,
 ) -> ConversionPlan:
     """Plan all output tensors from strict checkpoint headers before writing."""
-    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    config = normalize_config(
+        "qwen3", read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     if config.get("model_type") != "qwen3":
         raise UnsupportedConversion("Streaming converter supports Qwen3")
     if dtype not in _DTYPES:

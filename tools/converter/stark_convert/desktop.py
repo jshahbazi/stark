@@ -37,6 +37,7 @@ from .api_tools import (
     validate_parser_tools,
 )
 from .catalog_ranking import RELATIONSHIPS as REFERENCE_RELATIONSHIPS
+from .catalog_reasons import REPOSITORY as ORIGINAL_REPOSITORY
 from .chat import (
     ChatBudgetUnavailable,
     ChatCancelled,
@@ -361,7 +362,8 @@ def converter_progress(value):
         and value["category"] in CONVERTER_FAILURE_CATEGORIES
     ):
         return {"failure_category": value["category"]}
-    if not isinstance(value, dict) or set(value) != {"phase", "state", "completed_bytes", "total_bytes"}:
+    required = {"phase", "state", "completed_bytes", "total_bytes"}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"transferred_bytes"}:
         return None
     if (
         not isinstance(value["phase"], str)
@@ -377,7 +379,13 @@ def converter_progress(value):
         return None
     if value["state"] == "complete" and total is not None and completed != total:
         return None
-    return {key: value[key] for key in ("phase", "state", "completed_bytes", "total_bytes")}
+    if "transferred_bytes" in value and (
+        value["phase"] != "download"
+        or type(value["transferred_bytes"]) is not int
+        or not 0 <= value["transferred_bytes"] <= 2**63 - 1
+    ):
+        return None
+    return dict(value)
 
 
 def converter_failure_message(category):
@@ -774,6 +782,17 @@ class Desktop:
                 or any(ord(char) < 32 or ord(char) == 127 for char in reason)
             ):
                 raise ValueError()
+            original = item.get("original_repo")
+            if original is not None:
+                # Only a row that cannot be downloaded may point at another
+                # repository, and never at itself.
+                if (
+                    item["downloadable"]
+                    or not isinstance(original, str)
+                    or ORIGINAL_REPOSITORY.fullmatch(original) is None
+                    or original.casefold() == item["repo"].casefold()
+                ):
+                    raise ValueError()
             group = item.get("model_group")
             if group is not None and (
                 not isinstance(group, dict)
@@ -955,7 +974,7 @@ class Desktop:
             self.start(
                 self.install,
                 "installing",
-                "Checking model support…",
+                "Starting model download…" if native_choice else "Checking model support…",
                 "native" if native_choice else "huggingface",
                 native_choice or item["repo"],
                 mode,
@@ -1479,7 +1498,7 @@ class Desktop:
                 gpu_memory_bytes=amount,
             )
 
-    def progress(self, epoch, phase, state, completed_bytes=0, total_bytes=None):
+    def progress(self, epoch, phase, state, completed_bytes=0, total_bytes=None, transferred_bytes=None):
         with self.lock:
             if epoch != self.epoch or self.install_epoch != epoch:
                 return
@@ -1489,7 +1508,16 @@ class Desktop:
                 return
             if previous and completed_bytes < previous["completed_bytes"]:
                 return
+            previous_transferred = previous.get("transferred_bytes") if previous else None
+            if transferred_bytes is not None or previous_transferred is not None:
+                value["transferred_bytes"] = max(transferred_bytes or 0, previous_transferred or 0)
             self.install_progress[phase] = value
+            if state == "running" and (previous is None or previous["state"] != "running"):
+                self.status(
+                    "installing",
+                    "Downloading model files…" if phase == "download" else "Preparing model…",
+                    epoch,
+                )
             request_id = getattr(self, "install_request_id", None)
             self.emit("progress", epoch, phase=phase, **value, **({"request_id": request_id} if request_id else {}))
 

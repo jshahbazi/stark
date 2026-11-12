@@ -12,6 +12,7 @@ import ctypes
 import errno
 import hashlib
 import json
+import math
 import os
 import shutil
 import struct
@@ -22,7 +23,7 @@ from huggingface_hub import snapshot_download
 
 from . import qwen38_external
 from .cli import _publish
-from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
+from .progress import FDProgressSink, ProgressCallback, ProgressReporter, SnapshotDownloadProgress, reporter
 from .sources import SourceSnapshot, _verified_hashes, huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion, load_checkpoint, read_safetensors_header
 
@@ -610,6 +611,35 @@ def _external_identity(directory: Path, config: dict, receipt: dict, marker: dic
     }
 
 
+def completed_model_bytes(stage: Path, source: dict) -> int:
+    """Count completed Hub files at the pinned revision, never incomplete allocations."""
+    completed = 0
+    for path in stage.rglob("*"):
+        if path.suffix not in {".safetensors", ".gguf"} and not (
+            path.name == "ngram_table.bin" and source.get("ngram_in_weight_bytes")
+        ):
+            continue
+        if path.is_symlink() or not path.is_file():
+            continue
+        relative = path.relative_to(stage)
+        metadata = stage / ".cache/huggingface/download" / (str(relative) + ".metadata")
+        try:
+            if metadata.is_symlink() or metadata.stat().st_size > 4096:
+                continue
+            lines = metadata.read_text().splitlines()
+            if len(lines) != 3 or lines[0] != source["weights_revision"] or not lines[1]:
+                continue
+            info = path.stat()
+            timestamp = float(lines[2])
+            # Match the Hub's tolerance for filesystem timestamp precision.
+            if not math.isfinite(timestamp) or timestamp < info.st_mtime - 1:
+                continue
+            completed += info.st_size
+        except (OSError, ValueError, UnicodeError):
+            continue
+    return min(completed, source["weight_bytes"])
+
+
 def prepare(
     choice: str,
     output: Path,
@@ -667,12 +697,19 @@ def prepare(
             if shard.is_symlink() or not shard.is_file() or target.exists():
                 raise ValueError("conflicting GGUF resume state")
             shard.rename(target)
+    download_options = {}
     if progress is not None:
-        # snapshot_download's aggregate progress counts files. Incomplete files
-        # can be preallocated, so their sizes do not establish received bytes.
-        # Keep this phase indeterminate until the pinned weight total is checked.
+        # Read reconstruction callbacks from the locked Hub implementation;
+        # preallocated incomplete-file sizes are not evidence of progress.
         progress.emit("download", "running", force=True)
         progress.emit("conversion", "waiting", force=True)
+        capture = SnapshotDownloadProgress(
+            progress,
+            source["weight_bytes"],
+            completed_files=lambda: source["weight_bytes"] if gguf_complete else completed_model_bytes(stage, source),
+        )
+        capture.close()
+        download_options["tqdm_class"] = capture.bar_class()
     if not gguf_complete:
         snapshot_download(
             source["weights_repo"],
@@ -681,6 +718,7 @@ def prepare(
             local_dir=stage,
             local_files_only=offline,
             max_workers=3,
+            **download_options,
         )
     snapshot_download(
         source["metadata_repo"],
@@ -689,6 +727,7 @@ def prepare(
         local_dir=stage,
         local_files_only=offline,
         max_workers=2,
+        **download_options,
     )
     if choice == "glm53-q2" and not gguf_complete:
         shards = sorted((stage / "UD-Q2_K_XL").glob("*.gguf"))

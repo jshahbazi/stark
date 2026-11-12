@@ -348,6 +348,9 @@ struct InstallProgress {
     var state = "waiting"
     var completedBytes: Int64 = 0
     var totalBytes: Int64?
+    var transferredBytes: Int64?
+
+    var showsProgressBar: Bool { (totalBytes ?? 0) > 0 }
 
     var fraction: Double {
         if state == "complete" || state == "skipped" { return 1 }
@@ -363,7 +366,20 @@ struct InstallProgress {
         case "failed": return "Failed"
         case "waiting": return "Waiting"
         default:
-            guard let total = totalBytes, total > 0 else { return "Preparing…" }
+            if phase == "download", totalBytes == nil, let received = transferredBytes {
+                return received > 0
+                    ? ByteCountFormatter.string(fromByteCount: received, countStyle: .file) + " received"
+                    : "Downloading…"
+            }
+            guard let total = totalBytes, total > 0 else {
+                if phase == "download" {
+                    if completedBytes > 0 {
+                        return ByteCountFormatter.string(fromByteCount: completedBytes, countStyle: .file)
+                    }
+                    return "Downloading…"
+                }
+                return "Preparing…"
+            }
             if completedBytes >= total { return phase == "download" ? "Verifying…" : "Finalizing…" }
             return String(format: "%.0f%%", fraction * 100)
         }
@@ -713,6 +729,8 @@ struct FamilyModelCatalog {
         let installedIDs: [String]
         let modelGroup: CatalogModelGroup?
         let referenceScore: CatalogReferenceScore?
+        /// The repository an export Stark cannot import says it was made from.
+        let originalRepo: String?
 
         init?(_ raw: [String: Any]) {
             guard let id = SupportMetadata.string(raw["id"], maximum: 512),
@@ -746,6 +764,14 @@ struct FamilyModelCatalog {
                 guard let parsed = CatalogReferenceScore(reference) else { return nil }
                 referenceScore = parsed
             } else { referenceScore = nil }
+            if let original = raw["original_repo"], !(original is NSNull) {
+                // Only a row that cannot be downloaded may point at another repository.
+                guard !downloadable, let parsed = SupportMetadata.string(original, maximum: 193),
+                      parsed.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$",
+                                   options: .regularExpression) != nil,
+                      parsed.lowercased() != repo.lowercased() else { return nil }
+                originalRepo = parsed
+            } else { originalRepo = nil }
         }
 
         /// Whether the weights alone fit the guide's memory budget: 85% of physical
@@ -851,6 +877,10 @@ struct CatalogBrowserInventory {
         let name: String
         let publisher: String
         let items: [FamilyModelCatalog.Item]
+        /// Exports of the shown rows that Stark cannot import, folded under them.
+        var exports: [FamilyModelCatalog.Item] = []
+        /// The search matched one of `exports` and none of the group's own rows.
+        var foundByExport = false
 
         func size(for sort: ModelBrowserSort) -> Double? {
             let values = items.compactMap(\.numericSize)
@@ -859,10 +889,45 @@ struct CatalogBrowserInventory {
     }
     let groups: [Group]
 
-    /// The rows family detail lists. A row that cannot be downloaded, whether for an
-    /// unsupported format or any other stated reason, is left out when hiding.
+    /// Exports that restate a listed, downloadable model in a format Stark cannot
+    /// import, keyed by that model's lowercased repository. The link is the export
+    /// publisher's own declaration, so it only moves a row that could never be
+    /// downloaded under one that can; it never changes what a download fetches.
+    static func foldedExports(_ items: [FamilyModelCatalog.Item]) -> [String: [FamilyModelCatalog.Item]] {
+        let downloadable = Set(items.filter(\.downloadable).map { $0.repo.lowercased() })
+        var folded: [String: [FamilyModelCatalog.Item]] = [:]
+        for item in items where !item.downloadable {
+            guard let original = item.originalRepo?.lowercased(), downloadable.contains(original) else { continue }
+            folded[original, default: []].append(item)
+        }
+        return folded
+    }
+
+    static let maximumNamedExports = 6
+
+    /// One sentence naming a model's folded exports, each linked to its repository.
+    static func exportSummary(_ exports: [FamilyModelCatalog.Item]) -> AttributedString {
+        let named = Array(exports.prefix(maximumNamedExports)), more = exports.count - named.count
+        var text = AttributedString("Also published as ")
+        for (index, export) in named.enumerated() {
+            if index > 0 { text += AttributedString(index == named.count - 1 && more == 0 ? " and " : ", ") }
+            var link = AttributedString(export.quantization + " by " + export.repo.components(separatedBy: "/")[0])
+            link.link = URL(string: "https://huggingface.co/" + export.repo)
+            text += link
+        }
+        if more > 0 { text += AttributedString(" and \(more) more") }
+        text += AttributedString(exports.count == 1
+            ? ". Stark cannot import that format, so this original is listed instead."
+            : ". Stark cannot import those formats, so this original is listed instead.")
+        return text
+    }
+
+    /// The rows family detail lists. A folded export is shown under its original and
+    /// never as a row. Any other row that cannot be downloaded, whether for an
+    /// unsupported format or another stated reason, is left out when hiding.
     static func listed(_ items: [FamilyModelCatalog.Item], hidingUnsupported: Bool) -> [FamilyModelCatalog.Item] {
-        hidingUnsupported ? items.filter(\.downloadable) : items
+        let folded = Set(foldedExports(items).values.joined().map(\.id))
+        return items.filter { !folded.contains($0.id) && (!hidingUnsupported || $0.downloadable) }
     }
 
     /// Top-rated order: rows that can be downloaded and fit this Mac first, then the
@@ -887,13 +952,31 @@ struct CatalogBrowserInventory {
     }
 
     init(items: [FamilyModelCatalog.Item], query: String = "", sort: ModelBrowserSort = .sizeAscending,
-         quantization: CatalogQuantizationFilter = .all, physicalMemory: UInt64? = nil) {
+         quantization: CatalogQuantizationFilter = .all, physicalMemory: UInt64? = nil,
+         exports: [String: [FamilyModelCatalog.Item]] = [:]) {
         let quantization = quantization.resolved(for: items)
         func makeGroup(id: String, name: String, publisher: String, items: [FamilyModelCatalog.Item]) -> Group? {
-            let visible = items.filter {
+            var visible = items.filter {
                 quantization.matches($0) && ModelBrowserSearch.matches(query, fields: [name, publisher, $0.name, $0.repo, $0.revision,
                                                            $0.sizeLabel ?? "", $0.quantization] + $0.artifactModes.map(\.title))
-            }.sorted { first, second in
+            }
+            var foundByExport = false
+            if visible.isEmpty, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // A search for an export Stark cannot import lands on the model it was made from.
+                let matched = Set(items.filter { quantization.matches($0) && $0.downloadable }.compactMap { item in
+                    (exports[item.repo.lowercased()] ?? []).contains {
+                        ModelBrowserSearch.matches(query, fields: [$0.name, $0.repo, $0.quantization])
+                    } ? item.id : nil
+                })
+                visible = items.filter { matched.contains($0.id) }
+                foundByExport = !visible.isEmpty
+            }
+            let shownRepos = Set(visible.map { $0.repo.lowercased() })
+            let folded = shownRepos.flatMap { exports[$0] ?? [] }.sorted {
+                let order = $0.quantization.localizedStandardCompare($1.quantization)
+                return order == .orderedSame ? $0.repo < $1.repo : order == .orderedAscending
+            }
+            visible.sort { first, second in
                 if sort.isRating, let rated = Self.ratingPrecedes(first, second, sort: sort, physicalMemory: physicalMemory) {
                     return rated
                 }
@@ -907,7 +990,8 @@ struct CatalogBrowserInventory {
                 return ModelBrowserSort.nameAscending.precedes(first.repo, id: first.id, size: nil,
                                                                second.repo, id: second.id, size: nil)
             }
-            return visible.isEmpty ? nil : Group(id: id, name: name, publisher: publisher, items: visible)
+            return visible.isEmpty ? nil : Group(id: id, name: name, publisher: publisher, items: visible,
+                                                 exports: folded, foundByExport: foundByExport)
         }
         let candidates = Dictionary(grouping: items) { $0.modelGroup.map { "group:" + $0.id } ?? "repo:" + $0.repo }
         groups = candidates.flatMap { id, entries -> [Group] in
@@ -1964,7 +2048,12 @@ final class EngineController: ObservableObject {
                   let completed = event["completed_bytes"] as? Int64, completed >= 0 else { return }
             let total = event["total_bytes"] as? Int64
             guard total == nil || (total! >= 0 && completed <= total!) else { return }
-            let progress = InstallProgress(state: progressState, completedBytes: completed, totalBytes: total)
+            let transferred = SupportMetadata.integer(event["transferred_bytes"])
+            if event["transferred_bytes"] != nil {
+                guard phase == "download", let transferred, transferred >= 0 else { return }
+            }
+            let progress = InstallProgress(state: progressState, completedBytes: completed, totalBytes: total,
+                                           transferredBytes: transferred)
             if phase == "download" { downloadProgress = progress } else { conversionProgress = progress }
         default: break
         }
@@ -2589,6 +2678,7 @@ final class EngineController: ObservableObject {
     }
 
     func stop() {
+        let browsingFamilyID = catalogFamilyID
         if let model = models.first(where: { $0.id == modelControlID }) {
             stoppedModel = (model.id, loadedMode ?? mode)
         }
@@ -2602,7 +2692,11 @@ final class EngineController: ObservableObject {
         supportsImages = false
         imageVerification = "unverified"
         state = "stopping"; message = "Stopping…"
-        send(["command": "stop"])
+        if send(["command": "stop"]), let familyID = browsingFamilyID {
+            // Stop invalidates the backend catalogue session too. Reopen the
+            // selected family with a new request so stale replies stay fenced.
+            requestModelCatalog(familyID: familyID)
+        }
     }
 
     func resetInstallProgress(kind: String) {
@@ -2796,19 +2890,19 @@ struct InstallStageView: View {
                 Text(progress.detail(for: phase)).font(.caption.monospacedDigit())
                     .foregroundStyle(progress.state == "failed" ? Color.red : .secondary)
             }
-            Group {
-                if progress.state == "running" && progress.totalBytes == nil {
-                    ProgressView()
-                } else {
-                    ProgressView(value: progress.fraction)
-                }
+            if progress.showsProgressBar {
+                ProgressView(value: progress.fraction)
+                    .progressViewStyle(.linear)
+                    .tint(progress.state == "failed" ? .red : .accentColor)
+                    .accessibilityLabel("\(title) progress")
+                    .accessibilityValue(progress.detail(for: phase))
             }
-            .progressViewStyle(.linear)
-            .tint(progress.state == "failed" ? .red : .accentColor)
-            .accessibilityLabel("\(title) progress")
-            .accessibilityValue(progress.detail(for: phase))
             if let total = progress.totalBytes, total > 0 {
                 Text("\(bytes(progress.completedBytes)) of \(bytes(total))")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            if phase == "download", let received = progress.transferredBytes, progress.totalBytes != nil {
+                Text("\(bytes(received)) received over network")
                     .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
             }
         }
@@ -3180,10 +3274,13 @@ struct ModelsView: View {
     private func catalogContent(_ family: ModelsInventory.Family) -> some View {
         if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
             let listed = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: hideUnsupported)
-            let hidden = catalog.items.count - listed.count
+            let exports = CatalogBrowserInventory.foldedExports(catalog.items)
+            // A folded export is represented by its original, so it is not counted as hidden.
+            let hidden = catalog.items.count - listed.count - exports.values.reduce(0) { $0 + $1.count }
             let groups = CatalogBrowserInventory(items: listed, query: catalogQuery, sort: catalogSort,
                                                  quantization: catalogQuantization,
-                                                 physicalMemory: ProcessInfo.processInfo.physicalMemory).groups
+                                                 physicalMemory: ProcessInfo.processInfo.physicalMemory,
+                                                 exports: exports).groups
             LazyVStack(spacing: 6) {
                 if catalog.items.isEmpty {
                     Text(catalog.nextOffset == nil ? "No compatible models found" : "No compatible models found yet")
@@ -3259,6 +3356,12 @@ struct ModelsView: View {
                     exceedsMemory: !item.fits(physicalMemory: ProcessInfo.processInfo.physicalMemory)) {
                         engine.installCatalogItem(id: item.id)
                     }
+            }
+            // With unsupported rows hidden, the note appears only to explain a search
+            // that matched an export instead of the model's own rows.
+            if !group.exports.isEmpty, !hideUnsupported || group.foundByExport {
+                Divider().padding(.vertical, 6)
+                CatalogFoldedExports(exports: group.exports)
             }
         }.padding(.horizontal, 12).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)
             .background(.quaternary.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))

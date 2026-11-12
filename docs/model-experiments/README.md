@@ -1,5 +1,6 @@
 # Model change and experiment ledger
 
+- [20261112-CATALOG-01: shared config normalization](2026-11-12-catalog-config-normalization.md): one reviewed rewrite pass before every in-scope family planner, shared by catalogue admission and conversion; unknown keys and real RoPE variants still fail closed. Header admission only; converted artifacts unqualified.
 - [20261110-CATALOG-01: catalogue family admission](2026-11-10-catalog-family-admission.md): shared header planners, interleaved discovery and unsupported reasons. Pre-PR review repaired image-to-text fallback after vision header failure. Full checkpoint qualification remains separate.
 
 - [20261110-TOOL-QUALITY-01: bounded tool output and continuation replay](2026-11-10-tool-output-quality-replay.md): five installed artifacts checked; all passed synthetic tool continuation, four passed ordinary-chat exact match; 17×19 arithmetic controls isolated no demonstrated parser failure.

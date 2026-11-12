@@ -256,7 +256,10 @@ def test_phi_malformed_config_rejected_before_unqualified_semantics(tmp_path, ch
         {"architectures": ["PhiForCausalLM"]},
     ],
 )
-def test_phi_unqualified_semantics_fail_closed(tmp_path, changes):
+def test_phi_unqualified_semantics_fail_closed(tmp_path, monkeypatch, changes):
+    # The planner's own dropout check stays covered; the shared normalizer's
+    # separate inactive-dropout rewrite is switched off for this test.
+    monkeypatch.setattr("stark_convert.config_normalization.ZERO_INACTIVE_ATTENTION_DROPOUT", False)
     source = tmp_path / "source"
     config, _ = phi_fixture(source)
     update_config(source, config, **changes)
