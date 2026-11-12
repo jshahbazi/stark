@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from ..config_normalization import normalize_config
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -85,7 +86,9 @@ def build_olmo3_plan(
     source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
 ) -> ConversionPlan:
     """Preserve whole-projection Q/K RMSNorm and branch-postnorm residuals."""
-    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    config = normalize_config(
+        "olmo3", read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     if config.get("model_type") != "olmo3":
         raise UnsupportedConversion("Checkpoint model_type does not match OLMo 3")
     if dtype not in _DTYPES:
