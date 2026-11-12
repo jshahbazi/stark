@@ -631,7 +631,8 @@ def completed_model_bytes(stage: Path, source: dict) -> int:
                 continue
             info = path.stat()
             timestamp = float(lines[2])
-            if not math.isfinite(timestamp) or timestamp < info.st_mtime:
+            # Match the Hub's tolerance for filesystem timestamp precision.
+            if not math.isfinite(timestamp) or timestamp < info.st_mtime - 1:
                 continue
             completed += info.st_size
         except (OSError, ValueError, UnicodeError):

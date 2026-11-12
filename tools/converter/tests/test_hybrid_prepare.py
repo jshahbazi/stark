@@ -29,6 +29,24 @@ def test_completed_model_bytes_excludes_partial_stale_and_unreceipted_files(tmp_
     assert hybrid.completed_model_bytes(tmp_path, source) == 55
 
 
+def test_completed_bytes_matches_real_hub_receipt_timestamp_tolerance(tmp_path):
+    from huggingface_hub._local_folder import read_download_metadata, write_download_metadata
+
+    revision = "a" * 40
+    path = tmp_path / "model.safetensors"
+    path.write_bytes(b"complete")
+    write_download_metadata(tmp_path, path.name, revision, "etag")
+    receipt = read_download_metadata(tmp_path, path.name)
+    assert receipt is not None
+    source = {"weights_revision": revision, "weight_bytes": path.stat().st_size}
+    os.utime(path, (receipt.timestamp + 0.5, receipt.timestamp + 0.5))
+    assert read_download_metadata(tmp_path, path.name) is not None
+    assert hybrid.completed_model_bytes(tmp_path, source) == source["weight_bytes"]
+    os.utime(path, (receipt.timestamp + 2, receipt.timestamp + 2))
+    assert read_download_metadata(tmp_path, path.name) is None
+    assert hybrid.completed_model_bytes(tmp_path, source) == 0
+
+
 @pytest.fixture(autouse=True)
 def synthetic_download_disk_headroom(monkeypatch, tmp_path):
     # Download tests use byte-sized local stand-ins. Their admission must not
