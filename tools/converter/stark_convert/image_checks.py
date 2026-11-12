@@ -66,7 +66,12 @@ def preflight_family_memory(model: Path, config: dict) -> None:
         if retained is not None:
             from .hybrid_image_memory import retained_check_memory
 
-            if psutil.virtual_memory().available < retained_check_memory(retained):
+            try:
+                required = retained_check_memory(retained, directory=model, config=config)
+                available = psutil.virtual_memory().available
+            except (OSError, ValueError, psutil.Error):
+                raise ImageCheckError("Cannot inspect this image model's memory requirements.") from None
+            if type(available) is not int or available < required:
                 raise ImageCheckError("Not enough available memory to check this image model.")
         return
     family = artifact_image_family(config) if contract.get("schema_version") == 4 else contract.get("family")

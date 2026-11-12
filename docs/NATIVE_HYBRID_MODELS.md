@@ -107,6 +107,46 @@ loader remains responsible for tensor admission.
 
 ## Retained Lily image artifacts
 
+**Manage Models → Add Source → Enable images** uses a shared retained-image
+preparation path for compatible Flash Next checkpoints. Support is selected by
+the architecture and stored tensor layout. The publisher and repository name
+do not select a separate implementation. Supported layouts include Lily affine
+and external-table MLX-Serve affine storage with a complete BF16 image tower.
+Indexed affine exports with a supported `ple_manifest.json` can retain their
+separate PLE/MTP files, Q8 embeddings and shared gates, and group-128 trunk
+shared-expert matrices. Their zero-centered normalization policy remains
+distinct from folded MLX-Serve storage. The indexed adapter presents the PLE
+tensor ranges to the existing paged table and losslessly reorders a channels-last
+patch-embedding kernel at load time. Source weight files remain unchanged.
+Processor operations and image chat templates must match the implemented
+programs. When a compatible source omits processor sidecars, Stark derives the
+existing standard Flash Next processor after validating its image architecture
+and native geometry. Explicit sidecars must match that recipe. Preparation
+records the generated processor under `derived_metadata` separately from the
+upstream source hashes. Remote sources are bound to their immutable revision;
+a raw local source needs explicit repository/revision provenance for this schema-6 route.
+Prepared local image artifacts can still be imported directly.
+
+For the CLI, use a new output directory:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.cli OWNER/FLASH-NEXT-CHECKPOINT --metadata-profile hf-generic --artifact-mode vision-language --output models/flash-next-images
+```
+
+The resolver checks image processing metadata and the complete decoder, draft
+and BF16 tower headers before downloading weight payloads. Preparation preserves
+the supported source quantization and text draft head. Every artifact still
+receives its own hashes and native tensor admission, and the desktop runs local
+image checks before registering the model. Family compatibility does not
+transfer another checkpoint's numerical or performance qualification.
+
+Coverage is limited to the implemented storage contracts. The original official
+FP8 and legacy PipeNetwork/F32 exports do not use this retained image route. Other quantizers,
+quantized vision towers, changed geometry or unsupported processor/template
+programs require further implementation or admission work. Retained Lily
+pre-download checks include the declared MTP head and native control dtypes;
+the text-only Uzu converter's omission rules do not qualify those components.
+
 Source builds containing the image-family integration can explicitly enable
 still-image input for the pinned `qwen38-lily-q4-xl` and
 `qwen38-mlx-serve-mixed` retained formats. An existing complete prepared folder
@@ -116,8 +156,8 @@ can be upgraded without copying its model payloads:
 uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare qwen38-lily-q4-xl --output models/qwen38-lily-q4-xl --upgrade-images
 ```
 
-For a new preparation, add `--artifact-mode vision-language` to the matching
-preparation command. The helper writes a schema-6 `stark-image-artifact.json`
+For a new pinned preparation, add `--artifact-mode vision-language` to the matching
+preparation command. Both paths write a schema-6 `stark-image-artifact.json`
 binding the source, model shards, any external n-gram table, configuration,
 tokenizer, fixed processor recipe and standalone template. Native loading
 verifies the recorded payload hashes and retained BF16 tower before publishing

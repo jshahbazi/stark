@@ -251,22 +251,46 @@ fn hash_weights(
     Ok(verified)
 }
 
+fn source_identity_matches(
+    source: &str,
+    revision: &str,
+    config: &Value,
+    receipt: &Value,
+    config_sha256: &str,
+) -> bool {
+    let valid_source = !source.is_empty()
+        && source.len() <= 256
+        && source.split('/').count() <= 2
+        && source.split('/').all(|part| {
+            part.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+        });
+    valid_source
+        && revision.len() == 40
+        && revision.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && config["model_type"] == "qwen4_exp"
+        && config["stark_native_hybrid"]["schema_version"].as_u64() == Some(1)
+        && config["stark_native_hybrid"]["source"] == source
+        && config["stark_native_hybrid"]["revision"] == revision
+        && receipt["schema_version"].as_u64() == Some(1)
+        && receipt["architecture"] == "qwen4_exp"
+        && receipt["config_sha256"] == config_sha256
+        && receipt["weights_source"]["repo"] == source
+        && receipt["weights_source"]["revision"] == revision
+        && receipt["metadata_source"]["repo"] == source
+        && receipt["metadata_source"]["revision"] == revision
+}
+
 impl ImageArtifact {
     pub fn admit(path: &Path) -> Result<Self> {
         let path = path.canonicalize()?;
         let manifest_bytes = read(&path.join("stark-image-artifact.json"), 128 * 1024)?;
         let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
-        let source_ok = matches!(
-            (manifest.model_source.as_str(), manifest.model_revision.as_str()),
-            ("fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl", "0f94842e3682b49acace4daeb4cf2e65a6f94f83")
-                | ("ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit", "788c07a8725642bccf13a0a3b8a21954ab84b4f2")
-        );
         if manifest.kind != "Qwen38RetainedVisionArtifact"
             || manifest.schema_version != 6
             || manifest.family_profile != PROFILE
             || manifest.family_version != 1
-            || !source_ok
             || manifest.processor_sha256 != PROCESSOR
             || !(1..=256).contains(&manifest.weight_files.len())
         {
@@ -287,6 +311,21 @@ impl ImageArtifact {
             signatures.insert(name.into(), signature);
         }
         let config: Value = serde_json::from_slice(&read(&path.join("config.json"), 8 * 1024 * 1024)?)?;
+        let (receipt_sha256, receipt_signature, _) = hash(&path.join("native-source.json"), 8 * 1024 * 1024)?;
+        let receipt: Value = serde_json::from_slice(&read(&path.join("native-source.json"), 8 * 1024 * 1024)?)?;
+        if !source_identity_matches(
+            &manifest.model_source,
+            &manifest.model_revision,
+            &config,
+            &receipt,
+            &manifest.config_sha256,
+        ) || signature(&open(&path.join("native-source.json"))?)? != receipt_signature
+            || format!("{:x}", Sha256::digest(read(&path.join("native-source.json"), 8 * 1024 * 1024)?))
+                != receipt_sha256
+        {
+            return Err(Error::Invalid("retained image source identity"));
+        }
+        signatures.insert("native-source.json".into(), receipt_signature);
         let template = read(&path.join("chat_template.jinja"), 256 * 1024)?;
         if config.pointer("/token_codec_config/prompt_template").and_then(Value::as_str).map(str::as_bytes)
             != Some(template.as_slice())
@@ -517,5 +556,33 @@ mod tests {
         assert_eq!(file.metadata().unwrap().len(), before.len());
         assert_eq!(file.metadata().unwrap().modified().unwrap(), before.modified().unwrap());
         assert!(hash_weights(&fixture.0, &weights, &cache.files).is_err());
+    }
+
+    #[stark_test]
+    fn generic_image_source_requires_matching_immutable_receipts() {
+        let source = "example/compatible-flash-next";
+        let revision = "1234567890abcdef1234567890abcdef12345678";
+        let digest = "a".repeat(64);
+        let mut config = serde_json::json!({
+            "model_type": "qwen4_exp",
+            "stark_native_hybrid": {"schema_version": 1, "source": source, "revision": revision}
+        });
+        let mut receipt = serde_json::json!({
+            "schema_version": 1,
+            "architecture": "qwen4_exp",
+            "config_sha256": digest,
+            "weights_source": {"repo": source, "revision": revision},
+            "metadata_source": {"repo": source, "revision": revision}
+        });
+        assert!(source_identity_matches(source, revision, &config, &receipt, &digest));
+        for invalid in ["", "../model", "/tmp/model", "https://huggingface.co/example/model", "a/b/c"] {
+            assert!(!source_identity_matches(invalid, revision, &config, &receipt, &digest));
+        }
+        assert!(!source_identity_matches(source, "main", &config, &receipt, &digest));
+        receipt["metadata_source"]["revision"] = serde_json::json!("0".repeat(40));
+        assert!(!source_identity_matches(source, revision, &config, &receipt, &digest));
+        receipt["metadata_source"]["revision"] = serde_json::json!(revision);
+        config["stark_native_hybrid"]["source"] = serde_json::json!("other/model");
+        assert!(!source_identity_matches(source, revision, &config, &receipt, &digest));
     }
 }

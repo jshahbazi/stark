@@ -237,6 +237,11 @@ fn glm_exl3_checkpoint(config: &Value) -> bool {
 fn mixed_precision_checkpoint(config: &Value) -> bool {
     config.get("model_type").and_then(Value::as_str) == Some("qwen4_exp")
         && (config.pointer("/lily/format").and_then(Value::as_str) == Some("qwen4_exp-affine-v1")
+            || (config.pointer("/text_config/ple_storage/manifest").and_then(Value::as_str)
+                == Some("ple_manifest.json")
+                && config.pointer("/quantization/mode").and_then(Value::as_str) == Some("affine")
+                && config.pointer("/quantization/bits").and_then(Value::as_u64) == Some(4)
+                && config.pointer("/quantization/group_size").and_then(Value::as_u64) == Some(64))
             || (config.pointer("/ngram_table/file").and_then(Value::as_str) == Some("ngram_table.bin")
                 && config.pointer("/ngram_table/bits").and_then(Value::as_u64) == Some(4)
                 && config.pointer("/ngram_table/group_size").and_then(Value::as_u64) == Some(32)

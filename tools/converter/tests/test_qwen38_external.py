@@ -117,6 +117,25 @@ def tensor_bytes(tensors):
     return struct.pack("<Q", len(payload)) + payload + bytes(offset)
 
 
+@pytest.mark.parametrize("theta", [1e-50, 1e50])
+def test_external_draft_theta_must_remain_positive_finite_in_native_f32(external_config, theta):
+    external_config["text_config"]["mtp"] = {
+        "hybrid": True,
+        "num_hidden_layers": 1,
+        "layer_types": ["full_attention"],
+        "rope_theta": theta,
+    }
+    tensors, table = tensor_files(external_config)
+    # The metadata gate runs before visiting any draft planes or payloads.
+    with pytest.raises(UnsupportedConversion, match="draft head"):
+        qwen38_external.validate_layout(external_config, tensors, table)
+
+
+@pytest.mark.parametrize("theta", [1e-45, 1.0, 10_000_000, 3.4028234663852886e38])
+def test_native_mtp_theta_accepts_positive_finite_f32_values(theta):
+    assert qwen38_external._valid_native_mtp_theta(theta)
+
+
 class RangeHub(Hub):
     def __init__(self):
         super().__init__()

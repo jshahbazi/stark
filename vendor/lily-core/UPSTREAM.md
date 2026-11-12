@@ -7,6 +7,24 @@
 
 ## Extraction and local changes
 
+Stark additionally admits indexed affine Flash Next exports whose declared
+per-projection precision matches the implemented Q4/group-64 experts, Q8/group-64
+ordinary projections, Q8/group-128 trunk shared experts and Q4/group-32 PLE
+ranges. The adapter preserves original tensor files and byte intervals, aliases
+the indexed PLE shard names into the existing paged table, and retains the
+source's Q8 embedding and shared-expert gates. Source PLE manifests and actual
+tensor headers are checked before installation. This is storage admission.
+indexed exports retain zero-centered norm deltas and select the existing
+ordinary arithmetic with F32 `1 + weight`, including HC normalization. The
+MLX-Serve folded-gain stock paths remain exclusive to their original contract.
+Indexed MLX Conv3d patch weights are admitted in `[out,T,H,W,C]` storage and
+their BF16 encodings are losslessly permuted once to `[out,C,T,H,W]` at load.
+The adapter bounds CPU temporaries to 12 MiB and preserves the source weight
+files and their hashes; the final tensor uses the canonical existing GPU layout.
+Checkpoint-specific numerical, cache, MTP and performance qualifications remain
+separate. No upstream arithmetic or quantization kernel is copied or changed
+for this adapter.
+
 Stark maintains the draft head during ordinary single-token decode in
 `src/qwen4exp/model.rs`. It reuses the existing prefill catch-up with views of
 the exact decode residual and input token before drawing. This covers the

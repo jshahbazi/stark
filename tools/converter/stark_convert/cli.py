@@ -53,6 +53,20 @@ from .vision_family import (
 def capability(request: ConversionRequest) -> CapabilityResult:
     """Probe catalog coverage only; this does not validate checkpoint contents."""
     if request.artifact_mode != "text":
+        if request.architecture == "qwen4_exp":
+            supported = (
+                request.artifact_mode == "vision-language"
+                and request.dtype == "bfloat16"
+                and request.model_kind == "language"
+                and request.metadata_profile in {None, GENERIC_PROFILE}
+            )
+            return CapabilityResult(
+                adapter="qwen4_exp" if supported else None,
+                model_kind=request.model_kind,
+                conversion="implemented" if supported else "unsupported",
+                native_loading="supported_family_unverified" if supported else "runtime_blocked",
+                reason=None if supported else "unsupported_flash_next_vision_tuple",
+            )
         if request.architecture == "gemma3" or request.repo in {
             "google/gemma-3-4b-it",
             "google/gemma-3-12b-it",
@@ -434,7 +448,19 @@ def convert(
             from . import qwen38_external
             from .model_support import read_support_config
 
-            if qwen38_external.is_external_affine(read_support_config(snapshot.config_path, root=snapshot.root)):
+            config = read_support_config(snapshot.config_path, root=snapshot.root)
+            if artifact_mode == "vision-language":
+                from .hybrid_prepare import stage_retained_qwen
+
+                if dtype != "bfloat16" or snapshot.artifact_mode != artifact_mode:
+                    raise UnsupportedConversion("Retained Flash Next images require native BF16 execution mode")
+                receipt = stage_retained_qwen(snapshot, staging)
+                _publish(staging, output)
+                if progress is not None:
+                    weight_bytes = receipt["weight_bytes"]
+                    progress.emit("conversion", "complete", weight_bytes, weight_bytes, force=True)
+                return receipt
+            if qwen38_external.is_external_affine(config):
                 from .hybrid_prepare import stage_external_qwen
 
                 if dtype != "bfloat16" or artifact_mode != "text" or snapshot.artifact_mode != "text":
