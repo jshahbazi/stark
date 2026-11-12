@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -20,6 +21,7 @@ from stark_convert.progress import (
     DownloadProgress,
     FDProgressSink,
     ProgressReporter,
+    SnapshotDownloadProgress,
     converter_failure_category,
 )
 from stark_convert.sources import resolve_source
@@ -35,12 +37,17 @@ from stark_convert.streaming import (
 
 def assert_private(events):
     for event in events:
-        assert set(event) == {"phase", "state", "completed_bytes", "total_bytes"}
+        assert set(event) in (
+            {"phase", "state", "completed_bytes", "total_bytes"},
+            {"phase", "state", "completed_bytes", "total_bytes", "transferred_bytes"},
+        )
         assert event["phase"] in {"download", "conversion"}
         assert event["state"] in {"waiting", "running", "complete", "skipped"}
         assert type(event["completed_bytes"]) is int and event["completed_bytes"] >= 0
         total = event["total_bytes"]
         assert total is None or type(total) is int and event["completed_bytes"] <= total
+        if "transferred_bytes" in event:
+            assert type(event["transferred_bytes"]) is int and event["transferred_bytes"] >= 0
 
 
 def test_reporter_throttles_counts_and_always_emits_state_and_final_counts():
@@ -63,6 +70,22 @@ def test_reporter_throttles_counts_and_always_emits_state_and_final_counts():
     for completed, total in ((True, 5), (1, False), (-1, 1), (2, 1)):
         with pytest.raises(ValueError, match="invalid_progress_counts"):
             progress.emit("download", "running", completed, total)
+    for transferred in (True, -1, 1.5, 2**63):
+        with pytest.raises(ValueError, match="invalid_progress_counts"):
+            progress.emit("download", "running", transferred_bytes=transferred)
+    with pytest.raises(ValueError, match="invalid_progress_counts"):
+        progress.emit("conversion", "running", transferred_bytes=1)
+
+
+def test_reporter_emits_when_transferred_field_first_appears():
+    events = []
+    progress = ProgressReporter(events.append, interval=60)
+    progress.emit("download", "running", 0, None)
+    progress.emit("download", "running", 0, None, transferred_bytes=0)
+    progress.emit("download", "running", 1, None, transferred_bytes=1)
+    assert len(events) == 2
+    assert "transferred_bytes" not in events[0]
+    assert events[1]["transferred_bytes"] == 0
 
 
 def test_fd_sink_is_private_owns_duplicate_and_tolerates_closed_reader(capsys):
@@ -196,6 +219,185 @@ def test_xet_counts_reconstruction_once_with_progress_globally_disabled(monkeypa
     assert events[-1]["state"] == "running"
     download.complete()
     assert events[-1]["state"] == "complete"
+    assert_private(events)
+    assert capsys.readouterr() == ("", "")
+
+
+def test_snapshot_progress_captures_reconstruction_and_transfer_not_file_counts(monkeypatch, capsys):
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+    events = []
+    capture = SnapshotDownloadProgress(ProgressReporter(events.append, interval=60), max_bytes=100)
+    bar_class = capture.bar_class()
+
+    # These names are used by huggingface_hub 2.2.0's snapshot aggregate bars
+    # and the outer file-count bar.
+    reconstruction = bar_class(
+        desc="private-model-file", name="huggingface_hub.snapshot_download", total=100, initial=0, disable=False
+    )
+    with XetDownloadProgressReporter(
+        reconstruction_desc="private-model-file",
+        total=100,
+        log_level=0,
+        external_reconstruction_bar=reconstruction,
+    ) as xet:
+        xet.update_progress(
+            SimpleNamespace(
+                total_bytes_completed=23,
+                total_transfer_bytes_completed=71,
+                total_bytes_completion_rate=1.0,
+                total_transfer_bytes_completion_rate=2.0,
+                total_bytes=100,
+            )
+        )
+    reconstruction.close()
+
+    file_count = bar_class(desc="files", name="huggingface_hub.snapshot_download.files", total=4)
+    file_count.update(4)
+    file_count.close()
+    transfer = bar_class(desc="network", name="huggingface_hub.snapshot_download.transfer", total=100)
+    transfer.update(71)
+    transfer.update(-20)  # Retransmitted bytes remain part of received bytes.
+    transfer.close()
+
+    assert [event["completed_bytes"] for event in events] == [23, 23, 23]
+    assert [event["transferred_bytes"] for event in events] == [0, 0, 71]
+    assert all(event["state"] == "running" and event["total_bytes"] is None for event in events)
+    assert_private(events)
+    assert "private-model-file" not in json.dumps(events)
+    assert capsys.readouterr() == ("", "")
+
+
+def test_snapshot_progress_is_thread_safe_cumulative_capped_and_tracks_resets(capsys):
+    events = []
+    capture = SnapshotDownloadProgress(ProgressReporter(events.append, interval=60), max_bytes=105)
+    bar_class = capture.bar_class()
+
+    def snapshot_byte_burst():
+        bar = bar_class(name="huggingface_hub.snapshot_download", total=None)
+        for _ in range(25):
+            bar.update(1)
+        bar.close()
+
+    threads = [threading.Thread(target=snapshot_byte_burst) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    # A second sequential snapshot shares the same pinned maximum and count.
+    later_snapshot = bar_class(name="huggingface_hub.snapshot_download", total=100, initial=5)
+    later_snapshot.update(20)
+    later_snapshot.update(-25)
+    later_snapshot.update(10)
+    later_snapshot.close()
+    capture.close()
+
+    assert capture.completed_bytes == 105
+    assert events[-1] == {
+        "phase": "download",
+        "state": "running",
+        "completed_bytes": 105,
+        "total_bytes": None,
+        "transferred_bytes": 0,
+    }
+    assert [event["completed_bytes"] for event in events] == sorted(event["completed_bytes"] for event in events)
+    assert_private(events)
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("max_bytes", [-1, True, 1.5])
+def test_snapshot_progress_rejects_invalid_limits(max_bytes):
+    with pytest.raises(ValueError, match="invalid_snapshot_progress_limit"):
+        SnapshotDownloadProgress(ProgressReporter(lambda _event: None), max_bytes=max_bytes)
+
+
+def test_snapshot_resume_reset_does_not_double_count_discarded_partial_bytes():
+    events = []
+    capture = SnapshotDownloadProgress(ProgressReporter(events.append, interval=0), 1000)
+    bar_class = capture.bar_class()
+    with bar_class(name=capture.BAR_NAME, initial=78) as reconstruction:
+        # A server ignoring Range forces the Hub to discard resumed bytes.
+        reconstruction.update(-78)
+        reconstruction.update(30)
+        assert events[-1]["completed_bytes"] == 78
+        reconstruction.update(50)
+        assert events[-1]["completed_bytes"] == 80
+    with bar_class(name=capture.BAR_NAME, initial=20):
+        assert events[-1]["completed_bytes"] == 100
+    with bar_class(name=capture.TRANSFER_BAR_NAME, initial=500) as transfer:
+        transfer.update(20)
+        transfer.update(-20)
+        transfer.update(20)
+    # Resumed initial bytes aren't received now; retransmissions are.
+    assert events[-1]["transferred_bytes"] == 40
+    assert events[-1]["completed_bytes"] == 100
+    assert_private(events)
+
+
+def test_completed_files_progress_has_fixed_total_and_separate_network_bytes():
+    events, completed = [], [25]
+    capture = SnapshotDownloadProgress(
+        ProgressReporter(events.append, interval=0), 100, completed_files=lambda: completed[0]
+    )
+    bars = capture.bar_class()
+    capture.close()
+    assert events[-1]["completed_bytes"] == 25 and events[-1]["total_bytes"] == 100
+    with bars(name=capture.BAR_NAME) as reconstruction:
+        reconstruction.update(70)  # Buffered/partial file is not complete.
+    assert events[-1]["completed_bytes"] == 25
+    with bars(name=capture.TRANSFER_BAR_NAME) as transfer:
+        transfer.update(200)
+    assert events[-1]["transferred_bytes"] == 200
+    assert events[-1]["completed_bytes"] == 25
+    completed[0] = 75
+    with bars(total=3) as files:
+        files.update(1)  # Hub completed-file callback also covers cache hits.
+    assert events[-1]["completed_bytes"] == 75
+    assert events[-1]["total_bytes"] == 100
+
+
+def test_locked_hub_snapshot_routes_live_bytes_to_private_progress(tmp_path, monkeypatch, capsys):
+    from huggingface_hub import _snapshot_download as snapshot
+    from huggingface_hub.utils._xet_progress_reporting import XetDownloadProgressReporter
+
+    # Exercise the real aggregate byte bars and concurrent file-count bar.
+    # Only repository listing and payload transfer are replaced.
+    monkeypatch.setattr(snapshot, "read_tree_cache", lambda *_args: {"a.safetensors": None})
+    events = []
+    capture = SnapshotDownloadProgress(ProgressReporter(events.append, interval=0), 10_000_000_000)
+
+    def download(repo, *, filename, tqdm_class, **_options):
+        with XetDownloadProgressReporter(
+            reconstruction_desc="private-model-file",
+            total=100,
+            log_level=0,
+            tqdm_class=tqdm_class,
+        ) as xet:
+            for reconstructed, transferred in ((40 * 1024, 1_000_000_000), (78 * 1024, 1_600_000_000)):
+                xet.update_progress(
+                    SimpleNamespace(
+                        total_bytes_completed=reconstructed,
+                        total_transfer_bytes_completed=transferred,
+                        total_bytes_completion_rate=1.0,
+                        total_transfer_bytes_completion_rate=2.0,
+                        total_bytes=10_000_000_000,
+                    )
+                )
+        return str(tmp_path / filename)
+
+    monkeypatch.setattr(snapshot, "hf_hub_download", download)
+    snapshot.snapshot_download(
+        "private/repository",
+        revision=PIN,
+        local_dir=tmp_path,
+        cache_dir=tmp_path / "cache",
+        max_workers=2,
+        tqdm_class=capture.bar_class(),
+    )
+    assert events[-1]["completed_bytes"] == 78 * 1024
+    assert events[-1]["transferred_bytes"] == 1_600_000_000
+    assert any(0 < event["completed_bytes"] < 78 * 1024 and event["transferred_bytes"] > 0 for event in events)
+    assert all(event["state"] == "running" and event["total_bytes"] is None for event in events)
     assert_private(events)
     assert capsys.readouterr() == ("", "")
 

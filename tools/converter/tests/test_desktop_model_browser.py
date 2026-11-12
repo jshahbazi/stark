@@ -300,6 +300,46 @@ def test_glm_catalogue_download_uses_only_the_offered_pinned_native_choice(host,
     assert len(called) == 1
 
 
+def test_install_progress_replaces_support_status_and_fences_stale_events(host):
+    host.begin_install_progress(host.epoch, "native")
+    host.status("installing", "Checking model support…", host.epoch)
+    host.progress(host.epoch, "download", "running")
+    host.progress(host.epoch, "download", "running", 2)
+    host.progress(host.epoch - 1, "conversion", "running")
+    messages = [event["message"] for event in events(host) if event["event"] == "status"]
+    assert messages == ["Checking model support…", "Downloading model files…"]
+    host.progress(host.epoch, "download", "complete", 4, 4)
+    host.progress(host.epoch, "conversion", "running")
+    assert [event["message"] for event in events(host) if event["event"] == "status"][-1] == "Preparing model…"
+    before = events(host)
+    host.progress(host.epoch, "download", "running", 3)
+    assert events(host) == before
+
+
+def test_download_progress_keeps_network_bytes_separate_and_rejects_stale_updates(host):
+    host.begin_install_progress(host.epoch, "native")
+    # Buffered reconstruction can sit at a few KB while GB arrive over Xet.
+    for received in (2_000_000_000, 3_000_000_000):
+        frame = module.converter_progress(
+            {
+                "phase": "download",
+                "state": "running",
+                "completed_bytes": 78_000,
+                "total_bytes": None,
+                "transferred_bytes": received,
+            }
+        )
+        assert frame is not None
+        host.progress(host.epoch, **frame)
+    assert host.install_progress["download"]["completed_bytes"] == 78_000
+    assert host.install_progress["download"]["transferred_bytes"] == 3_000_000_000
+    before = events(host)
+    host.progress(host.epoch - 1, "download", "running", 78_000, transferred_bytes=4_000_000_000)
+    assert events(host) == before
+    host.progress(host.epoch, "download", "complete", 1_000_000_000, 1_000_000_000)
+    assert host.install_progress["download"]["transferred_bytes"] == 3_000_000_000
+
+
 def test_qwen_mixed_catalogue_download_uses_the_offered_native_choice(host, monkeypatch):
     item = native_catalog.catalog_item(native_catalog.QWEN_CHOICE)
     host.catalog_request_id, host.catalog_family_id = "request", native_catalog.QWEN_FAMILY_ID

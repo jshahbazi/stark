@@ -2050,6 +2050,31 @@ extension EngineController {
             let install = command()
             guard install["command"] as? String == "install_catalog", install["catalog_request_id"] as? String == browse["request_id"] as? String,
                   install["artifact_mode"] as? String == "text", engine.busy, engine.downloadProgress.state == "waiting" else { return false }
+            engine.apply(["event": "status", "state": "installing", "message": "Downloading model files…"])
+            engine.apply(["event": "progress", "request_id": install["support_request_id"]!,
+                          "phase": "download", "state": "running", "completed_bytes": Int64(2_000_000)])
+            guard engine.message == "Downloading model files…", engine.downloadProgress.completedBytes == 2_000_000,
+                  engine.downloadProgress.detail(for: "download") == "2 MB",
+                  InstallProgress(state: "running").detail(for: "download") == "Downloading…",
+                  InstallProgress(state: "running").detail(for: "conversion") == "Preparing…" else { return false }
+            let received: [String: Any] = ["event": "progress", "request_id": install["support_request_id"]!,
+                "phase": "download", "state": "running", "completed_bytes": Int64(78_000),
+                "transferred_bytes": Int64(2_000_000_000)]
+            engine.apply(received)
+            guard engine.downloadProgress.completedBytes == 78_000,
+                  engine.downloadProgress.detail(for: "download") == "2 GB received",
+                  !engine.downloadProgress.showsProgressBar,
+                  InstallProgress(state: "running", completedBytes: 25, totalBytes: 100).showsProgressBar,
+                  InstallProgress(state: "running", completedBytes: 25, totalBytes: 100).fraction == 0.25 else { return false }
+            engine.apply(received.merging(["transferred_bytes": Int64(3_000_000_000)]) { _, new in new })
+            guard engine.downloadProgress.detail(for: "download") == "3 GB received" else { return false }
+            let known = InstallProgress(state: "running", completedBytes: 25, totalBytes: 100, transferredBytes: 200)
+            guard known.showsProgressBar, known.fraction == 0.25, known.detail(for: "download") == "25%",
+                  known.transferredBytes == 200 else { return false }
+            for bad: Any in [true, -1, 1.5, "100"] {
+                engine.apply(received.merging(["transferred_bytes": bad]) { _, new in new })
+                guard engine.downloadProgress.transferredBytes == 3_000_000_000 else { return false }
+            }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             guard engine.busy, engine.catalogInstallation != nil else { return false }
             engine.apply(["event": "models", "models": [
@@ -2149,15 +2174,29 @@ extension EngineController {
             let browse = command(); engine.apply(catalogReply(browse))
             engine.installCatalogItem(id: "entry")
             let install = command()
-            engine.stop(); _ = command()
+            engine.stop()
+            let stoppedCommands = commands()
+            guard stoppedCommands.map({ $0["command"] as! String }) == ["stop", "catalog"],
+                  let refresh = stoppedCommands.last,
+                  refresh["request_id"] as? String != browse["request_id"] as? String,
+                  engine.catalogFamilyID == "qwen3", engine.catalogLoading,
+                  engine.catalogInstallation == nil, engine.activeInstallRequestID == nil else { return false }
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
             engine.selectedID = "replacement"
             engine.apply(["event": "ready", "mode": "decision", "model_id": "replacement"])
             engine.apply(["event": "installed", "support_request_id": install["support_request_id"]!, "model": ["id": "stale-model"]])
             engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Stale failure"])
             engine.apply(catalogReply(browse))
-            return engine.selectedID == "replacement" && engine.loadedID == "replacement" && engine.modelReady &&
-                engine.catalog == nil && engine.errorMessage == nil
+            guard engine.catalog == nil, engine.catalogLoading, engine.errorMessage == nil,
+                  engine.catalogInstallMessage == nil, !engine.catalogInstallFailed else { return false }
+            engine.apply(catalogReply(refresh))
+            guard engine.selectedID == "replacement", engine.loadedID == "replacement", engine.modelReady,
+                  engine.catalog?.status == .ready, engine.catalog?.items.map(\.id) == ["entry"],
+                  !engine.catalogLoading, engine.catalogError == nil else { return false }
+            engine.installCatalogItem(id: "entry")
+            let retry = command()
+            return retry["command"] as? String == "install_catalog" &&
+                retry["catalog_request_id"] as? String == refresh["request_id"] as? String
         case "model-removal-confirmation":
             let imported = InstalledModel(id: "imported", name: "Exact imported name", path: "/private/imported", apiID: "id",
                                           removal: InstalledModelRemoval(removal("unregister")))

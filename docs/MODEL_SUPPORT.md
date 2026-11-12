@@ -297,7 +297,9 @@ shards and 108,720,071,552 stored weight bytes owned by the preparation helper.
 Flint keeps its pinned MLX affine INT4 checkpoint. These entries use bundled
 metadata, while discovery of other variants uses the Hub. Download preserves
 quantized bytes and validates the prepared identity before library registration.
-Download progress remains indeterminate until the stored byte total is verified.
+Native downloads show a progress bar for completed model files against the pinned
+weight total, with received network bytes separately. Partial allocations never
+advance the bar; final weight validation still gates completion.
 GLM image input and Decision mode are unavailable.
 Known Gemma 4 image choices use the immutable revisions bound by their image
 import profiles. Later repository revisions require their own image admission.
