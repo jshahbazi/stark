@@ -195,6 +195,12 @@ stay in the browser. A completed download appears in **Installed** without
 selecting it; choose it and **Run** when ready. Some image installations stop
 the running model for their required local checks.
 
+Native downloads show **Downloading model files** while fetching the checkpoint,
+then **Preparing model**. Their byte counter tracks file reconstruction reported
+by Hugging Face, including resumed bytes when reported; files already cached may
+be skipped. The indicator stays indeterminate until the pinned weight total is
+verified. Incomplete-file sizes are never used to estimate download progress.
+
 The catalogue starts with known sources, then follows the family's Hugging Face
 architecture search through successive pages. Each request checks up to 30
 distinct candidates; there is no fixed total result ceiling. **Load more models**

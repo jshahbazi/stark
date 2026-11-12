@@ -881,7 +881,7 @@ class Desktop:
             self.start(
                 self.install,
                 "installing",
-                "Checking model support…",
+                "Starting model download…" if native_choice else "Checking model support…",
                 "native" if native_choice else "huggingface",
                 native_choice or item["repo"],
                 mode,
@@ -1416,6 +1416,12 @@ class Desktop:
             if previous and completed_bytes < previous["completed_bytes"]:
                 return
             self.install_progress[phase] = value
+            if state == "running" and (previous is None or previous["state"] != "running"):
+                self.status(
+                    "installing",
+                    "Downloading model files…" if phase == "download" else "Preparing model…",
+                    epoch,
+                )
             request_id = getattr(self, "install_request_id", None)
             self.emit("progress", epoch, phase=phase, **value, **({"request_id": request_id} if request_id else {}))
 

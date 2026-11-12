@@ -22,7 +22,7 @@ from huggingface_hub import snapshot_download
 
 from . import qwen38_external
 from .cli import _publish
-from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
+from .progress import FDProgressSink, ProgressCallback, ProgressReporter, SnapshotDownloadProgress, reporter
 from .sources import SourceSnapshot, _verified_hashes, huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion, load_checkpoint, read_safetensors_header
 
@@ -667,12 +667,13 @@ def prepare(
             if shard.is_symlink() or not shard.is_file() or target.exists():
                 raise ValueError("conflicting GGUF resume state")
             shard.rename(target)
+    download_options = {}
     if progress is not None:
-        # snapshot_download's aggregate progress counts files. Incomplete files
-        # can be preallocated, so their sizes do not establish received bytes.
-        # Keep this phase indeterminate until the pinned weight total is checked.
+        # Read reconstruction callbacks from the locked Hub implementation;
+        # preallocated incomplete-file sizes are not evidence of progress.
         progress.emit("download", "running", force=True)
         progress.emit("conversion", "waiting", force=True)
+        download_options["tqdm_class"] = SnapshotDownloadProgress(progress, source["weight_bytes"]).bar_class()
     if not gguf_complete:
         snapshot_download(
             source["weights_repo"],
@@ -681,6 +682,7 @@ def prepare(
             local_dir=stage,
             local_files_only=offline,
             max_workers=3,
+            **download_options,
         )
     snapshot_download(
         source["metadata_repo"],
@@ -689,6 +691,7 @@ def prepare(
         local_dir=stage,
         local_files_only=offline,
         max_workers=2,
+        **download_options,
     )
     if choice == "glm53-q2" and not gguf_complete:
         shards = sorted((stage / "UD-Q2_K_XL").glob("*.gguf"))

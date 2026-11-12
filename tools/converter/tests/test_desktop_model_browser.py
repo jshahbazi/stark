@@ -300,6 +300,22 @@ def test_glm_catalogue_download_uses_only_the_offered_pinned_native_choice(host,
     assert len(called) == 1
 
 
+def test_install_progress_replaces_support_status_and_fences_stale_events(host):
+    host.begin_install_progress(host.epoch, "native")
+    host.status("installing", "Checking model support…", host.epoch)
+    host.progress(host.epoch, "download", "running")
+    host.progress(host.epoch, "download", "running", 2)
+    host.progress(host.epoch - 1, "conversion", "running")
+    messages = [event["message"] for event in events(host) if event["event"] == "status"]
+    assert messages == ["Checking model support…", "Downloading model files…"]
+    host.progress(host.epoch, "download", "complete", 4, 4)
+    host.progress(host.epoch, "conversion", "running")
+    assert [event["message"] for event in events(host) if event["event"] == "status"][-1] == "Preparing model…"
+    before = events(host)
+    host.progress(host.epoch, "download", "running", 3)
+    assert events(host) == before
+
+
 def test_qwen_mixed_catalogue_download_uses_the_offered_native_choice(host, monkeypatch):
     item = native_catalog.catalog_item(native_catalog.QWEN_CHOICE)
     host.catalog_request_id, host.catalog_family_id = "request", native_catalog.QWEN_FAMILY_ID

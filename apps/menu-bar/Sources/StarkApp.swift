@@ -363,7 +363,15 @@ struct InstallProgress {
         case "failed": return "Failed"
         case "waiting": return "Waiting"
         default:
-            guard let total = totalBytes, total > 0 else { return "Preparing…" }
+            guard let total = totalBytes, total > 0 else {
+                if phase == "download" {
+                    if completedBytes > 0 {
+                        return ByteCountFormatter.string(fromByteCount: completedBytes, countStyle: .file)
+                    }
+                    return "Downloading…"
+                }
+                return "Preparing…"
+            }
             if completedBytes >= total { return phase == "download" ? "Verifying…" : "Finalizing…" }
             return String(format: "%.0f%%", fraction * 100)
         }
