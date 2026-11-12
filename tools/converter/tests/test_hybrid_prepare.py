@@ -408,6 +408,10 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
                 nested.mkdir()
                 for index in range(4):
                     (nested / f"model-{index}.gguf").write_bytes(b"x")
+                with options["tqdm_class"](
+                    name="huggingface_hub.snapshot_download", unit="B", total=4
+                ) as bar:
+                    bar.update(2)
             else:
                 assert repo == source["metadata_repo"]
                 assert options["revision"] == source["metadata_revision"]
@@ -432,9 +436,17 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
         assert failure_category is None
         assert controller.models == [] and controller.worker is None
         events = [json.loads(line) for line in controller.output.getvalue().splitlines()]
-        assert all(event["event"] == "progress" for event in events)
+        assert all(event["event"] in {"progress", "status"} for event in events)
+        messages = [event["message"] for event in events if event["event"] == "status"]
+        assert messages[0] == "Downloading model files…"
+        assert any(
+            event["event"] == "progress" and event.get("phase") == "download"
+            and event.get("state") == "running" and event.get("completed_bytes") == 2
+            for event in events
+        )
         assert str(output) not in controller.output.getvalue()
         if weight_bytes == 4:
+            assert messages[-1] == "Preparing model…"
             assert result == 0 and output.is_dir()
             assert len(list(output.glob("*.gguf"))) == 4
             assert json.loads((output / "native-source.json").read_bytes())["weight_bytes"] == 4

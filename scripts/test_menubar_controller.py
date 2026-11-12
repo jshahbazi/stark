@@ -1927,6 +1927,13 @@ extension EngineController {
             let install = command()
             guard install["command"] as? String == "install_catalog", install["catalog_request_id"] as? String == browse["request_id"] as? String,
                   install["artifact_mode"] as? String == "text", engine.busy, engine.downloadProgress.state == "waiting" else { return false }
+            engine.apply(["event": "status", "state": "installing", "message": "Downloading model files…"])
+            engine.apply(["event": "progress", "request_id": install["support_request_id"]!,
+                          "phase": "download", "state": "running", "completed_bytes": Int64(2_000_000)])
+            guard engine.message == "Downloading model files…", engine.downloadProgress.completedBytes == 2_000_000,
+                  engine.downloadProgress.detail(for: "download") == "2 MB",
+                  InstallProgress(state: "running").detail(for: "download") == "Downloading…",
+                  InstallProgress(state: "running").detail(for: "conversion") == "Preparing…" else { return false }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             guard engine.busy, engine.catalogInstallation != nil else { return false }
             engine.apply(["event": "models", "models": [

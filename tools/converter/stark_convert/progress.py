@@ -15,6 +15,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from huggingface_hub.utils import tqdm as hf_tqdm
+
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 CONVERTER_FAILURE_CATEGORIES = frozenset(
@@ -227,3 +229,81 @@ class DownloadProgress:
             keys = self.selected if self.selected is not None else self.sizes.keys()
             total = sum(self.completed.get(key, 0) for key in keys)
             self.progress.emit("download", "complete", total, total, force=True)
+
+
+class SnapshotDownloadProgress:
+    """Capture snapshot reconstruction bytes without exposing file or repo names.
+
+    ``snapshot_download`` uses its aggregate reconstruction bar for bytes made
+    available locally, and distinct bars for network transfer and file counts.
+    Only the reconstruction bar is reported here. Its total can grow as files
+    are discovered, so events remain indeterminate and are capped by the
+    caller's independently pinned maximum.
+    """
+
+    BAR_NAME = "huggingface_hub.snapshot_download"
+
+    def __init__(self, progress: ProgressReporter, max_bytes: int):
+        if type(max_bytes) is not int or max_bytes < 0:
+            raise ValueError("invalid_snapshot_progress_limit")
+        self.progress = progress
+        self.max_bytes = max_bytes
+        self.completed_bytes = 0
+        self.lock = threading.RLock()
+
+    def _count(self, amount: int, *, force: bool = False) -> None:
+        if type(amount) is not int or amount < 0:
+            return
+        with self.lock:
+            self.completed_bytes = min(self.max_bytes, max(0, self.completed_bytes + amount))
+            self.progress.emit("download", "running", self.completed_bytes, None, force=force)
+
+    def bar_class(self):
+        owner = self
+
+        class SilentSnapshotProgressBar(hf_tqdm):
+            def __init__(self, *args, **kwargs):
+                self._capture = False
+                self._closed = False
+                name = kwargs.get("name")
+                initial = kwargs.get("initial", 0)
+                # The Hub factory may pass disable=False for a custom subclass.
+                # Force silence independently of environment and TTY settings.
+                kwargs["disable"] = True
+                super().__init__(*args, **kwargs)
+                self._capture = name == owner.BAR_NAME
+                self._last_n = initial if type(initial) is int and initial >= 0 else 0
+                self._last_n_lock = threading.Lock()
+                if self._capture and self._last_n:
+                    owner._count(self._last_n)
+
+            def update(self, amount=1):
+                if not self._capture or type(amount) is not int or amount < 0:
+                    return
+                with self._last_n_lock:
+                    before = self._last_n
+                    self._last_n = max(0, before + amount)
+                    self.n = self._last_n
+                    delta = self._last_n - before
+                if delta:
+                    owner._count(delta)
+
+            def update_transfer(self, _amount=1):
+                # Network bytes can differ from reconstructed source bytes.
+                return None
+
+            def set_transfer_postfix_str(self, *_args, **_kwargs):
+                return None
+
+            def close(self):
+                super().close()
+                if self._capture and not self._closed:
+                    self._closed = True
+                    owner._count(0, force=True)
+
+        return SilentSnapshotProgressBar
+
+    def close(self) -> None:
+        """Force the latest indeterminate count after a snapshot call returns."""
+        with self.lock:
+            self.progress.emit("download", "running", self.completed_bytes, None, force=True)
