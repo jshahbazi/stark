@@ -92,8 +92,9 @@ seeds the pinned Lily Q4-XL source through the typed Uzu text converter, with it
 separate artifact-specific reuse qualification.
 
 The app validates each prepared native source identity before registering the
-managed folder; loading and execution remain separate checks. Native download
-progress is indeterminate until all stored weight bytes are verified. Stop
+managed folder; loading and execution remain separate checks. Native downloads
+show received network bytes separately from reconstructed file bytes, without a
+percentage or animated bar until the stored weight total is verified. Stop
 terminates preparation; private download staging is retained for retry without
 registering the model. Other native-source downloads use the preparation commands
 above. Family discovery checks metadata in successive pages; **Load more models**

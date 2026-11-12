@@ -412,6 +412,10 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
                     name="huggingface_hub.snapshot_download", unit="B", total=4
                 ) as bar:
                     bar.update(2)
+                with options["tqdm_class"](
+                    name="huggingface_hub.snapshot_download.transfer", unit="B", total=4
+                ) as transfer:
+                    transfer.update(8)
             else:
                 assert repo == source["metadata_repo"]
                 assert options["revision"] == source["metadata_revision"]
@@ -444,6 +448,7 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
             and event.get("phase") == "download"
             and event.get("state") == "running"
             and event.get("completed_bytes") == 2
+            and event.get("transferred_bytes") == 8
             for event in events
         )
         assert str(output) not in controller.output.getvalue()
@@ -456,6 +461,7 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
                 "state": "complete",
                 "completed_bytes": 4,
                 "total_bytes": 4,
+                "transferred_bytes": 8,
             }
             # Desktop reserves completion until its own publication checks pass.
             assert controller.install_progress["conversion"]["state"] == "running"

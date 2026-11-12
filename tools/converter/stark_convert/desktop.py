@@ -360,7 +360,8 @@ def converter_progress(value):
         and value["category"] in CONVERTER_FAILURE_CATEGORIES
     ):
         return {"failure_category": value["category"]}
-    if not isinstance(value, dict) or set(value) != {"phase", "state", "completed_bytes", "total_bytes"}:
+    required = {"phase", "state", "completed_bytes", "total_bytes"}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"transferred_bytes"}:
         return None
     if (
         not isinstance(value["phase"], str)
@@ -376,7 +377,13 @@ def converter_progress(value):
         return None
     if value["state"] == "complete" and total is not None and completed != total:
         return None
-    return {key: value[key] for key in ("phase", "state", "completed_bytes", "total_bytes")}
+    if "transferred_bytes" in value and (
+        value["phase"] != "download"
+        or type(value["transferred_bytes"]) is not int
+        or not 0 <= value["transferred_bytes"] <= 2**63 - 1
+    ):
+        return None
+    return dict(value)
 
 
 def converter_failure_message(category):
@@ -1405,7 +1412,7 @@ class Desktop:
                 gpu_memory_bytes=amount,
             )
 
-    def progress(self, epoch, phase, state, completed_bytes=0, total_bytes=None):
+    def progress(self, epoch, phase, state, completed_bytes=0, total_bytes=None, transferred_bytes=None):
         with self.lock:
             if epoch != self.epoch or self.install_epoch != epoch:
                 return
@@ -1415,6 +1422,9 @@ class Desktop:
                 return
             if previous and completed_bytes < previous["completed_bytes"]:
                 return
+            previous_transferred = previous.get("transferred_bytes") if previous else None
+            if transferred_bytes is not None or previous_transferred is not None:
+                value["transferred_bytes"] = max(transferred_bytes or 0, previous_transferred or 0)
             self.install_progress[phase] = value
             if state == "running" and (previous is None or previous["state"] != "running"):
                 self.status(
