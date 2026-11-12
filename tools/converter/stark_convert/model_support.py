@@ -93,7 +93,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
             caveats.extend(["qwen35_vision_geometry", "reviewed_processing_programs", "local_image_checks"])
         if supported and mode == "vision-language" and architecture == "gemma4_text":
             caveats.extend(["gemma4_pinned_bf16_image_geometry", "pinned_processing_metadata", "local_image_checks"])
-        if supported and architecture in {"phi3", "gemma2", "gemma3_text", "gemma4_text"}:
+        if supported and architecture in {"gemma2", "gemma3_text", "gemma4_text"}:
             caveats.append("tied_embeddings_required")
         if supported and architecture == "gemma4_text" and mode != "vision-language":
             caveats.extend(["native_dense_text_geometry", "image_and_audio_towers_excluded"])
@@ -297,7 +297,7 @@ def preflight_model(
             "unsupported_native_dtype",
             "Native app modes require BF16 output; floating-point sources can be converted to BF16.",
         )
-    if architecture in {"phi3", "gemma2", "gemma3_text"} and config.get("tie_word_embeddings") is False:
+    if architecture in {"gemma2", "gemma3_text"} and config.get("tie_word_embeddings") is False:
         return _report(
             family,
             mode,
