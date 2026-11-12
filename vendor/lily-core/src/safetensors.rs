@@ -107,6 +107,32 @@ impl Checkpoint {
     /// external PLE table is exposed as one logical shard without copying.
     pub fn open_qwen_external_mlx(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
+        let mut aliased = Self::open_qwen_indexed_mlx(dir)?;
+        let table = parse_shard_header(&dir.join("ngram_table.bin"))?;
+        ensure!(
+            table.len() == 3,
+            "official MLX PLE table must contain exactly three planes"
+        );
+        for (name, meta) in table {
+            ensure!(
+                matches!(name.as_str(), "weight" | "scales" | "biases"),
+                "unexpected official MLX PLE plane"
+            );
+            let alias = format!(
+                "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.{name}"
+            );
+            ensure!(
+                aliased.tensors.insert(alias, meta).is_none(),
+                "official MLX PLE alias collision"
+            );
+        }
+        Ok(aliased)
+    }
+
+    /// Name-only views of indexed affine tensors, including each PLE range.
+    /// The index and Safetensors headers remain the authority for every file,
+    /// dtype, shape and byte interval; no model payload is copied or rewritten.
+    pub fn open_qwen_indexed_mlx(dir: impl AsRef<Path>) -> Result<Self> {
         let original = Self::open(dir)?;
         let mut tensors = HashMap::new();
         for (name, meta) in original.tensors {
@@ -122,27 +148,28 @@ impl Checkpoint {
                 name
             };
             let alias = alias.replace(".mlp.switch_mlp.", ".mlp.experts.");
+            let alias = if let Some((prefix, suffix)) =
+                alias.split_once(".ngram_embedding.shards.")
+            {
+                let (part, plane) =
+                    suffix.split_once('.').context("invalid indexed PLE name")?;
+                let parsed =
+                    part.parse::<usize>().context("invalid indexed PLE shard")?;
+                ensure!(
+                    parsed < 128 && parsed.to_string() == part,
+                    "invalid indexed PLE shard"
+                );
+                ensure!(
+                    matches!(plane, "weight" | "scales" | "biases"),
+                    "invalid indexed PLE plane"
+                );
+                format!("{prefix}.ngram_embedding.shard_{parsed}.{plane}")
+            } else {
+                alias
+            };
             ensure!(
                 tensors.insert(alias, meta).is_none(),
                 "official MLX alias collision"
-            );
-        }
-        let table = parse_shard_header(&dir.join("ngram_table.bin"))?;
-        ensure!(
-            table.len() == 3,
-            "official MLX PLE table must contain exactly three planes"
-        );
-        for (name, meta) in table {
-            ensure!(
-                matches!(name.as_str(), "weight" | "scales" | "biases"),
-                "unexpected official MLX PLE plane"
-            );
-            let alias = format!(
-                "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.{name}"
-            );
-            ensure!(
-                tensors.insert(alias, meta).is_none(),
-                "official MLX PLE alias collision"
             );
         }
         Ok(Self { tensors })
@@ -575,6 +602,32 @@ mod official_mlx_alias_tests {
             [9, 10, 11, 12]
         );
         assert_eq!(ckpt.read("model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.scales").unwrap(),[42,42]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn indexed_ple_aliases_preserve_each_range_without_an_external_table() {
+        let dir = std::env::temp_dir()
+            .join(format!("stark-indexed-mlx-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight";
+        let header = serde_json::to_vec(&serde_json::json!({
+            name:{"dtype":"U32","shape":[1,1],"data_offsets":[0,4]},
+            "mtp.fc_hidden.weight":{"dtype":"U32","shape":[1,1],"data_offsets":[4,8]}
+        }))
+        .unwrap();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(&header);
+        bytes.extend([1, 2, 3, 4, 5, 6, 7, 8]);
+        std::fs::write(dir.join("model.safetensors"), bytes).unwrap();
+        let ckpt = Checkpoint::open_qwen_indexed_mlx(&dir).unwrap();
+        let canonical = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
+        assert_eq!(ckpt.read(canonical).unwrap(), [1, 2, 3, 4]);
+        let meta = ckpt.meta(canonical).unwrap();
+        assert_eq!(meta.shape, [1, 1]);
+        assert_eq!(meta.dtype, SafetensorsDType::U32);
+        assert_eq!(ckpt.read("mtp.fc_hidden.weight").unwrap(), [5, 6, 7, 8]);
+        assert!(!dir.join("ngram_table.bin").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

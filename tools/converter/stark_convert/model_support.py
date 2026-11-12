@@ -64,7 +64,8 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
     modes = {}
     for mode in MODES:
         supported = not classifier and (
-            mode != "vision-language" or architecture in {"qwen3_5", "qwen3_5_moe", "gemma3", "gemma4_text"}
+            mode != "vision-language"
+            or architecture in {"qwen3_5", "qwen3_5_moe", "qwen4_exp", "gemma3", "gemma4_text"}
         )
         if architecture == "gemma3" and mode != "vision-language":
             supported = False
@@ -103,7 +104,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
     if architecture in {"qwen3_5", "qwen3_5_moe"}:
         formats.append("mlx-affine-mixed")
     if architecture == "qwen4_exp":
-        formats.append("mlx-serve-external-affine")
+        formats.extend(("mlx-serve-external-affine", "mlx-indexed-affine-ple"))
     return {
         "family_id": architecture,
         "name": name,
@@ -305,44 +306,81 @@ def preflight_model(
             "This family currently implements tied embeddings only.",
         )
     if architecture == "qwen4_exp":
+        from .adapters.qwen38 import architecture_config
         from .qwen38_external import is_external_affine
+        from .qwen38_retained import is_retained_affine, validate_vision_config
 
-        if is_external_affine(config):
-            if mode in {"decision", "vision-language"}:
-                return _report(
-                    family,
-                    mode,
+        external = is_external_affine(config)
+        typed_text = not any(key in config for key in ("text_config", "lily", "ngram_table"))
+        if not typed_text:
+            try:
+                architecture_config(config)
+                typed_text = True
+            except (ConversionError, UnsupportedConversion, KeyError, TypeError, ValueError, OverflowError):
+                pass
+        image_geometry = False
+        try:
+            validate_vision_config(config)
+            image_geometry = True
+        except (ConversionError, UnsupportedConversion, KeyError, TypeError, ValueError, OverflowError):
+            pass
+
+        def qwen_report(status, reason, message, warnings=()):
+            result = _report(family, mode, status, reason, message, warnings)
+            result["modes"] = {
+                "text": "conditional" if external or typed_text else "unsupported",
+                "decision": "conditional" if typed_text and not external else "unsupported",
+                "vision-language": "conditional" if image_geometry else "unsupported",
+            }
+            if mode in MODES:
+                result["modes"][mode] = status
+            result["alternatives"] = [
+                name for name in MODES if name != mode and result["modes"][name] == "conditional"
+            ]
+            return result
+
+        if mode == "vision-language":
+            if not is_retained_affine(config):
+                return qwen_report(
+                    "unsupported",
+                    "unsupported_vision_weight_format",
+                    "Flash Next images require a supported retained affine checkpoint layout.",
+                )
+            if not isinstance(config.get("vision_config"), dict):
+                return qwen_report("unsupported", "vision_tower_missing", "This checkpoint has no vision tower.")
+            if not image_geometry:
+                return qwen_report(
+                    "unsupported",
+                    "unsupported_vision_geometry",
+                    "The declared Flash Next decoder or vision geometry is outside the implemented family.",
+                )
+            return qwen_report(
+                "conditional",
+                "checkpoint_validation_required",
+                "Stark can prepare this Flash Next checkpoint with its image tower "
+                "and supported text draft head retained.",
+            )
+        if external:
+            if mode == "decision":
+                return qwen_report(
                     "unsupported",
                     "unsupported_mode",
                     "Generic external-table Qwen3.8 import supports text generation.",
                 )
-            return _report(
-                family,
-                mode,
+            return qwen_report(
                 "conditional",
                 "checkpoint_validation_required",
                 "Stark can prepare this external-table affine layout for native text generation.",
             )
-        if mode == "vision-language":
-            return _report(family, mode, "unsupported", "unsupported_mode", "Qwen3.8 conversion implements text only.")
         # A bare family probe describes implemented coverage. Real nested
         # checkpoints receive the typed metadata validation before weight I/O.
-        if any(key in config for key in ("text_config", "lily", "ngram_table")):
-            try:
-                from .adapters.qwen38 import architecture_config
-
-                architecture_config(config)
-            except (ConversionError, UnsupportedConversion):
-                return _report(
-                    family,
-                    mode,
-                    "unsupported",
-                    "unsupported_qwen38_metadata",
-                    "Qwen3.8 metadata is outside the supported affine checkpoint layouts.",
-                )
-        return _report(
-            family,
-            mode,
+        if not typed_text:
+            return qwen_report(
+                "unsupported",
+                "unsupported_qwen38_metadata",
+                "Qwen3.8 metadata is outside the supported affine checkpoint layouts.",
+            )
+        return qwen_report(
             "conditional",
             "checkpoint_validation_required",
             "Qwen3.8 text conversion preserves MLX quantization; exact artifact runtime checks remain unverified.",
@@ -998,6 +1036,21 @@ def preflight_source(
             container=container or ".safetensors",
         )
         selected_family = next((family for family in _FAMILIES if family["family_id"] == report["family_id"]), None)
+        if (
+            report["status"] == "conditional"
+            and report["family_id"] == "qwen4_exp"
+            and mode == "vision-language"
+            and local
+            and (repo is None or revision is None)
+        ):
+            report.update(
+                status="inconclusive",
+                reasons=["image_source_identity_required"],
+                message="Raw local Flash Next image sources need an immutable source identity. "
+                "Use the Hugging Face repository or import an already prepared image artifact.",
+                pending_checks=[],
+            )
+            report["modes"]["vision-language"] = "inconclusive"
         if report["status"] == "conditional" and container is None:
             report = inconclusive(
                 "checkpoint_inventory_incomplete", "Metadata does not list a supported checkpoint container."
@@ -1005,7 +1058,11 @@ def preflight_source(
         if report["status"] == "conditional" and report["family_id"] == "qwen4_exp":
             from .qwen38_external import external_files, is_external_affine
 
-            if is_external_affine(config):
+            if mode == "vision-language":
+                from .qwen38_retained import retained_files
+
+                retained_files(repo, names, config)
+            elif is_external_affine(config):
                 try:
                     external_files(repo, names)
                 except (ConversionError, UnsupportedConversion):
@@ -1033,6 +1090,12 @@ def preflight_source(
                 ):
                     if hashlib.sha256(read({"repo": repo, "filename": filename}, maximum)).hexdigest() != expected:
                         raise UnsupportedConversion("Gemma image processing identity changed")
+            elif report["family_id"] == "qwen4_exp":
+                from .qwen38_retained import validate_processing_metadata
+
+                validate_processing_metadata(
+                    names, lambda filename, maximum: read({"repo": repo, "filename": filename}, maximum)
+                )
             elif report["family_id"] == "gemma3":
                 from .gemma3_contract import normalize_processor
 

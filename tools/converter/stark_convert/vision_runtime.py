@@ -166,11 +166,10 @@ def family_image_input_contract(value: object) -> bool:
     gemma = value.get("family_profile") in _GEMMA4_PROFILES
     if value.get("family_profile") == LILY_FAMILY_PROFILE and (
         value.get("artifact_schema_version") != 6
-        or (source, revision)
-        not in {
-            ("fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl", "0f94842e3682b49acace4daeb4cf2e65a6f94f83"),
-            ("ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit", "788c07a8725642bccf13a0a3b8a21954ab84b4f2"),
-        }
+        or not isinstance(source, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", source) is None
+        or not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-f]{40}", revision) is None
     ):
         return False
     if value.get("family_profile") == GEMMA3_FAMILY_PROFILE and (

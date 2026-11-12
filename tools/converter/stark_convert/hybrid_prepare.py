@@ -24,7 +24,7 @@ from . import qwen38_external
 from .cli import _publish
 from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
 from .sources import SourceSnapshot, _verified_hashes, huggingface_repository
-from .streaming import ConversionError, load_checkpoint, read_safetensors_header
+from .streaming import ConversionError, UnsupportedConversion, load_checkpoint, read_safetensors_header
 
 SOURCES = {
     "flint-int4": {
@@ -254,6 +254,89 @@ def stage_external_qwen(snapshot: SourceSnapshot, staging: Path) -> dict:
     return receipt
 
 
+def stage_retained_qwen(snapshot: SourceSnapshot, staging: Path) -> dict:
+    """Preserve a compatible Flash Next checkpoint and prepare its image route.
+
+    The original tensors, MTP heads and recurrent-state implementation remain
+    unchanged. Image transactions still bypass text-prefix state in the worker.
+    """
+    from . import qwen38_retained
+    from .hybrid_vision import _read as read_image_metadata
+    from .hybrid_vision import prepare_image_artifact
+
+    if snapshot.artifact_mode != "vision-language":
+        raise UnsupportedConversion("Retained Flash Next image preparation requires image mode")
+    if (
+        not isinstance(snapshot.repo, str)
+        or huggingface_repository(snapshot.repo) != snapshot.repo
+        or not isinstance(snapshot.revision, str)
+        or len(snapshot.revision) != 40
+        or any(character not in "0123456789abcdef" for character in snapshot.revision)
+    ):
+        raise UnsupportedConversion("Retained Flash Next images require an immutable Hugging Face source revision")
+    snapshot.assert_unchanged(verify_content=False)
+    records = snapshot.manifest["files"]
+    targets = []
+    for record in records:
+        name = record["filename"]
+        target = staging / name
+        _copy_snapshot_file(snapshot.resolve_file(name), target)
+        target.chmod(0o600)
+        targets.append(target)
+    _, hashes = _verified_hashes(targets)
+    if hashes != [record["sha256"] for record in records]:
+        raise ConversionError("Retained Flash Next source changed during preparation")
+    snapshot.assert_unchanged(verify_content=False)
+    config = _json(staging / "config.json")
+    qwen38_retained.validate_processing_metadata(
+        [record["filename"] for record in records], lambda name, maximum: read_image_metadata(staging / name, maximum)
+    )
+    tensors = load_checkpoint(staging)
+    table = staging / qwen38_external.NGRAM_TABLE
+    planes = read_safetensors_header(table)[1] if qwen38_external.is_external_affine(config) else None
+    qwen38_retained.validate_layout(config, tensors, planes)
+    if qwen38_retained.auxiliary_metadata_filenames(config):
+        from . import qwen38_kquant
+
+        qwen38_kquant.validate_manifest(config, _json(staging / qwen38_kquant.PLE_MANIFEST), tensors)
+    index = staging / qwen38_external.INDEX
+    if not index.exists():
+        index.write_text(
+            json.dumps(
+                {"weight_map": {name: info.path.name for name, info in sorted(tensors.items())}}, sort_keys=True
+            )
+            + "\n"
+        )
+    weight_files = {
+        record["filename"]: {"size": record["size"], "sha256": record["sha256"]}
+        for record in records
+        if record["role"] in {"weights", "weight_index", "ngram_table", "ple_manifest"}
+    }
+    weight_files[index.name] = {"size": index.stat().st_size, "sha256": hashlib.sha256(index.read_bytes()).hexdigest()}
+    source = {
+        "architecture": "qwen4_exp",
+        "weights_repo": snapshot.repo,
+        "weights_revision": snapshot.revision,
+        "metadata_repo": snapshot.repo,
+        "metadata_revision": snapshot.revision,
+        "quantization": qwen38_retained.quantization_name(config),
+        "ngram_bytes": table.stat().st_size if table.exists() else 0,
+        "ngram_in_weight_bytes": table.exists(),
+    }
+    receipt = {
+        **_finish_metadata(staging, source),
+        **snapshot.receipt(),
+        "layout": qwen38_retained.LAYOUT,
+        "weight_files": weight_files,
+        "status": "prepared",
+    }
+    (staging / "native-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    if prepared_identity(staging) is None:
+        raise ConversionError("Retained Flash Next prepared identity could not be verified")
+    prepare_image_artifact(staging)
+    return receipt
+
+
 def _sha256_text(value) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
@@ -377,6 +460,10 @@ def prepared_identity(directory: Path) -> dict | None:
             return None
         if receipt.get("layout") == _EXTERNAL_LAYOUT:
             return _external_identity(directory, config, receipt, marker)
+        from . import qwen38_retained
+
+        if receipt.get("layout") == qwen38_retained.LAYOUT:
+            return _external_identity(directory, config, receipt, marker, retained=True)
         source = next(
             (
                 value
@@ -436,16 +523,21 @@ def prepared_identity(directory: Path) -> dict | None:
         return None
 
 
-def _external_identity(directory: Path, config: dict, receipt: dict, marker: dict) -> dict | None:
+def _external_identity(directory: Path, config: dict, receipt: dict, marker: dict, *, retained=False) -> dict | None:
+    from . import qwen38_retained
+
     repo, revision = marker.get("source"), marker.get("revision")
     identity = {"repo": repo, "revision": revision}
     codec = config.get("token_codec_config")
+    external = qwen38_external.is_external_affine(config)
+    supported = qwen38_retained.is_retained_affine(config) if retained else external
+    quantization = qwen38_retained.quantization_name(config) if retained else qwen38_external.QUANTIZATION
     if (
-        not qwen38_external.is_external_affine(config)
+        not supported
         or receipt.get("schema_version") != 1
-        or receipt.get("artifact_mode") != "text"
+        or receipt.get("artifact_mode") != ("vision-language" if retained else "text")
         or receipt.get("architecture") != "qwen4_exp"
-        or receipt.get("quantization") != qwen38_external.QUANTIZATION
+        or receipt.get("quantization") != quantization
         or receipt.get("config_sha256") != hashlib.sha256((directory / "config.json").read_bytes()).hexdigest()
         or receipt.get("weights_source") != identity
         or receipt.get("metadata_source") != identity
@@ -469,7 +561,9 @@ def _external_identity(directory: Path, config: dict, receipt: dict, marker: dic
     shards = sorted(path.name for path in directory.glob("*.safetensors"))
     index = directory / qwen38_external.INDEX
     indexed = index.exists() or index.is_symlink()
-    names = {*shards, qwen38_external.NGRAM_TABLE}
+    names = {*shards, *([qwen38_external.NGRAM_TABLE] if external else [])}
+    auxiliary = qwen38_retained.auxiliary_metadata_filenames(config) if retained else ()
+    names.update(auxiliary)
     if indexed:
         names.add(index.name)
     if not qwen38_external.supported_shards(shards, indexed) or not isinstance(records, dict) or set(records) != names:
@@ -487,8 +581,10 @@ def _external_identity(directory: Path, config: dict, receipt: dict, marker: dic
             or path.stat().st_size != record["size"]
         ):
             return None
-        if name != qwen38_external.INDEX:
+        if name not in (qwen38_external.INDEX, *auxiliary):
             total += record["size"]
+        elif record["size"] > 1048576 or hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]:
+            return None
     if indexed and (
         index.stat().st_size > 1024 * 1024
         or hashlib.sha256(index.read_bytes()).hexdigest() != records[index.name]["sha256"]
@@ -500,7 +596,7 @@ def _external_identity(directory: Path, config: dict, receipt: dict, marker: dic
         **identity,
         "architecture": "qwen4_exp",
         "weight_bytes": total,
-        "quantization": qwen38_external.QUANTIZATION,
+        "quantization": quantization,
     }
 
 

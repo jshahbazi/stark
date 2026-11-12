@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import qwen38_external
+from . import qwen38_external, qwen38_retained
 from .gemma3_contract import gemma3_source_files, normalize_processor
 from .model_support import (
     check_hub_metadata_size,
@@ -234,13 +234,13 @@ class SourceSnapshot:
                 != profile["architecture"]
             ):
                 raise ConversionError("Generic source profile disagrees with its checkpoint")
-            external_qwen = (
-                self.artifact_mode == "text"
-                and profile["architecture"] == "qwen4_exp"
-                and qwen38_external.is_external_affine(read_support_config(self.config_path, root=self.root))
-            )
+            config = read_support_config(self.config_path, root=self.root)
+            external_qwen = profile["architecture"] == "qwen4_exp" and qwen38_external.is_external_affine(config)
+            retained_images = self.artifact_mode == "vision-language" and profile["architecture"] == "qwen4_exp"
             rules = (
-                (
+                qwen38_retained.retained_files(self.repo, names, config)
+                if retained_images
+                else (
                     gemma3_source_files(self.repo, names)
                     if profile["architecture"] == "gemma3"
                     else family_source_files(self.repo, names)
@@ -253,8 +253,10 @@ class SourceSnapshot:
             roles = set(GENERIC_REQUIRED) | set(GENERIC_OPTIONAL)
             if self.artifact_mode == "vision-language":
                 roles.add("processor_config")
-            if external_qwen:
+            if external_qwen or retained_images:
                 roles.update(("ngram_table", "source_notice"))
+            if retained_images:
+                roles.add("ple_manifest")
             actual = {
                 (record["role"], record["filename"]) for record in self.manifest["files"] if record["role"] in roles
             }
@@ -506,14 +508,20 @@ def _replay(
         if (schema == 2 or schema == 3 and profile is not None) and entry is not None:
             raise ValueError()
         names = tuple(record["filename"] for record in manifest["files"] if record["repo"] == primary)
+        source_names = tuple(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
+        retained_images = schema == 3 and profile is not None and profile["architecture"] == "qwen4_exp"
+        if retained_images and (primary is None or manifest["primary_revision"] is None):
+            raise ValueError()
         rules = (
-            (
+            qwen38_retained.retained_files(primary, source_names, read_support_config(root / "config.json", root=root))
+            if retained_images
+            else (
                 gemma3_source_files
                 if schema == 3 and profile["architecture"] == "gemma3"
                 else family_source_files
                 if schema == 3
                 else generic_files
-            )(primary, tuple(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()))
+            )(primary, source_names)
             if profile is not None
             else source_rules(entry, artifact_mode)
             if entry is not None
@@ -631,13 +639,17 @@ def resolve_source(
                 "google/gemma-3-12b-it",
                 "google/gemma-3-27b-it",
             }
-            if entry is not None and entry.get("adapter") not in {"qwen3_5", "qwen3_5_moe"} and not gemma3:
+            if (
+                entry is not None
+                and entry.get("adapter") not in {"qwen3_5", "qwen3_5_moe", "qwen4_exp"}
+                and not gemma3
+            ):
                 raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
             # Vision family sources always bind their own metadata, even when
             # the text catalog has external metadata rules for this repository.
             entry = None
             metadata_profile = metadata_profile or GENERIC_PROFILE
-            if architecture not in {None, "qwen3_5", "qwen3_5_moe", "gemma3"}:
+            if architecture not in {None, "qwen3_5", "qwen3_5_moe", "qwen4_exp", "gemma3"}:
                 raise UnsupportedConversion("Vision family requires a supported image architecture")
     if metadata_profile not in {None, GENERIC_PROFILE} or metadata_profile is not None and entry is not None:
         raise UnsupportedConversion("Generic metadata requires an uncatalogued source")
@@ -709,6 +721,16 @@ def resolve_source(
     config = read_support_config(metadata_path, root=metadata_root)
     admit(config, entry=entry)
     external_qwen = metadata_profile == GENERIC_PROFILE and qwen38_external.is_external_affine(config)
+    retained_images = (
+        metadata_profile == GENERIC_PROFILE
+        and artifact_mode == "vision-language"
+        and config.get("model_type") == "qwen4_exp"
+    )
+    if retained_images and local and (repo is None or revision is None):
+        raise UnsupportedConversion(
+            "Raw local Flash Next images require an immutable repository and source revision; "
+            "use the Hugging Face repository or an already prepared image artifact"
+        )
     selected = None
     if local:
         root = path.resolve()
@@ -752,10 +774,12 @@ def resolve_source(
             read_family_config(config_path) if artifact_mode == "vision-language" else read_json(config_path),
             architecture,
         )
-        if artifact_mode == "vision-language" and detected not in {"qwen3_5", "qwen3_5_moe", "gemma3"}:
+        if artifact_mode == "vision-language" and detected not in {"qwen3_5", "qwen3_5_moe", "qwen4_exp", "gemma3"}:
             raise UnsupportedConversion("Vision family requires a supported image architecture")
         rules = (
-            (gemma3_source_files(repo, names) if detected == "gemma3" else family_source_files(repo, names))
+            qwen38_retained.retained_files(repo, names, config)
+            if retained_images
+            else (gemma3_source_files(repo, names) if detected == "gemma3" else family_source_files(repo, names))
             if artifact_mode == "vision-language"
             else qwen38_external.external_files(repo, names)
             if external_qwen
@@ -769,17 +793,19 @@ def resolve_source(
                     check_hub_metadata_size(hub, repo, filename, revisions[repo], maximum)
                 return read_metadata_bytes(loader(filename), root=root, maximum=maximum)
 
-            if detected == "gemma3":
+            if retained_images:
+                qwen38_retained.validate_processing_metadata(names, inspect_sidecar)
+            elif detected == "gemma3":
                 normalize_processor(json.loads(inspect_sidecar("preprocessor_config.json", 65536)))
             else:
                 check_vision_processing_metadata(names, inspect_sidecar)
-    if external_qwen and not local and qwen38_external.INDEX in names:
+    if (external_qwen or retained_images) and not local and qwen38_external.INDEX in names:
         check_hub_metadata_size(hub, repo, qwen38_external.INDEX, revisions[repo], 1024 * 1024)
     if selected is None:
         selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
-    if external_qwen and not qwen38_external.supported_shards(selected, index_name is not None):
+    if (external_qwen or retained_images) and not qwen38_external.supported_shards(selected, index_name is not None):
         raise UnsupportedConversion("External Qwen3.8 requires flat native checkpoint shards")
-    if external_qwen and not local:
+    if (external_qwen or retained_images) and not local:
         index = read_json(loader(index_name))["weight_map"] if index_name is not None else None
         deadline = time.monotonic() + 80
 
@@ -788,9 +814,8 @@ def resolve_source(
                 raise qwen38_external.HeaderAccessError()
 
         try:
-            qwen38_external.verify_hub_layout(
-                hub, repo, revisions[repo], config, selected, index, check_header_deadline
-            )
+            verifier = qwen38_retained.verify_hub_layout if retained_images else qwen38_external.verify_hub_layout
+            verifier(hub, repo, revisions[repo], config, selected, index, check_header_deadline)
         except qwen38_external.HeaderAccessError:
             raise ConversionError("Cannot verify the pinned Qwen3.8 tensor headers") from None
     descriptors = list(rules)

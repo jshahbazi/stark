@@ -966,7 +966,7 @@ fn retained_lily_tower_source_reference() {
         .unwrap_or_else(|_| panic!("private tower header admission failed"));
     let loader =
         Loader::new(&context, checkpoint, config.quantization, &[], Box::new(|_| 4));
-    let weights = super::super::vision_weights::load(&loader, vision)
+    let weights = super::super::vision_weights::load(&loader, vision, config.storage.indexed_mlx())
         .unwrap_or_else(|_| panic!("private tower weights failed"));
     assert_eq!(weights.bytes(), 897_862_112);
     let hashes = &manifest["source_visual_tensor_sha256"];
