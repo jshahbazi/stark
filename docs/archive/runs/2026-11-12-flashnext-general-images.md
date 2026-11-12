@@ -95,6 +95,49 @@ sequential process restart. Keep prompts, token vectors and responses in memory;
 save only aggregate counters and hashes. Stop on a failed correctness/resource
 gate and retain the partial receipt. Close only the qualification worker.
 
+### Candidate identity
+
+| Field | Value |
+| --- | --- |
+| Implementation commit | `6ddfdaba` |
+| Host | Apple M5 Max, 128 GiB RAM, macOS 26.7.2 (25G332) |
+| Toolchains | Rust 1.98.1 (`48a229cea`), uv 0.12.24, locked dependencies |
+| Worker SHA-256 | `e44fcea263d8ceeea0819a5eebb257b7d2af933235e73cd4380a1eddb4d70543` |
+| Lifecycle helper SHA-256 | `5d1c0c2bc2cff49a48c1a8ba70d91a2bd5aa7bb950980988d6d59c2a9458e3c9` |
+| Cargo.lock SHA-256 | `f836a99ba1c6bd017fb829cd45f108fd97f9f1fb40c1497564898b3eac625f5f` |
+| Converter lock SHA-256 | `df7711726b1ed7e235ded21b9e6e1cbe130924be4d2c580d5d6bd9005248f8d5` |
+
+Final model-free checks on this implementation: 7,241 converter tests passed,
+94 skipped; 145 generation-worker tests passed, five ignored; 97 native-core
+tests passed, 54 ignored; the new engine source-identity test passed under the
+nightly custom harness; seven qualification-helper counterexample tests passed.
+Repository policy, Python lint/format, Rust formatting and the release worker
+build passed. These counts overlap focused subsets reported during development;
+they are not added to those subsets.
+
+### First actual attempt: memory preflight rejection
+
+Full pinned preparation passed with 52 stored weight files totaling
+107,614,239,896 bytes. The prepared configuration SHA-256 is
+`49bce31896c983ef11d98e51f7f839bc31f2129f273f0254a1d66aab93777b61`;
+the image manifest SHA-256 is
+`99d8cead8011d2f1f94c54c65c9da9a613245b489782eb52e69a04a0bdf3808f`.
+
+The first lifecycle attempt was rejected before launching a native worker.
+The host's unknown-artifact memory estimate charged the entire source payload
+plus 2 GiB: 109,761,723,544 bytes, against 99,870,408,704 bytes observed
+available. That includes the 32 GB paged PLE table as if fully resident. No
+generation or image execution occurred; this is an admission/resource failure,
+not a numerical result. Preserve the partial private receipt as
+`runtime/kquant-lifecycle-qualification-v1-memory-preflight.json`.
+
+Follow-up `20261112-FNI-04` generalizes the host estimate using validated
+tensor headers: resident target/head/tower payloads plus typed startup,
+scratch, paged-working-set and driver/host reserves. It must independently
+verify the supported layout before excluding PLE bytes; the native loader and
+request allocation guards remain authoritative. The frozen exact Lily recipe
+and unknown-layout fallback retain their previous behavior.
+
 ## 20261112-FNI-03: matched image-residency text check
 
 Registered before timing. State: pending the lifecycle gate. Use the exact same
