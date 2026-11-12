@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
-from . import qwen38_external
+from . import catalog_reasons, qwen38_external
 from .model_support import (
     check_vision_processing_metadata,
     normalize_architecture,
@@ -175,22 +175,30 @@ def _unsupported_quantization(config):
     return "Unsupported format"
 
 
+class _HeadersUnreadable(str):
+    """The unverified-headers reason, marked as a header read failure.
+
+    It equals ``qwen38_external.UNVERIFIED``; the caller replaces it with the
+    access-approval reason for a gated source.
+    """
+
+
 def _verify_hub_layout(family, hub, repo, revision, config, shards, index, sizes, remaining, modes):
     from .checkpoint_metadata import CheckpointMetadata
     from .hub_headers import HeaderAccessError, HeaderBudgetError, checkpoint_headers
     from .planning import plan_from_headers
 
-    unsupported = "The checkpoint's tensor names, shapes or packing do not match Stark's importer for this family."
+    unreadable = _HeadersUnreadable(qwen38_external.UNVERIFIED)
     try:
         tensors = checkpoint_headers(hub, repo, revision, shards, index, sizes, remaining)
-    except (ConversionError, UnsupportedConversion):
-        return dict.fromkeys(modes, unsupported)
+    except (ConversionError, UnsupportedConversion) as error:
+        return dict.fromkeys(modes, catalog_reasons.importer_reason(error))
     except HeaderBudgetError:
         return dict.fromkeys(modes, "A tensor header exceeds the catalog's 4 MiB verification limit.")
     except HeaderAccessError:
-        return dict.fromkeys(modes, qwen38_external.UNVERIFIED)
+        return dict.fromkeys(modes, unreadable)
     except Exception:
-        return dict.fromkeys(modes, qwen38_external.UNVERIFIED)
+        return dict.fromkeys(modes, unreadable)
 
     verdicts = {}
     for mode in modes:
@@ -198,8 +206,10 @@ def _verify_hub_layout(family, hub, repo, revision, config, shards, index, sizes
             remaining()
             plan_from_headers(family, CheckpointMetadata(config, tensors), mode=mode)
             verdicts[mode] = None
-        except (ConversionError, UnsupportedConversion, ValueError, TypeError, KeyError, OverflowError):
-            verdicts[mode] = unsupported
+        except (ConversionError, UnsupportedConversion) as error:
+            verdicts[mode] = catalog_reasons.importer_reason(error)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            verdicts[mode] = catalog_reasons.UNSUPPORTED_LAYOUT
         except Exception:
             verdicts[mode] = qwen38_external.UNVERIFIED
     return verdicts
@@ -1101,8 +1111,12 @@ def family_catalog(
                 return item
             if outcome.get("reused"):
                 cache.confirm(repo, revision)
-            elif not (item is not None and item.get("unavailable_reason") == qwen38_external.UNVERIFIED):
-                # A verdict that could not be verified must be checked again.
+            elif not (
+                item is not None
+                and item.get("unavailable_reason") in (qwen38_external.UNVERIFIED, catalog_reasons.GATED)
+            ):
+                # A verdict that could not be verified, including one waiting
+                # on access approval, must be checked again.
                 cache.store(repo, revision, item, settled=not outcome.get("volatile"))
             return item
 
@@ -1132,6 +1146,10 @@ def family_catalog(
                 if requested_revision is not None and revision != requested_revision:
                     raise _Unavailable()
                 names, sizes = _weight_inventory(info)
+                # The Hub reports "auto" or "manual" for a source whose files
+                # need access approval, and False otherwise.
+                gated = _field(info, "gated", False)
+                gated = gated is True or isinstance(gated, str) and gated.casefold() in {"auto", "manual"}
 
                 def read_pinned(filename, maximum):
                     # The pinned inventory already states each file's size.
@@ -1211,7 +1229,13 @@ def family_catalog(
                     if external_qwen
                     else _quantization(config, info, entry, family=family)
                 )
-                if quantization is None:
+                foreign = catalog_reasons.foreign_format(config) if quantization is None else None
+                if foreign is not None:
+                    # A GPU-server quantization export is described by its
+                    # format before any other check, and its tensor headers
+                    # are never requested.
+                    quantization, unavailable_reason = foreign
+                elif quantization is None:
                     unavailable_reason = unavailable_reason or (
                         "This checkpoint's declared weight format has no supported import path."
                     )
@@ -1246,7 +1270,7 @@ def family_catalog(
                     except qwen38_external.LayoutError as error:
                         unavailable_reason = str(error)
                     except qwen38_external.HeaderAccessError:
-                        unavailable_reason = qwen38_external.UNVERIFIED
+                        unavailable_reason = catalog_reasons.GATED if gated else qwen38_external.UNVERIFIED
                     if unavailable_reason is not None:
                         quantization = "MLX-Serve"
                     selected = [*selected, qwen38_external.NGRAM_TABLE]
@@ -1270,6 +1294,12 @@ def family_catalog(
                         family, hub, repo, revision, config, selected, index, sizes, remaining, modes
                     )
                     unavailable_reason = next((layout[mode] for mode in modes if layout[mode] is not None), None)
+                    if gated and isinstance(unavailable_reason, _HeadersUnreadable):
+                        # A gated source's header reads fail until the user
+                        # has been granted access.
+                        unavailable_reason = catalog_reasons.GATED
+                    elif unavailable_reason is not None:
+                        unavailable_reason = str(unavailable_reason)
                 extra_weights = any(name.endswith(".safetensors") and name not in selected for name in names)
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
                 if parameters is None and quantization != "BF16" and not extra_weights:

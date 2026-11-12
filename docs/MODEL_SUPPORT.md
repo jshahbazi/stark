@@ -215,6 +215,40 @@ catalogue's 4 MiB inspection limit remains unavailable with an explanation.
 Duplicate tied-tensor payload equality is checked during full conversion.
 Native loading and model execution remain separate checks.
 
+An **Unavailable** row states one reason, chosen in this order:
+
+- **GPU-server quantization.** A `quantization_config` whose `quant_method` is
+  anything other than MLX (for example AWQ, GPTQ, bitsandbytes, FP8,
+  compressed-tensors, ModelOpt or AutoRound), with no MLX `quantization` block,
+  is named as that format. The row's quantization label is the method name
+  only, never a guessed bit width, and the reason says Stark imports the
+  model's original weights or its MLX exports. This takes precedence over
+  every other check, and no tensor header is requested for such a row. The
+  rule applies only where the import-format check already rejects the source,
+  so it never changes which rows can be downloaded. An MLX export, which
+  writes a `quantization` block and usually a matching `quantization_config`,
+  is not affected.
+- **Configuration or format checks.** Preflight, quantization parsing and
+  container checks report their own message, such as an unsupported MLX
+  option, untied embeddings or a missing shard index.
+- **Importer rejection.** When the tensor planner or header inventory rejects
+  the checkpoint, the row shows the importer's own message, for example
+  "RoPE scaling is outside qualified dense coverage." These are fixed
+  messages written in the importer that name config fields and rules, never
+  file paths or tensor contents. A message is cut to the 240-byte reason
+  limit; one with control characters, and any unexpected exception type,
+  falls back to the general statement that tensor names, shapes or packing do
+  not match the family's importer.
+- **Access approval.** When the Hub marks a repository as gated and its tensor
+  headers cannot be read, the row asks the user to sign in to Hugging Face,
+  accept the model's terms and refresh. Like an unverified header read, this
+  verdict is never cached, so a refresh after approval checks the source
+  again. A gated source whose configuration cannot be read is still left out
+  of the list.
+- **Header limits.** A header beyond the 4 MiB inspection limit keeps its own
+  reason, and any other header read failure on a source that is not gated
+  still asks for a refresh.
+
 GLM and Flint searches also display other family exports with their import
 limitations. Their supported native installers currently bind exact artifacts.
 GLM's downloadable `UD-Q2_K_XL` GGUF entry keeps its source revisions, four
