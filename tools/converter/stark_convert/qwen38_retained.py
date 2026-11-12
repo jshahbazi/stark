@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import qwen38_external, qwen38_kquant
+from . import qwen38_external, qwen38_kquant, qwen38_lily
 from .adapters.qwen38 import architecture_config, build_qwen38_plan
 from .checkpoint_metadata import CheckpointMetadata
 from .hub_headers import HeaderAccessError, checkpoint_headers, read_header
@@ -51,6 +51,35 @@ def auxiliary_metadata_filenames(config):
     return (qwen38_kquant.PLE_MANIFEST,) if qwen38_kquant.is_kquant_affine(config) else ()
 
 
+def processor_metadata_files(names, *, config=None):
+    """Select declared programs, or the implemented family's fixed default.
+
+    Missing metadata is usable only after the retained image architecture and
+    native geometry have been established. Explicit sidecars are never ignored.
+    """
+    if any(name in names for name in ("preprocessor_config.json", "processor_config.json")):
+        return family_processor_filenames(names)
+    if not isinstance(config, dict):
+        raise UnsupportedConversion("A Flash Next family default processor requires complete image configuration.")
+    validate_vision_config(config)
+    return ()
+
+
+def family_default_processor_metadata(config, names):
+    """Describe derived output separately from the checkpoint's source files."""
+    if processor_metadata_files(names, config=config):
+        return None
+    from .hybrid_vision import PROCESSOR_BYTES, PROFILE
+
+    return {
+        "origin": "stark-family-default",
+        "family_profile": PROFILE,
+        "family_version": 1,
+        "sha256": hashlib.sha256(PROCESSOR_BYTES).hexdigest(),
+        "bytes": len(PROCESSOR_BYTES),
+    }
+
+
 def retained_files(repo, names, config):
     """Bind all processing sidecars and auxiliary storage to this source."""
     if not is_retained_affine(config):
@@ -73,7 +102,10 @@ def retained_files(repo, names, config):
     )
     return (
         *base,
-        *({"role": "processor_config", "repo": repo, "filename": name} for name in family_processor_filenames(names)),
+        *(
+            {"role": "processor_config", "repo": repo, "filename": name}
+            for name in processor_metadata_files(names, config=config)
+        ),
     )
 
 
@@ -88,7 +120,17 @@ def _unique_object(pairs):
 
 def validate_processing_metadata(names, read):
     """Require the checkpoint's supported recipe before downloading weights."""
-    for name in family_processor_filenames(names):
+    config = None
+    if "config.json" in names:
+        try:
+            config = json.loads(read("config.json", 1048576), object_pairs_hook=_unique_object)
+            if not isinstance(config, dict):
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError, RecursionError, AttributeError) as error:
+            raise UnsupportedConversion("Flash Next image processing configuration is invalid.") from error
+    processors = processor_metadata_files(names, config=config)
+    derived = family_default_processor_metadata(config, names) if not processors else None
+    for name in processors:
         try:
             value = json.loads(read(name, 65536), object_pairs_hook=_unique_object)
             if normalize_family_processor(value, name) != _PROCESSOR:
@@ -97,9 +139,10 @@ def validate_processing_metadata(names, read):
             raise UnsupportedConversion(
                 "Flash Next image processing metadata is outside the supported recipe."
             ) from error
-    if qwen38_kquant.PLE_MANIFEST in names:
+    if config is not None and qwen38_kquant.is_kquant_affine(config):
+        if qwen38_kquant.PLE_MANIFEST not in names:
+            raise UnsupportedConversion("Indexed Flash Next requires its PLE source metadata.")
         try:
-            config = json.loads(read("config.json", 1048576), object_pairs_hook=_unique_object)
             manifest = json.loads(read(qwen38_kquant.PLE_MANIFEST, 1048576), object_pairs_hook=_unique_object)
             qwen38_kquant.validate_manifest(config, manifest)
         except (ValueError, TypeError, UnicodeError, RecursionError, AttributeError) as error:
@@ -124,6 +167,7 @@ def validate_processing_metadata(names, read):
             raise ValueError()
     except (ValueError, TypeError, UnicodeError, RecursionError, AttributeError) as error:
         raise UnsupportedConversion("Flash Next images require a complete supported chat-template source.") from error
+    return derived
 
 
 def validate_vision_config(config):
@@ -138,6 +182,7 @@ def validate_vision_config(config):
         architecture = qwen38_external._architecture(config)
     else:
         architecture = architecture_config(config)[0]
+        qwen38_lily.validate_mtp_config(config)
     validate_native_geometry(architecture)
     qwen38_external._validate_vision_metadata(config, architecture)
     if isinstance(config.get("lily"), dict):
@@ -254,6 +299,8 @@ def validate_layout(config, tensors, table=None):
         )
     else:
         build_qwen38_plan(Path("."), checkpoint_metadata=CheckpointMetadata(config, tensors))
+        qwen38_lily.validate_trunk_control_dtypes(config, tensors)
+        qwen38_lily.validate_mtp_layout(config, tensors)
     validate_vision_layout(config, tensors)
 
 

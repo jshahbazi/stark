@@ -111,13 +111,13 @@ def test_channels_last_patch_shape_is_admitted_only_with_indexed_native_adapter(
     qwen38_retained.validate_vision_layout({**image_config, "test_indexed": True}, tensors)
 
 
-def test_image_processing_requires_source_recipe_and_template():
+def test_image_processing_requires_supported_recipe_or_complete_family_config_and_template():
     files = {
         "preprocessor_config.json": json.dumps(_PROCESSOR).encode(),
         "tokenizer_config.json": json.dumps({"chat_template": "{{ messages[0].content }}"}).encode(),
     }
     qwen38_retained.validate_processing_metadata(files, lambda name, _maximum: files[name])
-    with pytest.raises(Exception, match="processor metadata"):
+    with pytest.raises(UnsupportedConversion, match="image tower"):
         qwen38_retained.retained_files(
             "example/model",
             ("config.json", "tokenizer.json", "tokenizer_config.json"),

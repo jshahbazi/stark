@@ -232,3 +232,114 @@ The shared implementation and follow-up host memory fix are committed on
 receipts remain ignored. The original installed application and its library
 were not replaced; Stark was reopened after the sequential native runs. Use a
 build containing this branch to receive the Add Source fix. No PR was requested.
+
+## 20261112-FNI-05: independent follow-up review
+
+The user requested another review and clarification of whole-family coverage.
+Baseline for this review: pushed commit `e051a74e`. Independent native, host and
+coverage reviews found the following admission issues to repair:
+
+- The retained Lily route reused a text-only planner that intentionally ignores
+  `mtp.*`. A malformed declared Lily head could pass pre-download header checks
+  and preparation, then fail native loading. The fix must validate declared MTP
+  metadata, complete head shapes/dtypes/packing and the native draft precision
+  policy before downloading payloads. Typed text-only conversion keeps its
+  existing omission contract.
+- Merely finding an unrelated `ple_manifest.json` made processor inspection
+  invoke the indexed KQuant validator for other storage dialects. The check must
+  select the manifest by the declared format and require it for indexed PLE,
+  while ignoring unselected auxiliary sidecars for other admitted dialects.
+- The typed text planner allowed F32 controls that retained native RMS/HC,
+  attention and other kernels require in BF16. A retained-only control-dtype
+  check now preserves the native F32/BF16 GDN exceptions while rejecting
+  unsupported control inputs before payload downloads. Typed text conversion
+  and its recorded F32 reference evidence remain unchanged.
+- Actual metadata inspection found that both pinned Lily and MLX-Serve sources
+  omit processor sidecars. The generic route originally rejected those sources,
+  despite the existing pinned preparation path deriving the fixed processor.
+  The shared route now derives that same family recipe only after validating
+  the image architecture/native geometry, validates any explicit metadata
+  strictly, and records generated-file provenance separately from upstream
+  source hashes. No new pixel-processing arithmetic was introduced.
+
+These are host admission changes. They do not alter inference arithmetic or
+the already recorded worker executable. Retain all earlier receipts; record
+new regression/header checks and any additional actual-image smoke separately.
+
+Whole-family support is not established. The shared implementation admits
+specific compatible Lily, external-table affine and indexed affine contracts,
+complete BF16 towers, native Flash Next geometry and supported processor/template
+programs. Family membership alone does not establish those properties. The
+original 14 checks cover one actual checkpoint and one small valid PNG plus a
+malformed PNG; they are lifecycle assertions, not 14 image fixtures or a general
+visual-quality evaluation.
+
+### Actual source audit after the fixes
+
+These are pinned metadata and complete tensor-header checks only. The review
+does not transfer the actual `nace-ai` runtime result to other artifacts.
+
+| Source and immutable revision | Image preflight | Complete indexed header check |
+| --- | --- | --- |
+| `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, `0f94842e3682b49acace4daeb4cf2e65a6f94f83` | Conditional, family-default processor | Passed: 55 shards, 3,845 indexed tensors |
+| `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, `788c07a8725642bccf13a0a3b8a21954ab84b4f2` | Conditional, family-default processor | Passed: 101 shards, 3,167 indexed tensors, plus the external table planes |
+| `nace-ai/Qwen3.8-Flash-Next-MLX-KQuant`, `05cb5c56c918b8e32ed440c71d17a8e8f72fff90` | Conditional, explicit processor | Passed: 52 shards, 3,649 indexed tensors |
+| `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, `b2c422f3c643e36f04227a64d61796b44a4b1029` | Unsupported vision weight format | Not attempted |
+| `Qwen/Qwen3.8-Flash-Next`, `de4b8e4d43b917e7706784d8bb445c9af86a3540` | Unsupported vision weight format | Not attempted |
+
+Private source-audit receipt SHA-256:
+`500b93caeacc0ff27f71f5c797675b55abe20c274ed3cae75755ab70754c37f2`.
+The missing-processor diagnosis is independently retained with SHA-256
+`dfa76bb40469dfaad6d57dc622de7af181bdb45a2c6b47a11027accf1ac0f1c8`.
+
+## 20261112-FNI-06: additional actual image fixtures
+
+The original worker executable and exact `nace-ai` artifact were exercised again
+at context 2,048, maximum 64 output tokens, greedy sampling. Four synthetic
+fixtures passed 12 image/recovery/cleanup checks:
+
+| Fixture | Format / dimensions | Image tokens | Result |
+| --- | --- | ---: | --- |
+| Solid red square | PNG, 256 × 256 | 64 | Passed |
+| Solid green portrait | PNG, 256 × 512 | 128 | Passed |
+| Solid blue landscape | PNG, 512 × 256 | 128 | Passed |
+| Solid yellow square | JPEG, 256 × 256 | 64 | Passed |
+
+Each image required its unique expected color label, no negated answer, zero
+image drafts/proposals/reuse, valid token accounting, cleaned staging and
+subsequent text generation with MTP2 enabled. Responses and token vectors were
+kept in memory; receipts contain only hashes, counts and checks. This is
+transport/aspect-ratio smoke coverage. General vision quality, reference
+parity, multiple-image execution and high-resolution behavior remain unqualified.
+
+Setup history is retained: the first private helper incorrectly assumed Pillow
+was installed in the locked converter environment; it failed before launching
+a worker. A replacement Swift/ImageIO fixture generator initially produced
+black images because its drawing context did not fill the bitmap. Two attempts
+with those fixtures failed their expected-color gates and are invalid setup,
+not model correctness results. The black fixtures and failed receipts were
+preserved. The generator was corrected to fill RGB bytes directly; corrected
+fixtures were checked before the passing run. The final semantic gate accepts
+an unambiguous, non-negated color answer rather than requiring exact one-word
+formatting. No generation output was logged.
+
+Passing private aggregate receipt:
+`runtime/kquant-review-image-fixtures-v3.json`, SHA-256
+`e7b6894d3641cf4d95fe33e90b13902beb7489f2daf4a701e994251926092bf4`.
+
+### Follow-up validation and delivery
+
+With the review edits frozen, the complete offline converter suite passed
+**7,306 tests, 94 skipped**. The qualification harness counterexample suite
+passed all seven tests. Repository policy and its 55 self-tests passed; Ruff
+checks, formatting for all 219 converter Python files and `git diff --check`
+passed. No Rust code or dependency locks changed in this follow-up, so the
+earlier native test results and executable identity remain separate evidence.
+
+An earlier full-suite attempt overlapped a regression-test edit and reported
+one failing stale test assertion about source-file receipt keys. The final
+frozen-source run above includes the corrected provenance assertion and passes.
+
+The follow-up is delivered on the same `codex/flashnext-general-images` branch.
+No installed application or user library was replaced. A build containing these
+changes is required to use the revised Add Source route.

@@ -1093,9 +1093,14 @@ def preflight_source(
             elif report["family_id"] == "qwen4_exp":
                 from .qwen38_retained import validate_processing_metadata
 
-                validate_processing_metadata(
+                derived = validate_processing_metadata(
                     names, lambda filename, maximum: read({"repo": repo, "filename": filename}, maximum)
                 )
+                if derived is not None:
+                    report["warnings"].append(
+                        "This source omits image processing metadata; "
+                        "Stark will use standard Flash Next preprocessing."
+                    )
             elif report["family_id"] == "gemma3":
                 from .gemma3_contract import normalize_processor
 

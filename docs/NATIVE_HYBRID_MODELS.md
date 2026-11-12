@@ -119,8 +119,12 @@ distinct from folded MLX-Serve storage. The indexed adapter presents the PLE
 tensor ranges to the existing paged table and losslessly reorders a channels-last
 patch-embedding kernel at load time. Source weight files remain unchanged.
 Processor operations and image chat templates must match the implemented
-programs. Remote sources are bound to their immutable revision; a raw local
-source needs explicit repository/revision provenance for this schema-6 route.
+programs. When a compatible source omits processor sidecars, Stark derives the
+existing standard Flash Next processor after validating its image architecture
+and native geometry. Explicit sidecars must match that recipe. Preparation
+records the generated processor under `derived_metadata` separately from the
+upstream source hashes. Remote sources are bound to their immutable revision;
+a raw local source needs explicit repository/revision provenance for this schema-6 route.
 Prepared local image artifacts can still be imported directly.
 
 For the CLI, use a new output directory:
@@ -135,6 +139,13 @@ the supported source quantization and text draft head. Every artifact still
 receives its own hashes and native tensor admission, and the desktop runs local
 image checks before registering the model. Family compatibility does not
 transfer another checkpoint's numerical or performance qualification.
+
+Coverage is limited to the implemented storage contracts. The original official
+FP8 and legacy PipeNetwork/F32 exports do not use this retained image route. Other quantizers,
+quantized vision towers, changed geometry or unsupported processor/template
+programs require further implementation or admission work. Retained Lily
+pre-download checks include the declared MTP head and native control dtypes;
+the text-only Uzu converter's omission rules do not qualify those components.
 
 Source builds containing the image-family integration can explicitly enable
 still-image input for the pinned `qwen38-lily-q4-xl` and

@@ -19,6 +19,12 @@ layouts. The actual `nace-ai/Qwen3.8-Flash-Next-MLX-KQuant` artifact passed the
 Add Source controller's installation and local image checks, plus 14 explicit
 image/text/MTP/prefix lifecycle controls. This adds evidence for that exact
 artifact; older rows retain their original checkpoint-specific evidence.
+The follow-up review added strict Lily draft/control admission, selected-dialect
+sidecar checks and derived processor provenance. Complete pinned headers pass
+for the Lily, MLX-Serve and nace exports. Four additional actual nace color
+fixtures pass square/portrait/landscape PNG and square JPEG checks. Official
+FP8 and legacy PipeNetwork/F32 exports remain outside this image route;
+whole-family execution and general visual quality are unqualified.
 See the [implementation and qualification record](archive/runs/2026-11-12-flashnext-general-images.md).
 
 | Model / artifact | Images added in Stark? | Verified evidence and limits | Text optimizations with images loaded | Remaining action |

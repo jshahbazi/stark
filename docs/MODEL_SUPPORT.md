@@ -24,8 +24,13 @@ supported processor/template programs. It does not require a repository entry
 in the catalog. Immutable source provenance and content hashes remain bound to
 each installed artifact; automatic local image execution checks must pass before
 registration. See [retained image preparation](NATIVE_HYBRID_MODELS.md#retained-lily-image-artifacts).
-The
-ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
+Sources without a processor sidecar use the validated standard family recipe;
+generated processor provenance is recorded separately. Explicit unsupported
+processing programs, other weight formats and quantized towers remain outside
+this contract. Family recognition alone does not establish execution or image
+quality for an arbitrary export.
+
+The ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
 backend has an unchanged `headless-reference` default and a separately staged
 `--profile bf16-native-experimental` profile that includes the BF16 draft head,
 native MTP, and prefix support. Only that profile defaults to three drafts; requests

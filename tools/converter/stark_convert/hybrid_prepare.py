@@ -261,8 +261,8 @@ def stage_retained_qwen(snapshot: SourceSnapshot, staging: Path) -> dict:
     unchanged. Image transactions still bypass text-prefix state in the worker.
     """
     from . import qwen38_retained
+    from .hybrid_vision import PROCESSOR_BYTES, prepare_image_artifact
     from .hybrid_vision import _read as read_image_metadata
-    from .hybrid_vision import prepare_image_artifact
 
     if snapshot.artifact_mode != "vision-language":
         raise UnsupportedConversion("Retained Flash Next image preparation requires image mode")
@@ -288,8 +288,16 @@ def stage_retained_qwen(snapshot: SourceSnapshot, staging: Path) -> dict:
         raise ConversionError("Retained Flash Next source changed during preparation")
     snapshot.assert_unchanged(verify_content=False)
     config = _json(staging / "config.json")
+    processing_names = [record["filename"] for record in records]
+    derived_processor = qwen38_retained.family_default_processor_metadata(config, processing_names)
+    if derived_processor is not None:
+        processor = staging / "preprocessor_config.json"
+        with processor.open("xb") as stream:
+            stream.write(PROCESSOR_BYTES)
+        processor.chmod(0o600)
+        processing_names.append(processor.name)
     qwen38_retained.validate_processing_metadata(
-        [record["filename"] for record in records], lambda name, maximum: read_image_metadata(staging / name, maximum)
+        processing_names, lambda name, maximum: read_image_metadata(staging / name, maximum)
     )
     tensors = load_checkpoint(staging)
     table = staging / qwen38_external.NGRAM_TABLE
@@ -330,6 +338,8 @@ def stage_retained_qwen(snapshot: SourceSnapshot, staging: Path) -> dict:
         "weight_files": weight_files,
         "status": "prepared",
     }
+    if derived_processor is not None:
+        receipt["derived_metadata"] = {"preprocessor_config.json": derived_processor}
     (staging / "native-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
     if prepared_identity(staging) is None:
         raise ConversionError("Retained Flash Next prepared identity could not be verified")
