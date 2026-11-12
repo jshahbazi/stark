@@ -4,7 +4,8 @@
 
 - Registered and started: 2026-11-12; owner: Codex.
 - Baseline: Stark `72ad1b09e9f6ebdee269ea46197ccc06a5680c80`.
-- State: implementation and qualification in progress; no runtime pass claimed.
+- State: implementation and bounded local qualification completed; limits and
+  failed attempts are retained below.
 - Trigger: Add Source rejects `nace-ai/Qwen3.8-Flash-Next-MLX-KQuant`
   with images enabled because the generic `qwen4_exp` route is text-only.
 - Hypothesis: architecture, storage, complete tensor inventory and processing
@@ -72,8 +73,9 @@
 - Storage follow-up: the user freed space, increasing observed free storage to
   approximately 155 GiB. The pinned full checkpoint download started; complete
   execution results follow after download and preparation.
-- Full-model execution, numerical comparison, cache lifecycle and performance:
-  not run yet. No cross-artifact qualification is inherited.
+- Full source-reference decoder comparison and general visual quality remain
+  unassessed. Actual model lifecycle and short timing results are recorded
+  below; no cross-artifact qualification is inherited.
 - Models, metadata scratch and raw runtime evidence stay in ignored/private
   storage. Publish only aggregate results and hashes.
 
@@ -84,7 +86,7 @@ See the [experiment ledger](../../model-experiments/README.md) and
 
 Registered before loading the full checkpoint. Candidate: the same indexed
 storage adapter, native worker and source revision recorded above. State:
-pending download/preparation; no pass claimed.
+completed for the bounded lifecycle controls below.
 
 Use `scripts/qualify_flashnext_images.py` with context 8,192, 4,104 nonperiodic
 source-derived input tokens and a 64-token output budget. Exercise MTP0 and MTP2
@@ -107,7 +109,7 @@ gate and retain the partial receipt. Close only the qualification worker.
 | Cargo.lock SHA-256 | `f836a99ba1c6bd017fb829cd45f108fd97f9f1fb40c1497564898b3eac625f5f` |
 | Converter lock SHA-256 | `df7711726b1ed7e235ded21b9e6e1cbe130924be4d2c580d5d6bd9005248f8d5` |
 
-Final model-free checks on this implementation: 7,241 converter tests passed,
+Before the follow-up host memory fix, 7,241 converter tests passed,
 94 skipped; 145 generation-worker tests passed, five ignored; 97 native-core
 tests passed, 54 ignored; the new engine source-identity test passed under the
 nightly custom harness; seven qualification-helper counterexample tests passed.
@@ -138,9 +140,48 @@ verify the supported layout before excluding PLE bytes; the native loader and
 request allocation guards remain authoritative. The frozen exact Lily recipe
 and unknown-layout fallback retain their previous behavior.
 
+### Corrected actual lifecycle result
+
+Host fix commit `52e7cf62` passed 116 focused memory/image-check tests. For this
+artifact, validated resident payloads plus reserves require 91,585,062,040
+bytes at the host's actual 16 KiB page size. The paged working-set allowance
+uses that page size rather than the frozen legacy recipe's 4 KiB assumption.
+No native worker binary or source payload changed for this correction.
+
+The second full-model attempt passed all 14 registered lifecycle checks across
+16 recorded generations and two sequential worker instances. Automatic local
+image verification passed. Explicit checks passed for MTP0/MTP2 greedy equality,
+actual MTP proposals, 4,096-token prefix restoration, changed-tail fresh
+references, malformed-image recovery/invalidation, bounded red-image answering,
+zero image drafts/reuse, cleaned image staging, text/MTP recovery after images,
+re-established text reuse, explicit reset and process restart. This is bounded
+local execution/cache evidence; full source-reference decoder logits and general
+visual quality remain unassessed.
+
+Private aggregate receipt:
+`runtime/kquant-lifecycle-qualification-v2.json`, SHA-256
+`18b96b20bac7f41ad23f4fbe6db01f97a0bd62e857ac2f25c274f377b7a2e57f`.
+
+The actual desktop Add Source controller was then exercised in an isolated
+library using the remote repository, immutable revision and `vision-language`
+selection. Its real converter child completed, the host admitted the prepared
+artifact, automatic local image execution checks passed, and the controller
+registered one image artifact with `image_verification: locally_tested`.
+The resulting manifest matched the independently prepared artifact above.
+This uses the production controller path without replacing the installed app
+or modifying its library. The installed Stark app was temporarily closed to
+release its loaded model during the native tests.
+The controller's private aggregate receipt SHA-256 is
+`453843e4bc904addaed53d9a2caab1fe27fe8c15c0bd740ccf441d5feb9fbd37`.
+
+After the memory fix, the full converter suite passed again: **7,249 passed,
+94 skipped**. The existing CI benchmark/qualification step, including the new
+harness counterexamples, passed **123 tests and 12 subtests** locally. No hosted
+CI result is claimed.
+
 ## 20261112-FNI-03: matched image-residency text check
 
-Registered before timing. State: pending the lifecycle gate. Use the exact same
+Registered before timing; completed after the lifecycle gate. Use the exact same
 config and stored payload in text-only and image-loaded worker instances,
 sequentially. Four loading blocks: text, image, image, text. For MTP0 and MTP2,
 use 64 source-derived input tokens, context 512 and at most 64 output tokens;
@@ -150,3 +191,44 @@ proposals. Fixed regression bound: image-loaded median decode and end-to-end
 rates must be at least 95% of the matching text-only rates. Report dispersion
 and paging/compression/swap observations. A short passing result only covers
 this workload and build; it is not a general throughput qualification.
+
+### Results
+
+Completed on the same exact prepared payload and worker. All 48 requests (eight
+warmups and 40 measured requests) had identical greedy output hashes across
+loading modes and MTP0/MTP2. Prefix reuse was zero for every request; MTP2
+actually proposed drafts. The four sequential loading blocks used matched
+configuration and payload identities. Loading/hash checks were outside timing.
+
+| Policy | Text-only median decode tok/s | Images-loaded median decode tok/s | Image/text ratio | Text-only median wall s | Images-loaded median wall s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MTP0 | 62.9046 | 63.2476 | 1.00545 | 1.14388 | 1.13855 |
+| MTP2 | 51.0214 | 52.8509 | 1.03586 | 1.39743 | 1.34835 |
+
+Both fixed 5% timing bounds passed in this short observation. This does not
+establish a general speedup or an MTP benefit: MTP2 was slower than MTP0 on this
+workload. Ten measured requests per policy/loading mode contributed to each
+median. Full dispersion and per-block observations remain in the private
+aggregate receipt.
+
+The measurement endpoints recorded no pageouts, swapouts or compression, and
+thermal state remained zero. They recorded 12,710 decompressed pages across
+the 40 measured requests, so **no request passed the strict clean-endpoint
+screen**. CPU/GPU contention and clocks were not isolated. Disposition:
+**bounded unscreened observation**, not production throughput qualification or
+evidence of broad loading-mode performance equivalence. MTP1/MTP3, other
+contexts/prompt lengths and sustained/image throughput remain separately
+unqualified.
+
+Private helper SHA-256:
+`d181518a45f08f8f2ef91fe5d03e7566e0ba149da28eeafcb0fa56a10906aca3`.
+Private aggregate receipt `runtime/kquant-matched-text-performance.json`, SHA-256
+`323a4a60dab24832ef3f8e4fdedb5f9356208753aeea17f718c2e19a6121b6f5`.
+
+## Delivery status
+
+The shared implementation and follow-up host memory fix are committed on
+`codex/flashnext-general-images`. Models, binaries and raw/private qualification
+receipts remain ignored. The original installed application and its library
+were not replaced; Stark was reopened after the sequential native runs. Use a
+build containing this branch to receive the Add Source fix. No PR was requested.
