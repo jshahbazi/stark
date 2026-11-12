@@ -112,7 +112,10 @@ def source_choice(family: str, item: object) -> str | None:
     """Return a preparation choice only for an exact fixed catalog item."""
     if not isinstance(item, dict):
         return None
-    return next((choice for choice in _NATIVE_CHOICES.get(family, ()) if item == catalog_item(choice)), None)
+    # A reference score only orders the catalogue; it is not part of the
+    # installable identity, which must still match in every other field.
+    identity = {key: value for key, value in item.items() if key != "reference_score"}
+    return next((choice for choice in _NATIVE_CHOICES.get(family, ()) if identity == catalog_item(choice)), None)
 
 
 def unavailable_item(family: str, repo: str, revision: str, config, names, sizes) -> dict | None:

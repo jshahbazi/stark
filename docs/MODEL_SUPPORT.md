@@ -125,6 +125,29 @@ family overview sorts by name A–Z or Z–A; family detail sorts by name in eit
 direction or model size ascending or descending. Unknown numeric values sort last
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
+
+Family detail opens on **Top rated (coding)**, with **Top rated (general)**
+beside it. Both use the bundled whatmodel.sh reference scores described in
+[Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
+Rows that can be downloaded and whose weights fit this Mac's memory budget come
+first, then the higher score, then the smaller download; unscored rows follow
+scored ones, then models likely too large for this Mac, then unavailable rows.
+A group is placed by its best row. A scored row shows its score as a link to the
+source page, and its tooltip names the model the score belongs to. A row whose
+weights exceed 85% of physical memory less 2 GiB is marked as likely too large;
+that is a coarse check on weights alone, not a runtime plan. The catalogue also
+inspects sources with a reference score before the rest of the first 300
+listing positions, preferring models from the RAM list this Mac can use, so the
+first pages hold the best-rated candidates. A saved sort choice is kept.
+
+**Hide Unsupported** is checked by default and the choice persists. It leaves
+out every row that cannot be downloaded: a weight format or quantization option
+Stark does not import, a tensor layout the family's importer rejects, a source
+without a usable Safetensors file or shard index, and a source whose tensor
+headers could not be verified. Quantization tabs and counts follow the listed
+rows. The list states how many rows are hidden, and when every row found so far
+is hidden it offers to show them. Unchecking it lists those rows as
+**Unavailable** with their reason.
 Conversion-only families are omitted. Cards show whether each model supports
 text or text and images. Downloads automatically include image support when
 available for that artifact. This requires metadata confirming a supported
@@ -159,14 +182,113 @@ retains unsupported family variants with an **Unavailable** reason.
 **Load more models** follows the remaining pages automatically, preserving
 results already loaded. Failed pages can be retried at the same offset.
 
-Before enabling Download for a generic Safetensors source, the catalogue reads
-the pinned tensor headers with exact HTTP byte ranges and runs the same tensor
-planner used by conversion. Names, shapes, dtypes, affine packing and shard-index
-membership must match the importer. Header requests never consume weight payloads
-and reject servers that ignore the requested range. A header exceeding the
+The Hub listing itself carries each repository's head revision, task tags and
+file names. A source whose listing already shows another task, no model
+configuration or no weight file uses its position without any request of its
+own, so one page can pass up to 500 such positions and reach further down the
+family. Metadata files are bounded by the sizes in the pinned file inventory
+instead of a separate size request, and the Hub's parsed architecture rejects
+an unsupported head revision before its configuration is fetched.
+
+Rows appear as each source is checked; the page's sorted report follows. The
+app keeps verdicts in `catalog-cache` inside its data folder, keyed by
+repository and bound to the checked revision and the installed converter
+sources. An unchanged revision is answered from that cache without contacting
+the repository: for 30 days, or one hour when the outcome depended on access
+(gated or missing files, configuration borrowed from another repository). A
+registered source has no listed revision, so its head is confirmed with one
+request and then trusted for ten minutes. Verdicts that could not be verified
+are never stored. The cache holds public repository metadata only, and
+installing repeats the pinned preflight.
+
+Before enabling Download for a generic Safetensors source, the catalogue checks
+the pinned tensor headers with the same tensor planner used by conversion.
+Names, shapes, dtypes, affine packing and shard-index membership must match the
+importer. For a checkpoint with a shard index, one Hub API call returns every
+shard's parsed header; it is used only when the Hub labels it with the pinned
+revision and each header agrees with the pinned file sizes. A single-file
+checkpoint, a moved or older revision, or any reply that fails those checks is
+read from the pinned files with exact HTTP byte ranges instead, and every
+failure reason comes from those bytes. Header requests never consume weight
+payloads and reject servers that ignore the requested range. A header exceeding the
 catalogue's 4 MiB inspection limit remains unavailable with an explanation.
 Duplicate tied-tensor payload equality is checked during full conversion.
 Native loading and model execution remain separate checks.
+
+Each family planner admits an explicit set of `config.json` keys. Before a
+planner validates a configuration, one shared pass
+(`stark_convert/config_normalization.py`) rewrites a small set of reviewed
+forms that do not change the model. The planner applies it on the line that
+reads its configuration, so catalogue admission and the source-backed
+conversion that installs the model always judge the same normalized
+configuration. The source `config.json` is never modified. The pass:
+
+- drops publisher annotations and sampling defaults when their value has the
+  expected shape: `unsloth_fixed`, `unsloth_version`, `transformers.js_config`,
+  `model_name`, `generation_config`, `do_sample`, `top_p`, `top_k`,
+  `temperature`, `is_llama_config` and `init_method`. A malformed value is
+  refused rather than dropped;
+- drops `rope_interleaved` only when it is `false` and `rope_scaling` only
+  when it is `null`;
+- renames `dtype` to `torch_dtype` when `torch_dtype` is absent;
+- sets a nonzero `attention_dropout` within (0, 1] to 0.0. Dropout is inactive
+  at inference. This is a separate judgement call that
+  `ZERO_INACTIVE_ATTENTION_DROPOUT` turns off on its own;
+- for planners that read a single flat `rope_theta` and reject a nested
+  declaration (Qwen2, Mistral, Gemma 2, OLMo 3, Phi-3, Granite and SmolLM3),
+  flattens a plain `rope_parameters` object holding only `rope_theta` and an
+  absent or default `rope_type`. Qwen3, Llama and LFM2 already validate that
+  plain form themselves and see it unchanged;
+- for Gemma 2 and Gemma 3 text, drops `sliding_window_size` when it is an
+  integer equal to the required `sliding_window` the planner uses;
+- for LFM2, drops `tie_word_embeddings: true` unless `tie_embedding` is
+  `false` (the planner reads `tie_embedding`, default tied), and sets an absent
+  `block_ff_dim` from a positive integer `intermediate_size` (the Transformers
+  `Lfm2Config` stores one as the other).
+
+Gemma 4 and Qwen3.5 also apply the generic rules to their nested
+`text_config`. Everything else still fails closed in the planner: unknown keys,
+two differing declared RoPE bases, a plain `rope_parameters` beside a non-null
+`rope_scaling`, scaled, YaRN, linear, partial-rotary or per-attention-type RoPE
+forms, `rope_interleaved: true`, both `dtype` and `torch_dtype` declared, and
+dropout outside its valid range. The Gemma 3 image wrapper, the external
+Qwen3.8 profiles, LLaMBA and ModernBERT keep their configurations unchanged.
+Image-mode contract validators that read the configuration separately are not
+affected by this pass.
+
+An **Unavailable** row states one reason, chosen in this order:
+
+- **GPU-server quantization.** A `quantization_config` whose `quant_method` is
+  anything other than MLX (for example AWQ, GPTQ, bitsandbytes, FP8,
+  compressed-tensors, ModelOpt or AutoRound), with no MLX `quantization` block,
+  is named as that format. The row's quantization label is the method name
+  only, never a guessed bit width, and the reason says Stark imports the
+  model's original weights or its MLX exports. This takes precedence over
+  every other check, and no tensor header is requested for such a row. The
+  rule applies only where the import-format check already rejects the source,
+  so it never changes which rows can be downloaded. An MLX export, which
+  writes a `quantization` block and usually a matching `quantization_config`,
+  is not affected.
+- **Configuration or format checks.** Preflight, quantization parsing and
+  container checks report their own message, such as an unsupported MLX
+  option, untied embeddings or a missing shard index.
+- **Importer rejection.** When the tensor planner or header inventory rejects
+  the checkpoint, the row shows the importer's own message, for example
+  "RoPE scaling is outside qualified dense coverage." These are fixed
+  messages written in the importer that name config fields and rules, never
+  file paths or tensor contents. A message is cut to the 240-byte reason
+  limit; one with control characters, and any unexpected exception type,
+  falls back to the general statement that tensor names, shapes or packing do
+  not match the family's importer.
+- **Access approval.** When the Hub marks a repository as gated and its tensor
+  headers cannot be read, the row asks the user to sign in to Hugging Face,
+  accept the model's terms and refresh. Like an unverified header read, this
+  verdict is never cached, so a refresh after approval checks the source
+  again. A gated source whose configuration cannot be read is still left out
+  of the list.
+- **Header limits.** A header beyond the 4 MiB inspection limit keeps its own
+  reason, and any other header read failure on a source that is not gated
+  still asks for a refresh.
 
 GLM and Flint searches also display other family exports with their import
 limitations. Their supported native installers currently bind exact artifacts.

@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
+from ..config_normalization import normalize_config
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -123,7 +124,9 @@ def build_phi_plan(
     contiguous row views implement that reorder with the shared bounded writer.
     Q/K/V rows already have the required order and need no materialization.
     """
-    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    config = normalize_config(
+        "phi3", read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     if config.get("model_type") != "phi3":
         raise UnsupportedConversion("Checkpoint model_type does not match the Phi adapter")
     if dtype not in _DTYPES:

@@ -22,6 +22,7 @@ import numpy as np
 
 from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import MLXMatrixSource, plan_mlx_matrix, read_mlx_matrix
+from ..config_normalization import normalize_config
 from ..family_quantization import gemma4_quantization
 from ..streaming import (
     ConversionError,
@@ -96,7 +97,9 @@ def build_gemma4_plan(
     full-precision sources retain canonical HF arithmetic. Explicit profiles
     remain available for independently recorded controls.
     """
-    outer = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    outer = normalize_config(
+        "gemma4_text", read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     unified = outer.get("model_type") in {"gemma4_unified", "gemma4_unified_text"}
     wrapper = outer.get("model_type") in {"gemma4", "gemma4_unified"}
     if wrapper:

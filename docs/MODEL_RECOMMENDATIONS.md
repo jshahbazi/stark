@@ -95,6 +95,32 @@ If the snapshot is unavailable, malformed or covers none of the eligible models,
 
 The [RAM-scaled Speed check](archive/runs/2026-11-11-speed-recommendation-policy.md) records the current primary choices, exact source identities, hardware assumptions and model-free regression results.
 
+### Catalogue ordering
+
+**Model Catalog** uses the same snapshot to order a family's rows. This is a
+browsing aid, separate from the Beginner selection policy above: it never
+selects, installs or admits a model, and every row still passes the catalogue's
+own compatibility checks. `catalog_ranking.py` attaches a reference score to a
+row only through one of these relationships, which the row records:
+
+| Relationship | Rule |
+| --- | --- |
+| `benchmarked_model` | The row's repository is the scored repository. |
+| `reviewed_export` | A reviewed export-to-parent binding matches the row's exact repository and revision. |
+| `declared_quantization` | The row is a quantized format and its Hub tags declare exactly one `base_model:quantized:` parent, which is scored. |
+| `named_quantization` | The row is a quantized format whose name is a scored model's name plus a quantization suffix that agrees with the checked format. The scored model must share the row's publisher, or be the only scored model with that name. |
+
+Full-precision rows other than the scored repository itself never inherit a
+score: a fine-tune, merge or re-upload has its own weights. The last two
+relationships rest on what the export's publisher states, not on a review, so
+they order rows and nothing more. The app labels every inherited score as the
+parent model's and says that the quantized version was not benchmarked. General
+and coding scores are on separate scales; each rating order uses only its own
+score and treats a missing one as unknown, after scored rows. A parent with more
+than one snapshot entry is ambiguous and has no score, as in the Beginner
+policy. One score per parent is used for every RAM list that contains it; the
+RAM list this Mac can use only decides which scored sources are inspected first.
+
 ### Manual refresh
 
 There is no scheduled refresh. A maintainer reviews and commits a snapshot about monthly. The utility accesses the network only with explicit `--fetch`. Start from a reviewed upstream source checkout and record its commit. From the Stark repository root:

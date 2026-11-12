@@ -36,6 +36,7 @@ from .api_tools import (
     tool_parser_for,
     validate_parser_tools,
 )
+from .catalog_ranking import RELATIONSHIPS as REFERENCE_RELATIONSHIPS
 from .chat import (
     ChatBudgetUnavailable,
     ChatCancelled,
@@ -644,7 +645,12 @@ class Desktop:
             daemon=True,
         ).start()
 
-    def run_catalog_check(self, command, environment, generation):
+    def run_catalog_check(self, command, environment, generation, on_partial=None):
+        """Run one bounded catalogue child and return its report.
+
+        With ``on_partial`` the child writes one JSON document per line; rows
+        that arrive before the final report are passed on as they are read.
+        """
         process = None
         try:
             with self.lock:
@@ -660,6 +666,7 @@ class Desktop:
                 )
                 self.catalog_process = process
             pending = bytearray()
+            received = 0
             deadline = time.monotonic() + 120
             while True:
                 with self.lock:
@@ -674,8 +681,15 @@ class Desktop:
                 if not chunk:
                     break
                 pending.extend(chunk)
-                if len(pending) > MAX_CATALOG_BYTES:
+                received += len(chunk)
+                if received > MAX_CATALOG_BYTES:
                     raise ValueError()
+                while on_partial is not None and (newline := pending.find(b"\n")) >= 0:
+                    line = json.loads(pending[:newline])
+                    if not isinstance(line, dict) or set(line) != {"partial_items"}:
+                        break  # The final report stays buffered until the child exits.
+                    del pending[: newline + 1]
+                    on_partial(line["partial_items"])
             with self.lock:
                 if generation != self.catalog_generation:
                     return None
@@ -787,6 +801,27 @@ class Desktop:
                 not isinstance(item["size_label"], str) or not 0 < len(item["size_label"]) <= 64
             ):
                 raise ValueError()
+            reference = item.get("reference_score")
+            if reference is not None:
+                scores = [reference.get(task) for task in ("general", "coding")] if isinstance(reference, dict) else []
+                if (
+                    not isinstance(reference, dict)
+                    or set(reference) != {"model_id", "relationship", "general", "coding", "source_url", "captured"}
+                    or not isinstance(reference["model_id"], str)
+                    or huggingface_repository(reference["model_id"]) != reference["model_id"]
+                    or reference["relationship"] not in REFERENCE_RELATIONSHIPS
+                    or any(
+                        score is not None
+                        and (type(score) not in (int, float) or not math.isfinite(score) or not -1000 <= score <= 1000)
+                        for score in scores
+                    )
+                    or all(score is None for score in scores)
+                    or not isinstance(reference["source_url"], str)
+                    or re.fullmatch(r"https://whatmodel\.sh/model/[a-z0-9-]{1,200}", reference["source_url"]) is None
+                    or not isinstance(reference["captured"], str)
+                    or re.fullmatch(r"\d{4}-\d{2}-\d{2}", reference["captured"]) is None
+                ):
+                    raise ValueError()
             ids.add(item["id"])
         return {
             **value,
@@ -812,13 +847,69 @@ class Desktop:
                 identifiers.append(identifier)
         return identifiers
 
+    def publish_catalog(self, report, family, request_id, generation, offset, *, partial):
+        """Send a validated page, or the rows of one checked so far, for the current request."""
+        with self.lock:
+            if generation != self.catalog_generation or request_id != self.catalog_request_id:
+                return
+            if self.catalog_active_offset not in (None, offset):
+                return
+            if not partial:
+                if report["status"] == "ready":
+                    self.catalog_next_offset = report["next_offset"] if report["next_offset"] is not None else 0
+                self.catalog_active_offset = None
+            self.catalog_entries.update({item["id"]: dict(item) for item in report["items"]})
+            descriptions = [(model["id"], model_display(model)) for model in self.models]
+            report = {
+                **report,
+                "items": [
+                    {**item, "installed_ids": self.catalog_installed_ids(item, descriptions=descriptions)}
+                    for item in report["items"]
+                ],
+            }
+            self.emit(
+                "model_catalog",
+                request_id=request_id,
+                family_id=family,
+                report=report,
+                **({"partial": True} if partial else {}),
+            )
+
     def load_catalog(self, family, request_id, generation, offset=0):
-        command = [sys.executable, "-I", "-B", "-m", "stark_convert.cli", "--family-models", family]
+        command = [
+            sys.executable,
+            "-I",
+            "-B",
+            "-m",
+            "stark_convert.cli",
+            "--family-models",
+            family,
+            "--catalog-stream",
+            "--catalog-cache-dir",
+            str(self.data_dir / "catalog-cache"),
+        ]
         if offset > 0:
             command.extend(["--catalog-offset", str(offset)])
         environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
+
+        def publish_rows(items):
+            # Rows pass the same validation as a page before they can be shown or installed.
+            rows = {
+                "schema_version": 1,
+                "family_id": family,
+                "status": "ready",
+                "message": "Checking more models.",
+                "items": items,
+                "offset": offset,
+                "has_more": False,
+                "next_offset": None,
+            }
+            self.publish_catalog(
+                self.catalog_report(rows, family, offset), family, request_id, generation, offset, partial=True
+            )
+
         try:
-            report = self.run_catalog_check(command, environment, generation)
+            report = self.run_catalog_check(command, environment, generation, publish_rows)
             if report is None:
                 return
             report = self.catalog_report(report, family, offset)
@@ -833,24 +924,7 @@ class Desktop:
                 "next_offset": None,
                 "message": "Models could not be loaded. Check your connection and try again.",
             }
-        with self.lock:
-            if generation != self.catalog_generation or request_id != self.catalog_request_id:
-                return
-            if self.catalog_active_offset not in (None, offset):
-                return
-            if report["status"] == "ready":
-                self.catalog_next_offset = report["next_offset"] if report["next_offset"] is not None else 0
-            self.catalog_active_offset = None
-            self.catalog_entries.update({item["id"]: dict(item) for item in report["items"]})
-            descriptions = [(model["id"], model_display(model)) for model in self.models]
-            report = {
-                **report,
-                "items": [
-                    {**item, "installed_ids": self.catalog_installed_ids(item, descriptions=descriptions)}
-                    for item in report["items"]
-                ],
-            }
-            self.emit("model_catalog", request_id=request_id, family_id=family, report=report)
+        self.publish_catalog(report, family, request_id, generation, offset, partial=False)
 
     def install_catalog(self, payload):
         with self.lock:

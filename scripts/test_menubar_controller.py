@@ -1624,6 +1624,50 @@ extension EngineController {
             guard engine.catalog == nil, engine.catalogLoading else { return false }
             engine.apply(catalogReply(newFamily))
             return engine.catalog?.familyID == "qwen3_5" && engine.catalog?.items.map(\.id) == ["entry"]
+        case "catalog-partial-rows-stream-into-pending-page":
+            func partial(_ request: [String: Any], _ ids: [String]) -> [String: Any] {
+                var event = catalogReply(request, items: ids.map { catalogItem($0) })
+                event["partial"] = true
+                return event
+            }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let first = command()
+            engine.apply(partial(first, ["early"]))
+            guard engine.catalog?.items.map(\.id) == ["early"], engine.catalog?.status == .ready,
+                  engine.catalog?.nextOffset == nil, engine.catalogLoading, noCommandSent() else { return false }
+            engine.apply(partial(first, ["second"]))
+            guard engine.catalog?.items.map(\.id) == ["early", "second"], engine.catalogLoading else { return false }
+            // The page's report replaces its partial rows and does not count them as already shown.
+            engine.apply(catalogReply(first, items: [catalogItem("second"), catalogItem("early")], nextOffset: 30))
+            guard engine.catalog?.items.map(\.id) == ["second", "early"], engine.catalog?.nextOffset == 30,
+                  !engine.catalogLoading, noCommandSent() else { return false }
+            engine.apply(partial(first, ["after-report"]))
+            guard engine.catalog?.items.count == 2 else { return false }
+            engine.requestMoreModelCatalog(loadRemaining: false)
+            let second = command()
+            engine.apply(partial(first, ["stale-offset"]))
+            guard engine.catalog?.items.count == 2 else { return false }
+            engine.apply(partial(second, ["later"]))
+            guard engine.catalog?.items.map(\.id) == ["second", "early", "later"], engine.catalog?.nextOffset == 30,
+                  engine.catalogLoading else { return false }
+            // A failed page keeps the rows already checked and its retry position.
+            engine.apply(catalogReply(second, status: "error"))
+            guard engine.catalog?.items.map(\.id) == ["second", "early", "later"], engine.catalog?.nextOffset == 30,
+                  engine.catalogError != nil, !engine.catalogLoading else { return false }
+            engine.requestMoreModelCatalog(loadRemaining: false)
+            let retry = command()
+            guard (retry["offset"] as? NSNumber)?.int64Value == 30 else { return false }
+            engine.apply(partial(retry, ["later"]))
+            // The retried page only repeats a row shown before it was requested, so the next page follows.
+            engine.apply(catalogReply(retry, items: [catalogItem("later")], nextOffset: 60))
+            let third = command()
+            guard engine.catalog?.items.map(\.id) == ["second", "early", "later"], engine.catalog?.nextOffset == 60,
+                  (third["offset"] as? NSNumber)?.int64Value == 60, engine.catalogLoading else { return false }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let refresh = commands().last!
+            engine.apply(partial(refresh, ["fresh"]))
+            engine.apply(catalogReply(refresh, status: "error"))
+            return engine.catalog?.status == .error && engine.catalog?.items.isEmpty == true && !engine.catalogLoading
         case "catalog-pagination-auto-drains-positive-empty-and-duplicate-pages":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()
@@ -1825,6 +1869,71 @@ extension EngineController {
                   small.map({ $0.items[0].id }) == ["small", "large", "unknown"],
                   large.map({ $0.items[0].id }) == ["large", "small", "unknown"] else { return false }
             return ModelBrowserSort.nameDescending.precedes("Same", id: "a", size: nil, "Same", id: "b", size: nil)
+        case "catalog-browser-top-rated-sort":
+            let gigabyte: Int64 = 1_000_000_000
+            func rated(_ id: String, group: String, bytes: Int64?, general: Double? = nil, coding: Double? = nil,
+                       downloadable: Bool = true, relationship: String = "benchmarked_model") -> [String: Any] {
+                var item = groupedCatalogItem(id, repo: "owner/" + id, name: id, group: group, groupName: "Group " + group,
+                                              publisher: "owner")
+                item["weight_bytes"] = bytes as Any? ?? NSNull()
+                if general != nil || coding != nil {
+                    item["reference_score"] = [
+                        "model_id": "parent/" + id, "relationship": relationship,
+                        "general": general as Any? ?? NSNull(), "coding": coding as Any? ?? NSNull(),
+                        "source_url": "https://whatmodel.sh/model/" + id, "captured": "2026-11-11"]
+                }
+                if !downloadable { item["downloadable"] = false; item["unavailable_reason"] = "Fixture reason" }
+                return item
+            }
+            let raw = [
+                rated("unscored", group: "1", bytes: 1 * gigabyte),
+                rated("mid", group: "2", bytes: 4 * gigabyte, general: 50, coding: 60),
+                rated("best-full", group: "3", bytes: 30 * gigabyte, general: 70, coding: 40),
+                rated("best-small", group: "3", bytes: 8 * gigabyte, general: 70, coding: 40, relationship: "named_quantization"),
+                rated("huge", group: "4", bytes: 200 * gigabyte, general: 90),
+                rated("blocked", group: "5", bytes: 2 * gigabyte, general: 95, downloadable: false),
+                rated("coder", group: "6", bytes: 3 * gigabyte, coding: 80)
+            ]
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
+            let memory = UInt64(64) * 1024 * 1024 * 1024
+            func rows(_ sort: ModelBrowserSort, _ memory: UInt64?) -> [String] {
+                CatalogBrowserInventory(items: catalog.items, sort: sort, physicalMemory: memory).groups.flatMap { $0.items.map(\.id) }
+            }
+            // Fits and downloadable first by score, the smaller download breaking a tie; unscored rows follow,
+            // then models too large for this Mac, then rows that cannot be downloaded.
+            // A coding-only score does not rank on the general scale.
+            guard rows(.ratingGeneral, memory) == ["best-small", "best-full", "mid", "unscored", "coder", "huge", "blocked"],
+                  rows(.ratingCoding, memory) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
+                  rows(.ratingGeneral, nil) == ["huge", "best-small", "best-full", "mid", "unscored", "coder", "blocked"],
+                  rows(.ratingGeneral, UInt64(8) * 1024 * 1024 * 1024) ==
+                      ["mid", "unscored", "coder", "huge", "best-small", "best-full", "blocked"],
+                  rows(.sizeAscending, memory).count == 7 else { return false }
+            guard let export = catalog.items.first(where: { $0.id == "best-small" })?.referenceScore,
+                  let coder = catalog.items.first(where: { $0.id == "coder" })?.referenceScore,
+                  export.relationship == .namedQuantization, export.modelID == "parent/best-small",
+                  export.score(for: .ratingGeneral)?.value == 70, export.score(for: .ratingCoding)?.value == 40,
+                  coder.score(for: .ratingGeneral) == nil, coder.score(for: .sizeAscending)?.value == 80,
+                  coder.score(for: .sizeAscending)?.task == "coding",
+                  catalog.items.first(where: { $0.id == "unscored" })?.referenceScore == nil,
+                  catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: memory) == false,
+                  catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: nil) == true else { return false }
+            // Hiding unsupported rows removes exactly those that cannot be downloaded, whatever their score.
+            let supported = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: true)
+            guard supported.map(\.id) == ["unscored", "mid", "best-full", "best-small", "huge", "coder"],
+                  CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: false).count == 7,
+                  CatalogBrowserInventory(items: supported, sort: .ratingCoding, physicalMemory: memory).groups
+                      .flatMap({ $0.items.map(\.id) }) == ["coder", "mid", "best-small", "best-full", "unscored", "huge"],
+                  CatalogQuantizationFilter.tabs(for: supported).count == 2 else { return false }
+            // A malformed score rejects its row instead of ranking by a guess.
+            var malformed = raw[1]
+            for change in [["general": "50"], ["general": NSNull(), "coding": NSNull()], ["relationship": "guessed"],
+                           ["source_url": "https://example.com/model/mid"], ["extra": 1], ["general": true]] as [[String: Any]] {
+                var reference = raw[1]["reference_score"] as! [String: Any]
+                change.forEach { reference[$0.key] = $0.value }
+                malformed["reference_score"] = reference
+                guard FamilyModelCatalog.Item(malformed) == nil else { return false }
+            }
+            return true
         case "catalog-browser-row-size-and-numeric-fallback":
             let raw = [
                 groupedCatalogItem("unknown", repo: "owner/Unknown", name: "Unknown", group: "1", groupName: "Model", publisher: "owner", size: nil),
@@ -1895,7 +2004,21 @@ extension EngineController {
             defer { preferences.removePersistentDomain(forName: suite) }
             guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
                   ModelBrowserPreferences.load(.families, defaults: preferences) == .nameAscending,
-                  ModelBrowserPreferences.load(.catalog, defaults: preferences) == .sizeAscending else { return false }
+                  ModelBrowserPreferences.load(.catalog, defaults: preferences) == .ratingCoding else { return false }
+            // Unsupported rows stay hidden until the user chooses to see them; a damaged value restores that.
+            guard ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            ModelBrowserPreferences.saveHidesUnsupported(false, defaults: preferences)
+            guard !ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            preferences.set("no", forKey: ModelBrowserPreferences.hideUnsupportedKey)
+            guard ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            preferences.set(0, forKey: ModelBrowserPreferences.hideUnsupportedKey)
+            guard ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            // Rating orders exist only where rows carry reference scores.
+            ModelBrowserPreferences.save(.ratingGeneral, for: .saved, defaults: preferences)
+            guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
+                  !ModelBrowserScope.saved.sorts.contains(where: \.isRating),
+                  !ModelBrowserScope.families.sorts.contains(where: \.isRating),
+                  ModelBrowserScope.catalog.sorts.prefix(2) == [.ratingGeneral, .ratingCoding] else { return false }
             ModelBrowserPreferences.save(.sizeDescending, for: .saved, defaults: preferences)
             ModelBrowserPreferences.save(.nameDescending, for: .families, defaults: preferences)
             ModelBrowserPreferences.save(.nameAscending, for: .catalog, defaults: preferences)
@@ -1910,7 +2033,7 @@ extension EngineController {
             reopened.set(42, forKey: ModelBrowserScope.catalog.preferenceKey)
             return ModelBrowserPreferences.load(.saved, defaults: reopened) == .nameAscending &&
                 ModelBrowserPreferences.load(.families, defaults: reopened) == .nameAscending &&
-                ModelBrowserPreferences.load(.catalog, defaults: reopened) == .sizeAscending
+                ModelBrowserPreferences.load(.catalog, defaults: reopened) == .ratingCoding
         case "catalog-installed-mode":
             var item = catalogItem(); item["installed_ids"] = ["fixture-model", "not-in-library"]
             guard let parsed = FamilyModelCatalog.Item(item) else { return false }
@@ -2975,6 +3098,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_catalog_pagination_failure_retry_preserves_loaded_rows(self):
         self.exercise("catalog-pagination-failure-retry-preserves-rows")
 
+    def test_catalog_partial_rows_stream_into_the_pending_page(self):
+        self.exercise("catalog-partial-rows-stream-into-pending-page")
+
     def test_catalog_pagination_single_click_drains_pages_and_ignores_duplicate_clicks(
         self,
     ):
@@ -3016,6 +3142,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_catalog_sort_uses_natural_names_and_keeps_unknown_sizes_last(self):
         self.exercise("catalog-browser-name-and-size-sort")
+
+    def test_catalog_top_rated_sort_prefers_fitting_scored_rows(self):
+        self.exercise("catalog-browser-top-rated-sort")
 
     def test_grouped_rows_sort_numeric_sizes_with_parameter_fallback_and_bounds(self):
         self.exercise("catalog-browser-row-size-and-numeric-fallback")

@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
-from . import qwen38_external
+from . import catalog_reasons, qwen38_external
 from .model_support import (
     check_vision_processing_metadata,
     normalize_architecture,
@@ -28,6 +28,13 @@ from .vision_contract import REVISION as EXACT_VISION_REVISION
 MAX_ITEMS = 30
 MAX_CANDIDATES = MAX_ITEMS
 MAX_INVENTORY = 16384
+# Listing positions one page may pass without a per-repository request.
+MAX_SCREENED = 500
+_LISTING_STEP = 100
+# Listing positions searched for sources with a reference score, which are
+# inspected before the rest of that window.
+PRIORITY_WINDOW = 300
+_WEIGHT_SUFFIXES = (".gguf", ".safetensors", ".bin", ".exl3")
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_TOKENIZER_CONFIG_BYTES = 2 * 1024 * 1024
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
@@ -87,15 +94,33 @@ _SEARCH_TERMS = {
 }
 
 
-def _repository_search(api, definition, remaining):
-    """Interleave aliases and name searches so large tags cannot starve others."""
+def _repository_search(api, definition, remaining, expected=0):
+    """Interleave aliases and name searches so large tags cannot starve others.
+
+    ``expected`` is how many listing positions the caller plans to walk. Each
+    listing is requested at about that size and grows only if more are needed,
+    because a listing reply carries every repository's file list.
+    """
     queries = [
         *({"filter": alias} for alias in definition["architecture_aliases"]),
         *({"search": term} for term in _SEARCH_TERMS.get(definition["family_id"], ())),
     ]
 
     def results(query):
-        yield from api.list_models(**query, sort="downloads", expand=["sha"])
+        size, sent = _LISTING_STEP * max(1, -(-expected // _LISTING_STEP)), 0
+        while True:
+            count = 0
+            # Entries are passed on as they arrive, so a listing that fails
+            # partway still contributes what it returned.
+            for entry in api.list_models(
+                **query, sort="downloads", expand=["sha", "pipeline_tag", "tags", "siblings"], limit=size
+            ):
+                count += 1
+                if count > sent:
+                    yield entry
+            if count < size:
+                return
+            sent, size = count, size * 2
 
     streams = [iter(results(query)) for query in queries]
     while streams:
@@ -109,8 +134,33 @@ def _repository_search(api, definition, remaining):
             active.append(stream)
             repo = _repo(_field(item, "id"))
             if repo is not None:
-                yield repo
+                # The listing's head revision lets a cached verdict answer
+                # without any per-repository request.
+                revision = _field(item, "sha")
+                listed = isinstance(revision, str) and _REVISION.fullmatch(revision) is not None
+                yield repo, revision if listed else None, item
         streams = active
+
+
+def _listing_rejects(repo, listing):
+    """Decide from the Hub listing alone that inspection would reject a source.
+
+    Only outcomes that the per-repository checks reach from the same fields
+    are settled here: another task, no model configuration, or no weights.
+    """
+    if isinstance(_field(listing, "tags"), list) and not _application_source(listing, repo):
+        return True
+    siblings = _field(listing, "siblings")
+    if not isinstance(siblings, list) or not siblings:
+        return False
+    names = [_field(sibling, "rfilename") for sibling in siblings]
+    if any(not isinstance(name, str) for name in names):
+        return False
+    if "config.json" not in names and get_model(repo) is None:
+        return True
+    return not any(
+        name.endswith(_WEIGHT_SUFFIXES) and not PurePosixPath(name).name.startswith("adapter_model") for name in names
+    )
 
 
 def _unsupported_quantization(config):
@@ -125,22 +175,30 @@ def _unsupported_quantization(config):
     return "Unsupported format"
 
 
+class _HeadersUnreadable(str):
+    """The unverified-headers reason, marked as a header read failure.
+
+    It equals ``qwen38_external.UNVERIFIED``; the caller replaces it with the
+    access-approval reason for a gated source.
+    """
+
+
 def _verify_hub_layout(family, hub, repo, revision, config, shards, index, sizes, remaining, modes):
     from .checkpoint_metadata import CheckpointMetadata
     from .hub_headers import HeaderAccessError, HeaderBudgetError, checkpoint_headers
     from .planning import plan_from_headers
 
-    unsupported = "The checkpoint's tensor names, shapes or packing do not match Stark's importer for this family."
+    unreadable = _HeadersUnreadable(qwen38_external.UNVERIFIED)
     try:
         tensors = checkpoint_headers(hub, repo, revision, shards, index, sizes, remaining)
-    except (ConversionError, UnsupportedConversion):
-        return dict.fromkeys(modes, unsupported)
+    except (ConversionError, UnsupportedConversion) as error:
+        return dict.fromkeys(modes, catalog_reasons.importer_reason(error))
     except HeaderBudgetError:
         return dict.fromkeys(modes, "A tensor header exceeds the catalog's 4 MiB verification limit.")
     except HeaderAccessError:
-        return dict.fromkeys(modes, qwen38_external.UNVERIFIED)
+        return dict.fromkeys(modes, unreadable)
     except Exception:
-        return dict.fromkeys(modes, qwen38_external.UNVERIFIED)
+        return dict.fromkeys(modes, unreadable)
 
     verdicts = {}
     for mode in modes:
@@ -148,8 +206,10 @@ def _verify_hub_layout(family, hub, repo, revision, config, shards, index, sizes
             remaining()
             plan_from_headers(family, CheckpointMetadata(config, tensors), mode=mode)
             verdicts[mode] = None
-        except (ConversionError, UnsupportedConversion, ValueError, TypeError, KeyError, OverflowError):
-            verdicts[mode] = unsupported
+        except (ConversionError, UnsupportedConversion) as error:
+            verdicts[mode] = catalog_reasons.importer_reason(error)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            verdicts[mode] = catalog_reasons.UNSUPPORTED_LAYOUT
         except Exception:
             verdicts[mode] = qwen38_external.UNVERIFIED
     return verdicts
@@ -167,8 +227,12 @@ class _MalformedMetadata(Exception):
     """A bounded metadata document is invalid and cannot be retried usefully."""
 
 
-def _read_revision_metadata(hub, repo, filename, revision, maximum):
-    """Read pinned metadata, reusing a validated file in the HF disk cache when present."""
+def _read_revision_metadata(hub, repo, filename, revision, maximum, size=None):
+    """Read pinned metadata, reusing a validated file in the HF disk cache when present.
+
+    ``size`` is the file's size from the pinned repository inventory. When it is
+    known, the bound is checked against it instead of a separate request.
+    """
     try:
         # Only immutable full revisions can bypass the metadata HEAD request.
         # Hugging Face's cache lookup resolves precisely that snapshot; the
@@ -207,15 +271,21 @@ def _read_revision_metadata(hub, repo, filename, revision, maximum):
                 authority = authority.parent
             return read_metadata_bytes(cached_path, root=authority, maximum=maximum)
 
-        metadata = hub.get_hf_file_metadata(
-            hub.hf_hub_url(repo_id=repo, filename=filename, revision=revision), timeout=5
-        )
-        if type(metadata.size) is int and metadata.size > maximum:
-            raise _Inaccessible()
-        if type(metadata.size) is not int or metadata.size <= 0:
-            raise _Unavailable()
-        if _field(metadata, "commit_hash") not in (None, revision):
-            raise _Unavailable()
+        if type(size) is int:
+            if size > maximum:
+                raise _Inaccessible()
+            if size <= 0:
+                raise _Unavailable()
+        else:
+            metadata = hub.get_hf_file_metadata(
+                hub.hf_hub_url(repo_id=repo, filename=filename, revision=revision), timeout=5
+            )
+            if type(metadata.size) is int and metadata.size > maximum:
+                raise _Inaccessible()
+            if type(metadata.size) is not int or metadata.size <= 0:
+                raise _Unavailable()
+            if _field(metadata, "commit_hash") not in (None, revision):
+                raise _Unavailable()
         selected = Path(
             hub.hf_hub_download(
                 repo_id=repo,
@@ -848,9 +918,28 @@ def _catalog_image_metadata(family, config, repo, revision, names, read):
 
 
 def family_catalog(
-    family_id, *, hub=None, limit=MAX_ITEMS, offline=False, offset=0, planning=False, deadline_seconds=80
+    family_id,
+    *,
+    hub=None,
+    limit=MAX_ITEMS,
+    offline=False,
+    offset=0,
+    planning=False,
+    deadline_seconds=80,
+    cache_dir=None,
+    on_item=None,
+    physical_memory=None,
 ):
-    """Return candidate downloads; actual installation must repeat pinned preflight."""
+    """Return candidate downloads; actual installation must repeat pinned preflight.
+
+    ``cache_dir`` reuses verdicts for unchanged revisions. ``on_item`` receives
+    each accepted row as soon as it is checked, before the sorted report.
+    Browsing rows carry a parent-model reference score when one is known, and
+    sources with one are inspected first; ``physical_memory`` (this machine's
+    by default) prefers models from a RAM list this machine can use.
+    """
+    from .catalog_cache import VerdictCache
+    from .catalog_ranking import host_memory, reference_scores
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
     from .native_catalog import FLINT_FAMILY_ID
     from .native_catalog import catalog_items as native_catalog_items
@@ -882,6 +971,19 @@ def family_catalog(
 
         hub = huggingface_hub
     deadline = time.monotonic() + deadline_seconds
+    cache = VerdictCache(cache_dir, family, planning=planning) if cache_dir is not None else None
+    # Guided setup ranks its own planned recipes; only browsing is ordered here.
+    ranking = None if planning else reference_scores()
+    if ranking is not None and physical_memory is None:
+        physical_memory = host_memory()
+
+    def scored(item, tags=()):
+        """Attach the reference score a checked row may show."""
+        if ranking is None:
+            return item
+        base_name = _without_quantization_suffix(item["repo"].split("/")[-1], item["quantization"])
+        reference = ranking.reference(item["repo"], item["revision"], item["quantization"], tags, base_name)
+        return item if reference is None else {**item, "reference_score": reference}
 
     def remaining():
         if time.monotonic() >= deadline:
@@ -902,29 +1004,73 @@ def family_catalog(
 
         def repositories():
             nonlocal discovery_failed
-            yield from seeds
+            for seed in seeds:
+                yield seed, None, None
             if api is None:
                 return
+            expected = offset + limit + 1
+            stream = _repository_search(
+                api, definition, remaining, expected if ranking is None else max(expected, PRIORITY_WINDOW)
+            )
+            window, failed = [], False
+            if ranking is not None:
+                # The first listing positions are reordered so sources with a
+                # reference score are inspected, and shown, before the rest.
+                try:
+                    for entry in stream:
+                        window.append(entry)
+                        if len(window) == PRIORITY_WINDOW:
+                            break
+                except Exception:
+                    failed = True
+
+                def placement(entry):
+                    siblings = _field(entry[2], "siblings")
+                    # A listed source without Safetensors weights cannot be
+                    # downloaded, so its score earns it no earlier inspection.
+                    importable = not isinstance(siblings, list) or any(
+                        str(_field(sibling, "rfilename")).endswith(".safetensors") for sibling in siblings
+                    )
+                    rank = (
+                        ranking.priority(entry[0], _field(entry[2], "tags"), physical_memory) if importable else None
+                    )
+                    # Scored sources from a list this machine can use, then
+                    # other scored sources, then the rest in listing order.
+                    return (2, 0) if rank is None else (0 if rank[0] else 1, -rank[1])
+
+                yield from sorted(window, key=placement)
+            if failed:
+                discovery_failed = True
+                return
             try:
-                yield from _repository_search(api, definition, remaining)
+                yield from stream
             except Exception:
                 discovery_failed = True
                 # Retain the frontier so a retry never skips a failed search.
                 return
 
-        candidates, seen = [], set()
-        for repo in repositories():
+        candidates, seen, consumed, omitted = [], set(), offset, False
+        for repo, listed_revision, listing in repositories():
             remaining()
             if repo.casefold() in seen:
                 continue
             seen.add(repo.casefold())
-            if len(seen) > offset:
-                candidates.append(repo)
-                if len(candidates) > limit:
-                    break
-        omitted = len(candidates) > limit or discovery_failed
-        candidates = candidates[:limit]
+            if len(seen) <= offset:
+                continue
+            if len(candidates) == limit or len(seen) - offset > limit + MAX_SCREENED:
+                omitted = True
+                break
+            consumed = len(seen)
+            # A source the listing already rules out uses its position without
+            # any request of its own, so a page reaches further down the family.
+            if listing is not None and not native_family and _listing_rejects(repo, listing):
+                continue
+            candidates.append((repo, listed_revision))
+        omitted = omitted or discovery_failed
         if not candidates:
+            if omitted and not discovery_failed:
+                message = "No models on this page are available to download."
+                return report(family, "ready", message, next_offset=consumed)
             return report(
                 family,
                 "error" if discovery_failed else "ready",
@@ -934,10 +1080,10 @@ def family_catalog(
             )
 
         @lru_cache(maxsize=256)
-        def read(repo, filename, revision, maximum):
+        def read(repo, filename, revision, maximum, size=None):
             remaining()
             try:
-                return _read_revision_metadata(hub, repo, filename, revision, maximum)
+                return _read_revision_metadata(hub, repo, filename, revision, maximum, size)
             except _Inaccessible:
                 raise
             except Exception as error:
@@ -945,11 +1091,37 @@ def family_catalog(
                     raise _Inaccessible() from None
                 raise _Unavailable() from None
 
-        def inspect(repo):
+        def inspect(repo, listed_revision):
             remaining()
+            if repo in native_items and repo not in pins:
+                return scored(dict(native_items[repo]))
+            known_revision = pins.get(repo) or listed_revision
+            if cache is not None:
+                # A registered source has no listed revision; its head is
+                # trusted briefly after it was last confirmed.
+                found, item = (
+                    cache.load(repo, known_revision) if known_revision is not None else cache.load_recent(repo)
+                )
+                if found:
+                    return item
+            outcome = {"known": known_revision}
+            item = examine(repo, outcome)
+            revision = outcome.get("revision")
+            if cache is None or revision is None:
+                return item
+            if outcome.get("reused"):
+                cache.confirm(repo, revision)
+            elif not (
+                item is not None
+                and item.get("unavailable_reason") in (qwen38_external.UNVERIFIED, catalog_reasons.GATED)
+            ):
+                # A verdict that could not be verified, including one waiting
+                # on access approval, must be checked again.
+                cache.store(repo, revision, item, settled=not outcome.get("volatile"))
+            return item
+
+        def examine(repo, outcome):
             try:
-                if repo in native_items and repo not in pins:
-                    return dict(native_items[repo])
                 requested_revision = pins.get(repo)
                 try:
                     info = api.model_info(repo_id=repo, revision=requested_revision, files_metadata=True, timeout=5)
@@ -957,21 +1129,36 @@ def family_catalog(
                     if _hub_source_unavailable(error):
                         return None
                     raise
+                revision = _field(info, "sha")
+                if isinstance(revision, str) and _REVISION.fullmatch(revision) is not None:
+                    outcome["revision"] = revision
+                    # Sources without a listed revision (registered and pinned
+                    # seeds) learn it here and can still skip every file read.
+                    if cache is not None and revision != outcome["known"]:
+                        found, item = cache.load(repo, revision)
+                        if found:
+                            outcome["reused"] = True
+                            return item
                 if not _application_source(info, repo):
                     return None
-                revision = _field(info, "sha")
                 if not isinstance(revision, str) or _REVISION.fullmatch(revision) is None:
                     raise _Unavailable()
                 if requested_revision is not None and revision != requested_revision:
                     raise _Unavailable()
                 names, sizes = _weight_inventory(info)
+                # The Hub reports "auto" or "manual" for a source whose files
+                # need access approval, and False otherwise.
+                gated = _field(info, "gated", False)
+                gated = gated is True or isinstance(gated, str) and gated.casefold() in {"auto", "manual"}
+
+                def read_pinned(filename, maximum):
+                    # The pinned inventory already states each file's size.
+                    size = sizes.get(filename)
+                    return read(repo, filename, revision, maximum, size if type(size) is int else None)
+
                 if native_family:
-                    config = (
-                        _json(read(repo, "config.json", revision, MAX_CONFIG_BYTES))
-                        if "config.json" in names
-                        else None
-                    )
-                    return native_unavailable_item(family, repo, revision, config, names, sizes)
+                    config = _json(read_pinned("config.json", MAX_CONFIG_BYTES)) if "config.json" in names else None
+                    return scored(native_unavailable_item(family, repo, revision, config, names, sizes))
                 # The original registry's Gemma3 wrappers predate the native
                 # image adapter. Bind their complete, same-revision metadata
                 # through the generic vision path rather than a text recipe.
@@ -984,6 +1171,8 @@ def family_catalog(
                 config_repo = rule["repo"]
                 config_revision = revision
                 if config_repo != repo:
+                    # This verdict also depends on another repository's head.
+                    outcome["volatile"] = True
                     try:
                         config_info = api.model_info(repo_id=config_repo, timeout=5)
                     except Exception as error:
@@ -993,7 +1182,22 @@ def family_catalog(
                     config_revision = _field(config_info, "sha")
                     if not isinstance(config_revision, str) or _REVISION.fullmatch(config_revision) is None:
                         raise _Unavailable()
-                config = _json(read(config_repo, rule["filename"], config_revision, MAX_CONFIG_BYTES))
+                if config_repo == repo:
+                    # The pinned inventory and the Hub's parsed architecture
+                    # settle these rejections without requesting a file.
+                    if rule["filename"] not in names:
+                        return None
+                    described = _field(info, "config")
+                    declared = described.get("architectures") if isinstance(described, dict) else None
+                    if (
+                        requested_revision is None
+                        and isinstance(declared, list)
+                        and not _generation_architecture({"architectures": declared}, family)
+                    ):
+                        return None
+                    config = _json(read_pinned(rule["filename"], MAX_CONFIG_BYTES))
+                else:
+                    config = _json(read(config_repo, rule["filename"], config_revision, MAX_CONFIG_BYTES))
                 if not isinstance(config, dict) or not _generation_architecture(config, family):
                     return None
                 text_config = config.get("text_config", config)
@@ -1018,25 +1222,30 @@ def family_catalog(
                     item = dict(native_items[repo])
                     if unavailable_reason is not None:
                         item.update(downloadable=False, unavailable_reason=unavailable_reason)
-                    return item
+                    return scored(item)
                 external_qwen = qwen38_external.is_external_affine(config)
                 quantization = (
                     qwen38_external.QUANTIZATION
                     if external_qwen
                     else _quantization(config, info, entry, family=family)
                 )
-                if quantization is None:
+                foreign = catalog_reasons.foreign_format(config) if quantization is None else None
+                if foreign is not None:
+                    # A GPU-server quantization export is described by its
+                    # format before any other check, and its tensor headers
+                    # are never requested.
+                    quantization, unavailable_reason = foreign
+                elif quantization is None:
                     unavailable_reason = unavailable_reason or (
                         "This checkpoint's declared weight format has no supported import path."
                     )
                     quantization = _unsupported_quantization(config)
-                selected = _selected_weights(names, lambda filename, maximum: read(repo, filename, revision, maximum))
+                selected = _selected_weights(names, read_pinned)
                 if selected is None:
                     selected = [
                         name
                         for name in names
-                        if name.endswith((".gguf", ".safetensors", ".bin", ".exl3"))
-                        and not PurePosixPath(name).name.startswith("adapter_model")
+                        if name.endswith(_WEIGHT_SUFFIXES) and not PurePosixPath(name).name.startswith("adapter_model")
                     ]
                     if not selected:
                         return None
@@ -1052,9 +1261,7 @@ def family_catalog(
                     except (ConversionError, UnsupportedConversion):
                         return None
                     index = (
-                        _json(read(repo, qwen38_external.INDEX, revision, MAX_CONFIG_BYTES))["weight_map"]
-                        if indexed
-                        else None
+                        _json(read_pinned(qwen38_external.INDEX, MAX_CONFIG_BYTES))["weight_map"] if indexed else None
                     )
                     try:
                         qwen38_external.verify_hub_layout(
@@ -1063,21 +1270,14 @@ def family_catalog(
                     except qwen38_external.LayoutError as error:
                         unavailable_reason = str(error)
                     except qwen38_external.HeaderAccessError:
-                        unavailable_reason = qwen38_external.UNVERIFIED
+                        unavailable_reason = catalog_reasons.GATED if gated else qwen38_external.UNVERIFIED
                     if unavailable_reason is not None:
                         quantization = "MLX-Serve"
                     selected = [*selected, qwen38_external.NGRAM_TABLE]
                 weight_bytes = _weight_bytes(selected, sizes)
                 modes = [base_mode]
                 if unavailable_reason is None and family in {"qwen3_5", "qwen3_5_moe", "gemma3", "gemma4_text"}:
-                    image_metadata = _catalog_image_metadata(
-                        family,
-                        config,
-                        repo,
-                        revision,
-                        names,
-                        lambda filename, maximum: read(repo, filename, revision, maximum),
-                    )
+                    image_metadata = _catalog_image_metadata(family, config, repo, revision, names, read_pinned)
                     if base_mode == "vision-language" and (quantization != "BF16" or not image_metadata):
                         unavailable_reason = (
                             "Image import requires supported BF16 vision weights and complete processing metadata."
@@ -1086,7 +1286,7 @@ def family_catalog(
                         modes.append("vision-language")
                 if unavailable_reason is None and not external_qwen:
                     index = (
-                        _json(read(repo, "model.safetensors.index.json", revision, MAX_CONFIG_BYTES))["weight_map"]
+                        _json(read_pinned("model.safetensors.index.json", MAX_CONFIG_BYTES))["weight_map"]
                         if "model.safetensors.index.json" in names
                         else None
                     )
@@ -1094,17 +1294,19 @@ def family_catalog(
                         family, hub, repo, revision, config, selected, index, sizes, remaining, modes
                     )
                     unavailable_reason = next((layout[mode] for mode in modes if layout[mode] is not None), None)
+                    if gated and isinstance(unavailable_reason, _HeadersUnreadable):
+                        # A gated source's header reads fail until the user
+                        # has been granted access.
+                        unavailable_reason = catalog_reasons.GATED
+                    elif unavailable_reason is not None:
+                        unavailable_reason = str(unavailable_reason)
                 extra_weights = any(name.endswith(".safetensors") and name not in selected for name in names)
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
                 if parameters is None and quantization != "BF16" and not extra_weights:
                     parameters = _dense_config_parameters(config, family)
                 chat_template, chat_template_blocker = (None, None)
                 if planning:
-
-                    def read_source(filename, maximum):
-                        return read(repo, filename, revision, maximum)
-
-                    chat_template, chat_template_blocker = _source_chat_template(entry, repo, names, read_source)
+                    chat_template, chat_template_blocker = _source_chat_template(entry, repo, names, read_pinned)
                 item = {
                     "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
                     "repo": repo,
@@ -1134,8 +1336,10 @@ def family_catalog(
                     )
                     item["task_tags"] = item["planning"]["task_tags"]
                     item["license"] = item["planning"]["license"]
-                return item
+                return scored(item, _field(info, "tags", []))
             except _Inaccessible:
+                # Gating and file availability can change without a new revision.
+                outcome["volatile"] = True
                 return None
             except _MalformedMetadata:
                 return None
@@ -1146,12 +1350,14 @@ def family_catalog(
 
         accepted, failures = [], 0
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(inspect, repo) for repo in candidates]
+            futures = [pool.submit(inspect, repo, listed_revision) for repo, listed_revision in candidates]
             for future in as_completed(futures):
                 try:
                     item = future.result()
                     if item is not None:
                         accepted.append(item)
+                        if on_item is not None:
+                            on_item(item)
                 except Exception:
                     failures += 1
         accepted.sort(key=_size_order)
@@ -1171,7 +1377,7 @@ def family_catalog(
             accepted,
             # A partial guided result must retry this window instead of
             # advancing past sources whose metadata could not be checked.
-            next_offset=offset if planning and partial_failure else offset + len(candidates) if omitted else None,
+            next_offset=offset if planning and partial_failure else consumed if omitted else None,
         )
         if planning:
             result["incomplete"] = omitted or partial_failure
