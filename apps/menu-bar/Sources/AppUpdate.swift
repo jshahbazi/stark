@@ -322,12 +322,37 @@ struct AppUpdateOperations {
 }
 
 @MainActor
+struct AppUpdateSchedule {
+    var start: (TimeInterval, @escaping @MainActor () async -> Void) -> Void
+    var stop: () -> Void
+
+    static func live(scheduler: NSBackgroundActivityScheduler = NSBackgroundActivityScheduler(
+        identifier: "com.starkengine.menubar.update-check")) -> Self {
+        return Self(start: { interval, check in
+            scheduler.interval = interval
+            scheduler.tolerance = 60
+            scheduler.repeats = true
+            scheduler.qualityOfService = .utility
+            scheduler.schedule { completion in
+                Task { @MainActor in
+                    // Keep the background activity alive through download and
+                    // verification, even when every Stark window is closed.
+                    await check()
+                    completion(.finished)
+                }
+            }
+        }, stop: { scheduler.invalidate() })
+    }
+}
+
+@MainActor
 final class AppUpdateController: ObservableObject {
     @Published private(set) var message = ""
     @Published private(set) var busy = false
     @Published private(set) var available: AppUpdateDownload?
+    @Published private(set) var downloading = false
     private var task: Task<Void, Never>?
-    private var automaticChecks: Task<Void, Never>?
+    private var automaticChecks: UUID?
     private var lastCheck: Date?
     private var installFailed = false
     private var preparedUpdate: PreparedAppUpdate?
@@ -335,17 +360,19 @@ final class AppUpdateController: ObservableObject {
     private let operations: AppUpdateOperations
     private let now: () -> Date
     private let automaticCheckInterval: TimeInterval
-    private let waitForAutomaticCheck: @MainActor (TimeInterval) async throws -> Void
+    private let schedule: AppUpdateSchedule
     private static let backgroundCheckInterval: TimeInterval = 15 * 60
 
     var actionTitle: String {
-        if let available { return "Upgrade to \(available.version)" }
-        return "Check for Updates…"
+        if downloading { return "Downloading..." }
+        if available != nil { return "Upgrade" }
+        return "Check for Upgrades"
     }
 
     var versionLabel: String { installedBuild.label }
 
-    deinit {
+    isolated deinit {
+        schedule.stop()
         if let preparedUpdate {
             try? FileManager.default.removeItem(at: preparedUpdate.workspace)
         }
@@ -353,10 +380,8 @@ final class AppUpdateController: ObservableObject {
 
     init(installed: String? = nil, installedBuild: InstalledAppBuild? = nil,
          operations: AppUpdateOperations? = nil, now: @escaping () -> Date = Date.init,
-         automaticCheckInterval: TimeInterval = 60 * 60, restorePreviousFailure: Bool = true,
-         waitForAutomaticCheck: @escaping @MainActor (TimeInterval) async throws -> Void = { interval in
-             try await Task.sleep(for: .seconds(interval))
-         }) {
+         automaticCheckInterval: TimeInterval = 15 * 60, restorePreviousFailure: Bool = true,
+         schedule: AppUpdateSchedule? = nil) {
         if let installedBuild {
             self.installedBuild = installedBuild
         } else if let installed {
@@ -367,7 +392,7 @@ final class AppUpdateController: ObservableObject {
         self.operations = operations ?? .live()
         self.now = now
         self.automaticCheckInterval = automaticCheckInterval
-        self.waitForAutomaticCheck = waitForAutomaticCheck
+        self.schedule = schedule ?? .live()
         if restorePreviousFailure, let path = UserDefaults.standard.string(forKey: "appUpdateWorkspace") {
             let previous = URL(fileURLWithPath: path)
             if let data = try? Data(contentsOf: previous.appendingPathComponent("result.json")),
@@ -389,24 +414,20 @@ final class AppUpdateController: ObservableObject {
 
     func startAutomaticChecks() {
         guard automaticChecks == nil else { return }
+        let identity = UUID()
+        automaticChecks = identity
         checkIfNeeded()
-        let interval = automaticCheckInterval
-        let waitForNextCheck = waitForAutomaticCheck
-        automaticChecks = Task { [weak self] in
-            while !Task.isCancelled {
-                do { try await waitForNextCheck(interval) }
-                catch { return }
-                // A completed sleep can be queued on the main actor when stop
-                // cancels this task. Recheck before starting another request.
-                guard !Task.isCancelled, let self else { return }
-                self.checkIfNeeded()
-            }
+        schedule.start(automaticCheckInterval) { [weak self] in
+            // Invalidation can race with an already queued scheduler callback.
+            guard let self, self.automaticChecks == identity else { return }
+            self.checkIfNeeded()
+            await self.task?.value
         }
     }
 
     func stopAutomaticChecks() {
-        automaticChecks?.cancel()
         automaticChecks = nil
+        schedule.stop()
     }
 
     func prepareForTermination() {
@@ -476,6 +497,8 @@ final class AppUpdateController: ObservableObject {
     }
 
     private func prepare(_ release: AppUpdateDownload) async throws {
+        downloading = true
+        defer { downloading = false }
         message = "Downloading Stark \(release.version)…"
         let update = try await operations.prepare(release) { [weak self] status in self?.message = status }
         // Preparation may finish after quit cancelled this task (for example,
