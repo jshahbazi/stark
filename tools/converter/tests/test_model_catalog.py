@@ -91,7 +91,9 @@ class Hub:
         (root / "config.json").write_text(json.dumps(config))
         for name, data in (sidecars or {}).items():
             (root / name).write_bytes(data if isinstance(data, bytes) else json.dumps(data).encode())
-        names = names or {"model.safetensors": 1234567890, "config.json": (root / "config.json").stat().st_size}
+        names = names or {"model.safetensors": 1234567890}
+        # A Hub file inventory lists every file in the revision, including the configuration.
+        names = {"config.json": (root / "config.json").stat().st_size, **names}
         summary = parameters or {"BF16": 1000000000}
         info = SimpleNamespace(
             id=repo,
@@ -178,7 +180,8 @@ def test_catalog_reuses_pinned_huggingface_disk_cache_across_requests(tmp_path):
     second = catalog.family_catalog("qwen3", hub=hub)
 
     assert first["items"] == second["items"]
-    assert [event for event in hub.events if event[0] == "head"] == [("head", "someone/Stable", "config.json")]
+    # The pinned inventory already bounds the file, so no size request is made.
+    assert not [event for event in hub.events if event[0] == "head"]
     assert [event for event in hub.events if event[0] == "download"] == [("download", "someone/Stable", "config.json")]
     assert len([event for event in hub.events if event[0] == "cache"]) == 2
 
@@ -186,7 +189,7 @@ def test_catalog_reuses_pinned_huggingface_disk_cache_across_requests(tmp_path):
     hub.repos["someone/Stable"][1].sha = "b" * 40
     third = catalog.family_catalog("qwen3", hub=hub)
     assert third["items"][0]["revision"] == "b" * 40
-    assert len([event for event in hub.events if event[0] == "head"]) == 2
+    assert not [event for event in hub.events if event[0] == "head"]
     assert len([event for event in hub.events if event[0] == "download"]) == 2
 
 
@@ -203,7 +206,7 @@ def test_catalog_rejects_cached_path_outside_huggingface_snapshot(tmp_path):
     report = catalog.family_catalog("qwen3", hub=hub)
 
     assert report["status"] == "ready" and len(report["items"]) == 1
-    assert [event for event in hub.events if event[0] == "head"] == [("head", "someone/Outside", "config.json")]
+    assert not [event for event in hub.events if event[0] == "head"]
 
 
 @pytest.mark.parametrize(
@@ -923,15 +926,20 @@ def test_bf16_qwen_moe_catalog_requires_image_metadata_and_never_offers_text(
     assert not any(event[0] in {"head", "download"} and event[-1].endswith(".safetensors") for event in hub.events)
 
 
-def test_oversized_config_stops_at_head_and_never_reaches_download(tmp_path):
+@pytest.mark.parametrize("inventory_size", [True, False])
+def test_oversized_config_stops_at_its_size_and_never_reaches_download(tmp_path, inventory_size):
     hub = Hub()
-    root = hub.add(tmp_path, "someone/Large", {"model_type": "qwen3"})
+    oversized = catalog.MAX_CONFIG_BYTES + 1
+    names = {"model.safetensors": 1234567890, "config.json": oversized if inventory_size else None}
+    root = hub.add(tmp_path, "someone/Large", {"model_type": "qwen3"}, names=names)
     with (root / "config.json").open("wb") as stream:
-        stream.truncate(catalog.MAX_CONFIG_BYTES + 1)
+        stream.truncate(oversized)
     hub.discovered["qwen3"] = ["someone/Large"]
     report = catalog.family_catalog("qwen3", hub=hub)
     assert report["status"] == "ready" and report["items"] == []
     assert not [event for event in hub.events if event[0] == "download"]
+    # Only an inventory without the size falls back to a size request.
+    assert len([event for event in hub.events if event[0] == "head"]) == (0 if inventory_size else 1)
 
 
 def test_missing_sizes_are_unknown_not_partial_sums(tmp_path):
@@ -1139,7 +1147,8 @@ def test_guided_planning_preserves_seed_when_source_discovery_fails(tmp_path, mo
 def test_missing_required_hub_metadata_file_is_an_incompatible_candidate(tmp_path, monkeypatch, method):
     hub = Hub()
     missing, available = "someone/Missing", "someone/Available"
-    hub.add(tmp_path, missing, {"model_type": "qwen3"})
+    # Without an inventory size the catalogue asks the Hub for the file's size first.
+    hub.add(tmp_path, missing, {"model_type": "qwen3"}, names={"model.safetensors": 1234567890, "config.json": None})
     hub.add(tmp_path, available, {"model_type": "qwen3"})
     hub.discovered["qwen3"] = [missing, available]
     original = getattr(hub, method)

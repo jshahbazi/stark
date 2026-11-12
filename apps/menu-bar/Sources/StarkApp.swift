@@ -727,9 +727,12 @@ struct FamilyModelCatalog {
         self.items = items; self.offset = offset; self.nextOffset = nextOffset
     }
 
-    init(page: Self, previous: Self?) {
+    /// Merges a page into the rows already shown. A partial page carries rows
+    /// checked so far, so it keeps the continuation position already known.
+    init(page: Self, previous: Self?, partial: Bool = false) {
+        let paging = partial ? (previous ?? page) : page
         familyID = page.familyID; status = page.status; message = page.message
-        hasMore = page.hasMore; offset = page.offset; nextOffset = page.nextOffset
+        hasMore = paging.hasMore; offset = paging.offset; nextOffset = paging.nextOffset
         var combined = previous?.items ?? []
         var positions = Dictionary(uniqueKeysWithValues: combined.enumerated().map { ($0.element.id, $0.offset) })
         for item in page.items {
@@ -1304,6 +1307,8 @@ final class EngineController: ObservableObject {
     private var installErrorMessage: String?
     private var catalogRequestID: String?
     private var pendingCatalogOffset: Int64?
+    // Rows shown before the pending page was requested; its own partial rows are not counted.
+    private var catalogPageKnownIDs = Set<String>()
     private var loadRemainingCatalog = false
     private var stoppedModel: (id: String, mode: PlaygroundMode)?
     private var activeInstallRequestID: String?
@@ -1593,8 +1598,14 @@ final class EngineController: ObservableObject {
                   let raw = event["report"] as? [String: Any], let result = FamilyModelCatalog(raw),
                   let pendingOffset = pendingCatalogOffset, catalogLoading,
                   result.familyID == catalogFamilyID, result.offset == pendingOffset else { return }
-            let previousIDs = Set(pendingOffset > 0 ? (catalog?.items.map(\.id) ?? []) : [])
-            let addedItems = result.items.contains { !previousIDs.contains($0.id) }
+            let shown = catalog?.familyID == result.familyID && catalog?.status == .ready ? catalog : nil
+            if event["partial"] as? Bool == true {
+                // Rows checked so far for the pending page. The page stays pending until its full report.
+                guard result.status == .ready, !result.items.isEmpty else { return }
+                catalog = FamilyModelCatalog(page: result, previous: shown, partial: true)
+                return
+            }
+            let addedItems = result.items.contains { !catalogPageKnownIDs.contains($0.id) }
             if result.status == .ready {
                 catalog = FamilyModelCatalog(page: result, previous: pendingOffset > 0 ? catalog : nil)
             } else if pendingOffset == 0 { catalog = result }
@@ -2313,6 +2324,7 @@ final class EngineController: ObservableObject {
         }
         let requestID = UUID().uuidString.lowercased()
         catalogRequestID = requestID; catalogFamilyID = familyID; catalogLoading = true; pendingCatalogOffset = 0
+        catalogPageKnownIDs = []
         if !send(["command": "catalog", "family_id": familyID, "request_id": requestID]) {
             catalogLoading = false; pendingCatalogOffset = nil
             catalogError = "Could not reach Stark. Reopen the app and try again."
@@ -2325,6 +2337,7 @@ final class EngineController: ObservableObject {
               let offset = catalog.nextOffset else { return }
         loadRemainingCatalog = loadRemaining
         catalogLoading = true; pendingCatalogOffset = offset; catalogError = nil
+        catalogPageKnownIDs = Set(catalog.items.map(\.id))
         if !send(["command": "catalog", "family_id": familyID, "request_id": requestID, "offset": offset]) {
             catalogLoading = false; pendingCatalogOffset = nil
             catalogError = "Could not reach Stark. Reopen the app and try again."

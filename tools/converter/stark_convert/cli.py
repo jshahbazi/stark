@@ -724,6 +724,16 @@ def main() -> int:
         help="Continue family-model browsing from a candidate offset",
     )
     parser.add_argument(
+        "--catalog-cache-dir",
+        type=Path,
+        help="Reuse family-model browsing verdicts for unchanged revisions from this directory",
+    )
+    parser.add_argument(
+        "--catalog-stream",
+        action="store_true",
+        help="Print each family-model row as a JSON line when it is checked, before the full report",
+    )
+    parser.add_argument(
         "--preflight", action="store_true", help="Check bounded model metadata without downloading weights"
     )
     parser.add_argument("--support-mode", choices=MODES, help="Check the requested app mode before weight downloads")
@@ -749,15 +759,21 @@ def main() -> int:
                 raise ValueError("invalid_catalog_offset")
             logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
             os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-            print(
-                json.dumps(
-                    family_catalog(args.family_models, offset=args.catalog_offset, offline=args.offline),
-                    sort_keys=True,
+            options = {"offset": args.catalog_offset, "offline": args.offline}
+            if args.catalog_cache_dir is not None:
+                options["cache_dir"] = args.catalog_cache_dir
+            if args.catalog_stream:
+                # One JSON document per line: each checked row as it is ready,
+                # then the complete report.
+                options["on_item"] = lambda item: print(
+                    json.dumps({"partial_items": [item]}, sort_keys=True), flush=True
                 )
-            )
+            print(json.dumps(family_catalog(args.family_models, **options), sort_keys=True))
             return 0
         if args.catalog_offset != 0:
             raise ValueError("catalog_offset_requires_family_models")
+        if args.catalog_cache_dir is not None or args.catalog_stream:
+            raise ValueError("catalog_options_require_family_models")
         if args.list_families:
             print(json.dumps(support_matrix(), sort_keys=True))
             return 0

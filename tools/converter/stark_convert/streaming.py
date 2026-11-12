@@ -226,14 +226,19 @@ def parse_safetensors_header(header_bytes: bytes, file_size: int):
         header = json.loads(header_bytes, object_pairs_hook=_unique_object)
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise ConversionError("Cannot parse safetensors header") from exc
+    return safetensors_header_records(header, 8 + len(header_bytes), file_size)
+
+
+def safetensors_header_records(header, data_start: int, file_size: int):
+    """Validate a decoded header whose tensor data begins at ``data_start``."""
     if not isinstance(header, dict):
         raise ConversionError("Safetensors header must be an object")
+    header = dict(header)
     metadata = header.pop("__metadata__", {})
     if not isinstance(metadata, dict) or any(
         not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items()
     ):
         raise ConversionError("Safetensors metadata must contain strings")
-    data_start = 8 + len(header_bytes)
     tensors = {}
     spans = []
     for name, info in header.items():

@@ -1624,6 +1624,50 @@ extension EngineController {
             guard engine.catalog == nil, engine.catalogLoading else { return false }
             engine.apply(catalogReply(newFamily))
             return engine.catalog?.familyID == "qwen3_5" && engine.catalog?.items.map(\.id) == ["entry"]
+        case "catalog-partial-rows-stream-into-pending-page":
+            func partial(_ request: [String: Any], _ ids: [String]) -> [String: Any] {
+                var event = catalogReply(request, items: ids.map { catalogItem($0) })
+                event["partial"] = true
+                return event
+            }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let first = command()
+            engine.apply(partial(first, ["early"]))
+            guard engine.catalog?.items.map(\.id) == ["early"], engine.catalog?.status == .ready,
+                  engine.catalog?.nextOffset == nil, engine.catalogLoading, noCommandSent() else { return false }
+            engine.apply(partial(first, ["second"]))
+            guard engine.catalog?.items.map(\.id) == ["early", "second"], engine.catalogLoading else { return false }
+            // The page's report replaces its partial rows and does not count them as already shown.
+            engine.apply(catalogReply(first, items: [catalogItem("second"), catalogItem("early")], nextOffset: 30))
+            guard engine.catalog?.items.map(\.id) == ["second", "early"], engine.catalog?.nextOffset == 30,
+                  !engine.catalogLoading, noCommandSent() else { return false }
+            engine.apply(partial(first, ["after-report"]))
+            guard engine.catalog?.items.count == 2 else { return false }
+            engine.requestMoreModelCatalog(loadRemaining: false)
+            let second = command()
+            engine.apply(partial(first, ["stale-offset"]))
+            guard engine.catalog?.items.count == 2 else { return false }
+            engine.apply(partial(second, ["later"]))
+            guard engine.catalog?.items.map(\.id) == ["second", "early", "later"], engine.catalog?.nextOffset == 30,
+                  engine.catalogLoading else { return false }
+            // A failed page keeps the rows already checked and its retry position.
+            engine.apply(catalogReply(second, status: "error"))
+            guard engine.catalog?.items.map(\.id) == ["second", "early", "later"], engine.catalog?.nextOffset == 30,
+                  engine.catalogError != nil, !engine.catalogLoading else { return false }
+            engine.requestMoreModelCatalog(loadRemaining: false)
+            let retry = command()
+            guard (retry["offset"] as? NSNumber)?.int64Value == 30 else { return false }
+            engine.apply(partial(retry, ["later"]))
+            // The retried page only repeats a row shown before it was requested, so the next page follows.
+            engine.apply(catalogReply(retry, items: [catalogItem("later")], nextOffset: 60))
+            let third = command()
+            guard engine.catalog?.items.map(\.id) == ["second", "early", "later"], engine.catalog?.nextOffset == 60,
+                  (third["offset"] as? NSNumber)?.int64Value == 60, engine.catalogLoading else { return false }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let refresh = commands().last!
+            engine.apply(partial(refresh, ["fresh"]))
+            engine.apply(catalogReply(refresh, status: "error"))
+            return engine.catalog?.status == .error && engine.catalog?.items.isEmpty == true && !engine.catalogLoading
         case "catalog-pagination-auto-drains-positive-empty-and-duplicate-pages":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()
@@ -2935,6 +2979,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_catalog_pagination_failure_retry_preserves_loaded_rows(self):
         self.exercise("catalog-pagination-failure-retry-preserves-rows")
+
+    def test_catalog_partial_rows_stream_into_the_pending_page(self):
+        self.exercise("catalog-partial-rows-stream-into-pending-page")
 
     def test_catalog_pagination_single_click_drains_pages_and_ignores_duplicate_clicks(
         self,

@@ -147,11 +147,35 @@ retains unsupported family variants with an **Unavailable** reason.
 **Load more models** follows the remaining pages automatically, preserving
 results already loaded. Failed pages can be retried at the same offset.
 
-Before enabling Download for a generic Safetensors source, the catalogue reads
-the pinned tensor headers with exact HTTP byte ranges and runs the same tensor
-planner used by conversion. Names, shapes, dtypes, affine packing and shard-index
-membership must match the importer. Header requests never consume weight payloads
-and reject servers that ignore the requested range. A header exceeding the
+The Hub listing itself carries each repository's head revision, task tags and
+file names. A source whose listing already shows another task, no model
+configuration or no weight file uses its position without any request of its
+own, so one page can pass up to 500 such positions and reach further down the
+family. Metadata files are bounded by the sizes in the pinned file inventory
+instead of a separate size request, and the Hub's parsed architecture rejects
+an unsupported head revision before its configuration is fetched.
+
+Rows appear as each source is checked; the page's sorted report follows. The
+app keeps verdicts in `catalog-cache` inside its data folder, keyed by
+repository and bound to the checked revision and the installed converter
+sources. An unchanged revision is answered from that cache without contacting
+the repository: for 30 days, or one hour when the outcome depended on access
+(gated or missing files, configuration borrowed from another repository). A
+registered source has no listed revision, so its head is confirmed with one
+request and then trusted for ten minutes. Verdicts that could not be verified
+are never stored. The cache holds public repository metadata only, and
+installing repeats the pinned preflight.
+
+Before enabling Download for a generic Safetensors source, the catalogue checks
+the pinned tensor headers with the same tensor planner used by conversion.
+Names, shapes, dtypes, affine packing and shard-index membership must match the
+importer. For a checkpoint with a shard index, one Hub API call returns every
+shard's parsed header; it is used only when the Hub labels it with the pinned
+revision and each header agrees with the pinned file sizes. A single-file
+checkpoint, a moved or older revision, or any reply that fails those checks is
+read from the pinned files with exact HTTP byte ranges instead, and every
+failure reason comes from those bytes. Header requests never consume weight
+payloads and reject servers that ignore the requested range. A header exceeding the
 catalogue's 4 MiB inspection limit remains unavailable with an explanation.
 Duplicate tied-tensor payload equality is checked during full conversion.
 Native loading and model execution remain separate checks.
