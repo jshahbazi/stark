@@ -76,6 +76,8 @@ reuse and its artifact-specific qualification remain unchanged.
 
 `recommendation_leaderboard.json` bundles a dated [whatmodel.sh](https://whatmodel.sh/) snapshot with separate [General Work](https://whatmodel.sh/?gpu=apple&max=0) and [Coding](https://whatmodel.sh/?gpu=apple&max=0&task=coding) rankings. General Work uses the requested all-task configuration. Both lists select Apple Silicon and local models only. Full lists cover 8, 16, 24, 32, 48, 64, 96, 128, 192, 256 and 512 GB RAM. Exact query URLs, response SHA-256 values, update times, source revision and model-catalogue hash remain in the snapshot. The [November capture](archive/runs/2026-11-11-whatmodel-recommendations.md) records the top three models per RAM/task list, including models Stark cannot run.
 
+For benchmark information behind these rankings, start with whatmodel’s [About this repo](https://github.com/jakemanger/whatmodel#about-this-repo) section, which links to its scoring methodology and benchmark sources. The bundled snapshot retains the source revision used for Stark’s recommendations.
+
 The recommendation path never requests whatmodel.sh. Hardware checks and supported-model discovery remain fresh; existing Hugging Face metadata lookups are separate. Clicking a source link intentionally opens the browser.
 
 ### Selection policy
