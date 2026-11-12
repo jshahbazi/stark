@@ -366,7 +366,7 @@ struct InstallProgress {
         case "failed": return "Failed"
         case "waiting": return "Waiting"
         default:
-            if phase == "download", let received = transferredBytes {
+            if phase == "download", totalBytes == nil, let received = transferredBytes {
                 return received > 0
                     ? ByteCountFormatter.string(fromByteCount: received, countStyle: .file) + " received"
                     : "Downloading…"
@@ -2700,6 +2700,10 @@ struct InstallStageView: View {
             }
             if let total = progress.totalBytes, total > 0 {
                 Text("\(bytes(progress.completedBytes)) of \(bytes(total))")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            if phase == "download", let received = progress.transferredBytes, progress.totalBytes != nil {
+                Text("\(bytes(received)) received over network")
                     .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
             }
         }

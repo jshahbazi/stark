@@ -1945,6 +1945,9 @@ extension EngineController {
                   InstallProgress(state: "running", completedBytes: 25, totalBytes: 100).fraction == 0.25 else { return false }
             engine.apply(received.merging(["transferred_bytes": Int64(3_000_000_000)]) { _, new in new })
             guard engine.downloadProgress.detail(for: "download") == "3 GB received" else { return false }
+            let known = InstallProgress(state: "running", completedBytes: 25, totalBytes: 100, transferredBytes: 200)
+            guard known.showsProgressBar, known.fraction == 0.25, known.detail(for: "download") == "25%",
+                  known.transferredBytes == 200 else { return false }
             for bad: Any in [true, -1, 1.5, "100"] {
                 engine.apply(received.merging(["transferred_bytes": bad]) { _, new in new })
                 guard engine.downloadProgress.transferredBytes == 3_000_000_000 else { return false }
