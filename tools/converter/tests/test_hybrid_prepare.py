@@ -440,8 +440,10 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
         messages = [event["message"] for event in events if event["event"] == "status"]
         assert messages[0] == "Downloading model files…"
         assert any(
-            event["event"] == "progress" and event.get("phase") == "download"
-            and event.get("state") == "running" and event.get("completed_bytes") == 2
+            event["event"] == "progress"
+            and event.get("phase") == "download"
+            and event.get("state") == "running"
+            and event.get("completed_bytes") == 2
             for event in events
         )
         assert str(output) not in controller.output.getvalue()

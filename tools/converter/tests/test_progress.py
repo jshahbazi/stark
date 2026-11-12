@@ -306,8 +306,12 @@ def test_locked_hub_snapshot_routes_live_bytes_to_private_progress(tmp_path, mon
 
     monkeypatch.setattr(snapshot, "hf_hub_download", download)
     snapshot.snapshot_download(
-        "private/repository", revision=PIN, local_dir=tmp_path, cache_dir=tmp_path / "cache",
-        max_workers=2, tqdm_class=capture.bar_class(),
+        "private/repository",
+        revision=PIN,
+        local_dir=tmp_path,
+        cache_dir=tmp_path / "cache",
+        max_workers=2,
+        tqdm_class=capture.bar_class(),
     )
     assert events[-1]["completed_bytes"] == 10
     assert any(0 < event["completed_bytes"] < 10 for event in events)
