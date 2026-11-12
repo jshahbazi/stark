@@ -99,6 +99,22 @@ uv run --project tools/converter --locked --python 3.13.13 ruff format --check t
 uv lock --check --directory tools/converter
 ```
 
+The Flash Next image qualification harness has model-free counterexamples in
+the repository job's benchmark and qualification step. They check that cache
+mismatches, missing MTP proposals, image speculation and resource failures stop
+qualification, preserve a sanitized partial receipt and close the owned worker.
+Run them separately when changing the harness:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 pytest -q scripts/test_qualify_flashnext_images.py
+uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/qualify_flashnext_images.py scripts/test_qualify_flashnext_images.py
+uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/qualify_flashnext_images.py scripts/test_qualify_flashnext_images.py
+```
+
+These checks use synthetic worker replies. The opt-in
+`scripts/qualify_flashnext_images.py` command still requires a private, actual
+model run for artifact-specific image, MTP and prefix lifecycle evidence.
+
 Installer, app and release scripts (shell syntax plus every unit test CI runs):
 
 ```sh
