@@ -22,7 +22,7 @@ their existing canonical locations under `docs/archive/`, `docs/benchmarks/` and
 
 | Record | Scope |
 | --- | --- |
-| [20261112-FNI-01: general Flash Next image admission](../archive/runs/2026-11-12-flashnext-general-images.md) | Shared Add Source retained-image routing and content-bound family admission; requested KQuant layout and artifact qualification tracked separately. |
+| [20261112-FNI-01–07: general Flash Next image admission](../archive/runs/2026-11-12-flashnext-general-images.md) | Shared Add Source admission, actual KQuant lifecycle and image fixtures, and contract/harness follow-up; compatibility and artifact-specific qualification remain bounded to the recorded evidence. |
 | [20261110-Q38IMPORT-01: external-table affine import](2026-11-10-qwen38-external-import.md) | Live iQ-MLX catalog and preflight, complete header comparison, synthetic import and manifest replay. Full checkpoint execution deferred for storage. |
 | [20261110-LILY-SIZE-01: retained image resolution](2026-11-10-lily-image-size.md) | Retained Lily 16 MP processor ceiling, negotiated app limits, 65,536-row component controls and 2.4 MP native execution; signed local build installed, full-ceiling model qualification pending |
 | [20261110-FAMILY-RECHECK-01: independent pre-PR review](2026-11-10-family-double-check.md) | Isolated cache invalidation controls, accepted-temperature overflow handling and scratch-pool high-water admission; revised validation tracked separately |

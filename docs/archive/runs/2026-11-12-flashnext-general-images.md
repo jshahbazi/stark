@@ -343,3 +343,63 @@ frozen-source run above includes the corrected provenance assertion and passes.
 The follow-up is delivered on the same `codex/flashnext-general-images` branch.
 No installed application or user library was replaced. A build containing these
 changes is required to use the revised Add Source route.
+
+## 20261112-FNI-07: pre-PR contract and harness review
+
+Registered before the new actual-model replay. Baseline: `1e055e7e`; independent
+host and native reviews cover the entire implementation diff from `72ad1b09`.
+The native review found no further actionable issue. Host review identified
+two metadata discrepancies with native admission: indexed precision maps
+accepted canonical aliases that the native reader rejects, and external/indexed
+MTP RoPE metadata accepted positive finite Python floats that overflow or
+underflow the native F32 field. Align host checks before payload downloads and
+add focused counterexamples; supported source files and inference arithmetic
+remain unchanged.
+
+The review also reproduced a false success in the lifecycle harness: merely
+finding the word `red` accepted a negated or reasoning-only color mention.
+The revised public fixture asks for a single color word and requires an
+explicit final `red` label, allowing case, simple emphasis and punctuation.
+A completed thinking segment is excluded from the final-answer check.
+Model-free counterexamples must reject negated, ambiguous, wrong and incomplete
+answers while retaining sanitized partial receipts and closing the owned worker.
+
+Replay the actual `nace-ai` lifecycle with the revised helper and a new private
+receipt. Preserve the original helper hash and all previous source-bound
+results; the original color gate provides weaker semantic evidence. This replay
+does not add a source-reference parity or general visual-quality claim.
+
+### Review fixes and actual replay result
+
+The metadata restrictions now match the native precision-map namespace and
+positive finite F32 draft-rotary field. All 58 focused storage tests passed,
+including the new alias and float-range counterexamples. The unchanged actual
+`nace-ai` configuration still passes admission. The revised lifecycle helper's
+21 model-free tests passed, including failed-image-answer cleanup and sanitized
+partial receipts.
+
+The new actual run passed all **14 lifecycle checks**, with **16 generations
+and two sequential worker instances**, using the same artifact, worker,
+context, sampling, output budget and lifecycle matrix as FNI-02. The stricter
+final color-label gate passed. No native arithmetic, weight or prepared-config
+identity changed. Image requests still used zero drafts/reuse; exact text/MTP
+restoration, recovery, cleanup, reset and restart gates passed again.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Revised lifecycle helper | `9fe848bd4f750f0565538826424c9e5ebd1b1a1948f08110457a8f3a6d49b672` |
+| New private receipt, `runtime/kquant-lifecycle-qualification-v3-pr-review.json` | `a19a24b5b5e69f36cab5ea2982762cf05bdf6afdd8a2577305e9f24339d098a0` |
+| Unchanged worker | `e44fcea263d8ceeea0819a5eebb257b7d2af933235e73cd4380a1eddb4d70543` |
+| Unchanged prepared config | `49bce31896c983ef11d98e51f7f839bc31f2129f273f0254a1d66aab93777b61` |
+
+Fresh native model-free runs passed: generator **145 passed, five ignored**;
+standalone core **97 passed, 54 ignored**; engine immutable-source receipt test
+**one passed**. The benchmark/qualification CI invocation passed **137 tests
+and 12 subtests**. Repository policy and its 55 self-tests, Python lint/format,
+locked converter dependency check and pinned-nightly Rust formatting passed.
+The saved earlier runtime receipts were rehashed and still match this record.
+
+After all source/test edits were frozen, the final offline converter suite
+passed **7,318 tests, 94 skipped** in 313.57 seconds. An earlier pre-fix run was
+explicitly interrupted before applying the review changes; it is not counted
+as completed validation. The installed app remained open and was not replaced.

@@ -4,7 +4,6 @@ Admission depends on actual tensor headers and declared per-projection storage.
 The adapter changes names and file views only; it never requantizes payloads.
 """
 
-import math
 import re
 
 from . import qwen38_external
@@ -80,7 +79,14 @@ def validate_config(config):
     for name, spec in quant.items():
         if name in {"bits", "group_size", "mode"}:
             continue
+        # Tensor-name aliases do not broaden the native precision-map schema.
+        # indexed_mlx_config reads these source prefixes and the plural PLE
+        # shard spelling before constructing the canonical tensor loader.
+        if not name.startswith(("language_model.model.", "language_model.lm_head", "mtp.")):
+            raise UnsupportedConversion("A Flash Next precision key is outside the native source namespace.")
         canonical = alias(name)
+        if ".ngram_embedding.shard_" in canonical and ".ngram_embedding.shards." not in name:
+            raise UnsupportedConversion("A Flash Next PLE precision key is outside the native shard namespace.")
         if canonical in supplied or canonical not in specs or spec != specs[canonical]:
             raise UnsupportedConversion("A Flash Next projection declares unsupported affine precision or group size.")
         if spec is not False and (
@@ -89,7 +95,9 @@ def validate_config(config):
             raise UnsupportedConversion("Invalid Flash Next affine projection metadata.")
         supplied[canonical] = spec
     default = {"bits": 4, "group_size": 64, "mode": "affine"}
-    if any(spec != default and supplied.get(name) != spec for name, spec in specs.items()):
+    if "language_model.model.embed_tokens" not in quant or any(
+        spec != default and supplied.get(name) != spec for name, spec in specs.items()
+    ):
         raise UnsupportedConversion("Flash Next per-projection precision metadata is incomplete.")
     qwen38_external._validate_vision_metadata(config, result)
     mtp = config["text_config"].get("mtp")
@@ -100,8 +108,7 @@ def validate_config(config):
         or mtp["num_hidden_layers"] != 1
         or mtp.get("layer_types") != ["full_attention"]
         or mtp.get("mtp_use_hidden_state_from_layer") is not None
-        or type(mtp.get("rope_theta")) not in (int, float)
-        or not 0 < mtp["rope_theta"] < math.inf
+        or not qwen38_external._valid_native_mtp_theta(mtp.get("rope_theta"))
     ):
         raise UnsupportedConversion("Unsupported indexed Flash Next draft-head configuration.")
     return result

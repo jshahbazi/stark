@@ -101,7 +101,8 @@ uv lock --check --directory tools/converter
 
 The Flash Next image qualification harness has model-free counterexamples in
 the repository job's benchmark and qualification step. They check that cache
-mismatches, missing MTP proposals, image speculation and resource failures stop
+mismatches, missing MTP proposals, image speculation, incorrect color labels and
+resource failures stop
 qualification, preserve a sanitized partial receipt and close the owned worker.
 Run them separately when changing the harness:
 

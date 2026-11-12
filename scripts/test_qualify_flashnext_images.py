@@ -98,6 +98,10 @@ class WorkerFixture:
         reply = self.reply(0, 0, input_tokens=90, text="red")
         if self.defect == "image_mtp_leak":
             reply["mtp"]["stats"]["proposed"] = 1
+        if self.defect == "negated_image_answer":
+            reply["text"] = "not red; it is blue"
+        if self.defect == "reasoning_only_image_answer":
+            reply["text"] = "<think>It might be red.</think>blue"
         return reply
 
     def close(self):
@@ -178,6 +182,8 @@ def test_complete_lifecycle_is_serialized_and_receipt_contains_only_aggregates(
         ("changed_output", "mtp0_reuse", "correctness"),
         ("no_proposals", "mtp2_cold", "mtp"),
         ("image_mtp_leak", "valid_image", "mtp"),
+        ("negated_image_answer", "valid_image", "image"),
+        ("reasoning_only_image_answer", "valid_image", "image"),
         ("resource", "mtp0_cold", "resource"),
     ],
 )
@@ -196,6 +202,29 @@ def test_failed_gates_preserve_sanitized_partial_receipt_and_close_owned_worker(
     assert json.loads(args.output.read_text()) == report
     assert len(factory.workers) == 1 and factory.workers[0].closed
     assert "private" not in args.output.read_text()
+
+
+@pytest.mark.parametrize(
+    "answer", ["red", " Red. ", "RED!", "**red**", "<think>Color check.</think>red"]
+)
+def test_color_smoke_accepts_only_an_explicit_final_label(answer):
+    assert qualification.red_answer(answer)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "not red",
+        "not red; it is blue",
+        "red or blue",
+        "red?",
+        "I cannot identify whether it is red",
+        "<think>red</think>blue",
+        "<think>red",
+    ],
+)
+def test_color_smoke_rejects_negated_ambiguous_and_reasoning_only_labels(answer):
+    assert not qualification.red_answer(answer)
 
 
 def test_summary_refuses_boolean_counters_and_unacknowledged_draft_depth():

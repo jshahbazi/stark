@@ -90,6 +90,46 @@ def test_precision_metadata_cannot_change_the_fixed_indexed_contract(indexed_con
         qwen38_kquant.validate_config(config)
 
 
+@pytest.mark.parametrize(
+    "source,renamed",
+    [
+        ("language_model.model.embed_tokens", "model.language_model.embed_tokens"),
+        ("language_model.lm_head", "lm_head"),
+        (
+            "language_model.model.layers.3.self_attn.q_proj",
+            "model.language_model.layers.3.self_attn.q_proj",
+        ),
+        (
+            "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0",
+            "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_0",
+        ),
+    ],
+)
+def test_precision_map_aliases_do_not_admit_names_the_native_config_rejects(indexed_config, source, renamed):
+    # Unlike tensor-header names, native precision keys are read in their
+    # original source namespace, before the loader's alias normalization.
+    indexed_config["quantization"][renamed] = indexed_config["quantization"].pop(source)
+    indexed_config["quantization_config"] = copy.deepcopy(indexed_config["quantization"])
+    with pytest.raises(UnsupportedConversion, match="namespace"):
+        qwen38_kquant.validate_config(indexed_config)
+
+
+@pytest.mark.parametrize("theta", [1e-50, 1e50])
+def test_indexed_draft_theta_must_remain_positive_finite_in_native_f32(indexed_config, theta):
+    indexed_config["text_config"]["mtp"] = {
+        "hybrid": True,
+        "num_hidden_layers": 1,
+        "layer_types": ["full_attention"],
+        "rope_theta": theta,
+    }
+    _, specs = qwen38_kquant._descriptors(indexed_config)
+    default = {"mode": "affine", "bits": 4, "group_size": 64}
+    indexed_config["quantization"].update({source_name(name): spec for name, spec in specs.items() if spec != default})
+    indexed_config["quantization_config"] = copy.deepcopy(indexed_config["quantization"])
+    with pytest.raises(UnsupportedConversion, match="draft-head"):
+        qwen38_kquant.validate_config(indexed_config)
+
+
 def test_actual_header_planes_must_match_declared_packing(indexed_config):
     tensors = tensors_for(indexed_config)
     name = "language_model.model.layers.0.mlp.shared_expert_gate.weight"

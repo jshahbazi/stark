@@ -101,7 +101,10 @@ def image_prompt(model):
                 "role": "user",
                 "content": [
                     {"type": "image"},
-                    {"type": "text", "text": "Name the main color."},
+                    {
+                        "type": "text",
+                        "text": "Name the main color. Answer with one color word.",
+                    },
                 ],
             }
         ],
@@ -111,6 +114,17 @@ def image_prompt(model):
         bos_token=codec.get("bos_token") or "",
         eos_token=codec.get("eos_token") or "",
     )
+
+
+def red_answer(text):
+    """Require an explicit final label for this bounded color smoke check."""
+    answer = text.strip()
+    if answer.startswith("<think>"):
+        _reasoning, separator, answer = answer.partition("</think>")
+        if not separator:
+            return False
+        answer = answer.strip()
+    return re.fullmatch(r"(?:red|\*\*red\*\*)[.!]?", answer, re.IGNORECASE) is not None
 
 
 def summarize(reply, *, input_tokens=None, drafts, reuse, require_proposals=True):
@@ -386,7 +400,7 @@ def qualify(args, *, worker_factory=None, prompt_factory=image_prompt):
         )
         image_summary = summarize(reply, drafts=0, reuse=0)
         require(worker._last_image_tokens == 64, "image")
-        require(re.search(r"\bred\b", reply["text"].casefold()) is not None, "image")
+        require(red_answer(reply["text"]), "image")
         image_summary.update(name="valid_image", image_tokens=worker._last_image_tokens)
         report["generations"].append(image_summary)
         report["image_fixture"] = {

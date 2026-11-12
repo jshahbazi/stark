@@ -1,6 +1,7 @@
 """The external-table affine dialect handled by the native Qwen3.8 loader."""
 
 import math
+import struct
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import PurePosixPath
 
@@ -47,6 +48,17 @@ _NATIVE_TEXT_GEOMETRY = {
 
 class LayoutError(UnsupportedConversion):
     """A bounded, user-facing reason produced by the layout checker."""
+
+
+def _valid_native_mtp_theta(value):
+    """The native head stores its positive finite rotary base as f32."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        rounded = struct.unpack("<f", struct.pack("<f", value))[0]
+    except (OverflowError, struct.error):
+        return False
+    return math.isfinite(rounded) and rounded > 0
 
 
 def is_external_affine(config: dict) -> bool:
@@ -314,8 +326,7 @@ def validate_layout(config, tensors, table):
         or mtp["num_hidden_layers"] != 1
         or mtp.get("layer_types") != ["full_attention"]
         or mtp.get("mtp_use_hidden_state_from_layer") is not None
-        or type(mtp.get("rope_theta")) not in (int, float)
-        or not 0 < mtp["rope_theta"] < math.inf
+        or not _valid_native_mtp_theta(mtp.get("rope_theta"))
     ):
         raise LayoutError("The checkpoint’s draft head is outside Stark’s Qwen3.8 loader.")
     describe_text_weights(architecture, canonical, matrix, control, include_mtp=mtp is not None)
