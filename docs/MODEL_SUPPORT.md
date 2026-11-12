@@ -114,7 +114,7 @@ direction or model size ascending or descending. Unknown numeric values sort las
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
 
-Family detail opens on **Top rated (general)**, with **Top rated (coding)**
+Family detail opens on **Top rated (coding)**, with **Top rated (general)**
 beside it. Both use the bundled whatmodel.sh reference scores described in
 [Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
 Rows that can be downloaded and whose weights fit this Mac's memory budget come
@@ -127,6 +127,15 @@ that is a coarse check on weights alone, not a runtime plan. The catalogue also
 inspects sources with a reference score before the rest of the first 300
 listing positions, preferring models from the RAM list this Mac can use, so the
 first pages hold the best-rated candidates. A saved sort choice is kept.
+
+**Hide Unsupported** is checked by default and the choice persists. It leaves
+out every row that cannot be downloaded: a weight format or quantization option
+Stark does not import, a tensor layout the family's importer rejects, a source
+without a usable Safetensors file or shard index, and a source whose tensor
+headers could not be verified. Quantization tabs and counts follow the listed
+rows. The list states how many rows are hidden, and when every row found so far
+is hidden it offers to show them. Unchecking it lists those rows as
+**Unavailable** with their reason.
 Conversion-only families are omitted. Cards show whether each model supports
 text or text and images. Downloads automatically include image support when
 available for that artifact. This requires metadata confirming a supported

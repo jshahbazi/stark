@@ -55,6 +55,31 @@ either rule.
 Scores are parent-model references from the snapshot captured 2026-11-11. No
 export was benchmarked, and no row's availability changed.
 
+## Follow-up: coding default and Hide Unsupported
+
+After a first look at a development build, family detail now opens on **Top
+rated (coding)** instead of the general order, and a **Hide Unsupported**
+checkbox, checked by default and persisted, leaves out every row that cannot be
+downloaded. Across the first two pages of five families (Qwen3, Llama, Mistral,
+Qwen3.5 and Gemma 3 text; live Hub metadata) 75 of 170 rows were unavailable:
+
+| Rows | Stated reason |
+| --- | --- |
+| 24 | MLX quantization configuration has unimplemented options |
+| 19 | Qwen3.5 MLX export lacks the quantization field needed for baked normalization weights |
+| 13 | Tensor names, shapes or packing do not match the family's importer |
+| 9 | The family and mode do not implement the declared quantized representation |
+| 7 | Tensor headers could not be verified |
+| 3 | No supported Safetensors file or complete shard index |
+
+The Swift controller harness covers the new default, the stored preference and
+its fallback, and the listed rows: 149 checks, zero failures and zero skips
+after this follow-up, and the full app typecheck passed. A Developer ID signed
+development build (`20261112141104661004`) was produced in `artifacts/menu-bar`
+with strict signature verification, reusing the native workers of the installed
+0.20.0 release, and opened without replacing that installed app. Its window
+was not operated by this run.
+
 ## Validation
 
 - New `test_catalog_ranking.py`: 23 tests covering each relationship, refusal

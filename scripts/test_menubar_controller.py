@@ -1917,6 +1917,13 @@ extension EngineController {
                   catalog.items.first(where: { $0.id == "unscored" })?.referenceScore == nil,
                   catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: memory) == false,
                   catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: nil) == true else { return false }
+            // Hiding unsupported rows removes exactly those that cannot be downloaded, whatever their score.
+            let supported = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: true)
+            guard supported.map(\.id) == ["unscored", "mid", "best-full", "best-small", "huge", "coder"],
+                  CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: false).count == 7,
+                  CatalogBrowserInventory(items: supported, sort: .ratingCoding, physicalMemory: memory).groups
+                      .flatMap({ $0.items.map(\.id) }) == ["coder", "mid", "best-small", "best-full", "unscored", "huge"],
+                  CatalogQuantizationFilter.tabs(for: supported).count == 2 else { return false }
             // A malformed score rejects its row instead of ranking by a guess.
             var malformed = raw[1]
             for change in [["general": "50"], ["general": NSNull(), "coding": NSNull()], ["relationship": "guessed"],
@@ -1997,7 +2004,15 @@ extension EngineController {
             defer { preferences.removePersistentDomain(forName: suite) }
             guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
                   ModelBrowserPreferences.load(.families, defaults: preferences) == .nameAscending,
-                  ModelBrowserPreferences.load(.catalog, defaults: preferences) == .ratingGeneral else { return false }
+                  ModelBrowserPreferences.load(.catalog, defaults: preferences) == .ratingCoding else { return false }
+            // Unsupported rows stay hidden until the user chooses to see them; a damaged value restores that.
+            guard ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            ModelBrowserPreferences.saveHidesUnsupported(false, defaults: preferences)
+            guard !ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            preferences.set("no", forKey: ModelBrowserPreferences.hideUnsupportedKey)
+            guard ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            preferences.set(0, forKey: ModelBrowserPreferences.hideUnsupportedKey)
+            guard ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
             // Rating orders exist only where rows carry reference scores.
             ModelBrowserPreferences.save(.ratingGeneral, for: .saved, defaults: preferences)
             guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
@@ -2018,7 +2033,7 @@ extension EngineController {
             reopened.set(42, forKey: ModelBrowserScope.catalog.preferenceKey)
             return ModelBrowserPreferences.load(.saved, defaults: reopened) == .nameAscending &&
                 ModelBrowserPreferences.load(.families, defaults: reopened) == .nameAscending &&
-                ModelBrowserPreferences.load(.catalog, defaults: reopened) == .ratingGeneral
+                ModelBrowserPreferences.load(.catalog, defaults: reopened) == .ratingCoding
         case "catalog-installed-mode":
             var item = catalogItem(); item["installed_ids"] = ["fixture-model", "not-in-library"]
             guard let parsed = FamilyModelCatalog.Item(item) else { return false }

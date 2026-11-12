@@ -644,7 +644,7 @@ enum ModelBrowserSort: String, CaseIterable {
 enum ModelBrowserScope: String, CaseIterable {
     case saved, families, catalog
     var preferenceKey: String { "modelBrowser.sort." + rawValue }
-    var defaultSort: ModelBrowserSort { self == .catalog ? .ratingGeneral : .nameAscending }
+    var defaultSort: ModelBrowserSort { self == .catalog ? .ratingCoding : .nameAscending }
     var sorts: [ModelBrowserSort] {
         switch self {
         case .families: return [.nameAscending, .nameDescending]
@@ -664,6 +664,19 @@ enum ModelBrowserPreferences {
     static func save(_ sort: ModelBrowserSort, for scope: ModelBrowserScope, defaults: UserDefaults = .standard) {
         guard scope.sorts.contains(sort) else { return }
         defaults.set(sort.rawValue, forKey: scope.preferenceKey)
+    }
+
+    static let hideUnsupportedKey = "modelBrowser.catalog.hideUnsupported"
+
+    /// Family detail hides rows Stark cannot download unless the user chose to see them.
+    static func hidesUnsupported(defaults: UserDefaults = .standard) -> Bool {
+        guard let stored = defaults.object(forKey: hideUnsupportedKey) as? NSNumber,
+              CFGetTypeID(stored) == CFBooleanGetTypeID() else { return true }
+        return stored.boolValue
+    }
+
+    static func saveHidesUnsupported(_ hides: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(hides, forKey: hideUnsupportedKey)
     }
 }
 
@@ -845,6 +858,12 @@ struct CatalogBrowserInventory {
         }
     }
     let groups: [Group]
+
+    /// The rows family detail lists. A row that cannot be downloaded, whether for an
+    /// unsupported format or any other stated reason, is left out when hiding.
+    static func listed(_ items: [FamilyModelCatalog.Item], hidingUnsupported: Bool) -> [FamilyModelCatalog.Item] {
+        hidingUnsupported ? items.filter(\.downloadable) : items
+    }
 
     /// Top-rated order: rows that can be downloaded and fit this Mac first, then the
     /// higher score, with unscored rows last and the smaller download breaking ties.
@@ -2834,6 +2853,7 @@ struct ModelsView: View {
     @State private var savedSort = ModelBrowserPreferences.load(.saved)
     @State private var familiesSort = ModelBrowserPreferences.load(.families)
     @State private var catalogSort = ModelBrowserPreferences.load(.catalog)
+    @State private var hideUnsupported = ModelBrowserPreferences.hidesUnsupported()
 
     private var inventory: ModelsInventory {
         ModelsInventory(models: engine.models, loadedID: engine.modelControlID, registry: engine.modelFamilies,
@@ -2847,7 +2867,7 @@ struct ModelsView: View {
     private var catalogItems: [FamilyModelCatalog.Item] {
         guard let family = selectedFamily, let catalog = engine.catalog,
               catalog.familyID == family.id, catalog.status == .ready else { return [] }
-        return catalog.items
+        return CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: hideUnsupported)
     }
 
     private var quantizationTabs: [CatalogQuantizationFilter] {
@@ -2929,12 +2949,19 @@ struct ModelsView: View {
                 if selectedFamily == nil && navigation.tab == .download {
                     Label("Scroll to browse all model families", systemImage: "arrow.down")
                         .font(.caption).foregroundStyle(.secondary)
-                } else if selectedFamily != nil && catalogSort.isRating {
-                    HStack(spacing: 4) {
-                        Text("Models that fit this Mac come first, ranked by whatmodel.sh scores. Quantized versions show their original model's score.")
-                            .fixedSize(horizontal: false, vertical: true)
-                        Link("About scores", destination: URL(string: "https://whatmodel.sh/")!).fixedSize()
-                    }.font(.caption).foregroundStyle(.secondary)
+                } else if selectedFamily != nil {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        if catalogSort.isRating {
+                            HStack(spacing: 4) {
+                                Text("Models that fit this Mac come first, ranked by whatmodel.sh scores. Quantized versions show their original model's score.")
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Link("About scores", destination: URL(string: "https://whatmodel.sh/")!).fixedSize()
+                            }.font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                        Toggle("Hide Unsupported", isOn: $hideUnsupported).toggleStyle(.checkbox).fixedSize()
+                            .help("Hides models in a format Stark cannot import and models marked Unavailable")
+                    }
                 }
                 ScrollView {
                     if let family = selectedFamily { catalogContent(family) }
@@ -3029,6 +3056,7 @@ struct ModelsView: View {
         }.padding(24).frame(width: 640, height: 580)
             .onAppear { selectedFamily = nil; catalogQuantization = .all }
             .onChange(of: navigation.tab) { leaveFamily() }
+            .onChange(of: hideUnsupported) { ModelBrowserPreferences.saveHidesUnsupported(hideUnsupported) }
             .onChange(of: quantizationTabs) {
                 guard !engine.catalogLoading, engine.catalog?.status == .ready,
                       engine.catalog?.familyID == selectedFamily?.id else { return }
@@ -3151,21 +3179,33 @@ struct ModelsView: View {
     @ViewBuilder
     private func catalogContent(_ family: ModelsInventory.Family) -> some View {
         if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
-            let groups = CatalogBrowserInventory(items: catalog.items, query: catalogQuery, sort: catalogSort,
+            let listed = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: hideUnsupported)
+            let hidden = catalog.items.count - listed.count
+            let groups = CatalogBrowserInventory(items: listed, query: catalogQuery, sort: catalogSort,
                                                  quantization: catalogQuantization,
                                                  physicalMemory: ProcessInfo.processInfo.physicalMemory).groups
             LazyVStack(spacing: 6) {
                 if catalog.items.isEmpty {
                     Text(catalog.nextOffset == nil ? "No compatible models found" : "No compatible models found yet")
                         .font(.headline).frame(maxWidth: .infinity, minHeight: 180)
+                } else if listed.isEmpty {
+                    // Everything found so far is hidden; say so instead of looking empty.
+                    VStack(spacing: 10) {
+                        Text(catalog.nextOffset == nil && !engine.catalogLoading
+                             ? "No supported models found" : "No supported models found yet").font(.headline)
+                        Button("Show \(hidden) unsupported") { hideUnsupported = false }
+                    }.frame(maxWidth: .infinity, minHeight: 180)
                 } else if groups.isEmpty { noSearchResults("No matching models") }
                 else {
                     ForEach(groups) { group in catalogGroup(group) }
+                    if hidden > 0 {
+                        Text("\(hidden) unsupported hidden").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 if engine.catalogLoading {
                     HStack(spacing: 10) {
                         ProgressView().controlSize(.small)
-                        Text("Checking HuggingFace... \(catalog.items.count) available so far").foregroundStyle(.secondary)
+                        Text("Checking HuggingFace... \(listed.count) available so far").foregroundStyle(.secondary)
                     }
                 } else if let message = engine.catalogError {
                     Text(message).font(.callout).foregroundStyle(.secondary)
