@@ -22,13 +22,18 @@ changing the pages. Run the repository policy check before committing.
 
 - The homepage introduces the app, shows its three product screenshots, gives a
   short setup path and explains the OpenWork/OpenCode connections and local
-  processing.
+  processing. The new beginner flow offers General Work → OpenWork or Coding →
+  OpenCode, followed by Quality (the default) or Speed.
 - Technical details covers the local API, featured models, memory examples,
   context reuse and three benchmark studies. Its tabs and copy control work
   without external services; content remains readable without JavaScript.
 - Documentation provides an on-site quick start and organized guides for app
   connections, model compatibility and developers. Full reference material stays
-  in the linked documents under `docs/`.
+  in the linked documents under `docs/`. The setup guide explains RAM-aware
+  recommendations, manually refreshed offline rankings and the distinction
+  between parent-model scores and quantized-export quality. Label the new flow
+  as development work until a release contains it; the existing setup screenshot
+  depicts the earlier interface.
 - The Images panel retains existing dense Qwen3.5 BF16 guidance and links to a
   development update for the added Qwen dense/MoE, retained Lily and Gemma paths.
   The on-site image coverage section distinguishes recorded complete-artifact

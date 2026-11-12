@@ -32,7 +32,17 @@ Use an **Apple silicon Mac with macOS 26.4 or newer** in a native arm64 terminal
 
 ### Install the app
 
-Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest) and open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop: copy `Stark.app` into Applications, quit the old app, then open the installed copy. Click the cat icon, select **Beginner**, then **Guided setup**. Choose a task, review the model recommendation for your Mac, and follow the steps to download, start and chat with the model. The guide can also help connect OpenWork. To choose your own model and settings, select **Advanced** and open **Manage Models**; **Model Catalog** and **Add from Source** remain available. Both interfaces share installed models. [Menu bar guide](apps/menu-bar/README.md)
+Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest) and open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop: copy `Stark.app` into Applications, quit the old app, then open the installed copy.
+
+Click the cat icon and select **Beginner → Guided setup**:
+
+1. Choose **General Work** for the OpenWork guide or **Coding** for the OpenCode Desktop guide.
+2. Choose **Quality** (selected by default) or **Speed**, then **Find a model**.
+3. Review the recommendation for your Mac, download and start it, then follow the guide to install and connect your chosen app. In OpenCode, select **Stark** and the recommended model in its model picker. You can also chat in Stark.
+
+Recommendations check model compatibility, available memory and storage. Quality uses task rankings; Speed applies a minimum parent-model score and a weight budget that grows with RAM. Rankings come from a bundled whatmodel.sh snapshot reviewed and refreshed manually about monthly; setup never queries that site. Scores describe parent models, so they do not measure the quality of each quantized export. Benchmark information is linked from whatmodel’s [About this repo](https://github.com/jakemanger/whatmodel#about-this-repo) section. See [recommendation policy and maintenance](docs/MODEL_RECOMMENDATIONS.md). This flow is new in the source branch; installed releases may have an earlier setup.
+
+To choose your own model and settings, select **Advanced** and open **Manage Models**; **Model Catalog** and **Add from Source** remain available. Both interfaces share installed models. [Menu bar guide](apps/menu-bar/README.md)
 
 ### Install the app and terminal tools
 

@@ -42,10 +42,14 @@
       <p class="docs-lead">You’ll need an Apple silicon Mac with macOS 26.4 or newer. Model size and context length determine how much memory and storage you need.</p>
       <ol class="docs-steps">
         <li><strong>Install Stark.</strong> <a href="https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg">Download the Mac app</a>, open the DMG and follow the installation steps.</li>
-        <li><strong>Choose a model.</strong> Open Stark from the menu bar, choose <strong>Beginner → Guided setup</strong>, then <strong>Find a model</strong>.</li>
+        <li><strong>Choose your work.</strong> Open Stark from the menu bar and choose <strong>Beginner → Guided setup</strong>. Select <strong>General Work</strong> for OpenWork or <strong>Coding</strong> for OpenCode Desktop, then continue.</li>
+        <li><strong>Choose your priority.</strong> Keep <strong>Quality</strong>, selected by default, or choose <strong>Speed</strong>. Select <strong>Find a model</strong> to review a recommendation for your Mac.</li>
         <li><strong>Download and run it.</strong> Choose <strong>Download and set up</strong>, then follow the prompt to start the model.</li>
-        <li><strong>Start chatting.</strong> Choose <strong>Open chat</strong>, or connect one of the apps below. Advanced mode gives you the full catalog and import options.</li>
+        <li><strong>Connect your app.</strong> Follow the guide to install OpenWork or OpenCode Desktop and allow its connection. In OpenCode, open a project and select <strong>Stark</strong> and the recommended model in the model picker. You can also chat in Stark. Advanced mode gives you the full catalog and import options.</li>
       </ol>
+      <p>These steps describe the new guided flow in development. Installed releases may show an earlier setup.</p>
+      <p>Recommendations check compatibility, available memory and storage. Quality uses task rankings. Speed adds a minimum parent-model score and a model-weight budget that grows with your Mac’s RAM. If no model qualifies for Speed, choose Quality or browse Advanced.</p>
+      <p>Rankings use a bundled whatmodel.sh snapshot, reviewed and refreshed manually about monthly. Setup never queries that site; model discovery and downloads can still need internet access. Scores compare parent models and do not measure each quantized export’s quality. Stark checks the selected export’s memory requirements separately. For benchmark information behind the rankings, see whatmodel’s <a href="https://github.com/jakemanger/whatmodel#about-this-repo">About this repo</a> section. <a href="https://github.com/jshahbazi/stark/blob/main/docs/MODEL_RECOMMENDATIONS.md">Recommendation policy and maintenance</a>.</p>
       <div class="docs-links"><a href="https://github.com/jshahbazi/stark/blob/main/docs/INSTALLATION.md">Installation &amp; CLI tools <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/releases/latest">Release notes <span aria-hidden="true">↗</span></a></div>
     </section>
 
