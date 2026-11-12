@@ -311,6 +311,29 @@ def test_snapshot_progress_rejects_invalid_limits(max_bytes):
         SnapshotDownloadProgress(ProgressReporter(lambda _event: None), max_bytes=max_bytes)
 
 
+def test_snapshot_resume_reset_does_not_double_count_discarded_partial_bytes():
+    events = []
+    capture = SnapshotDownloadProgress(ProgressReporter(events.append, interval=0), 1000)
+    bar_class = capture.bar_class()
+    with bar_class(name=capture.BAR_NAME, initial=78) as reconstruction:
+        # A server ignoring Range forces the Hub to discard resumed bytes.
+        reconstruction.update(-78)
+        reconstruction.update(30)
+        assert events[-1]["completed_bytes"] == 78
+        reconstruction.update(50)
+        assert events[-1]["completed_bytes"] == 80
+    with bar_class(name=capture.BAR_NAME, initial=20):
+        assert events[-1]["completed_bytes"] == 100
+    with bar_class(name=capture.TRANSFER_BAR_NAME, initial=500) as transfer:
+        transfer.update(20)
+        transfer.update(-20)
+        transfer.update(20)
+    # Resumed initial bytes aren't received now; retransmissions are.
+    assert events[-1]["transferred_bytes"] == 40
+    assert events[-1]["completed_bytes"] == 100
+    assert_private(events)
+
+
 def test_locked_hub_snapshot_routes_live_bytes_to_private_progress(tmp_path, monkeypatch, capsys):
     from huggingface_hub import _snapshot_download as snapshot
     from huggingface_hub.utils._xet_progress_reporting import XetDownloadProgressReporter
