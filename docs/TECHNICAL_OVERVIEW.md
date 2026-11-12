@@ -116,7 +116,11 @@ them immediately, keeps the page pending and its continuation position
 unchanged, and lets the page's full report settle it. A catalogue item may carry
 `reference_score`: the scored `model_id`, its `relationship` to the row, `general`
 and `coding` scores (either may be null), the `source_url` and the snapshot's
-`captured` date. Both sides reject a malformed record. Installs echo
+`captured` date. Both sides reject a malformed record. An item that cannot be
+downloaded may carry `original_repo`, the repository its publisher declares it
+was quantized from; both sides reject one on a downloadable item, one naming the
+item's own repository, or one that is not an `owner/name` identifier. The app
+uses it only to fold the item under that repository's row. Installs echo
 `support_request_id` in `installed`; errors echo
 the matching `request_id`. Removal completes with `model_removed` or
 `model_remove_error`, carrying the removal `request_id`, `model_id` and optional

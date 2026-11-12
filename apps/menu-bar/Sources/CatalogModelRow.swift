@@ -1,5 +1,16 @@
 import SwiftUI
 
+/// Names the exports of a model that Stark cannot import, under the model they were made from.
+struct CatalogFoldedExports: View {
+    let exports: [FamilyModelCatalog.Item]
+
+    var body: some View {
+        Text(CatalogBrowserInventory.exportSummary(exports)).font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .help(exports.map(\.repo).joined(separator: "\n"))
+    }
+}
+
 struct CatalogModelRow: View {
     let item: FamilyModelCatalog.Item
     let downloaded: Bool
@@ -48,6 +59,12 @@ struct CatalogModelRow: View {
             if let reason = item.unavailableReason {
                 Text(reason).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                // Shown only while the original is not a downloadable row here;
+                // otherwise this export is folded under that row instead.
+                if let original = item.originalRepo, let url = URL(string: "https://huggingface.co/" + original) {
+                    Link("Made from " + original, destination: url).font(.caption)
+                        .help("Declared by this export's publisher")
+                }
             } else if exceedsMemory {
                 Text("Likely too large for this Mac's memory").font(.caption).foregroundStyle(.orange)
             }

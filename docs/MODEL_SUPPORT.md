@@ -148,6 +148,18 @@ headers could not be verified. Quantization tabs and counts follow the listed
 rows. The list states how many rows are hidden, and when every row found so far
 is hidden it offers to show them. Unchecking it lists those rows as
 **Unavailable** with their reason.
+
+A GPU-server quantization export (AWQ, GPTQ, bitsandbytes and similar) that
+declares the model it was made from is folded under that model when the model
+is a downloadable row among those loaded. A folded export is never a row of its
+own and is not counted as hidden. With **Hide Unsupported** unchecked, the
+original's group names its folded exports, each linked to its repository, up to
+six with a count of the rest. Searching for a folded export's name, repository
+or format shows the original with the same note, so a search for an AWQ build
+lands on the model Stark can import. An export whose original is not loaded, or
+is itself unavailable, stays an **Unavailable** row and links to the declared
+original on Hugging Face. Folding follows the rows loaded so far, so a row can
+fold when a later page brings in its original.
 Conversion-only families are omitted. Cards show whether each model supports
 text or text and images. Downloads automatically include image support when
 available for that artifact. This requires metadata confirming a supported
@@ -268,7 +280,12 @@ An **Unavailable** row states one reason, chosen in this order:
   rule applies only where the import-format check already rejects the source,
   so it never changes which rows can be downloaded. An MLX export, which
   writes a `quantization` block and usually a matching `quantization_config`,
-  is not affected.
+  is not affected. When the Hub tags of such a row carry exactly one
+  `base_model:quantized:<repository>` entry naming another valid repository,
+  the row also carries that repository as its declared original. The tag comes
+  from the export's own model card and is not verified; it is used only to
+  place the row in the browser. The named repository is never requested on
+  the export's behalf, and the pointer never selects or alters a download.
 - **Configuration or format checks.** Preflight, quantization parsing and
   container checks report their own message, such as an unsupported MLX
   option, untied embeddings or a missing shard index.

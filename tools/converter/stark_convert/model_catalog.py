@@ -1230,11 +1230,15 @@ def family_catalog(
                     else _quantization(config, info, entry, family=family)
                 )
                 foreign = catalog_reasons.foreign_format(config) if quantization is None else None
+                original = None
                 if foreign is not None:
                     # A GPU-server quantization export is described by its
                     # format before any other check, and its tensor headers
                     # are never requested.
                     quantization, unavailable_reason = foreign
+                    # The export's declared original lets the browser show it
+                    # under that model's row instead of as a dead end.
+                    original = catalog_reasons.declared_original(repo, _field(info, "tags", []))
                 elif quantization is None:
                     unavailable_reason = unavailable_reason or (
                         "This checkpoint's declared weight format has no supported import path."
@@ -1322,6 +1326,7 @@ def family_catalog(
                     else base_mode,
                     "downloadable": unavailable_reason is None,
                     **({"unavailable_reason": unavailable_reason} if unavailable_reason is not None else {}),
+                    **({"original_repo": original} if original is not None else {}),
                     "model_group": _model_group(family, repo, repo.split("/")[-1], quantization, entry),
                 }
                 if planning:

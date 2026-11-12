@@ -37,6 +37,7 @@ from .api_tools import (
     validate_parser_tools,
 )
 from .catalog_ranking import RELATIONSHIPS as REFERENCE_RELATIONSHIPS
+from .catalog_reasons import REPOSITORY as ORIGINAL_REPOSITORY
 from .chat import (
     ChatBudgetUnavailable,
     ChatCancelled,
@@ -781,6 +782,17 @@ class Desktop:
                 or any(ord(char) < 32 or ord(char) == 127 for char in reason)
             ):
                 raise ValueError()
+            original = item.get("original_repo")
+            if original is not None:
+                # Only a row that cannot be downloaded may point at another
+                # repository, and never at itself.
+                if (
+                    item["downloadable"]
+                    or not isinstance(original, str)
+                    or ORIGINAL_REPOSITORY.fullmatch(original) is None
+                    or original.casefold() == item["repo"].casefold()
+                ):
+                    raise ValueError()
             group = item.get("model_group")
             if group is not None and (
                 not isinstance(group, dict)

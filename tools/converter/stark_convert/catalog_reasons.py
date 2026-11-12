@@ -50,6 +50,8 @@ _FOREIGN_LABELS = {
     "vptq": "VPTQ",
 }
 _METHOD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,31}\Z")
+_DECLARED = "base_model:quantized:"
+REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\Z")
 
 
 def _merged(config):
@@ -80,6 +82,25 @@ def foreign_format(config):
         label = method if _METHOD.fullmatch(method) else "another method"
     badge = label if label != "another method" else "Other format"
     return badge, _FOREIGN.format(label=label)
+
+
+def declared_original(repo, tags):
+    """Return the one repository a quantized export says it was made from, else ``None``.
+
+    The Hub derives ``base_model:quantized:<repo>`` tags from the export's own
+    model card, so this is the publisher's statement and is never verified
+    here. It only lets the browser point at another catalogue row; it grants
+    no compatibility and is never used to choose a download.
+    """
+    if not isinstance(repo, str) or not isinstance(tags, (list, tuple)):
+        return None
+    declared = {tag[len(_DECLARED) :] for tag in tags if isinstance(tag, str) and tag.startswith(_DECLARED)}
+    if len(declared) != 1:
+        return None
+    original = next(iter(declared))
+    if REPOSITORY.fullmatch(original) is None or original.casefold() == repo.casefold():
+        return None
+    return original
 
 
 def bounded_reason(message, fallback=UNSUPPORTED_LAYOUT):
