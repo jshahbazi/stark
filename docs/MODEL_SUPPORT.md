@@ -196,9 +196,15 @@ results already loaded. Failed pages can be retried at the same offset.
 
 The Hub listing itself carries each repository's head revision, task tags and
 file names. A source whose listing already shows another task, no model
-configuration or no weight file uses its position without any request of its
-own, so one page can pass up to 500 such positions and reach further down the
-family. Metadata files are bounded by the sizes in the pinned file inventory
+configuration, no weight file, or only GGUF weight files uses its position
+without any request of its own, so one page can pass up to 500 such positions
+and reach further down the family. The family catalogues do not offer GGUF
+downloads, and some publishers give every GGUF repository the same placeholder
+configuration, so a GGUF-only source would otherwise appear as an
+**Unavailable** row, sometimes under an unrelated family. A source that lists
+any other weight file (Safetensors, PyTorch or EXL3) beside its GGUF files is
+still inspected, and
+registered, pinned and native sources are never screened this way. Metadata files are bounded by the sizes in the pinned file inventory
 instead of a separate size request, and the Hub's parsed architecture rejects
 an unsupported head revision before its configuration is fetched.
 
