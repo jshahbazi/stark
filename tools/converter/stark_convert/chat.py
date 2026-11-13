@@ -308,7 +308,11 @@ def load_template(model, *, expected_hashes=None):
             ):
                 raise ValueError
         template = _ChatTemplate(source)
-        return codec, template
+        from .api_tools import codec_with_template_review
+        from .model_inventory import template_review_receipt
+
+        # A template selected from a named list keeps tool calling unavailable.
+        return codec_with_template_review(codec, template_review_receipt(model)), template
     except TemplateHelperMissing:
         raise ChatError("Native chat-template helper is missing; rebuild or reinstall Stark.") from None
     except (OSError, ValueError, KeyError, TypeError, ConversionError, TemplateError, SyntaxError):

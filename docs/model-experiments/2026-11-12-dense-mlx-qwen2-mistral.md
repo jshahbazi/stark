@@ -505,3 +505,92 @@ Not measured.
 
 - No other BF16 dense artifact was available locally without a download.
 - Kernel-level and full-suite engine tests are in the run record.
+
+## 20261112-DENSE-MLX-07: published Mistral 7B v0.3 MLX 4-bit export through the app install route
+
+The canonical aggregates are in the
+[install run record](../archive/runs/2026-11-12-install-auto-f16.md#published-mistral-export-named-template-list).
+
+### Identity and state
+
+| Field | Value |
+| --- | --- |
+| Attempt ID / registered date / executed date / owner | `20261112-DENSE-MLX-07`; registered and executed 2026-11-12; Claude agent session on branch `claude/install-native-f16` |
+| Kind | Compatibility (named chat-template list, app install route), correctness and prefix reuse |
+| Attempt state | Completed; prefix-reuse gate blocked |
+| Result and acceptance criterion | The published revision **installs** through the desktop local-folder route. It renders the named list's `default` entry, and automatic selection chooses F16. Weights, config and tokenizer equal the `-05` F16 diagnostic artifact, and the effective template equals the `-05` copy's. Worker checks **passed**, identical to `-05`. Tool calling reports `unavailable`. Prefix reuse **not run**: the harness's synthetic sessions cannot render with this template |
+| Evidence scope | Conversion, metadata and worker gate on the published bytes; no logit-gate rerun; no timing |
+| Promotion decision | Not promoted. The prefix-reuse gate is incomplete and tool behavior is not reviewed |
+| Disposition | Named-list selection and the F16 install route adopted on branch `claude/install-native-f16`; not pushed, merged, released or installed |
+| Predecessor / related attempts / governing issue / PR | `-03` (published revision failed conversion), `-05` (diagnostic copy, F16); no PR |
+
+### Hypothesis and change
+
+- **Problem:** the converter refused a `chat_template` given as a named list.
+  `-03` and `-05` therefore substituted the `default` entry by hand.
+- **Change:** the converter accepts a Hugging Face named list that has unique
+  names and a `default` entry, renders that entry, and records every entry's
+  hash in the receipt. Every other entry is unreviewed, so tool calling stays
+  unavailable for the artifact.
+- **Expected:** the weights, config and tokenizer equal the `-05` artifact
+  built from the hand-substituted `default` template.
+
+### Artifact, source and environment
+
+| Field | Baseline | Candidate |
+| --- | --- | --- |
+| Model family, exact checkpoint and upstream revision | `-05` diagnostic copy of `mlx-community/Mistral-7B-Instruct-v0.3-4bit` @ `a4b8f870...`, output `968cf950...` | The published bytes at the same revision, read in place; `tokenizer_config.json` `e8fbcfef...` holds the named list (`default` `a6fc0e6b...`, `tool_use` `4c8a2468...`) |
+| Format/quantization and config/weight/tokenizer/processor/template hashes | Config `a8ced577...`, tokenizer `3e017710...` | Output `968cf950b4d7cba8ab2f0d1c97a708f0a1bfe2dc9f8f209aa6d8492e671d1a5a`, config `a8ced577...`, tokenizer `3e017710...` (all equal); source manifest `8df43010...` (differs, because `tokenizer_config.json` differs) |
+| Backend, vendor revision and local patch provenance | As in `-05` | Same engine source (`103a8296`) |
+| Stark commit, dirty patch/runtime manifest and executable hash | `-05` builds | Branch `claude/install-native-f16`; `stark-generate` `8a2b700c...`, `stark-score` `74dd50b3...`, `stark-template` `886769ce...` |
+| Toolchains, dependency lock hashes and build flags | As in `-05` | Rust 1.98.1 release, locked; `Cargo.lock` `f836a99b...` |
+| Weight, activation, accumulation, recurrent-state and KV precision | F16 profile | F16 profile, selected by `--dtype auto` |
+| Selected kernel and materialization policies | Not instrumented | Not instrumented |
+| Hardware, physical RAM, OS/driver/Metal toolchain | Apple M5 Max, 128 GiB, macOS 26.7.2 | Same |
+| Available headroom, observed peak memory and measurement method | Not measured | Not measured |
+
+### Workload and controls
+
+- **Image capability, image arms and MTP:** N/A, as in `-03`. The source is a
+  text-only `MistralForCausalLM` with no draft-head tensors.
+- **Workload:** the `-03` worker fixture (prompts of 16 and 20 tokens), and
+  the `-05` prefix-harness flags.
+
+### Attempt history and failures
+
+| Trial / source | What was attempted | Observation | Validity and disposition |
+| --- | --- | --- | --- |
+| Desktop install, before the change | Local-folder route, `--dtype auto` | Preflight `conditional`; conversion `conversion_failed` | Valid failure (the `-03` cause) |
+| Desktop install, after the change | Same route | Installed; F16; hashes equal `-05` | Valid pass |
+| Worker checks | `dense_native_validation.py workers`, `-03` fixture | Greedy 14 tokens to EOS and 32/32, reference-exact; scorer 0.023/0.031; identical to `-05` | Valid pass |
+| Prefix harness, `default` template | `-05` flags, exactness mode | `ChatError` before any worker loads | Not run |
+| Render probe | Harness session steps, error types only | System-led first turns and tool steps raise `ChatError`; user/assistant-only turns render | Diagnostic |
+
+### Correctness and lifecycle
+
+- **Weights and metadata:** byte-identical to `-05`. The `-05` logit result
+  therefore describes these weights and this codec. The logit gate was not
+  rerun.
+- **Prefix reuse:** not established on this template. The harness always opens
+  with a system message and grows through tool calls. The `default` template
+  refuses both, and the harness has no tool-free, system-free sequence. The
+  `-05` rows (on a `tool_use` copy) remain the only prefix evidence for these
+  weights.
+- **Tools:** `unavailable` from the receipt rule. Neither entry maps to a
+  reviewed parser in any case.
+
+### Performance and memory
+
+Not measured.
+
+### Evidence, decision and limits
+
+- **Decision:** the published export is importable and its worker outputs
+  match `-05`. It is not qualified: prefix reuse is unproven on the `default`
+  template, and tool behavior is unreviewed.
+- **Limit:** the `default` template rejects system messages, so a request
+  with a system prompt fails to render. This affects agent clients and the
+  prefix harness.
+- **Next action:** add a user/assistant-only session mode to the prefix
+  harness (a tooling change, recorded separately) and rerun under a new ID.
+  Review the `tool_use` entry if tools are wanted.

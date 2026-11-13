@@ -577,6 +577,7 @@ def convert(
                     **entry,
                     "files": {key: value for key, value in entry["files"].items() if key != "chat_template"},
                 }
+        template_provenance = {}
         if planned.request.model_kind == "classifier":
             from .classifier_metadata import write_classifier_metadata
 
@@ -590,8 +591,16 @@ def convert(
             }
         else:
             fragments = write_metadata(
-                snapshot.root, staging, config, model_entry=entry, resolve_file=snapshot.resolve_file
+                snapshot.root,
+                staging,
+                config,
+                model_entry=entry,
+                resolve_file=snapshot.resolve_file,
+                provenance=template_provenance,
             )
+            if template_provenance and artifact_mode != "text":
+                # Image artifacts pin their own reviewed templates.
+                raise UnsupportedConversion("Image conversion requires a plain chat template")
             root_config = {
                 "type": (
                     "Gemma3VisionLanguageModelConfig"
@@ -738,6 +747,7 @@ def convert(
             "tokenizer_sha256": artifact_hashes["tokenizer_sha256"],
             "native_qualification": qualification,
             **({"dtype_selection": dtype_selection} if dtype_selection is not None else {}),
+            **template_provenance,
             **({"storage_validation": storage_validation} if storage_validation is not None else {}),
             "architecture": planned.capability.adapter,
             "metadata_profile": planned.request.metadata_profile or entry["metadata_profile"],

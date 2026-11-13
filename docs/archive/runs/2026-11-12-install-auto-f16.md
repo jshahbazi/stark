@@ -117,12 +117,112 @@ original `-02` reference fixture, the same check as `-04`:
 The logit gate (`dense_parity`) and the prefix-reuse harness were not rerun.
 The artifact is byte-identical to `-04`, which passed both.
 
-The published `mlx-community/Mistral-7B-Instruct-v0.3-4bit` source
-(`a4b8f870...`, read in place) went through the same route. Preflight is
-`conditional`, then the `--dtype auto` conversion fails with
-`conversion_failed`, so the named chat-template list still blocks it. Nothing
-was installed, and the source was unchanged. The catalogue still marks this
-row downloadable: a template blocker only removes it from guided setup.
+Before the named-list change below, the published
+`mlx-community/Mistral-7B-Instruct-v0.3-4bit` source (`a4b8f870...`, read in
+place) went through the same route. Preflight was `conditional`, then the
+`--dtype auto` conversion failed with `conversion_failed`, because the named
+chat-template list blocked it. Nothing was installed, and the source was
+unchanged. The catalogue marked this row downloadable: a template blocker only
+removed it from guided setup.
+
+## Published Mistral export (named template list)
+
+This section is attempt `20261112-DENSE-MLX-07`, made by the second commit on
+this branch.
+
+The published export's `tokenizer_config.json` (`e8fbcfef...`) gives
+`chat_template` as a Hugging Face named list with a `default` entry
+(`a6fc0e6b...`) and a `tool_use` entry (`4c8a2468...`). Neither entry maps to
+a reviewed tool parser. The `-03`/`-05` diagnostic copy substituted the
+`default` string by hand.
+
+### Rule
+
+- **Accepted form:** a named list converts with its `default` entry,
+  matching Transformers when no name is given
+  (`template_compat.select_named_chat_template`).
+- **Validation:** the entry is validated like any plain string.
+- **Refused:** a missing `default`, duplicate names, keys other than `name`
+  and `template`, non-string fields, empty or oversized lists, and
+  name-to-template mappings. Image and classifier conversions and the pinned
+  GGUF import also keep refusing named lists.
+- **Provenance:** `conversion.json` records `chat_template_selection` (form,
+  selected entry, names, each entry's SHA-256, `tool_templates: unreviewed`).
+  `config.json` cannot carry it, because the native loader rejects unknown
+  codec fields.
+- **Tool gate:** `chat.load_template` and `model_inventory.model_tool_support`
+  add a Python-only codec annotation from that receipt, and `tool_parser_for`
+  returns no parser for an annotated codec. An unreadable receipt fails
+  closed; an absent one adds nothing.
+- **Catalogue:** offers the `default` entry as the row's template, with
+  `supports_tools: false`.
+
+### Results
+
+| Check | Result |
+| --- | --- |
+| Desktop install (local-folder route, temporary data directory) | Preflight `conditional`; `--dtype auto` conversion exit 0; one model installed |
+| Selections | Template `default` of `default`, `tool_use`; dtype `float16` (`all_f16_mlx_affine_source`) |
+| Stored tensors | 260 F16, 65 F32, 130 U8; 455 tensors, 4,078,014,360 bytes |
+| Output `model.safetensors` | `968cf950b4d7cba8ab2f0d1c97a708f0a1bfe2dc9f8f209aa6d8492e671d1a5a`, equal to `-05` |
+| Config / tokenizer | `a8ced577...` / `3e017710...`, equal to `-05`. The whole codec, including the effective template, equals the `-05` copy's |
+| Source manifest | `8df43010...`, not `-05`'s `f38f3991...`. The difference is expected: the published `tokenizer_config.json` differs from the substituted copy |
+| Tool support | `unavailable` (installed-row inspection and loaded codec) |
+| Worker checks (`-03` fixture) | 14 tokens to EOS and 32/32, reference greedy-exact; replay, recovery and restart exact; scorer 0.023 / 0.031. Native output hashes, scorer results and verdicts identical to `-05` and its commit recheck |
+| Source tree | Unchanged |
+
+### Prefix reuse
+
+The prefix-reuse gate did not run. With the `-05` flags, the harness stops
+with `ChatError` in its template preflight, before any worker loads.
+
+A render probe, which reports only error types, shows why:
+
+- The `default` template refuses a conversation that starts with a system
+  message, even without tools.
+- It also refuses the harness's tool-call steps.
+- User/assistant-only turns render.
+
+The harness always opens with a system message and grows through tool steps
+(`--tools` must be positive), so it has no sequence this template accepts.
+Completing the gate needs a user/assistant-only session mode in the harness.
+That is a validation-tooling change and should be recorded separately. The
+`-05` rows on the `tool_use` copy remain the only prefix evidence for these
+weights.
+
+The same system-message refusal applies in use: a chat or API request with a
+system prompt fails to render on this artifact.
+
+### Receipts
+
+These files are private and kept outside the repository.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Installed `conversion.json` | `4053c114b291482a0f98c1ea8173b703314fe862839086c411ec42573ea00a3a` |
+| Worker receipt | `5688d1fbed53660a5b2bf89a33610ae5a03ff90e5d967fb2158b4f4c3fa3a05f` |
+| Prefix harness output (both runs) | `245eed6f2545d9d0795bcaa3f510d56f4873d08fa045bdabdf403e32ffee81fe` |
+| Install driver / render probe / template probe | `43db9326...` / `0e702ec7...` / `af523523...` |
+
+`scripts/validate_generation_prefix_cache.py` (`58ad8a04...`) and
+`scripts/dense_native_validation.py` (`172e177b...`) are unchanged.
+
+### Tests
+
+The named-list change adds `tools/converter/tests/test_named_chat_templates.py`
+(23 tests) and one classifier refusal test. The tests cover:
+
+- selection of the `default` entry and its hash-only record;
+- every refused form;
+- a conversion byte-identical to the plain `default` string;
+- tool support `unavailable` from the installed row and the loaded codec, for
+  a `default` program that would otherwise map to `mistral-json-v1`;
+- fail-closed receipt reading;
+- catalogue rows without tools.
+
+One existing metadata case now uses a list without `default`. The full
+converter suite has 7,677 passed and 94 skipped. The 16 CI ruff commands and
+the repository policy check pass.
 
 ## Build and environment
 

@@ -235,6 +235,14 @@ Import completion and Installed rows report `available`, `unavailable` or
 `model_behavior` remains `unverified`. The loaded template and
 `/v1/capabilities` remain the authority for serving requests.
 
+A source whose `chat_template` is a Hugging Face named list converts with its
+`default` entry, and the receipt records every entry's hash as
+`chat_template_selection`. Tool calling for that artifact stays `unavailable`
+even if the `default` program matches a reviewed parser. Its `tool_use` or
+other entries are never rendered. Admitting tools for such an artifact needs
+the review below for its entries and a reviewed change to that rule
+(`api_tools.UNREVIEWED_TOOL_TEMPLATES`).
+
 For each new template:
 
 1. Pin its upstream source and revision, template hash, license and program

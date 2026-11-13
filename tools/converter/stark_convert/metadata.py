@@ -26,6 +26,7 @@ from stark_convert.profiles import GENERIC_PROFILE
 from stark_convert.registry import CONFIG_ADAPTERS, get_model, models
 from stark_convert.streaming import ConversionError, authorize_source_path, read_json, read_regular_bytes
 from stark_convert.template_compat import GENERATION_BLOCK_TAG as _GENERATION_BLOCK_TAG
+from stark_convert.template_compat import NamedTemplateError, is_named_template_list, select_named_chat_template
 
 __all__ = ["SUPPORTED_METADATA_REPOS", "UnsupportedMetadata", "write_metadata"]
 
@@ -225,8 +226,10 @@ def _chat_template(
     model_entry: dict[str, Any],
     tokenizer_config: dict[str, Any],
     resolve_file: Callable[..., Path] | None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
+    """Return the effective template and, for a named list, its selection record."""
     prompt_template = tokenizer_config.get("chat_template")
+    selection = None
     template_spec = model_entry["files"].get("chat_template")
     inline_id = model_entry["metadata"].get("inline_sources", {}).get("chat_template")
     if prompt_template is not None and (template_spec is not None or inline_id is not None):
@@ -240,24 +243,24 @@ def _chat_template(
             prompt_template = _read_object(template_path, "chat-template").get(field_name)
     elif prompt_template is None and inline_id is not None:
         prompt_template = _inline_text("chat_template", inline_id)
+    if is_named_template_list(prompt_template):
+        # Transformers renders the `default` entry when no name is given. Every
+        # other entry (such as `tool_use`) is unreviewed and never selected.
+        try:
+            prompt_template, selection = select_named_chat_template(prompt_template)
+        except NamedTemplateError:
+            raise UnsupportedMetadata("Unsupported chat-template representation.") from None
     if not isinstance(prompt_template, str):
-        named_templates = (
-            isinstance(prompt_template, list)
-            and bool(prompt_template)
-            and all(
-                isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("template"), str)
-                for item in prompt_template
-            )
-        )
+        # Named lists were handled above; a name-to-template mapping stays unsupported.
         mapped_templates = (
             isinstance(prompt_template, dict)
             and bool(prompt_template)
             and all(isinstance(value, str) for value in prompt_template.values())
         )
-        if named_templates or mapped_templates:
+        if mapped_templates:
             raise UnsupportedMetadata("Unsupported chat-template representation.")
         raise ConversionError("Invalid chat-template metadata.")
-    return _GENERATION_BLOCK_TAG.sub("", prompt_template)
+    return _GENERATION_BLOCK_TAG.sub("", prompt_template), selection
 
 
 def _profile_codec(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -382,8 +385,13 @@ def write_metadata(
     *,
     model_entry: dict[str, Any] | None = None,
     resolve_file: Callable[..., Path] | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize tokenizer metadata using an explicit registered model profile.
+
+    When ``provenance`` is a dict, a named chat-template list's selection record
+    is stored in it under ``chat_template_selection`` for the conversion
+    receipt. The returned config fragments never carry it.
 
     The caller resolves metadata files at immutable source revisions, including
     cross-repository ConfigMap entries, before invoking this adapter. Files are
@@ -437,7 +445,7 @@ def write_metadata(
             if generation.get("eos_token_id") is None:
                 raise ConversionError("Generic metadata requires explicit stop-token identifiers.")
             hf_config = {**hf_config, "eos_token_id": generation["eos_token_id"]}
-    prompt_template = _chat_template(source, model_entry, tokenizer_config, resolve_file)
+    prompt_template, template_selection = _chat_template(source, model_entry, tokenizer_config, resolve_file)
     codec_profile = _profile_codec(model_entry["metadata"])
     system_prompt = None
     if "system_prompt" in model_entry["files"]:
@@ -480,4 +488,6 @@ def write_metadata(
         tokenizer.save(str(output / "tokenizer.json"))
     except Exception:
         raise ConversionError("Cannot write tokenizer metadata.") from None
+    if provenance is not None and template_selection is not None:
+        provenance["chat_template_selection"] = template_selection
     return {"token_codec_config": token_codec_config, "generation_config": generation_config}

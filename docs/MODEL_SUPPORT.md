@@ -91,9 +91,22 @@ logit gates, and a named chat-template list blocks conversion
 ([20261112-DENSE-MLX-02/03](archive/runs/2026-11-12-dense-mlx-qwen2-mistral-qualification.md)).
 Converted with `--dtype float16`, the `mlx-community/Qwen2.5-0.5B-Instruct-4bit`
 export and a template-substituted diagnostic copy of the Mistral 7B v0.3 4-bit
-export pass the logit, greedy and scorer gates; the published Mistral revision
-still fails conversion
+export pass the logit, greedy and scorer gates
 ([20261112-DENSE-MLX-04/05](archive/runs/2026-11-12-dense-f16-native-qualification.md)).
+The published Mistral revision now converts through its named template list
+([20261112-DENSE-MLX-07](archive/runs/2026-11-12-install-auto-f16.md#published-mistral-export-named-template-list)).
+
+A `chat_template` given as a Hugging Face named list (`{"name", "template"}`
+objects with unique names) converts with its `default` entry, which is what
+Transformers renders when no name is given. The chosen string is validated
+like a plain template. A list without `default`, with duplicate names, with
+other keys or non-string fields, a name-to-template mapping, and any image or
+classifier conversion are refused. The receipt's `chat_template_selection`
+records the entry names, each entry's SHA-256 and the selected entry, and
+`config.json` is identical to a conversion of that `default` string. The other
+entries, such as `tool_use`, are never used. Tool calling for such an artifact
+reports `unavailable`, and its catalogue row offers no tools, until a
+reviewed parser admits that exact artifact.
 
 Native F16 is a separate precision profile for the plain full-attention dense
 graph of Llama, Qwen2 and Mistral artifacts. The engine selects it only when
