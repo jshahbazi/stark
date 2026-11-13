@@ -28,6 +28,12 @@ sessions, with less retained resource registration and unchanged useful work.
 Twenty-six lifecycle cases pass. The separate unchanged-screen MTP attempt still
 defers every group before measured arms; this is a bounded churn improvement,
 with no qualified throughput or route ranking.
+The [host-interference investigation](2026-11-13-edge0-host-interference.md)
+identifies charged task events and active graphics clients with incomplete
+attribution. Its observer control fails the final no-worker census. A separate
+strict rerun retains every threshold, matches 12 warmups and defers six groups
+before measured arms. Counter-only quiet briefly exceeds ten seconds, while
+combined CPU/GPU/counter admission never qualifies; performance remains open.
 
 ## Current result
 

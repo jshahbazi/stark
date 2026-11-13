@@ -7,6 +7,9 @@ Subsequent strict reruns still defer every group before measured arms. Selected
 expert-record Metal bindings now reduce reproduced worker decompression churn
 in a fixed-idle ABBA control and pass bounded lifecycle gates. Residual global
 decompressions and CPU/GPU gate failures still prevent performance qualification.
+Task and GPU-client endpoints now identify background application activity;
+the observer control fails its no-worker condition and another strict rerun
+admits zero measured arms.
 Phase 5 performance qualification and phases 6–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
@@ -396,6 +399,18 @@ covers every record window, including overlapping pages. This bounded churn
 result establishes no throughput or MTP route ranking. Record bindings remain
 opt-in and [separate receipts](benchmarks/2026-11-13-edge0-expert-windows.md)
 preserve all earlier evidence and every screen.
+The [host-interference successor](model-experiments/2026-11-13-edge0-host-interference.md)
+records decompressions charged to other accessible same-user tasks and active
+graphics clients, with incomplete attribution and unverified GPU-counter units.
+Its six observer treatments complete, but the final census finds another
+evaluation worker, so the registered no-worker control fails. No observer-caused
+decompression total is established. The separate rerun preserves all thresholds
+and tightens late admission rejection at the existing deadline: 12 warmups
+match, six groups defer, zero measured arms. Admission totals are 1,455 global
+decompressions and 45 pageouts; owned worker-task decompressions remain zero.
+Two groups obtain ten-second counter-only quiet streaks, but combined host
+streaks remain below ten seconds. [Separate receipts](benchmarks/2026-11-13-edge0-host-interference.md)
+preserve the failed control, background interference and pending timing decision.
 Default remains off and timing qualification remains pending. The 512-token cap,
 disabled prefix reuse and local non-commercial scope remain in force.
 
