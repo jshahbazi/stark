@@ -19,6 +19,8 @@ const MAX_CHECKPOINT_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) enum StagingPolicy {
     /// Target verification uses ordinary single-token steps. Batched-prefill
     /// tolerance is not an exact target-distribution verification policy.
+    /// Checkpoints require position > 0 after a completed target advance;
+    /// the uninitialized position-zero state is outside this staging policy.
     Edge0MetalSingleStepV1,
 }
 
@@ -154,31 +156,33 @@ fn fence() -> Result<()> {
     DecodeGraph::new()?.finish(&[]).map(|_| ())
 }
 
-fn valid_history(
+fn valid_boundary(
     position: usize,
     history: &[u32],
     g: &Geometry,
 ) -> bool {
-    position <= g.context
+    position > 0
+        && position <= g.context
         && g.ngram_size >= 2
         && history.len() == position.min(g.ngram_size - 1)
         && history.iter().all(|&token| (token as usize) < g.vocab)
 }
 
 impl QwenModel {
+    /// Capture a completed positive-position target boundary under the staging policy.
     pub(super) fn capture_checkpoint(
         &mut self,
         staging: StagingPolicy,
     ) -> Result<Checkpoint> {
         let result = (|| {
             let policy = PolicyKey::read(&self.geometry, staging)?;
-            if !self.graph_enabled || !valid_history(self.position, &self.history, &self.geometry) {
+            if !self.graph_enabled || !valid_boundary(self.position, &self.history, &self.geometry) {
                 return Err(Error::Invalid("checkpoint target state boundary"));
             }
             fence()?;
             let graph =
                 self.graph.as_ref().map(|state| state.capture_checkpoint(&self.geometry, self.position)).transpose()?;
-            if self.position != 0 && graph.is_none() {
+            if graph.is_none() {
                 return Err(Error::Invalid("checkpoint graph state missing"));
             }
             let mut bytes = self.history.len() * 4;
@@ -190,7 +194,7 @@ impl QwenModel {
                 let saved = match &layer.mixer {
                     Mixer::Delta(state) => {
                         let value = state.metal.as_ref().map(|state| state.capture_checkpoint()).transpose()?;
-                        if self.position != 0 && value.is_none() {
+                        if value.is_none() {
                             return Err(Error::Invalid("checkpoint recurrent state missing"));
                         }
                         value
@@ -225,6 +229,7 @@ impl QwenModel {
         result
     }
 
+    /// Restore a completed positive-position boundary from this loaded model and epoch.
     pub(super) fn restore_checkpoint(
         &mut self,
         checkpoint: &Checkpoint,
@@ -240,7 +245,7 @@ impl QwenModel {
                 || checkpoint.policy != policy
                 || checkpoint.recurrent.len() != self.layers.len()
                 || checkpoint.bytes > MAX_CHECKPOINT_BYTES
-                || !valid_history(checkpoint.position, &checkpoint.history, &self.geometry)
+                || !valid_boundary(checkpoint.position, &checkpoint.history, &self.geometry)
             {
                 return Err(Error::Invalid("checkpoint model, epoch or state policy mismatch"));
             }
@@ -249,7 +254,6 @@ impl QwenModel {
                 (Some(source), Some(saved)) => {
                     Some(source.stage_checkpoint(saved, &self.geometry, checkpoint.position)?)
                 },
-                (_, None) if checkpoint.position == 0 => None,
                 _ => return Err(Error::Invalid("checkpoint graph restore inventory")),
             };
             let mut replacements = Vec::with_capacity(self.layers.len());
@@ -262,7 +266,6 @@ impl QwenModel {
                             .ok_or(Error::Invalid("checkpoint recurrent owner missing"))?
                             .stage_checkpoint(saved)?,
                     ),
-                    (Mixer::Delta(_), None) if checkpoint.position == 0 => None,
                     (Mixer::Attention(_), None) => None,
                     _ => return Err(Error::Invalid("checkpoint recurrent restore inventory")),
                 });
@@ -327,19 +330,26 @@ mod tests {
     }
 
     #[stark_test]
-    fn private_checkpoint_history_requires_exact_committed_prefix_tail() {
+    fn private_checkpoint_boundary_rejects_zero_and_requires_exact_positive_tail() {
         let g = Geometry {
             context: 512,
             vocab: 20,
             ngram_size: 3,
             ..Geometry::default()
         };
-        assert!(valid_history(0, &[], &g));
-        assert!(valid_history(1, &[2], &g));
-        assert!(valid_history(9, &[2, 3], &g));
-        assert!(!valid_history(0, &[2], &g));
-        assert!(!valid_history(9, &[2], &g));
-        assert!(!valid_history(9, &[2, 20], &g));
-        assert!(!valid_history(513, &[2, 3], &g));
+        // Capture and restore share this admission check. Rejecting the empty
+        // boundary prevents restoring it from discarding the initialized GPU
+        // owners needed by another positive checkpoint in the same epoch.
+        assert!(!valid_boundary(0, &[], &g));
+        assert!(!valid_boundary(0, &[2], &g));
+        assert!(valid_boundary(1, &[2], &g));
+        assert!(valid_boundary(2, &[2, 3], &g));
+        assert!(valid_boundary(9, &[2, 3], &g));
+        assert!(valid_boundary(512, &[2, 3], &g));
+        assert!(!valid_boundary(1, &[], &g));
+        assert!(!valid_boundary(1, &[2, 3], &g));
+        assert!(!valid_boundary(9, &[2], &g));
+        assert!(!valid_boundary(9, &[2, 20], &g));
+        assert!(!valid_boundary(513, &[2, 3], &g));
     }
 }

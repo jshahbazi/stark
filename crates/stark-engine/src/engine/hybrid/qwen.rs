@@ -19,9 +19,13 @@ mod decode_graph;
 
 #[cfg(feature = "metal")]
 #[path = "qwen_checkpoint.rs"]
+// Private staging primitives remain unused until separately qualified MTP integration.
+#[allow(dead_code)]
 mod checkpoint;
 
 #[cfg(feature = "metal")]
+// Reserved for the private native-target adapter; no production caller is enabled.
+#[allow(unused_imports)]
 pub(super) use checkpoint::{Checkpoint, StagingPolicy};
 
 use super::{
