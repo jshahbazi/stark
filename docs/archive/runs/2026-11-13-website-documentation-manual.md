@@ -8,3 +8,5 @@ Validation: `npm run build` passed in the publication checkout; `python3 scripts
 
 App installation, model loading, managed-client behavior and authenticated inference were not replayed during this documentation change. Product instructions were checked against the owning source references listed in `website/docs-site/README.md`. Development-flow labels and release/artifact capability differences remain explicit. No new numerical or performance qualification is claimed.
 
+
+Publication completed as Sites version 66, source commit `8940409233a20dd7335275f3b1110e6bc675f32e`, deployment `appgdep_6af7051f210c819197e6c1fbbd87b9ce` (succeeded). The published introduction was verified at https://starkengine.app/docs/. A clean `npm ci --ignore-scripts` and full build in the Stark worktree also passed, followed by the same 624-link check. The dependency audit reported zero vulnerabilities.
