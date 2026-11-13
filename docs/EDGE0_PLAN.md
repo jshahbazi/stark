@@ -1,8 +1,8 @@
 # Edge0-145B native support plan
 
 Status: phases 3 and 4 bounded runtime gates passed for local non-commercial
-evaluation, 2026-11-13; Phase 5 model-free foundation in progress, phases 5–8
-remain unfinished.
+evaluation, 2026-11-13; Phase 5 in progress with foundation gates passed.
+Executable MTP and phases 6–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
@@ -343,8 +343,10 @@ qualification remain separate. MTP and prefix reuse remain unavailable.
 
 ### Phase 5: MTP
 
-The model-free foundation is registered in
+The foundation component and bounded actual-target checkpoint gates passed in
 [attempt `20261113-EDGE0-07`](model-experiments/2026-11-13-edge0-mtp.md).
+The executable head, complete target-plus-head lifecycle and MTP on/off
+qualification remain unfinished; capabilities stay unavailable.
 
 - Load the draft layer from `mtp/` and adapt the existing Flash-Next head
   contract to the native Qwen graph. Implement the source's four-plane Q2 expert
@@ -370,6 +372,8 @@ The model-free foundation is registered in
 - Complete the state inventory below against the implemented path.
 - Implement consistent export/import for the native graph using the existing
   mixed-precision backend's 4,096-token snapshot contract as a reference.
+  Phase 5 supplies private positive-boundary target primitives; worker prefix
+  scope/lifetime integration and draft-head restoration remain unfinished.
   The current 512-token cap cannot exercise that boundary. Address the recorded
   wider-context indexer finite-check concern and qualify the larger context
   before a 4,096-token reuse run.

@@ -21,7 +21,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Native hybrid sampling](NUMERICAL_SAMPLING.md) | Exact nucleus-prefix proof, reference-order fallbacks, precision and scratch lifetime |
 | [OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) | Native text paths, Gemma 4 BF16 image profiles, encoder-free and MoE paths, precision policy and validation boundaries |
 | [Gemma 4 assistants](GEMMA4_ASSISTANT_PLAN.md) | Pinned E2B/E4B companion metadata and staged conversion, target activation/KV, text MTP and cache qualification work |
-| [Edge0-145B plan](EDGE0_PLAN.md) | Local non-commercial evaluation, sealed source preparation, bounded F32 reference qualification and staged Metal graph; MTP, reuse and product admission unfinished |
+| [Edge0-145B plan](EDGE0_PLAN.md) | Local non-commercial evaluation, bounded reference/Metal gates and native MTP foundation; executable MTP, prefix reuse and product admission unfinished |
 | [Gemma 3 images](GEMMA3_IMAGES.md) | Source-bound SigLIP image artifacts, 4B/12B/27B admission, exact processor semantics and qualification boundaries |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
