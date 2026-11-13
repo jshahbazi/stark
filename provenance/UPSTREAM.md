@@ -10,6 +10,43 @@ The import contains the scoring API, topology and state changes, Rust/Metal opti
 
 The pinned upstream ancestry, root license, original upstream README, dependency lock, and JevK5 fixture licenses are preserved. Earlier fork commits were rewritten to keep only standalone engine source and neutral optimization names. Source-bound receipts from the previous history are replaced by fresh build and correctness validation records for the rewritten source.
 
+## Edge0 Phase 0 intake
+
+The format and potential reference-source intake pins
+[`Edge0-AI/Edge0`](https://github.com/Edge0-AI/Edge0/tree/b7900cbb322926ccebdcd0c0c5a1280497ecff22)
+at `b7900cbb322926ccebdcd0c0c5a1280497ecff22`. Its root framework code is
+Apache-2.0 with Copyright 2025 edge0 contributors; the root `NOTICE` records
+separately licensed components. The bundled `edge0-strata/` fork is MIT,
+Copyright 2026 Niko1221 and the Strata contributors. Its origin record names
+fork import `f1933b1e4993fecc10d2e9360d85569619a2c42d`, upstream Strata merge
+base `c62d5e3a15b40ea51c96aae9e8d36928965f53ab`, and additional imported
+files enumerated by path and SHA-256 in `edge0/IMPORTED_UNCOMMITTED.txt`.
+These are publisher-recorded origins; the private fork ancestry was not
+independently reconstructed.
+
+The Strata build recipe separately pins llama.cpp
+`3cf03257f219afbe7334045ff7c6a06ac68c627d`. The framework's bundled GGML and
+tokenizer records instead name llama.cpp
+`7ab4ee7baad2d920464cbacfad4f4b07cf111fd2`. These component identities must
+remain separate when recording a later port. No Edge0 source, table, kernel
+or layout implementation was imported or adapted in Phase 0; no runtime was
+built or executed. A later adaptation must preserve the applicable Apache-2.0,
+MIT and component notices beside the existing reference licenses, with its
+exact source paths, hashes, changes and distribution-notice coverage.
+
+The candidate weights are independently pinned to
+[`Edge0/Edge0-145B-q3k`](https://huggingface.co/Edge0/Edge0-145B-q3k/tree/d7de835cfce7d9bb22a3d5ebb7d1e8565d4ecf74)
+at `d7de835cfce7d9bb22a3d5ebb7d1e8565d4ecf74`. Their designated Edge0
+contributions carry Edge0 Community Model License 1.0; upstream material
+retains Qwen Community License 1.0. Neither is replaced by the source-code
+licenses. The model license decision remains pending the owner, including
+the intended use and any required separate commercial authorizations.
+No model payload was downloaded. The
+[dated intake record](../docs/archive/runs/2026-11-12-edge0-license-intake.md)
+contains immutable primary links, inspected-text hashes, commercial-scope
+facts, preservation requirements and unresolved provenance limits. This
+record does not establish permission or model qualification.
+
 ## Third-party algorithm adaptations
 
 The vision-only BF16 LayerNorm variance implementation adapts the logical

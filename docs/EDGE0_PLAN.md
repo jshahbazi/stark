@@ -1,9 +1,13 @@
 # Edge0-145B native support plan
 
-Status: metadata intake only, 2026-11-12. Public model metadata, GGUF headers,
-manifests and upstream source were read. No weight payload was downloaded, no
-Stark code was changed and nothing was executed. Every statement below about
-Stark behaviour with this model is planned and untested. Follow
+Status: phase 0 opened, 2026-11-12. Compatibility attempt
+[`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
+records the intake and prerequisites. The
+[license and provenance review](archive/runs/2026-11-12-edge0-license-intake.md)
+is prepared for the owner's decision; that decision and merge of the attempt
+record remain pending. No weight payload was downloaded and no Stark runtime
+code was changed or model executed. Every statement below about Stark behaviour
+with this model is planned and untested. Follow
 [model onboarding](MODEL_ONBOARDING.md), the
 [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md) and the
 [experiment ledger](model-experiments/README.md).
@@ -22,9 +26,10 @@ trunk natively. It is a backend project, not a catalogue entry:
 - the upstream runtime for this model is NVIDIA-only in the public tree, so
   there is no Mac reference to compare against.
 
-Recommended first artifact: `Edge0/Edge0-145B-q3k`. Its default file set is
-103,374,319,296 bytes (96.27 GiB), of which 51.2 GB is the n-gram table that is
-read from disk by row.
+Recommended first artifact: `Edge0/Edge0-145B-q3k`. The eight binary files listed
+below total 103,374,417,600 bytes (96.27 GiB), of which 51.2 GB is the n-gram
+table that is read from disk by row. This subtotal includes `labels.bin` and
+excludes the small text, tokenizer and license files.
 
 ## Pinned intake
 
@@ -161,20 +166,27 @@ Each phase ends at a gate. A later phase does not start on an unmet gate.
 
 ### Phase 0: records, provenance and license
 
-- Open attempt `20261112-EDGE0-01` (compatibility) from the template and add it
-  to the ledger. Later phases get their own IDs.
-- Record `Edge0-AI/Edge0` at the pinned revision in `provenance/UPSTREAM.md`.
+- Attempt [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
+  (compatibility) is opened from the template and added to the ledger on the
+  work branch. Later phases get their own IDs.
+- The pinned `Edge0-AI/Edge0` revision is recorded in
+  [`provenance/UPSTREAM.md`](../provenance/UPSTREAM.md).
   If any source, table or layout is ported, add the Apache-2.0 and MIT license
   texts beside the existing reference licenses and state the patch provenance.
 - Owner decision on the model license. The weights are under the Edge0
   Community Model License 1.0 for Edge0's contributions and the Qwen Community
   License 1.0 for upstream material. Section 4 of the Edge0 license reserves
   model sales, commercial model services and commercial independent coding or
-  office assistants. Stark does not redistribute weights; the prepared folder
-  keeps `LICENSE`, `NOTICE`, `release-scope.json` and the Qwen license text,
-  and the catalogue row links the license.
+  office assistants, including on-device products. The Qwen license has its own
+  commercial permission conditions. Keeping weights out of Stark's distribution
+  does not resolve these use restrictions. The prepared folder must keep
+  `LICENSE`, `NOTICE`, `release-scope.json` and the Qwen license text, and any
+  future catalogue row must link the license. The license intake records the
+  exact terms and pending owner decision.
 
-Gate: attempt record merged; license decision recorded.
+Gate: attempt record merged; license decision recorded. Both remain pending.
+The [license intake](archive/runs/2026-11-12-edge0-license-intake.md) records the
+terms and the decision needed from the owner. Phase 1 has not started.
 
 ### Phase 1: source preparation and admission
 
@@ -196,7 +208,8 @@ Gate: attempt record merged; license decision recorded.
   `derived_metadata`. Any difference fails preparation.
 
 Gate: a prepared folder on the intake host whose receipt binds every payload
-hash. Download is 103.4 GB; the host had 317 GiB free.
+hash. Binary payloads total 103.4 GB, plus the small metadata files; the host had
+317 GiB free at the original intake. Recheck space before download.
 
 ### Phase 2: readers and block decoders, without a model
 
@@ -240,8 +253,9 @@ false and MTP stays unavailable on this path.
   per group before the up-projection changes the reduction order and is a
   separate, gated candidate.
 - Resident banks through the existing registry. Experts are 37.3 GiB and
-  projections 3.5 GiB. All weights other than the n-gram table total
-  52,174,073,184 bytes (48.59 GiB).
+  projections 3.5 GiB. The listed binaries other than the n-gram table total
+  52,174,171,488 bytes (48.59 GiB), including labels and excluding the small
+  metadata files.
 - Loaded-state memory estimate for automatic planning, and a startup recipe.
 
 Gate: agreement with the phase 3 reference under the recorded numerical gates,
