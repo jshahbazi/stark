@@ -294,9 +294,92 @@ impl QwenModel {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use stark_engine_macros::stark_test;
 
     use super::*;
+    use crate::engine::hybrid::{Forward, Model};
+
+    /// Bounded actual-target state lifecycle only. Requires the registered
+    /// prepared artifact and an externally serialized, resource-watched run.
+    /// Token IDs and full readouts remain private in RAM throughout the test.
+    #[stark_test]
+    // Ignored by default: requires the prepared artifact and a coordinated
+    // Metal resource gate, beyond the model-free foundation suite.
+    #[ignore]
+    fn private_edge0_actual_checkpoint_readouts_and_failure_fences() {
+        assert!(
+            std::env::var("STARK_EDGE0_REFERENCE").ok().as_deref() == Some("1")
+                && std::env::var("STARK_EDGE0_METAL").ok().as_deref() == Some("1")
+                && std::env::var("STARK_EDGE0_RESIDENT").ok().as_deref() != Some("1"),
+            "checkpoint_actual_policy"
+        );
+        let path = PathBuf::from(
+            std::env::var_os("STARK_EDGE0_SOURCE_PATH").unwrap_or_else(|| panic!("checkpoint_actual_source_required")),
+        );
+        let mut model = Model::load(&path).unwrap_or_else(|_| panic!("checkpoint_actual_load"));
+        let text = "A quiet morning brings clear light through the window. ".repeat(8);
+        let encoding = model.tokenizer().encode(text, false).unwrap_or_else(|_| panic!("checkpoint_actual_encode"));
+        let tokens = encoding.get_ids().get(..36).unwrap_or_else(|| panic!("checkpoint_actual_corpus_length"));
+        let Forward::Qwen(target) = &mut model.forward else {
+            panic!("checkpoint_actual_backend");
+        };
+        assert!(
+            target.geometry.edge0 && target.geometry.edge0_metal && target.graph_enabled,
+            "checkpoint_actual_target_policy"
+        );
+        let policy = StagingPolicy::Edge0MetalSingleStepV1;
+        target.ingest_prefix(&tokens[..32], || Ok(())).unwrap_or_else(|_| panic!("checkpoint_actual_initial_ingest"));
+        let checkpoint = target.capture_checkpoint(policy).unwrap_or_else(|_| panic!("checkpoint_actual_capture"));
+        assert!(checkpoint.position() == 32 && target.position == 32, "checkpoint_actual_boundary");
+        let mut readouts = Vec::with_capacity(4);
+        for &token in &tokens[32..] {
+            let row = target.step(token).unwrap_or_else(|_| panic!("checkpoint_actual_initial_step"));
+            assert!(
+                row.len() == target.geometry.vocab && row.iter().all(|value| value.is_finite()),
+                "checkpoint_actual_readout_shape"
+            );
+            readouts.push(row);
+        }
+        target.restore_checkpoint(&checkpoint, policy).unwrap_or_else(|_| panic!("checkpoint_actual_restore"));
+        assert!(target.position == 32, "checkpoint_actual_restored_position");
+        for (&token, expected) in tokens[32..].iter().zip(&readouts) {
+            let row = target.step(token).unwrap_or_else(|_| panic!("checkpoint_actual_replay_step"));
+            assert!(
+                row.len() == expected.len()
+                    && row.iter().zip(expected).all(|(value, expected)| value.to_bits() == expected.to_bits()),
+                "checkpoint_actual_replay_bits"
+            );
+        }
+        let mut invalid =
+            target.capture_checkpoint(policy).unwrap_or_else(|_| panic!("checkpoint_actual_invalid_capture"));
+        invalid.position = 0;
+        invalid.history = Box::<[u32]>::default();
+        assert!(target.restore_checkpoint(&invalid, policy).is_err(), "checkpoint_actual_invalid_admitted");
+        assert!(
+            target.position == 0
+                && target.history.is_empty()
+                && target.graph.is_none()
+                && target
+                    .checkpoint_stamp
+                    .as_ref()
+                    .is_some_and(|stamp| !stamp.matches(&checkpoint.identity, checkpoint.epoch)),
+            "checkpoint_actual_failure_fence"
+        );
+        assert!(target.restore_checkpoint(&checkpoint, policy).is_err(), "checkpoint_actual_stale_admitted");
+        assert!(target.position == 0 && target.graph.is_none(), "checkpoint_actual_stale_fence");
+        target.ingest_prefix(&tokens[..32], || Ok(())).unwrap_or_else(|_| panic!("checkpoint_actual_recovery_ingest"));
+        for (&token, expected) in tokens[32..].iter().zip(&readouts) {
+            let row = target.step(token).unwrap_or_else(|_| panic!("checkpoint_actual_recovery_step"));
+            assert!(
+                row.len() == expected.len()
+                    && row.iter().zip(expected).all(|(value, expected)| value.to_bits() == expected.to_bits()),
+                "checkpoint_actual_recovery_bits"
+            );
+        }
+        assert!(target.position == 36, "checkpoint_actual_recovery_position");
+    }
 
     #[stark_test]
     fn private_checkpoint_stamps_reject_cross_model_reset_and_policy_changes() {
