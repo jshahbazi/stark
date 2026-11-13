@@ -67,6 +67,13 @@ impl MatmulKernel for MatmulCpuKernel {
         >,
         command_buffer: &mut CpuCommandBufferEncoding,
     ) -> Result<(), CpuError> {
+        arguments.validate_affine_input_sum_policy(
+            self.weights_data_type,
+            self.input_data_type,
+            self.output_data_type,
+        )?;
+        let materialize_affine_input_sum =
+            arguments.m == 1 && arguments.b.quantized().is_some_and(|q| q.params.materializes_affine_input_sum());
         let output_scale = arguments.d_transform.ab_scale;
         let accumulate = arguments.d_transform.accumulate;
         let bias_buffer = arguments.d_transform.bias;
@@ -167,8 +174,19 @@ impl MatmulKernel for MatmulCpuKernel {
                             Some(g) => *g.as_ptr().add(row * n_u + col) as usize,
                             None => col,
                         };
-                        let mut accumulator = 0.0f32;
-                        for inner in 0..k_u {
+                        let mut accumulator = if materialize_affine_input_sum {
+                            let AData::FullPrecision(input) = a_data else {
+                                unreachable!();
+                            };
+                            super::reference::materialized_affine_dot(&weight_data, input.as_ptr(), row, b_col, k_u)
+                        } else {
+                            0.0f32
+                        };
+                        for inner in 0..if materialize_affine_input_sum {
+                            0
+                        } else {
+                            k_u
+                        } {
                             let a_value = match a_data {
                                 AData::FullPrecision(ptr) => read_f32(ptr.as_ptr(), input_data_type, row * k_u + inner),
                                 AData::Int8 {

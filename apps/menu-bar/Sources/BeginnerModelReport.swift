@@ -8,6 +8,55 @@ enum BeginnerContextPolicy {
 
 /// A recommendation is a short-lived backend binding, separate from the catalog.
 struct BeginnerModelReport {
+    struct BenchmarkReference: Equatable {
+        let name: String
+        let score: String
+        let usedForRanking: Bool
+        let sourceURL: URL?
+        let capturedDate: String?
+
+        init?(_ raw: [String: Any]) {
+            let names = ["livecodebench": "LiveCodeBench", "bfcl": "BFCL", "ifeval": "IFEval",
+                         "whatmodel_general": "whatmodel.sh · General Work", "whatmodel_coding": "whatmodel.sh · Coding"]
+            guard let key = raw["benchmark"] as? String, let name = names[key],
+                  raw["evidence_kind"] as? String == "upstream_reference",
+                  let text = BeginnerMetadata.string(raw["score"], limit: 32),
+                  let value = Double(text), value.isFinite,
+                  key.hasPrefix("whatmodel_") || (0...100).contains(value),
+                  let used = raw["used_for_ranking"] as? NSNumber,
+                  CFGetTypeID(used) == CFBooleanGetTypeID() else { return nil }
+            self.name = name
+            let formatter = NumberFormatter()
+            formatter.minimumFractionDigits = 0; formatter.maximumFractionDigits = 1
+            formatter.usesGroupingSeparator = false
+            score = formatter.string(from: NSNumber(value: value)) ?? text
+            usedForRanking = used.boolValue
+            if key.hasPrefix("whatmodel_"), let date = raw["captured"] as? String,
+               date.range(of: "\\A[0-9]{4}-[0-9]{2}-[0-9]{2}\\z", options: .regularExpression) != nil {
+                capturedDate = date
+            } else { capturedDate = nil }
+            if key.hasPrefix("whatmodel_"),
+               let source = BeginnerMetadata.string(raw["source_url"], limit: 512),
+               source.range(of: "\\Ahttps://whatmodel[.]sh/model/[a-z0-9-]+\\z", options: .regularExpression) != nil {
+                sourceURL = URL(string: source)
+            } else if let model = BeginnerMetadata.string(raw["model_id"], limit: 256),
+               model.range(of: "\\A[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*\\z",
+                           options: .regularExpression) != nil {
+                sourceURL = URL(string: "https://huggingface.co/" + model)
+            } else { sourceURL = nil }
+        }
+
+        var recommendation: String {
+            switch name {
+            case "whatmodel.sh · General Work": return "Recommended using the cached General Work leaderboard."
+            case "whatmodel.sh · Coding": return "Recommended using the cached Coding leaderboard."
+            case "LiveCodeBench": return "Recommended for coding using published benchmark results."
+            case "BFCL": return "Recommended using published tool-use results."
+            default: return "Recommended using published instruction-following results."
+            }
+        }
+    }
+
     struct Item: Identifiable, Equatable {
         let id: String
         let name: String
@@ -19,12 +68,16 @@ struct BeginnerModelReport {
         let installedBytes: Int64
         let setupBytes: Int64
         let runtimeBytes: Int64
+        let gpuRuntimeBytes: Int64
         let contextTokens: Int
         let installedIDs: [String]
         let license: String
         let qualification: String
         let caveats: [String]
         let recommendationReason: String
+        let benchmarkDetails: [String]
+        let benchmarkReference: BenchmarkReference?
+        let prefersSpeed: Bool
 
         var variantName: String {
             name == displayName ? String(source.split(separator: "/").last ?? Substring(name)) : name
@@ -51,14 +104,68 @@ struct BeginnerModelReport {
             self.id = id; self.name = name; self.source = source; self.revision = revision
             displayName = BeginnerMetadata.string(raw["display_name"], limit: 256) ?? name
             self.quantization = quantization; downloadBytes = download; installedBytes = installed
-            setupBytes = setup; runtimeBytes = runtime; contextTokens = Int(context)
+            if let value = raw["setup_disk_bytes_remaining_estimate"] {
+                guard let remaining = BeginnerMetadata.integer(value), remaining <= setup else { return nil }
+                setupBytes = remaining
+            } else { setupBytes = setup }
+            runtimeBytes = runtime; contextTokens = Int(context)
+            if let value = raw["gpu_memory_bytes_estimate"] {
+                guard let gpu = BeginnerMetadata.integer(value), gpu > 0, gpu <= runtime else { return nil }
+                gpuRuntimeBytes = gpu
+            } else { gpuRuntimeBytes = runtime }
             installedIDs = ids; self.license = license; self.qualification = qualification; self.caveats = caveats
+            prefersSpeed = raw["selection_preference"] as? String == "speed"
+            if let value = raw["benchmark_details"] {
+                guard let details = BeginnerMetadata.strings(value, count: 16, length: 2_000) else { return nil }
+                benchmarkDetails = details
+            } else { benchmarkDetails = [] }
+            let references = (raw["benchmarks"] as? [[String: Any]]).flatMap { values in
+                values.count <= 32 ? values.compactMap(BenchmarkReference.init) : nil
+            } ?? []
+            benchmarkReference = references.first(where: \.usedForRanking) ?? references.first
             if raw["recommendation_reason"] != nil {
                 guard let reason = BeginnerMetadata.string(raw["recommendation_reason"], limit: 2_000) else { return nil }
                 recommendationReason = reason
             } else {
                 recommendationReason = "A starting model checked for this setup. Review its answers and any actions in OpenWork."
             }
+        }
+
+        func beginnerSummary(availableMemoryBytes: Int64?) -> String {
+            var summary = "Selected to fit your Mac."
+            if prefersSpeed { summary = "Selected within a speed budget for your Mac using published model scores. Actual speed varies." }
+            else if let reference = benchmarkReference, reference.usedForRanking { summary = reference.recommendation }
+            if benchmarkReference == nil { summary += " No benchmark result is recorded." }
+            if let availableMemoryBytes, availableMemoryBytes < runtimeBytes {
+                summary += " Free up memory before starting."
+            }
+            return summary
+        }
+
+        var beginnerDetails: String {
+            var lines = ["Estimated memory: " + ByteCountFormatter.string(fromByteCount: runtimeBytes, countStyle: .memory)]
+            if let benchmarkReference {
+                lines.append(benchmarkReference.name + ": " + benchmarkReference.score
+                             + (benchmarkReference.name.hasPrefix("whatmodel.sh") ? "" : "/100"))
+                lines.append(benchmarkReference.usedForRanking
+                    ? (benchmarkReference.capturedDate.map { "Cached \($0). " } ?? "")
+                        + (benchmarkReference.name.hasPrefix("whatmodel.sh")
+                           ? "Parent-model score; this quantization was not evaluated by this ranking."
+                           : "Published model score; local results may vary.")
+                    : "Reference only; it did not determine this choice.")
+            }
+            return lines.joined(separator: "\n")
+        }
+
+        var memoryDetails: [String] {
+            if gpuRuntimeBytes == runtimeBytes {
+                return ["Estimated runtime memory: " + ByteCountFormatter.string(fromByteCount: runtimeBytes, countStyle: .memory)]
+            }
+            return [
+                "Estimated system memory: " + ByteCountFormatter.string(fromByteCount: runtimeBytes, countStyle: .memory),
+                "Estimated GPU memory: " + ByteCountFormatter.string(fromByteCount: gpuRuntimeBytes, countStyle: .memory),
+                "The system estimate includes the model's disk-backed tables."
+            ]
         }
     }
 
@@ -91,8 +198,6 @@ struct BeginnerModelReport {
         var details: [String] = []
         if let gpuName { details.append(gpuName) }
         if let bytes = physicalMemoryBytes { details.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory) + " memory") }
-        if let bytes = gpuMemoryBudgetBytes, bytes > 0 { details.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory) + " GPU budget") }
-        if let bytes = freeDiskBytes { details.append(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) + " free for setup") }
         return details.joined(separator: " · ")
     }
 }

@@ -27,7 +27,8 @@ template <
     GemmTiling GEMM_TILING,
     bool TRANSPOSE_B,
     typename LeftOperand,
-    typename RightOperand>
+    typename RightOperand,
+    bool SOURCE_F32_FRAGMENTS = false>
 struct SimdgroupMmaCore {
   using OutputElementType = OutputElementType_;
   using Left = LeftOperand;
@@ -77,7 +78,8 @@ struct SimdgroupMmaCore {
       SHARED_STRIDE_A,
       SHARED_STRIDE_B,
       float,
-      stark::matmul::TransformNone<OutputElementType, float>>;
+      stark::matmul::TransformNone<OutputElementType, float>,
+      SOURCE_F32_FRAGMENTS>;
 
   template <uint GEMM_ALIGNMENT_RAW, typename BLoader>
   static METAL_FUNC void k_loop(

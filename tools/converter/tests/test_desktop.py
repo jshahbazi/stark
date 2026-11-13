@@ -70,7 +70,7 @@ def executable(tmp_path):
         "wire=6*budget+2*1024*1024\n"
         "print(json.dumps({'ready':True,'mode':'text-generation-v1',"
         "'max_context_tokens':8192,'max_new_tokens':8192,'max_request_bytes':wire,"
-        "'streaming':'text-delta-v1','generation_budget':'memory-context-v1'}),flush=True)\n"
+        "'streaming':'text-delta-v1'}),flush=True)\n"
         "for line in sys.stdin:\n"
         "    request=json.loads(line)\n"
         "    if request['operation']=='plan_generation':\n"
@@ -191,6 +191,139 @@ def running(desktop, model):
     finish(desktop)
     assert desktop.active_model == identifier
     return identifier
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("thinking", "effort", "label"), [(False, None, "Low"), (True, None, "Max"), (False, "high", "High")]
+)
+def test_api_glm_reasoning_controls_and_separated_response(
+    desktop, model, monkeypatch, stream, thinking, effort, label
+):
+    from stark_convert.chat import _ChatTemplate
+
+    running(desktop, model)
+    source = (Path(__file__).parent / "fixtures" / "glm53_chat_template.jinja").read_text()
+    desktop.codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    desktop.template = _ChatTemplate(source)
+    generated = "Synthetic reasoning</think>Visible answer"
+    prompts = []
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            prompts.append(payload["text"])
+            return {"token_count": 24, "token_ids": [2] * 24}
+        if deliver := options.get("on_delta"):
+            for character in generated:
+                deliver(character)
+        return {
+            "text": generated,
+            "input_tokens": 24,
+            "output_tokens": 17,
+            "finish_reason": "eos",
+            "_tool_initial_thinking": False,
+        }
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    payload = {
+        "messages": [{"role": "user", "content": "Synthetic question"}],
+        "thinking": thinking,
+        **({"reasoning_effort": effort} if effort else {}),
+    }
+    deltas = []
+    response = desktop.api_complete(payload, on_delta=deltas.append if stream else None)
+    assert "<|system|>Reasoning Effort: " + label in prompts[0]
+    message = response["choices"][0]["message"]
+    assert message == {"role": "assistant", "content": "Visible answer", "reasoning_content": "Synthetic reasoning"}
+    if stream:
+        assert "".join(item for item in deltas if isinstance(item, str)) == message["content"]
+        assert (
+            "".join(item["reasoning_content"] for item in deltas if isinstance(item, dict))
+            == message["reasoning_content"]
+        )
+    assert response["usage"]["completion_tokens"] == 17
+
+
+def test_api_reasoning_effort_rejection_preserves_worker_before_dispatch(desktop, model, monkeypatch):
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    worker = desktop.worker
+    monkeypatch.setattr(worker, "request", lambda *args, **kwargs: pytest.fail("unsupported effort reached worker"))
+    with pytest.raises(APIError) as rejected:
+        desktop.api_complete(
+            {"messages": [{"role": "user", "content": "Synthetic question"}], "reasoning_effort": "high"}
+        )
+    assert rejected.value.code == "unsupported_parameter"
+    assert desktop.worker is worker and desktop.job is None
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_api_qwen_boolean_thinking_reaches_reviewed_template(desktop, model, monkeypatch, thinking):
+    from stark_convert.chat import _ChatTemplate
+
+    running(desktop, model)
+    source = (Path(__file__).parent / "fixtures" / "qwen3_4b_chat_template.jinja").read_text()
+    desktop.codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    desktop.template = _ChatTemplate(source)
+    prompts = []
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            prompts.append(payload["text"])
+            return {"token_count": 24, "token_ids": [2] * 24}
+        text = "<think>Synthetic reasoning</think>Answer" if thinking else "Answer"
+        if deliver := options.get("on_delta"):
+            for character in text:
+                deliver(character)
+        return {"text": text, "input_tokens": 24, "output_tokens": 17, "finish_reason": "eos"}
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    deltas = []
+    message = desktop.api_complete(
+        {"messages": [{"role": "user", "content": "Synthetic question"}], "thinking": thinking},
+        on_delta=deltas.append,
+    )["choices"][0]["message"]
+    assert prompts[0].endswith("<think>\n\n</think>\n\n") is (not thinking)
+    assert message["content"] == "Answer"
+    assert message.get("reasoning_content") == ("Synthetic reasoning" if thinking else None)
+    assert "".join(item for item in deltas if isinstance(item, str)) == "Answer"
+
+
+def test_playground_keeps_reasoning_out_of_visible_history(desktop, model, monkeypatch):
+    from stark_convert.chat import _ChatTemplate
+
+    running(desktop, model)
+    source = (
+        "{% for m in messages %}{{ m.role }}:{{ m.content }}"
+        "{% if m.reasoning_content is defined %}|reasoning={{ m.reasoning_content }}{% endif %};{% endfor %}"
+        "assistant:<think>\n"
+    )
+    desktop.codec = {"type": "ChatCodecConfig", "prompt_template": source}
+    desktop.template = _ChatTemplate(source)
+    prompts = []
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            prompts.append(payload["text"])
+            return {"token_count": 24, "token_ids": [2] * 24}
+        return {
+            "text": "Synthetic reasoning</think>Answer",
+            "input_tokens": 24,
+            "output_tokens": 17,
+            "finish_reason": "eos",
+        }
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    desktop.generate(desktop.epoch, "first synthetic turn")
+    assert desktop.messages[-1] == {
+        "role": "assistant",
+        "content": "Answer",
+        "reasoning_content": "Synthetic reasoning",
+    }
+    desktop.generate(desktop.epoch, "second synthetic turn")
+    assert "assistant:Answer|reasoning=Synthetic reasoning;" in prompts[1]
+    assert "assistant:Synthetic reasoning</think>" not in prompts[1]
 
 
 def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
@@ -322,6 +455,84 @@ def test_api_requests_publish_content_free_progress_to_the_app(desktop, model, m
     assert progress[1]["ttft_seconds"] == 0.2
     assert not progress[0]["calibrated"] and progress[3]["calibrated"]
     assert lifecycle(desktop) == ["generating", *["generation_progress"] * 3, "metrics", "ready"] * 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("request_metadata_supported", [False, True])
+def test_finite_auto_uses_memory_admission_and_preserves_reported_capacity(
+    desktop, model, stream, request_metadata_supported
+):
+    running(desktop, model)
+    worker = desktop.worker
+    worker.generation_budget = True
+    worker.generation_budget_inputs = request_metadata_supported
+    original = worker.request
+    planned, generated = [], []
+
+    def request(payload, **options):
+        if payload["operation"] == "plan_generation":
+            planned.append(payload)
+            return {
+                "context_tokens": 1024,
+                "max_new_tokens": 1024 - payload["input_tokens"],
+                "context_capacity_known": True,
+                "budget_kind": "memory",
+            }
+        if payload["operation"] == "generate":
+            generated.append(payload)
+        return original(payload, **options)
+
+    with patch.object(worker, "request", side_effect=request):
+        desktop.api_complete(
+            {"messages": [{"role": "user", "content": "synthetic request"}], "stream": stream},
+            on_delta=(lambda _: None) if stream else None,
+        )
+    expected = {"operation": "plan_generation", "input_tokens": 20, "context_tokens": 8192}
+    if request_metadata_supported:
+        expected.update(input_token_ids=generated[0]["input_token_ids"], mtp_drafts=0, sampling={"mode": "greedy"})
+    assert planned == [expected]
+    assert generated[0]["context_tokens"] == 1024
+    assert generated[0]["max_new_tokens"] == 1004
+    assert desktop.api_models()[0]["context_length"] == 8192
+    assert desktop.api_models()[0]["context_capacity_known"] is True
+    assert desktop.worker is worker and worker.process.poll() is None
+
+
+def test_finite_auto_memory_rejection_keeps_worker_for_explicit_retry(desktop, model):
+    from stark_convert.chat import ChatRequestTooLarge
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    worker = desktop.worker
+    worker.generation_budget = True
+    original = worker.request
+
+    def request(payload, **options):
+        if payload["operation"] == "plan_generation":
+            raise ChatRequestTooLarge("Automatic execution cannot fit safely in available memory.")
+        return original(payload, **options)
+
+    with patch.object(worker, "request", side_effect=request):
+        with pytest.raises(APIError) as rejected:
+            desktop.api_complete({"messages": [{"role": "user", "content": "synthetic request"}]})
+        assert rejected.value.code == "request_too_large"
+        assert desktop.api_complete({"messages": [{"role": "user", "content": "synthetic retry"}], "max_tokens": 16})[
+            "choices"
+        ]
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert desktop.job is None
+
+
+def test_legacy_finite_auto_keeps_remaining_context_behavior(desktop, model):
+    running(desktop, model)
+    worker = desktop.worker
+    worker.generation_budget = False
+    with patch.object(worker, "request", wraps=worker.request) as request:
+        desktop.api_complete({"messages": [{"role": "user", "content": "synthetic request"}]})
+    assert all(call.args[0]["operation"] != "plan_generation" for call in request.call_args_list)
+    generated = [call.args[0] for call in request.call_args_list if call.args[0]["operation"] == "generate"]
+    assert generated[0]["context_tokens"] == 8192
+    assert generated[0]["max_new_tokens"] == 8172
 
 
 def test_serialized_api_requests_never_interleave_progress(desktop, model, monkeypatch):
@@ -826,7 +1037,12 @@ def test_tool_parsing_uses_rendered_generation_prefix_not_worker_claim(
         with pytest.raises(APIError) as error:
             desktop.api_complete(payload, on_delta=deltas.append if stream else None)
         assert error.value.code == "invalid_tool_call"
-    assert "<tool_call>" not in "".join(deltas)
+    assert "<tool_call>" not in "".join(
+        item if isinstance(item, str) else item["reasoning_content"] for item in deltas
+    )
+    if fixture == "glm53" and closed:
+        assert result["choices"][0]["message"]["reasoning_content"] == "Synthetic reasoning"
+        assert result["choices"][0]["message"]["content"] is None
     assert desktop.worker is not None and desktop.job is None
 
 
@@ -1376,6 +1592,7 @@ def test_api_default_output_plans_unknown_context_without_user_options(desktop, 
         reply = read(worker, *args, **kwargs)
         if reply.get("ready") is True:
             reply["max_context_tokens"] = 0xFFFFFFFF
+            reply["generation_budget"] = "memory-context-v1"
         return reply
 
     with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=unknown_ready):
@@ -1403,6 +1620,7 @@ def test_unknown_context_playground_auto_uses_memory_plan_without_unloading_work
         reply = read(worker, *args, **kwargs)
         if reply.get("ready") is True:
             reply["max_context_tokens"] = 0xFFFFFFFF
+            reply["generation_budget"] = "memory-context-v1"
         return reply
 
     with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=unknown_ready):
@@ -1572,6 +1790,7 @@ def score_executable(tmp_path):
         "               'input_tokens':len(request['input_token_ids']),\n"
         "               'temperature':request['temperature'],'truncated':False}\n"
         "        if 'context fixture' in prompt: reply={'error':'context_overflow'}\n"
+        "        if 'resource fixture' in prompt: reply={'error':'resource_budget_exceeded'}\n"
         "    print(json.dumps(reply),flush=True)\n"
     )
     path.chmod(0o755)
@@ -1718,6 +1937,21 @@ def test_native_model_context_rejection_preserves_worker_and_allows_retry(deskto
     assert any("context limit" in event.get("message", "") for event in events(desktop))
     desktop.dispatch(decision_command())
     finish(desktop)
+    assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
+
+
+def test_decision_memory_rejection_preserves_worker_and_allows_retry(desktop, model, score_executable):
+    running_decision(desktop, model, score_executable)
+    worker = desktop.worker
+    desktop.dispatch(decision_command(text="resource fixture"))
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert not any(event["event"] == "decision" for event in events(desktop))
+    assert any("resource budget" in event.get("message", "") for event in events(desktop))
+    assert desktop.job is None
+    desktop.dispatch(decision_command())
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
     assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
 
 
@@ -2318,6 +2552,65 @@ def test_mtp_preference_write_failure_stale_model_and_busy_changes_are_atomic(de
     assert desktop.settings_summary()["mtp_enabled"] is True
 
 
+@pytest.mark.parametrize(
+    "display,verification,source,enabled",
+    [
+        ({"family_id": "gemma4_text"}, "fixture-exact-v1", None, False),
+        (None, "gemma4-e2b-target-verify-v1", None, False),
+        ({"group_id": "repo:Qwen/Qwen3.5-0.8B", "quantization": "BF16"}, "fixture-exact-v1", None, False),
+        ({"group_id": "repo:Qwen/Qwen3.5-0.8B", "quantization": "4-bit"}, "fixture-exact-v1", None, True),
+        ({"group_id": "repo:Qwen/Qwen3.5-4B", "quantization": "BF16"}, "fixture-exact-v1", None, True),
+        ({"quantization": "BF16"}, "fixture-exact-v1", "huggingface:Qwen/Qwen3.5-0.8B", False),
+        ({"quantization": "4-bit"}, "fixture-exact-v1", "huggingface:Qwen/Qwen3.5-0.8B", True),
+        ({"quantization": "BF16"}, "fixture-exact-v1", "huggingface:Qwen/Qwen3.5-4B", True),
+        ({"quantization": "BF16"}, "fixture-exact-v1", "local:canonical-name", True),
+        ({"quantization": "BF16"}, "fixture-exact-v1", None, True),
+        (None, "fixture-exact-v1", None, True),
+    ],
+)
+def test_model_specific_mtp_defaults_keep_explicit_choices(
+    desktop, model, mtp_executable, monkeypatch, display, verification, source, enabled
+):
+    config = json.loads((model / "config.json").read_text())
+    config["fixture_mtp"] = {
+        "supported": True,
+        "max_drafts": 3,
+        "recommended_drafts": 3,
+        "default_drafts": 0,
+        "sampling": "exact-rejection-v1",
+        "verification": verification,
+        "operations": ["generate"],
+    }
+    (model / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr("stark_convert.desktop.model_display", lambda _: display)
+    desktop.executable = mtp_executable
+    identifier = installed(desktop, model)
+    if source is not None:
+        desktop.models[0]["source"] = source
+        if source == "local:canonical-name":
+            desktop.models[0]["name"] = "Qwen/Qwen3.5-0.8B"
+        desktop.persist()
+    desktop.dispatch({"command": "run", "model_id": identifier})
+    finish(desktop)
+    assert "mtp_enabled" not in desktop.models[0]
+    assert desktop.settings_summary()["mtp_enabled"] is enabled
+    assert desktop.api_models()[0]["defaults"]["mtp"] is enabled
+    assert desktop.settings_summary()["mtp"]["recommended_drafts"] == 3
+    desktop.library()
+    assert events(desktop)[-1]["models"][0]["source"] == desktop.models[0]["source"]
+    payload = {"messages": [{"role": "user", "content": "fixture"}]}
+    for override, drafts in ((None, 3 if enabled else 0), (True, 3), (False, 0), (None, 3 if enabled else 0)):
+        body = {**payload, **({"mtp": override} if override is not None else {})}
+        with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+            desktop.api_complete(body)
+        assert request.call_args_list[-1].args[0]["mtp_drafts"] == drafts
+    assert "mtp_enabled" not in desktop.models[0]
+    for preference in (True, False):
+        set_mtp(desktop, identifier, preference)
+        assert desktop.settings_summary()["mtp_enabled"] is preference
+        assert json.loads(desktop.registry.read_text())[0]["mtp_enabled"] is preference
+
+
 def test_legacy_model_without_mtp_preference_defaults_on_after_restart(desktop, model, mtp_executable):
     desktop.executable = mtp_executable
     identifier = running(desktop, model)
@@ -2696,6 +2989,27 @@ def test_failed_conversion_does_not_complete_progress_or_publish_model(desktop, 
     assert not list(desktop.model_dir.iterdir())
 
 
+@pytest.mark.parametrize(
+    "category,message",
+    [
+        ("disk_full", "Not enough disk space to convert this model. Free space and retry."),
+        ("permission_denied", "Stark could not read or write the model files. Check folder permissions and retry."),
+        ("unsupported_format_or_config", "This model format or configuration is not supported by the converter."),
+        ("invalid_checkpoint", "The checkpoint is incomplete or invalid. Check the source revision and retry."),
+        ("conversion_failed", "Model conversion failed. Check the model source and try again."),
+    ],
+)
+def test_converter_failure_category_maps_to_fixed_ui_message(desktop, model, converter_support, category, message):
+    lines = [json.dumps({"phase": "failure", "category": category}).encode()]
+    with patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, exit_code=1)):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+    failure = [event for event in events(desktop) if event["event"] == "error"][-1]
+    assert failure["message"] == message
+    assert "private" not in desktop.output.getvalue()
+    assert not desktop.models
+
+
 def test_registry_failure_keeps_conversion_progress_failed(desktop, model, converter_support):
     lines = [progress_line("download", "complete", 100, 100), progress_line("conversion", "complete", 200, 200)]
     with (
@@ -2712,7 +3026,10 @@ def test_registry_failure_keeps_conversion_progress_failed(desktop, model, conve
 
 
 def test_cancelled_progress_reaps_converter_and_cannot_emit_late_completion(desktop, model, converter_support):
-    lines = [progress_line("download", "running", 5, 100)]
+    lines = [
+        json.dumps({"phase": "failure", "category": "conversion_failed"}).encode(),
+        progress_line("download", "running", 5, 100),
+    ]
     with patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, pause=True)):
         desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
         deadline = time.monotonic() + 3
@@ -2729,6 +3046,7 @@ def test_cancelled_progress_reaps_converter_and_cannot_emit_late_completion(desk
     assert progress_events(desktop, "download")[-1]["state"] == "cancelled"
     assert progress_events(desktop, "conversion")[-1]["state"] == "cancelled"
     assert not any(e["state"] == "complete" for e in progress_events(desktop))
+    assert not any(e["event"] == "error" for e in events(desktop))
     assert not list(desktop.model_dir.iterdir())
 
 
@@ -2814,8 +3132,17 @@ def test_exited_converter_cannot_leave_a_descendant_holding_progress_pipe(deskto
         {"total_bytes": False},
         {"total_bytes": float("nan")},
         {"total_bytes": -1},
+        {"transferred_bytes": True},
+        {"transferred_bytes": -1},
+        {"transferred_bytes": None},
+        {"transferred_bytes": 2**63},
+        {"transferred_bytes": 1.5},
+        {"transferred_bytes": "100"},
+        {"phase": "conversion", "transferred_bytes": 100},
         {"state": "complete"},
         {"private": "private fixture"},
+        {"phase": "failure", "category": "unlisted_category"},
+        {"phase": "failure", "category": ["private"]},
     ],
 )
 def test_converter_progress_rejects_invalid_schema(patch_value):

@@ -358,6 +358,7 @@ impl<B: Backend> Weaver<B> {
                 .prefix_attention
                 .encode(
                     AttentionArguments {
+                        image_span: None,
                         queries: &queries,
                         keys: &kv_cache,
                         values: kv_cache.subrange(kv_plane_bytes..),

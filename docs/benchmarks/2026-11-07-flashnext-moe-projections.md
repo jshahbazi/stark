@@ -4,6 +4,12 @@ Date: 2026-11-07. Scope: the native Lily-format Qwen3.8-Flash-Next Q4 XL
 artifact, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83`.
 Engine baseline: `72b5aaef96c939809bc906d10d45a0eef70386c0`.
 
+Follow-up: the [sustained diagnosis](2026-11-07-flashnext-sustained-diagnosis.md)
+records additional GPU/clock and one-model crossover controls. The projection
+candidate is withdrawn and original dispatch restored because no accepted
+whole-model benefit is established. The measurements below retain their
+original source bindings.
+
 [Aggregate receipts](data/flashnext-moe-projections-2026-11-07.json) and
 [applyable source patches](../archive/experiments/2026-11-07-flashnext-moe/README.md)
 bind the variants and measurements separately.

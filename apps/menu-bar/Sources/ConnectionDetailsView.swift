@@ -263,7 +263,6 @@ struct ConnectionDetailsView: View {
             Text(engine.supportsImages && !modelID.isEmpty
                  ? "The running model accepts one PNG or JPEG up to 4 MiB through inline image data URLs."
                  : "Image input is unavailable without a running chat model and app build that support it.").foregroundStyle(.secondary)
-            if engine.supportsImages && !modelID.isEmpty { Text(engine.imageVerificationNote).foregroundStyle(.secondary) }
             Text("Containers and other devices cannot reach this address. The API key stays in macOS Keychain across restarts and upgrades. Copying or showing it never changes it.")
                 .foregroundStyle(.secondary)
         }.font(.caption).fixedSize(horizontal: false, vertical: true)

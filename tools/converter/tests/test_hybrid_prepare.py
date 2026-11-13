@@ -10,6 +10,52 @@ import pytest
 from stark_convert import hybrid_prepare as hybrid
 
 
+def test_completed_model_bytes_excludes_partial_stale_and_unreceipted_files(tmp_path):
+    source = {"weights_revision": "a" * 40, "weight_bytes": 100}
+    records = tmp_path / ".cache/huggingface/download"
+    records.mkdir(parents=True)
+
+    def complete(name, size, revision=source["weights_revision"]):
+        path = tmp_path / name
+        path.write_bytes(b"x" * size)
+        (records / (name + ".metadata")).write_text(f"{revision}\netag\n{path.stat().st_mtime + 1}\n")
+
+    complete("a.safetensors", 25)
+    complete("b.safetensors", 30, "b" * 40)
+    (tmp_path / "c.safetensors").write_bytes(b"x" * 40)
+    (tmp_path / "d.incomplete").write_bytes(b"x" * 200)
+    assert hybrid.completed_model_bytes(tmp_path, source) == 25
+    complete("b.safetensors", 30)
+    assert hybrid.completed_model_bytes(tmp_path, source) == 55
+
+
+def test_completed_bytes_matches_real_hub_receipt_timestamp_tolerance(tmp_path):
+    from huggingface_hub._local_folder import read_download_metadata, write_download_metadata
+
+    revision = "a" * 40
+    path = tmp_path / "model.safetensors"
+    path.write_bytes(b"complete")
+    write_download_metadata(tmp_path, path.name, revision, "etag")
+    receipt = read_download_metadata(tmp_path, path.name)
+    assert receipt is not None
+    source = {"weights_revision": revision, "weight_bytes": path.stat().st_size}
+    os.utime(path, (receipt.timestamp + 0.5, receipt.timestamp + 0.5))
+    assert read_download_metadata(tmp_path, path.name) is not None
+    assert hybrid.completed_model_bytes(tmp_path, source) == source["weight_bytes"]
+    os.utime(path, (receipt.timestamp + 2, receipt.timestamp + 2))
+    assert read_download_metadata(tmp_path, path.name) is None
+    assert hybrid.completed_model_bytes(tmp_path, source) == 0
+
+
+@pytest.fixture(autouse=True)
+def synthetic_download_disk_headroom(monkeypatch, tmp_path):
+    # Download tests use byte-sized local stand-ins. Their admission must not
+    # depend on how much disk happens to be free on the test host. Individual
+    # disk-rejection cases can override this fixture's probe.
+    usage = hybrid.shutil.disk_usage(tmp_path)
+    monkeypatch.setattr(hybrid.shutil, "disk_usage", lambda _: usage._replace(free=16 * 1024**3))
+
+
 def metadata(root: Path, architecture="glm5_next"):
     (root / "config.json").write_text(
         json.dumps(
@@ -90,7 +136,14 @@ def test_pinned_download_publishes_only_complete_original_format(tmp_path, monke
     assert progress[-3] == {"phase": "download", "state": "complete", "completed_bytes": 4, "total_bytes": 4}
     assert progress[-2]["phase"] == "conversion" and progress[-2]["state"] == "running"
     assert progress[-1]["phase"] == "conversion" and progress[-1]["state"] == "complete"
-    assert all(set(event) == {"phase", "state", "completed_bytes", "total_bytes"} for event in progress)
+    assert all(
+        set(event)
+        in (
+            {"phase", "state", "completed_bytes", "total_bytes"},
+            {"phase", "state", "completed_bytes", "total_bytes", "transferred_bytes"},
+        )
+        for event in progress
+    )
     assert len(list(output.glob("*.gguf"))) == 4
     assert not (output / "stark-download.json").exists()
     assert calls[0][1]["revision"] == source["weights_revision"]
@@ -399,6 +452,14 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
                 nested.mkdir()
                 for index in range(4):
                     (nested / f"model-{index}.gguf").write_bytes(b"x")
+                with options["tqdm_class"](
+                    name="huggingface_hub.snapshot_download", unit="B", total=4
+                ) as bar:
+                    bar.update(2)
+                with options["tqdm_class"](
+                    name="huggingface_hub.snapshot_download.transfer", unit="B", total=4
+                ) as transfer:
+                    transfer.update(8)
             else:
                 assert repo == source["metadata_repo"]
                 assert options["revision"] == source["metadata_revision"]
@@ -414,17 +475,29 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
     output = tmp_path / "prepared"
     try:
         controller.begin_install_progress(controller.epoch, "native")
-        result = controller.run_converter(
+        result, failure_category = controller.run_converter(
             [sys.executable, "-I", "-B", "-c", bootstrap, str(output), str(weight_bytes)],
             dict(os.environ, HF_HUB_OFFLINE="1"),
             controller.epoch,
         )
         assert controller.converter is None
+        assert failure_category is None
         assert controller.models == [] and controller.worker is None
         events = [json.loads(line) for line in controller.output.getvalue().splitlines()]
-        assert all(event["event"] == "progress" for event in events)
+        assert all(event["event"] in {"progress", "status"} for event in events)
+        messages = [event["message"] for event in events if event["event"] == "status"]
+        assert messages[0] == "Downloading model files…"
+        assert any(
+            event["event"] == "progress"
+            and event.get("phase") == "download"
+            and event.get("state") == "running"
+            and event.get("completed_bytes") == 0
+            and event.get("transferred_bytes") == 8
+            for event in events
+        )
         assert str(output) not in controller.output.getvalue()
         if weight_bytes == 4:
+            assert messages[-1] == "Preparing model…"
             assert result == 0 and output.is_dir()
             assert len(list(output.glob("*.gguf"))) == 4
             assert json.loads((output / "native-source.json").read_bytes())["weight_bytes"] == 4
@@ -432,6 +505,7 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
                 "state": "complete",
                 "completed_bytes": 4,
                 "total_bytes": 4,
+                "transferred_bytes": 8,
             }
             # Desktop reserves completion until its own publication checks pass.
             assert controller.install_progress["conversion"]["state"] == "running"

@@ -1,4 +1,4 @@
-//! Architecture-specific execution for GLM5-Next, Qwen4-Exp and Recursive Flint.
+//! Architecture-specific execution for GLM5-Next, Qwen4-Exp, Flint and Ripple.
 //!
 //! These models carry distinct recurrent state, sparse attention and residual
 //! streams. Qwen3.8 also admits the typed Uzu converted architecture extension.
@@ -7,6 +7,9 @@ pub mod activity;
 pub mod finite_guard;
 pub mod flint;
 pub mod glm;
+pub mod guided_admission;
+mod image;
+pub use image::PreparedHybridImage;
 #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
 mod glm_exl3;
 #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
@@ -16,10 +19,12 @@ mod glm_metal;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod lily;
 pub mod math;
+mod memory;
 pub mod profile;
 pub mod qwen;
 #[cfg(feature = "metal")]
 mod qwen_metal;
+pub mod ripple;
 mod uzu;
 #[cfg(feature = "metal")]
 mod weight_metal;
@@ -33,6 +38,8 @@ use tokenizers::Tokenizer;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("native hybrid image request cancelled")]
+    Cancelled,
     #[error("invalid native hybrid model: {0}")]
     Invalid(&'static str),
     #[error("unsupported native hybrid model: {0}")]
@@ -206,11 +213,15 @@ fn extend_eos(
 pub fn recognizes(path: &Path) -> Result<bool> {
     let value = config(path)?;
     Ok(value.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE)
-        || matches!(value.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp" | "flint")))
+        || matches!(
+            value.get("model_type").and_then(Value::as_str),
+            Some("glm5_next" | "qwen4_exp" | "flint" | "ricursive")
+        ))
 }
 
 enum Forward {
     Flint(flint::FlintModel),
+    Ripple(ripple::RippleModel),
     Glm(glm::GlmModel),
     #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
     GlmExl3(Box<glm_exl3::GlmExl3Model>),
@@ -231,6 +242,11 @@ fn glm_exl3_checkpoint(config: &Value) -> bool {
 fn mixed_precision_checkpoint(config: &Value) -> bool {
     config.get("model_type").and_then(Value::as_str) == Some("qwen4_exp")
         && (config.pointer("/lily/format").and_then(Value::as_str) == Some("qwen4_exp-affine-v1")
+            || (config.pointer("/text_config/ple_storage/manifest").and_then(Value::as_str)
+                == Some("ple_manifest.json")
+                && config.pointer("/quantization/mode").and_then(Value::as_str) == Some("affine")
+                && config.pointer("/quantization/bits").and_then(Value::as_u64) == Some(4)
+                && config.pointer("/quantization/group_size").and_then(Value::as_u64) == Some(64))
             || (config.pointer("/ngram_table/file").and_then(Value::as_str) == Some("ngram_table.bin")
                 && config.pointer("/ngram_table/bits").and_then(Value::as_u64) == Some(4)
                 && config.pointer("/ngram_table/group_size").and_then(Value::as_u64) == Some(32)
@@ -245,6 +261,7 @@ pub struct Model {
     vocab_size: usize,
     max_context: u32,
     eos: Vec<u32>,
+    image_artifact: Option<image::artifact::ImageArtifact>,
 }
 
 impl Model {
@@ -258,7 +275,7 @@ impl Model {
         path: &Path,
         with_mtp: bool,
     ) -> Result<Self> {
-        Self::load_with_policy(path, with_mtp, false)
+        Self::load_with_policy(path, with_mtp, false, false)
     }
 
     /// Explicit source-bound native profile or private validation stage. The
@@ -268,7 +285,16 @@ impl Model {
         path: &Path,
         with_mtp: bool,
     ) -> Result<Self> {
-        Self::load_with_policy(path, with_mtp, Self::native_decode_stage_available())
+        Self::load_with_policy(path, with_mtp, Self::native_decode_stage_available(), false)
+    }
+
+    /// Load the original-format Qwen tower explicitly. Converted text exports
+    /// and other hybrid architectures cannot acquire image capability here.
+    pub fn load_with_image_support(
+        path: &Path,
+        with_mtp: bool,
+    ) -> Result<Self> {
+        Self::load_with_policy(path, with_mtp, false, true)
     }
 
     pub const fn native_decode_stage_available() -> bool {
@@ -293,11 +319,20 @@ impl Model {
         path: &Path,
         with_mtp: bool,
         native_decode_stage: bool,
+        with_images: bool,
     ) -> Result<Self> {
         let _ = native_decode_stage;
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
-        let _ = with_mtp;
+        let _ = (with_mtp, with_images);
         let outer = config(path)?;
+        if with_images && !mixed_precision_checkpoint(&outer) {
+            return Err(Error::Unsupported("retained original-format Qwen image tower required"));
+        }
+        let image_artifact = if with_images {
+            Some(image::artifact::ImageArtifact::admit(path)?)
+        } else {
+            None
+        };
         if outer.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE) {
             return Self::load_uzu(path);
         }
@@ -376,7 +411,10 @@ impl Model {
         } else if mixed_precision_checkpoint(&outer) {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             {
-                let model = lily::LilyModel::load_with_mtp(path, with_mtp)?;
+                let model = lily::LilyModel::load_with_options(path, with_mtp, with_images)?;
+                if with_images {
+                    model.validate_image_tokenizer(&tokenizer)?;
+                }
                 if model.vocab_size() != vocab_size || model.position() != 0 {
                     return Err(Error::Invalid("mixed precision metadata mismatch"));
                 }
@@ -393,19 +431,113 @@ impl Model {
             let weights = weights::Weights::open(path)?;
             let forward = match outer.get("model_type").and_then(Value::as_str) {
                 Some("flint") => Forward::Flint(flint::FlintModel::new(weights, &outer)?),
+                Some("ricursive") => Forward::Ripple(ripple::RippleModel::new(weights, &outer)?),
                 Some("glm5_next") => Forward::Glm(glm::GlmModel::new(weights, &outer)?),
                 Some("qwen4_exp") => Forward::Qwen(qwen::QwenModel::new(weights, &outer)?),
                 _ => return Err(Error::Unsupported("architecture")),
             };
             (forward, max_context)
         };
+        if let Some(artifact) = &image_artifact {
+            artifact.unchanged(path)?;
+        }
         Ok(Self {
             forward,
             tokenizer,
             vocab_size,
             max_context,
             eos,
+            image_artifact,
         })
+    }
+
+    pub fn supports_images(&self) -> bool {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return self.image_artifact.is_some() && model.supports_images();
+        }
+        false
+    }
+
+    pub fn image_artifact_identity(&self) -> Option<&crate::engine::vision::VisionArtifactIdentity> {
+        self.image_artifact.as_ref().map(|artifact| &artifact.identity)
+    }
+
+    pub fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
+        self.image_artifact.as_ref().map(|artifact| (artifact.source.as_str(), Some(artifact.revision.as_str())))
+    }
+
+    pub fn image_family_profile(&self) -> Option<(&'static str, u32)> {
+        self.image_artifact.as_ref().map(|_| (image::artifact::PROFILE, 1))
+    }
+
+    pub fn prepare_image(
+        &self,
+        encoded: &[u8],
+    ) -> Result<PreparedHybridImage> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.prepare_image(encoded);
+        }
+        let _ = encoded;
+        Err(Error::Unsupported("native image preparation unavailable"))
+    }
+
+    /// Full request-owned vision storage, including host upload copies.
+    pub fn image_request_memory_bytes(
+        &self,
+        image: &PreparedHybridImage,
+    ) -> Option<usize> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            let grid = image.grid();
+            return model.image_request_memory_bytes((grid[1] as usize).checked_mul(grid[2] as usize)?);
+        }
+        let _ = image;
+        None
+    }
+
+    pub fn prepare_image_prompt(
+        &self,
+        tokens: &[u32],
+        image: &PreparedHybridImage,
+        context_capacity: u32,
+    ) -> Result<Box<[u32]>> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.prepare_image_prompt(tokens, image, context_capacity as usize);
+        }
+        let _ = (tokens, image, context_capacity);
+        Err(Error::Unsupported("native image prompt unavailable"))
+    }
+
+    /// Consume an expanded image prompt and return its first target logits.
+    /// Image state never participates in generation prefix reuse.
+    pub fn prefill_image(
+        &mut self,
+        tokens: &[u32],
+        image: PreparedHybridImage,
+    ) -> Result<Vec<f32>> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.prefill_image(tokens, image);
+        }
+        let _ = (tokens, image);
+        Err(Error::Unsupported("native image prefill unavailable"))
+    }
+
+    pub fn prefill_image_controlled<F: FnMut() -> bool>(
+        &mut self,
+        tokens: &[u32],
+        image: PreparedHybridImage,
+        should_cancel: F,
+    ) -> Result<Vec<f32>> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.prefill_image_controlled(tokens, image, should_cancel);
+        }
+        let _ = (tokens, image, should_cancel);
+        Err(Error::Unsupported("native image prefill unavailable"))
     }
 
     fn load_uzu(path: &Path) -> Result<Self> {
@@ -450,6 +582,7 @@ impl Model {
                 vocab_size,
                 max_context,
                 eos,
+                image_artifact: None,
             })
         }
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
@@ -467,6 +600,139 @@ impl Model {
     pub fn max_context_length(&self) -> u32 {
         self.max_context
     }
+
+    /// Allocation admission uses the loaded execution family and cache policy.
+    /// The returned context remains bounded by the model's declared capacity.
+    pub fn automatic_context_length(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+    ) -> Option<u32> {
+        self.automatic_context_length_with_prefix(input_tokens, maximum, memory_budget_bytes, true)
+    }
+
+    pub fn automatic_context_length_with_prefix(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+        capture_prefix: bool,
+    ) -> Option<u32> {
+        self.automatic_context_length_for_request(input_tokens, maximum, memory_budget_bytes, capture_prefix, false)
+    }
+
+    pub fn automatic_context_length_for_request(
+        &self,
+        input_tokens: u32,
+        maximum: u32,
+        memory_budget_bytes: usize,
+        capture_prefix: bool,
+        greedy_without_mtp: bool,
+    ) -> Option<u32> {
+        crate::encodable_block::memory::automatic_context(
+            input_tokens,
+            maximum.min(self.max_context),
+            memory_budget_bytes,
+            |context| {
+                self.generation_memory_bytes_for_request(context, input_tokens, capture_prefix, greedy_without_mtp)
+                    .map(crate::encodable_block::memory::MemoryEstimate::state)
+            },
+        )
+    }
+
+    pub fn supports_automatic_context_planning(&self) -> bool {
+        self.request_memory_bytes(2.min(self.max_context), 1).is_some()
+    }
+
+    /// Release only per-request owners which cannot participate in prefix
+    /// reuse, before the caller samples current OS headroom. Persistent native
+    /// recurrent/cache owners and retained prefix snapshots are preserved.
+    pub fn prepare_request_memory(&mut self) -> Result<bool> {
+        match &mut self.forward {
+            Forward::Ripple(model) => Ok(model.prepare_request_memory()),
+            Forward::Qwen(model) => model.prepare_request_memory(),
+            _ => Ok(false),
+        }
+    }
+
+    /// Additional state and transient workspace for generation. Persistent
+    /// family owners are charged only when they need allocation or growth.
+    pub fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        self.generation_memory_bytes(context_tokens, input_tokens, true)
+    }
+
+    /// Exact scoring does not capture a generation prefix or reserve output.
+    pub fn scoring_memory_bytes(
+        &self,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        let additional_device_readout = match &self.forward {
+            Forward::Flint(_) => cfg!(feature = "metal"),
+            // Ripple's request allowance includes graph/scalar device output.
+            Forward::Ripple(_) => false,
+            Forward::Glm(model) => model.additional_scoring_device_readout(),
+            Forward::Qwen(model) => model.additional_scoring_device_readout(),
+            // These backends retain/prepay their device readout buffers.
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(_) => false,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(_) => false,
+        };
+        self.request_state_memory_bytes(input_tokens, input_tokens, false)?
+            .checked_add(memory::scoring_host_workspace(self.vocab_size, additional_device_readout)?)
+    }
+
+    pub fn generation_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        capture_prefix: bool,
+    ) -> Option<usize> {
+        self.generation_memory_bytes_for_request(context_tokens, input_tokens, capture_prefix, false)
+    }
+
+    /// Only greedy requests with MTP disabled omit stochastic sampler arrays.
+    /// Count-only/legacy callers must retain the conservative default above.
+    pub fn generation_memory_bytes_for_request(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        capture_prefix: bool,
+        greedy_without_mtp: bool,
+    ) -> Option<usize> {
+        self.request_state_memory_bytes(context_tokens, input_tokens, capture_prefix)?.checked_add(
+            memory::host_workspace_for_request(context_tokens, input_tokens, self.vocab_size, greedy_without_mtp)?,
+        )
+    }
+
+    fn request_state_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        capture_prefix: bool,
+    ) -> Option<usize> {
+        if input_tokens == 0 || context_tokens < input_tokens || context_tokens > self.max_context {
+            return None;
+        }
+        let state = match &self.forward {
+            Forward::Flint(model) => model.request_memory_bytes(context_tokens)?,
+            Forward::Ripple(model) => model.request_memory_bytes(context_tokens)?,
+            Forward::Glm(model) => model.request_memory_bytes(context_tokens, input_tokens, capture_prefix)?,
+            Forward::Qwen(model) => model.request_memory_bytes(context_tokens)?,
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            // The bridge's loader bills all device phases at its installed
+            // full context, including MTP and prefix-copy peak, before load.
+            Forward::GlmExl3(_) => 0,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.request_memory_bytes(context_tokens, input_tokens)?,
+        };
+        Some(state)
+    }
     pub fn eos_token_ids(&self) -> &[u32] {
         &self.eos
     }
@@ -477,6 +743,7 @@ impl Model {
     pub fn reset(&mut self) {
         match &mut self.forward {
             Forward::Flint(model) => model.reset(),
+            Forward::Ripple(model) => model.reset(),
             Forward::Glm(model) => model.reset(),
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
             Forward::GlmExl3(model) => model.reset(),
@@ -516,6 +783,7 @@ impl Model {
         } else {
             match &mut self.forward {
                 Forward::Flint(model) => model.step(token),
+                Forward::Ripple(model) => model.step(token),
                 Forward::Glm(model) => model.step(token),
                 #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
                 Forward::GlmExl3(model) => model.step(token),
@@ -537,6 +805,38 @@ impl Model {
         result
     }
 
+    /// Reserve the complete admitted request span before prompt execution.
+    /// Lily's scratch and state caches then use the same growth as admission.
+    pub fn reserve_generation_context(
+        &mut self,
+        tokens: u32,
+    ) -> Result<()> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.reserve_generation_context(tokens as usize);
+        }
+        let _ = tokens;
+        Ok(())
+    }
+
+    /// Initial readout with control checks between synchronous prefill passes.
+    pub fn step_controlled(
+        &mut self,
+        token: u32,
+        mut before_pass: impl FnMut() -> Result<()>,
+    ) -> Result<Vec<f32>> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            let result = model.step_controlled(token, &mut before_pass);
+            if result.is_err() {
+                self.reset_after_error();
+            }
+            return result;
+        }
+        before_pass()?;
+        self.step(token)
+    }
+
     /// Advance a prefill prefix without projecting vocabulary logits that the
     /// caller will discard. The final input token must still use `step`.
     pub fn ingest(
@@ -548,6 +848,7 @@ impl Model {
         } else {
             match &mut self.forward {
                 Forward::Flint(model) => model.ingest(token),
+                Forward::Ripple(model) => model.ingest(token),
                 Forward::Glm(model) => model.ingest(token),
                 #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
                 Forward::GlmExl3(model) => model.ingest(token),
@@ -811,6 +1112,23 @@ impl Model {
         }
         result
     }
+
+    pub fn step_greedy_controlled(
+        &mut self,
+        token: u32,
+        mut before_pass: impl FnMut() -> Result<()>,
+    ) -> Result<u32> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            let result = model.step_greedy_controlled(token, &mut before_pass);
+            if result.is_err() {
+                self.reset_after_error();
+            }
+            return result;
+        }
+        before_pass()?;
+        self.step_greedy(token)
+    }
     /// Continue an already validated greedy draw within one serialized request.
     /// Dropping the iterator drains submitted work before the model is reusable.
     pub fn greedy_decode(
@@ -828,6 +1146,30 @@ impl Model {
                 Err(Error::Unsupported("native greedy stream unavailable"))
             },
         }
+    }
+
+    /// Owner-thread maintenance while the generation worker waits for input.
+    /// Other backends retain their existing idle behavior.
+    pub fn idle_maintenance_interval(&self) -> Option<std::time::Duration> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward
+            && model.needs_idle_queue_maintenance()
+        {
+            return Some(std::time::Duration::from_millis(500));
+        }
+        None
+    }
+
+    /// Submit only an empty queue signal; caches, sampling and model positions
+    /// survive unchanged. Failures require the owning worker to exit/reload.
+    pub fn maintain_idle_queue(&self) -> Result<()> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward
+            && model.needs_idle_queue_maintenance()
+        {
+            return model.maintain_idle_queue();
+        }
+        Ok(())
     }
 
     /// The prefill chunk length when this backend can snapshot and resume a

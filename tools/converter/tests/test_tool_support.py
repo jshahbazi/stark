@@ -269,6 +269,7 @@ def validator_module():
         "cancelled_result",
         "unclosed_answer",
         "call_inside_thinking",
+        "repeated_call",
     ],
 )
 def test_qualification_checks_behavior_and_never_returns_model_content(failure):
@@ -290,7 +291,7 @@ def test_qualification_checks_behavior_and_never_returns_model_content(failure):
                     text = text.removeprefix("Synthetic reasoning</think>")
                 if failure == "native_error":
                     raise ValueError("private native diagnostic")
-            elif index == 2 and failure not in {
+            elif index in {2, 3} and failure not in {
                 "wrong_argument",
                 "truncated_call",
                 "native_error",
@@ -298,6 +299,12 @@ def test_qualification_checks_behavior_and_never_returns_model_content(failure):
             }:
                 assert "K7V3M9" in payload["rendered_prompt"] and "<|observation|>" in payload["rendered_prompt"]
                 text = "Synthetic reasoning</think>" + ("wrong" if failure == "wrong_result" else "K7V3M9")
+                if index == 2 and failure == "repeated_call":
+                    text = "Synthetic reasoning</think>" + OUTPUT.replace("synthetic", "alpha")
+                if index == 2:
+                    assert "Reply with only the exact lookup result" not in payload["rendered_prompt"]
+                else:
+                    assert "Reply with only the exact lookup result" in payload["rendered_prompt"]
             else:
                 text = "Synthetic reasoning</think>HELLO"
             if failure == "unclosed_answer" and index > 1:
@@ -310,7 +317,14 @@ def test_qualification_checks_behavior_and_never_returns_model_content(failure):
     worker = SyntheticWorker()
     checks = module.run_checks(worker, _ChatTemplate(source), {"prompt_template": source}, context=8192, maximum=2048)
     assert all(checks.values()) == (failure is None)
-    assert set(checks) == {"single_call_and_arguments", "tool_result_use", "ordinary_chat"}
+    assert set(checks) == {
+        "single_call_and_arguments",
+        "tool_result_use",
+        "autonomous_tool_result_use",
+        "ordinary_chat",
+    }
+    if failure == "repeated_call":
+        assert checks["tool_result_use"] and not checks["autonomous_tool_result_use"]
     assert all(type(v) is bool for v in checks.values())
     assert checks["ordinary_chat"] is (failure != "unclosed_answer")
 
@@ -374,7 +388,12 @@ def test_qualification_seals_inputs_closes_worker_and_writes_only_private_aggreg
     monkeypatch.setattr(
         module,
         "run_checks",
-        lambda *args, **kwargs: {"single_call_and_arguments": True, "tool_result_use": True, "ordinary_chat": True},
+        lambda *args, **kwargs: {
+            "single_call_and_arguments": True,
+            "tool_result_use": True,
+            "autonomous_tool_result_use": True,
+            "ordinary_chat": True,
+        },
     )
     monkeypatch.setattr(
         "sys.argv", ["validator", "--model", str(tmp_path), "--worker", str(executable), "--output", str(output)]
@@ -425,7 +444,7 @@ def test_qualification_end_to_end_uses_native_renderer_and_real_private_worker_p
         else OUTPUT.replace("synthetic", "alpha")
     )
     prefix = "Synthetic reasoning</think>" if fixture == "glm53" else ""
-    replies = [prefix + call, prefix + "K7V3M9", prefix + "HELLO"]
+    replies = [prefix + call, prefix + "K7V3M9", prefix + "K7V3M9", prefix + "HELLO"]
     executable = tmp_path / "synthetic-worker"
     executable.write_text(
         f"#!{sys.executable}\n"

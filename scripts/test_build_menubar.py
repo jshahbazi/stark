@@ -1154,6 +1154,13 @@ class ConverterPackageTests(unittest.TestCase):
                 "model_inventory.py",
                 "model_catalog.py",
                 "guided_models.py",
+                "recommendation_leaderboard.py",
+                "recommendation_leaderboard.json",
+                "_third_party/whatmodel/README.md",
+                "_third_party/whatmodel/DATA-LICENSE.md",
+                "_third_party/whatmodel/LICENSE",
+                "_third_party/whatmodel/licenses/SHA256SUMS",
+                "_third_party/whatmodel/licenses/CC-BY-SA-4.0.txt",
                 "model_removal.py",
                 "vision_runtime_qualifications.json",
             ):

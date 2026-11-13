@@ -5,6 +5,7 @@ pub mod decoder;
 pub mod dflash;
 pub mod embedding;
 pub mod embedding_table;
+pub mod gemma4_assistant;
 pub mod linear;
 pub mod memory;
 pub mod mixer;

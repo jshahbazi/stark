@@ -20,6 +20,8 @@ repository root:
 
 Add ``--reuse boundary`` for backends that resume only from a snapshot at the
 previous prompt's last full prefill chunk (native hybrid models).
+Add ``--vision`` to qualify text prefix reuse on an image-capable artifact,
+including invalidation across a completed synthetic image request.
 The pinned raw EXL3/FP8 pack also requires ``--download-receipt RECEIPT``;
 its complete original pack stays unchanged and its chat codec is adapted in RAM.
 """
@@ -35,9 +37,12 @@ import secrets
 import select
 import stat
 import statistics
+import struct
 import subprocess
 import sys
+import tempfile
 import time
+import zlib
 from pathlib import Path
 
 from stark_convert import hybrid_prepare, template_runtime
@@ -287,14 +292,20 @@ class Worker:
     """One private worker process; replies are parsed in memory only."""
 
     def __init__(
-        self, binary, model, *, prefix_cache=False, timeout=900, progress=False
+        self, binary, model, *, prefix_cache=False, timeout=900, progress=False, vision=False
     ):
         self.timeout = timeout
+        self.model = Path(model)
+        self.vision = vision
+        self.staging = tempfile.TemporaryDirectory(prefix="stark-prefix-vision-") if vision else None
+        self.staging_root = Path(self.staging.name).resolve() if self.staging else None
         started = time.monotonic()
         self.cancel_read, self.cancel_write = os.pipe()
         command = [binary, "--model-path", model] + (
             ["--prefix-cache"] if prefix_cache else []
         )
+        if self.staging_root is not None:
+            command.extend(["--vision-staging-root", str(self.staging_root)])
         try:
             self.process = subprocess.Popen(
                 command,
@@ -307,6 +318,8 @@ class Worker:
         except BaseException:
             os.close(self.cancel_read)
             os.close(self.cancel_write)
+            if self.staging is not None:
+                self.staging.cleanup()
             raise
         os.close(self.cancel_read)
         report_stage(progress, phase="worker_spawned", prefix_cache=prefix_cache)
@@ -354,7 +367,7 @@ class Worker:
         self.process.stdin.flush()
 
     def request(self, payload, *, cancel_after_first_progress=False):
-        if payload.get("operation") == "generate":
+        if payload.get("operation") in {"generate", "prepare_image", "generate_image"}:
             self.request_id += 1
             payload = {**payload, "request_id": self.request_id}
         self.send(payload)
@@ -374,6 +387,42 @@ class Worker:
     def tokenize(self, text):
         return self.request({"operation": "tokenize", "text": text})["token_ids"]
 
+    def image_transaction(self, context):
+        """Complete one tiny private synthetic image request; retain no image or reply content."""
+        if self.staging_root is None:
+            raise ValueError("image transaction requires a vision worker")
+        codec, template = load_template(self.model)
+        prompt = template.render(
+            messages=[{"role": "user", "content": [
+                {"type": "image"}, {"type": "text", "text": "Describe the image briefly."}
+            ]}], tools=None, add_generation_prompt=True, enable_thinking=False,
+            bos_token=codec.get("bos_token") or "", eos_token=codec.get("eos_token") or "",
+        )
+        image = synthetic_png()
+        identifier = secrets.token_hex(16)
+        path = self.staging_root / identifier
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(image)
+            prepared = self.request({"operation": "prepare_image", "rendered_prompt": prompt,
+                                     "image": {"id": identifier, "media_type": "image/png", "byte_length": len(image)},
+                                     "context_tokens": context, "max_new_tokens": 1})
+            if "error" in prepared:
+                return prepared
+            prepared_id = prepared.get("prepared_id")
+            if not isinstance(prepared_id, str) or re.fullmatch(r"[0-9a-f]{32}", prepared_id) is None:
+                return {"error": "invalid_image_preparation_output"}
+            result = self.request({"operation": "generate_image", "prepared_id": prepared_id,
+                                   "context_tokens": context, "max_new_tokens": 1,
+                                   "sampling": {"mode": "greedy"}})
+            if "error" not in result and (type(result.get("output_tokens")) is not int
+                                           or result["output_tokens"] != 1):
+                return {"error": "invalid_image_generation_output"}
+            return result
+        finally:
+            path.unlink(missing_ok=True)
+
     def close(self):
         # EOF requests native cancellation before waiting for the worker.
         if self.cancel_write is not None:
@@ -389,6 +438,20 @@ class Worker:
             self.process.kill()
             self.process.wait()
         self.process.stdout.close()
+        if self.staging is not None:
+            self.staging.cleanup()
+
+
+def synthetic_png():
+    """Encode a deterministic 32×32 RGB fixture using only the standard library."""
+    def chunk(kind, payload):
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload)))
+
+    rows = b"".join(b"\0" + b"".join(bytes((x * 7, y * 7, (x + y) * 3)) for x in range(32))
+                    for y in range(32))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 32, 32, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
 
 
 def tool_definition(rng, index):
@@ -672,6 +735,8 @@ def act(worker, label, ids, context, scope):
     if label == "reset_cache":
         return worker.request({"operation": "reset_cache"}), False
     if label == "image_operation":
+        if worker.vision:
+            return worker.image_transaction(context), False
         return worker.request({"operation": "discard_image"}), False
     if label == "cancellation":
         payload = {
@@ -814,7 +879,7 @@ def run_exactness(args, template, codec, parser):
     started = time.monotonic()
     report(args, phase="cached")
     with Worker(
-        args.candidate, args.model, prefix_cache=True, progress=args.progress
+        args.candidate, args.model, prefix_cache=True, progress=args.progress, vision=args.vision
     ) as cached:
         settings = cached.ready.get("prefix_cache") or {}
         if settings.get("enabled") is not True:
@@ -851,7 +916,7 @@ def run_exactness(args, template, codec, parser):
     for name, binary in (("fresh", args.candidate), ("baseline", args.baseline)):
         report(args, phase=name)
         started = time.monotonic()
-        with Worker(binary, args.model, progress=args.progress) as worker:
+        with Worker(binary, args.model, progress=args.progress, vision=args.vision) as worker:
             references[name], _ = run_cases(worker, steps, args, session.tools, parser)
         phase_seconds[name] = round(time.monotonic() - started, 1)
     checks, invalidations = [], []
@@ -880,7 +945,7 @@ def run_exactness(args, template, codec, parser):
     # Reuse must not survive a worker restart, even with the same host scope.
     report(args, phase="restart")
     with Worker(
-        args.candidate, args.model, prefix_cache=True, progress=args.progress
+        args.candidate, args.model, prefix_cache=True, progress=args.progress, vision=args.vision
     ) as restarted:
         reply = generate(
             restarted,
@@ -918,6 +983,8 @@ def run_exactness(args, template, codec, parser):
                 and (after["reused_input_tokens"] > 0) == (label == "tokenize_decode")
                 and (
                     label != "cancellation" or observed[label] == "generation_cancelled"
+                ) and (
+                    label != "image_operation" or not args.vision or observed[label] == "ok"
                 ),
             }
         )
@@ -930,6 +997,7 @@ def run_exactness(args, template, codec, parser):
         "chunk_tokens": chunk,
         "reuse_rule": args.reuse,
         "mtp_drafts": mtp_drafts,
+        "image_invalidation": "completed_image_generation" if args.vision else "discard_without_prepared_image",
         "session_turn_tokens": [len(ids) for ids in turns],
         "phase_seconds": phase_seconds,
         "checks": checks,
@@ -952,7 +1020,7 @@ def run_timing(args, template, codec):
         for name, binary, cache in order if block % 2 == 0 else order[::-1]:
             report(args, phase="timing", worker=name, block=block + 1)
             with Worker(
-                binary, args.model, prefix_cache=cache, progress=args.progress
+                binary, args.model, prefix_cache=cache, progress=args.progress, vision=args.vision
             ) as worker:
                 if turns is None:
                     _, turns = build_turns(
@@ -1047,6 +1115,8 @@ def timing_passed(timing):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True, type=Path)
+    parser.add_argument("--vision", action="store_true",
+                        help="Load image-capable artifacts and check completed image-request invalidation")
     parser.add_argument("--download-receipt", type=Path,
                         help=("Verified pinned EXL3 flat-pack receipt; "
                               "checks file identities before and after execution"))
@@ -1103,7 +1173,8 @@ def main():
     started = time.time()
     report(args, phase="artifact_hashing")
     record = {
-        "schema": "stark-prefix-cache-validation-v4",
+        "schema": "stark-prefix-cache-validation-v5",
+        "artifact_mode": "vision-language" if args.vision else "text",
         "harness_sha256": file_sha256(Path(__file__)),
         "host": {"machine": platform.machine(), "macos": platform.mac_ver()[0]},
         "model": {
@@ -1117,6 +1188,7 @@ def main():
                     "chat_template.jinja",
                     "native-source.json",
                     "conversion.json",
+                    "preprocessor_config.json",
                 )
                 if (args.model / name).is_file()
             },

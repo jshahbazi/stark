@@ -20,6 +20,7 @@ from ._build_metadata import ConversionError, file_hash, open_regular
 from .generation_eta import progress_frame
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .mtp import mtp_capabilities, resolve_mtp
+from .reasoning import assistant_message, prompt_opens_reasoning, reasoning_options
 from .resource_budget import REQUEST_BUDGET_MIB, WIRE_BYTES
 from .template_runtime import (
     IsolatedTemplate,
@@ -31,8 +32,11 @@ from .template_runtime import (
 from .tool_protocols import runtime_template_source
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
+    LILY_FAMILY_PROFILE,
+    VISION_MODEL_TYPES,
     family_image_input_contract,
     image_input_contract,
+    model_image_family,
     qualified_image_worker,
     supported_image_family,
 )
@@ -101,12 +105,32 @@ class ChatBudgetUnavailable(ChatError):
     """An older worker cannot yet plan automatic memory-bounded execution."""
 
 
-def automatic_generation_budget(worker, input_tokens, context_tokens, *, cancelled=None):
-    """Ask the loaded backend to size unknown-capacity execution after tokenization."""
+def automatic_generation_budget(
+    worker,
+    input_tokens,
+    context_tokens,
+    *,
+    context_capacity_known=False,
+    cancelled=None,
+    input_token_ids=None,
+    cache_scope=None,
+    mtp_drafts=None,
+    sampling=None,
+):
+    """Ask the loaded backend to admit execution after tokenization."""
     if not getattr(worker, "generation_budget", False):
         raise ChatBudgetUnavailable("Update Stark's worker to enable automatic output for this model.")
+    request = {"operation": "plan_generation", "input_tokens": input_tokens, "context_tokens": context_tokens}
+    if getattr(worker, "generation_budget_inputs", False) is True:
+        if input_token_ids is not None:
+            request["input_token_ids"] = input_token_ids
+        if cache_scope is not None:
+            request["cache_scope"] = cache_scope
+        if mtp_drafts is not None:
+            request["mtp_drafts"] = mtp_drafts
+        request["sampling"] = sampling or {"mode": "greedy"}
     reply = worker.request(
-        {"operation": "plan_generation", "input_tokens": input_tokens, "context_tokens": context_tokens},
+        request,
         **({"cancelled": cancelled} if cancelled is not None else {}),
     )
     if reply.get("error") == "context_planning_unavailable":
@@ -119,7 +143,7 @@ def automatic_generation_budget(worker, input_tokens, context_tokens, *, cancell
         or type(maximum) is not int
         or maximum != context - input_tokens
         or maximum > getattr(worker, "max_new_tokens", 0xFFFFFFFE)
-        or reply.get("context_capacity_known") is not False
+        or reply.get("context_capacity_known") is not context_capacity_known
         or reply.get("budget_kind") != "memory"
     ):
         raise ChatError("Invalid automatic execution budget; restart the model.")
@@ -131,7 +155,15 @@ class ChatImageError(ChatError):
 
     def __init__(self, code):
         self.code = code
-        super().__init__("The image request could not be prepared or executed.")
+        message = {
+            "invalid_image_request": "This image could not be decoded or exceeds the model's image limits.",
+            "context_overflow": (
+                "The image and conversation exceed the context budget. Start a new chat or reduce the output limit."
+            ),
+            "invalid_image_reference": "The image attachment is no longer available. Remove it and attach it again.",
+            "image_read_failed": "The image attachment could not be read. Remove it and attach it again.",
+        }.get(code, "The image request could not be prepared or executed.")
+        super().__init__(message)
 
 
 class _ChatTemplate(IsolatedTemplate):
@@ -218,17 +250,51 @@ def load_template(model, *, expected_hashes=None):
         source = codec["prompt_template"]
         if codec.get("type") != "ChatCodecConfig" or not isinstance(source, str) or not source:
             raise ValueError
-        if config.get("type") == "Qwen35VisionLanguageModelConfig":
+        image_family = model_image_family(config, model)
+        if config.get("type") in VISION_MODEL_TYPES or image_family is not None:
             # Only the recognized program may reach Jinja compilation. An
             # immutable sandbox does not bound arbitrary template computation.
             template_hashes = {
                 "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
                 "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
             }
+            if config.get("type") == "Gemma4VisionLanguageModelConfig":
+                descriptor = config.get("artifact_contract", {}).get("family", {})
+                template_hashes = (
+                    {"ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"}
+                    if descriptor
+                    in (
+                        {"id": profile, "version": 1}
+                        for profile in ("gemma4-31b-bf16-v1", "gemma4-12b-bf16-v1", "gemma4-26b-a4b-bf16-v1")
+                    )
+                    else {"0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"}
+                )
+            elif config.get("type") == "Gemma3VisionLanguageModelConfig":
+                template_hashes = {"7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"}
+            elif image_family == {"profile": LILY_FAMILY_PROFILE, "version": 1}:
+                from . import qwen38_retained
+
+                template_hashes = qwen38_retained.SUPPORTED_TEMPLATE_HASHES
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
-            if supported_image_family(family) and family["profile"] == CONFIGURED_FAMILY_PROFILE:
+            if (
+                config.get("type") == "Qwen35VisionLanguageModelConfig"
+                and supported_image_family(family)
+                and family["profile"]
+                in {
+                    CONFIGURED_FAMILY_PROFILE,
+                    "qwen35-dense-affine-merged-v3",
+                    "qwen35-moe-affine-merged-v4",
+                    "qwen35-moe-bf16-merged-v5",
+                }
+            ):
                 template_hashes.add("a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715")
+                if family["profile"] in {
+                    "qwen35-dense-affine-merged-v3",
+                    "qwen35-moe-affine-merged-v4",
+                    "qwen35-moe-bf16-merged-v5",
+                }:
+                    template_hashes.add("c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041")
             copied = _chat_file(model / "chat_template.jinja", 256 * 1024)
             if (
                 len(data) > 1024 * 1024
@@ -277,12 +343,15 @@ class Worker:
         self.media = None
         self.prefix_cache = False
         self.prefix_chunk_tokens = None
+        self.generation_budget_inputs = False
         command = [str(executable), "--model-path", str(model)]
         try:
             config = read_model_config(Path(model))
         except (OSError, ValueError, ConversionError):
             config = {}
-        if isinstance(config, dict) and config.get("type") == "Qwen35VisionLanguageModelConfig":
+        if isinstance(config, dict) and (
+            config.get("type") in VISION_MODEL_TYPES or model_image_family(config, Path(model)) is not None
+        ):
             from .image_checks import ImageCheckError, preflight_family_memory
 
             try:
@@ -291,9 +360,9 @@ class Worker:
                 raise ChatError(str(error)) from None
             self.media = PrivateMediaStore()
             command.extend(["--vision-staging-root", str(self.media.root)])
-        else:
-            # The worker enables reuse only for models whose state can rewind.
-            command.append("--prefix-cache")
+        # Readiness enables reuse only when the loaded decoder can restore an
+        # exact text prefix, including text requests on image-capable models.
+        command.append("--prefix-cache")
         read_fd, self.cancel_fd = os.pipe()
         os.set_blocking(self.cancel_fd, False)
         telemetry_fd = None
@@ -467,6 +536,7 @@ class Worker:
                 if type(maximum_output) is int and maximum_output > 0:
                     self.max_new_tokens = maximum_output
                 self.generation_budget = reply.get("generation_budget") == "memory-context-v1"
+                self.generation_budget_inputs = reply.get("generation_budget_inputs") == "token-ids-v1"
                 self.mtp = mtp_capabilities(reply)
                 self.prefix_cache = prefix_cache_enabled(reply)
                 self.prefix_chunk_tokens = reply["prefix_cache"]["chunk_tokens"] if self.prefix_cache else None
@@ -586,12 +656,18 @@ class Worker:
                 ):
                     raise ChatError("Invalid worker stream; restart the model.")
                 progress = accepted
-                if on_progress is not None and (control is None or not control.is_set()):
-                    try:
-                        on_progress(accepted)
-                    except OSError:
-                        control = control or threading.Event()
-                        control.set()
+                if control is None or not control.is_set():
+                    if (
+                        payload.get("operation") == "generate_image"
+                        and getattr(self, "_image_deadline", None) is not None
+                    ):
+                        self._renew_image_deadline()
+                    if on_progress is not None:
+                        try:
+                            on_progress(accepted)
+                        except OSError:
+                            control = control or threading.Event()
+                            control.set()
                 continue
             if (
                 on_delta is None
@@ -602,21 +678,26 @@ class Worker:
                 raise ChatError("Invalid worker stream; restart the model.")
             chunks.append(reply["text"])
             if control is None or not control.is_set():
+                if payload.get("operation") == "generate_image" and getattr(self, "_image_deadline", None) is not None:
+                    self._renew_image_deadline()
                 try:
                     on_delta(reply["text"])
                 except OSError:
                     control = control or threading.Event()
                     control.set()
 
+    def _renew_image_deadline(self):
+        # Only validated generation activity renews an active transaction. Image
+        # verification still has an absolute cap, and cancellation cannot renew.
+        deadline = time.monotonic() + self.timeout
+        verification_deadline = getattr(self, "_verification_deadline", None)
+        self._image_deadline = min(deadline, verification_deadline) if verification_deadline is not None else deadline
+
     def request_image(self, prompt, image, options, on_delta=None, cancelled=None, *, on_progress=None):
         """Own one complete prepare/generate/discard transaction on the serialized worker."""
         with self._transaction_lock:
             self._last_image_tokens = None
-            deadline = time.monotonic() + self.timeout
-            verification_deadline = getattr(self, "_verification_deadline", None)
-            self._image_deadline = (
-                min(deadline, verification_deadline) if verification_deadline is not None else deadline
-            )
+            self._renew_image_deadline()
             try:
                 return self._request_image(
                     prompt, image, options, on_delta=on_delta, cancelled=cancelled, on_progress=on_progress
@@ -899,6 +980,7 @@ def run_chat(args, worker):
     ):
         raise ChatError("Requested token limits exceed this worker's limits.")
     worker.generation_budget = ready.get("generation_budget") == "memory-context-v1"
+    streaming = ready.get("streaming") == "text-delta-v1"
     image = None
     if image_path is not None:
         if not context_capacity_known:
@@ -940,7 +1022,7 @@ def run_chat(args, worker):
                 messages=candidate,
                 tools=None,
                 add_generation_prompt=True,
-                enable_thinking=args.thinking,
+                **reasoning_options(codec, thinking=args.thinking),
                 bos_token=codec.get("bos_token") or "",
                 eos_token=codec.get("eos_token") or "",
             )
@@ -952,7 +1034,9 @@ def run_chat(args, worker):
                         "context_tokens": context,
                         "max_new_tokens": args.max_new_tokens or 0,
                         "sampling": {"mode": "greedy"},
+                        **({"stream": True} if streaming else {}),
                     },
+                    **({"on_delta": lambda _text: None} if streaming else {}),
                 )
             else:
                 tokens = worker.request({"operation": "tokenize", "text": prompt, "add_special_tokens": False})
@@ -965,10 +1049,18 @@ def run_chat(args, worker):
                 maximum = args.max_new_tokens
                 request_context = context
                 if maximum is None:
-                    if context_capacity_known:
+                    if context_capacity_known and not worker.generation_budget:
                         maximum = min(ready["max_new_tokens"], context - count)
                     else:
-                        request_context, maximum = automatic_generation_budget(worker, count, context)
+                        request_context, maximum = automatic_generation_budget(
+                            worker,
+                            count,
+                            context,
+                            context_capacity_known=context_capacity_known,
+                            input_token_ids=tokens.get("token_ids"),
+                            cache_scope=cache_scope if getattr(worker, "prefix_cache", False) else None,
+                            mtp_drafts=drafts,
+                        )
                 if maximum < 1 or count + maximum > context:
                     print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")
                     continue
@@ -983,7 +1075,11 @@ def run_chat(args, worker):
                     request["mtp_drafts"] = drafts
                 if getattr(worker, "prefix_cache", False) is True:
                     request["cache_scope"] = cache_scope
-                reply = worker.request(request)
+                if streaming:
+                    request["stream"] = True
+                    reply = worker.request(request, on_delta=lambda _text: None)
+                else:
+                    reply = worker.request(request)
             if not isinstance(reply.get("text"), str) or "error" in reply:
                 raise ChatError("Generation failed; chat closed.")
         except ChatError as error:
@@ -995,7 +1091,7 @@ def run_chat(args, worker):
                 continue
             raise
         print("Stark> " + terminal_text(reply["text"]) + "\n")
-        messages = [*candidate, {"role": "assistant", "content": reply["text"]}]
+        messages = [*candidate, assistant_message(reply["text"], initial_thinking=prompt_opens_reasoning(prompt))]
         if image is not None:
             image_attached = True
 
@@ -1008,14 +1104,21 @@ def main(argv=None):
     parser.add_argument("--system", help="System message (default: model metadata)")
     parser.add_argument("--context-tokens", type=int, help="Context budget (default: loaded model's maximum)")
     parser.add_argument("--max-new-tokens", type=int, help="Reply budget (default: all remaining context)")
-    parser.add_argument("--thinking", action="store_true", help="Enable reasoning for templates that support it")
+    parser.add_argument(
+        "--thinking", action="store_true", help="Enable reasoning where supported; GLM uses max effort (default: low)"
+    )
     mtp = parser.add_mutually_exclusive_group()
     mtp.add_argument(
         "--mtp", dest="mtp", action="store_true", help="Enable exact MTP when the loaded model supports it"
     )
     mtp.add_argument("--no-mtp", dest="mtp", action="store_false", help="Disable MTP (default)")
     parser.set_defaults(mtp=False)
-    parser.add_argument("--timeout", type=float, default=300, help="Worker reply timeout in seconds (default: 300)")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300,
+        help="Worker inactivity timeout in seconds; progress renews it (default: 300)",
+    )
     args = parser.parse_args(argv)
     if (
         (args.context_tokens is not None and args.context_tokens < 1)
@@ -1025,7 +1128,7 @@ def main(argv=None):
         parser.error("token limits and timeout must be positive and finite")
     worker = None
     try:
-        if read_model_config(args.model_path).get("type") != "Qwen35VisionLanguageModelConfig":
+        if read_model_config(args.model_path).get("type") not in VISION_MODEL_TYPES:
             load_template(args.model_path)
         print("Loading model...", file=sys.stderr)
         worker = Worker(args.worker, args.model_path, args.timeout)

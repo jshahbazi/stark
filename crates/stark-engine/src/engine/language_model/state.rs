@@ -4,8 +4,12 @@ use derive_more::Debug;
 use thiserror::Error;
 
 use crate::{
-    backends::common::Backend,
-    encodable_block::{dflash::DFlashState, sampling::PRng, transformer::TransformerState},
+    backends::common::{Backend, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context},
+    encodable_block::{
+        dflash::DFlashState,
+        sampling::PRng,
+        transformer::{TransformerPrefix, TransformerState},
+    },
     engine::language_model::LanguageModel,
 };
 
@@ -31,15 +35,43 @@ pub struct LanguageModelState<B: Backend> {
     pub(super) speculator_state: Option<DFlashState<B>>,
     pub(super) max_context_length: Option<u32>,
     pub(super) multimodal_failed: bool,
+    /// Image request marker independent of Qwen's spatial rotary delta.
+    pub(super) multimodal_prefilled: bool,
+    pub(super) text_prefix_capture_position: Option<usize>,
+    pub(super) text_prefix: Option<(usize, TransformerPrefix<B>)>,
+    /// One-shot proof that this exact state was restored before a suffix stream.
+    pub(super) text_prefix_restored_position: Option<usize>,
     #[cfg(test)]
     pub(crate) vision_prefill_logits_readback: Option<B::GlobalBuffer>,
     #[cfg(test)]
     pub(crate) vision_prefill_layer_readbacks: Option<(usize, Box<[B::GlobalBuffer]>)>,
+    #[cfg(test)]
+    pub(crate) validation_fail_after_completed_prefill: Option<usize>,
 }
 
 impl<B: Backend> LanguageModelState<B> {
+    /// A failed stream or cleanup invalidates this request's state and caches.
+    pub fn is_fenced(&self) -> bool {
+        self.multimodal_failed
+    }
+
+    pub fn resident_payload_bytes(&self) -> Option<usize> {
+        self.transformer_state.resident_payload_bytes()
+    }
+
+    pub(super) fn has_multimodal_context(&self) -> bool {
+        self.multimodal_prefilled || self.transformer_state.rotary_position_delta().is_some()
+    }
+
     pub fn tokens(&self) -> &[u64] {
         &self.tokens
+    }
+
+    /// A completed text-only prefill boundary retained for consecutive reuse.
+    pub fn text_prefix_position(&self) -> Option<usize> {
+        (!self.multimodal_failed && !self.has_multimodal_context())
+            .then(|| self.text_prefix.as_ref().map(|(position, _)| *position))
+            .flatten()
     }
 
     pub(crate) fn context_capacity(&self) -> Option<u32> {
@@ -55,6 +87,14 @@ impl<B: Backend> LanguageModelState<B> {
 #[derive(Debug, Error)]
 #[error("State cannot be rewound to this prefix")]
 pub struct LanguageModelRewindStateError;
+
+/// Guard rejection leaves the loaded instance usable. A failure after entering
+/// restoration also fences the public vision wrapper's loaded instance.
+#[derive(Debug)]
+pub enum TextPrefixRestoreError {
+    Invalid,
+    RestoreFailed,
+}
 
 #[derive(Debug, Error)]
 pub enum LanguageModelCreateEmptyStateError<B: Backend> {
@@ -111,16 +151,157 @@ impl<B: Backend> LanguageModel<B> {
             speculator_state,
             max_context_length,
             multimodal_failed: false,
+            multimodal_prefilled: false,
+            text_prefix_capture_position: None,
+            text_prefix: None,
+            text_prefix_restored_position: None,
             #[cfg(test)]
             vision_prefill_logits_readback: None,
             #[cfg(test)]
             vision_prefill_layer_readbacks: None,
+            #[cfg(test)]
+            validation_fail_after_completed_prefill: None,
         })
     }
 
     /// Whether a completed state can be rewound for the next request.
     pub fn prefix_reuse_supported(&self) -> bool {
         self.speculator.is_none() && self.decoder.prefix_reuse_supported()
+    }
+
+    /// Whether ordinary text requests can retain and restore a completed
+    /// prefill boundary, including decoders whose KV state cannot be rewound.
+    pub fn text_prefix_snapshot_supported(&self) -> bool {
+        self.speculator.is_none() && self.decoder.prefix_snapshot_supported()
+    }
+
+    /// Arm one non-final prefill chunk. The stream checks that the requested
+    /// boundary is reached before sampling and publishes only completed copies.
+    pub fn prepare_text_prefix_capture(
+        &self,
+        state: &mut LanguageModelState<B>,
+        position: usize,
+    ) -> Result<(), LanguageModelRewindStateError> {
+        if !Arc::ptr_eq(&self.model_identity, &state.model_identity)
+            || !self.text_prefix_snapshot_supported()
+            || state.speculator_state.is_some()
+            || state.multimodal_failed
+            || state.has_multimodal_context()
+        {
+            return Err(LanguageModelRewindStateError);
+        }
+        if position == 0 {
+            state.text_prefix_capture_position = None;
+            state.text_prefix = None;
+            return Ok(());
+        }
+        if !position.is_multiple_of(super::stream::PREFILL_CHUNK_TOKENS)
+            || state.max_context_length.is_none_or(|capacity| position >= capacity as usize)
+        {
+            return Err(LanguageModelRewindStateError);
+        }
+        if position == state.tokens.len() && state.text_prefix_position() == Some(position) {
+            state.text_prefix_capture_position = None;
+            return Ok(());
+        }
+        if position <= state.tokens.len() {
+            return Err(LanguageModelRewindStateError);
+        }
+        state.text_prefix_capture_position = Some(position);
+        state.text_prefix = None;
+        Ok(())
+    }
+
+    pub(crate) fn preflight_restored_text_stream(
+        &self,
+        input: &[u64],
+        state: &LanguageModelState<B>,
+        options: &super::stream::LanguageModelStreamOptions,
+    ) -> Result<(), super::stream::LanguageModelStreamError<B>> {
+        use super::stream::LanguageModelStreamError;
+        if !Arc::ptr_eq(&self.model_identity, &state.model_identity) {
+            return Err(LanguageModelStreamError::ForeignState);
+        }
+        if !self.text_prefix_snapshot_supported()
+            || state.multimodal_failed
+            || state.has_multimodal_context()
+            || state.last_output_token.is_some()
+            || state.tokens.is_empty()
+            || state.text_prefix_restored_position != Some(state.tokens.len())
+            || state.transformer_state.context_length() as usize != state.tokens.len()
+        {
+            return Err(LanguageModelStreamError::InvalidMultimodal);
+        }
+        if input.is_empty() {
+            return Err(LanguageModelStreamError::NoSeedToken);
+        }
+        if input.iter().any(|&token| token >= u64::from(self.sampling.vocab_size())) {
+            return Err(LanguageModelStreamError::InvalidToken);
+        }
+        options
+            .sampling_method
+            .validate(self.sampling.vocab_size())
+            .map_err(|_| LanguageModelStreamError::InvalidSampling)?;
+        if state.max_context_length.is_some_and(|capacity| state.tokens.len() + input.len() >= capacity as usize) {
+            return Err(LanguageModelStreamError::ContextOverflow);
+        }
+        Ok(())
+    }
+
+    /// Restore this loaded model's completed, chunk-aligned text snapshot.
+    /// A failed backend restoration invalidates the state; callers must drop it.
+    pub fn restore_text_prefix(
+        &self,
+        state: &mut LanguageModelState<B>,
+        position: usize,
+        capacity: Option<u32>,
+        seed: u64,
+    ) -> Result<(), TextPrefixRestoreError> {
+        if !Arc::ptr_eq(&self.model_identity, &state.model_identity)
+            || !self.text_prefix_snapshot_supported()
+            || state.speculator_state.is_some()
+            || state.multimodal_failed
+            || state.has_multimodal_context()
+            || state.max_context_length != capacity
+            || position == 0
+            || !position.is_multiple_of(super::stream::PREFILL_CHUNK_TOKENS)
+            || position > state.tokens.len()
+        {
+            return Err(TextPrefixRestoreError::Invalid);
+        }
+        let Some((saved_position, prefix)) = state.text_prefix.as_ref() else {
+            return Err(TextPrefixRestoreError::Invalid);
+        };
+        if *saved_position != position || !state.transformer_state.can_restore_prefix(prefix) {
+            return Err(TextPrefixRestoreError::Invalid);
+        }
+        let restored = (|| {
+            let mut command = self
+                .engine
+                .context
+                .create_command_buffer(Some("text prefix restore"), None)
+                .map_err(|_| TextPrefixRestoreError::RestoreFailed)?;
+            if !state.transformer_state.restore_prefix(prefix, &mut command) {
+                return Err(TextPrefixRestoreError::RestoreFailed);
+            }
+            command
+                .end_encoding()
+                .submit()
+                .wait_until_completed()
+                .map_err(|_| TextPrefixRestoreError::RestoreFailed)?;
+            Ok(())
+        })();
+        if restored.is_err() {
+            state.multimodal_failed = true;
+            state.text_prefix = None;
+            return restored;
+        }
+        state.tokens.truncate(position);
+        state.last_output_token = None;
+        state.prng = PRng::new(seed);
+        state.text_prefix_capture_position = None;
+        state.text_prefix_restored_position = Some(position);
+        Ok(())
     }
 
     /// Prepare a completed request state for a new prompt that shares its

@@ -62,6 +62,10 @@ pub(crate) struct PrefixEntry<S> {
 }
 
 impl<S> PrefixEntry<S> {
+    pub(crate) fn context_tokens(&self) -> u32 {
+        self.context_tokens
+    }
+
     pub(crate) fn new(
         state: S,
         scope: CacheScope,
@@ -104,6 +108,10 @@ pub(crate) struct BoundaryEntry<S> {
 }
 
 impl<S> BoundaryEntry<S> {
+    pub(crate) fn context_tokens(&self) -> u32 {
+        self.context_tokens
+    }
+
     pub(crate) fn new(
         state: S,
         scope: CacheScope,
