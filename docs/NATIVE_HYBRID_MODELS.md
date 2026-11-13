@@ -1,4 +1,4 @@
-# Native GLM-5.3-Flash, Qwen3.8-Flash-Next and Flint
+# Native GLM-5.3-Flash, Qwen3.8-Flash-Next, Flint and Ripple
 
 Stark has a separate native Rust/Metal forward path for `glm5_next`,
 `qwen4_exp` and `flint`. It reads their prepared quantized GGUF or MLX
@@ -8,6 +8,10 @@ readout and sampled-generation controls are recorded in the Uzu-format study.
 There is no Sushi, llama.cpp, MLX, Python or Transformers inference process in
 this execution path. Python is used to prepare download metadata and by the
 optional reference validators.
+
+Ripple-65B Preview uses a separate custom `ricursive` native text path. Its
+preparation, precision policy and artifact-specific qualification are described
+in [Ripple setup and limits](RIPPLE.md).
 
 The optional [GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) links a
 pinned MLX core into the generation worker. Its separate pack, native build,
@@ -23,6 +27,8 @@ The preparation command pins these sources:
 | `qwen38-mixed` | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, revision `b2c422f3c643e36f04227a64d61796b44a4b1029` | 106,195,031,237 bytes, 98.90 GiB |
 | `qwen38-lily-q4-xl` | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83` | 106,905,155,192 bytes, 99.56 GiB |
 | `flint-int4` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | 22,568,912,600 bytes, 21.02 GiB |
+| `ripple-q8` | `AtomicChat/Ripple-65B-Preview-GGUF`, Q8_0, revision `57066fdb2348a53f2261f096e0a793b9554b4106` | 68,840,113,568 bytes, 64.11 GiB |
+| `ripple-q4-k-m` | `AtomicChat/Ripple-65B-Preview-GGUF`, standard Q4_K_M, revision `df550a7178a87bbfb6ee2bdbd37603c553d536ee` | 38,798,820,576 bytes, 36.13 GiB |
 
 See [Recursive Flint](FLINT.md) for its architecture, installation command,
 precision policy and validation. The GLM/Qwen-specific execution details below
@@ -90,6 +96,11 @@ existing F32 Qwen graph, whose [prefix-reuse disposition](GENERATION.md#prefix-r
 is `fresh-per-request` with `prefix_cache.supported: false`. That family also
 seeds the pinned Lily Q4-XL source through the typed Uzu text converter, with its
 separate artifact-specific reuse qualification.
+Source builds containing the new workers also offer **Model Catalog →
+Ripple-65B Preview** with prepared Q8_0 and standard Q4_K_M text checkpoints.
+Support is conditional on the individual artifact checks and runtime memory
+admission; see [Ripple setup and limits](RIPPLE.md). Ripple does not currently
+support prefix reuse, Decision scoring or image input.
 
 The app validates each prepared native source identity before registering the
 managed folder; loading and execution remain separate checks. Native downloads

@@ -20,6 +20,11 @@ changing the pages. Run the repository policy check before committing.
 
 ## Content
 
+- Ripple-65B Preview appears in the technical page's Text model list and the
+  documentation page, with the pinned Q4_K_M and Q8_0 downloads and a link to the
+  native support guide. Copy identifies the tested M5 Max 128 GB host and requires
+  a source build containing Ripple support.
+
 - The homepage introduces the app, shows its three product screenshots, gives a
   short setup path and explains the OpenWork/OpenCode connections and local
   processing. The new beginner flow offers General Work → OpenWork or Coding →

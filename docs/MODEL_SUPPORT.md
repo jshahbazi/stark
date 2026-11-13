@@ -6,6 +6,16 @@ tab in the menu bar app's **Manage Models** window consume that registry. A fami
 entry describes implemented paths and constraints; a source preflight checks selected checkpoint
 metadata before weights are downloaded.
 
+**Model Catalog → Ripple-65B Preview** offers the pinned standard Q4_K_M
+(38,798,820,576 weight bytes) and Q8_0 (68,840,113,568 weight bytes) artifacts.
+Both use native Rust/Metal text inference for the custom `ricursive`
+architecture. Loading, generation and reference checks were run separately for
+each quantization on an M5 Max with 128 GB memory; runtime and context require
+memory beyond the weight download. Decision scoring, image input, tool calling
+and cross-request prefix reuse are not enabled. Use a source build containing
+Ripple support; this does not qualify earlier installed releases. See the
+[Ripple preparation, precision and validation guide](RIPPLE.md).
+
 The [native hybrid path](NATIVE_HYBRID_MODELS.md) loads prepared
 GLM-5.3-Flash UD-Q2_K_XL, Qwen3.8-Flash-Next mixed MLX and Flint checkpoints.
 Its helper pins native-source downloads for local import. **Model Catalog →
