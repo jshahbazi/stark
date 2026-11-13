@@ -100,7 +100,7 @@ struct ConnectionDetailsView: View {
                         HStack(alignment: .center, spacing: 8) {
                             Image(systemName: "circle.fill")
                                 .font(.system(size: 8)).foregroundStyle(.red).accessibilityHidden(true)
-                            Text("Model is not running - will not show up in OpenWork")
+                            Text("Model is not running - may not show up in tools")
                                 .font(.body).fixedSize(horizontal: false, vertical: true)
                         }
                         .phaseAnimator(reduceMotion ? [false] : [false, true]) { content, dimmed in
