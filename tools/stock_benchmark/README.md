@@ -104,3 +104,19 @@ It attributes external CPU activity by phase and requires fresh quiet admission
 after full warmup. Its stricter measurement guards, per-attempt receipts and
 accepted paired subsets must accompany any result. Regression checks run with
 `python -m unittest discover -s scripts -p test_clean_qwen.py`.
+
+## 2026-11-13 OpenTelemetry dependency refresh
+
+The vLLM benchmark requires OpenTelemetry API 1.45.2 or newer for
+[`GHSA-mf5v-w3w3-f6cg`](https://github.com/advisories/GHSA-mf5v-w3w3-f6cg).
+The regenerated lock updates only `opentelemetry-api` and `opentelemetry-sdk`
+from 1.45.1 to 1.45.2, plus their matching semantic conventions from 0.66b1 to
+0.66b2. Other locked packages and the vLLM wheel pins are unchanged.
+
+Locked resolution and the complete eight-lockfile OSV gate passed, with zero
+blocking advisories and the two existing Rust maintenance warnings retained.
+A focused Python 3.12.13 check imported the updated SDK, accepted valid trace
+context and rejected an oversized traceparent. The full vLLM environment was
+not synchronized, and no model or benchmark was run. Historical measurements
+keep their original dependency identities; this refresh does not qualify new
+benchmark results.
