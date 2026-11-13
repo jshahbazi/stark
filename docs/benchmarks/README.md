@@ -1,5 +1,10 @@
 # Benchmarks
 
+[Edge0 short observed speed, 2026-11-13](2026-11-13-edge0-observed-speed.md):
+matching 128-token inputs and 16-token outputs, median decode 6.35 tok/s with MTP
+off and 2.77 with one draft; two measured requests per route. Immediate local
+observation without host-isolation qualification; prior strict gates unchanged.
+
 Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Earlier archived comparison artifacts are under [archive/experiments](../archive/experiments/). Each report states where its source-bound aggregates are retained.
 
 Track each proposed optimization, failed approach and promotion decision in the

@@ -11,6 +11,10 @@ retains every per-group and measured-arm screen. Twelve warmups match, eight
 arms complete, three arms and one pair are eligible, and five groups defer.
 Zero complete groups qualify. Residual global decompressions and host activity
 still prevent performance qualification. MTP remains off by default.
+A separate [short observed-speed run](benchmarks/2026-11-13-edge0-observed-speed.md)
+reports 6.35 decode tok/s off and 2.77 with one draft, using matching 128-token
+inputs and 16-token outputs. These practical observations do not claim host
+isolation or complete the strict performance gate.
 Phase 5 performance qualification and phases 6–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
