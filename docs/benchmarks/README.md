@@ -12,6 +12,36 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Ripple attention decode diagnostic (2026-11-12).** A same-loaded-model,
+teacher-forced snapshot diagnostic at a 1,024-token prefix measures median
+native decode at 6.639
+tokens/s before and 7.796 tokens/s after the attention change; all four paired
+rounds favor the candidate, with a 16.3% median paired gain. This isolates
+decoding and does not measure worker end-to-end throughput or establish general
+performance. The
+[attention report](RIPPLE_Q4_ATTENTION_2026_11_12.md) records Q4/Q8 oracle
+qualification, exact fallback behavior and the rejected experiments.
+
+**Ripple-65B Q4_K_M grouped kernels (2026-11-12).** A saved-binary ABBA
+comparison measures median native-worker decode at 4.559 versus 7.460 tokens/s
+(1.64x), with identical quantized weights and generated-token hashes. Four warm
+requests per arm are short and unscreened, and host drift was observed. The
+[kernel report](RIPPLE_Q4_KERNELS_2026_11_12.md) records reference checks,
+component selection and evidence scope. It supersedes timing observations in
+the [initial Q4 report](RIPPLE_Q4_K_M_2026_11_12.md); earlier numerical evidence
+remains source-bound.
+
+**Ripple-65B native GPU graph (2026-11-05 UTC).** A saved-binary comparison on
+the 128 GiB M5 Max measures median decode at 2.760 versus 6.040 tok/s (2.19x)
+with identical Q8 weights and generated-token hashes. Warm ten-token prefill
+measures 3.438 versus 1.544 seconds. Four requests per arm are short and
+unscreened; the candidate arm includes unsigned and signed worker cohorts. The
+[GPU report](RIPPLE_65B_GPU_2026_11_05.md) records reference checks, source
+identities and bounded memory admission. It supersedes timing observations in
+the [initial Ripple report](RIPPLE_65B_NATIVE_2026_11_04.md) for this workload;
+earlier validation evidence remains preserved. These local observations do not
+establish general performance.
+
 **Retained Lily image startup (2026-11-09).** The
 [startup/Playground record](2026-11-09-lily-image-startup.md) preserves a canceled
 baseline, a functionally passing but latency-rejected full-scan candidate, and

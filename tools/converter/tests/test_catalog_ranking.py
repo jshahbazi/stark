@@ -174,10 +174,12 @@ def test_scored_sources_are_inspected_and_reported_first(tmp_path):
 
 def test_score_does_not_prioritize_a_source_without_safetensors_or_change_admission(tmp_path):
     hub = ranked_hub(tmp_path)
-    hub.listing["maker/Big-70B"] = listed(["config.json", "model.gguf"])
+    # A GGUF-only listing is screened before inspection, so this source ships
+    # PyTorch weights instead.
+    hub.listing["maker/Big-70B"] = listed(["config.json", "pytorch_model.bin"])
     hub.repos["maker/Big-70B"][1].siblings = [
         SimpleNamespace(rfilename="config.json", size=10),
-        SimpleNamespace(rfilename="model.gguf", size=10),
+        SimpleNamespace(rfilename="pytorch_model.bin", size=10),
     ]
 
     first = catalog.family_catalog("qwen3", hub=hub, limit=2, physical_memory=128 * GIB)

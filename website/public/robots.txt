@@ -2,3 +2,5 @@ User-agent: *
 Allow: /
 
 Sitemap: https://starkengine.app/sitemap.xml
+
+Sitemap: https://starkengine.app/docs/sitemap-index.xml

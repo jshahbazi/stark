@@ -6,6 +6,16 @@ tab in the menu bar app's **Manage Models** window consume that registry. A fami
 entry describes implemented paths and constraints; a source preflight checks selected checkpoint
 metadata before weights are downloaded.
 
+**Model Catalog → Ripple-65B Preview** offers the pinned standard Q4_K_M
+(38,798,820,576 weight bytes) and Q8_0 (68,840,113,568 weight bytes) artifacts.
+Both use native Rust/Metal text inference for the custom `ricursive`
+architecture. Loading, generation and reference checks were run separately for
+each quantization on an M5 Max with 128 GB memory; runtime and context require
+memory beyond the weight download. Decision scoring, image input, tool calling
+and cross-request prefix reuse are not enabled. Use a source build containing
+Ripple support; this does not qualify earlier installed releases. See the
+[Ripple preparation, precision and validation guide](RIPPLE.md).
+
 The [native hybrid path](NATIVE_HYBRID_MODELS.md) loads prepared
 GLM-5.3-Flash UD-Q2_K_XL, Qwen3.8-Flash-Next mixed MLX and Flint checkpoints.
 Its helper pins native-source downloads for local import. **Model Catalog →
@@ -253,9 +263,15 @@ results already loaded. Failed pages can be retried at the same offset.
 
 The Hub listing itself carries each repository's head revision, task tags and
 file names. A source whose listing already shows another task, no model
-configuration or no weight file uses its position without any request of its
-own, so one page can pass up to 500 such positions and reach further down the
-family. Metadata files are bounded by the sizes in the pinned file inventory
+configuration, no weight file, or only GGUF weight files uses its position
+without any request of its own, so one page can pass up to 500 such positions
+and reach further down the family. The family catalogues do not offer GGUF
+downloads, and some publishers give every GGUF repository the same placeholder
+configuration, so a GGUF-only source would otherwise appear as an
+**Unavailable** row, sometimes under an unrelated family. A source that lists
+any other weight file (Safetensors, PyTorch or EXL3) beside its GGUF files is
+still inspected, and
+registered, pinned and native sources are never screened this way. Metadata files are bounded by the sizes in the pinned file inventory
 instead of a separate size request, and the Hub's parsed architecture rejects
 an unsupported head revision before its configuration is fetched.
 

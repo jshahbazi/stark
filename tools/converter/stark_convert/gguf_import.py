@@ -50,7 +50,7 @@ GGML_REFERENCE_REVISION = "1b70350c92563449576bcbbf552994b1d1ed847d"
 _MAX_COUNT = 2_000_000
 _MAX_STRING = 64 * 1024 * 1024
 _MAX_HEADER = 100_000_000
-_TYPES = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 8: ("Q8_0", 32, 34)}
+_TYPES = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 8: ("Q8_0", 32, 34), 12: ("Q4_K", 256, 144), 14: ("Q6_K", 256, 210)}
 _VALUES = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
 
 
@@ -133,8 +133,12 @@ def _value(stream: BinaryIO, kind: int):
     return value
 
 
-def read_gguf(path: Path) -> GGUFSource:
-    """Validate one little-endian GGUF v3 file, without reading weight payloads."""
+def read_gguf(path: Path, *, reference_k_quants: bool = False) -> GGUFSource:
+    """Validate a bounded GGUF v3 inventory without reading weight payloads.
+
+    K-block parsing is opt-in for the independent Ripple reference harness.
+    It does not extend the experimental Qwen3 importer's conversion contract.
+    """
     path = path.resolve()
     with path.open("rb") as stream:
         signature = _signature(os.fstat(stream.fileno()))
@@ -162,7 +166,7 @@ def read_gguf(path: Path) -> GGUFSource:
             if any(not 0 < value <= _MAX_COUNT for value in dimensions):
                 raise ConversionError("Invalid GGUF tensor dimensions")
             type_id, offset = _number(stream, "I"), _number(stream, "Q")
-            if type_id not in _TYPES:
+            if type_id not in _TYPES or (type_id in {12, 14} and not reference_k_quants):
                 raise UnsupportedConversion("Experiment supports Q8_0, F16 and F32 tensors only")
             kind, block_size, block_bytes = _TYPES[type_id]
             if dimensions[0] % block_size or offset % alignment:
@@ -281,6 +285,8 @@ def validate_metadata(source: GGUFSource, hf_source: Path, config: dict) -> None
 
 
 def build_import_plan(source: GGUFSource, hf_source: Path):
+    if any(tensor.kind not in {"F32", "F16", "Q8_0"} for tensor in source.tensors.values()):
+        raise UnsupportedConversion("Experiment supports Q8_0, F16 and F32 tensors only")
     config = read_json(hf_source / "config.json")
     validate_metadata(source, hf_source, config)
     layers = config.get("num_hidden_layers")

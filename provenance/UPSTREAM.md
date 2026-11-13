@@ -282,6 +282,59 @@ only by their private validators and never by native inference. The canonical
 validator uses the unchanged `tools/uv.lock`, while the MLX validation environment
 and its independent lock remain ignored under `runtime/`.
 
+Ripple's independent native Rust forward follows Ricursive Intelligence's
+Apache-2.0 `ricursiveAI/Ripple-65B-Preview` reference at revision
+`e27e171792f303d74c048184e8259ba663cfa0d5`. The inspected
+`modeling_ricursive.py` SHA-256 is
+`f83865ef643e273a6c9aecf1575e85c95ad01fd995b1e43c3c7a892765006bb3`;
+`configuration_ricursive.py` SHA-256 is
+`002cb3915be9685eb962d617623bec14d45b5d6b5d46e689fac98a3b38cb6cf6`.
+The original license is retained in `LICENSE.ripple-reference` and included
+with distribution notices. Native execution uses Stark's matrix kernels and
+does not execute the reference Python. The optional validation tools import
+only the hash-pinned reference sources. Q8_0 GGUF weights are pinned separately
+to `AtomicChat/Ripple-65B-Preview-GGUF` revision
+`57066fdb2348a53f2261f096e0a793b9554b4106`; its tensor mapping preserves Q/K
+row order and the split-half rotary convention. Existing ggml storage notices
+continue to cover the shared GGUF reader. See [Ripple support](../docs/RIPPLE.md)
+for the precision policy, preparation and validation scope.
+
+Ripple's Q4_K_M recipe pins the standard AtomicChat artifact at
+`df550a7178a87bbfb6ee2bdbd37603c553d536ee`, preserving its packed bytes and
+the existing official metadata revision above. The independent NumPy reference
+decoder implements the Q4_K/Q6_K layouts documented by MIT-licensed
+[GGML quantization source](https://github.com/ggml-org/llama.cpp/blob/1b70350c92563449576bcbbf552994b1d1ed847d/ggml/src/ggml-quants.c).
+It uses no external inference engine. Native execution reuses Stark's existing
+packed kernels; each quantized artifact requires its own validation record.
+The Q4_K_M production graph selects the existing packed block kernel only for
+Ripple's validated dense geometries, with an isolated cache. Artifact-specific
+checks are recorded in the [Q4_K_M report](../docs/benchmarks/RIPPLE_Q4_K_M_2026_11_12.md).
+Later Ripple K-quant tuning reuses the existing MIT-attributed GGML-derived
+grouped32 Q4_K and grouped16 Q6_K kernels, with separately qualified shape
+policies and caches. No packed weights change. The new row-reuse shader is a
+test-only experiment retaining its upstream attribution and is not selected in
+production. A separate exact-index attention optimization replaces a bounded
+ring modulo with one subtraction. The [kernel report](../docs/benchmarks/RIPPLE_Q4_KERNELS_2026_11_12.md)
+preserves the new numerical and saved-binary performance evidence.
+Subsequent independent Stark attention kernels in `ripple_prepare_parallel.metal`
+and `ripple_attention_parallel.metal` use the existing Apache-2.0 native
+reference contract. Ordered RMS/softmax reductions, SIMD score reductions and
+bounded weighted-output partitions have separate numerical checks. No new
+dependency or source model revision is introduced. The
+[attention report](../docs/benchmarks/RIPPLE_Q4_ATTENTION_2026_11_12.md) records
+257-position artifact references, bounded diagnostic snapshot comparisons and
+rejected test-only residency/envelope experiments. Existing upstream-derived
+matrix paths retain their copyright and default checked behavior.
+
+Ripple's F32 Metal graph and shape-scoped Q8 dispatch were introduced in
+`410bec76c195522b6478c329225d6cbfb84b9977`, with complete-inventory admission
+enforced in `1978a3b17df1ea83b4d7e1139ec2e91619f2acfc`. The control kernels
+independently implement the same pinned equations. Q8 dispatch reuses Stark's
+existing MIT-licensed ggml grouped kernel; its source header and
+`LICENSE.ggml-hybrid` remain intact. The separate
+[GPU validation record](../docs/benchmarks/RIPPLE_65B_GPU_2026_11_05.md)
+preserves the new numerical policy checks and measured worker comparison.
+
 Recursive Flint's native Rust forward contract follows the Apache-2.0
 `recursive-oss/rec` model module at revision
 `0e3150ca4262f572dee25c231d9ac7148414d2af`, path

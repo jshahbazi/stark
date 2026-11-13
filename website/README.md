@@ -1,24 +1,30 @@
 # Stark website
 
 A static product website built with HTML, CSS and a small browser script.
-There are no package dependencies, analytics, external fonts or model execution.
+The Markdown documentation uses Astro/Starlight. There are no analytics, external fonts or model execution.
 
 ## Build and preview
 
-From the repository root:
+Use Node.js 22.23.4 or newer and npm 9.6.5 or newer. From the repository root:
 
 ```sh
-node website/build.mjs
+npm --prefix website ci
+npm --prefix website run build
 uv run --project tools/converter --locked --python 3.13.13 python -m http.server 4173 --bind 127.0.0.1 --directory website/dist
 ```
 
 `website/public/` is the source; `website/dist/` is ignored build output. A
-standalone Site checkout builds with `node build.mjs`.
+standalone Site checkout also builds with `npm ci` and `npm run build`.
 
 Check the build, local links, keyboard navigation and narrow-screen layout when
 changing the pages. Run the repository policy check before committing.
 
 ## Content
+
+- Ripple-65B Preview appears in the technical page's Text model list and the
+  documentation page, with the pinned Q4_K_M and Q8_0 downloads and a link to the
+  native support guide. Copy identifies the tested M5 Max 128 GB host and requires
+  a source build containing Ripple support.
 
 - The homepage introduces the app, shows its three product screenshots, gives a
   short setup path and explains the OpenWork/OpenCode connections and local
@@ -73,3 +79,7 @@ mirrors only website files, builds and packages the static output, and publishes
 through Sites. Credentials are passed through the workflow's stdin and never
 stored. Preserve the Site's audience. See the
 [initial deployment record](../docs/archive/runs/WEBSITE_DEPLOYMENT_2026_10_21.md).
+
+## Documentation site
+
+The Markdown manual lives in `docs-site/src/content/docs/`. Run `npm ci` and `npm run build` from `website/` to build the full site, then `uv run --no-project --python 3.12.13 python scripts/check_docs.py` from that directory to check generated docs links and assets. `node build.mjs` alone copies static assets only. See [documentation maintenance](docs-site/README.md). Preserve newer published homepage changes when synchronizing with the Sites repository.

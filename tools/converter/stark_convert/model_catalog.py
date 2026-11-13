@@ -148,6 +148,10 @@ def _listing_rejects(repo, listing):
 
     Only outcomes that the per-repository checks reach from the same fields
     are settled here: another task, no model configuration, or no weights.
+    A source whose only weights are GGUF files is also dropped. Inspection
+    could only show it as unavailable for want of Safetensors weights, and
+    some publishers give every GGUF repository the same placeholder
+    configuration, which would list it under an unrelated family.
     """
     if isinstance(_field(listing, "tags"), list) and not _application_source(listing, repo):
         return True
@@ -159,9 +163,12 @@ def _listing_rejects(repo, listing):
         return False
     if "config.json" not in names and get_model(repo) is None:
         return True
-    return not any(
-        name.endswith(_WEIGHT_SUFFIXES) and not PurePosixPath(name).name.startswith("adapter_model") for name in names
-    )
+    weights = [
+        name
+        for name in names
+        if name.endswith(_WEIGHT_SUFFIXES) and not PurePosixPath(name).name.startswith("adapter_model")
+    ]
+    return all(name.endswith(".gguf") for name in weights)
 
 
 def _unsupported_quantization(config):
@@ -970,7 +977,7 @@ def family_catalog(
     from .catalog_cache import VerdictCache
     from .catalog_ranking import host_memory, reference_scores
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
-    from .native_catalog import FLINT_FAMILY_ID
+    from .native_catalog import FLINT_FAMILY_ID, RIPPLE_FAMILY_ID
     from .native_catalog import catalog_items as native_catalog_items
     from .native_catalog import unavailable_item as native_unavailable_item
 
@@ -984,7 +991,7 @@ def family_catalog(
     if type(planning) is not bool or type(deadline_seconds) not in (int, float) or not 0 < deadline_seconds <= 600:
         return report(family_id or "", "error", "The model catalogue request is invalid.")
 
-    native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID}
+    native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID, RIPPLE_FAMILY_ID}
     family = family_id if native_family else normalize_architecture(family_id)
     definition = next((item for item in support_matrix()["families"] if item["family_id"] == family), None)
     if definition is None or not any(
@@ -995,6 +1002,22 @@ def family_catalog(
         return report(family, "error", "The model catalogue request is invalid.")
     if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
         return report(family, "offline", "Connect to the internet to browse models.")
+    if family == RIPPLE_FAMILY_ID:
+        # Both quantizations share a repository but have distinct pinned
+        # revisions. Keep their exact artifact identities rather than collapsing
+        # them through the generic repository discovery map below.
+        choices = native_catalog_items(family)
+        items = choices[offset : offset + limit]
+        if on_item is not None:
+            for item in items:
+                on_item(item)
+        return report(
+            family,
+            "ready",
+            "Choose a model to download." if items else "No more models are available.",
+            items,
+            next_offset=offset + len(items) if offset + len(items) < len(choices) else None,
+        )
     if hub is None:
         import huggingface_hub
 
