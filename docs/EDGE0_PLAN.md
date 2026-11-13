@@ -345,10 +345,13 @@ qualification remain separate. MTP and prefix reuse remain unavailable.
 
 The foundation component and bounded actual-target checkpoint gates passed in
 [attempt `20261113-EDGE0-07`](model-experiments/2026-11-13-edge0-mtp.md).
-The executable head, complete target-plus-head lifecycle and MTP on/off
-qualification remain unfinished; capabilities stay unavailable.
-The head component is tracked separately in
+The private original-weight head component passed its independent numerical
+and bounded actual-artifact replay gates in
 [attempt `20261113-EDGE0-08`](model-experiments/2026-11-13-edge0-mtp-head.md).
+Combined target-plus-head restoration/rebinding, exact sampling integration,
+request lifecycle and MTP on/off qualification remain unfinished; worker
+capabilities stay unavailable. Current diagnostic head admission is one-shot;
+fresh target binding requires model reload until leasing/rebinding is implemented.
 
 - Load the draft layer from `mtp/` and adapt the existing Flash-Next head
   contract to the native Qwen graph. Implement the source's four-plane Q2 expert

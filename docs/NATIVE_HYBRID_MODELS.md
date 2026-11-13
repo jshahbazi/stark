@@ -40,6 +40,13 @@ The owner selected continuing on this native Qwen graph; the plan records that
 decision. The 512-token limit and unavailable MTP/prefix reuse apply to both
 execution policies.
 
+The private native MTP head has passed independent component and bounded
+actual-artifact replay checks in
+[attempt `20261113-EDGE0-08`](model-experiments/2026-11-13-edge0-mtp-head.md).
+It retains original four-plane Q2 expert bytes and F32 arithmetic. This does
+not enable worker MTP: complete target/head restoration and rebinding, request
+lifecycle, exact sampling and MTP on/off measurement remain unfinished.
+
 Inspect only its pinned small metadata and bounded skeleton header with:
 
 ```sh

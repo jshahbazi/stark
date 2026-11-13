@@ -6,7 +6,7 @@
 | --- | --- |
 | Registered / owner | 2026-11-13 / Codex, local non-commercial evaluation only |
 | Baseline | `e91a3fdf`, qualified Phase 4 and native MTP foundation |
-| State / result | Component implementation and independent oracle in progress; MTP unavailable |
+| State / result | Bounded head-component numerical and actual-artifact lifecycle gates passed; worker MTP remains unavailable |
 | Governing plan | [Phase 5](../EDGE0_PLAN.md#phase-5-mtp), native Qwen Metal graph |
 | Predecessor | [20261113-EDGE0-07](2026-11-13-edge0-mtp.md) |
 
@@ -100,6 +100,9 @@ Python style issues. Preserve that helper/test revision and `fixture-v1`
 privately. The corrected helper uses literal dictionaries, sorted imports and
 adjacent-pair iteration without changing equations, cases, seed or gates.
 Ruff and all 14 controls pass after cleanup.
+Oracle generation uses the private pinned source-text cache and intake Git-tree
+record; the native consumer uses the sealed fixture. These are qualification
+inputs and are not inference-worker dependencies.
 
 The replacement `fixture-v2` registers the corrected helper before evaluation.
 Its dense binary, dense manifest, expert bank, inputs and expected binary are
@@ -161,3 +164,99 @@ executable/recipe bindings. Timing includes test/build overhead and is not a
 performance measurement. This case establishes actual component integration
 and deterministic replay only, excluding exact MTP sampling, acceptance rate,
 external full-model/source numerical parity and production capability.
+
+## Results and disposition
+
+### Native and independent numerical controls
+
+At `151bb30c`, all 12 selected MTP operator/storage/admission tests passed,
+including four original-plane Q2 tests. The complete head matched 402 observed
+F64 stage rows and all ten routed rows across serial, catch-up and chained
+cases. Maximum stage-bound ratio was `0.005921221`; maximum independent Q2 down
+dot-bound ratio was `0.000041197`. Complete readout maximum absolute error was
+`6.276948e-8`, maximum relative L2 `1.447396e-7`, both below the unchanged gates.
+Fused GU scalar preactivations remain unobserved; their fused operator controls
+are separate evidence, not 402-stage claims.
+
+Synthetic head checkpoints passed seven bit-exact replay pairs plus cross-head,
+reset-stale, malformed-position and nonfinite-state refusal. At `6f8745a8`, ten
+traced/untraced readout pairs, ten wide-vector pairs and ten routing pairs were
+exact; both front-only pairs retained no readout. Thus the extra diagnostic
+trace passes did not change the tested untraced outputs. The new target-wide
+restoration-branch counterexample and overflow controls passed too.
+
+The full native CPU/Metal suite at `151bb30c` passed: 1,087 passed, 159 ignored,
+219.84 seconds, plus seven integration, two profile and three documentation
+tests. The later source adds two ignored qualification cases and documentation;
+the full run remains bound to its original revision. Production Rust 1.98.1
+Metal Clippy passed with `-D warnings`, CPU/grammar checking passed, and pinned
+formatting and repository policy passed. The 14 Python oracle controls and Ruff
+passed. No full-model external parity or generation quality is inferred.
+
+### Actual artifact integration
+
+The one-model component case passed at `6f8745a8`: 72 target advances and 40
+target readout rows, 31 front-only head cells and four complete head rows.
+All four target readout pairs, two head readout pairs and two dedicated-wide
+pairs were bit-exact. A target restore invalidated the abandoned residual at
+an otherwise valid head cell; the bound head fenced itself and rejected its
+old checkpoint. Sampling remained absent.
+
+Actual-head-1 passed these functional assertions with source pre/post bindings,
+but its helper did not seal the executable before launch. Preserve that result
+as source-bound evidence with a post-run executable seal. It does not satisfy
+the preregistered executable-binding requirement on its own.
+
+Actual-head-2 repeated the unchanged case by directly invoking the frozen native
+test binary. The replacement helper checks its SHA-256 before registration and
+launch, checks it again afterward, and rechecks all source hashes. It requires
+the exact named pass and all aggregate fields/types/counts. This strict repeat
+passed with exit code 0 and closes the component gate.
+
+The repeat began with 89,822,871,552 available bytes and peaked at 711,606,272
+sampled owned-process RSS bytes under the 48 GiB watchdog. Wall time was 19.30
+seconds including test startup/model load, below 600 seconds. These are process
+watchdog aggregates, not complete model/device memory or throughput. Immediately
+after reap, available memory was 60,720,906,240 bytes; normal process exit is not
+proof of synchronous GPU-page reclamation. Device allocation/residency claims
+retain the separate Phase 4 scope. The host remains the same 128 GiB Apple M5 Max.
+A later system sample reported 87,894,769,664 available bytes, above the
+next-process admission gate; this is not attribution of every reclaimed page.
+
+| Evidence binding | SHA-256 |
+| --- | --- |
+| Component source manifest at `151bb30c` | `7f60987ea4e0e36ca34fe94ab3ac2c13101a1041fc6e006b0c19b2b9ca510497` |
+| Component native binary at `151bb30c` | `854053a2d1f9e9f3fa3d92672ce2a34d6a3ad1611c30b39808b4fc30bd4b9ccb` |
+| Component registration | `795694c2add85eb68e76fed743ca06206ce71cd03849705a4bb0511aadd1fee0` |
+| F64 head result log | `d18798401c976e2fe86bb23b388b20ec0986533ddfc91727d88cd4d093681523` |
+| Full native result log | `ae9cdc1eec1448650c869e87fff7cac1249d99c9fe963798d6ce1fcc4dbd5243` |
+| Head checkpoint result log | `6a7efabb126d14e527964e4cce95aa0097d7258d71f4ebf6fcce132e3eb3e858` |
+| Tracing equivalence result log | `dfc4b4e789c254f4c054cf3dc070ce3e3aaf1d67a8e2d332e41fbe53edfddcd5` |
+| Actual/test source manifest at `6f8745a8` | `0104b5351ee115701c4365a06e5b0e9cdddbaa3e1b74dc410cbb4a78ca4e6db5` |
+| Actual frozen native binary | `62ccfaf1dec139b329eb56572f5977dcce43588714651fb4a88b8c27c51fc215` |
+| Actual-head-1 registration, incomplete executable binding | `2b2100875e811bfca160196657db0062f58175a9546f61bdfc02eee6d6373c4c` |
+| Actual-head-1 result | `4ba96bd5fcb70a393de437a4e74b28656251e2360dc9f8828c2b7d69d3dacc54` |
+| Actual-head-2 registration | `c4d149f3f27103129b7cda80ea4293da1a3372d7389849cdb824341364af6b06` |
+| Actual-head-2 result | `7ceef6005abb2205e16d8c6dbd1711f0c8896ccd5c9a6c56730df3f9b880dcef` |
+| Actual-head-2 log | `cd0eaab638374feeb1b59ab19f20e0648739127a5289b5ce24e0681c1e7ae6fa` |
+| Final component evidence receipt | `5f7adc631cde84bf579660724eab05298523f34e37de474df86022551ec2893a` |
+
+### Scoped conformance and remaining work
+
+| Obligation | Evidence | Disposition |
+| --- | --- | --- |
+| Original storage and source normalization | Checked descriptors/planes, pinned source trace, independent hand/mutation controls and F64 head stages | Conforms for the F32 candidate |
+| Complete bounded head and catch-up/chain semantics | 402 synthetic stage rows, exact routes and real 31-cell catch-up/two-cell replay | Conforms within the registered cases |
+| Finite, ownership and loaded-model branch safety | Q2 poison controls, scoped keys, dedicated residual owner and actual abandoned-branch refusal | Conforms |
+| Head K/V restoration | Synthetic zero/positive/failure controls and actual same-head replay | Conforms for component checkpoints |
+| Prospective diagnostic memory and private evidence | Complete mapped allowance, virtual-only admission and strict actual-head-2 resource/binding gates | Conforms within stated memory metrics |
+| Default target preservation | Optional wide copy only, actual four ordinary/wide target pairs exact, full native regression | Conforms within tested scope |
+| Combined controller, resource leasing/rebinding and exact sampling | Not connected; one-shot head admission requires reload after target binding changes | Pending before MTP promotion |
+| MTP on/off default/performance and prefix reuse | No sampling or benchmark run; 512-token cap, worker prefix integration/4,096-token gate unfinished | Pending later gates |
+
+Decision: adopt the private original-byte head component for continued local
+evaluation. Attempt 08's bounded component gate passes. Phase 5 remains
+incomplete: combined target/head/pending-wide state, resource leasing, request
+recovery/cancellation, real one-to-three-draft exact sampling and matched on/off
+measurement are still required. Worker MTP and prefix reuse remain unavailable;
+app/catalogue and distribution admission are unchanged.
