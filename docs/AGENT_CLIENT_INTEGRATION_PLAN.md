@@ -1,10 +1,12 @@
 # Codex, Claude and Pi integration plan
 
-Status: proposed implementation and qualification plan, reviewed against Stark
-`main` revision `a171326271f6c5eaf31f4ea49bc21905f7e7a813` on 2026-11-12.
-This document adds no runtime support. No Codex, Claude or Pi session was run
-against Stark for this work. Configuration examples below are proposed starting
-points; examples involving an adapter require that adapter to be implemented.
+Status: Pi manual foundation started on 2026-11-12 against Stark revision
+`0bdcf4b3b4cc316fd7fd4f4ec2f6bc3a18268420`. The original plan was reviewed
+against `a171326271f6c5eaf31f4ea49bc21905f7e7a813`. Client implementation lives in
+the separate [stark-agent-clients repository](https://github.com/jshahbazi/stark-agent-clients).
+No Codex, Claude or Pi session has been qualified against a live Stark model.
+Pi's pinned CLI has model-free fixture evidence only. Examples involving a
+Responses/Messages adapter still require that adapter to be implemented.
 
 ## Objective and delivery order
 
@@ -172,6 +174,30 @@ a direct manual pilot using Stark's current API. Official references:
 [configuration location](https://pi.dev/docs/latest/configuration) and
 [provider extensions](https://pi.dev/docs/latest/custom-provider).
 
+### Initial implementation status
+
+The separate integration repository pins Pi CLI and Pi AI 1.5.2. Its
+[manual setup helper and guide](https://github.com/jshahbazi/stark-agent-clients/blob/codex/pi-manual-pilot/README.md)
+inspect authenticated public model/capability metadata, require finite API
+limits and tool support, and create a new provider configuration with an
+environment credential reference. Optional JSON merging preserves the original
+file and rejects an existing `stark-local` entry. It installs nothing into the
+user's default Pi profile and adds no managed authentication.
+
+Twenty-two model-free checks pass, including the actual bundled Pi CLI loading
+generated configuration and completing read/edit/test/failed-tool rounds in a
+disposable workspace. Pi AI cancellation closes the fixture HTTP connection
+and permits a recovery request; native Stark and interactive CLI cancellation
+remain untested. The isolated pilot settings disable both provider and agent
+retries, plus automatic compaction. Context recovery needs separate qualification.
+
+Pi 1.5.2 reports a successful result with zero counters if upstream usage is
+missing. This is a characterized accounting gap, not a passing acceptance case.
+Keep the missing-accounting gate open until a client change or qualified guard
+fails closed. No artifact, backend, coding quality, native prefix reuse or live
+lifecycle result follows from these fixture checks. See the
+[foundation validation record](archive/runs/2026-11-12-pi-manual-foundation.md).
+
 ### Manual setup
 
 1. Start the intended model in Stark's Chat mode and enable the local API through
@@ -201,6 +227,7 @@ a direct manual pilot using Stark's current API. Official references:
         "supportsReasoningEffort": false,
         "supportsStrictMode": false,
         "supportsUsageInStreaming": true,
+        "supportsFinishReason": true,
         "maxTokensField": "max_tokens"
       },
       "models": [
@@ -656,6 +683,11 @@ or numerical equivalence. Report task success separately.
 
 ## Implementation milestones
 
+Current progress: milestone 0 has a pinned, inventoried Pi manual profile;
+other client contracts remain to be frozen. Milestone 1 has setup tooling and
+model-free evidence, with the full live artifact matrix and missing-accounting
+gate still open. Milestones 2–7 have no implementation from this work.
+
 | Milestone | Deliverable | Exit condition |
 | --- | --- | --- |
 | 0. Freeze contracts | Pin Stark/client versions; synthetic schemas and capability inventory | All unsupported fields and security boundaries have an explicit policy |
@@ -685,5 +717,5 @@ tool behavior, auth mode, cancellation, prefix-reuse policy and recovery cases
 have matching evidence. Unsupported client versions remain explicitly blocked.
 Update this plan and [Local API](LOCAL_API.md) as implementation lands; retain
 dated validation separately under [archive/runs](archive/runs/) or in the owning
-implementation PR. This documentation PR establishes the work required and
-does not mark any runtime milestone complete.
+implementation PR. The Pi foundation does not mark any runtime milestone
+complete.
