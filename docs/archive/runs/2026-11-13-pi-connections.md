@@ -9,22 +9,22 @@ choice. This record supplements the earlier [guarded CLI matrix](2026-11-13-pi-g
 
 | Item | Identity |
 | --- | --- |
-| Stark source | `d5557bce3c637480f3c8cd2a34ce43f6b88348d7`, clean at build; implementation `43ea570ed80d289b05d01de67790a0e96f687593` plus nvm correction |
-| Installed application | Development version `0.0.0`, build `20261113133359056674`; Developer ID team `S5BT2PRN5B`, hardened runtime and timestamp; no notarization/release claim |
-| Installed manifest SHA-256 | `3808288af4b9e3db084da8b4d09963a267c0abfe104475a8722f1a97cc623766` |
-| Client source | Separate integration repository `4455cbfe60f8a7b88e78d82cc0238c3dfec70ddd` |
-| Pi public resource lock | Seven exact Git-blob-matched files; lock SHA-256 `4cc5af1cd29647afdb6f258e9a0852bcc683d8d95525c14149ef2e60baa9f480` |
+| Stark source | `f9a247e6c87f1f52901a5a869cdcdbf2ce93aff7`, clean at build; initial implementation `43ea570ed80d289b05d01de67790a0e96f687593`, nvm correction `d5557bce3c637480f3c8cd2a34ce43f6b88348d7` |
+| Installed application | Development version `0.0.0`, build `20261113134611603911`; Developer ID team `S5BT2PRN5B`, hardened runtime and timestamp; no notarization/release claim |
+| Installed manifest SHA-256 | `4dce165998f711760c77d303701c6875933553b21ce39ab867e23e341647e15a` |
+| Client source | Separate integration repository `349f9ceb0b2a65f883d35f4a8bb83a63356e5cce` |
+| Pi public resource lock | Seven exact Git-blob-matched files; lock SHA-256 `3126381a2ada27639b9dacdaa03c98892f29d7d55d65425302308f0e8d267e39` |
 | Installed client / Node | Pi `1.5.2`; Node `26.13.0` through nvm |
-| Delivered generation worker | `2079ba5b1a89f8bc8f80463a3e3d55ebfe2be6a181fb32db2be1266e379805cb` |
-| Delivered template worker | `1e442b42d7c4178fe6073f925bc8e31e27417c0657049994ff3ad2533a02bd09` |
+| Delivered generation worker | `3a4acf235c148c8e3a76bc489c63e898c113f181cdbbbb77d5d6a2927d176774` |
+| Delivered template worker | `adf63f0a8b64ce4c934f57b5f4503c1b727cf5983d5ff79fab73a3902431b912` |
 | Live harness | SHA-256 `77ea14d22155fa6f64e8bdc712f919a25c545712063f7b9b4c92b359967293c1` |
-| Installed live aggregate | SHA-256 `5f3365355b32e7e951c1d7d491d2b1be8c49fb66afb6fe1a1ad41e89fe125ecc`; published with the integration record |
+| Installed live aggregate | SHA-256 `3a31aba2ad9d1b4c2a8b643533e17f158b2d66f1c2f5a01268a9a9134e32e2cb`; [immutable aggregate](https://github.com/jshahbazi/stark-agent-clients/blob/954a8ea334ccb85fbc51b7325b8db53582ec48c2/docs/runs/data/2026-11-13-pi-desktop-final-summary.json) |
 
 Build inputs reused the previous installed workers from source
 `9e33ab729581994269f56c64685e27a0bdd94c27`. Signing changes their complete-file
-hashes. Disposable signature-removed copies of the first candidate and previous
-workers matched byte-for-byte for generate, score and template. The final build
-reused those same code inputs. No native engine rebuild or precision change was
+hashes. Disposable signature-removed copies of both the first and final candidates
+matched the previous worker code for generate, score and template. No native
+engine rebuild or precision change was
 introduced. The builder overlays the current converter package and records its
 source/dependency hashes separately.
 
@@ -46,7 +46,7 @@ candidate manifest. The installed manifest matched the verified candidate.
 
 ## Model-free and installed checks
 
-- Integration suite: **50 passed, zero skipped**. Seven desktop tests include
+- Integration suite: **51 passed, zero skipped**. Eight desktop tests include
   configuration integrity, unsupported version refusal, redirected/oversized
   files, shell quoting, actual pinned Pi tool execution, stale metadata refusal,
   credential absence after execution, and real PTY hidden-input/environment checks.
@@ -68,8 +68,12 @@ Pi bin directories, without restoring inherited cloud/proxy/Node environment.
 The PTY fixture exercises a symlinked Pi with a sibling `fd`; it passes. Actual
 installed `fd 10.4.2` resolves in the corrected environment. The latest integration
 suite has 51 passing checks, including rejection of a self-consistent old
-profile whose source no longer matches the current bundle. Follow-up installed
-identity and real-model evidence are recorded below when sealed.
+profile whose source no longer matches the current bundle. Attempt
+`20261113-PIGUI-03` is the final installed build in the identity table; all eight
+fresh real-model checks passed again. Its actual GUI rejected the old profile,
+detected Pi, and saved a fresh current profile. Qwen3-4B was restored to Ready for
+the user. The existing Terminal window is preserved; reopening Pi from
+Connections picks up the companion-tool PATH fix.
 
 The first installed candidate passed eight model checks but its GUI did not find
 nvm Node. That failure is retained as attempt `20261113-PIGUI-01`. The final
@@ -83,7 +87,7 @@ non-TTY wrapper; the final test exercises the generated scripts with `expect`.
 
 ## Fresh real-model checks
 
-Attempt `20261113-PIGUI-02` ran the installed app's embedded Python/native backend,
+Attempt `20261113-PIGUI-03` ran the installed app's embedded Python/native backend,
 bundled desktop setup/launcher and actual installed Pi executable in official
 RPC mode. All **8/8** stages passed: backend startup, artifact registration, model
 load, authenticated discovery, intended Pi route, text/follow-up, four actual
