@@ -86,9 +86,26 @@ Qwen2 attention biases stay separate full-precision vectors beside the packed
 projection. Granite, Gemma 2 and Phi-3 reject quantized sources. The Qwen2 and
 Mistral MLX paths are not numerically qualified
 ([20261112-DENSE-MLX-01](archive/runs/2026-11-12-dense-mlx-qwen2-mistral.md)).
-Their F16-parameter sources run as BF16 and miss the stock-MLX logit gates, and
-a named chat-template list blocks conversion
+Their F16-parameter sources converted to the default BF16 miss the stock-MLX
+logit gates, and a named chat-template list blocks conversion
 ([20261112-DENSE-MLX-02/03](archive/runs/2026-11-12-dense-mlx-qwen2-mistral-qualification.md)).
+Converted with `--dtype float16`, the `mlx-community/Qwen2.5-0.5B-Instruct-4bit`
+export and a template-substituted diagnostic copy of the Mistral 7B v0.3 4-bit
+export pass the logit, greedy and scorer gates; the published Mistral revision
+still fails conversion
+([20261112-DENSE-MLX-04/05](archive/runs/2026-11-12-dense-f16-native-qualification.md)).
+
+Native F16 is a separate precision profile for the plain full-attention dense
+graph of Llama, Qwen2 and Mistral artifacts. The engine selects it only when
+the converted decoder stores F16 tensors and no BF16 tensor. Weights,
+embeddings, norms, biases and MLX affine scales and biases stay F16, and packed
+affine codes are unchanged. Activations, the KV cache and the readout are F16.
+Matrix products, affine dequantization, normalization, RoPE and attention
+accumulate in F32, as on the BF16 path. Query/key norms, sliding windows,
+soft caps, sinks, gates, per-layer embeddings, image embeddings, MTP heads and
+speculators have no F16 path: such an F16 artifact fails to load with an
+unsupported-precision error. BF16 artifacts keep their existing policy, and BF16
+qualification does not transfer to an F16 artifact or the reverse.
 
 Qwen3.5 MoE image conversion has two schema-3 profiles: affine-quantized source
 weights use `qwen35-moe-affine-merged-v4`, while complete BF16 source weights
@@ -437,8 +454,10 @@ validation still follows.
 
 The matrix also records conversion containers, source formats and output dtypes.
 Source precision and native output precision are distinct: supported text
-conversion can cast floating source weights to BF16. F16/F32 output remains
-conversion-only where the native engine requires BF16. Packed formats have their
+conversion can cast floating source weights to BF16. F16 output loads natively
+only for full-attention Llama, Qwen2 and Mistral text and Decision use (the
+native F16 profile above); other F16 output and all F32 output remain
+conversion-only. Packed formats have their
 own family/layout constraints. Classifier conversion coverage does not imply
 that the desktop Chat or Decision workflow implements classification.
 
@@ -553,7 +572,8 @@ separate decision artifact. Normal conversion still selects its output through
 use before weights. Without that optional mode, the CLI retains its separate
 conversion-only paths. Explicit classifier conversion and F16/F32 export remain
 possible even though they do not establish support for the desktop's application
-modes.
+modes. With `--support-mode text` or `decision`, F16 output passes preflight only
+for Llama, Qwen2 and Mistral metadata without an active sliding window.
 
 The report is JSON on standard output. `conditional`, `unsupported` and
 `inconclusive` are successful report outcomes with exit status 0; callers inspect

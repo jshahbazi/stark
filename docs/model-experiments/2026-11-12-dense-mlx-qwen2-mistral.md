@@ -334,3 +334,174 @@ Not measured, for the same reason as `-02`.
   catalogue, or are supported through the tool-template review. Then rerun on
   the published artifact under a new ID, with the precision follow-up from
   `-02`.
+
+## 20261112-DENSE-MLX-04: Qwen2.5 0.5B Instruct MLX 4-bit, native F16 profile
+
+The canonical aggregates for `-04`, `-05` and `-06` are in the
+[F16 run record](../archive/runs/2026-11-12-dense-f16-native-qualification.md).
+
+### Identity and state
+
+| Field | Value |
+| --- | --- |
+| Attempt ID / registered date / executed date / owner | `20261112-DENSE-MLX-04`; registered and executed 2026-11-12 US local time (2026-11-13 00:17-00:45 UTC); Claude agent session on branch `claude/engine-f16-weights` |
+| Kind | Precision (new native F16 activation profile), correctness and prefix reuse |
+| Attempt state | Completed |
+| Result and acceptance criterion | **Passed** all preregistered gates (unchanged from `-02`). `dense_parity` 5/5 cases, centered relative L2 0.37-0.61% against the 2% budget. Both 32-token greedy generations exact. Scorer max error 0.031. Prefix exactness 32/32 with invalidations as documented |
+| Evidence scope | Full-model numerical (logits, greedy, scorer) and lifecycle (prefix reuse) on Metal; no timing |
+| Promotion decision | Promoted within named scope: this exact F16 artifact (`e227c073...`) on the candidate build. Not a catalogue default; the app still converts to BF16 |
+| Disposition | Engine F16 profile adopted on branch `claude/engine-f16-weights`; not pushed, merged, released or installed |
+| Predecessor / related attempts / governing issue / PR | Successor to `-02` (BF16, failed); siblings `-05`, `-06`; no PR |
+
+### Hypothesis and change
+
+- **Problem:** `-02` showed that a BF16 conversion of this all-F16 source misses
+  the logit gate, and that the F16 conversion fails native load
+  (`model_load_failed`).
+- **Cause:** the engine fixed the dense activation dtype to BF16
+  (`language_model_from_config`), so `ParameterLeaf::validate` rejected the
+  first F16 tensor, the tied embedding's scale plane. The dense-path Metal
+  kernels and Rust routes also had no F16 variants.
+- **Change:** add an F16 activation profile. The precision policy is in the run
+  record; in short, F16 weights, scales, biases, activations, KV cache and
+  readout, with F32 accumulation. The profile is selected only for a decoder
+  with F16 and no BF16 storage, and admitted only for the plain dense graph.
+  BF16 artifacts keep their established policy.
+- **Thresholds:** fixed before the run in private preregistration `2a947504...`,
+  identical to `6a443af7...`.
+- **Reference:** stock MLX-LM on the exact downloaded checkpoint (source
+  profile, F16), the same fixture as `-02`; a rerun reproduced every reference
+  logit file byte-for-byte.
+
+### Artifact, source and environment
+
+| Field | Baseline | Candidate |
+| --- | --- | --- |
+| Model family, exact checkpoint and upstream revision | `mlx-community/Qwen2.5-0.5B-Instruct-4bit` @ `a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3`, BF16 conversion (`-02`) | Same source, `--dtype float16` conversion |
+| Format/quantization and config/weight/tokenizer/processor/template hashes | Output `bd822bbb...` | MLX affine 4-bit, group 64, tied head; output `e227c07354092ee96211a0068e279f81ee26cc553c6f73265247cc904967be04`, config `bb3b6784...`, tokenizer `9c5ae00e...` |
+| Backend, vendor revision and local patch provenance | Native Metal dense decoder at `e1e90517` | Same plus the F16 profile (this branch) |
+| Stark commit, dirty patch/runtime manifest and executable hash | `e1e90517`; `stark-generate` `ec741a1e...` | Gate runs: pre-commit build of the branch change, `stark-generate` `2fa9f4df...`, `stark-score` `c6205b40...`, `dense_parity` `26f85d0e...`. Engine commit `f203f004` rebuilt (`2adf7b0d...`, `b73e1fea...`, `224d9571...`) reproduces every logit hash, worker output and prefix row |
+| Toolchains, dependency lock hashes and build flags | Rust 1.98.1 release, locked | Same; `Cargo.lock` `f836a99b...` |
+| Weight, activation, accumulation, recurrent-state and KV precision | BF16-rounded scales and biases; BF16 activations and KV | F16 scales, biases, norms and embeddings; F16 activations, KV cache and readout; F32 accumulation; no recurrent state |
+| Selected kernel and materialization policies | Not instrumented | Generic F16 GEMV/GEMM (F32-accumulating), F16 attention kernels; BF16-only source, A8 and MXU-attention paths unused |
+| Hardware, physical RAM, OS/driver/Metal toolchain | Apple M5 Max, 128 GiB, macOS 26.7.2 (25G332) | Same; Metal 32023.883 |
+| Available headroom, observed peak memory and measurement method | Not measured | Not measured |
+
+### Workload and controls
+
+- **Image capability, image arms and MTP:** N/A, as in `-02`. The source is a
+  text-only `Qwen2ForCausalLM` with no draft-head tensors.
+- **Workload:** the same five logit cases, two 32-token greedy generations,
+  scorer cases and prefix-harness flags as `-02`.
+- **Run order:** serial. Another agent's Phi workload may have shared the GPU,
+  so no timing is used.
+
+### Attempt history and failures
+
+| Trial / source | What was attempted | Observation | Validity and disposition |
+| --- | --- | --- | --- |
+| Load reproduction | Earlier F16 artifact on the baseline build | `Invalid tensor ... @ F16, expected ... @ BF16` | Root cause |
+| Functional smoke | Candidate load and finite logits for synthetic IDs | Loaded, finite | Pre-registration smoke; no comparison |
+| Gate run | Stock MLX F16 reference versus Stark F16 | All three gates pass | Valid pass |
+
+### Correctness and lifecycle
+
+- **Logits:** centered relative L2 0.37-0.61%, KL at most 0.00014, and argmax
+  agrees in every case.
+- **Prefix reuse:** rewind reuse is exact on the F16 KV cache: follow-ups reuse
+  2,048 tokens and the maximum is 3,072.
+- **Tests:** the new engine and converter tests are listed in the run record.
+
+### Performance and memory
+
+Not measured (another workload may have shared the GPU).
+
+### Evidence, decision and limits
+
+- **Decision:** the F16 artifact of this export meets the dense gates on this
+  build. Do not transfer this result to BF16 conversions, 8-bit or larger
+  Qwen2.5/QwQ exports, or later builds.
+- **Untested:** catalogue and app routes, tool calling, timing, sampled
+  generation.
+
+## 20261112-DENSE-MLX-05: Mistral 7B Instruct v0.3 MLX 4-bit diagnostic copy, native F16 profile
+
+### Identity and state
+
+| Field | Value |
+| --- | --- |
+| Attempt ID / registered date / executed date / owner | `20261112-DENSE-MLX-05`; same session and dates as `-04` |
+| Kind | Precision, correctness and prefix reuse |
+| Attempt state | Completed |
+| Result and acceptance criterion | Diagnostic copy: logit gate **passed** 5/5 (0.08-0.34%), worker checks **passed** (both greedy-exact, scorer 0.023/0.031), prefix rows 32/32 exact but aggregate **failed** on the template follow-up rule, as in `-03`. Published revision: still **fails conversion** |
+| Evidence scope | Full-model numerical and lifecycle evidence on a diagnostic copy with byte-identical weights; no timing |
+| Promotion decision | Rejected for the published revision (not importable); diagnostic only for the copy |
+| Disposition | Experiment only |
+| Predecessor / related attempts / governing issue / PR | Successor to `-03`; siblings `-04`, `-06`; no PR |
+
+### Hypothesis and change
+
+The hypothesis and change are as in `-04`, on the `-03` diagnostic copy, which
+substitutes the source's own `default` template. The prefix harness uses the
+`tool_use` copy, as `-03` did. The thresholds and reference fixture are the
+same as `-03`; a reference rerun reproduced every logit file byte-for-byte.
+
+### Artifact, source and environment
+
+| Field | Baseline | Candidate |
+| --- | --- | --- |
+| Model family, exact checkpoint and upstream revision | `mlx-community/Mistral-7B-Instruct-v0.3-4bit` @ `a4b8f870474b0eb527f466a03fbc187830d271f5`, diagnostic copy, BF16 (`-03`) | Same copy, `--dtype float16` |
+| Format/quantization and config/weight/tokenizer/processor/template hashes | Output `4283ec25...` | Output `968cf950b4d7cba8ab2f0d1c97a708f0a1bfe2dc9f8f209aa6d8492e671d1a5a`, config `a8ced577...`, tokenizer `3e017710...`; `tool_use` copy config `ca215e8a...`, same output hash |
+| Remaining rows | As in `-04` | As in `-04` |
+
+### Workload and controls
+
+The workload and controls are as in `-03`, with prompt lengths of 16 and 20
+tokens. Image capability and MTP are N/A.
+
+### Attempt history and failures
+
+| Trial / source | What was attempted | Observation | Validity and disposition |
+| --- | --- | --- | --- |
+| Gate run (diagnostic copy) | Stock MLX F16 versus Stark F16 | 5/5 logit cases; workers pass | Diagnostic weights evidence |
+| Prefix (`tool_use` F16 copy) | Exactness harness | 32/32 identical and rule-matching; follow-ups reuse 0, 2,048, 2,048, 0 | Rows pass; aggregate fails as in `-03` |
+
+### Performance and memory
+
+Not measured.
+
+### Evidence, decision and limits
+
+- **Decision:** the F16 profile removes the 1,029-token logit failure of `-03`
+  on these weights. The published export remains blocked by its named template
+  list, so no artifact is qualified.
+- **Next action:** the named-template decision from `-03`.
+
+## 20261112-DENSE-MLX-06: BF16 regression control for the F16 engine change
+
+### Identity and state
+
+| Field | Value |
+| --- | --- |
+| Attempt ID / registered date / executed date / owner | `20261112-DENSE-MLX-06`; same session and dates as `-04` |
+| Kind | Correctness (regression control) |
+| Attempt state | Completed |
+| Result and acceptance criterion | **Passed**: every BF16 logit hash and worker output hash is bit-identical between the baseline (`e1e90517`) and candidate builds, and identical to the `-02`/`-03` receipts |
+| Evidence scope | Full-model numerical and worker outputs on existing BF16 artifacts; no timing |
+| Promotion decision | Supports adopting the engine change without altering any BF16 path |
+| Disposition | Adopted on branch |
+| Predecessor / related attempts / governing issue / PR | `-02`, `-03`; no PR |
+
+### Workload and results
+
+| Artifact | Comparison | Result |
+| --- | --- | --- |
+| BF16 Qwen2.5 MLX `bd822bbb...` | `dense_parity` hashes (5 cases), worker generations and scorer, baseline versus candidate and the `-02` receipt | Identical |
+| BF16 Mistral diagnostic copy `4283ec25...` | `dense_parity` hashes (5 cases), worker generations and scorer versus the `-03` receipt | Identical |
+| `Qwen/Qwen3-0.6B` @ `c1899de2...` BF16, `87c3344a...` | Next-token logit hashes for three synthetic inputs; `stark-generate` readiness and two 32-token replies | Identical |
+| Qwen3-0.6B F16 conversion `92fa34d8...` (query/key norms) | Admission negative control | Candidate refuses with `UnsupportedPrecision(F16)`; baseline refused with the dtype mismatch |
+
+### Limits
+
+- No other BF16 dense artifact was available locally without a download.
+- Kernel-level and full-suite engine tests are in the run record.
