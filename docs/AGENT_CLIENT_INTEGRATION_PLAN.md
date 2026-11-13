@@ -51,8 +51,12 @@ under Connections when their integrations become available.
 
 The Pi card implements manual setup: verify installed Pi 1.5.2, discover the
 running model, create a separate Stark-owned profile with the required guard,
-and open Terminal for a user-selected folder. **Copy Key & Open Pi…** explicitly
-copies the key for Terminal's hidden prompt. Generated files and command
+and open Terminal in an automatic private workspace. **Open Stark Pi** explicitly
+copies the key for Terminal's hidden prompt and starts the connected profile.
+It requires no folder selection. **Change Working Folder…** optionally selects a
+project for new sessions; **Use Stark Workspace** restores the automatic folder
+at `~/Library/Application Support/Stark/Pi/Workspace`. Starting `pi` normally uses
+the user's usual settings. Generated files and command
 arguments contain no key; the helper and Pi receive it through their environment.
 While running, Stark schedules the unchanged clipboard item for clearing after
 two minutes and clears it on normal quit. A crash or force quit cannot run cleanup.

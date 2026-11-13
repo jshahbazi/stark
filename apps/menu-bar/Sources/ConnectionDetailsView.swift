@@ -322,13 +322,23 @@ private struct PiConnectionView: View {
             }
             HStack(spacing: 12) {
                 if connection.profile != nil {
-                    Button("Copy Key & Open Pi…") { connection.open(baseURL: baseURL, modelID: modelID, key: key) }
+                    Button("Open Stark Pi") { connection.open(baseURL: baseURL, modelID: modelID, key: key) }
+                        .buttonStyle(.borderedProminent)
                         .disabled(connection.busy || !connection.installed || !available || !current)
-                        .accessibilityLabel("Copy API key and open Pi in Terminal")
+                        .accessibilityLabel("Open Stark Pi in Terminal and copy API key")
                 }
                 Button("Check Installation") { connection.refresh(force: true) }.disabled(connection.busy)
             }.font(.caption)
-            Text("Uses a separate Pi profile. Choose a folder, then paste the copied key at the hidden Terminal prompt. Pi can edit files and run commands. Sessions are not saved.")
+            Text("Working folder: \(connection.workingFolderLabel)")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 12) {
+                Button("Change Working Folder…") { connection.chooseWorkingFolder(in: NSApp.keyWindow) }
+                    .disabled(connection.busy)
+                if connection.workingFolder != nil {
+                    Button("Use Stark Workspace", action: connection.useDefaultWorkspace).disabled(connection.busy)
+                }
+            }.font(.caption)
+            Text("Open Stark Pi starts the connected profile in Terminal. Paste the copied API key at the hidden prompt. Pi can edit files and run commands in its working folder. Sessions are not saved. Starting Pi normally uses your usual settings.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)

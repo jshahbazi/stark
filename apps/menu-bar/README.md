@@ -52,8 +52,13 @@ to Beginner hides an open Connections window.
 Detection includes Pi's managed Node, compatible installed nvm versions, and
 Homebrew/system locations. It does not source interactive shell startup files.
 
-Choose **Copy Key & Open Pi…**, select a working folder, then paste the copied key
-at Terminal's hidden prompt. This manual setup keeps the master key in process
+Choose **Open Stark Pi**, then paste the copied key at Terminal's hidden prompt.
+Stark finds Pi automatically and creates or reuses the private working folder
+`~/Library/Application Support/Stark/Pi/Workspace`. **Change Working Folder…**
+optionally selects a project for new sessions in a sheet attached to Connections;
+**Use Stark Workspace** restores the automatic folder. Starting `pi` normally
+uses your usual settings; use **Open Stark Pi** for the connected profile.
+This manual setup keeps the master key in process
 environments and the explicitly requested, concealed/transient clipboard item;
 it writes no key into public profiles, launch scripts or command arguments.
 While Stark runs, it schedules the unchanged clipboard item for clearing after

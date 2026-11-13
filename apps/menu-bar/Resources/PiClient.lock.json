@@ -5,10 +5,10 @@
     "package.json": "509d843602ffdd59096ce1d1d54b3c00ac27b9c655dbbeb0770093e958eb3322",
     "src/config.mjs": "bf965f55c92721ad42e8e51a8611a027339552c14bdbe1cb7c4845b607113675",
     "src/desktop-launch.mjs": "989a6fc8f0717f094ce58fb385f022464b05c8d94ad89b0e51efa49eb07077fa",
-    "src/desktop-setup.mjs": "4266cebb8af8f0c155745b7f61d7cd68af4bc0523a94586416f18a38de1a7f18",
+    "src/desktop-setup.mjs": "371d733bceb85462a214b612fdac568fa4e650d199c129c016fae6276850f005",
     "src/guarded-fetch.mjs": "386429c89911c8fd2f4176b7d0e746195345b1defed66016875a3f5a2daff15a"
   },
   "repository": "https://github.com/jshahbazi/stark-agent-clients",
-  "revision": "11e91d0a23c8a21dee5e6e0ba9b9833bacd17458",
+  "revision": "2a1a89b8e78787c92bfecf88f046edeb651096a0",
   "schema_version": 1
 }

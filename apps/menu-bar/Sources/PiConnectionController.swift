@@ -13,6 +13,7 @@ final class PiConnectionController: ObservableObject {
     @Published private(set) var profile: String?
     @Published private(set) var configuredModel = ""
     @Published private(set) var configuredBaseURL = ""
+    @Published private(set) var workingFolder: URL?
 
     struct Tools {
         let node: URL
@@ -20,6 +21,7 @@ final class PiConnectionController: ObservableObject {
     }
     typealias Completion = ([String: Any]) -> Void
     typealias Runner = (URL, [String], [String: String], @escaping Completion) -> Void
+    typealias FolderChooser = (NSWindow, URL?, @escaping (URL?) -> Void) -> Void
     private let resources: URL
     private let root: URL
     private let defaults: UserDefaults
@@ -28,6 +30,7 @@ final class PiConnectionController: ObservableObject {
     private var tools: Tools?
     private var refreshed = false
     private static let profilePreference = "stark.pi.manualProfile.v1"
+    private static let workingFolderPreference = "stark.pi.workingFolder.v1"
     private static let clipboard = ConnectionClipboardLease()
 
     init(resources: URL = Bundle.main.resourceURL?.appendingPathComponent("PiClient") ?? URL(fileURLWithPath: "/nonexistent"),
@@ -38,7 +41,13 @@ final class PiConnectionController: ObservableObject {
          runner: @escaping Runner = PiConnectionController.runHelper) {
         self.resources = resources; self.root = root; self.defaults = defaults
         self.tools = tools; self.finder = finder; self.runner = runner
+        if let path = defaults.string(forKey: Self.workingFolderPreference), path.hasPrefix("/"),
+           !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+            workingFolder = URL(fileURLWithPath: path, isDirectory: true)
+        }
     }
+
+    var workingFolderLabel: String { workingFolder?.lastPathComponent ?? "Stark workspace (automatic)" }
 
     func matches(baseURL: String, modelID: String) -> Bool {
         profile != nil && configuredBaseURL == baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) &&
@@ -86,29 +95,57 @@ final class PiConnectionController: ObservableObject {
                   self.ownedProfilePath(path) else { self.message = Self.failure(result); return }
             self.acceptProfile(result)
             self.defaults.set(path, forKey: Self.profilePreference)
-            self.message = "Setup saved. Choose a folder to open Pi. Paste the copied key at its hidden prompt."
+            self.message = "Ready. Open Stark Pi to use the running model."
         }
     }
 
-    func open(baseURL: String, modelID: String, key: String) {
+    func open(baseURL: String, modelID: String, key: String,
+              openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void = PiConnectionController.openTerminal,
+              copyKey: @escaping (String) -> Bool = PiConnectionController.copyKey) {
         guard !busy, installed, matches(baseURL: baseURL, modelID: modelID), !key.isEmpty else { return }
-        let picker = NSOpenPanel()
-        picker.title = "Choose a folder for Pi"
-        picker.message = "Pi can read and edit files and run commands in this folder."
-        picker.prompt = "Open Pi"
-        picker.canChooseDirectories = true; picker.canChooseFiles = false
-        picker.allowsMultipleSelection = false
-        guard picker.runModal() == .OK, let workspace = picker.url else { return }
-        prepareLaunch(workspace: workspace, key: key)
+        prepareLaunch(workspace: workingFolder, key: key, openTerminal: openTerminal, copyKey: copyKey)
     }
 
-    /// Kept separate from the folder picker so tests can exercise the real helper
-    /// boundary with a disposable profile without presenting or launching Terminal.
-    func prepareLaunch(workspace: URL, key: String,
+    func chooseWorkingFolder(in window: NSWindow?, chooser: @escaping FolderChooser = PiConnectionController.chooseFolder) {
+        guard !busy else { return }
+        guard let window else { message = "Open Connections to change Pi's working folder."; return }
+        busy = true
+        chooser(window, workingFolder) { [weak self] chosen in
+            guard let self else { return }
+            self.busy = false
+            guard let chosen, chosen.isFileURL else { return }
+            self.workingFolder = chosen
+            self.defaults.set(chosen.path, forKey: Self.workingFolderPreference)
+            self.message = "Working folder updated for new Stark Pi sessions."
+        }
+    }
+
+    func useDefaultWorkspace() {
+        guard !busy else { return }
+        workingFolder = nil
+        defaults.removeObject(forKey: Self.workingFolderPreference)
+        message = "New Stark Pi sessions will use the automatic workspace."
+    }
+
+    private static func chooseFolder(in window: NSWindow, current: URL?, completion: @escaping (URL?) -> Void) {
+        let picker = NSOpenPanel()
+        picker.title = "Choose a working folder for Stark Pi"
+        picker.message = "Select a project folder for Pi to read and edit. This applies to new Stark Pi sessions."
+        picker.prompt = "Use Folder"
+        picker.canChooseDirectories = true; picker.canChooseFiles = false
+        picker.allowsMultipleSelection = false; picker.canCreateDirectories = true
+        picker.directoryURL = current ?? FileManager.default.homeDirectoryForCurrentUser
+        picker.beginSheetModal(for: window) { response in completion(response == .OK ? picker.url : nil) }
+    }
+
+    /// Omitting workspace asks the helper to create/reuse Stark's private default.
+    func prepareLaunch(workspace: URL? = nil, key: String,
                        openTerminal: @escaping (URL, @escaping (Bool) -> Void) -> Void = PiConnectionController.openTerminal,
                        copyKey: @escaping (String) -> Bool = PiConnectionController.copyKey) {
         guard !busy, let profile, !key.isEmpty else { return }
-        perform(["--action", "prepare-launch", "--profile", profile, "--workspace", workspace.path]) { [weak self] result in
+        var arguments = ["--action", "prepare-launch", "--profile", profile]
+        if let workspace { arguments += ["--workspace", workspace.path] }
+        perform(arguments) { [weak self] result in
             guard let self else { return }
             guard result["ok"] as? Bool == true, let command = result["command"] as? String,
                   URL(fileURLWithPath: command).deletingLastPathComponent().path == profile,
@@ -176,6 +213,7 @@ final class PiConnectionController: ObservableObject {
         case "unsafe_setup_location": return "Pi's setup folder has unsafe permissions or a redirected path. Check the folder and try again."
         case "model_unavailable_or_changed": return "The running model changed. Update Pi setup."
         case "setup_stale": return "Pi setup is out of date. Update setup."
+        case "workspace_unavailable": return "The working folder is unavailable. Change the working folder and try again."
         case "setup_changed", "invalid_setup": return "The saved Pi setup changed. Set it up again."
         case "helper_timeout": return "Pi setup took too long. Check Stark and Pi, then try again."
         default: return "Pi setup could not finish. Check that the model and local API are running, then try again."
@@ -190,7 +228,9 @@ final class PiConnectionController: ObservableObject {
 
     private static func openTerminal(_ command: URL, completion: @escaping (Bool) -> Void) {
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        NSWorkspace.shared.open([command], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration()) { app, _ in
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open([command], withApplicationAt: terminal, configuration: configuration) { app, _ in
             DispatchQueue.main.async { completion(app != nil) }
         }
     }

@@ -164,18 +164,40 @@ export async function readProfile(profile) {
   return receipt;
 }
 
-export async function prepareLaunch(profile, workspace) {
+async function resolveWorkspace(profile, workspace) {
+  if (workspace === undefined) {
+    const automatic = path.join(path.dirname(profile), 'Workspace');
+    await privateDirectory(automatic, true);
+    try { return await realpath(automatic); }
+    catch { fail('workspace_unavailable'); }
+  }
+  if (!validPath(workspace)) fail('workspace_unavailable');
+  try {
+    const resolved = await realpath(workspace);
+    if (!(await stat(resolved)).isDirectory()) fail('workspace_unavailable');
+    return resolved;
+  } catch (error) {
+    if (error instanceof PilotError) throw error;
+    fail('workspace_unavailable');
+  }
+}
+
+async function prepareLaunchDetails(profile, workspace) {
   const receipt = await readProfile(profile);
   await probePi(receipt.piPath);
-  if (!validPath(workspace) || !(await lstat(await realpath(workspace))).isDirectory()) fail('workspace_unavailable');
+  const resolvedWorkspace = await resolveWorkspace(profile, workspace);
   const environment = privateEnvironment(receipt.piPath);
   const assignments = Object.entries(environment).map(([name, value]) => quote(`${name}=${value}`)).join(' ');
   // env receives only public values here. The API key is read later by terminal.zsh,
   // so it never enters a command line, .command file, config or shell history.
-  const script = `#!/bin/zsh -f\nexec /usr/bin/env -i ${assignments} /bin/zsh -f ${quote(path.join(profile, 'terminal.zsh'))} ${quote(workspace)}\n`;
+  const script = `#!/bin/zsh -f\nexec /usr/bin/env -i ${assignments} /bin/zsh -f ${quote(path.join(profile, 'terminal.zsh'))} ${quote(resolvedWorkspace)}\n`;
   const command = path.join(profile, `Open Pi-${randomUUID()}.command`);
   await writeFile(command, script, { flag: 'wx', mode: 0o700 });
-  return command;
+  return { command, workspace: resolvedWorkspace };
+}
+
+export async function prepareLaunch(profile, workspace) {
+  return (await prepareLaunchDetails(profile, workspace)).command;
 }
 
 async function main() {
@@ -194,7 +216,7 @@ async function main() {
       result = await setupDesktop({ root: values.root, piPath: values.pi, baseUrl: values['base-url'],
         modelId: values.model, key: process.env.STARK_API_KEY });
     } else if (values.action === 'prepare-launch') {
-      result = { command: await prepareLaunch(values.profile, values.workspace) };
+      result = await prepareLaunchDetails(values.profile, values.workspace);
     } else fail('invalid_arguments');
     process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
   } catch (error) {

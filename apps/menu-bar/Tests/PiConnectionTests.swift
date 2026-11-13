@@ -34,6 +34,7 @@ struct PiConnectionTests {
         let key = "synthetic-pi-test-key"
         let tools = PiConnectionController.Tools(node: URL(fileURLWithPath: "/synthetic/node"), pi: URL(fileURLWithPath: "/synthetic/pi"))
         var calls = 0
+        var launchArguments: [String] = []
         var deferred: PiConnectionController.Completion?
         let controller = PiConnectionController(resources: directory.appendingPathComponent("resources"), root: root,
             defaults: defaults, tools: tools, runner: { node, args, environment, completion in
@@ -50,6 +51,7 @@ struct PiConnectionTests {
                     require(args.contains(baseURL) && args.contains("public-model"))
                     deferred = completion
                 } else if args.contains("prepare-launch") {
+                    launchArguments = args
                     require(environment["STARK_API_KEY"] == nil)
                     require(args.contains(profile))
                     completion(["ok": true, "command": profile + "/Open Pi-fixture.command"])
@@ -73,6 +75,36 @@ struct PiConnectionTests {
             opened = true; completion(true)
         }, copyKey: { supplied in copied = supplied == key; return copied })
         require(copied && opened && calls == 3)
+
+        // The actual Open action launches directly. Folder selection is optional.
+        copied = false; opened = false
+        controller.open(baseURL: baseURL, modelID: "public-model", key: key,
+            openTerminal: { _, completion in require(copied); opened = true; completion(true) },
+            copyKey: { supplied in copied = supplied == key; return copied })
+        require(copied && opened && calls == 4 && !launchArguments.contains("--workspace"))
+
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
+        defer { window.close() }
+        var choose: ((URL?) -> Void)?
+        controller.chooseWorkingFolder(in: window, chooser: { parent, current, completion in
+            require(parent === window && current == nil); choose = completion
+        })
+        require(controller.busy && calls == 4)
+        choose?(directory)
+        require(!controller.busy && controller.workingFolder == directory)
+        controller.open(baseURL: baseURL, modelID: "public-model", key: key,
+            openTerminal: { _, completion in completion(true) }, copyKey: { _ in true })
+        require(launchArguments.contains("--workspace") && launchArguments.contains(directory.path))
+        controller.chooseWorkingFolder(in: window, chooser: { _, current, completion in
+            require(current == directory); completion(nil)
+        })
+        require(!controller.busy && controller.workingFolder == directory)
+        controller.useDefaultWorkspace()
+        require(controller.workingFolder == nil)
+        controller.open(baseURL: baseURL, modelID: "public-model", key: key,
+            openTerminal: { _, completion in completion(true) }, copyKey: { _ in true })
+        require(!launchArguments.contains("--workspace"))
 
         // Saved setup restoration uses the same verified helper, and an unsafe
         // helper path cannot be saved or opened even if it reports success.
