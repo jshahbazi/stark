@@ -234,6 +234,7 @@ impl State {
         }
         let mut graph = DecodeGraph::new()?;
         graph.enable_ripple_dense_q8();
+        graph.enable_ripple_dense_q4();
         let seed = graph.upload_into(&embedding)?;
         let mut hidden = seed.clone();
         for (index, (layer, controls)) in model.layers.iter().zip(&self.layers).enumerate() {

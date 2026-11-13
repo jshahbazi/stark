@@ -74,6 +74,9 @@ decoder implements the Q4_K/Q6_K layouts documented by MIT-licensed
 [GGML quantization source](https://github.com/ggml-org/llama.cpp/blob/1b70350c92563449576bcbbf552994b1d1ed847d/ggml/src/ggml-quants.c).
 It uses no external inference engine. Native execution reuses Stark's existing
 packed kernels; each quantized artifact requires its own validation record.
+The Q4_K_M production graph selects the existing packed block kernel only for
+Ripple's validated dense geometries, with an isolated cache. Artifact-specific
+checks are recorded in the [Q4_K_M report](../docs/benchmarks/RIPPLE_Q4_K_M_2026_11_12.md).
 
 Ripple's F32 Metal graph and shape-scoped Q8 dispatch were introduced in
 `410bec76c195522b6478c329225d6cbfb84b9977`, with complete-inventory admission

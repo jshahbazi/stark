@@ -48,6 +48,9 @@ Native execution uses the existing packed Q4_K/Q6_K kernels and the Ripple
 device graph, with F32 controls, accumulation and KV state. The independent
 full reference helper also decodes these block types. Q8 validation does not
 qualify this artifact; record Q4_K_M numerical and generation checks separately.
+The released Q4_K projection shapes use the existing two-row, 64-thread block
+kernel through a Ripple-local policy and pipeline cache. Q6_K retains its
+established kernel. No diagnostic environment flag is needed.
 
 ## Precision and limits
 
@@ -96,6 +99,9 @@ vocabulary projections. Each request starts with fresh state; errors clear the s
 Cross-request prefix reuse, image input and DFlash2 speculative decoding are
 not implemented for Ripple. Source chat-template preservation does not itself
 establish structured tool-call parsing or agent performance.
+Both Q8 and Q4_K_M graphs own request-local cache buffers without a qualified
+snapshot/restore interface. Exact restoration of those buffers is the concrete
+blocker for cross-request prefix reuse; reuse remains disabled.
 
 ## Reference and validation
 
@@ -138,3 +144,5 @@ Recorded checks: [native validation](archive/runs/2026-11-04-ripple-native-suppo
 The later [GPU performance report](benchmarks/RIPPLE_65B_GPU_2026_11_05.md)
 records graph/Q8 validation, the matched worker comparison and the installed
 development build.
+The separate [Q4_K_M report](benchmarks/RIPPLE_Q4_K_M_2026_11_12.md) records
+artifact-specific reference, generation and timing checks.

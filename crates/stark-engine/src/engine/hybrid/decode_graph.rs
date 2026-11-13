@@ -134,6 +134,7 @@ pub(crate) struct DecodeGraph {
     rms_prefetch: bool,
     phase_timing: bool,
     ripple_dense_q8: bool,
+    ripple_dense_q4: bool,
 }
 
 impl DecodeGraph {
@@ -285,6 +286,7 @@ impl DecodeGraph {
                 rms_prefetch: std::env::var_os("STARK_GLM53_RMS_PREFETCH").is_some_and(|value| value == "1"),
                 phase_timing,
                 ripple_dense_q8: false,
+                ripple_dense_q4: false,
             })
         })
     }
@@ -358,6 +360,10 @@ impl DecodeGraph {
     /// Admit the separately validated Ripple Q8 projection schedule for this
     /// graph only. Exact shape and storage guards leave all other work on its
     /// established route; this changes F32 reduction grouping, not precision.
+    pub fn enable_ripple_dense_q4(&mut self) {
+        self.ripple_dense_q4 = true;
+    }
+
     pub fn enable_ripple_dense_q8(&mut self) {
         self.ripple_dense_q8 = true;
     }
@@ -1043,7 +1049,11 @@ impl DecodeGraph {
             && operation.matrices.iter().all(|matrix| matrix.codes.offset.is_multiple_of(16));
         let ripple_q8 =
             self.ripple_dense_q8 && ripple_dense_q8_shape(operation.format, operation.rows, operation.columns);
-        let pipeline = if ripple_q8 {
+        let ripple_q4 =
+            self.ripple_dense_q4 && ripple_dense_q4_shape(operation.format, operation.rows, operation.columns);
+        let pipeline = if ripple_q4 {
+            executor.cached_pipeline(operation.format, "hybrid_packed_block_matvec", &executor.ripple_q4_pipelines)?
+        } else if ripple_q8 {
             executor.cached_pipeline(
                 operation.format,
                 "hybrid_q8_grouped8_safe_matvec",
@@ -1104,7 +1114,9 @@ impl DecodeGraph {
             &pipeline,
             (&input.buffer, input.offset),
             (&output.buffer, output.offset),
-            if ripple_q8 {
+            if ripple_q4 {
+                (operation.rows.div_ceil(2), 64)
+            } else if ripple_q8 {
                 (operation.rows.div_ceil(2), 128)
             } else {
                 (
