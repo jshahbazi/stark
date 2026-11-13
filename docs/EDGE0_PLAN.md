@@ -1,15 +1,14 @@
 # Edge0-145B native support plan
 
 Status: phases 3 and 4 and bounded Phase 5 worker correctness/lifecycle gates
-passed for local non-commercial evaluation, 2026-11-13. Sixty matched worker
-requests completed, with no eligible timing group; MTP remains off by default.
-Subsequent strict reruns still defer every group before measured arms. Selected
-expert-record Metal bindings now reduce reproduced worker decompression churn
-in a fixed-idle ABBA control and pass bounded lifecycle gates. Residual global
-decompressions and CPU/GPU gate failures still prevent performance qualification.
-Task and GPU-client endpoints now identify background application activity;
-the observer control fails its no-worker condition and another strict rerun
-admits zero measured arms.
+passed for local non-commercial evaluation, 2026-11-13. Selected expert-record
+Metal bindings reduce reproduced worker decompression churn in a fixed-idle
+ABBA control and pass bounded lifecycle gates. A fresh quiet-entry observer
+control now passes all six treatments and its no-worker checks. The subsequent
+matched MTP attempt completes 12 warmups and 40 measured arms: 13 arms and four
+pairs are eligible, with zero complete eligible groups; the final group defers
+at admission. Residual global decompressions and host activity still prevent
+performance qualification. MTP remains off by default.
 Phase 5 performance qualification and phases 6–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
@@ -411,6 +410,18 @@ decompressions and 45 pageouts; owned worker-task decompressions remain zero.
 Two groups obtain ten-second counter-only quiet streaks, but combined host
 streaks remain below ten seconds. [Separate receipts](benchmarks/2026-11-13-edge0-host-interference.md)
 preserve the failed control, background interference and pending timing decision.
+The [quiet-entry successor](model-experiments/2026-11-13-edge0-quiet-window.md)
+preserves an initial preflight deferral with no child launch. After the owner
+declares a fresh quiet window, a separately registered workflow admits both
+entry preflights and passes the six-treatment no-worker control. Entry evidence
+does not establish continuous quiet throughout the control. The matched child
+completes 12 matching warmups and 40 of 48 intended measured arms. Thirteen arms
+and four pairs pass their screens, but no complete group qualifies; the final
+128-token/depth-three group defers. Measured-arm rejections include nonzero
+global decompressions and external CPU. Worker-task decompressions stay zero.
+[Separate receipts](benchmarks/2026-11-13-edge0-quiet-window.md) retain both
+workflow attempts, all rejected arms and every existing threshold. No eligible
+subset establishes a performance or default-depth decision.
 Default remains off and timing qualification remains pending. The 512-token cap,
 disabled prefix reuse and local non-commercial scope remain in force.
 

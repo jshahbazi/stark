@@ -34,6 +34,12 @@ attribution. Its observer control fails the final no-worker census. A separate
 strict rerun retains every threshold, matches 12 warmups and defers six groups
 before measured arms. Counter-only quiet briefly exceeds ten seconds, while
 combined CPU/GPU/counter admission never qualifies; performance remains open.
+The [quiet-entry successor](2026-11-13-edge0-quiet-window.md) preserves a deferred
+preflight and a separately owner-authorized quiet window. Both fresh entry
+preflights and the complete no-worker control pass. The matched run completes
+12 warmups and 40 measured arms, with 13 eligible arms, four eligible pairs and
+zero complete eligible groups. The final group defers; all thresholds and
+rejected observations remain intact. Timing qualification remains open.
 
 ## Current result
 
