@@ -1,7 +1,8 @@
 # Edge0-145B native support plan
 
 Status: phases 3 and 4 bounded runtime gates passed for local non-commercial
-evaluation, 2026-11-13; phases 5–8 remain unfinished.
+evaluation, 2026-11-13; Phase 5 model-free foundation in progress, phases 5–8
+remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
@@ -103,7 +104,7 @@ Read from the skeleton GGUF header, the pack manifests and the pinned source.
 | Scales | One 1792-value F32 column-scale vector per layer for Q3_K packs; per-expert `scale` and `input_scale` vectors for gate, up and down in the pack pool | `native_expert.hpp`, `index.txt` |
 | Skeleton storage | 1,079 tensors: 302 Q8_0, 484 BF16, 292 F32, 1 F16 | GGUF tensor table |
 | Table storage | One I8 tensor `[160, 320001536]`, `strata.ple.format = f8_e4m3`, global scale `0.00019931793212890625` | GGUF header |
-| Draft layer | One Flash-Next MTP layer; dense tensors in Q8_0, BF16 and F32; a 512-expert bank of 1,382,400-byte records, which matches the fused 1280x2560 plus 2560x640 layout at Q2_0 | `mtp/dense.txt`, `tools/mtp_pack.py`; expert format inferred from size, to be confirmed |
+| Draft layer | One Flash-Next MTP layer; dense tensors in Q8_0, BF16 and F32; 512 expert records of 1,382,400 bytes, with interleaved gate/up rows and four separate Q2 code/F16-scale planes | `mtp/dense.txt`, `tools/mtp_rt.py::blob_of`; source-traced, executable head unqualified |
 | Tokenizer | GPT-2 BPE with the `qwen35` pre-tokenizer, as `vocab.json`, `merges.txt` and GGUF arrays; `tokenizer/tokenizer.json` is a 541-byte descriptor, not a Hugging Face tokenizer file | Repository files |
 | Sampling defaults | top-k 20, top-p 0.95, temperature 1.0 | GGUF metadata |
 | Vision | No vision or projector tensors among the 1,079 skeleton tensors and no projector file; `pipeline_tag: text-generation` | GGUF tensor table, file list |
@@ -342,9 +343,13 @@ qualification remain separate. MTP and prefix reuse remain unavailable.
 
 ### Phase 5: MTP
 
+The model-free foundation is registered in
+[attempt `20261113-EDGE0-07`](model-experiments/2026-11-13-edge0-mtp.md).
+
 - Load the draft layer from `mtp/` and adapt the existing Flash-Next head
-  contract to the native Qwen graph; add the Q2_0 expert kernel once the bank
-  format is confirmed. Existing `Forward::Lily` MTP dispatch is not a native
+  contract to the native Qwen graph. Implement the source's four-plane Q2 expert
+  kernel with gate/up row interleaving; this bank is not contiguous GGML Q2_0.
+  Existing `Forward::Lily` MTP dispatch is not a native
   Qwen implementation and must not advertise support for this artifact.
 - Keep Stark's exact rejection-sampling verification with one to three drafts.
   Four drafts and the restricted draft vocabulary are separate attempts.
@@ -422,8 +427,9 @@ These are expectations from the Flash-Next inventory, not findings.
    the upstream arithmetic. Floating activations may differ from the trained
    forward.
 3. Main-path scale conventions are traced and component-qualified. The retained
-   draft's expected Q2_0 bank still needs executable head/storage qualification
-   and independent normalization checks before MTP admission.
+   draft's four-plane Q2 bank is source-traced but still needs executable
+   head/storage qualification and independent normalization checks before MTP
+   admission.
 4. The borrowed Flash-Next tokenizer comparison failed. The separately qualified
    source-native tokenizer is artifact/profile bound; other exports do not
    inherit that proof.

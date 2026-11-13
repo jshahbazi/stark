@@ -137,6 +137,21 @@ model licenses and Phase 3 validation remain separate from
 That candidate uses the native F32 Qwen Metal graph with mixed stored weights;
 it does not establish a Lily-backend port or reduced-precision state validation.
 
+### Edge0 native MTP foundation
+
+The source-specific staged draft reader follows `edge0-strata/tools/mtp_rt.py`
+at the same Edge0 revision, SHA-256
+`2d128e3a62f8f4810e1837cf4292d0e8473c80c384c2f2e10e2c9bfc4e94a531`.
+It retains interleaved gate/up rows and the separate Q2 code/F16-scale planes;
+it does not reinterpret the file as contiguous GGML Q2_0 blocks. The exporter
+also supplies final gamma values by adding one to F32 norm records. The draft
+input, position and cache authority is `edge0-strata/include/strata/core/mtp.hpp`,
+SHA-256 `d3d16322e3242a5436ff60cfc1fe630c46706f76b2f1e5151d35aab3245fa2d0`.
+Independent foundation work and remaining executable-head gates are recorded in
+[attempt `20261113-EDGE0-07`](../docs/model-experiments/2026-11-13-edge0-mtp.md).
+Existing Strata MIT/GGML notices remain preserved; no model license or runtime
+capability is changed by these checked views.
+
 ### Edge0 native reader and block components
 
 The independent native Strata readers and the new Q4_0 (GGML 2), IQ4_NL

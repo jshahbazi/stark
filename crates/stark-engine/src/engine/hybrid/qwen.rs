@@ -17,6 +17,13 @@ mod edge0;
 #[path = "qwen_graph.rs"]
 mod decode_graph;
 
+#[cfg(feature = "metal")]
+#[path = "qwen_checkpoint.rs"]
+mod checkpoint;
+
+#[cfg(feature = "metal")]
+pub(super) use checkpoint::{Checkpoint, StagingPolicy};
+
 use super::{
     Error, Result,
     math::{rms_norm, sigmoid, silu, softmax, topk},
@@ -1002,6 +1009,8 @@ pub struct QwenModel {
     graph: Option<decode_graph::State>,
     #[cfg(feature = "metal")]
     graph_enabled: bool,
+    #[cfg(feature = "metal")]
+    checkpoint_stamp: Option<checkpoint::Stamp>,
 }
 
 pub(super) fn forced_scalar_attention() -> bool {
@@ -1488,6 +1497,8 @@ impl QwenModel {
             graph: None,
             #[cfg(feature = "metal")]
             graph_enabled,
+            #[cfg(feature = "metal")]
+            checkpoint_stamp: None,
         };
         #[cfg(feature = "metal")]
         if model.geometry.edge0_metal {
@@ -1502,6 +1513,9 @@ impl QwenModel {
     pub fn reset(&mut self) {
         #[cfg(feature = "metal")]
         {
+            if let Some(stamp) = &mut self.checkpoint_stamp {
+                stamp.invalidate();
+            }
             self.graph = None;
         }
         self.position = 0;

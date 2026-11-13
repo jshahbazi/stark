@@ -457,7 +457,227 @@ pub(super) struct State {
     final_norm: DeviceVector,
 }
 
+/// Opaque, private host state. Current query/gate/selection buffers and scalar
+/// attention workspaces are overwritten before reading and are not captured.
+pub(super) struct Checkpoint {
+    position: usize,
+    geometry: [usize; 4],
+    layers: Vec<LayerCheckpoint>,
+}
+
+struct LayerCheckpoint {
+    attention: Option<AttentionCheckpoint>,
+    ple_history: Option<Box<[f32]>>,
+}
+
+struct AttentionCheckpoint {
+    capacity: usize,
+    keys: Box<[f32]>,
+    values: Box<[f32]>,
+    // The raw prefix also retains the incomplete pooling block. Completed
+    // pooled rows are captured separately; there is no other partial owner.
+    index_keys: Box<[f32]>,
+    pooled_index_keys: Box<[f32]>,
+}
+
+impl Checkpoint {
+    pub(super) fn bytes(&self) -> usize {
+        self.layers
+            .iter()
+            .map(|layer| {
+                let attention = layer.attention.as_ref().map_or(0, |value| {
+                    value.keys.len() + value.values.len() + value.index_keys.len() + value.pooled_index_keys.len()
+                });
+                (attention + layer.ple_history.as_ref().map_or(0, |values| values.len())) * 4
+            })
+            .sum()
+    }
+}
+
+fn checkpoint_geometry(g: &Geometry) -> [usize; 4] {
+    [g.context, g.kv_heads * g.head_dim, g.index_dim, g.ratio]
+}
+
+fn checkpoint_attention(
+    saved: &AttentionCheckpoint,
+    g: &Geometry,
+    position: usize,
+) -> Result<AttentionCache> {
+    let key_width = g.kv_heads * g.head_dim;
+    if saved.capacity < position
+        || saved.capacity > g.context
+        || saved.capacity == 0
+        || saved.keys.len() != position * key_width
+        || saved.values.len() != position * key_width
+        || saved.index_keys.len() != position * g.index_dim
+        || saved.pooled_index_keys.len() != (position / g.ratio) * g.index_dim
+    {
+        return Err(Error::Invalid("QSA checkpoint geometry"));
+    }
+    let restore = |values: &[f32], len: usize| -> Result<DeviceVector> {
+        if values.len() > len || values.iter().any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("QSA checkpoint state values"));
+        }
+        let mut storage = vec![0.0_f32; len];
+        storage[..values.len()].copy_from_slice(values);
+        DecodeGraph::upload(&storage)
+    };
+    let capacity = saved.capacity;
+    Ok(AttentionCache {
+        capacity,
+        keys: restore(&saved.keys, capacity * key_width)?,
+        values: restore(&saved.values, capacity * key_width)?,
+        index_keys: restore(&saved.index_keys, capacity * g.index_dim)?,
+        pooled_index_keys: restore(&saved.pooled_index_keys, (capacity / g.ratio).max(1) * g.index_dim)?,
+        index_queries: DecodeGraph::zeros(g.index_heads * g.index_dim)?,
+        query: DecodeGraph::zeros(g.heads * g.head_dim)?,
+        gates: DecodeGraph::zeros(g.heads * g.head_dim)?,
+        visible: DecodeGraph::zeros(capacity)?,
+        block_scores: DecodeGraph::zeros((capacity / g.ratio).max(1))?,
+        top_ids: DecodeGraph::zeros(g.budget / g.ratio)?,
+        top_scores: DecodeGraph::zeros(g.budget / g.ratio)?,
+    })
+}
+
 impl State {
+    pub(super) fn capture_checkpoint(
+        &self,
+        g: &Geometry,
+        position: usize,
+    ) -> Result<Checkpoint> {
+        if position > g.context || g.ratio == 0 {
+            return Err(Error::Invalid("graph checkpoint position"));
+        }
+        let mut views = Vec::new();
+        let mut append = |values: &DeviceVector, len: usize| -> Result<Option<usize>> {
+            if len == 0 {
+                return Ok(None);
+            }
+            let index = views.len();
+            views.push(values.slice(0, len)?);
+            Ok(Some(index))
+        };
+        let mut plans = Vec::with_capacity(self.layers.len());
+        for layer in &self.layers {
+            let attention = match &layer.attention {
+                Some(control) => match &control.cache {
+                    Some(cache) => {
+                        if cache.capacity < position {
+                            return Err(Error::Invalid("QSA checkpoint source capacity"));
+                        }
+                        let key_count = position * g.kv_heads * g.head_dim;
+                        Some((
+                            cache.capacity,
+                            [
+                                append(&cache.keys, key_count)?,
+                                append(&cache.values, key_count)?,
+                                append(&cache.index_keys, position * g.index_dim)?,
+                                append(&cache.pooled_index_keys, (position / g.ratio) * g.index_dim)?,
+                            ],
+                        ))
+                    },
+                    None if position == 0 => None,
+                    None => return Err(Error::Invalid("QSA checkpoint source missing")),
+                },
+                None => None,
+            };
+            let ple = layer.ple.as_ref().map(|ple| append(&ple.history, ple.history.len)).transpose()?.flatten();
+            plans.push((attention, ple));
+        }
+        // Completion fences prior target work, validates all returned spans,
+        // and copies only exact causal state into private RAM.
+        let mut captured = DecodeGraph::new()?
+            .finish(&views)?
+            .into_iter()
+            .map(|values| Some(values.into_boxed_slice()))
+            .collect::<Vec<_>>();
+        let mut take = |index: Option<usize>| -> Box<[f32]> {
+            index.map_or_else(|| Box::new([]), |index| captured[index].take().unwrap())
+        };
+        let layers = plans
+            .into_iter()
+            .map(|(attention, ple)| LayerCheckpoint {
+                attention: attention.map(|(capacity, indices)| AttentionCheckpoint {
+                    capacity,
+                    keys: take(indices[0]),
+                    values: take(indices[1]),
+                    index_keys: take(indices[2]),
+                    pooled_index_keys: take(indices[3]),
+                }),
+                ple_history: ple.map(|index| take(Some(index))),
+            })
+            .collect();
+        Ok(Checkpoint {
+            position,
+            geometry: checkpoint_geometry(g),
+            layers,
+        })
+    }
+
+    /// Build an independent mutable state set. Only immutable norm/scale/
+    /// convolution controls share owners with the current graph.
+    pub(super) fn stage_checkpoint(
+        &self,
+        saved: &Checkpoint,
+        g: &Geometry,
+        position: usize,
+    ) -> Result<Self> {
+        if saved.position != position
+            || saved.geometry != checkpoint_geometry(g)
+            || saved.layers.len() != self.layers.len()
+            || position > g.context
+            || g.ratio == 0
+        {
+            return Err(Error::Invalid("graph checkpoint policy or layer inventory"));
+        }
+        let mut layers = Vec::with_capacity(self.layers.len());
+        for (source, saved) in self.layers.iter().zip(&saved.layers) {
+            let attention = match (&source.attention, &saved.attention) {
+                (Some(source), saved) => Some(AttentionControls {
+                    q_norm: source.q_norm.clone(),
+                    k_norm: source.k_norm.clone(),
+                    index_q_norm: source.index_q_norm.clone(),
+                    index_k_norm: source.index_k_norm.clone(),
+                    cache: match saved {
+                        Some(value) => Some(checkpoint_attention(value, g, position)?),
+                        None if position == 0 => None,
+                        None => return Err(Error::Invalid("graph checkpoint attention missing")),
+                    },
+                    scalar: None,
+                }),
+                (None, None) => None,
+                _ => return Err(Error::Invalid("graph checkpoint attention inventory")),
+            };
+            let ple = match (&source.ple, &saved.ple_history) {
+                (Some(source), Some(history)) if history.len() == source.history.len => Some(PleControls {
+                    key_norm: source.key_norm.clone(),
+                    query_norm: source.query_norm.clone(),
+                    conv_norm: source.conv_norm.clone(),
+                    convolution: source.convolution.clone(),
+                    history: DecodeGraph::upload(history)?,
+                    scratch: DecodeGraph::zeros(source.scratch.len)?,
+                }),
+                (None, None) => None,
+                _ => return Err(Error::Invalid("graph checkpoint PLE inventory")),
+            };
+            layers.push(LayerControls {
+                attention_hyper: HyperControls {
+                    norm: source.attention_hyper.norm.clone(),
+                },
+                mlp_hyper: HyperControls {
+                    norm: source.mlp_hyper.norm.clone(),
+                },
+                attention,
+                ple,
+                edge0: source.edge0.clone(),
+            });
+        }
+        Ok(Self {
+            layers,
+            final_norm: self.final_norm.clone(),
+        })
+    }
+
     fn new(model: &QwenModel) -> Result<Self> {
         if model.geometry.edge0 && !model.geometry.edge0_metal {
             return Err(Error::Unsupported("Edge0 reference requires scalar control"));
@@ -967,3 +1187,157 @@ mod tests;
 #[cfg(test)]
 #[path = "qwen_attention_tests.rs"]
 mod attention_tests;
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+
+    fn values(
+        count: usize,
+        salt: usize,
+    ) -> Box<[f32]> {
+        (0..count)
+            .map(|index| match (index + salt) % 7 {
+                0 => f32::from_bits(0x8000_0000),
+                1 => f32::from_bits(1),
+                _ => ((index + salt) % 13) as f32 * 0.125 - 0.75,
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
+    fn equal(
+        first: &Checkpoint,
+        second: &Checkpoint,
+    ) -> bool {
+        let bits =
+            |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits());
+        first.position == second.position
+            && first.geometry == second.geometry
+            && first.layers.len() == second.layers.len()
+            && first.layers.iter().zip(&second.layers).all(|(a, b)| {
+                let attention = match (&a.attention, &b.attention) {
+                    (Some(a), Some(b)) => {
+                        a.capacity == b.capacity
+                            && bits(&a.keys, &b.keys)
+                            && bits(&a.values, &b.values)
+                            && bits(&a.index_keys, &b.index_keys)
+                            && bits(&a.pooled_index_keys, &b.pooled_index_keys)
+                    },
+                    (None, None) => true,
+                    _ => false,
+                };
+                let ple = match (&a.ple_history, &b.ple_history) {
+                    (Some(a), Some(b)) => bits(a, b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                attention && ple
+            })
+    }
+
+    #[stark_test]
+    fn private_graph_checkpoint_restores_prefix_partial_pool_and_ple_without_aliasing() {
+        let g = Geometry {
+            context: 32,
+            dim: 2,
+            streams: 1,
+            heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            index_heads: 1,
+            index_dim: 2,
+            ratio: 4,
+            budget: 8,
+            ple_kernel: 2,
+            ngram_size: 3,
+            ..Geometry::default()
+        };
+        let position = 6;
+        let attention = AttentionCheckpoint {
+            capacity: 16,
+            keys: values(position * 2, 0),
+            values: values(position * 2, 1),
+            index_keys: values(position * 2, 2),
+            pooled_index_keys: values(2, 3),
+        };
+        let norm = DecodeGraph::upload(&[1.0; 2]).unwrap();
+        let source = State {
+            final_norm: norm.clone(),
+            layers: vec![LayerControls {
+                attention_hyper: HyperControls {
+                    norm: norm.clone(),
+                },
+                mlp_hyper: HyperControls {
+                    norm: norm.clone(),
+                },
+                attention: Some(AttentionControls {
+                    q_norm: norm.clone(),
+                    k_norm: norm.clone(),
+                    index_q_norm: norm.clone(),
+                    index_k_norm: norm.clone(),
+                    cache: Some(checkpoint_attention(&attention, &g, position).unwrap()),
+                    scalar: None,
+                }),
+                ple: Some(PleControls {
+                    key_norm: norm.clone(),
+                    query_norm: norm.clone(),
+                    conv_norm: norm.clone(),
+                    convolution: norm,
+                    history: DecodeGraph::upload(&values(6, 4)).unwrap(),
+                    scratch: DecodeGraph::zeros(2).unwrap(),
+                }),
+                edge0: None,
+            }],
+        };
+        let saved = source.capture_checkpoint(&g, position).unwrap();
+        assert!(
+            saved.layers[0].attention.as_ref().unwrap().index_keys.len() == 12,
+            "partial index pool prefix missing"
+        );
+        assert!(saved.layers[0].attention.as_ref().unwrap().pooled_index_keys.len() == 2, "completed index pool count");
+        let cache = source.layers[0].attention.as_ref().unwrap().cache.as_ref().unwrap();
+        let history = &source.layers[0].ple.as_ref().unwrap().history;
+        let mut mutation = DecodeGraph::new().unwrap();
+        for view in [&cache.keys, &cache.values, &cache.index_keys, &cache.pooled_index_keys, history] {
+            let overwrite = DecodeGraph::upload(&vec![42.0; view.len]).unwrap();
+            mutation.copy_into(&overwrite, view).unwrap();
+        }
+        mutation.finish(&[]).unwrap();
+        let restored = source.stage_checkpoint(&saved, &g, position).unwrap();
+        assert!(
+            equal(&saved, &restored.capture_checkpoint(&g, position).unwrap()),
+            "graph checkpoint exact state roundtrip"
+        );
+        let restored_cache = restored.layers[0].attention.as_ref().unwrap().cache.as_ref().unwrap();
+        assert!(!std::ptr::eq(&*cache.keys.buffer, &*restored_cache.keys.buffer), "QSA restore aliases mutable cache");
+        assert!(
+            !std::ptr::eq(&*history.buffer, &*restored.layers[0].ple.as_ref().unwrap().history.buffer),
+            "PLE restore aliases mutable history"
+        );
+        assert!(
+            std::ptr::eq(&*source.final_norm.buffer, &*restored.final_norm.buffer),
+            "immutable norm ownership changed"
+        );
+        // Force a failure after replacement attention allocation. The current
+        // source owners must remain untouched; model-level restore will reset
+        // and invalidate handles when this staged operation fails.
+        let current = source.capture_checkpoint(&g, position).unwrap();
+        let mut bad = restored.capture_checkpoint(&g, position).unwrap();
+        bad.layers[0].ple_history.as_mut().unwrap()[0] = f32::NAN;
+        assert!(source.stage_checkpoint(&bad, &g, position).is_err());
+        assert!(
+            equal(&current, &source.capture_checkpoint(&g, position).unwrap()),
+            "failed graph staging changed live state"
+        );
+        bad = restored.capture_checkpoint(&g, position).unwrap();
+        bad.layers[0].attention.as_mut().unwrap().index_keys = Box::new([]);
+        assert!(source.stage_checkpoint(&bad, &g, position).is_err());
+        assert!(source.stage_checkpoint(&saved, &g, position + 1).is_err());
+        let mut changed = g.clone();
+        changed.ratio = 2;
+        assert!(source.stage_checkpoint(&saved, &changed, position).is_err());
+    }
+}

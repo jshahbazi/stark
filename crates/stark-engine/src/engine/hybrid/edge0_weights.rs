@@ -24,6 +24,12 @@ use super::{
 #[path = "edge0_weights_metal.rs"]
 mod metal_backend;
 
+// Staged storage inspection surface; no inference caller is enabled yet.
+#[allow(dead_code)]
+#[path = "edge0_mtp_storage.rs"]
+mod mtp_storage;
+pub use mtp_storage::{Edge0MtpDenseView, Edge0MtpEncoding, Edge0MtpExpertView, Edge0MtpQ2Block, Edge0MtpQ2Row};
+
 const TABLE_NAME: &str = "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
 const TABLE_ROWS: usize = 320_001_536;
 const LOGICAL_ROWS: usize = 320_001_446;
@@ -73,6 +79,7 @@ pub(super) struct Edge0Data {
     scales: Vec<Box<[f32]>>,
     experts: edge0_source::NativeExperts,
     projections: edge0_source::Q8Projections,
+    mtp: mtp_storage::MtpStorage,
     integers: HashMap<String, Vec<i64>>,
     integer_shapes: HashMap<String, Vec<usize>>,
     metal_counters: [std::sync::atomic::AtomicU64; 4],
@@ -725,13 +732,13 @@ impl Weights {
         let scales = (0..48)
             .map(|layer| edge0_source::read_column_scales(source_file(path, &format!("scales/l{layer}.f32"))?))
             .collect::<Result<Vec<_>>>()?;
-        let mtp_dense = source_file(path, "mtp/dense.bin")?;
-        if mtp_dense.metadata()?.len() != 116_099_072
-            || source_file(path, "mtp/experts.bin")?.metadata()?.len() != 707_788_800
-        {
-            return Err(Error::Invalid("Edge0 retained MTP payload size"));
-        }
-        edge0_source::read_mtp_dense(source_file(path, "mtp/dense.txt")?, 116_099_072)?;
+        let mtp_dense = map_file(&mut weights, path, "mtp/dense.bin", mtp_storage::DENSE_BYTES)?;
+        let mtp_experts = map_file(&mut weights, path, "mtp/experts.bin", mtp_storage::EXPERT_BYTES)?;
+        let mtp = mtp_storage::MtpStorage::new(
+            Arc::clone(&weights.files[mtp_dense]),
+            Arc::clone(&weights.files[mtp_experts]),
+            source_file(path, "mtp/dense.txt")?,
+        )?;
         let mut integers = HashMap::new();
         let mut integer_shapes = HashMap::new();
         for (suffix, key, count) in [
@@ -765,6 +772,7 @@ impl Weights {
             scales,
             experts,
             projections,
+            mtp,
             integers,
             integer_shapes,
             metal_counters: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
@@ -780,6 +788,22 @@ impl Weights {
 
     pub fn is_edge0(&self) -> bool {
         self.edge0.is_some()
+    }
+
+    /// Staged storage view only. Does not enable draft execution/capabilities.
+    pub fn edge0_mtp_dense(
+        &self,
+        name: &str,
+    ) -> Result<Edge0MtpDenseView> {
+        self.edge0.as_ref().ok_or(Error::Invalid("Edge0 MTP storage unavailable"))?.mtp.dense(name)
+    }
+
+    /// Original four-plane Q2_0 expert, retaining the mapped file owner.
+    pub fn edge0_mtp_expert(
+        &self,
+        expert: usize,
+    ) -> Result<Edge0MtpExpertView> {
+        self.edge0.as_ref().ok_or(Error::Invalid("Edge0 MTP storage unavailable"))?.mtp.expert(expert)
     }
 
     /// Aggregate diagnostics only; these counters never retain route IDs,
@@ -1064,7 +1088,15 @@ mod tests {
         let path = PathBuf::from(std::env::var_os("STARK_EDGE0_SOURCE_PATH").expect("source fixture required"));
         let weights = Weights::open_edge0(&path).unwrap();
         assert!(weights.is_edge0());
-        assert_eq!(weights.files.len(), 5);
+        assert_eq!(weights.files.len(), 7);
+        let draft = weights.edge0_mtp_dense("self_attn.q_proj.weight").unwrap();
+        assert_eq!(draft.shape(), [12288, 2560]);
+        assert_eq!(draft.encoding(), Edge0MtpEncoding::Q8_0);
+        assert_eq!(draft.offset(), 81_231_872);
+        let final_draft_expert = weights.edge0_mtp_expert(511).unwrap();
+        assert_eq!(final_draft_expert.offset() + final_draft_expert.record_bytes(), mtp_storage::EXPERT_BYTES as usize);
+        assert!(weights.edge0_mtp_expert(512).is_err());
+        assert!(weights.edge0_mtp_dense("unexpected.weight").is_err());
         assert_eq!(weights.shape("model.embed_tokens.weight").unwrap(), [248320, 2560]);
         assert_eq!(weights.shape("model.layers.3.self_attn.indexer.index_qk_proj.weight").unwrap(), [640, 2560]);
         assert_eq!(weights.shape("model.layers.0.linear_attn.conv1d.weight").unwrap(), [10240, 4, 1]);

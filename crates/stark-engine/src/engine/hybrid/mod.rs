@@ -22,6 +22,7 @@ mod glm_metal;
 mod lily;
 pub mod math;
 mod memory;
+mod mtp_controller;
 pub mod profile;
 pub mod qwen;
 #[cfg(feature = "metal")]

@@ -1,5 +1,6 @@
 # Model change and experiment ledger
 
+- [20261113-EDGE0-07: native MTP foundation](2026-11-13-edge0-mtp.md): registered model-free draft storage, checkpoint/rewind and round-controller work; native MTP remains unavailable pending head and artifact qualification.
 - [20261112-EDGE0-06: Metal graph and grouped prefill](2026-11-12-edge0-metal.md): bounded Phase 4 gate passed for virtual/resident native graph variants, with complete-readout comparison, matched fixed-work timing, corrected cold memory admission and worker lifecycle checks; cap 512, MTP/reuse unavailable, app/catalogue excluded.
 - [20261112-EDGE0-05: F32 reference forward](2026-11-12-edge0-reference-forward.md): diagnostic native adapter, independent F64 component and bounded checkpoint chat/reset/restart gates passed; broad model parity, mixed execution, MTP and prefix reuse remain unqualified.
 - [20261112-EDGE0-04: native readers and block decoders](2026-11-12-edge0-block-readers.md): native readers and four scalar formats match pinned references; Safe/Fast Metal checks and the full native suite pass. No model/backend admission; sealed scoring replay inputs unavailable.

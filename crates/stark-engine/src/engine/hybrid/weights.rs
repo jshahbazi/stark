@@ -42,7 +42,7 @@ use super::{Error, Result};
 
 #[path = "edge0_weights.rs"]
 mod edge0;
-pub use edge0::Edge0Matrix;
+pub use edge0::{Edge0Matrix, Edge0MtpDenseView, Edge0MtpEncoding, Edge0MtpExpertView, Edge0MtpQ2Block, Edge0MtpQ2Row};
 
 const MAX_HEADER: usize = 128 * 1024 * 1024;
 const MAX_COUNT: usize = 2_000_000;

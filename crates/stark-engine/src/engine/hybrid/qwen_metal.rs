@@ -12,6 +12,7 @@ type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 const EDGE0_RAW_NEGATIVE_A: u32 = 2;
 const EDGE0_TILED_VALUE_HEADS: u32 = 4;
 
+#[derive(Clone)]
 pub(super) struct Geometry {
     pub key_heads: usize,
     pub key_dim: usize,
@@ -35,6 +36,20 @@ pub(super) struct Gdn {
     recurrent_count: usize,
 }
 
+/// Private RAM only. Immutable controls and overwrite-before-read convolved/
+/// result buffers are excluded. The model-level owner fences before capture.
+pub(super) struct Checkpoint {
+    parameters: [u32; 8],
+    history: Box<[f32]>,
+    recurrent: Box<[f32]>,
+}
+
+impl Checkpoint {
+    pub(super) fn bytes(&self) -> usize {
+        (self.history.len() + self.recurrent.len()) * 4
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ptr::NonNull;
@@ -46,6 +61,71 @@ mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn private_gdn_checkpoint_roundtrip_preserves_bits_and_rejects_bad_state() {
+        use crate::engine::hybrid::weight_metal::{DecodeGraph, DeviceVector};
+
+        let state = Gdn::new_edge0(
+            Geometry {
+                key_heads: 1,
+                key_dim: 2,
+                value_heads: 2,
+                value_dim: 2,
+                conv_kernel: 2,
+                eps: 1e-5,
+                sigmoid_output: true,
+            },
+            &[0.0; 16],
+            &[-0.5, -1.0],
+            &[0.0; 2],
+            &[1.0; 2],
+        )
+        .unwrap();
+        let values = [f32::from_bits(0x8000_0000), f32::from_bits(1), 0.25, -0.75, 1.0, -2.0, 0.5, 0.0];
+        unsafe {
+            state.history.contents().as_ptr().cast::<f32>().copy_from_nonoverlapping(values.as_ptr(), values.len());
+            state.recurrent.contents().as_ptr().cast::<f32>().copy_from_nonoverlapping(values.as_ptr(), values.len());
+        }
+        let snapshot = state.capture_checkpoint().unwrap();
+        let mut graph = DecodeGraph::new().unwrap();
+        let overwrite = DecodeGraph::upload(&[7.0; 8]).unwrap();
+        for buffer in [&state.history, &state.recurrent] {
+            let destination = DeviceVector {
+                buffer: buffer.clone(),
+                offset: 0,
+                len: 8,
+            };
+            graph.copy_into(&overwrite, &destination).unwrap();
+        }
+        graph.finish(&[]).unwrap();
+        let restored = state.stage_checkpoint(&snapshot).unwrap();
+        let actual = restored.capture_checkpoint().unwrap();
+        assert!(
+            actual.history.iter().zip(values).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "GDN history checkpoint bits"
+        );
+        assert!(
+            actual.recurrent.iter().zip(values).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "GDN recurrent checkpoint bits"
+        );
+        assert!(!std::ptr::eq(&*restored.history, &*state.history), "GDN restore aliases mutable history");
+        assert!(!std::ptr::eq(&*restored.recurrent, &*state.recurrent), "GDN restore aliases mutable recurrence");
+        assert!(std::ptr::eq(&*restored.controls, &*state.controls), "GDN immutable control ownership");
+        let mut wrong = restored.capture_checkpoint().unwrap();
+        wrong.parameters[6] ^= EDGE0_TILED_VALUE_HEADS;
+        assert!(state.stage_checkpoint(&wrong).is_err());
+        wrong = restored.capture_checkpoint().unwrap();
+        wrong.recurrent[0] = f32::NAN;
+        assert!(state.stage_checkpoint(&wrong).is_err());
+        wrong = restored.capture_checkpoint().unwrap();
+        wrong.history = Box::new([]);
+        assert!(state.stage_checkpoint(&wrong).is_err());
+        unsafe {
+            state.history.contents().as_ptr().cast::<f32>().write(f32::NAN);
+        }
+        assert!(state.capture_checkpoint().is_err());
+    }
 
     struct RecurrenceHarness {
         device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -375,6 +455,61 @@ mod tests {
 }
 
 impl Gdn {
+    pub(super) fn capture_checkpoint(&self) -> Result<Checkpoint> {
+        let read = |buffer: &Buffer, count: usize| -> Result<Box<[f32]>> {
+            if count.checked_mul(4) != Some(buffer.length()) {
+                return Err(Error::Invalid("GDN checkpoint source span"));
+            }
+            let values = unsafe { std::slice::from_raw_parts(buffer.contents().as_ptr().cast::<f32>(), count) };
+            if values.iter().any(|value| !value.is_finite()) {
+                return Err(Error::Invalid("GDN checkpoint nonfinite state"));
+            }
+            Ok(values.to_vec().into_boxed_slice())
+        };
+        Ok(Checkpoint {
+            parameters: self.parameters,
+            history: read(&self.history, self.history_count)?,
+            recurrent: read(&self.recurrent, self.recurrent_count)?,
+        })
+    }
+
+    /// Allocate and populate replacement owners without touching this state.
+    /// A caller can stage every layer before its infallible model-level swap.
+    pub(super) fn stage_checkpoint(
+        &self,
+        checkpoint: &Checkpoint,
+    ) -> Result<Self> {
+        if checkpoint.parameters != self.parameters
+            || checkpoint.history.len() != self.history_count
+            || checkpoint.recurrent.len() != self.recurrent_count
+            || checkpoint.history.iter().chain(checkpoint.recurrent.iter()).any(|value| !value.is_finite())
+        {
+            return Err(Error::Invalid("GDN checkpoint geometry or values"));
+        }
+        let device = self.history.device();
+        let copy = |values: &[f32]| {
+            device
+                .new_buffer_with_data(bytemuck::cast_slice(values), MTLResourceOptions::STORAGE_MODE_SHARED)
+                .ok_or(Error::Invalid("GDN checkpoint replacement allocation"))
+        };
+        let zeros = |count| {
+            device
+                .new_buffer_with_data(&vec![0_u8; count * 4], MTLResourceOptions::STORAGE_MODE_SHARED)
+                .ok_or(Error::Invalid("GDN checkpoint scratch allocation"))
+        };
+        Ok(Self {
+            geometry: self.geometry.clone(),
+            parameters: self.parameters,
+            controls: self.controls.clone(),
+            history: copy(&checkpoint.history)?,
+            recurrent: copy(&checkpoint.recurrent)?,
+            convolved: zeros(self.parameters[7] as usize)?,
+            result: zeros(self.geometry.value_heads * self.geometry.value_dim)?,
+            history_count: self.history_count,
+            recurrent_count: self.recurrent_count,
+        })
+    }
+
     pub(super) fn new(
         geometry: Geometry,
         convolution: &[f32],

@@ -22,6 +22,7 @@ pub(super) fn new_graph() -> Result<DecodeGraph> {
     Ok(graph)
 }
 
+#[derive(Clone)]
 pub(super) struct Controls {
     stored_s: DeviceVector,
 }
