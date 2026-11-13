@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "ASTRO_TELEMETRY_DISABLED=1 node build.mjs && ASTRO_TELEMETRY_DISABLED=1 astro build --root docs-site",
+    "build": "node build.mjs",
     "preview": "python3 -m http.server 4173 --bind 127.0.0.1 --directory dist"
   },
   "dependencies": {
