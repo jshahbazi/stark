@@ -594,3 +594,88 @@ Not measured.
 - **Next action:** add a user/assistant-only session mode to the prefix
   harness (a tooling change, recorded separately) and rerun under a new ID.
   Review the `tool_use` entry if tools are wanted.
+
+## 20261112-DENSE-MLX-08: system-role fold for the published Mistral export and its prefix-reuse gate
+
+The canonical aggregates are in the
+[install run record](../archive/runs/2026-11-12-install-auto-f16.md#system-role-fold).
+
+### Identity and state
+
+| Field | Value |
+| --- | --- |
+| Attempt ID / registered date / executed date / owner | `20261112-DENSE-MLX-08`; registered under the -07 series and executed 2026-11-13; Claude agent session on branch `claude/install-native-f16` after merge `b88b5e6b` |
+| Kind | Compatibility (system role), correctness and prefix reuse |
+| Attempt state | Completed |
+| Result and acceptance criterion | A system message now renders on the published export: conversion records `fold_into_first_user`, and rendering folds the system text into the first user turn. Weights and config are unchanged (`968cf950...`, `a8ced577...`). Worker checks are identical to `-05`/`-07`. The prefix-reuse gate **passed** with `--session-kind user-assistant`: 32/32 requests exact and rule-matching, follow-ups reusing 2,048 tokens, all invalidations as documented |
+| Evidence scope | Conversion metadata, rendering, worker gate and prefix-reuse exactness on the published bytes; no logit-gate rerun; no tool histories; no timing |
+| Promotion decision | Not promoted. The prefix gate covers user/assistant sessions only, tool behavior is unreviewed, and the logit gate was not rerun on this build |
+| Disposition | Fold rule and harness option adopted on branch `claude/install-native-f16`; not pushed, merged, released or installed |
+| Predecessor / related attempts / governing issue / PR | `-07` (prefix gate blocked by system and tool roles), `-05`; no PR |
+
+### Hypothesis and change
+
+- **Problem:** in `-07` the `default` entry raised on every system message,
+  through an explicit `raise_exception` on role order. Chat or API requests
+  with a system prompt failed, and so did the prefix harness.
+- **Change:** a conversion-time probe records the fold policy only for a
+  template that renders a user turn, refuses a leading system message and
+  renders the folded turns. Rendering then folds exactly one leading text
+  system message into the first user message with `"\n\n"`, and refuses every
+  other system placement. The opt-in harness kind grows sessions through user
+  and assistant turns.
+- **Expected:** the artifact bytes are unchanged, and the prefix-reuse gate
+  passes on folded user/assistant sessions.
+
+### Artifact, source and environment
+
+| Field | Baseline | Candidate |
+| --- | --- | --- |
+| Model family, exact checkpoint and upstream revision | `-07` install of `mlx-community/Mistral-7B-Instruct-v0.3-4bit` @ `a4b8f870...` | Reinstall of the same published bytes, read in place |
+| Format/quantization and config/weight/tokenizer/processor/template hashes | Output `968cf950...`, config `a8ced577...` | Same output, config and tokenizer; receipt adds `chat_template_system_role` |
+| Backend, vendor revision and local patch provenance | Engine at `103a8296` | Engine after merge `b88b5e6b` |
+| Stark commit, dirty patch/runtime manifest and executable hash | `-07` builds | `stark-generate` `041ee11b...`, `stark-score` `95159c28...`, `stark-template` `886769ce...`; harness `ffa987ed...` |
+| Toolchains, dependency lock hashes and build flags | Rust 1.98.1 release, locked | Same; `Cargo.lock` `f836a99b...` |
+| Weight, activation, accumulation, recurrent-state and KV precision | F16 profile | F16 profile |
+| Selected kernel and materialization policies | Not instrumented | Not instrumented |
+| Hardware, physical RAM, OS/driver/Metal toolchain | Apple M5 Max, 128 GiB, macOS 26.7.2 | Same |
+| Available headroom, observed peak memory and measurement method | Not measured | Not measured |
+
+### Workload and controls
+
+- **Image capability, image arms and MTP:** N/A (text-only, no draft head).
+- **Prefix harness:** the `-05` flags (`--reuse rewind --mode exactness
+  --context 8192 --first-tokens 3000 --tools 1 --instruction-paragraphs 2
+  --follow-up-sentences 8 8 40 --max-new 64`) plus
+  `--session-kind user-assistant`. `--tools` is unused in that kind.
+- **Workers:** the `-03` fixture, with no system message.
+
+### Attempt history and failures
+
+| Trial / source | What was attempted | Observation | Validity and disposition |
+| --- | --- | --- | --- |
+| Probe on real templates | `probe_system_role` | `default` gets the policy; `tool_use`, Mistral v0.3, Qwen2.5 and Llama 3.2 fixtures get none | Valid |
+| Desktop reinstall | Local-folder route, temporary data directory | Installed; unchanged bytes; policy recorded; synthetic system render equals the manual fold | Valid pass |
+| Worker checks | `-03` fixture | Identical to `-05` and `-07` | Valid pass |
+| Prefix harness | User/assistant kind | 32/32 exact and rule-matching; follow-ups reuse 2,048; maximum 3,072; invalidations as documented | Valid pass for that session kind |
+
+### Correctness and lifecycle
+
+- **Rendering:** requests without a system message render exactly as before.
+  The worker outputs show generation is unchanged.
+- **Prefix reuse:** rewind reuse is exact on folded user/assistant sessions.
+  Each request starts with the folded system message, so the fold keeps a
+  stable prefix.
+- **Not covered:** tool histories, which this template cannot render.
+
+### Performance and memory
+
+Not measured.
+
+### Evidence, decision and limits
+
+- **Decision:** system prompts work on this artifact, and its prefix reuse is
+  exact for user/assistant sessions. This does not qualify tool use or other
+  artifacts.
+- **Limit:** artifacts converted before this rule have no policy record and
+  must be reinstalled to fold system messages.

@@ -327,7 +327,7 @@ def _source(receipt, model):
 
 
 def template_review_receipt(root):
-    """Return the receipt fields that restrict tool templates, failing closed.
+    """Return the receipt fields that restrict tool templates or system roles, failing closed.
 
     An absent receipt (an imported artifact) adds no restriction. A receipt that
     exists but cannot be read is treated as recording an unreviewed template.
@@ -341,8 +341,12 @@ def template_review_receipt(root):
             raise ValueError()
     except Exception:
         return {"chat_template_selection": "unreadable_receipt"}
-    selection = receipt.get("chat_template_selection")
-    return {} if selection is None else {"chat_template_selection": selection}
+    # The loader validates the recorded system-role policy exactly.
+    return {
+        key: receipt[key]
+        for key in ("chat_template_selection", "chat_template_system_role")
+        if receipt.get(key) is not None
+    }
 
 
 def model_tool_support(root):

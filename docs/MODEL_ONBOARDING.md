@@ -167,7 +167,11 @@ Choose prompts long enough to cross the advertised chunk boundary, and a context
 large enough for the synthetic follow-ups and output budget. `--first-tokens`
 sets the first-turn target; `--tools`, `--instruction-paragraphs` and
 `--follow-up-sentences N N N` control the synthetic session size. Keep their
-values in the validation record. Use `--mode exactness` and `--mode timing` for
+values in the validation record. The default session grows through tool
+calls and results. For a template without tool roles, the opt-in
+`--session-kind user-assistant` keeps the same system and first-user text but
+grows through user and assistant turns only, declares no tools, and records
+`session_kind`. It does not exercise tool histories. Use `--mode exactness` and `--mode timing` for
 separate runs when the model's resource cost requires it. The exactness run
 includes a new worker using the same host scope and requires zero reused tokens
 after that restart.
@@ -242,6 +246,13 @@ even if the `default` program matches a reviewed parser. Its `tool_use` or
 other entries are never rendered. Admitting tools for such an artifact needs
 the review below for its entries and a reviewed change to that rule
 (`api_tools.UNREVIEWED_TOOL_TEMPLATES`).
+
+A template that raises on a leading system message, but renders user-only and
+folded turns, is recorded at conversion as `chat_template_system_role`
+(`fold_into_first_user`). Its system message is then folded into the first user
+message at render time; see [model support](MODEL_SUPPORT.md). Qualify such an
+artifact's prefix reuse with `--session-kind user-assistant` when its template
+also lacks tool roles.
 
 For each new template:
 

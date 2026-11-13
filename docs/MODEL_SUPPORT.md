@@ -118,6 +118,30 @@ entries, such as `tool_use`, are never used. Tool calling for such an artifact
 reports `unavailable`, and its catalogue row offers no tools, until a
 reviewed parser admits that exact artifact.
 
+Some chat templates, such as that `default` entry, raise on any role other
+than alternating user and assistant, so they refuse a system message.
+Conversion test-renders every text artifact's template with fixed synthetic
+messages through the native template helper. When a user-only turn renders, a
+leading system message raises, and the folded turns render, the receipt
+records `chat_template_system_role`
+(`{"policy": "fold_into_first_user", "separator": "\n\n"}`).
+
+For such an artifact, rendering folds one leading system message into the
+first user message, joined by a blank line. It never folds into the last one,
+so earlier turns render identically and prefix reuse stays exact. Requests
+that cannot be folded fail with a clear error:
+
+- more than one system message;
+- a system message that is not first;
+- non-text system content;
+- a system message not immediately followed by a text user message.
+
+Templates that accept a system message, and artifacts without the record,
+render exactly as before. An artifact converted before this rule has no
+record, so it still refuses system messages until it is reinstalled.
+`config.json` is unchanged, and the loader honours only that exact recorded
+policy ([20261112-DENSE-MLX-08](archive/runs/2026-11-12-install-auto-f16.md#system-role-fold)).
+
 Native F16 is a separate precision profile for the plain full-attention dense
 graph of Llama, Qwen2 and Mistral artifacts. The engine selects it only when
 the converted decoder stores F16 tensors and no BF16 tensor. Weights,

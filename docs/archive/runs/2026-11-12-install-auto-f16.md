@@ -224,6 +224,114 @@ One existing metadata case now uses a list without `default`. The full
 converter suite has 7,677 passed and 94 skipped. The 16 CI ruff commands and
 the repository policy check pass.
 
+## System-role fold
+
+This section is attempt `20261112-DENSE-MLX-08`, run on 2026-11-13. It is the
+third change on this branch, after merging `origin/main` (`b88b5e6b`).
+
+The published export's `default` entry raises on role order:
+`(role == 'user') != (index % 2 == 0)` triggers `raise_exception`, and any
+other role reaches a second `raise_exception`. A leading system message
+therefore fails, as `-07` found. Mistral's own v0.3 template
+(`mistral_v03.jinja`, Apache-2.0) accepts one leading system message and joins
+it to the last user message with `"\n\n"`. Transformers adds no system
+handling of its own.
+
+### Rule
+
+- **Detection** (`template_runtime.probe_system_role`). Conversion
+  test-renders every text artifact's template through the native helper, with
+  fixed synthetic messages. It records `chat_template_system_role` =
+  `{"policy": "fold_into_first_user", "separator": "\n\n"}` only when:
+  - a user-only turn renders;
+  - a leading system message raises;
+  - the folded single-turn and multi-turn conversations render.
+
+  Otherwise nothing is recorded. A missing helper fails conversion.
+- **Results on real templates:**
+  - the published `default` (`a6fc0e6b...`) records the fold;
+  - its `tool_use` entry (`4c8a2468...`), the Mistral v0.3 fixture
+    (`e16746b4...`), the Qwen2.5 fixture (`cd8e9439...`) and the Llama 3.2
+    fixture (`5816fce1...`) accept the system role and record nothing.
+- **Fold** (`template_runtime.fold_system_message`). One leading system
+  message is joined to the first user message's text with `"\n\n"`. Folding
+  into the first message keeps earlier turns unchanged.
+
+  It refuses, with fixed reasons and clear chat errors:
+  - more than one system message;
+  - a system message that is not first;
+  - non-text system content;
+  - no text user message immediately after the system message.
+
+  Conversations without a system message pass through unchanged.
+- **Wiring.** `IsolatedTemplate(system_role=...)` applies the fold before the
+  helper evaluates the template. `chat.load_template` passes it only for the
+  exact recorded policy, and any other recorded value fails to load. The Rust
+  workers and the `stark-template` helper are unchanged, because they do not
+  build chat messages.
+- **Tools** stay `unavailable` under the named-list rule.
+
+### Results
+
+| Check | Result |
+| --- | --- |
+| Desktop reinstall (local-folder route, temporary data directory) | Installed; `float16`; template `default`; `chat_template_system_role` recorded |
+| Weights / config / tokenizer | `968cf950...` / `a8ced577...` / `3e017710...`, unchanged |
+| Synthetic system render | A system-plus-user render succeeds, equals the manually folded render, and differs from the user-only render (hash comparison) |
+| Tool support | `unavailable` |
+| Worker checks (`-03` fixture, rebuilt workers) | 14 tokens to EOS and 32/32, reference greedy-exact; scorer 0.023 / 0.031; identical to `-05` and `-07` |
+| Prefix reuse (`-05` flags plus `--session-kind user-assistant`) | **Passed** (details below) |
+
+Prefix-reuse details:
+
+- The context was 8,192 tokens with a reuse chunk of 1,024. The session's turns
+  had 2,652, 2,810, 2,986 and 3,628 tokens.
+- All 32 requests were identical to a fresh worker and to the baseline worker,
+  and every reuse count matched the rewind rule.
+- Each follow-up reused 2,048 tokens (`follow_ups_reuse: true`), and the
+  maximum reuse was 3,072.
+- Five invalidations reused 0 afterwards: the error reply, an unscoped request,
+  reset, an image operation and cancellation. Tokenize/decode kept reuse.
+- Every request started with the folded system message, so the passing
+  follow-ups also show the fold is a stable prefix on this artifact.
+
+### Harness option
+
+`scripts/validate_generation_prefix_cache.py` gains an opt-in
+`--session-kind user-assistant`:
+
+- It keeps the same system and first-user text.
+- It declares no tools, and grows through user and assistant turns where the
+  default grows through tool calls and results.
+- It records `session_kind`.
+
+The default session, its records and its gates are unchanged. This option does
+not test tool histories, which this template cannot render.
+
+### Receipts
+
+These files are private and kept outside the repository.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Prefix-reuse record / stdout | `87a453482668d2a2ca4299308a5c97d5d3e59065142e61604b7063abb5d6df2f` / `7fc064a001709ace39f31cc7153feeed225f4526329241d110180a5c80e8f1e8` |
+| Worker receipt | `1794d6f707d2cdf1d9dfc33b95343d6cc5ce8106918e557b7eda2347e438ee27` |
+| Harness after this change | `ffa987ede4a944a8d0f6a88c32d20e02df5fd07e374999586eb07e782cc0cec2` |
+| Rebuilt workers (`b88b5e6b` source) | `stark-generate` `041ee11b00cf415897d1b1fadfdad0b7daf1602a8084006c2e44f3ead5ce0cf4`, `stark-score` `95159c2818178b9d22294795eaf9867e4191415e8521921091c9d31cca69813c`, `stark-template` `886769ce...` (unchanged) |
+
+### Tests
+
+- `tools/converter/tests/test_system_role_fold.py` (16 tests). It covers fold
+  targets and every refusal, detection on synthetic templates, the published
+  `default` entry (read from the local snapshot and referenced by hash),
+  prefix stability against a fold into the last message, unchanged rendering
+  without the policy, exact-policy loading, and conversion receipts.
+- `scripts/test_validate_generation_prefix_cache.py` gains one test of the
+  opt-in kind and of default equivalence (19 pass).
+- The full converter suite after merge `b88b5e6b` has 7,708 passed and 94
+  skipped. The 16 CI ruff commands and the repository policy check pass. No
+  Rust or `stark-template` source changed.
+
 ## Build and environment
 
 | Item | Identity |

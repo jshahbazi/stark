@@ -601,6 +601,20 @@ def convert(
             if template_provenance and artifact_mode != "text":
                 # Image artifacts pin their own reviewed templates.
                 raise UnsupportedConversion("Image conversion requires a plain chat template")
+            codec = fragments.get("token_codec_config")
+            if artifact_mode == "text" and isinstance(codec, dict) and isinstance(codec.get("prompt_template"), str):
+                from .template_runtime import TemplateHelperMissing, probe_system_role
+
+                try:
+                    # Test-render with fixed synthetic messages. A program that
+                    # refuses only a leading system message gets the fold policy.
+                    system_role = probe_system_role(
+                        codec["prompt_template"], bos_token=codec.get("bos_token"), eos_token=codec.get("eos_token")
+                    )
+                except TemplateHelperMissing:
+                    raise ConversionError("Native chat-template helper is missing") from None
+                if system_role is not None:
+                    template_provenance["chat_template_system_role"] = system_role
             root_config = {
                 "type": (
                     "Gemma3VisionLanguageModelConfig"
