@@ -45,3 +45,7 @@ When a benchmark changes, update its corresponding result JSON, pinned report li
 ## Hosting
 
 The site identity is in `.openai/hosting.json` (a deployment project identifier, not a secret), with `dist` as the static directory. The public URL is [starkengine.app](https://starkengine.app/), which is also the canonical URL; [starkengine.io](https://starkengine.io/) serves the same site. Publication mirrors only the website source into a separate ignored checkout, builds it, and uploads `dist/` with the hosting manifest; credentials are supplied through the workflow's stdin and never stored. The domain setup and the first deployment are recorded in [the deployment record](../docs/archive/runs/WEBSITE_DEPLOYMENT_2026_10_21.md).
+
+## Documentation site
+
+Run `npm ci` followed by `npm run build` to build the full website, including Markdown docs at `dist/docs/`. `node build.mjs` alone only copies static assets. See [documentation maintenance](docs-site/README.md). The Sites publication repository may contain newer homepage content; preserve that content when publishing a documentation-only change.
