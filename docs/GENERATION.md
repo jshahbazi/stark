@@ -537,6 +537,44 @@ Privacy: the retained state and its prefix token IDs exist only in worker memory
 
 Drops the retained prefix. The reply is `{"cache_reset":true}`. Available only when prefix reuse is enabled; otherwise the reply is `{"error":"invalid_request"}`.
 
+### Worker memory diagnostics
+
+For explicit local investigation, start `stark-generate` with
+`STARK_WORKER_MEMORY_DIAGNOSTICS=1`. Unset or `0` leaves diagnostics disabled;
+other values fail startup with `invalid_memory_diagnostics_setting`. Enabled
+readiness adds `memory_diagnostics` with schema `self-task-memory-v1`,
+`counter_scope: "worker_task"` and operation `memory_diagnostics`.
+
+```json
+{"operation":"memory_diagnostics"}
+```
+
+This serialized, aggregate-only operation performs two self-task Darwin
+`task_info` reads. It adds no background sampler or automatic generation hooks.
+A valid request preserves prepared images and retained prefixes and never calls
+the inference backend. Reply write failures and malformed requests retain the
+ordinary failure/invalidation behavior. Disabled requests return
+`memory_diagnostics_unavailable`; unknown fields remain invalid.
+
+The reply includes `schema`, `counter_scope`, `supported`, fixed `source` and
+status codes, returned VM/events word counts, cumulative
+`decompressions_total_pages` and `pageins_total`, and current `resident_bytes`,
+`compressed_bytes`, `physical_footprint_bytes`, `virtual_bytes` and
+`page_size_bytes`. Unsupported, failed or short native reads report null fields
+with fixed statuses. Negative, saturated or regressed cumulative counters become
+unavailable for the sampler lifetime; never treat them as zero activity.
+
+Task decompressions count events charged to worker task/thread execution;
+page-ins are a different counter. Compressed bytes are the task's internal
+compressed accounting balance. These gauges do not establish complete model
+page ownership, physical compressed storage or GPU residency. The two native
+reads are sequential and include their own query cost. Clients should bracket
+queries with monotonic clocks and keep global paging gates independent. No
+prompt, response, token, address, identifier or raw native error is included.
+Raw evaluation receipts remain private; publish only aggregates and hashes.
+Diagnostic refusal or serialization failure uses the recoverable fixed codes
+`memory_diagnostics_unavailable` or `memory_diagnostics_failed`.
+
 ### Error codes
 
 Errors are replies of the form `{"error":CODE}`. Codes are fixed strings; see [error classes](WORKER_PROTOCOLS.md#error-classes) for the behaviour of each class.

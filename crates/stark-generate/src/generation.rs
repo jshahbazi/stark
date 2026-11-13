@@ -140,6 +140,7 @@ enum Request {
         cache_scope: Option<String>,
     },
     ResetCache {},
+    MemoryDiagnostics {},
     PrepareImage {
         rendered_prompt: String,
         image: ImageReference,
@@ -706,6 +707,8 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     prepared: Option<PreparedRequest<B::PreparedImage>>,
     /// `Some(enabled)` when the host requested prefix reuse at startup.
     prefix_cache: Option<bool>,
+    /// Explicit operator opt-in; ordinary generation never samples task memory.
+    memory_diagnostics: Option<crate::memory_diagnostics::MemoryDiagnostics>,
     budget: Budget,
 }
 
@@ -772,8 +775,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             media,
             prepared: None,
             prefix_cache,
+            memory_diagnostics: None,
             budget,
         })
+    }
+
+    pub(crate) fn enable_memory_diagnostics(&mut self) {
+        self.memory_diagnostics.get_or_insert_with(Default::default);
     }
 
     fn prefix_cache_enabled(&self) -> bool {
@@ -1027,6 +1035,14 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         output: &mut impl Write,
     ) -> Result<Value, &'static str> {
         match request {
+            Request::MemoryDiagnostics {} => {
+                let diagnostics = self.memory_diagnostics.as_mut().ok_or("memory_diagnostics_unavailable")?;
+                let mut reply =
+                    serde_json::to_value(diagnostics.snapshot()).map_err(|_| "memory_diagnostics_failed")?;
+                reply["schema"] = json!("self-task-memory-v1");
+                reply["counter_scope"] = json!("worker_task");
+                Ok(reply)
+            },
             Request::Tokenize {
                 text,
                 add_special_tokens,
@@ -1341,6 +1357,17 @@ impl<B: GenerationBackend> GenerationWorker<B> {
     ) -> Result<(), &'static str> {
         let request = stark_resource_budget::check_json_structure(bytes, self.budget)
             .and_then(|()| serde_json::from_slice::<Request>(bytes).map_err(|_| "invalid_request"));
+        // A valid explicit diagnostic does not consume a prepared image or
+        // change prefix state, including when the operator has not enabled it.
+        if matches!(&request, Ok(Request::MemoryDiagnostics {})) {
+            let reply = self.handle(Request::MemoryDiagnostics {}, output).unwrap_or_else(|code| json!({"error":code}));
+            let result = write_reply(output, &reply);
+            if result.is_err() {
+                self.prepared = None;
+                self.backend.clear_prefix_cache();
+            }
+            return result;
+        }
         if !matches!(&request, Ok(Request::GenerateImage { .. } | Request::DiscardImage { .. })) {
             self.prepared = None;
         }
@@ -1491,6 +1518,11 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     }
     if let Some(memory) = worker.backend.loaded_memory_metadata() {
         readiness["loaded_memory"] = memory;
+    }
+    if worker.memory_diagnostics.is_some() {
+        readiness["memory_diagnostics"] = json!({"schema":"self-task-memory-v1",
+            "counter_scope":"worker_task","operation":"memory_diagnostics"});
+        readiness["operations"].as_array_mut().ok_or("invalid_model_config")?.push(json!("memory_diagnostics"));
     }
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
@@ -4039,6 +4071,7 @@ mod tests {
             assert!(!worker.backend.prefix_cache_retained());
         }
     }
+    include!("generation_memory_diagnostics_tests.rs");
 }
 
 #[cfg(all(test, feature = "metal"))]

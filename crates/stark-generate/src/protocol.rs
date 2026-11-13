@@ -62,6 +62,15 @@ fn protocol_output() -> Result<File, &'static str> {
     Ok(output)
 }
 
+fn memory_diagnostics_setting(value: Option<&OsStr>) -> Result<bool, &'static str> {
+    match value {
+        None => Ok(false),
+        Some(value) if value == OsStr::new("0") => Ok(false),
+        Some(value) if value == OsStr::new("1") => Ok(true),
+        Some(_) => Err("invalid_memory_diagnostics_setting"),
+    }
+}
+
 pub fn main() {
     std::panic::set_hook(Box::new(|_| {}));
     let Ok(output) = protocol_output() else {
@@ -88,6 +97,8 @@ pub fn main() {
         } = arguments(std::env::args_os().skip(1))?;
         // Validate operator resource policy before model loading allocates native state.
         let _request_budget = stark_resource_budget::Budget::from_environment()?;
+        let memory_diagnostics =
+            memory_diagnostics_setting(std::env::var_os("STARK_WORKER_MEMORY_DIAGNOSTICS").as_deref())?;
         #[cfg(feature = "metal")]
         {
             let cancellation = crate::cancel::CancelSignal::from_environment()?;
@@ -114,6 +125,9 @@ pub fn main() {
                     crate::hybrid::HybridBackend::load(&path, cancellation)?
                 };
                 let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+                if memory_diagnostics {
+                    worker.enable_memory_diagnostics();
+                }
                 return crate::generation::run_lines(
                     &mut worker,
                     &mut crate::prefix_cache::StandardInput::reader(),
@@ -128,11 +142,14 @@ pub fn main() {
                 crate::native::NativeBackend::load(&path, cancellation)?
             };
             let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
+            if memory_diagnostics {
+                worker.enable_memory_diagnostics();
+            }
             crate::generation::run_lines(&mut worker, &mut crate::prefix_cache::StandardInput::reader(), &mut output)
         }
         #[cfg(not(feature = "metal"))]
         {
-            let _ = (path, staging, prefix_cache, validation_gemma_text_only);
+            let _ = (path, staging, prefix_cache, validation_gemma_text_only, memory_diagnostics);
             Err::<(), _>("native_backend_unavailable")
         }
     }));
@@ -150,6 +167,15 @@ pub fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn memory_diagnostics_requires_exact_operator_opt_in() {
+        assert_eq!(memory_diagnostics_setting(None), Ok(false));
+        assert_eq!(memory_diagnostics_setting(Some(OsStr::new("0"))), Ok(false));
+        assert_eq!(memory_diagnostics_setting(Some(OsStr::new("1"))), Ok(true));
+        for value in ["", "true", "01", " 1", "private-marker"] {
+            assert_eq!(memory_diagnostics_setting(Some(OsStr::new(value))), Err("invalid_memory_diagnostics_setting"));
+        }
+    }
     fn parse(args: &[&str]) -> Result<(PathBuf, Option<PathBuf>, bool), &'static str> {
         arguments(args.iter().map(OsString::from)).map(|parsed| (parsed.model, parsed.staging, parsed.prefix_cache))
     }

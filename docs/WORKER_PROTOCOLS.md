@@ -204,6 +204,11 @@ Image readiness describes implemented functionality and loaded identity. Its `qu
 
 ## GPU memory telemetry
 
+The generation worker also exposes an explicitly enabled
+[self-task memory diagnostic operation](GENERATION.md#worker-memory-diagnostics).
+It reads aggregate task counters on request and remains separate from GPU
+telemetry and global paging eligibility screens.
+
 An owning host can opt into a separate, private telemetry pipe by setting
 `STARK_GPU_MEMORY_FD` to an inherited writable, nonblocking FIFO descriptor of 3
 or higher. Both workers remove the variable before loading a model and sample

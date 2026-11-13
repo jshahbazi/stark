@@ -1,5 +1,6 @@
 # Model change and experiment ledger
 
+- [20261113-EDGE0-13: worker memory diagnostics and screened rerun](2026-11-13-edge0-worker-memory.md): explicit self-task aggregate instrumentation implemented; validation and a separately bound unchanged-screen MTP rerun in progress. Local non-commercial only; default off.
 - [20261113-EDGE0-12: paging investigation and unchanged-screen rerun](2026-11-13-edge0-mtp-paging.md): native/CLI counters agree; idle decompressions persist; six groups deferred at strict admission after 12 matching warmups, zero measured arms. All four zero-paging gates and default off retained; performance qualification open.
 - [20261113-EDGE0-11: shared prompt arithmetic and matched stopped requests](2026-11-13-edge0-mtp-batched-worker.md): full-readout equality and 26 worker lifecycle cases passed; 60 matched requests completed with zero eligible timing groups. Local virtual Metal opt-in only, default off, performance qualification pending.
 - [20261113-EDGE0-10: worker integration and matched MTP measurement](2026-11-13-edge0-mtp-worker.md): serial-target lifecycle passed; first fixed-16 warmup failed useful-work gate; initial-token cancellation and serial/off prompt gaps preserved, then addressed in attempt 11. No qualified timing result.

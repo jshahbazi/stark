@@ -5,6 +5,7 @@ mod generation;
 #[cfg(feature = "metal")]
 mod hybrid;
 mod media;
+mod memory_diagnostics;
 #[cfg(any(feature = "metal", test))]
 mod model_stops;
 #[cfg(feature = "metal")]
