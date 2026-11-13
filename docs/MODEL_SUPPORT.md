@@ -107,6 +107,19 @@ speculators have no F16 path: such an F16 artifact fails to load with an
 unsupported-precision error. BF16 artifacts keep their existing policy, and BF16
 qualification does not transfer to an F16 artifact or the reverse.
 
+App installs (the Install button and guided setup) convert text artifacts with
+`--dtype auto`. The converter selects F16 only after download, from the planned
+source tensors' own dtypes: every floating tensor must be F16, every matrix
+must be an MLX affine plane set, the family must be Qwen2 or Mistral, the native
+F16 admission above must accept the metadata in the requested mode, and the
+repository must have no recorded native qualification. Everything else,
+including Llama, Qwen3, unquantized F16 checkpoints, mixed-dtype sources and
+sliding-window exports, converts to BF16 byte-for-byte as before. Llama stays
+on BF16 because no F16 Llama artifact has a model run and its MLX exports carry
+BF16 load qualifications. The receipt's `dtype_selection` records the choice
+and reason. Image installs and explicit `--dtype` values are unchanged
+([install check](archive/runs/2026-11-12-install-auto-f16.md)).
+
 Qwen3.5 MoE image conversion has two schema-3 profiles: affine-quantized source
 weights use `qwen35-moe-affine-merged-v4`, while complete BF16 source weights
 use `qwen35-moe-bf16-merged-v5`. Both produce BF16 artifacts; the BF16-source

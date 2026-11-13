@@ -2064,6 +2064,11 @@ class Desktop:
                         command.append("--offline")
                     if selected_mode == "vision-language":
                         command.extend(["--artifact-mode", "vision-language"])
+                    else:
+                        # The converter keeps BF16 unless the downloaded tensors
+                        # are all F16 MLX affine planes of a family with a
+                        # recorded native F16 pass (cli._select_auto_dtype).
+                        command.extend(["--dtype", "auto"])
                     if source_revision is not None:
                         command.extend(["--revision", source_revision])
                 environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")

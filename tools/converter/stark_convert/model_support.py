@@ -38,6 +38,13 @@ _MLX = {
 # The native engine runs F16 activations only for the plain full-attention
 # dense graph of these families; every other native path requires BF16.
 NATIVE_F16_FAMILIES = frozenset({"llama", "qwen2", "mistral"})
+# `--dtype auto` may select F16 only for these families: the native F16 dense
+# profile has a recorded model-bound pass for an MLX affine Qwen2 export
+# (20261112-DENSE-MLX-04) and a Mistral export's weights (-05). Llama has no
+# F16 model run, and its MLX exports carry BF16 load qualifications, so it stays
+# BF16 until an F16 Llama artifact is qualified.
+AUTO_F16_FAMILIES = frozenset({"qwen2", "mistral"})
+_INTEGER_DTYPES = frozenset({"BOOL", "U8", "I8", "U16", "I16", "U32", "I32", "U64", "I64"})
 
 
 def native_f16_sliding_window(architecture: str, config: dict) -> bool:
@@ -48,6 +55,49 @@ def native_f16_sliding_window(architecture: str, config: dict) -> bool:
         return True
     layer_types = config.get("layer_types")
     return isinstance(layer_types, list) and any(layer != "full_attention" for layer in layer_types)
+
+
+def auto_f16_refusal(
+    architecture: str | None,
+    config: dict,
+    source_dtypes,
+    matrix_specs,
+    *,
+    mode: str,
+    artifact_mode: str,
+    model_kind: str,
+    require_native_support: bool,
+    qualified: bool,
+) -> str | None:
+    """Return why `--dtype auto` keeps BF16, or None when F16 output is selected.
+
+    The decision reads the planned source tensors' own dtypes, never names,
+    repository guesses or the config's declared dtype. Every floating source
+    tensor must be F16, every planned matrix must be an MLX affine plane set (the
+    format the F16 profile was qualified with), and the existing native F16
+    admission must accept the metadata in the requested app mode. A repository
+    with a recorded native qualification keeps its qualified BF16 output.
+    """
+    if require_native_support:
+        return "native_qualification_requires_bf16"
+    if artifact_mode != "text" or model_kind != "language" or mode not in {"text", "decision"}:
+        return "unsupported_mode"
+    if architecture not in AUTO_F16_FAMILIES:
+        return "family_not_qualified_for_f16"
+    if qualified:
+        return "qualified_bf16_artifact"
+    floating = {dtype for dtype in source_dtypes if dtype not in _INTEGER_DTYPES}
+    if floating != {"F16"}:
+        return "source_not_all_f16"
+    specs = tuple(matrix_specs)
+    if not specs or any(spec != "MLXSpec" for spec in specs):
+        return "source_not_mlx_affine"
+    report = preflight_model(
+        config, mode=mode, dtype="float16", model_kind="language", expected_architecture=architecture
+    )
+    if report["status"] != "conditional":
+        return "native_f16_not_admitted"
+    return None
 
 
 _FAMILY_DEFINITIONS = (
