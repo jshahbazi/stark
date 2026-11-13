@@ -635,7 +635,6 @@ pub(super) fn max_buffer_length() -> Result<usize> {
     Ok(executor()?.device.max_buffer_length())
 }
 
-#[cfg(test)]
 pub(super) fn allocated_bytes() -> Result<usize> {
     executor().map(|executor| executor.device.current_allocated_size())
 }

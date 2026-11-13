@@ -72,6 +72,15 @@ adds explicitly enabled self-task diagnostics: warmups show task-charged
 decompressions, while global paging and CPU/GPU activity prevent timing admission.
 These accounting observations preserve every screen and establish no speed claim.
 
+The separately staged `STARK_EDGE0_EXPERT_WINDOWS=1` experiment narrows each
+target expert binding to its original gate/up/down record while retaining
+projection layer bindings. Admission includes every possible page-rounded
+record window; it does not reduce the full prospective allowance. Default layer
+bindings remain available and residency plus record windows is rejected. See
+[attempt 14](model-experiments/2026-11-13-edge0-expert-windows.md) for the fixed-idle
+control and separately screened MTP evaluation. No arithmetic, precision or
+prefix-state format changes with the binding extent.
+
 Inspect only its pinned small metadata and bounded skeleton header with:
 
 ```sh

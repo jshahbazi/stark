@@ -13,6 +13,7 @@ const MTP_EXPERT_RECORD_BYTES: usize = 1_382_400;
 fn admit_mtp_memory(
     target_admitted: bool,
     target_resident: bool,
+    target_bank_bytes: usize,
     target_dynamic_bytes: usize,
     head_dynamic_bytes: usize,
     cap: usize,
@@ -23,8 +24,9 @@ fn admit_mtp_memory(
     if target_resident {
         return Err(Error::Unsupported("Edge0 MTP resident head is unqualified"));
     }
-    if head_dynamic_bytes < MIN_HEAD_DYNAMIC_BYTES
-        || TARGET_BANK_BYTES
+    if target_bank_bytes < TARGET_BANK_BYTES
+        || head_dynamic_bytes < MIN_HEAD_DYNAMIC_BYTES
+        || target_bank_bytes
             .checked_add(MAX_STATIC_VIEW_BYTES)
             .and_then(|n| n.checked_add(target_dynamic_bytes))
             .and_then(|n| n.checked_add(head_dynamic_bytes))
@@ -106,6 +108,7 @@ impl Weights {
         admit_mtp_memory(
             target_admitted,
             data.metal_resident.load(Ordering::Acquire),
+            data.metal_bank_allowance.load(Ordering::Acquire),
             data.metal_dynamic_allowance.load(Ordering::Acquire),
             extra_dynamic_bytes,
             cap,
@@ -220,13 +223,43 @@ mod tests {
     fn edge0_mtp_head_memory_admission_includes_target_and_extra_dynamic_reserves() {
         let target_dynamic = 1024 * 1024 * 1024;
         let exact = TARGET_BANK_BYTES + MAX_STATIC_VIEW_BYTES + target_dynamic + MIN_HEAD_DYNAMIC_BYTES;
-        assert!(admit_mtp_memory(true, false, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, exact).is_ok());
-        assert!(admit_mtp_memory(true, false, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, exact - 1).is_err());
-        assert!(admit_mtp_memory(false, false, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, usize::MAX).is_err());
-        assert!(admit_mtp_memory(true, true, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, usize::MAX).is_err());
-        assert!(admit_mtp_memory(true, false, target_dynamic, MIN_HEAD_DYNAMIC_BYTES - 1, usize::MAX).is_err());
-        assert!(admit_mtp_memory(true, false, usize::MAX, MIN_HEAD_DYNAMIC_BYTES, usize::MAX).is_err());
-        assert!(admit_mtp_memory(true, false, 0, usize::MAX, usize::MAX).is_err());
+        assert!(
+            admit_mtp_memory(true, false, TARGET_BANK_BYTES, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, exact).is_ok()
+        );
+        assert!(
+            admit_mtp_memory(true, false, TARGET_BANK_BYTES, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, exact - 1)
+                .is_err()
+        );
+        assert!(
+            admit_mtp_memory(false, false, TARGET_BANK_BYTES, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, usize::MAX)
+                .is_err()
+        );
+        assert!(
+            admit_mtp_memory(true, true, TARGET_BANK_BYTES, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, usize::MAX)
+                .is_err()
+        );
+        assert!(
+            admit_mtp_memory(true, false, TARGET_BANK_BYTES, target_dynamic, MIN_HEAD_DYNAMIC_BYTES - 1, usize::MAX)
+                .is_err()
+        );
+        assert!(
+            admit_mtp_memory(true, false, TARGET_BANK_BYTES, usize::MAX, MIN_HEAD_DYNAMIC_BYTES, usize::MAX).is_err()
+        );
+        assert!(admit_mtp_memory(true, false, TARGET_BANK_BYTES, 0, usize::MAX, usize::MAX).is_err());
+        assert!(admit_mtp_memory(true, false, 0, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, usize::MAX).is_err());
+        let narrowed = 44_210_061_312;
+        assert!(admit_mtp_memory(true, false, narrowed, target_dynamic, MIN_HEAD_DYNAMIC_BYTES, exact).is_err());
+        assert!(
+            admit_mtp_memory(
+                true,
+                false,
+                narrowed,
+                target_dynamic,
+                MIN_HEAD_DYNAMIC_BYTES,
+                exact + narrowed - TARGET_BANK_BYTES
+            )
+            .is_ok()
+        );
         assert_eq!(edge0_memory_cap(64 * 1024 * 1024 * 1024), 48 * 1024 * 1024 * 1024);
         assert_eq!(edge0_memory_cap(128 * 1024 * 1024 * 1024), BANK_CAP);
         assert_eq!(edge0_memory_cap(usize::MAX), BANK_CAP);

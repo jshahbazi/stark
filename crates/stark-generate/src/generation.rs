@@ -141,6 +141,7 @@ enum Request {
     },
     ResetCache {},
     MemoryDiagnostics {},
+    BackendMemoryDiagnostics {},
     PrepareImage {
         rendered_prompt: String,
         image: ImageReference,
@@ -558,6 +559,10 @@ pub(crate) trait GenerationBackend {
     }
     fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
         Ok(())
+    }
+    /// Aggregate allocation/registration accounting; never inference content.
+    fn memory_diagnostics_metadata(&self) -> Option<Value> {
+        None
     }
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
@@ -1035,6 +1040,15 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         output: &mut impl Write,
     ) -> Result<Value, &'static str> {
         match request {
+            Request::BackendMemoryDiagnostics {} => {
+                if self.memory_diagnostics.is_none() {
+                    return Err("memory_diagnostics_unavailable");
+                }
+                self.backend
+                    .memory_diagnostics_metadata()
+                    .map(|memory| json!({"schema":"backend-memory-v1","memory":memory}))
+                    .ok_or("memory_diagnostics_unavailable")
+            },
             Request::MemoryDiagnostics {} => {
                 let diagnostics = self.memory_diagnostics.as_mut().ok_or("memory_diagnostics_unavailable")?;
                 let mut reply =
@@ -1359,8 +1373,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             .and_then(|()| serde_json::from_slice::<Request>(bytes).map_err(|_| "invalid_request"));
         // A valid explicit diagnostic does not consume a prepared image or
         // change prefix state, including when the operator has not enabled it.
-        if matches!(&request, Ok(Request::MemoryDiagnostics {})) {
-            let reply = self.handle(Request::MemoryDiagnostics {}, output).unwrap_or_else(|code| json!({"error":code}));
+        if matches!(&request, Ok(Request::MemoryDiagnostics {} | Request::BackendMemoryDiagnostics {})) {
+            let reply = self
+                .handle(request.map_err(|_| "invalid_request")?, output)
+                .unwrap_or_else(|code| json!({"error":code}));
             let result = write_reply(output, &reply);
             if result.is_err() {
                 self.prepared = None;
@@ -1523,6 +1539,14 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         readiness["memory_diagnostics"] = json!({"schema":"self-task-memory-v1",
             "counter_scope":"worker_task","operation":"memory_diagnostics"});
         readiness["operations"].as_array_mut().ok_or("invalid_model_config")?.push(json!("memory_diagnostics"));
+        if worker.backend.memory_diagnostics_metadata().is_some() {
+            readiness["backend_memory_diagnostics"] =
+                json!({"schema":"backend-memory-v1","operation":"backend_memory_diagnostics"});
+            readiness["operations"]
+                .as_array_mut()
+                .ok_or("invalid_model_config")?
+                .push(json!("backend_memory_diagnostics"));
+        }
     }
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
@@ -1648,6 +1672,7 @@ mod tests {
     }
 
     struct FakeBackend {
+        memory_metadata: Option<Value>,
         idle_interval: Option<Duration>,
         idle_calls: usize,
         fail_idle: bool,
@@ -1700,6 +1725,9 @@ mod tests {
 
     impl GenerationBackend for FakeBackend {
         type PreparedImage = FakePreparedImage;
+        fn memory_diagnostics_metadata(&self) -> Option<Value> {
+            self.memory_metadata.clone()
+        }
 
         fn idle_maintenance_interval(&self) -> Option<Duration> {
             self.idle_interval
@@ -2008,6 +2036,7 @@ mod tests {
     }
     fn worker() -> GenerationWorker<FakeBackend> {
         GenerationWorker::new(FakeBackend {
+            memory_metadata: None,
             idle_interval: None,
             idle_calls: 0,
             fail_idle: false,

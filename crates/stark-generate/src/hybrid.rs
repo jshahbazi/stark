@@ -647,6 +647,9 @@ impl GenerationBackend for HybridBackend {
     fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
         self.model.maintain_idle_queue().map_err(|_| "native_idle_maintenance_failed")
     }
+    fn memory_diagnostics_metadata(&self) -> Option<serde_json::Value> {
+        self.model.edge0_execution_metadata()
+    }
 
     fn supports_images(&self) -> bool {
         self.image_runtime_identity.is_some() && self.model.supports_images()

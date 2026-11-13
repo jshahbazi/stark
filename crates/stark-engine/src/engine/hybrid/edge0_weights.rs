@@ -39,10 +39,11 @@ const TABLE_SCALE: f32 = f32::from_bits(0x3951_0000);
 
 #[cfg(feature = "metal")]
 fn remaining_edge0_weight_bytes(
+    bank_allowance: usize,
     banks: usize,
     statics: usize,
 ) -> Option<usize> {
-    43_819_991_040usize.saturating_sub(banks).checked_add(MAX_STATIC_VIEW_BYTES.saturating_sub(statics))
+    bank_allowance.saturating_sub(banks).checked_add(MAX_STATIC_VIEW_BYTES.saturating_sub(statics))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -93,6 +94,10 @@ pub(super) struct Edge0Data {
     metal_dynamic_allowance: std::sync::atomic::AtomicUsize,
     #[cfg(feature = "metal")]
     metal_resident: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "metal")]
+    metal_expert_windows: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "metal")]
+    metal_bank_allowance: std::sync::atomic::AtomicUsize,
     #[cfg(feature = "metal")]
     mtp_admitted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -797,6 +802,10 @@ impl Weights {
             #[cfg(feature = "metal")]
             metal_resident: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "metal")]
+            metal_expert_windows: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "metal")]
+            metal_bank_allowance: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(feature = "metal")]
             mtp_admitted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         #[cfg(feature = "metal")]
@@ -843,7 +852,27 @@ impl Weights {
         let virtual_bytes = self.encoder_bank_views.lock().map(|cache| cache.virtual_bytes).unwrap_or(0);
         #[cfg(not(feature = "metal"))]
         let virtual_bytes = 0;
+        #[cfg(feature = "metal")]
+        let (expert_windows, bank_allowance, windows) = self.edge0.as_ref().map_or((false, 0, 0), |data| {
+            (
+                data.metal_expert_windows.load(std::sync::atomic::Ordering::Acquire),
+                data.metal_bank_allowance.load(std::sync::atomic::Ordering::Acquire),
+                self.encoder_bank_views.lock().map(|cache| cache.matrices.len()).unwrap_or(0),
+            )
+        });
+        #[cfg(not(feature = "metal"))]
+        let (expert_windows, bank_allowance, windows) = (false, 0, 0);
+        #[cfg(feature = "metal")]
+        let allocated = self
+            .edge0
+            .as_ref()
+            .filter(|data| data.metal_admitted.load(std::sync::atomic::Ordering::Acquire))
+            .and_then(|_| super::super::weight_metal::allocated_bytes().ok());
+        #[cfg(not(feature = "metal"))]
+        let allocated: Option<usize> = None;
         serde_json::json!({"resident_enabled":resident,"registered_bank_bytes":virtual_bytes,
+            "bank_window_policy":if expert_windows {"expert-record-v1"} else {"layer-v1"},
+            "admitted_bank_bytes":bank_allowance,"registered_bank_windows":windows,"metal_allocated_bytes":allocated,
             "graph_scratch_high_water_bytes":counters[3],
             "counters":{"batched_matrix_calls":counters[0],"batched_q8_calls":counters[1],"batched_expert_calls":counters[2]}})
     }
@@ -889,7 +918,11 @@ impl Weights {
                 let statics = self.static_views.lock().ok()?.registered_bytes;
                 (banks, statics)
             };
-            remaining_edge0_weight_bytes(banks, statics)
+            remaining_edge0_weight_bytes(
+                data.metal_bank_allowance.load(std::sync::atomic::Ordering::Acquire),
+                banks,
+                statics,
+            )
         }
         #[cfg(not(feature = "metal"))]
         Some(0)
@@ -962,10 +995,14 @@ mod tests {
     #[cfg(feature = "metal")]
     #[stark_test]
     fn edge0_retained_resource_allowance_counts_cold_partial_and_complete_banks() {
-        assert_eq!(remaining_edge0_weight_bytes(0, 0), Some(52_409_925_632));
-        assert_eq!(remaining_edge0_weight_bytes(20_000_000_000, 1_000_000_000), Some(31_409_925_632));
-        assert_eq!(remaining_edge0_weight_bytes(43_819_991_040, MAX_STATIC_VIEW_BYTES), Some(0));
-        assert_eq!(remaining_edge0_weight_bytes(44_000_000_000, MAX_STATIC_VIEW_BYTES + 1), Some(0));
+        let layer = 43_819_991_040;
+        let records = 44_210_061_312;
+        assert_eq!(remaining_edge0_weight_bytes(layer, 0, 0), Some(52_409_925_632));
+        assert_eq!(remaining_edge0_weight_bytes(layer, 20_000_000_000, 1_000_000_000), Some(31_409_925_632));
+        assert_eq!(remaining_edge0_weight_bytes(layer, layer, MAX_STATIC_VIEW_BYTES), Some(0));
+        assert_eq!(remaining_edge0_weight_bytes(layer, 44_000_000_000, MAX_STATIC_VIEW_BYTES + 1), Some(0));
+        assert_eq!(remaining_edge0_weight_bytes(records, 0, 0), Some(52_799_995_904));
+        assert_eq!(remaining_edge0_weight_bytes(records, layer, MAX_STATIC_VIEW_BYTES), Some(390_070_272));
     }
 
     struct Fixture(PathBuf);

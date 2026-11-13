@@ -575,6 +575,20 @@ Raw evaluation receipts remain private; publish only aggregates and hashes.
 Diagnostic refusal or serialization failure uses the recoverable fixed codes
 `memory_diagnostics_unavailable` or `memory_diagnostics_failed`.
 
+When an enabled worker advertises `backend_memory_diagnostics` with schema
+`backend-memory-v1`, it also accepts:
+
+```json
+{"operation":"backend_memory_diagnostics"}
+```
+
+The Edge0 hybrid implementation returns aggregate execution policy, precision,
+registered window count/bytes, complete admitted bank allowance, scratch high
+water and Metal's current allocated resource bytes. Valid diagnostic requests
+preserve prepared images and prefixes. This operation uses the same operator
+gate and unavailable error as self-task diagnostics. Registration counts include
+page overlap; allocated resource bytes do not establish physical residency.
+
 ### Error codes
 
 Errors are replies of the form `{"error":CODE}`. Codes are fixed strings; see [error classes](WORKER_PROTOCOLS.md#error-classes) for the behaviour of each class.

@@ -17,6 +17,41 @@ fn memory_diagnostics_readiness_is_explicit() {
     assert!(ready["operations"].as_array().unwrap().contains(&json!("memory_diagnostics")));
 }
 
+#[test]
+fn backend_memory_diagnostics_are_opt_in_and_preserve_prefix_state() {
+    for enabled in [false, true] {
+        let mut worker = prefix_worker(true);
+        worker.backend.memory_metadata = Some(json!({"registered_bytes":17}));
+        if enabled { worker.enable_memory_diagnostics(); }
+        let ready = readiness(&mut worker);
+        assert_eq!(ready.get("backend_memory_diagnostics").is_some(), enabled);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        let before = memory_diagnostics_backend_counts(&worker.backend);
+        let reply = post(&mut worker,json!({"operation":"backend_memory_diagnostics"}));
+        if enabled {
+            assert_eq!(reply,json!({"schema":"backend-memory-v1","memory":{"registered_bytes":17}}));
+        } else {
+            assert_eq!(reply,json!({"error":"memory_diagnostics_unavailable"}));
+        }
+        assert_eq!(memory_diagnostics_backend_counts(&worker.backend),before);
+        assert_eq!(reused(&mut worker,3_000),2048);
+    }
+}
+
+#[test]
+fn backend_memory_diagnostics_preserve_prepared_image_and_reject_bad_frames() {
+    let root = crate::media::tests::PrivateRoot::new();
+    let mut worker = image_worker(&root);
+    worker.enable_memory_diagnostics();
+    worker.backend.memory_metadata = Some(json!({"registered_bytes":17}));
+    let prepared = post(&mut worker,image_prepare(&root));
+    assert_eq!(post(&mut worker,json!({"operation":"backend_memory_diagnostics"}))["schema"],"backend-memory-v1");
+    assert_eq!(post(&mut worker,image_generate(&prepared))["finish_reason"],"eos");
+    assert_eq!(post(&mut worker,json!({"operation":"backend_memory_diagnostics","private_marker":"do-not-echo"})),json!({"error":"invalid_request"}));
+    worker.backend.memory_metadata = None;
+    assert_eq!(post(&mut worker,json!({"operation":"backend_memory_diagnostics"})),json!({"error":"memory_diagnostics_unavailable"}));
+}
+
 fn memory_diagnostics_backend_counts(backend: &FakeBackend) -> (usize, usize, usize, usize, usize, usize, usize) {
     (
         backend.idle_calls,
