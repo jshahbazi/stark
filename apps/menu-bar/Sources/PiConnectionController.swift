@@ -142,9 +142,20 @@ final class PiConnectionController: ObservableObject {
         }
     }
 
-    private static func findTools() -> Tools? {
-        let home = NSHomeDirectory()
-        let nodes = [home + "/.local/share/pi-node/current/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"]
+    static func findTools(home: String = NSHomeDirectory()) -> Tools? {
+        // Desktop apps do not inherit nvm's interactive-shell PATH. Inspect its
+        // public installed-version names without sourcing shell startup files.
+        let nvm = URL(fileURLWithPath: home + "/.nvm/versions/node", isDirectory: true)
+        let versions = ((try? FileManager.default.contentsOfDirectory(atPath: nvm.path)) ?? [])
+            .filter { $0.range(of: #"^v[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil }
+            .sorted { $0.compare($1, options: .numeric) == .orderedDescending }
+            .prefix(64)
+        let nvmNodes = versions.compactMap { version -> String? in
+            let parts = version.dropFirst().split(separator: ".").compactMap { Int($0) }
+            guard parts.count == 3, parts[0] > 22 || (parts[0] == 22 && parts[1] >= 19) else { return nil }
+            return nvm.appendingPathComponent(version).appendingPathComponent("bin/node").path
+        }
+        let nodes = [home + "/.local/share/pi-node/current/bin/node"] + nvmNodes + ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
         let clients = [home + "/.local/bin/pi", home + "/.pi/agent/bin/pi", "/opt/homebrew/bin/pi", "/usr/local/bin/pi"]
         guard let node = nodes.first(where: { FileManager.default.isExecutableFile(atPath: $0) }),
               let pi = clients.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return nil }

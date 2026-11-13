@@ -15,6 +15,16 @@ struct PiConnectionTests {
         try FileManager.default.createDirectory(at: directory.appendingPathComponent("resources/src"), withIntermediateDirectories: true)
         try Data().write(to: directory.appendingPathComponent("resources/src/desktop-setup.mjs"))
         defer { try? FileManager.default.removeItem(at: directory) }
+        for file in [".nvm/versions/node/v20.0.0/bin/node", ".nvm/versions/node/v22.19.0/bin/node",
+                     ".nvm/versions/node/v26.13.0/bin/node", ".local/bin/pi"] {
+            let url = directory.appendingPathComponent(file)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: url)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        }
+        let detected = PiConnectionController.findTools(home: directory.path)
+        require(detected?.node.path == directory.appendingPathComponent(".nvm/versions/node/v26.13.0/bin/node").path)
+        require(detected?.pi.path == directory.appendingPathComponent(".local/bin/pi").path)
         let suite = "stark.pi.tests." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }

@@ -47,6 +47,9 @@ the running model's public metadata, and writes a guarded profile under
 unchanged. Pi is excluded from Beginner Guided Setup and Adjust Setup; switching
 to Beginner hides an open Connections window.
 
+Detection includes Pi's managed Node, compatible installed nvm versions, and
+Homebrew/system locations. It does not source interactive shell startup files.
+
 Choose **Copy Key & Open Pi…**, select a working folder, then paste the copied key
 at Terminal's hidden prompt. This manual setup keeps the master key in process
 environments and the explicitly requested, concealed/transient clipboard item;
