@@ -11,7 +11,7 @@
 | Evidence scope | Structural (converter, header planning, tied byte identity), synthetic full-model numerical and lifecycle controls, and an actual-artifact native load/execution attempt |
 | Promotion decision | Converter untied path adopted on branch; Phi-3.5-mini rejected (refused in preflight); every real untied Phi3 checkpoint awaiting qualification |
 | Disposition | Adopted on branch; not merged, released or installed |
-| Predecessor / related attempts / governing issue / PR | [20261112-CATALOG-01](2026-11-12-catalog-config-normalization.md) and [20261110-CATALOG-01](2026-11-10-catalog-family-admission.md) (catalogue admission); no PR opened |
+| Predecessor / related attempts / governing issue / PR | [20261112-CATALOG-01](2026-11-12-catalog-config-normalization.md) and [20261110-CATALOG-01](2026-11-10-catalog-family-admission.md) (catalogue admission); implementation PR [jshahbazi/stark#156](https://github.com/jshahbazi/stark/pull/156) |
 
 ## Hypothesis and change
 
