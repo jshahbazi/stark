@@ -3,6 +3,8 @@
 Status: phases 3 and 4 and bounded Phase 5 worker correctness/lifecycle gates
 passed for local non-commercial evaluation, 2026-11-13. Sixty matched worker
 requests completed, with no eligible timing group; MTP remains off by default.
+The subsequent unchanged-screen rerun deferred all six groups at stricter quiet
+admission, after 12 matching warmups and before any measured arm.
 Phase 5 performance qualification and phases 6–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
@@ -364,6 +366,13 @@ supports `mtp: true` or explicit `mtp_drafts: 1..3`; omitted/off selects zero.
 The scalar reference and explicit-residency policies have no worker MTP.
 All 60 [matched performance requests](benchmarks/2026-11-13-edge0-worker-mtp.md)
 completed, but paging/decompression/CPU screens left no eligible timing group.
+The [paging investigation and rerun](model-experiments/2026-11-13-edge0-mtp-paging.md)
+confirmed native/CLI global-counter agreement and decompressions without a live
+evaluation worker. All six successor groups failed combined strict admission;
+12 warmups matched, zero measured arms ran, and no counter threshold was relaxed.
+The source of global activity and the per-host-gate deferral split remain
+unresolved. [Separate receipts](benchmarks/2026-11-13-edge0-mtp-paging.md)
+preserve the result without replacing the predecessor evidence.
 Default remains off and timing qualification remains pending. The 512-token cap,
 disabled prefix reuse and local non-commercial scope remain in force.
 

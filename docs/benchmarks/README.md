@@ -13,6 +13,10 @@ qualification; the ledger is not a completed historical backfill.
 [Edge0 local worker MTP, 2026-11-13](2026-11-13-edge0-worker-mtp.md) records
 60 matched requests with no eligible timing group. Default remains off; the
 observations are excluded from throughput ranking and performance promotion.
+The [separate strict-admission rerun](2026-11-13-edge0-mtp-paging.md) deferred all
+six groups after 12 matching warmups, with zero measured arms. Native/CLI counters
+agree; decompressions were observed without a live evaluation worker. The source
+of paging remains unresolved and every existing performance screen is retained.
 
 ## Current result
 
