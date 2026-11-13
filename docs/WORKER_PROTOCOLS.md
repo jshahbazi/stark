@@ -116,6 +116,13 @@ selected MTP path. Older workers receive the original count-only request.
 Count-only clients remain supported, but cannot establish prefix identity and
 therefore receive no unproven retained-prefix credit.
 
+The local non-commercial Edge0 virtual Metal profile reports MTP maximum three,
+recommendation one, default zero and `serial-target-exact-v1`. Its selected on path
+adds a conservative 768 MiB head/checkpoint planning allowance before dispatch.
+Context is limited to 512 and prefix scopes are rejected because prefix reuse is
+unsupported. See [the artifact-specific qualification](model-experiments/2026-11-13-edge0-mtp-batched-worker.md)
+for exactness, cancellation, memory and timing limits.
+
 Planning can release incompatible retained state and reclaim fully retired
 allocator cache pages when more headroom is needed. Reclamation waits for the
 owning queue's retirements; live or aliased buffers are excluded. Available

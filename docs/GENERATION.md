@@ -331,6 +331,16 @@ cost when drafting is disabled. Set `mtp_drafts` to 1,
 2 or 3 on a text request; omit it or use 0 for ordinary autoregressive decode.
 Requests on one worker remain serialized. With `--prefix-cache`, a request resumes a [prefix snapshot](#prefix-reuse) only when it enables or disables MTP the same way as the request that captured it.
 
+The explicitly opted-in [Edge0 virtual Metal evaluation](NATIVE_HYBRID_MODELS.md#checkpoints-and-preparation)
+also exposes depths one through three with `verification: "serial-target-exact-v1"`.
+Its default is zero; explicit `mtp: true` selects one. It uses ordinary off-mode
+prompt batches followed by single-token target verification and complete bounded
+rewind. Worker cancellation is observed at native completion boundaries, including
+prompt, head and replay work. Context remains capped at 512, prefix reuse is
+unavailable, and explicit-residency MTP is unsupported. This is local
+non-commercial evaluation only. The [matched run](benchmarks/2026-11-13-edge0-worker-mtp.md)
+had no eligible timing group; no performance promotion follows.
+
 Converted dense `qwen3_5` models with an admitted quantized one-layer MTP head
 report `verification: "dense-qwen35-target-verify-v1"`, recommend three drafts
 and allow up to three. Drafting defaults to zero. This route includes

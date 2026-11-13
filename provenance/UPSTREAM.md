@@ -176,6 +176,10 @@ failure fencing, acknowledgement and conservative request accounting are local
 adapter changes, tracked in
 [attempt `20261113-EDGE0-10`](../docs/model-experiments/2026-11-13-edge0-mtp-worker.md).
 The model remains limited to explicit local non-commercial evaluation.
+The compact per-row wide capture in ordinary prefix batches is also original
+Stark code. It adds copies after the existing target arithmetic; its ordinary-off
+exactness and worker follow-up are recorded in
+[attempt `20261113-EDGE0-11`](../docs/model-experiments/2026-11-13-edge0-mtp-batched-worker.md).
 
 ### Edge0 native reader and block components
 

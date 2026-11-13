@@ -1,8 +1,9 @@
 # Edge0-145B native support plan
 
-Status: phases 3 and 4 bounded runtime gates passed for local non-commercial
-evaluation, 2026-11-13; Phase 5 in progress with foundation gates passed.
-Executable MTP and phases 6–8 remain unfinished.
+Status: phases 3 and 4 and bounded Phase 5 worker correctness/lifecycle gates
+passed for local non-commercial evaluation, 2026-11-13. Sixty matched worker
+requests completed, with no eligible timing group; MTP remains off by default.
+Phase 5 performance qualification and phases 6–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
@@ -21,8 +22,9 @@ gates in
 The native Metal graph also passed the bounded Phase 4 gates in
 [`20261112-EDGE0-06`](model-experiments/2026-11-12-edge0-metal.md).
 Both policies require explicit local selectors and retain a 512-token runtime limit;
-app/catalogue admission, MTP, prefix reuse and broad numerical/performance
-qualification remain unfinished. Follow
+app/catalogue admission, prefix reuse and broad numerical/performance
+qualification remain unfinished. Virtual Metal worker MTP is available through
+explicit request overrides under the local evaluation policy below. Follow
 [model onboarding](MODEL_ONBOARDING.md), the
 [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md) and the
 [experiment ledger](model-experiments/README.md).
@@ -339,7 +341,8 @@ readouts, reset/recovery checks and matched fixed-work prefill/decode runs.
 The corrected build passed cold allocation admission, generation-worker smokes
 and complete residency/clean-exit checks. This is a short-context local gate
 on a 128 GiB host; full-context, low-memory, quality and broad performance
-qualification remain separate. MTP and prefix reuse remain unavailable.
+qualification remain separate. Phase 4 qualifies target execution; the bounded
+worker MTP gates are recorded below. Prefix reuse remains unavailable.
 
 ### Phase 5: MTP
 
@@ -353,9 +356,16 @@ and exact serial sampling passed bounded local gates in
 [attempt `20261113-EDGE0-09`](model-experiments/2026-11-13-edge0-mtp-integration.md).
 The private evaluator supports one to three drafts and one live combined
 checkpoint per round; head recreation and reset recovery require no model reload.
-Worker request integration, asynchronous cancellation and matched MTP on/off
-qualification/default selection remain unfinished. Worker capabilities stay
-unavailable; the 512-token cap and disabled prefix reuse remain in force.
+The normal JSONL worker subsequently passed bounded correctness and lifecycle
+gates in [attempt `20261113-EDGE0-11`](model-experiments/2026-11-13-edge0-mtp-batched-worker.md),
+including shared ordinary prompt arithmetic, full-readout equality and actual
+prompt/decode cancellation with same-worker recovery. Virtual Metal evaluation
+supports `mtp: true` or explicit `mtp_drafts: 1..3`; omitted/off selects zero.
+The scalar reference and explicit-residency policies have no worker MTP.
+All 60 [matched performance requests](benchmarks/2026-11-13-edge0-worker-mtp.md)
+completed, but paging/decompression/CPU screens left no eligible timing group.
+Default remains off and timing qualification remains pending. The 512-token cap,
+disabled prefix reuse and local non-commercial scope remain in force.
 
 - Load the draft layer from `mtp/` and adapt the existing Flash-Next head
   contract to the native Qwen graph. Implement the source's four-plane Q2 expert

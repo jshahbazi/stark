@@ -207,3 +207,9 @@ local non-commercial evaluation. Independent review found no outstanding issue i
 attempt 09's bounded scope. Phase 5 remains incomplete until worker integration and
 matched on/off/default qualification pass. Worker MTP and prefix reuse stay
 unavailable; no app/catalogue, distribution or installed-build promotion is made.
+
+Follow-up: [attempt `20261113-EDGE0-11`](2026-11-13-edge0-mtp-batched-worker.md)
+subsequently qualified the local virtual Metal worker path, aligned ordinary
+prompt arithmetic and strengthened actual cancellation/recovery controls. Its
+matched requests completed with no eligible timing group; default remains off.
+The original attempt 09 results and source boundaries above remain unchanged.

@@ -24,8 +24,8 @@ qualified source-native tokenizer is available through an explicit evaluation
 policy. Default worker loading rejects this source. An explicit source-checkout
 diagnostic path, selected with `STARK_EDGE0_REFERENCE=1`, has passed the
 [bounded F32 reference gate](model-experiments/2026-11-12-edge0-reference-forward.md)
-on the exact prepared artifact, with a 512-token runtime limit. MTP and prefix
-reuse remain unavailable; image input is N/A for this text-only source. This
+on the exact prepared artifact, with a 512-token runtime limit. The reference-only
+path has no MTP or prefix reuse; image input is N/A for this text-only source. This
 does not enable catalogue admission, full-model external numerical parity or
 broad quality/performance qualification.
 
@@ -37,8 +37,9 @@ accumulation, recurrence and attention caches. Its bounded prefill batches
 contain at most eight tokens. `STARK_EDGE0_RESIDENT=1` separately requests the
 existing residency manager for the complete expert/projection inventory.
 The owner selected continuing on this native Qwen graph; the plan records that
-decision. The 512-token limit and unavailable MTP/prefix reuse apply to both
-execution policies.
+decision. Both execution policies retain the 512-token limit and disabled prefix
+reuse. Worker MTP below is available only with virtual mappings; explicit
+residency has no MTP support.
 
 The private native MTP head has passed independent component and bounded
 actual-artifact replay checks in
@@ -48,9 +49,23 @@ target/head/pending-wide restoration, exclusive resource leases and exact
 one-to-three-draft serial sampling subsequently passed bounded local gates in
 [attempt `20261113-EDGE0-09`](model-experiments/2026-11-13-edge0-mtp-integration.md).
 The private evaluator qualifies one combined checkpoint per round, clean callback
-stops and same-model recovery. Worker request integration, asynchronous
-cancellation and matched MTP on/off measurement/default selection remain
-unfinished; worker MTP and prefix reuse stay unavailable.
+stops and same-model recovery. The normal JSONL worker then passed bounded
+ordinary-off full-readout equality, stopping, prompt/decode cancellation and
+same-worker recovery in
+[attempt `20261113-EDGE0-11`](model-experiments/2026-11-13-edge0-mtp-batched-worker.md).
+With `STARK_EDGE0_REFERENCE=1`, `STARK_EDGE0_METAL=1` and virtual mappings, it
+advertises `serial-target-exact-v1`, maximum three drafts and recommendation one.
+Omitted MTP, `mtp: false` or `mtp_drafts: 0` keeps the default off;
+`mtp: true` selects one, and `mtp_drafts: 1..3` selects an explicit depth.
+Prompt batches match ordinary off-mode arithmetic. Control observes cancellation
+before/after submitted batch, head, target and replay work, then drains before
+releasing the exclusive head lease. Request planning conservatively reserves
+768 MiB for the head/checkpoint path; the internal live head allowance is 512 MiB.
+
+All 60 [matched requests](benchmarks/2026-11-13-edge0-worker-mtp.md) completed,
+but no timing group met the host screens. Default remains off, with no qualified
+speed claim or draft-depth ranking. Prefix reuse, wider contexts, quality and
+product admission remain unqualified; the local non-commercial scope is unchanged.
 
 Inspect only its pinned small metadata and bounded skeleton header with:
 

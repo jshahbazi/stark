@@ -10,6 +10,10 @@ to them and must not broaden their claims. New studies need an attempt ID and
 linked source-bound evidence. Existing reports retain their original
 qualification; the ledger is not a completed historical backfill.
 
+[Edge0 local worker MTP, 2026-11-13](2026-11-13-edge0-worker-mtp.md) records
+60 matched requests with no eligible timing group. Default remains off; the
+observations are excluded from throughput ranking and performance promotion.
+
 ## Current result
 
 **Retained Lily image startup (2026-11-09).** The
