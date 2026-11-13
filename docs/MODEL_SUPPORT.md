@@ -93,18 +93,21 @@ LLaMBA. Each family's tensor planner still applies its own layout limits.
 Per-module overrides and five/six-bit widths remain limited to the families
 that document them.
 Qwen2 attention biases stay separate full-precision vectors beside the packed
-projection. Granite, Gemma 2 and Phi-3 reject quantized sources. The Qwen2 and
-Mistral MLX paths are not numerically qualified
-([20261112-DENSE-MLX-01](archive/runs/2026-11-12-dense-mlx-qwen2-mistral.md)).
-Their F16-parameter sources converted to the default BF16 miss the stock-MLX
-logit gates, and a named chat-template list blocks conversion
+projection. Granite, Gemma 2 and Phi-3 reject quantized sources. App installs
+convert Qwen2 and Mistral MLX exports whose parameters are all F16 to native F16
+(described below), because converted to the default BF16 they miss the
+stock-MLX logit gates
 ([20261112-DENSE-MLX-02/03](archive/runs/2026-11-12-dense-mlx-qwen2-mistral-qualification.md)).
-Converted with `--dtype float16`, the `mlx-community/Qwen2.5-0.5B-Instruct-4bit`
-export and a template-substituted diagnostic copy of the Mistral 7B v0.3 4-bit
-export pass the logit, greedy and scorer gates
+Only `mlx-community/Qwen2.5-0.5B-Instruct-4bit` converted to F16 is numerically
+qualified. A template-substituted diagnostic copy of the Mistral 7B v0.3 4-bit
+export also passes the logit, greedy and scorer gates
 ([20261112-DENSE-MLX-04/05](archive/runs/2026-11-12-dense-f16-native-qualification.md)).
-The published Mistral revision now converts through its named template list
+The published Mistral revision converts through its named template list but is
+not promoted
 ([20261112-DENSE-MLX-07](archive/runs/2026-11-12-install-auto-f16.md#published-mistral-export-named-template-list)).
+Other sizes, 8-bit exports and other publishers' exports of these families have
+no qualification of their own
+([20261112-DENSE-MLX-01](archive/runs/2026-11-12-dense-mlx-qwen2-mistral.md)).
 
 A `chat_template` given as a Hugging Face named list (`{"name", "template"}`
 objects with unique names) converts with its `default` entry, which is what
@@ -159,7 +162,7 @@ App installs (the Install button and guided setup) convert text artifacts with
 source tensors' own dtypes: every floating tensor must be F16, every matrix
 must be an MLX affine plane set, the family must be Qwen2 or Mistral, the native
 F16 admission above must accept the metadata in the requested mode, and the
-repository must have no recorded native qualification. Everything else,
+repository must have no recorded BF16 native qualification. Everything else,
 including Llama, Qwen3, unquantized F16 checkpoints, mixed-dtype sources and
 sliding-window exports, converts to BF16 byte-for-byte as before. Llama stays
 on BF16 because no F16 Llama artifact has a model run and its MLX exports carry
@@ -212,8 +215,9 @@ quantization and stored weight-file size. Missing metadata is omitted.
 Search text is transient; sort choices persist independently for **Installed**,
 the family overview and family detail. The saved-model view sorts by name A–Z or
 Z–A, or total disk bytes from its visible versions ascending or descending. The
-family overview sorts by name A–Z or Z–A; family detail sorts by name in either
-direction or model size ascending or descending. Unknown numeric values sort last
+family overview sorts by name A–Z or Z–A; family detail adds the two Top rated
+orders described below, name in either direction and model size ascending or
+descending. Unknown numeric values sort last
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
 

@@ -151,6 +151,15 @@ def test_every_bf16_qualified_repository_is_recognized():
     assert not has_recorded_qualification(FUTURE) and not has_recorded_qualification(None)
 
 
+def test_only_bf16_records_keep_a_repository_on_bf16(monkeypatch):
+    from stark_convert import qualifications
+
+    records = [{"repo": FUTURE, "dtype": "float16"}, {"repo": "example/bf16", "dtype": "bfloat16"}]
+    monkeypatch.setattr(qualifications, "_load_qualifications", lambda: records)
+    assert not qualifications.has_recorded_qualification(FUTURE)
+    assert qualifications.has_recorded_qualification("example/bf16")
+
+
 @pytest.mark.parametrize("mode", ["text", "decision"])
 def test_decision_mode_shares_the_text_f16_admission(tmp_path, mode):
     receipt = convert(tmp_path, source(tmp_path, "qwen2-f16"), "auto", dtype="auto", support_mode=mode)
