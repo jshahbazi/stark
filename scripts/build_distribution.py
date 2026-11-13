@@ -56,6 +56,9 @@ SOURCE_PATHS = (
     "tools/converter",
     "apps/menu-bar",
     "LICENSE",
+    "LICENSE.edge0-reference",
+    "LICENSE.strata-reference",
+    "NOTICE.edge0-reference",
     "LICENSE.mlx-reference",
     "provenance/UPSTREAM.md",
     "scripts/licenses/distribution",
@@ -555,6 +558,9 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
     notices.mkdir()
     for name in (
         "LICENSE",
+        "LICENSE.edge0-reference",
+        "LICENSE.strata-reference",
+        "NOTICE.edge0-reference",
         "LICENSE.ggml-hybrid",
         "LICENSE.qwen38-reference",
         "LICENSE.omlx-reference",

@@ -30,7 +30,7 @@ build-backend = "setuptools.build_meta"
 include = ["stark_convert*"]
 
 [tool.setuptools.package-data]
-stark_convert = ["catalog.json", "guided_native_profiles.json", "guided_memory_profiles.json", "recommendation_benchmarks.json", "recommendation_leaderboard.json", "_third_party/whatmodel/*", "_third_party/whatmodel/licenses/*", "native_qualifications.json", "vision_runtime_qualifications.json", "chat_templates/*.jinja", "chat_templates/*.txt"]
+stark_convert = ["catalog.json", "guided_native_profiles.json", "guided_memory_profiles.json", "recommendation_benchmarks.json", "recommendation_leaderboard.json", "_third_party/whatmodel/*", "_third_party/whatmodel/licenses/*", "native_qualifications.json", "vision_runtime_qualifications.json", "edge0_unicode.json", "chat_templates/*.jinja", "chat_templates/*.txt"]
 
 [tool.uv]
 python-preference = "only-managed"

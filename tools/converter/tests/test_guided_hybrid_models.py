@@ -39,9 +39,12 @@ def host_resources(**changes):
     }
 
 
-def test_every_fixed_native_source_has_a_separate_bound_plan():
+def test_every_catalogue_native_source_has_a_separate_bound_plan():
     recipes = guided.native_recipes()
-    assert {recipe.native_choice for recipe in recipes} == set(hybrid.SOURCES)
+    assert {recipe.native_choice for recipe in recipes} == {
+        choice for choice in hybrid.SOURCES if native_catalog.allowed_choice(choice)
+    }
+    assert "edge0-145b-q3k" not in {recipe.native_choice for recipe in recipes}
     assert len({recipe.id for recipe in recipes}) == len(recipes)
     for recipe in recipes:
         source = hybrid.SOURCES[recipe.native_choice]
@@ -261,7 +264,9 @@ def test_native_sources_are_considered_offline_without_catalog_candidates(tmp_pa
         report = [json.loads(line) for line in host.output.getvalue().splitlines()][-1]["report"]
         assert report["items"][0]["repo"] == hybrid.SOURCES["flint-int4"]["weights_repo"]
         assert "Native hybrid" in report["message"]
-        assert report["catalog_search"]["candidates_considered"] == len(guided.RECIPES) + len(hybrid.SOURCES)
+        assert report["catalog_search"]["candidates_considered"] == len(guided.RECIPES) + sum(
+            native_catalog.allowed_choice(choice) for choice in hybrid.SOURCES
+        )
     finally:
         host.stop(quiet=True)
 

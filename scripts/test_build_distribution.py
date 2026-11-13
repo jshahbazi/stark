@@ -571,6 +571,9 @@ class BundleConstructionTests(unittest.TestCase):
             root = Path(temporary)
             for name in (
                 "LICENSE",
+                "LICENSE.edge0-reference",
+                "LICENSE.strata-reference",
+                "NOTICE.edge0-reference",
                 "LICENSE.ggml-hybrid",
                 "LICENSE.qwen38-reference",
                 "LICENSE.omlx-reference",
@@ -758,6 +761,9 @@ class BundleConstructionTests(unittest.TestCase):
                 ).read_text(),
             )
             for name in (
+                "LICENSE.edge0-reference",
+                "LICENSE.strata-reference",
+                "NOTICE.edge0-reference",
                 "LICENSE.ggml-hybrid",
                 "LICENSE.qwen38-reference",
                 "LICENSE.omlx-reference",

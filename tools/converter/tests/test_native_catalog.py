@@ -4,6 +4,8 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from stark_convert import desktop as desktop_module
 from stark_convert import hybrid_prepare, native_catalog
 from stark_convert.desktop import Desktop
@@ -49,6 +51,21 @@ def test_native_catalog_rejects_other_families_and_mutated_items():
     assert native_catalog.source_choice(native_catalog.FAMILY_ID, item) is None
     assert native_catalog.source_for("unregistered") is None
     assert not native_catalog.allowed_choice("unregistered")
+
+
+def test_edge0_evaluation_preparation_does_not_enable_catalog_installation(tmp_path):
+    choice = "edge0-145b-q3k"
+    assert hybrid_prepare.SOURCES[choice]["preparatory_only"] is True
+    assert native_catalog.source_for(choice) is None
+    assert not native_catalog.allowed_choice(choice)
+    assert all(
+        item["repo"] != "Edge0/Edge0-145B-q3k"
+        for item in native_catalog.catalog_items(native_catalog.QWEN_FAMILY_ID)
+    )
+    with pytest.raises(desktop_module.DesktopError, match="pinned native catalogue"):
+        with desktop_module.native_download_stage(tmp_path, choice):
+            raise AssertionError("evaluation source admitted to app installer")
+    assert not (tmp_path / "native-downloads").exists()
 
 
 def test_unavailable_native_catalog_rows_surface_unqualified_native_layouts():

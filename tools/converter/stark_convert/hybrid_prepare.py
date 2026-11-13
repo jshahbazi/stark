@@ -21,13 +21,26 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-from . import qwen38_external
+from . import edge0_source, qwen38_external
 from .cli import _publish
 from .progress import FDProgressSink, ProgressCallback, ProgressReporter, SnapshotDownloadProgress, reporter
 from .sources import SourceSnapshot, _verified_hashes, huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion, load_checkpoint, read_safetensors_header
 
 SOURCES = {
+    "edge0-145b-q3k": {
+        "architecture": "qwen4_exp",
+        "weights_repo": edge0_source.EDGE0_REPO_ID,
+        "weights_revision": edge0_source.EDGE0_REVISION,
+        "weights_patterns": list(edge0_source.EDGE0_FILES),
+        "metadata_repo": edge0_source.EDGE0_REPO_ID,
+        "metadata_revision": edge0_source.EDGE0_REVISION,
+        "file_manifest": edge0_source.EDGE0_FILES,
+        "weight_files": list(edge0_source.PAYLOAD_FILES),
+        "weight_bytes": 103_374_417_600,
+        "quantization": "Edge0 Strata Q3_K / IQ4_NL, Q8_0 projections, FP8 table",
+        "preparatory_only": True,
+    },
     "flint-int4": {
         "architecture": "flint",
         "weights_repo": "RecursiveSI/flint-int4",
@@ -123,7 +136,10 @@ def _ids(value):
 
 def finish_metadata(directory: Path, choice: str) -> dict:
     """Bind the preserved architecture and tokenizer template for CLI chat."""
-    receipt = _finish_metadata(directory, SOURCES[choice])
+    source = SOURCES[choice]
+    if source.get("preparatory_only"):
+        raise ValueError("preparatory-only sources require pinned source preparation")
+    receipt = _finish_metadata(directory, source)
     (directory / "native-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return receipt
 
@@ -189,6 +205,306 @@ def _finish_metadata(directory: Path, source: dict) -> dict:
 
 
 _EXTERNAL_LAYOUT = "qwen38-external-affine"
+_EDGE0_TOKENIZER_POLICIES = ("borrowed-qwen", "edge0-native-v2")
+
+
+def _edge0_files(directory: Path, names) -> dict:
+    """Hash every bound file; never follow a source-controlled symlink."""
+    names = list(names)
+    paths = [directory / name for name in names]
+    before = [_edge0_signature(path) for path in paths]
+    try:
+        signatures, hashes = _verified_hashes(paths)
+    except ConversionError:
+        raise ValueError("Edge0 source changed or is unavailable during preparation") from None
+    if before != [_edge0_signature(path) for path in paths]:
+        raise ValueError("Edge0 source changed during preparation")
+    return {
+        name: {"size": signature[2], "sha256": digest}
+        for name, signature, digest in zip(names, signatures, hashes, strict=True)
+    }
+
+
+def _edge0_signature(path: Path) -> tuple:
+    info = path.lstat()
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _edge0_safe_stage(directory: Path) -> None:
+    # Check before snapshot_download or derived writes can traverse a resumed
+    # stage. Transport cache directories are part of this boundary too.
+    if any(path.is_symlink() for path in (directory, *directory.parents)) or any(
+        path.is_symlink() for path in directory.rglob("*")
+    ):
+        raise ValueError("invalid Edge0 staging path")
+
+
+def _verify_edge0_files(directory: Path, manifest: dict) -> dict:
+    records = _edge0_files(directory, manifest)
+    if records != manifest:
+        raise ValueError("pinned Edge0 file size or SHA-256 mismatch")
+    return records
+
+
+def _edge0_bound_names(directory: Path) -> set[str]:
+    names = set()
+    for path in directory.rglob("*"):
+        relative = path.relative_to(directory)
+        if relative.parts[0] == ".cache" or relative.as_posix() in {"stark-download.json", "native-source.json"}:
+            continue
+        if path.is_symlink():
+            raise ValueError("invalid Edge0 source file")
+        if path.is_file():
+            names.add(relative.as_posix())
+    return names
+
+
+def _edge0_config(source: dict, tokenizer_policy: str = "borrowed-qwen") -> dict:
+    # This intentionally contains no Lily/affine fields or runtime-admission
+    # marker. Phase 1 verifies a preserved source, not a loadable model.
+    return {
+        "model_type": source["architecture"],
+        "storage": {"schema_version": 1, "layout": edge0_source.EDGE0_LAYOUT},
+        "stark_preparation": {
+            "schema_version": 1,
+            "source": source["weights_repo"],
+            "revision": source["weights_revision"],
+            "preparatory_only": True,
+            "usage_scope": "local_noncommercial_evaluation",
+            "tokenizer_policy": tokenizer_policy,
+        },
+    }
+
+
+def preparation_identity(directory: Path) -> dict | None:
+    """Explicit, full-hash inspection of an evaluation-only prepared source.
+
+    Unlike ``prepared_identity``, this function never grants app import or
+    runtime admission. It reads all payload bytes and is not a discovery probe.
+    """
+    try:
+        source = SOURCES["edge0-145b-q3k"]
+        receipt_signature = _edge0_signature(directory / "native-source.json")
+        receipt = _json(directory / "native-source.json", 4 * 1024 * 1024)
+        policy = receipt.get("tokenizer_policy")
+        if policy not in _EDGE0_TOKENIZER_POLICIES:
+            return None
+        config = _json(directory / "config.json")
+        if config != _edge0_config(source, policy):
+            return None
+        expected = {
+            "schema_version": 1,
+            "artifact_mode": "text",
+            "architecture": source["architecture"],
+            "quantization": source["quantization"],
+            "layout": edge0_source.EDGE0_LAYOUT,
+            "status": "prepared",
+            "preparatory_only": True,
+            "usage_scope": "local_noncommercial_evaluation",
+            "native_loading": "unverified",
+            "execution": "unverified",
+            "weight_bytes": source["weight_bytes"],
+            "weights_source": {"repo": source["weights_repo"], "revision": source["weights_revision"]},
+            "metadata_source": {"repo": source["metadata_repo"], "revision": source["metadata_revision"]},
+            "tokenizer_policy": policy,
+        }
+        if any(receipt.get(key) != value for key, value in expected.items()):
+            return None
+        names = {*source["file_manifest"], "config.json", "tokenizer.json", "tokenizer_config.json"}
+        if _edge0_bound_names(directory) != names:
+            return None
+        files = receipt.get("files")
+        if not isinstance(files, dict) or set(files) != names:
+            return None
+        if {name: files[name] for name in source["file_manifest"]} != source["file_manifest"]:
+            return None
+        if _edge0_files(directory, sorted(names)) != files:
+            return None
+        if receipt.get("config_sha256") != files["config.json"]["sha256"]:
+            return None
+        derived = receipt.get("derived_metadata")
+        if not isinstance(derived, dict) or set(derived) != {"tokenizer.json", "tokenizer_config.json"}:
+            return None
+        if any(
+            name not in files or not isinstance(record, dict) or record.get("sha256") != files[name]["sha256"]
+            for name, record in derived.items()
+        ):
+            return None
+        equivalence = receipt.get("tokenizer_equivalence")
+        if policy == "edge0-native-v2":
+            admission = _edge0_policy_module(policy)
+            validation = admission.validation_identity()
+            profile = validation["qualification"]
+            if (
+                "tokenizer_equivalence" in receipt
+                or receipt.get("native_tokenizer_validation") != validation
+                or files["tokenizer.json"]["sha256"] != profile["tokenizer_json_sha256"]
+                or files["tokenizer_config.json"]["sha256"] != profile["tokenizer_config_sha256"]
+                or any(
+                    record.get("profile") != profile["profile"]
+                    or record.get("qualification_proof_sha256") != profile["proof"]["sha256"]
+                    for record in derived.values()
+                )
+            ):
+                return None
+        elif not isinstance(equivalence, dict) or equivalence.get("equivalent") is not True:
+            return None
+        if not isinstance(receipt.get("source_layout"), dict) or receipt_signature != _edge0_signature(
+            directory / "native-source.json"
+        ):
+            return None
+        return {
+            "repo": source["weights_repo"],
+            "revision": source["weights_revision"],
+            "architecture": source["architecture"],
+            "weight_bytes": source["weight_bytes"],
+            "quantization": source["quantization"],
+            "loadable": False,
+            "usage_scope": "local_noncommercial_evaluation",
+            "tokenizer_policy": policy,
+        }
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return None
+
+
+class Edge0PreflightError(ValueError):
+    """A content-free category for the source-bound tokenizer gate."""
+
+    category = "tokenizer_equivalence_rejected"
+
+
+class Edge0NativeUnqualifiedError(Edge0PreflightError):
+    category = "native_tokenizer_unqualified"
+
+
+def _edge0_policy_module(policy):
+    if policy == "borrowed-qwen":
+        from . import edge0_tokenizer
+
+        return edge0_tokenizer
+    from . import edge0_tokenizer_admission
+
+    try:
+        edge0_tokenizer_admission.qualification_identity()
+    except ValueError:
+        raise Edge0NativeUnqualifiedError("Native tokenizer policy is unqualified") from None
+    return edge0_tokenizer_admission
+
+
+def _prepare_edge0(
+    stage,
+    output,
+    source,
+    offline,
+    progress,
+    download_options,
+    *,
+    preflight_only=False,
+    tokenizer_policy="borrowed-qwen",
+):
+    tokenizer_module = _edge0_policy_module(tokenizer_policy)
+
+    _edge0_safe_stage(stage)
+    smalls = {name: record for name, record in source["file_manifest"].items() if name not in source["weight_files"]}
+    snapshot_download(
+        source["weights_repo"],
+        revision=source["weights_revision"],
+        allow_patterns=list(smalls),
+        local_dir=stage,
+        local_files_only=offline,
+        max_workers=3,
+        **download_options,
+    )
+    _verify_edge0_files(stage, smalls)
+    gguf_metadata = edge0_source.fetch_skeleton_metadata(stage, offline=offline)
+    try:
+        validation = tokenizer_module.preflight_tokenizer(stage, gguf_metadata, offline=offline)
+        if tokenizer_policy == "borrowed-qwen":
+            if validation.get("equivalent") is not True:
+                raise Edge0PreflightError("Edge0 tokenizer equivalence rejected")
+            evidence = {"tokenizer_equivalence": validation}
+        else:
+            if validation != tokenizer_module.validation_identity():
+                raise Edge0NativeUnqualifiedError("Native tokenizer qualification identity mismatch")
+            evidence = {"native_tokenizer_validation": validation}
+    except ValueError:
+        if tokenizer_policy != "borrowed-qwen":
+            raise Edge0NativeUnqualifiedError("Native tokenizer validation rejected") from None
+        raise Edge0PreflightError("Edge0 tokenizer equivalence rejected") from None
+    if preflight_only:
+        return {
+            "status": "preflight_verified",
+            "preparatory_only": True,
+            "usage_scope": "local_noncommercial_evaluation",
+            "native_loading": "unverified",
+            "execution": "unverified",
+            "tokenizer_policy": tokenizer_policy,
+            **evidence,
+        }
+    snapshot_download(
+        source["weights_repo"],
+        revision=source["weights_revision"],
+        allow_patterns=source["weight_files"],
+        local_dir=stage,
+        local_files_only=offline,
+        max_workers=3,
+        **download_options,
+    )
+    _verify_edge0_files(stage, source["file_manifest"])
+    validated = edge0_source.validate_source(stage)
+    # Re-run against the full, hash-verified skeleton; a bounded remote header
+    # can reject early but cannot substitute for the pinned payload identity.
+    tokenizer = tokenizer_module.prepare_tokenizer(stage, validated["gguf_metadata"], offline=offline)
+    config = _edge0_config(source, tokenizer_policy)
+    _edge0_safe_stage(stage)
+    (stage / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+    names = {*source["file_manifest"], "config.json", "tokenizer.json", "tokenizer_config.json"}
+    files = _edge0_files(stage, sorted(names))
+    if {name: files[name] for name in source["file_manifest"]} != source["file_manifest"]:
+        raise ValueError("Edge0 source changed during preparation")
+    receipt = {
+        "schema_version": 1,
+        "artifact_mode": "text",
+        "architecture": source["architecture"],
+        "quantization": source["quantization"],
+        "layout": edge0_source.EDGE0_LAYOUT,
+        "status": "prepared",
+        "preparatory_only": True,
+        "usage_scope": "local_noncommercial_evaluation",
+        "weights_source": {"repo": source["weights_repo"], "revision": source["weights_revision"]},
+        "metadata_source": {"repo": source["metadata_repo"], "revision": source["metadata_revision"]},
+        "native_loading": "unverified",
+        "execution": "unverified",
+        "weight_bytes": source["weight_bytes"],
+        "config_sha256": files["config.json"]["sha256"],
+        "files": files,
+        "source_layout": validated["source_layout"],
+        "derived_metadata": tokenizer["derived_metadata"],
+        "tokenizer_policy": tokenizer_policy,
+        **{
+            name: tokenizer[name]
+            for name in ("tokenizer_equivalence", "native_tokenizer_validation")
+            if name in tokenizer
+        },
+    }
+    (stage / "native-source.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    publication_names = sorted([*names, "native-source.json"])
+    publication_signatures = [_edge0_signature(stage / name) for name in publication_names]
+    if preparation_identity(stage) is None:
+        raise ValueError("Edge0 preparation receipt could not be verified")
+    if progress is not None:
+        progress.emit("download", "complete", source["weight_bytes"], source["weight_bytes"], force=True)
+        progress.emit("conversion", "running", force=True)
+    _edge0_safe_stage(stage)
+    if publication_signatures != [_edge0_signature(stage / name) for name in publication_names] or (
+        _edge0_bound_names(stage) != names
+    ):
+        raise ValueError("Edge0 source changed before publication")
+    _publish(stage, output)
+    (output / "stark-download.json").unlink()
+    if progress is not None:
+        progress.emit("conversion", "complete", force=True)
+    return receipt
 
 
 def _copy_snapshot_file(source: Path, target: Path) -> None:
@@ -469,6 +785,13 @@ def prepared_identity(directory: Path) -> dict | None:
         marker = config.get("stark_native_hybrid")
         if not isinstance(marker, dict) or marker.get("schema_version") != 1:
             return None
+        if (
+            receipt.get("layout") == edge0_source.EDGE0_LAYOUT
+            or config.get("storage", {}).get("layout") == edge0_source.EDGE0_LAYOUT
+            or config.get("stark_preparation", {}).get("preparatory_only") is True
+        ):
+            # Source preparation is not native/runtime admission.
+            return None
         if receipt.get("layout") == _EXTERNAL_LAYOUT:
             return _external_identity(directory, config, receipt, marker)
         from . import qwen38_retained
@@ -484,7 +807,7 @@ def prepared_identity(directory: Path) -> dict | None:
             ),
             None,
         )
-        if source is None or config.get("model_type") != source["architecture"]:
+        if source is None or source.get("preparatory_only") or config.get("model_type") != source["architecture"]:
             return None
         if (
             receipt.get("schema_version") != 1
@@ -615,8 +938,10 @@ def completed_model_bytes(stage: Path, source: dict) -> int:
     """Count completed Hub files at the pinned revision, never incomplete allocations."""
     completed = 0
     for path in stage.rglob("*"):
-        if path.suffix not in {".safetensors", ".gguf"} and not (
-            path.name == "ngram_table.bin" and source.get("ngram_in_weight_bytes")
+        if (source.get("preparatory_only") and path.relative_to(stage).as_posix() not in source["weight_files"]) or (
+            not source.get("preparatory_only")
+            and path.suffix not in {".safetensors", ".gguf"}
+            and not (path.name == "ngram_table.bin" and source.get("ngram_in_weight_bytes"))
         ):
             continue
         if path.is_symlink() or not path.is_file():
@@ -647,7 +972,17 @@ def prepare(
     offline: bool = False,
     progress: ProgressCallback | ProgressReporter | None = None,
     artifact_mode: str = "text",
+    preflight_only: bool = False,
+    tokenizer_policy: str = "borrowed-qwen",
 ) -> dict:
+    if preflight_only and choice != "edge0-145b-q3k":
+        raise ValueError("preflight-only requires Edge0")
+    if tokenizer_policy not in _EDGE0_TOKENIZER_POLICIES or (
+        choice != "edge0-145b-q3k" and tokenizer_policy != "borrowed-qwen"
+    ):
+        raise ValueError("unsupported tokenizer policy")
+    if choice == "edge0-145b-q3k":
+        _edge0_policy_module(tokenizer_policy)
     if artifact_mode not in {"text", "vision-language"} or (
         artifact_mode == "vision-language" and choice not in {"qwen38-mlx-serve-mixed", "qwen38-lily-q4-xl"}
     ):
@@ -664,6 +999,8 @@ def prepare(
     stage.mkdir(mode=0o700, exist_ok=True)
     marker = stage / "stark-download.json"
     identity = {"choice": choice, "source": source}
+    if source.get("preparatory_only"):
+        identity["tokenizer_policy"] = tokenizer_policy
     if marker.exists():
         if _json(marker) != identity:
             raise ValueError("staging source mismatch")
@@ -672,7 +1009,7 @@ def prepare(
     else:
         marker.write_text(json.dumps(identity, sort_keys=True))
     disk_bytes = source["weight_bytes"] + (0 if source.get("ngram_in_weight_bytes") else source.get("ngram_bytes", 0))
-    if not offline and shutil.disk_usage(output.parent).free < disk_bytes + 4 * 1024**3:
+    if not offline and not preflight_only and shutil.disk_usage(output.parent).free < disk_bytes + 4 * 1024**3:
         # Account for a resumable completed shard already in our owned staging
         # directory. Hugging Face handles its own incomplete-file recovery.
         present = sum(path.stat().st_size for path in stage.rglob("*") if path.is_file() and not path.is_symlink())
@@ -710,6 +1047,17 @@ def prepare(
         )
         capture.close()
         download_options["tqdm_class"] = capture.bar_class()
+    if source.get("preparatory_only"):
+        return _prepare_edge0(
+            stage,
+            output,
+            source,
+            offline,
+            progress,
+            download_options,
+            preflight_only=preflight_only,
+            tokenizer_policy=tokenizer_policy,
+        )
     if not gguf_complete:
         snapshot_download(
             source["weights_repo"],
@@ -775,6 +1123,8 @@ def main(argv=None):
     parser.add_argument("model", choices=tuple(SOURCES))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true", help="Verify Edge0 metadata without payload download")
+    parser.add_argument("--tokenizer-policy", choices=_EDGE0_TOKENIZER_POLICIES, default="borrowed-qwen")
     parser.add_argument("--artifact-mode", choices=("text", "vision-language"), default="text")
     parser.add_argument("--upgrade-images", action="store_true", help="Upgrade the existing --output folder in place")
     parser.add_argument("--progress-fd", type=int, help=argparse.SUPPRESS)
@@ -784,12 +1134,21 @@ def main(argv=None):
         if args.progress_fd is not None:
             progress_sink = FDProgressSink(args.progress_fd)
         if args.upgrade_images:
+            if args.tokenizer_policy != "borrowed-qwen":
+                raise ValueError("tokenizer policy does not apply to image upgrades")
             from .hybrid_vision import prepare_image_artifact
 
             receipt = prepare_image_artifact(args.output, args.model)
         else:
             options = {"artifact_mode": args.artifact_mode} if args.artifact_mode != "text" else {}
+            if args.preflight_only:
+                options["preflight_only"] = True
+            if args.tokenizer_policy != "borrowed-qwen":
+                options["tokenizer_policy"] = args.tokenizer_policy
             receipt = prepare(args.model, args.output, offline=args.offline, progress=progress_sink, **options)
+    except Edge0PreflightError as error:
+        print(json.dumps({"status": "rejected", "category": error.category}, sort_keys=True), file=sys.stderr)
+        return 1
     except (Exception, KeyboardInterrupt):
         print(
             "Native model preparation did not complete; its owned download directory can be retried.", file=sys.stderr

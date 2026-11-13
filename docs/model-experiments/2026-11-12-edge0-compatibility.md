@@ -156,6 +156,12 @@ establish resident memory or supported host capacity.
 
 ## Follow-up history
 
-No execution follow-up or successor attempt registered. Append later evidence
-without replacing the original intake scope or treating new runs as Phase 0
-measurements.
+### 2026-11-12: local evaluation decision
+
+After reviewing the Phase 0 gate, the owner selected **local non-commercial
+evaluation only** and instructed continued plan work with parallel Sol agents.
+This authorizes local branch progression before the Phase 0 record is merged;
+merge status remains pending. The original registration above preserves its
+then-pending state. No commercial permission, product admission or runtime
+qualification is established. Source preparation has successor attempt
+[`20261112-EDGE0-02`](2026-11-12-edge0-source-preparation.md).

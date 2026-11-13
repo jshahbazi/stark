@@ -1,13 +1,16 @@
 # Edge0-145B native support plan
 
-Status: phase 0 opened, 2026-11-12. Compatibility attempt
+Status: phase 1 in progress for local non-commercial evaluation, 2026-11-12.
+Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
 [license and provenance review](archive/runs/2026-11-12-edge0-license-intake.md)
-is prepared for the owner's decision; that decision and merge of the attempt
-record remain pending. No weight payload was downloaded and no Stark runtime
-code was changed or model executed. Every statement below about Stark behaviour
-with this model is planned and untested. Follow
+records the owner's local non-commercial evaluation decision. The owner
+authorized continuing local branch work while the attempt record remains
+unmerged. Commercial/product availability is outside this scope. Source
+preparation is tracked separately in
+[`20261112-EDGE0-02`](model-experiments/2026-11-12-edge0-source-preparation.md).
+No Stark model execution is qualified. Follow
 [model onboarding](MODEL_ONBOARDING.md), the
 [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md) and the
 [experiment ledger](model-experiments/README.md).
@@ -53,11 +56,15 @@ the Hub reports for each:
 | `mtp/dense.bin` | 116,099,072 | `c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a` | Draft-layer dense tensors |
 | `labels.bin` | 98,304 | `ce9b4a20b92c5c866e65d84a3884c104986522471cf11cc5f797a153affbcc06` | Projection group of each expert |
 
-Small text files (`index.txt`, `native_experts.txt`, `model.json`,
+Small files (`index.txt`, `native_experts.txt`, `model.json`,
 `mtp/dense.txt`, `scales/l0.f32` to `l47.f32`, `tokenizer/`, `LICENSE`,
 `NOTICE`, `release-scope.json`, `third-party/Qwen-LICENSE.txt`) are bound by
-the repository revision; their SHA-256 values are recorded when the
-preparation helper is written. `latent_dense_q4.bin` (1,981,808,640 bytes) is
+the repository revision. The preparation helper now pins all 69 default source
+paths, sizes and SHA-256 values in
+[`edge0_source.py`](../tools/converter/stark_convert/edge0_source.py): eight
+binary payloads plus 61 small files, 103,384,750,077 bytes total. Those identities
+do not establish a complete local download or native load. `latent_dense_q4.bin`
+(1,981,808,640 bytes) is
 only needed for the optional Q4 projection choice and is not part of the
 default set.
 
@@ -182,11 +189,15 @@ Each phase ends at a gate. A later phase does not start on an unmet gate.
   does not resolve these use restrictions. The prepared folder must keep
   `LICENSE`, `NOTICE`, `release-scope.json` and the Qwen license text, and any
   future catalogue row must link the license. The license intake records the
-  exact terms and pending owner decision.
+  exact terms and the owner's local non-commercial evaluation decision.
 
-Gate: attempt record merged; license decision recorded. Both remain pending.
-The [license intake](archive/runs/2026-11-12-edge0-license-intake.md) records the
-terms and the decision needed from the owner. Phase 1 has not started.
+Gate: attempt record merged; license decision recorded. On 2026-11-12 the owner
+selected local non-commercial evaluation only and instructed work to continue
+on this branch while the record remains unmerged. This authorizes the local
+evaluation sequence; merge, product admission and any commercial permissions
+remain separate. The
+[license intake](archive/runs/2026-11-12-edge0-license-intake.md#owner-decision-2026-11-12)
+records this scope. Phase 1 is in progress under that instruction.
 
 ### Phase 1: source preparation and admission
 
@@ -202,10 +213,21 @@ terms and the decision needed from the owner. Phase 1 has not started.
   storage block naming this layout, so the existing Lily and external-affine
   admission predicates cannot match it by accident. Write the
   `native-source.json` receipt with native loading reported as unverified.
-- Tokenizer: derive `tokenizer.json` from the pinned Qwen3.8-Flash-Next
-  tokenizer only after proving that token IDs, merge order, token types and
-  special IDs equal the shipped files and the GGUF arrays. Record it under
-  `derived_metadata`. Any difference fails preparation.
+- Tokenizer, borrowed-reference route (`20261112-EDGE0-02`): derive
+  `tokenizer.json` from the pinned Qwen3.8-Flash-Next tokenizer only after proving
+  that token IDs, merge order, token types, special IDs and normalization/split
+  semantics equal the shipped files and GGUF arrays. Any difference fails this
+  route. The pinned release fails this check; retain that result.
+- Tokenizer, source-native successor
+  ([`20261112-EDGE0-03`](model-experiments/2026-11-12-edge0-native-tokenizer.md)):
+  independently represent the released vocabulary, merges, token classes and
+  pinned `qwen35` semantics. Qualify it against a tokenizer-only CPU oracle
+  from Strata's exact llama.cpp revision before permitting preparation. Require
+  exact encode/decode and special-token behavior on the declared controls,
+  including Unicode normalization/case-fold boundaries and unused padding.
+  An unavailable oracle or mismatch keeps this route disabled. Bind source,
+  program, fixture and result hashes under `derived_metadata`; do not substitute
+  a modified borrowed tokenizer and relabel the rejected comparison as passing.
 
 Gate: a prepared folder on the intake host whose receipt binds every payload
 hash. Binary payloads total 103.4 GB, plus the small metadata files; the host had

@@ -15,6 +15,34 @@ admission limits and prefix-state qualification are documented there.
 
 ## Checkpoints and preparation
 
+The separate [Edge0 evaluation plan](EDGE0_PLAN.md) has a preparation-only
+`edge0-145b-q3k` CLI choice for local non-commercial work. It is excluded from
+the app catalogue, Beginner recommendations and normal prepared-model identity.
+Its default metadata-only preflight rejects the released tokenizer's mismatch
+with the pinned Qwen reference before downloading payloads. A separately
+qualified source-native tokenizer is available through an explicit evaluation
+policy; no Edge0 backend is enabled.
+Inspect only its pinned small metadata and bounded skeleton header with:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare edge0-145b-q3k --output runtime/edge0-evaluation --preflight-only
+```
+
+The rejected preflight exits with status 1 and category
+`tokenizer_equivalence_rejected`, retains owned `.native-download` staging and
+does not publish the requested output. `--offline` retries verified metadata
+from the local caches. See [attempt `20261112-EDGE0-02`](model-experiments/2026-11-12-edge0-source-preparation.md)
+for the exact scope and source-bound result.
+
+For the accepted Python 3.13.13 / tokenizers 0.23.3 preparation profile, add
+`--tokenizer-policy edge0-native-v2`. This policy binds the exact source,
+explicit Unicode range asset, tokenizer program and CPU-oracle proof. First
+run with `--preflight-only`; remove that flag to acquire and fully validate the
+69 pinned source files. The source-native proof is independent of the rejected
+borrowed-HF comparison. Both policies retain the local non-commercial scope.
+Native loading, Rust tokenizer parsing, streaming, MTP and reuse need their own
+later implementation and qualification.
+
 The preparation command pins these sources:
 
 | Choice | Checkpoint | Weight files |

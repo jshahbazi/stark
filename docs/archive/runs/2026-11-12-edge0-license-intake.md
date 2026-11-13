@@ -161,3 +161,17 @@ byte-for-byte; the GitHub model aggregate scope and the artifact-specific
 scope intentionally have different hashes and were not substituted for one
 another. These hashes identify intake text only. They do not attest to model
 payload integrity, source-port correctness, inference support or throughput.
+
+## Owner decision, 2026-11-12
+
+The owner selected **local non-commercial evaluation only** and instructed
+continued work on the plan with parallel Sol agents. This permits the local
+evaluation sequence on the work branch while the Phase 0 record remains
+unmerged. The pending status in the original intake above records the state
+before this decision.
+
+Scope excludes commercial model services, commercial assistant availability,
+product catalogue admission and redistribution of weights. No separate Edge0
+or Qwen commercial permission was supplied or inferred. Keep preparation
+receipts explicit about evaluation scope and native execution unverified until
+their own gates pass. Reassess licensing before expanding that scope.

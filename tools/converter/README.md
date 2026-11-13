@@ -44,6 +44,18 @@ The output directory contains `config.json`, `tokenizer.json`, `model.safetensor
 
 A successful conversion validates the complete supported layout. It does not run the model. Text conversions report `native_loading: "unverified"` unless the exact artifact matches a stored qualification record. Vision conversion reports the applicable unverified layout/family status or a matching exact record (see [qualification](#catalog-coverage-and-qualification)).
 
+The separate `stark_convert.hybrid_prepare` command also has a preparation-only
+`edge0-145b-q3k` choice for local non-commercial evaluation. Its
+`--preflight-only` mode checks pinned small metadata and a bounded GGUF header
+before any full weight download. The pinned release currently fails strict
+tokenizer equivalence under the default policy and exits with category
+`tokenizer_equivalence_rejected`. The explicit `--tokenizer-policy edge0-native-v2`
+uses a separately qualified source-native tokenizer for Python preparation;
+it still grants no app installation or native execution. Use the profile-bound
+environment and metadata preflight described in the
+[native-source guide](../../docs/NATIVE_HYBRID_MODELS.md#checkpoints-and-preparation)
+and [Edge0 plan](../../docs/EDGE0_PLAN.md).
+
 ## Check family and mode coverage
 
 The [shared support registry](../../docs/MODEL_SUPPORT.md) describes implemented

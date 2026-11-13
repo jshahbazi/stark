@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import os
@@ -85,6 +86,456 @@ def test_metadata_keeps_architecture_and_unions_checkpoint_stops(tmp_path):
     assert config["token_codec_config"]["prompt_template"] == "{{ messages[0]['content'] }}"
     assert receipt["native_loading"] == receipt["execution"] == "unverified"
     assert receipt["weights_source"]["revision"] == hybrid.SOURCES["glm53-q2"]["weights_revision"]
+
+
+def test_edge0_recipe_is_pinned_and_prepare_only():
+    source = hybrid.SOURCES["edge0-145b-q3k"]
+    assert source["weights_repo"] == "Edge0/Edge0-145B-q3k"
+    assert source["weights_revision"] == "d7de835cfce7d9bb22a3d5ebb7d1e8565d4ecf74"
+    assert source["preparatory_only"] is True
+    assert source["weight_bytes"] == 103_374_417_600
+    assert len(source["weight_files"]) == 8
+    assert sum(source["file_manifest"][name]["size"] for name in source["weight_files"]) == source["weight_bytes"]
+    assert set(source["weights_patterns"]) == set(source["file_manifest"])
+    assert not {"profile.bin", "mtp/draft_vocab.bin", "latent_dense_q4.bin", "start.sh"} & set(
+        source["weights_patterns"]
+    )
+    assert not any(name.startswith("assets/") or "*" in name for name in source["weights_patterns"])
+
+
+@pytest.fixture
+def edge0_preparation(monkeypatch):
+    from stark_convert import edge0_source, edge0_tokenizer
+
+    content = {"experts.bin": b"1234", "mtp/dense.bin": b"56", "LICENSE": b"terms", "tokenizer/vocab.json": b"{}"}
+    manifest = {
+        name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()} for name, data in content.items()
+    }
+    source = {
+        **hybrid.SOURCES["edge0-145b-q3k"],
+        "file_manifest": manifest,
+        "weights_patterns": list(manifest),
+        "weight_files": ["experts.bin", "mtp/dense.bin"],
+        "weight_bytes": 6,
+    }
+    monkeypatch.setitem(hybrid.SOURCES, "edge0-145b-q3k", source)
+    calls = []
+
+    def download(repo, **options):
+        assert repo == source["weights_repo"] and options["revision"] == source["weights_revision"]
+        assert options["local_files_only"]
+        calls.append(list(options["allow_patterns"]))
+        for name in options["allow_patterns"]:
+            target = Path(options["local_dir"]) / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content[name])
+
+    def tokenizer(directory, metadata, *, offline=False):
+        assert offline
+        assert metadata == {"checked": True}
+        derived = {}
+        for name in ("tokenizer.json", "tokenizer_config.json"):
+            data = b"{}"
+            (directory / name).write_bytes(data)
+            derived[name] = {"sha256": hashlib.sha256(data).hexdigest(), "derivation": "synthetic"}
+        return {"derived_metadata": derived, "tokenizer_equivalence": {"equivalent": True}}
+
+    monkeypatch.setattr(hybrid, "snapshot_download", download)
+    monkeypatch.setattr(edge0_source, "fetch_skeleton_metadata", lambda *_args, **_kw: {"checked": True})
+    monkeypatch.setattr(
+        edge0_source,
+        "validate_source",
+        lambda _directory: {"gguf_metadata": {"checked": True}, "source_layout": {"validated": True}},
+    )
+    monkeypatch.setattr(edge0_tokenizer, "prepare_tokenizer", tokenizer)
+    monkeypatch.setattr(edge0_tokenizer, "preflight_tokenizer", lambda *_args, **_kw: {"equivalent": True})
+    return source, calls, content
+
+
+def test_edge0_preparation_binds_every_file_and_never_grants_runtime_admission(tmp_path, edge0_preparation):
+    from stark_convert import qwen38_external, qwen38_retained
+    from stark_convert.desktop import model_valid
+
+    source, calls, content = edge0_preparation
+    output = tmp_path / "edge0"
+    result = hybrid.prepare("edge0-145b-q3k", output, offline=True)
+    assert calls == [["LICENSE", "tokenizer/vocab.json"], ["experts.bin", "mtp/dense.bin"]]
+    assert result["status"] == "prepared"
+    assert result["native_loading"] == result["execution"] == "unverified"
+    assert result["usage_scope"] == "local_noncommercial_evaluation"
+    assert set(result["files"]) == {*content, "config.json", "tokenizer.json", "tokenizer_config.json"}
+    assert result == json.loads((output / "native-source.json").read_text())
+    config = json.loads((output / "config.json").read_text())
+    assert config["model_type"] == "qwen4_exp"
+    assert config["storage"]["layout"] == "edge0-strata"
+    assert not qwen38_external.is_external_affine(config)
+    assert not qwen38_retained.is_retained_affine(config)
+    assert hybrid.preparation_identity(output)["loadable"] is False
+    assert hybrid.prepared_identity(output) is None
+    assert not model_valid(output)
+    assert not output.with_name(output.name + ".native-download").exists()
+    assert not (output / "stark-download.json").exists()
+    (output / "mtp/dense.bin").write_bytes(b"78")
+    assert hybrid.preparation_identity(output) is None
+
+
+@pytest.mark.parametrize("mutation", ["source", "derived", "extra", "receipt", "config"])
+def test_edge0_preparation_identity_rejects_mutations(tmp_path, edge0_preparation, mutation):
+    output = tmp_path / "edge0"
+    hybrid.prepare("edge0-145b-q3k", output, offline=True)
+    if mutation == "source":
+        (output / "LICENSE").write_bytes(b"other")
+    elif mutation == "derived":
+        (output / "tokenizer.json").write_bytes(b"[]")
+    elif mutation == "extra":
+        (output / "unexpected.bin").write_bytes(b"extra")
+    elif mutation == "config":
+        config = json.loads((output / "config.json").read_text())
+        config["lily"] = {"format": "qwen4_exp-affine-v1"}
+        (output / "config.json").write_text(json.dumps(config))
+    else:
+        receipt = json.loads((output / "native-source.json").read_text())
+        receipt["native_loading"] = "verified"
+        (output / "native-source.json").write_text(json.dumps(receipt))
+    assert hybrid.preparation_identity(output) is None
+    assert hybrid.prepared_identity(output) is None
+
+
+def test_edge0_tokenizer_preflight_rejects_before_any_payload_download(
+    tmp_path, monkeypatch, edge0_preparation, capsys
+):
+    from stark_convert import edge0_tokenizer
+
+    _, calls, _ = edge0_preparation
+
+    def reject(*_args, **_kw):
+        raise ValueError("private source details")
+
+    monkeypatch.setattr(edge0_tokenizer, "preflight_tokenizer", reject)
+    output = tmp_path / "edge0"
+    assert hybrid.main(["edge0-145b-q3k", "--output", str(output), "--offline", "--preflight-only"]) == 1
+    assert calls == [["LICENSE", "tokenizer/vocab.json"]]
+    assert not output.exists()
+    assert output.with_name(output.name + ".native-download").is_dir()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {"status": "rejected", "category": "tokenizer_equivalence_rejected"}
+    assert "private source details" not in captured.err
+
+
+def test_edge0_metadata_only_preflight_does_not_publish(tmp_path, edge0_preparation):
+    _, calls, _ = edge0_preparation
+    output = tmp_path / "edge0"
+    result = hybrid.prepare("edge0-145b-q3k", output, offline=True, preflight_only=True)
+    assert result["status"] == "preflight_verified"
+    assert calls == [["LICENSE", "tokenizer/vocab.json"]]
+    assert not output.exists()
+    assert not (output.with_name(output.name + ".native-download") / "experts.bin").exists()
+
+
+@pytest.mark.parametrize("failure", ["hash", "symlink", "validation", "mutation", "publication"])
+def test_edge0_failed_preparation_keeps_owned_retryable_stage(tmp_path, monkeypatch, edge0_preparation, failure):
+    from stark_convert import edge0_source
+
+    _, _, content = edge0_preparation
+    output = tmp_path / "edge0"
+    if failure == "hash":
+        content["experts.bin"] = b"4321"
+    elif failure == "symlink":
+        original = hybrid.snapshot_download
+
+        def download(*args, **options):
+            original(*args, **options)
+            if "experts.bin" in options["allow_patterns"]:
+                target = Path(options["local_dir"]) / "experts.bin"
+                target.unlink()
+                target.symlink_to(Path(options["local_dir"]) / "LICENSE")
+
+        monkeypatch.setattr(hybrid, "snapshot_download", download)
+    elif failure == "validation":
+        monkeypatch.setattr(
+            edge0_source, "validate_source", lambda _directory: (_ for _ in ()).throw(ValueError("invalid source"))
+        )
+    elif failure == "mutation":
+
+        def mutate(directory):
+            (directory / "experts.bin").write_bytes(b"4321")
+            return {"gguf_metadata": {"checked": True}, "source_layout": {"validated": True}}
+
+        monkeypatch.setattr(edge0_source, "validate_source", mutate)
+    else:
+        monkeypatch.setattr(hybrid, "_publish", lambda *_args: (_ for _ in ()).throw(InterruptedError()))
+    with pytest.raises((ValueError, InterruptedError)):
+        hybrid.prepare("edge0-145b-q3k", output, offline=True)
+    assert not output.exists()
+    stage = output.with_name(output.name + ".native-download")
+    assert json.loads((stage / "stark-download.json").read_text())["choice"] == "edge0-145b-q3k"
+
+
+def test_edge0_publication_retry_preserves_owned_staging(tmp_path, monkeypatch, edge0_preparation):
+    output = tmp_path / "edge0"
+    publish = hybrid._publish
+    monkeypatch.setattr(hybrid, "_publish", lambda *_args: (_ for _ in ()).throw(InterruptedError()))
+    with pytest.raises(InterruptedError):
+        hybrid.prepare("edge0-145b-q3k", output, offline=True)
+    monkeypatch.setattr(hybrid, "_publish", publish)
+    assert hybrid.prepare("edge0-145b-q3k", output, offline=True)["status"] == "prepared"
+    assert hybrid.preparation_identity(output)["loadable"] is False
+
+
+def test_edge0_generic_metadata_finisher_cannot_issue_a_native_receipt(tmp_path):
+    with pytest.raises(ValueError, match="require pinned source preparation"):
+        hybrid.finish_metadata(tmp_path, "edge0-145b-q3k")
+    assert not (tmp_path / "native-source.json").exists()
+
+
+def test_edge0_progress_counts_nested_payloads_from_verified_hub_download_records(tmp_path):
+    source = hybrid.SOURCES["edge0-145b-q3k"]
+    path = tmp_path / "mtp/dense.bin"
+    path.parent.mkdir()
+    path.write_bytes(b"1234")
+    records = tmp_path / ".cache/huggingface/download/mtp"
+    records.mkdir(parents=True)
+    (records / "dense.bin.metadata").write_text(f"{source['weights_revision']}\netag\n{path.stat().st_mtime + 1}\n")
+    assert hybrid.completed_model_bytes(tmp_path, source) == 4
+    (tmp_path / "unlisted.gguf").write_bytes(b"ignored")
+    assert hybrid.completed_model_bytes(tmp_path, source) == 4
+
+
+def test_edge0_hash_batch_detects_a_file_changed_after_its_hash(tmp_path, monkeypatch):
+    (tmp_path / "a").write_bytes(b"A")
+    (tmp_path / "b").write_bytes(b"B")
+    original = hashlib.sha256
+
+    class Digest:
+        def __init__(self):
+            self.digest = original()
+
+        def update(self, data):
+            self.digest.update(data)
+            if data == b"B":
+                (tmp_path / "a").write_bytes(b"C")
+
+        def hexdigest(self):
+            return self.digest.hexdigest()
+
+    monkeypatch.setattr(hashlib, "sha256", Digest)
+    with pytest.raises(ValueError, match="changed"):
+        hybrid._edge0_files(tmp_path, ["a", "b"])
+
+
+@pytest.mark.parametrize("name", ["tokenizer", ".cache", "config.json", "native-source.json"])
+def test_edge0_resume_rejects_symlinks_before_any_source_writes(tmp_path, edge0_preparation, name):
+    source, calls, _ = edge0_preparation
+    output = tmp_path / "edge0"
+    stage = output.with_name(output.name + ".native-download")
+    stage.mkdir()
+    (stage / "stark-download.json").write_text(
+        json.dumps({"choice": "edge0-145b-q3k", "source": source, "tokenizer_policy": "borrowed-qwen"})
+    )
+    target = tmp_path / "untouched"
+    target.mkdir()
+    (stage / name).symlink_to(target, target_is_directory=True)
+    with pytest.raises(ValueError, match="staging path"):
+        hybrid.prepare("edge0-145b-q3k", output, offline=True)
+    assert calls == []
+    assert list(target.iterdir()) == []
+
+
+def test_edge0_progress_callback_mutation_cannot_publish(tmp_path, edge0_preparation):
+    output = tmp_path / "edge0"
+    stage = output.with_name(output.name + ".native-download")
+
+    def progress(event):
+        if event["phase"] == "conversion" and event["state"] == "running":
+            (stage / "experts.bin").write_bytes(b"4321")
+
+    with pytest.raises(ValueError, match="changed before publication"):
+        hybrid.prepare("edge0-145b-q3k", output, offline=True, progress=progress)
+    assert not output.exists()
+
+
+def test_edge0_receipt_cannot_claim_preparation_with_failed_tokenizer_equivalence(tmp_path, edge0_preparation):
+    output = tmp_path / "edge0"
+    hybrid.prepare("edge0-145b-q3k", output, offline=True)
+    receipt = json.loads((output / "native-source.json").read_text())
+    receipt["tokenizer_equivalence"]["equivalent"] = False
+    (output / "native-source.json").write_text(json.dumps(receipt))
+    assert hybrid.preparation_identity(output) is None
+
+
+@pytest.fixture
+def qualified_native_tokenizer(tmp_path, monkeypatch, edge0_preparation):
+    """Synthetic acceptance exercises publication; it is not a real proof."""
+    from stark_convert import edge0_tokenizer_admission as admission
+
+    asset = {"properties": {"L": [[97, 122]], "M": [], "N": [[48, 57]], "s": [[32, 32]]}}
+    asset_bytes = admission._encoded(asset)
+    metadata = {
+        "tokens": [
+            "a",
+            "b",
+            "ab",
+            "ba",
+            "<|endoftext|>",
+            "<|im_end|>",
+            "<|fim_pad|>",
+            "<|repo_name|>",
+            "<|file_sep|>",
+        ],
+        "types": [1, 1, 1, 1, 3, 3, 3, 3, 3],
+        "vocab": {
+            "a": 0,
+            "b": 1,
+            "ab": 2,
+            "ba": 3,
+            "<|endoftext|>": 4,
+            "<|im_end|>": 5,
+            "<|fim_pad|>": 6,
+            "<|repo_name|>": 7,
+            "<|file_sep|>": 8,
+        },
+        "merges": ["a b", "b a"],
+        "descriptor": {
+            "pre_pattern": r"\p{L}+",
+            "special_ids": {f"tokenizer.ggml.{name}_token_id": 4 for name in ("bos", "eos", "padding")},
+        },
+    }
+    monkeypatch.setattr(admission.candidate, "sealed_metadata", lambda *_args: metadata)
+    monkeypatch.setattr(admission, "_source_bytes", lambda *_args: b"{{ messages[0].content }}")
+    package = {"edge0_unicode.json": asset_bytes, "edge0_native_tokenizer.py": b"synthetic-candidate"}
+    monkeypatch.setattr(admission, "_package_bytes", lambda name: package[name])
+    derived = admission.inspect_derived_metadata(tmp_path, {})
+    profile = {
+        "policy": "edge0-native-v2",
+        "profile": "synthetic-native-policy",
+        "candidate_revision": admission.candidate.UNICODE_CANDIDATE_REVISION,
+        "source": {"repo": admission.EDGE0_REPO_ID, "revision": admission.EDGE0_REVISION},
+        "tokenizers_version": admission.tokenizers.__version__,
+        "candidate_module_sha256": hashlib.sha256(package["edge0_native_tokenizer.py"]).hexdigest(),
+        "unicode_asset_sha256": hashlib.sha256(asset_bytes).hexdigest(),
+        "tokenizer_json_sha256": derived["tokenizer.json"]["sha256"],
+        "tokenizer_config_sha256": derived["tokenizer_config.json"]["sha256"],
+        "proof": {"attempt": "20261112-EDGE0-03B.1", "sha256": "a" * 64},
+        "primary_eos_token_id": 4,
+        "eog_token_ids": [4, 5, 6, 7, 8],
+    }
+    monkeypatch.setattr(admission, "ACCEPTED_PROFILE", profile)
+    return admission, package, profile
+
+
+def test_edge0_native_policy_is_disabled_without_registered_profile(tmp_path, monkeypatch, edge0_preparation, capsys):
+    from stark_convert import edge0_tokenizer_admission as admission
+
+    monkeypatch.setattr(admission, "ACCEPTED_PROFILE", None)
+    output = tmp_path / "edge0"
+    assert (
+        hybrid.main(
+            [
+                "edge0-145b-q3k",
+                "--output",
+                str(output),
+                "--offline",
+                "--preflight-only",
+                "--tokenizer-policy",
+                "edge0-native-v2",
+            ]
+        )
+        == 1
+    )
+    assert edge0_preparation[1] == []
+    assert not output.exists() and not output.with_name(output.name + ".native-download").exists()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {"status": "rejected", "category": "native_tokenizer_unqualified"}
+
+
+def test_edge0_native_policy_uses_separate_qualified_receipt(tmp_path, edge0_preparation, qualified_native_tokenizer):
+    admission, _, profile = qualified_native_tokenizer
+    output = tmp_path / "edge0-native"
+    receipt = hybrid.prepare("edge0-145b-q3k", output, offline=True, tokenizer_policy="edge0-native-v2")
+    assert receipt["tokenizer_policy"] == "edge0-native-v2"
+    assert "tokenizer_equivalence" not in receipt
+    assert receipt["native_tokenizer_validation"] == admission.validation_identity()
+    assert receipt["native_tokenizer_validation"]["qualification"] == profile
+    assert receipt["native_loading"] == receipt["execution"] == "unverified"
+    assert receipt["files"]["tokenizer.json"]["sha256"] == profile["tokenizer_json_sha256"]
+    assert receipt["files"]["tokenizer_config.json"]["sha256"] == profile["tokenizer_config_sha256"]
+    assert hybrid.preparation_identity(output)["tokenizer_policy"] == "edge0-native-v2"
+    assert hybrid.prepared_identity(output) is None
+    from stark_convert.desktop import model_valid
+
+    assert not model_valid(output)
+
+
+@pytest.mark.parametrize("change", ["program", "asset", "profile", "proof", "equivalence"])
+def test_edge0_native_identity_rejects_changed_qualification(
+    tmp_path, qualified_native_tokenizer, edge0_preparation, change
+):
+    _, package, profile = qualified_native_tokenizer
+    output = tmp_path / "edge0-native"
+    hybrid.prepare("edge0-145b-q3k", output, offline=True, tokenizer_policy="edge0-native-v2")
+    if change == "program":
+        package["edge0_native_tokenizer.py"] = b"changed"
+    elif change == "asset":
+        package["edge0_unicode.json"] = b"{}"
+    elif change == "profile":
+        profile["tokenizer_json_sha256"] = "b" * 64
+    else:
+        receipt = json.loads((output / "native-source.json").read_text())
+        if change == "proof":
+            receipt["native_tokenizer_validation"]["qualification"]["proof"]["sha256"] = "b" * 64
+        else:
+            receipt["tokenizer_equivalence"] = {"equivalent": True}
+        (output / "native-source.json").write_text(json.dumps(receipt))
+    assert hybrid.preparation_identity(output) is None
+    assert hybrid.prepared_identity(output) is None
+
+
+def test_edge0_native_policy_cannot_reuse_borrowed_policy_stage(
+    tmp_path, edge0_preparation, qualified_native_tokenizer
+):
+    output = tmp_path / "edge0"
+    hybrid.prepare("edge0-145b-q3k", output, offline=True, preflight_only=True)
+    stage = output.with_name(output.name + ".native-download")
+    assert json.loads((stage / "stark-download.json").read_text())["tokenizer_policy"] == "borrowed-qwen"
+    with pytest.raises(ValueError, match="staging source mismatch"):
+        hybrid.prepare("edge0-145b-q3k", output, offline=True, tokenizer_policy="edge0-native-v2")
+
+
+def test_edge0_native_preflight_has_no_payload_download_or_derived_writes(
+    tmp_path, edge0_preparation, qualified_native_tokenizer
+):
+    output = tmp_path / "edge0-native"
+    report = hybrid.prepare(
+        "edge0-145b-q3k", output, offline=True, tokenizer_policy="edge0-native-v2", preflight_only=True
+    )
+    assert report["status"] == "preflight_verified" and "tokenizer_equivalence" not in report
+    assert report["native_tokenizer_validation"]["source_metadata_validated"] is True
+    assert edge0_preparation[1] == [["LICENSE", "tokenizer/vocab.json"]]
+    stage = output.with_name(output.name + ".native-download")
+    assert not (stage / "tokenizer.json").exists()
+    assert not (stage / "tokenizer_config.json").exists()
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("change", ["self_attestation", "version", "source", "eog"])
+def test_edge0_native_policy_rejects_incomplete_or_drifted_registration_before_download(
+    tmp_path, edge0_preparation, qualified_native_tokenizer, change
+):
+    _, _, profile = qualified_native_tokenizer
+    if change == "self_attestation":
+        profile.clear()
+        profile["passed"] = True
+    elif change == "version":
+        profile["tokenizers_version"] = "different"
+    elif change == "source":
+        profile["source"]["revision"] = "b" * 40
+    else:
+        profile["eog_token_ids"] = [4]
+    with pytest.raises(hybrid.Edge0NativeUnqualifiedError):
+        hybrid.prepare("edge0-145b-q3k", tmp_path / "edge0", offline=True, tokenizer_policy="edge0-native-v2")
+    assert edge0_preparation[1] == []
 
 
 def test_metadata_rejects_changed_architecture_and_invalid_stops(tmp_path):

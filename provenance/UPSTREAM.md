@@ -39,13 +39,57 @@ The candidate weights are independently pinned to
 at `d7de835cfce7d9bb22a3d5ebb7d1e8565d4ecf74`. Their designated Edge0
 contributions carry Edge0 Community Model License 1.0; upstream material
 retains Qwen Community License 1.0. Neither is replaced by the source-code
-licenses. The model license decision remains pending the owner, including
-the intended use and any required separate commercial authorizations.
+licenses. The owner subsequently selected local non-commercial evaluation only
+and authorized continued branch work before merge. No commercial permissions
+or product availability are established.
 No model payload was downloaded. The
 [dated intake record](../docs/archive/runs/2026-11-12-edge0-license-intake.md)
 contains immutable primary links, inspected-text hashes, commercial-scope
 facts, preservation requirements and unresolved provenance limits. This
 record does not establish permission or model qualification.
+
+### Edge0 source preparation
+
+The independent Python admission code in `tools/converter/stark_convert/edge0_source.py`
+implements container facts from the pinned Edge0 Strata specifications, without
+copying an upstream runtime. `edge0_tokenizer.py` retains the failed comparison
+with the pinned original-Qwen tokenizer. The reference code licenses are kept
+verbatim in `LICENSE.edge0-reference` (Apache-2.0) and `LICENSE.strata-reference`
+(MIT), with the root source notice in `NOTICE.edge0-reference`. The distribution
+source inventory and notice collector include all three. Model-weight licenses
+remain separate and are retained in the prepared artifact only.
+
+Inspected format authorities at the Edge0 revision above:
+
+| Path | SHA-256 |
+| --- | --- |
+| `edge0-strata/tools/iq_pack.py` | `6588cba726b74b70ebbe17f8972afecda4cd1e3160f82c15ec15214a8bc55be6` |
+| `edge0-strata/tools/mtp_pack.py` | `322502ce2356122c72c5958e0775e4bbbf22ab804a31a8a63c783388e04b3894` |
+| `edge0-strata/include/strata/core/latent_dense.hpp` | `31065354f027bfaf388623811ec9efaf0d3bf7b50e65b7e61f2d037a1d591a11` |
+| `edge0-strata/src/core/latent_dense.cpp` | `a8cfdbccbb6225bc243c1a28adfa75bf74b012a2da88d67f035a61db0a24fd9d` |
+
+The tokenizer semantic reference is Strata's pinned llama.cpp
+`3cf03257f219afbe7334045ff7c6a06ac68c627d`, `src/llama-vocab.cpp`, SHA-256
+`82e8996cbbd81c1648b1f4946b5f481138aa897a1343dcd8b1a4abe8cff0b5fc`.
+Its existing MIT reference notice is retained in `LICENSE.ggml-hybrid`; this
+source revision remains distinct from the older native block-decoder revision
+recorded below. A CPU-only tokenizer oracle is an evaluation dependency, not
+a production inference process. Its build and any successor tokenizer proof
+belong to [attempt `20261112-EDGE0-03`](../docs/model-experiments/2026-11-12-edge0-native-tokenizer.md).
+
+The source-native tokenizer separately derives explicit Unicode classifications
+from that llama.cpp revision. `edge0_unicode.json` preserves the full MIT text,
+ggml attribution and these source hashes: `src/unicode-data.cpp`
+`95170cd1c105a5b41a1b2dce73b0fae8ce8011ef7897600828bb2babe8b26e5d`,
+`src/unicode.cpp`
+`b1f3a18646197e21f7300c6d3b45c9faf52a123d58a38d7d54f3f225018da45d`,
+and `src/unicode.h`
+`f1562388d5b9d2dac1152ad8eda56e0bcae25dd407cf15d9dd2e96fe0124f4e7`.
+The final explicit-range asset SHA-256 is
+`a8d7b7bea4f53942453a535e71b52a91098328eed16dcd466af69ed7a8225820`.
+This avoids inheriting the Python regex engine's different Unicode category
+tables. The accepted profile is Python preparation only; it establishes no
+Rust parser, native generation, stream or model qualification.
 
 ## Third-party algorithm adaptations
 
