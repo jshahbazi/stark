@@ -3,12 +3,14 @@
 Status: phases 3 and 4 and bounded Phase 5 worker correctness/lifecycle gates
 passed for local non-commercial evaluation, 2026-11-13. Selected expert-record
 Metal bindings reduce reproduced worker decompression churn in a fixed-idle
-ABBA control and pass bounded lifecycle gates. A fresh quiet-entry observer
-control now passes all six treatments and its no-worker checks. The subsequent
-matched MTP attempt completes 12 warmups and 40 measured arms: 13 arms and four
-pairs are eligible, with zero complete eligible groups; the final group defers
-at admission. Residual global decompressions and host activity still prevent
-performance qualification. MTP remains off by default.
+ABBA control and pass bounded lifecycle gates. The earlier quiet-entry observer
+control passes all six treatments and its no-worker checks. A new investigation
+adds task endpoints around measured arms. After an outer preflight defers, the
+owner explicitly requests worker launch; a separately registered direct run
+retains every per-group and measured-arm screen. Twelve warmups match, eight
+arms complete, three arms and one pair are eligible, and five groups defer.
+Zero complete groups qualify. Residual global decompressions and host activity
+still prevent performance qualification. MTP remains off by default.
 Phase 5 performance qualification and phases 6–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
@@ -422,6 +424,17 @@ global decompressions and external CPU. Worker-task decompressions stay zero.
 [Separate receipts](benchmarks/2026-11-13-edge0-quiet-window.md) retain both
 workflow attempts, all rejected arms and every existing threshold. No eligible
 subset establishes a performance or default-depth decision.
+The [arm-attribution successor](model-experiments/2026-11-13-edge0-arm-attribution.md)
+reconstructs the prior CPU/decompression rejections and adds sequential task
+endpoints outside the native measured brackets, recording their own overhead.
+It preserves a 120-second outer preflight deferral with no child launch. The
+owner then explicitly requests launch, and a separate direct worker run keeps
+every per-group quiet admission and measured-arm screen. Twelve warmups match;
+eight arms complete in the first group, with three eligible arms, one eligible
+pair and no eligible complete group. The other five groups defer. Worker-task
+decompressions remain zero; partial accessible host-task attribution does not
+resolve global ownership or permit baseline subtraction. [New receipts](benchmarks/2026-11-13-edge0-arm-attribution.md)
+retain all outcomes, additive observer costs and unchanged timing thresholds.
 Default remains off and timing qualification remains pending. The 512-token cap,
 disabled prefix reuse and local non-commercial scope remain in force.
 

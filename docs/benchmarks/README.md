@@ -40,6 +40,13 @@ preflights and the complete no-worker control pass. The matched run completes
 12 warmups and 40 measured arms, with 13 eligible arms, four eligible pairs and
 zero complete eligible groups. The final group defers; all thresholds and
 rejected observations remain intact. Timing qualification remains open.
+The [per-arm host-task successor](2026-11-13-edge0-arm-attribution.md) audits the
+remaining rejections and adds endpoint diagnostics outside native request
+brackets. An outer preflight defers; a separately registered owner-requested
+direct launch retains every per-group admission and measured screen. Twelve
+warmups match and eight arms complete: three eligible arms, one eligible pair,
+zero complete eligible groups; five groups defer. Partial task attribution
+does not resolve global ownership or support subtraction. MTP remains off.
 
 ## Current result
 
