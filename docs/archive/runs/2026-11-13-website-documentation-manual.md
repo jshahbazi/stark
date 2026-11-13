@@ -10,3 +10,7 @@ App installation, model loading, managed-client behavior and authenticated infer
 
 
 Publication completed as Sites version 66, source commit `8940409233a20dd7335275f3b1110e6bc675f32e`, deployment `appgdep_6af7051f210c819197e6c1fbbd87b9ce` (succeeded). The published introduction was verified at https://starkengine.app/docs/. A clean `npm ci --ignore-scripts` and full build in the Stark worktree also passed, followed by the same 624-link check. The dependency audit reported zero vulnerabilities.
+
+## Pre-PR review
+
+Merged current main and preserved its website changes. Corrected homepage and technical-page links to removed documentation anchors; the link checker now covers incoming docs links and fails when docs output is missing. Added a path-filtered documentation CI job with pinned actions, locked npm installation, static build and link check. Documented Node/npm requirements. Independent source review corrected image guidance to include both matching reference-verified execution evidence and locally tested evidence, using runtime capabilities for availability. Final Stark build and 640-link check passed; publication checkout check covered 639 links because its homepage differs. Repository policy and npm audit passed (zero reported vulnerabilities). Functional app/inference replay remains outside this documentation review.

@@ -21,16 +21,18 @@ class Page(HTMLParser):
 
 
 root = Path(__file__).resolve().parents[1] / "dist"
+if not (root / "docs" / "index.html").is_file():
+    raise SystemExit("Documentation output is missing; run npm run build first.")
 pages = {p: Page(p) for p in root.rglob("*.html")}
 errors = []
 checked = 0
 for path, page in pages.items():
-    if root / "docs" not in path.parents:
-        continue
     base = "/" + str(path.relative_to(root))
     for link in page.links:
         url = urlsplit(urljoin(base, link))
         if url.scheme or url.netloc:
+            continue
+        if root / "docs" not in path.parents and not url.path.startswith("/docs/"):
             continue
         target = root / unquote(url.path).lstrip("/")
         if target.is_dir():

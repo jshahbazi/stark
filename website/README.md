@@ -1,11 +1,11 @@
 # Stark website
 
 A static product website built with HTML, CSS and a small browser script.
-There are no package dependencies, analytics, external fonts or model execution.
+The Markdown documentation uses Astro/Starlight. There are no analytics, external fonts or model execution.
 
 ## Build and preview
 
-From the repository root:
+Use Node.js 22.23.4 or newer and npm 9.6.5 or newer. From the repository root:
 
 ```sh
 npm --prefix website ci
@@ -14,7 +14,7 @@ uv run --project tools/converter --locked --python 3.13.13 python -m http.server
 ```
 
 `website/public/` is the source; `website/dist/` is ignored build output. A
-standalone Site checkout builds with `node build.mjs`.
+standalone Site checkout also builds with `npm ci` and `npm run build`.
 
 Check the build, local links, keyboard navigation and narrow-screen layout when
 changing the pages. Run the repository policy check before committing.

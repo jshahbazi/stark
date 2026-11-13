@@ -38,7 +38,7 @@ Streaming uses Server-Sent Events and terminates successfully with `data: [DONE]
 
 Check the loaded model's capabilities before sending tools or images. The client executes tools and returns tool results; Stark renders supported templates and parses supported tool-call formats.
 
-Image requests accept one inline PNG/JPEG data URL, with a 4 MiB decoded-file limit at the HTTP service. Remote image URLs are rejected. The artifact must pass local image checks.
+Image requests accept one inline PNG/JPEG data URL, with a 4 MiB decoded-file limit at the HTTP service. Remote image URLs are rejected. Image input requires matching reference-verified or locally tested execution evidence. Check `capabilities.images` on the running model.
 
 [Tool contract](https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md#function-tools) · [Image qualification](https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md#image-qualification)
 

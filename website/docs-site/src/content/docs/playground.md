@@ -19,7 +19,7 @@ Supported text paths can reuse an unchanged prefix from the immediately precedin
 
 ## Ask about an image
 
-Use one PNG or JPEG with a model whose image input is enabled after local checks. Image availability depends on the exact artifact and build. If attachment is unavailable, check [image compatibility](/docs/compatibility/#images) before importing another model.
+Use one PNG or JPEG with a model whose image input is enabled after qualification. Image availability depends on the exact artifact and build. If attachment is unavailable, check [image compatibility](/docs/compatibility/#images) before importing another model.
 
 ## Decision mode
 

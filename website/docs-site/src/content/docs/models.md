@@ -17,7 +17,7 @@ Newer development builds offer **Quality** and **Speed** priorities. Their ranki
 | --- | --- |
 | Chat or writing | A usable chat template and enough memory for your conversation |
 | File tasks or coding agents | Tool support for the exact model and template |
-| Image questions | An admitted vision artifact with passing local image checks |
+| Image questions | An admitted vision artifact with image input enabled |
 | Decision scoring | Compatibility with Decision mode and the scoring workflow |
 
 ## Understand memory and context

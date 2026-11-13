@@ -19,7 +19,7 @@ Some newer builds show **Tools available**, **Tools unavailable** or **Tools unc
 
 ## Images
 
-Use one PNG or JPEG only when the loaded artifact has passing local image evidence. Successful text generation or conversion does not enable image input.
+Use one PNG or JPEG only when the loaded artifact has passing local image evidence. Image input can be enabled by a matching reference-verified execution record or passing local checks. Use the running model's `capabilities.images` value. Successful text generation or conversion does not enable image input.
 
 Qwen and Gemma image coverage varies by artifact and build. The status reference distinguishes implementation, component comparisons and full-checkpoint execution evidence. A development-branch result does not establish availability in a released app.
 
