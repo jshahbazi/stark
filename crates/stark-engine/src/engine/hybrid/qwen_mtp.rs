@@ -11,6 +11,10 @@
 #[path = "qwen_mtp_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "qwen_mtp_actual_tests.rs"]
+mod actual_tests;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use super::{Geometry, QwenModel, checkpoint, edge0};
@@ -434,7 +438,9 @@ impl Head {
     }
 
     /// Clear draft state and invalidate every previously issued handle. A
-    /// target reset still requires a newly bound head, because its tag changes.
+    /// target reset changes its tag. Current one-shot diagnostic admission
+    /// requires a model reload for a fresh binding; resource leasing and
+    /// transactional target/head rebinding are not integrated yet.
     pub(in crate::engine::hybrid) fn reset(&mut self) -> Result<()> {
         self.fence();
         if !self.policy_matches() {

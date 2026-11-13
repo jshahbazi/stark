@@ -748,6 +748,85 @@ fn output_bits(output: &HeadOutput) -> Result<(Vec<u32>, Vec<u32>, Vec<usize>)> 
 #[stark_test]
 // Requires the sealed private synthetic MTP fixture and a physical Metal device.
 #[ignore]
+fn edge0_mtp_head_trace_preserves_readouts() {
+    let fixture = private(Fixture::load());
+    let mut readout_pairs = 0;
+    let mut wide_pairs = 0;
+    let mut routing_pairs = 0;
+    let mut front_only_pairs = 0;
+    for case in ["serial", "catchup", "chain"] {
+        let mut traced = private(Head::new(geometry(), &fixture.weights));
+        let mut plain = private(Head::new(geometry(), &fixture.weights));
+        let mut traced_previous = None;
+        let mut plain_previous = None;
+        for cell in 0..CELLS {
+            let chained = case == "chain" && cell == 3;
+            let traced_input = if chained {
+                traced_previous.take().unwrap_or_else(|| panic!("private traced chain owner missing"))
+            } else {
+                private(fixture.input(cell))
+            };
+            let plain_input = if chained {
+                plain_previous.take().unwrap_or_else(|| panic!("private plain chain owner missing"))
+            } else {
+                private(fixture.input(cell))
+            };
+            let full = case != "catchup" || cell >= 2;
+            let traced_output = private(if full {
+                traced.step(&fixture.weights, cell, &traced_input, fixture.tokens[cell], true)
+            } else {
+                traced.catch_up(&fixture.weights, cell, &traced_input, fixture.tokens[cell], true)
+            });
+            let plain_output = private(if full {
+                plain.step(&fixture.weights, cell, &plain_input, fixture.tokens[cell], false)
+            } else {
+                plain.catch_up(&fixture.weights, cell, &plain_input, fixture.tokens[cell], false)
+            });
+            assert!(plain_output.stages.is_empty(), "private plain path has no diagnostic captures");
+            if full {
+                let traced_bits = private(output_bits(&traced_output));
+                let plain_bits = private(output_bits(&plain_output));
+                assert!(traced_bits.0 == plain_bits.0, "private tracing preserves exact readout bits");
+                assert!(traced_bits.1 == plain_bits.1, "private tracing preserves exact dedicated wide bits");
+                assert!(traced_bits.2 == plain_bits.2, "private tracing preserves exact routed order");
+                readout_pairs += 1;
+                wide_pairs += 1;
+                routing_pairs += 1;
+            } else {
+                assert!(
+                    traced_output.wide.is_none()
+                        && traced_output.logits.is_none()
+                        && traced_output.routed_ids.is_empty()
+                        && plain_output.wide.is_none()
+                        && plain_output.logits.is_none()
+                        && plain_output.routed_ids.is_empty(),
+                    "private trace/plain front-only output boundary"
+                );
+                front_only_pairs += 1;
+            }
+            traced_previous = traced_output.wide;
+            plain_previous = plain_output.wide;
+        }
+        assert!(
+            traced.next_cell() == CELLS && plain.next_cell() == CELLS && !traced.is_fenced() && !plain.is_fenced(),
+            "private trace/plain final cell boundary"
+        );
+    }
+    assert!(
+        readout_pairs == 10 && wide_pairs == 10 && routing_pairs == 10 && front_only_pairs == 2,
+        "private trace/plain comparison coverage"
+    );
+    println!(
+        "{}",
+        json!({"synthetic_mtp_trace_preserves_outputs":true,"bit_exact_readout_pairs":readout_pairs,
+            "bit_exact_wide_pairs":wide_pairs,"exact_routing_pairs":routing_pairs,"front_only_pairs":front_only_pairs,
+            "actual_artifact_forward":false})
+    );
+}
+
+#[stark_test]
+// Requires the sealed private synthetic MTP fixture and a physical Metal device.
+#[ignore]
 fn edge0_mtp_head_checkpoint_replay_and_failure_fences() {
     let fixture = private(Fixture::load());
     let mut head = private(Head::new(geometry(), &fixture.weights));

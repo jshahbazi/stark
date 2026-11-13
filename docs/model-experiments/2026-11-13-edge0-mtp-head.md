@@ -75,6 +75,16 @@ owners, validate identity/policy/cell chronology and invalidate on failure.
 Complete target-plus-head controller integration and its pending residual are
 still required before MTP capability promotion.
 
+Current source admission is one-shot per loaded target. A fresh bound head after
+target reset/restore requires model reload; reusable head leasing and combined
+rebinding are unfinished integration work. Synthetic unbound head reset/replay
+does not qualify loaded-model request recovery.
+
+Tracing materializes extra GPU calculations for ungated attention and weighted
+shared output; these are not separately retained normal-path intermediates.
+Require ten traced/untraced readout, wide-vector and routing pairs to match
+exactly across the registered serial/catch-up/chain cases before actual use.
+
 Run native operator/component and regression checks only after source freeze.
 Serialize GPU/model work. Actual-artifact head execution requires a separate
 preregistered case, 64 GiB available before process start, owned-process RSS
@@ -120,3 +130,34 @@ Residual tags must additionally bind a target restoration branch generation,
 without making reusable target checkpoints single-use. A previously bound head
 must reject after target restoration until an explicit combined target/head
 restore can safely rebind it. That composite integration remains unfinished.
+
+## Registered actual-artifact component case
+
+After the synthetic head and lifecycle gates pass, run one separately bound
+ignored actual-artifact diagnostic with virtual Metal registration. Keep MTP
+sampling and worker admission disabled. Use one loaded model and an ordinary
+36-token input kept in RAM.
+
+First ingest 32 tokens and collect four ordinary target readouts. Reset the
+target, create the bounded diagnostic head and advance all 36 target tokens
+through the private wide-output path. Require the last four target readouts
+bit-exact to the ordinary path. Catch up head cells 0–30 and retain the dedicated
+target residual for cell 31. Run that head cell and one chained cell, then
+restore the head checkpoint and replay both. Require finite complete vocabulary
+rows and bit-exact head readouts and dedicated wide vectors.
+
+Finally restore a valid target checkpoint, thereby changing its residual branch
+generation. Restore the still-valid head checkpoint and submit the abandoned
+target residual at a chronologically valid head row. Require tag rejection,
+head fencing and refusal of the old head checkpoint. This deliberately does
+not implement combined target/head rebinding or request recovery.
+
+Fixed work is 72 target advances, 40 target readout rows, 31 front-only head
+cells and four full head rows (35 successful head cells). Compare four target,
+two head readout and two head-wide vector pairs exactly. Require the unchanged
+prepared receipt, 64 GiB available before the owned process tree, a 48 GiB RSS
+watchdog, a 600-second deadline, one named test passing and immutable source/
+executable/recipe bindings. Timing includes test/build overhead and is not a
+performance measurement. This case establishes actual component integration
+and deterministic replay only, excluding exact MTP sampling, acceptance rate,
+external full-model/source numerical parity and production capability.
