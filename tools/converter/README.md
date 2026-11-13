@@ -192,7 +192,7 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 | Gemma 3 text MLX | `mlx-community/gemma-3-1b-it-{4bit,8bit}`; multimodal 4B and 27B variants are unsupported |
 | Gemma 4 text | `google/gemma-4-{E2B,E4B}-it`; dense PLE E2B/E4B text layouts. E2B affine Q4 conversion emits 901 tensors in a 2.605 GB packed artifact. Separate schema-4 BF16 image profiles support pinned E2B/E4B sources. No audio/video, 31B, 26B MoE or unified 12B support |
 | OLMo 3 | Extension `allenai/Olmo-3-7B-Instruct`; dense text profile with MLX affine Q4/Q8 matrix imports |
-| Phi | `microsoft/Phi-4-mini-instruct` (tied Phi3 layout with LongRoPE; untied Phi3 is unsupported) |
+| Phi | `microsoft/Phi-4-mini-instruct` (tied Phi3 layout with LongRoPE; untied Phi3 plans but no real untied checkpoint is qualified, and head dimensions without a Metal attention kernel are refused) |
 | Granite | `ibm-granite/granite-{3.1,3.3}-{2b,8b}-instruct` |
 | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` |
 | SmolLM3 MLX | `mlx-community/SmolLM3-3B-{4bit,8bit}` |
