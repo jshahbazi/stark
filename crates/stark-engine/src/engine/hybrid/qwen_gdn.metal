@@ -3,7 +3,10 @@
 // dot products and normalization sums retain the scalar reference order.
 
 struct QwenGdnParameters {
-    uint key_heads, key_dim, value_heads, value_dim, conv_width, eps_bits, sigmoid_output, width;
+    // bit0 retains the original sigmoid-output flag. The additional bits are
+    // set only by the explicit Edge0 constructor: bit1 raw negative A, bit2
+    // tiled V heads. Original Qwen parameter words remain exactly 0 or 1.
+    uint key_heads, key_dim, value_heads, value_dim, conv_width, eps_bits, output_flags, width;
 };
 
 // Metal has no log1p intrinsic. Compensate the rounded 1+x before taking log;
@@ -43,7 +46,7 @@ kernel void hybrid_qwen_gdn_recurrent(device const float *mixed [[buffer(0)]],
     threadgroup float values[1024];
     threadgroup float scales[5];
     uint key_width = p.key_heads * p.key_dim;
-    uint key_head = head / (p.value_heads / p.key_heads);
+    uint key_head = (p.output_flags & 4u) ? head % p.key_heads : head / (p.value_heads / p.key_heads);
     if (lane < p.key_dim) {
         q[lane] = mixed[key_head * p.key_dim + lane];
         k[lane] = mixed[key_width + key_head * p.key_dim + lane];
@@ -61,7 +64,8 @@ kernel void hybrid_qwen_gdn_recurrent(device const float *mixed [[buffer(0)]],
         uint control_offset = p.width * p.conv_width;
         float argument = a[head] + controls[control_offset + p.value_heads + head];
         float softplus = max(argument, 0.0f) + hybrid_qwen_log1p(exp(-abs(argument)));
-        scales[2] = exp(-exp(controls[control_offset + head]) * softplus);
+        if (p.output_flags & 2u) scales[2] = exp(controls[control_offset + head] * softplus);
+        else scales[2] = exp(-exp(controls[control_offset + head]) * softplus);
         scales[3] = hybrid_ffn_sigmoid(b[head]);
         if (!isfinite(a[head]) || !isfinite(b[head]) || !isfinite(scales[2])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
     }
@@ -97,7 +101,7 @@ kernel void hybrid_qwen_gdn_recurrent(device const float *mixed [[buffer(0)]],
         uint index = head * p.value_dim + lane;
         uint norm_offset = p.width * p.conv_width + 2 * p.value_heads;
         float gate = hybrid_ffn_sigmoid(z[index]);
-        if (!p.sigmoid_output) gate *= z[index];
+        if (!(p.output_flags & 1u)) gate *= z[index];
         float value = ((values[lane] * scales[4]) * controls[norm_offset + lane]) * gate;
         if (!isfinite(z[index]) || !isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
         output[index] = value;
@@ -119,7 +123,7 @@ kernel void hybrid_qwen_gdn_recurrent_fused(device const float *mixed [[buffer(0
     threadgroup float values[1024];
     threadgroup float scales[5];
     uint key_width = p.key_heads * p.key_dim;
-    uint key_head = head / (p.value_heads / p.key_heads);
+    uint key_head = (p.output_flags & 4u) ? head % p.key_heads : head / (p.value_heads / p.key_heads);
     if (lane < p.key_dim) {
         q[lane] = mixed[key_head * p.key_dim + lane];
         k[lane] = mixed[key_width + key_head * p.key_dim + lane];
@@ -137,7 +141,8 @@ kernel void hybrid_qwen_gdn_recurrent_fused(device const float *mixed [[buffer(0
         uint control_offset = p.width * p.conv_width;
         float argument = a[head] + controls[control_offset + p.value_heads + head];
         float softplus = max(argument, 0.0f) + hybrid_qwen_log1p(exp(-abs(argument)));
-        scales[2] = exp(-exp(controls[control_offset + head]) * softplus);
+        if (p.output_flags & 2u) scales[2] = exp(controls[control_offset + head] * softplus);
+        else scales[2] = exp(-exp(controls[control_offset + head]) * softplus);
         scales[3] = hybrid_ffn_sigmoid(b[head]);
         if (!isfinite(a[head]) || !isfinite(b[head]) || !isfinite(scales[2])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
     }
@@ -199,7 +204,7 @@ kernel void hybrid_qwen_gdn_recurrent_fused(device const float *mixed [[buffer(0
         uint index = head * p.value_dim + lane;
         uint norm_offset = p.width * p.conv_width + 2 * p.value_heads;
         float gate = hybrid_ffn_sigmoid(z[index]);
-        if (!p.sigmoid_output) gate *= z[index];
+        if (!(p.output_flags & 1u)) gate *= z[index];
         float value = ((values[lane] * scales[4]) * controls[norm_offset + lane]) * gate;
         if (!isfinite(z[index]) || !isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
         output[index] = value;

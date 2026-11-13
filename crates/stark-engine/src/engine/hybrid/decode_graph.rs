@@ -19,6 +19,9 @@ use metal::MTLHeap;
 #[path = "decode_graph_batch.rs"]
 mod batch;
 
+#[path = "decode_graph_edge0.rs"]
+mod edge0;
+
 /// Persistent backing for automatic, non-aliasable Shared scratch buffers.
 /// Apple documents that each subresource strongly retains its heap until the
 /// resource is destroyed. No buffer here is ever made aliasable or placed.
@@ -1436,8 +1439,40 @@ impl DecodeGraph {
             .map(|name| weights.encode_matvec(self, &format!("{prefix}.{name}.weight"), input))
             .collect::<Result<Vec<_>>>()?;
         self.end_projection_level()?;
+        let projections: [DeviceVector; 4] =
+            projections.try_into().map_err(|_| Error::Invalid("GDN projection count"))?;
+        self.qwen_gdn_projected(weights, prefix, state, &projections)
+    }
+
+    /// Reuse explicitly batched independent projections while preserving
+    /// token-ordered convolution, recurrence and output projection.
+    pub fn qwen_gdn_projected(
+        &mut self,
+        weights: &weights::Weights,
+        prefix: &str,
+        state: &mut QwenGdnState,
+        projections: &[DeviceVector; 4],
+    ) -> Result<DeviceVector> {
+        if self.unretained {
+            return Err(Error::Invalid("unretained graph supports audited GLM bindings only"));
+        }
         let g = &state.geometry;
         let width = 2 * g.key_heads * g.key_dim + g.value_heads * g.value_dim;
+        for projection in projections {
+            projection.validate()?;
+        }
+        // Batched prefill reuses these persistent outputs within one command.
+        // Flush deferred checks before a later causal token overwrites them.
+        self.prepare_external_write(&DeviceVector {
+            buffer: state.convolved.clone(),
+            offset: 0,
+            len: width,
+        })?;
+        self.prepare_external_write(&DeviceVector {
+            buffer: state.result.clone(),
+            offset: 0,
+            len: g.value_heads * g.value_dim,
+        })?;
         if projections[0].len != width
             || projections[1].len != g.value_heads * g.value_dim
             || projections[2].len != g.value_heads

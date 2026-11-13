@@ -49,7 +49,8 @@ def write_new(path, value):
 
 
 class Worker:
-    def __init__(self, binary, model):
+    def __init__(self, binary, model, *, metal=False, resident=False):
+        require(not resident or metal, "resident_requires_metal")
         environment = {
             key: value
             for key, value in os.environ.items()
@@ -64,6 +65,8 @@ class Worker:
                 **environment,
                 "STARK_EDGE0_REFERENCE": "1",
                 "STARK_REQUEST_BUDGET_MIB": "16",
+                **({"STARK_EDGE0_METAL": "1"} if metal else {}),
+                **({"STARK_EDGE0_RESIDENT": "1"} if resident else {}),
             },
         )
         self.owner = psutil.Process(self.process.pid)
@@ -156,6 +159,9 @@ def result_summary(reply):
 
 
 def run(args):
+    metal = getattr(args, "metal", False)
+    resident = getattr(args, "resident", False)
+    require(not resident or metal, "resident_requires_metal")
     model, binary, output = (
         args.model.resolve(),
         args.worker.resolve(),
@@ -207,7 +213,7 @@ def run(args):
     }
     registration = {
         "schema": 1,
-        "attempt": "20261112-EDGE0-05",
+        "attempt": "20261112-EDGE0-06" if metal else "20261112-EDGE0-05",
         "scope": "local_noncommercial_evaluation",
         "worker_sha256": digest(binary),
         "qualifier_sha256": digest(Path(__file__)),
@@ -229,6 +235,8 @@ def run(args):
         "worker_selectors": {
             "STARK_EDGE0_REFERENCE": "1",
             "STARK_REQUEST_BUDGET_MIB": "16",
+            **({"STARK_EDGE0_METAL": "1"} if metal else {}),
+            **({"STARK_EDGE0_RESIDENT": "1"} if resident else {}),
         },
         "inherited_stark_uzu_selectors_removed": True,
         "platform": platform.platform(),
@@ -258,7 +266,7 @@ def run(args):
         )
         expected = {}
         for process_index in range(2):
-            worker = Worker(binary, model)
+            worker = Worker(binary, model, metal=metal, resident=resident)
             ready = worker.read()
             require(ready.get("ready") is True, "load_failed")
             require(
@@ -340,6 +348,14 @@ def main():
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--metal", action="store_true", help="Select the explicit Phase 4 candidate"
+    )
+    parser.add_argument(
+        "--resident",
+        action="store_true",
+        help="Request its separately gated residency policy",
+    )
     try:
         return run(parser.parse_args())
     except Exception as error:  # noqa: BLE001 -- Do not expose requests or exception dumps.

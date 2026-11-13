@@ -9,6 +9,9 @@ use super::{Error, Result};
 
 type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 
+const EDGE0_RAW_NEGATIVE_A: u32 = 2;
+const EDGE0_TILED_VALUE_HEADS: u32 = 4;
+
 pub(super) struct Geometry {
     pub key_heads: usize,
     pub key_dim: usize,
@@ -190,6 +193,120 @@ mod tests {
         }
     }
 
+    // Independent F64 post-convolution recurrence. Its state stays in
+    // [head,value,key] order, rather than the device's [head,key,value] layout.
+    fn edge0_reference_step(
+        g: &Geometry,
+        state: &mut [f64],
+        negative_a: &[f32],
+        dt: &[f32],
+        norm: &[f32],
+        seed: usize,
+    ) -> Vec<f64> {
+        let data = |count: usize, salt: usize| {
+            (0..count).map(|i| f64::from((((i * 19 + seed * 7 + salt) % 67) as f32 - 33.0) * 0.017)).collect::<Vec<_>>()
+        };
+        let key_width = g.key_heads * g.key_dim;
+        let mixed = data(2 * key_width + g.value_heads * g.value_dim, 3);
+        let z = data(g.value_heads * g.value_dim, 5);
+        let a = data(g.value_heads, 7);
+        let b = data(g.value_heads, 11);
+        let mut output = vec![0.0; z.len()];
+        for head in 0..g.value_heads {
+            let key_head = head % g.key_heads;
+            let mut q = mixed[key_head * g.key_dim..(key_head + 1) * g.key_dim].to_vec();
+            let mut k = mixed[key_width + key_head * g.key_dim..key_width + (key_head + 1) * g.key_dim].to_vec();
+            let qs = 1.0 / ((q.iter().map(|v| v * v).sum::<f64>() + 1e-6) * g.key_dim as f64).sqrt();
+            let ks = 1.0 / (k.iter().map(|v| v * v).sum::<f64>() + 1e-6).sqrt();
+            for i in 0..g.key_dim {
+                q[i] *= qs;
+                k[i] *= ks;
+            }
+            let argument = a[head] + f64::from(dt[head]);
+            let softplus = argument.max(0.0) + (-argument.abs()).exp().ln_1p();
+            let decay = (f64::from(negative_a[head]) * softplus).exp();
+            let beta = 1.0 / (1.0 + (-b[head]).exp());
+            let mut values = vec![0.0; g.value_dim];
+            for (channel, value) in values.iter_mut().enumerate() {
+                let offset = (head * g.value_dim + channel) * g.key_dim;
+                let row = &mut state[offset..offset + g.key_dim];
+                for entry in row.iter_mut() {
+                    *entry *= decay;
+                }
+                let prediction = row.iter().zip(&k).map(|(s, k)| s * k).sum::<f64>();
+                let delta = (mixed[2 * key_width + head * g.value_dim + channel] - prediction) * beta;
+                for i in 0..g.key_dim {
+                    row[i] += k[i] * delta;
+                }
+                *value = row.iter().zip(&q).map(|(s, q)| s * q).sum();
+            }
+            let inverse =
+                1.0 / (values.iter().map(|v| v * v).sum::<f64>() / g.value_dim as f64 + f64::from(g.eps)).sqrt();
+            for channel in 0..g.value_dim {
+                let index = head * g.value_dim + channel;
+                let gate = 1.0 / (1.0 + (-z[index]).exp());
+                let gate = if g.sigmoid_output {
+                    gate
+                } else {
+                    z[index] * gate
+                };
+                output[index] = values[channel] * inverse * f64::from(norm[channel]) * gate;
+            }
+        }
+        output
+    }
+
+    #[stark_test]
+    fn edge0_gdn_gpu_preserves_negative_a_tiled_heads_and_f32_state() {
+        let harness = RecurrenceHarness::new();
+        for (key_dim, value_dim, value_heads) in [(7, 13, 6), (128, 128, 48)] {
+            for sigmoid_output in [false, true] {
+                let geometry = || Geometry {
+                    key_heads: value_heads / 3,
+                    key_dim,
+                    value_heads,
+                    value_dim,
+                    conv_kernel: 4,
+                    eps: 1e-6,
+                    sigmoid_output,
+                };
+                let width = 2 * (value_heads / 3) * key_dim + value_heads * value_dim;
+                let negative_a: Vec<f32> = (0..value_heads).map(|h| -0.1 - h as f32 * 0.025).collect();
+                let dt: Vec<f32> = (0..value_heads).map(|h| (h as f32 - 3.0) * 0.015).collect();
+                let norm: Vec<f32> = (0..value_dim).map(|c| 0.8 + (c % 11) as f32 * 0.03).collect();
+                let make = || Gdn::new_edge0(geometry(), &vec![0.02; width * 4], &negative_a, &dt, &norm).unwrap();
+                let mut staged = make();
+                let mut fused = make();
+                assert_eq!(staged.parameters[6], 6 | u32::from(sigmoid_output));
+                let mut reference = vec![0.0; value_heads * key_dim * value_dim];
+                for step in 0..8 {
+                    let expected = edge0_reference_step(&geometry(), &mut reference, &negative_a, &dt, &norm, step);
+                    let plain = harness.run(&mut staged, false, step, 1);
+                    let blocked = harness.run(&mut fused, true, step, 1);
+                    assert!(plain.0 == blocked.0, "Edge0 blocked output changed ordered F32 arithmetic");
+                    assert!(plain.1 == blocked.1, "Edge0 blocked state changed ordered F32 arithmetic");
+                    for (&actual, &expected) in plain.0.iter().zip(&expected) {
+                        assert!(actual.is_finite() && (f64::from(actual) - expected).abs() <= 2e-5);
+                    }
+                    for head in 0..value_heads {
+                        for key in 0..key_dim {
+                            for value in 0..value_dim {
+                                let actual = plain.1[(head * key_dim + key) * value_dim + value];
+                                let expected = reference[(head * value_dim + value) * key_dim + key];
+                                assert!(actual.is_finite() && (f64::from(actual) - expected).abs() <= 2e-5);
+                            }
+                        }
+                    }
+                }
+                staged.reset();
+                let after_reset = harness.run(&mut staged, false, 0, 1);
+                let mut fresh = make();
+                let fresh_result = harness.run(&mut fresh, false, 0, 1);
+                assert!(after_reset.0 == fresh_result.0 && after_reset.1 == fresh_result.1);
+            }
+        }
+    }
+
     #[stark_test]
     #[ignore]
     fn qwen_gdn_blocked_recurrence_microbenchmark() {
@@ -225,6 +342,10 @@ mod tests {
         let width = 2 * 2 * 4 + 6 * 8;
         let convolution = vec![0.2; width * 4];
         let mut state = Gdn::new(geometry(), &convolution, &[0.1; 6], &[0.3; 6], &[1.0; 8]).unwrap();
+        assert_eq!(state.parameters[6], 1);
+        let edge0 = Gdn::new_edge0(geometry(), &convolution, &[-0.1; 6], &[0.3; 6], &[1.0; 8]).unwrap();
+        assert_eq!(edge0.parameters[6], 7);
+        assert!(Gdn::new_edge0(geometry(), &convolution, &[0.1; 6], &[0.3; 6], &[1.0; 8]).is_err());
         let zeroed = |state: &Gdn| unsafe {
             std::slice::from_raw_parts(state.history.contents().as_ptr().cast::<f32>(), state.history_count)
                 .iter()
@@ -261,6 +382,29 @@ impl Gdn {
         dt_bias: &[f32],
         norm: &[f32],
     ) -> Result<Self> {
+        Self::new_with_policy(geometry, convolution, a_log, dt_bias, norm, false)
+    }
+
+    /// Original GGUF controls already contain -exp(A_log), with value heads
+    /// tiled across key heads. Keep both transformations in their stored form.
+    pub(super) fn new_edge0(
+        geometry: Geometry,
+        convolution: &[f32],
+        negative_a: &[f32],
+        dt_bias: &[f32],
+        norm: &[f32],
+    ) -> Result<Self> {
+        Self::new_with_policy(geometry, convolution, negative_a, dt_bias, norm, true)
+    }
+
+    fn new_with_policy(
+        geometry: Geometry,
+        convolution: &[f32],
+        a_log: &[f32],
+        dt_bias: &[f32],
+        norm: &[f32],
+        edge0: bool,
+    ) -> Result<Self> {
         let g = &geometry;
         if g.key_heads == 0
             || g.key_heads > 256
@@ -287,7 +431,7 @@ impl Gdn {
             return Err(Error::Invalid("Metal Qwen GDN control geometry"));
         }
         let all_controls: Vec<f32> = convolution.iter().chain(a_log).chain(dt_bias).chain(norm).copied().collect();
-        if all_controls.iter().any(|value| !value.is_finite()) {
+        if all_controls.iter().any(|value| !value.is_finite()) || (edge0 && a_log.iter().any(|value| *value > 0.0)) {
             return Err(Error::Invalid("Metal Qwen GDN control values"));
         }
         let device = <dyn MTLDevice>::system_default().ok_or(Error::Unsupported("Metal device unavailable"))?;
@@ -304,7 +448,12 @@ impl Gdn {
             g.value_dim as u32,
             g.conv_kernel as u32,
             g.eps.to_bits(),
-            u32::from(g.sigmoid_output),
+            u32::from(g.sigmoid_output)
+                | if edge0 {
+                    EDGE0_RAW_NEGATIVE_A | EDGE0_TILED_VALUE_HEADS
+                } else {
+                    0
+                },
             width as u32,
         ];
         let controls = device

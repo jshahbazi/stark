@@ -28,6 +28,7 @@ use super::{
 #[cfg_attr(test, derive(Default))]
 struct Geometry {
     edge0: bool,
+    edge0_metal: bool,
     dim: usize,
     vocab: usize,
     streams: usize,
@@ -340,7 +341,7 @@ impl DeltaNet {
         let width =
             g.key_heads.checked_mul(g.key_dim)?.checked_mul(2)?.checked_add(g.value_heads.checked_mul(g.value_dim)?)?;
         let recurrent = g.value_heads.checked_mul(g.value_dim)?.checked_mul(g.key_dim)?;
-        if g.edge0 {
+        if g.edge0 && !g.edge0_metal {
             return super::memory::sum(&[
                 super::memory::vector_resize_bytes::<f32>(self.state.capacity(), recurrent)?,
                 super::memory::vector_resize_bytes::<f32>(
@@ -432,9 +433,14 @@ impl DeltaNet {
     ) -> Result<Vec<f32>> {
         let _profile = Scope::new("qwen.gdn");
         #[cfg(feature = "metal")]
-        if !g.edge0 {
+        if !g.edge0 || g.edge0_metal {
             if self.metal.is_none() {
-                self.metal = Some(super::weight_metal::QwenGdnState::new(
+                let constructor = if g.edge0 {
+                    super::weight_metal::QwenGdnState::new_edge0
+                } else {
+                    super::weight_metal::QwenGdnState::new
+                };
+                self.metal = Some(constructor(
                     super::weight_metal::QwenGdnGeometry {
                         key_heads: g.key_heads,
                         key_dim: g.key_dim,
@@ -1106,9 +1112,31 @@ impl Geometry {
             // persistent model allocation. Do not also bill scalar activations.
             // Initial embedding upload is outside that arena; its host repeat
             // can coexist with the uploaded owner.
+            let (arenas, batch) = if g.edge0_metal {
+                // Router fences replace command segments while earlier device
+                // owners can still be retained. Charge three bounded arenas.
+                #[cfg(feature = "metal")]
+                {
+                    (decode_graph::EDGE0_GRAPH_SCRATCH_BYTES.checked_mul(3)?, decode_graph::EDGE0_PREFILL_BATCH)
+                }
+                #[cfg(not(feature = "metal"))]
+                {
+                    return None;
+                }
+            } else {
+                (512 * 1024 * 1024, 1)
+            };
             super::memory::sum(&[
-                512 * 1024 * 1024,
-                super::memory::bytes(&[g.dim.checked_mul(g.streams)?.checked_mul(2)?.checked_add(g.dim)?], 4)?,
+                arenas,
+                super::memory::bytes(&[batch, g.dim.checked_mul(g.streams)?.checked_mul(2)?.checked_add(g.dim)?], 4)?,
+                // Router host scores, F64 sort/normalization scratch and
+                // selected route descriptors coexist across a batch fence.
+                if g.edge0_metal {
+                    super::memory::bytes(&[batch, g.experts], 32)?
+                        .checked_add(super::memory::bytes(&[batch, g.active_experts], 32)?)?
+                } else {
+                    0
+                },
             ])?
         } else {
             // Scalar mapped kernels have layer-local host/device activation
@@ -1120,6 +1148,26 @@ impl Geometry {
 }
 
 impl QwenModel {
+    pub(super) fn edge0_execution_metadata(&self) -> Option<Value> {
+        if !self.geometry.edge0 {
+            return None;
+        }
+        #[cfg(feature = "metal")]
+        let graph = self.geometry.edge0_metal && self.graph_enabled;
+        #[cfg(not(feature = "metal"))]
+        let graph = false;
+        Some(serde_json::json!({
+            "backend": if graph { "edge0-metal-graph-v1" } else { "edge0-f32-reference" },
+            "activation_precision": "f32",
+            "accumulation_precision": "f32",
+            "recurrent_state_precision": "f32",
+            "attention_cache_precision": "f32",
+            "prefill_max_batch": if graph { 8 } else { 1 },
+            "prefix_reuse": false,
+            "weights": self.weights.edge0_metal_metadata(),
+        }))
+    }
+
     pub(super) fn additional_scoring_device_readout(&self) -> bool {
         #[cfg(feature = "metal")]
         return !self.graph_enabled;
@@ -1156,6 +1204,14 @@ impl QwenModel {
         let graph = false;
         let attention = self.layers.iter().filter(|layer| matches!(layer.mixer, Mixer::Attention(_))).count();
         let mut bytes = g.execution_workspace(context_tokens, attention, graph)?;
+        #[cfg(feature = "metal")]
+        let batch = if graph && g.edge0_metal {
+            decode_graph::EDGE0_PREFILL_BATCH
+        } else {
+            1
+        };
+        #[cfg(not(feature = "metal"))]
+        let batch = 1;
         for layer in &self.layers {
             match &layer.mixer {
                 Mixer::Delta(state) => {
@@ -1186,6 +1242,11 @@ impl QwenModel {
                 bytes = bytes.checked_add(
                     layer.attn_hyper.norm.len().checked_add(layer.mlp_hyper.norm.len())?.checked_mul(4)?,
                 )?;
+                if let Some(index) = layer.edge0_layer {
+                    // Each graph owns a device copy of the stored column scale
+                    // vector; the existing source host vector remains resident.
+                    bytes = bytes.checked_add(self.weights.edge0_column_scales(index).ok()?.len().checked_mul(4)?)?;
+                }
             }
             if let Some(ple) = &layer.ple {
                 let wide = g.dim.checked_mul(g.streams)?;
@@ -1203,7 +1264,7 @@ impl QwenModel {
                     // Gathered PLE embeddings are separately uploaded for all
                     // layers before the graph begins. One host gather and its
                     // current row may overlap the last upload.
-                    bytes = bytes.checked_add(g.ple_dim.checked_mul(4)?)?;
+                    bytes = bytes.checked_add(super::memory::bytes(&[batch, g.ple_dim], 4)?)?;
                 } else {
                     bytes = bytes.checked_add(super::memory::vector_resize_bytes::<f32>(
                         ple.state.history.capacity(),
@@ -1215,10 +1276,15 @@ impl QwenModel {
         if graph {
             bytes = bytes.checked_add(self.final_mix.norm.len().checked_mul(4)?)?;
             if self.layers.iter().any(|layer| layer.ple.is_some()) {
-                bytes = bytes.checked_add(g.ple_dim.checked_mul(8)?)?;
+                bytes = bytes.checked_add(super::memory::bytes(&[batch, g.ple_dim], 8)?)?;
             }
         }
         bytes = bytes.checked_add(super::memory::vector_growth_bytes::<u32>(self.history.capacity(), g.ngram_size)?)?;
+        if g.edge0_metal {
+            // Available memory already reflects wired owners. Admit only the
+            // registry's remaining bank/static reservation once per request.
+            bytes = bytes.checked_add(self.weights.edge0_additional_resident_bytes()?)?;
+        }
         Some(bytes)
     }
 
@@ -1227,6 +1293,10 @@ impl QwenModel {
         config: &Value,
     ) -> Result<Self> {
         let edge0 = weights.is_edge0();
+        if edge0 && !cfg!(feature = "metal") && std::env::var_os("STARK_EDGE0_METAL").is_some_and(|value| value == "1")
+        {
+            return Err(Error::Unsupported("Edge0 Metal requires a Metal-enabled build"));
+        }
         if config.get("model_type").and_then(Value::as_str) != Some("qwen4_exp") {
             return Err(Error::Unsupported("Qwen3.8 architecture"));
         }
@@ -1268,6 +1338,9 @@ impl QwenModel {
         }
         let g = Geometry {
             edge0,
+            edge0_metal: edge0
+                && cfg!(feature = "metal")
+                && std::env::var_os("STARK_EDGE0_METAL").is_some_and(|value| value == "1"),
             dim: integer(text, "hidden_size", 16_384)?,
             vocab: integer(text, "vocab_size", 1_000_000)?,
             streams: integer(text, "hc_count", 16)?,
@@ -1300,6 +1373,9 @@ impl QwenModel {
             shards: integer(text, "split_ngram_parts", 4096)?,
             eos,
         };
+        if g.edge0 && g.context > 512 {
+            return Err(Error::Unsupported("Edge0 reference context qualification"));
+        }
         if !g.heads.is_multiple_of(g.kv_heads)
             || !g.value_heads.is_multiple_of(g.key_heads)
             || g.active_experts > g.experts
@@ -1394,11 +1470,12 @@ impl QwenModel {
             });
         }
         #[cfg(feature = "metal")]
-        let graph_enabled = !g.edge0
-            && g.active_experts <= 64
-            && weights.indexed_banks_admitted()
-            && std::env::var_os("STARK_QWEN38_DECODE_GRAPH").is_none_or(|value| value != "0");
-        Ok(Self {
+        let graph_enabled = g.edge0_metal
+            || (!g.edge0
+                && g.active_experts <= 64
+                && weights.indexed_banks_admitted()
+                && std::env::var_os("STARK_QWEN38_DECODE_GRAPH").is_none_or(|value| value != "0"));
+        let model = Self {
             weights,
             geometry: g,
             layers,
@@ -1411,7 +1488,15 @@ impl QwenModel {
             graph: None,
             #[cfg(feature = "metal")]
             graph_enabled,
-        })
+        };
+        #[cfg(feature = "metal")]
+        if model.geometry.edge0_metal {
+            let dynamic = model
+                .request_memory_bytes(model.geometry.context as u32)
+                .ok_or(Error::Invalid("Edge0 Metal dynamic allocation inventory"))?;
+            model.weights.prepare_edge0_metal(dynamic)?;
+        }
+        Ok(model)
     }
 
     pub fn reset(&mut self) {
@@ -1446,6 +1531,33 @@ impl QwenModel {
         token: u32,
     ) -> Result<()> {
         self.advance(token, false).map(|_| ())
+    }
+
+    pub fn ingest_prefix(
+        &mut self,
+        tokens: &[u32],
+        mut before_token: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let result = (|| {
+            if tokens.iter().any(|&token| token as usize >= self.geometry.vocab)
+                || self.position.checked_add(tokens.len()).is_none_or(|end| end > self.geometry.context)
+            {
+                return Err(Error::Invalid("Qwen3.8 token or context boundary"));
+            }
+            #[cfg(feature = "metal")]
+            if self.geometry.edge0_metal && self.graph_enabled {
+                return objc2::rc::autoreleasepool(|_| decode_graph::prefill(self, tokens, &mut before_token));
+            }
+            for &token in tokens {
+                before_token()?;
+                self.ingest(token)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.reset();
+        }
+        result
     }
 
     fn advance(
@@ -1588,6 +1700,38 @@ mod tests {
         assert!(g.request_memory_bytes(4, 2, 4097).is_none());
         g.heads = usize::MAX;
         assert!(g.request_memory_bytes(4, 2, 64).is_none());
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn edge0_graph_inventory_bills_three_segments_batch_uploads_and_router_host_owners() {
+        let mut g = Geometry {
+            edge0: true,
+            dim: 2560,
+            streams: 4,
+            heads: 16,
+            kv_heads: 2,
+            head_dim: 256,
+            experts: 512,
+            active_experts: 10,
+            expert_dim: 1792,
+            shared_dim: 2048,
+            index_heads: 16,
+            index_dim: 128,
+            ratio: 4,
+            context: 512,
+            ..Geometry::default()
+        };
+        let reference = g.execution_workspace(128, 12, true).unwrap();
+        g.edge0_metal = true;
+        let candidate = g.execution_workspace(128, 12, true).unwrap();
+        let embedding = (g.dim * g.streams * 2 + g.dim) * 4;
+        let router = 8 * (g.experts + g.active_experts) * 32;
+        assert_eq!(candidate + 512 * 1024 * 1024, reference + 3 * 64 * 1024 * 1024 + 7 * embedding + router);
+        // Context/cache ownership remains bounded independently of grouping.
+        assert!(g.execution_workspace(513, 12, true).is_none());
+        g.experts = usize::MAX;
+        assert!(g.execution_workspace(128, 12, true).is_none());
     }
 
     #[stark_test]

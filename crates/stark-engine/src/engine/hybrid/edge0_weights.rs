@@ -20,6 +20,10 @@ use super::{
     *,
 };
 
+#[cfg(feature = "metal")]
+#[path = "edge0_weights_metal.rs"]
+mod metal_backend;
+
 const TABLE_NAME: &str = "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
 const TABLE_ROWS: usize = 320_001_536;
 const LOGICAL_ROWS: usize = 320_001_446;
@@ -63,6 +67,9 @@ pub(super) struct Edge0Data {
     projections: edge0_source::Q8Projections,
     integers: HashMap<String, Vec<i64>>,
     integer_shapes: HashMap<String, Vec<usize>>,
+    metal_counters: [std::sync::atomic::AtomicU64; 4],
+    #[cfg(feature = "metal")]
+    metal_admitted: std::sync::atomic::AtomicBool,
 }
 
 impl Edge0Data {
@@ -752,6 +759,9 @@ impl Weights {
             projections,
             integers,
             integer_shapes,
+            metal_counters: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(feature = "metal")]
+            metal_admitted: std::sync::atomic::AtomicBool::new(false),
         });
         #[cfg(feature = "metal")]
         {
@@ -762,6 +772,61 @@ impl Weights {
 
     pub fn is_edge0(&self) -> bool {
         self.edge0.is_some()
+    }
+
+    /// Aggregate diagnostics only; these counters never retain route IDs,
+    /// tokens, activations or numerical readouts.
+    pub fn edge0_metal_metadata(&self) -> Value {
+        let counters = self
+            .edge0
+            .as_ref()
+            .map(|data| data.metal_counters.each_ref().map(|value| value.load(std::sync::atomic::Ordering::Relaxed)))
+            .unwrap_or([0; 4]);
+        #[cfg(feature = "metal")]
+        let resident =
+            self.encoder_residency.lock().is_ok_and(|guard| guard.as_ref().is_some_and(|state| !state.failed));
+        #[cfg(not(feature = "metal"))]
+        let resident = false;
+        #[cfg(feature = "metal")]
+        let virtual_bytes = self.encoder_bank_views.lock().map(|cache| cache.virtual_bytes).unwrap_or(0);
+        #[cfg(not(feature = "metal"))]
+        let virtual_bytes = 0;
+        serde_json::json!({"resident_enabled":resident,"registered_bank_bytes":virtual_bytes,
+            "graph_scratch_high_water_bytes":counters[3],
+            "counters":{"batched_matrix_calls":counters[0],"batched_q8_calls":counters[1],"batched_expert_calls":counters[2]}})
+    }
+
+    #[cfg(feature = "metal")]
+    pub(in crate::engine::hybrid) fn edge0_record_graph_scratch(
+        &self,
+        bytes: usize,
+    ) {
+        if let Some(data) = &self.edge0 {
+            data.metal_counters[3].fetch_max(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Charge future wiring against current available-memory admission. The
+    /// dynamic model/workspace allowance is accounted by the Qwen owner.
+    pub(in crate::engine::hybrid) fn edge0_additional_resident_bytes(&self) -> Option<usize> {
+        #[cfg(feature = "metal")]
+        {
+            if !self.is_edge0() {
+                return Some(0);
+            }
+            let guard = self.encoder_residency.lock().ok()?;
+            let Some(state) = guard.as_ref() else {
+                return Some(0);
+            };
+            if state.failed {
+                return None;
+            }
+            43_819_991_040usize
+                .saturating_sub(state.bank_bytes)
+                .checked_add(state.static_reserve.saturating_sub(state.static_bytes))
+        }
+        #[cfg(not(feature = "metal"))]
+        Some(0)
     }
 
     pub fn edge0_group(

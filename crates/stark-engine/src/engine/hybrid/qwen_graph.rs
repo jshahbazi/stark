@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Qwen's F32 device graph. Host work supplies immutable embeddings; all
-//! dependent activations remain on the device until one token completes.
+//! Qwen's F32 device graph. Host work supplies immutable embeddings. The
+//! opt-in Edge0 path additionally reads bounded router-score rows for exact
+//! host F64 routing; other activations remain on the device until completion.
+
+#[path = "edge0_metal.rs"]
+mod edge0_metal;
+
+pub(super) const EDGE0_PREFILL_BATCH: usize = edge0_metal::MAX_BATCH;
+// Request accounting conservatively charges three coexisting segment caps.
+pub(super) const EDGE0_GRAPH_SCRATCH_BYTES: usize = edge0_metal::SEGMENT_SCRATCH;
 
 use super::{Attention, Geometry, HyperConnection, Mixer, Ple, QwenModel};
 use crate::engine::hybrid::{
@@ -145,6 +153,20 @@ impl AttentionControls {
         g: &Geometry,
         position: usize,
     ) -> Result<DeviceVector> {
+        self.encode_projected(graph, weights, attention, input, g, position, None)
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "explicit causal position and optional preprojected token row")]
+    fn encode_projected(
+        &mut self,
+        graph: &mut DecodeGraph,
+        weights: &Weights,
+        attention: &Attention,
+        input: &DeviceVector,
+        g: &Geometry,
+        position: usize,
+        projected: Option<&[DeviceVector; 4]>,
+    ) -> Result<DeviceVector> {
         self.ensure_cache(graph, g, position)?;
         let count = position + 1;
         let partial_len = g.attention_partial_elements(count);
@@ -156,12 +178,19 @@ impl AttentionControls {
         let project = |graph: &mut DecodeGraph, name: &str| {
             weights.encode_matvec(graph, &format!("{}.{name}.weight", attention.prefix), input)
         };
-        graph.begin_projection_level()?;
-        let index = project(graph, "indexer.index_qk_proj")?;
-        let query_and_gate = project(graph, "q_proj")?;
-        let keys = project(graph, "k_proj")?;
-        let values = project(graph, "v_proj")?;
-        graph.end_projection_level()?;
+        let [index, query_and_gate, keys, values] = if let Some(projections) = projected {
+            std::array::from_fn(|index| projections[index].clone())
+        } else {
+            graph.begin_projection_level()?;
+            let projections = [
+                project(graph, "indexer.index_qk_proj")?,
+                project(graph, "q_proj")?,
+                project(graph, "k_proj")?,
+                project(graph, "v_proj")?,
+            ];
+            graph.end_projection_level()?;
+            projections
+        };
         let scalar_prepare = std::env::var_os("STARK_QWEN38_SCALAR_QSA_PREPARE").is_some_and(|value| value == "1");
         graph.kernel(
             if scalar_prepare {
@@ -420,6 +449,7 @@ struct LayerControls {
     mlp_hyper: HyperControls,
     attention: Option<AttentionControls>,
     ple: Option<PleControls>,
+    edge0: Option<edge0_metal::Controls>,
 }
 
 pub(super) struct State {
@@ -429,11 +459,11 @@ pub(super) struct State {
 
 impl State {
     fn new(model: &QwenModel) -> Result<Self> {
-        if model.geometry.edge0 {
+        if model.geometry.edge0 && !model.geometry.edge0_metal {
             return Err(Error::Unsupported("Edge0 reference requires scalar control"));
         }
         let mut layers = Vec::with_capacity(model.layers.len());
-        for layer in &model.layers {
+        for (index, layer) in model.layers.iter().enumerate() {
             layers.push(LayerControls {
                 attention_hyper: HyperControls {
                     norm: DecodeGraph::upload(&layer.attn_hyper.norm)?,
@@ -446,6 +476,7 @@ impl State {
                     Mixer::Delta(_) => None,
                 },
                 ple: layer.ple.as_ref().map(|ple| PleControls::new(ple, &model.geometry)).transpose()?,
+                edge0: model.geometry.edge0.then(|| edge0_metal::Controls::new(&model.weights, index)).transpose()?,
             });
         }
         Ok(Self {
@@ -460,6 +491,9 @@ impl State {
         token: u32,
         readout: bool,
     ) -> Result<Vec<f32>> {
+        if model.geometry.edge0 {
+            return self.encode_edge0_batch(model, &[token], readout);
+        }
         let g = &model.geometry;
         let embedding = model.weights.row(&model.embedding, token as usize)?;
         // Prepare every n-gram input before any device submission. These
@@ -561,6 +595,211 @@ impl State {
         if model.history.len() >= g.ngram_size {
             model.history.remove(0);
         }
+        Ok(logits)
+    }
+
+    /// Layer-major, bounded causal prefill. Trunk projection rows are batched
+    /// before sequential GDN/QSA state updates; the latent stage then groups
+    /// those token rows by selected expert. Neither causal state nor U's
+    /// original route ordering is reassociated.
+    fn encode_edge0_batch(
+        &mut self,
+        model: &mut QwenModel,
+        tokens: &[u32],
+        readout: bool,
+    ) -> Result<Vec<f32>> {
+        let g = &model.geometry;
+        let count = tokens.len();
+        let start = model.position;
+        if !g.edge0_metal
+            || count == 0
+            || count > edge0_metal::MAX_BATCH
+            || tokens.iter().any(|&token| token as usize >= g.vocab)
+            || start.checked_add(count).is_none_or(|end| end > g.context)
+            || (readout && count != 1)
+        {
+            return Err(Error::Invalid("Edge0 graph token batch boundary"));
+        }
+        // Immutable gathers use each token's chronological history. Runtime
+        // model history is published only after the entire batch succeeds.
+        let mut history = model.history.clone();
+        let mut histories = Vec::with_capacity(count);
+        for &token in tokens {
+            histories.push(history.clone());
+            history.push(token);
+            if history.len() >= g.ngram_size {
+                history.remove(0);
+            }
+        }
+        let mut hidden = tokens
+            .iter()
+            .map(|&token| {
+                let embedding = model.weights.row(&model.embedding, token as usize)?;
+                DecodeGraph::upload(&embedding.repeat(g.streams))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let ple_embeddings = model
+            .layers
+            .iter()
+            .map(|layer| {
+                tokens
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &token)| {
+                        layer
+                            .ple
+                            .as_ref()
+                            .map(|ple| {
+                                let values = ple.gather(&model.weights, token, &histories[index], g)?;
+                                DecodeGraph::upload(&values)
+                            })
+                            .transpose()
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut graph = edge0_metal::new_graph()?;
+        for (layer_index, layer) in model.layers.iter_mut().enumerate() {
+            let controls = &mut self.layers[layer_index];
+            let mut mixer_inputs = Vec::with_capacity(count);
+            let mut attention_gates = Vec::with_capacity(count);
+            for token in 0..count {
+                if let (Some(ple), Some(ple_controls), Some(embedding)) =
+                    (&layer.ple, &controls.ple, &ple_embeddings[layer_index][token])
+                {
+                    let extra = ple_controls.encode(&mut graph, &model.weights, ple, embedding, &hidden[token], g)?;
+                    hidden[token] = graph.add(&hidden[token], &extra)?;
+                }
+                let (input, gates) = mix(
+                    &mut graph,
+                    &model.weights,
+                    &layer.attn_hyper,
+                    &controls.attention_hyper.norm,
+                    &hidden[token],
+                    g,
+                )?;
+                mixer_inputs.push(input);
+                attention_gates.push(gates);
+            }
+            let packed_inputs = edge0_metal::concatenate(&mut graph, &mixer_inputs)?;
+            let (prefix, names) = match &layer.mixer {
+                Mixer::Delta(mixer) => (&mixer.prefix, ["in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b"]),
+                Mixer::Attention(attention) => {
+                    (&attention.prefix, ["indexer.index_qk_proj", "q_proj", "k_proj", "v_proj"])
+                },
+            };
+            graph.begin_projection_level()?;
+            let projected = names
+                .iter()
+                .map(|name| {
+                    model.weights.encode_edge0_named_batch(
+                        &mut graph,
+                        &format!("{prefix}.{name}.weight"),
+                        &packed_inputs,
+                        count,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            graph.end_projection_level()?;
+            let mut ffn_inputs = Vec::with_capacity(count);
+            let mut ffn_gates = Vec::with_capacity(count);
+            for token in 0..count {
+                let projections: [DeviceVector; 4] = projected
+                    .iter()
+                    .map(|values| {
+                        if !values.len.is_multiple_of(count) {
+                            return Err(Error::Invalid("Edge0 graph projected row batch"));
+                        }
+                        let width = values.len / count;
+                        values.slice(token * width, width)
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .try_into()
+                    .map_err(|_| Error::Invalid("Edge0 graph mixer projection count"))?;
+                let output = match &mut layer.mixer {
+                    Mixer::Delta(mixer) => {
+                        if mixer.metal.is_none() {
+                            mixer.metal = Some(QwenGdnState::new_edge0(
+                                QwenGdnGeometry {
+                                    key_heads: g.key_heads,
+                                    key_dim: g.key_dim,
+                                    value_heads: g.value_heads,
+                                    value_dim: g.value_dim,
+                                    conv_kernel: g.conv_kernel,
+                                    eps: g.eps,
+                                    sigmoid_output: g.sigmoid_output,
+                                },
+                                &mixer.convolution,
+                                &mixer.a_log,
+                                &mixer.dt_bias,
+                                &mixer.norm,
+                            )?);
+                        }
+                        graph.qwen_gdn_projected(
+                            &model.weights,
+                            &mixer.prefix,
+                            mixer.metal.as_mut().ok_or(Error::Invalid("Edge0 graph GDN state"))?,
+                            &projections,
+                        )?
+                    },
+                    Mixer::Attention(attention) => controls
+                        .attention
+                        .as_mut()
+                        .ok_or(Error::Invalid("Edge0 graph attention controls"))?
+                        .encode_projected(
+                            &mut graph,
+                            &model.weights,
+                            attention,
+                            &mixer_inputs[token],
+                            g,
+                            start + token,
+                            Some(&projections),
+                        )?,
+                };
+                hidden[token] = inject(&mut graph, &hidden[token], &output, &attention_gates[token], g)?;
+                let (input, gates) =
+                    mix(&mut graph, &model.weights, &layer.mlp_hyper, &controls.mlp_hyper.norm, &hidden[token], g)?;
+                ffn_inputs.push(input);
+                ffn_gates.push(gates);
+            }
+            let input = edge0_metal::concatenate(&mut graph, &ffn_inputs)?;
+            let output = edge0_metal::encode(
+                &mut graph,
+                &model.weights,
+                layer_index,
+                &format!("{}.mlp", layer.prefix),
+                &input,
+                g,
+                controls.edge0.as_ref().ok_or(Error::Invalid("Edge0 graph latent controls"))?,
+                count,
+            )?;
+            for token in 0..count {
+                hidden[token] =
+                    inject(&mut graph, &hidden[token], &output.slice(token * g.dim, g.dim)?, &ffn_gates[token], g)?;
+            }
+        }
+        for values in &hidden {
+            graph.check_finite(values)?;
+        }
+        let outputs = if readout {
+            let (input, _) = mix(&mut graph, &model.weights, &model.final_mix, &self.final_norm, &hidden[0], g)?;
+            let logits = model.weights.encode_edge0_named_batch(&mut graph, &model.readout, &input, 1)?;
+            model.weights.edge0_record_graph_scratch(graph.scratch_backing_bytes());
+            graph.finish(&[logits])?
+        } else {
+            model.weights.edge0_record_graph_scratch(graph.scratch_backing_bytes());
+            graph.finish(&[])?
+        };
+        let logits = if readout {
+            outputs.into_iter().next().ok_or(Error::Invalid("Edge0 graph readout missing"))?
+        } else {
+            Vec::new()
+        };
+        if readout && (logits.len() != g.vocab || logits.iter().any(|v| !v.is_finite())) {
+            return Err(Error::Invalid("Edge0 graph readout values"));
+        }
+        model.position += count;
+        model.history = history;
         Ok(logits)
     }
 }
@@ -686,6 +925,38 @@ pub(super) fn step(
     };
     let result = state.encode_step(model, token, readout);
     model.graph = Some(state);
+    result
+}
+
+pub(super) fn prefill(
+    model: &mut QwenModel,
+    tokens: &[u32],
+    before_token: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    if !model.geometry.edge0_metal {
+        return Err(Error::Unsupported("batched Edge0 graph selector"));
+    }
+    if tokens.is_empty() {
+        return Ok(());
+    }
+    let mut state = match model.graph.take() {
+        Some(state) => state,
+        None => State::new(model)?,
+    };
+    let result = (|| {
+        for batch in tokens.chunks(edge0_metal::MAX_BATCH) {
+            for _ in batch {
+                before_token()?;
+            }
+            state.encode_edge0_batch(model, batch, false)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        model.reset();
+    } else {
+        model.graph = Some(state);
+    }
     result
 }
 

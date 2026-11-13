@@ -94,3 +94,31 @@ def test_progress_frames_share_one_request_deadline():
     assert worker.request({"operation": "generate"}) == {"finished": True}
     assert len(deadlines) == 3
     assert len(set(deadlines)) == 1
+
+
+@pytest.mark.parametrize(
+    "metal,resident", [(False, False), (True, False), (True, True)]
+)
+def test_explicit_candidate_selectors_are_passed_without_inherited_experiments(
+    monkeypatch, metal, resident
+):
+    captured = {}
+    monkeypatch.setenv("STARK_GLM53_PACKED_FAST_MATH", "1")
+    monkeypatch.setenv("STARK_EDGE0_METAL", "1")
+
+    def spawn(command, **options):
+        captured.update(options["env"])
+        return SimpleNamespace(pid=123)
+
+    monkeypatch.setattr(qualification.subprocess, "Popen", spawn)
+    monkeypatch.setattr(qualification.psutil, "Process", lambda _: object())
+    qualification.Worker("worker", "model", metal=metal, resident=resident)
+    assert captured["STARK_EDGE0_REFERENCE"] == "1"
+    assert (captured.get("STARK_EDGE0_METAL") == "1") == metal
+    assert (captured.get("STARK_EDGE0_RESIDENT") == "1") == resident
+    assert "STARK_GLM53_PACKED_FAST_MATH" not in captured
+
+
+def test_residency_requires_explicit_metal_selection():
+    with pytest.raises(qualification.Failure, match="^resident_requires_metal$"):
+        qualification.Worker("worker", "model", resident=True)

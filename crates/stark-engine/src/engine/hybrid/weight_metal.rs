@@ -685,6 +685,7 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_kquant_dense_wide.metal"));
             source.push_str(include_str!("packed_mla_prefill.metal"));
             source.push_str(include_str!("feed_forward.metal"));
+            source.push_str(include_str!("edge0_graph.metal"));
             source.push_str(include_str!("qwen_gdn.metal"));
             source.push_str(include_str!("decode_graph.metal"));
             source.push_str(include_str!("affine_uint_matvec.metal"));

@@ -1,7 +1,7 @@
 # Edge0-145B native support plan
 
 Status: phase 3 reference gate passed for local non-commercial evaluation;
-phase 4 pending, 2026-11-12.
+phase 4 in progress, 2026-11-12.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
@@ -299,6 +299,9 @@ passed. This is a diagnostic reference qualification; it establishes no
 whole-model external numerical equivalence or broad quality/speed result.
 
 ### Phase 4: mixed-precision Metal path
+
+Implementation and fixed qualification gates are registered in
+[attempt `20261112-EDGE0-06`](model-experiments/2026-11-12-edge0-metal.md).
 
 - Q8_0 trunk kernels for decode and batched prefill.
 - Latent expert kernels: fused projection, gate/up, SwiGLU, down and

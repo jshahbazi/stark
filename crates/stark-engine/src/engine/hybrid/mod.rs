@@ -607,6 +607,15 @@ impl Model {
     pub fn vocab_size(&self) -> usize {
         self.vocab_size
     }
+
+    /// Diagnostic execution policy and aggregate work counters. No request
+    /// content or numerical model output is returned by this metadata API.
+    pub fn edge0_execution_metadata(&self) -> Option<Value> {
+        match &self.forward {
+            Forward::Qwen(model) => model.edge0_execution_metadata(),
+            _ => None,
+        }
+    }
     pub fn max_context_length(&self) -> u32 {
         self.max_context
     }
@@ -875,6 +884,13 @@ impl Model {
         tokens: &[u32],
         mut before_token: impl FnMut() -> Result<()>,
     ) -> Result<()> {
+        if let Forward::Qwen(model) = &mut self.forward {
+            let result = model.ingest_prefix(tokens, &mut before_token);
+            if result.is_err() {
+                self.reset_after_error();
+            }
+            return result;
+        }
         #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
         if let Forward::GlmExl3(model) = &mut self.forward {
             let result = model.ingest_prefix(tokens, &mut before_token);
