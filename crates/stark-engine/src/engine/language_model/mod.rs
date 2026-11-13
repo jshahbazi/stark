@@ -40,6 +40,9 @@ pub mod gemma4_assistant;
 pub(crate) mod multimodal;
 #[cfg(test)]
 mod multimodal_tests;
+pub(crate) mod precision;
+#[cfg(test)]
+mod precision_tests;
 pub mod scoring;
 pub mod state;
 pub mod stream;
@@ -86,6 +89,8 @@ pub struct LanguageModel<B: Backend> {
 pub enum EngineLoadLanguageModelError<B: Backend> {
     #[error("Tokenizer vocabulary exceeds decoder vocabulary")]
     InvalidTokenizerVocabulary,
+    #[error("Unsupported activation precision {0:?} for this model graph")]
+    UnsupportedPrecision(DataType),
     #[error("I/O error: {0}")]
     IO(#[from] io::Error),
     #[error("Serde error: {0}")]
@@ -152,7 +157,13 @@ impl<B: Backend> Engine<B> {
             return Err(EngineLoadLanguageModelError::InvalidTokenizerVocabulary);
         }
 
-        let data_type = DataType::BF16;
+        // BF16 artifacts keep their established policy. A decoder stored
+        // entirely in F16 floats runs F16 activations and KV cache, admitted
+        // only for the plain dense graph (see `precision`).
+        let data_type = weight_loader.decoder_activation_data_type();
+        if !precision::activation_precision_admitted(data_type, &config, speculator_path.is_some()) {
+            return Err(EngineLoadLanguageModelError::UnsupportedPrecision(data_type));
+        }
 
         let decoder = Decoder::new(
             self.context.as_ref(),

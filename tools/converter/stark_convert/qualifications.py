@@ -126,3 +126,15 @@ def qualification_for(repo: str, dtype: str, hashes: dict) -> dict | None:
         ):
             return copy.deepcopy(record)
     return None
+
+
+def has_recorded_qualification(repo: str | None) -> bool:
+    """Whether a stored BF16 native qualification names this repository.
+
+    Automatic precision selection uses this to keep a repository's qualified
+    BF16 output; it does not grant or match a qualification. Only BF16 records
+    count, so a record of another precision never pins a repository to BF16.
+    """
+    return isinstance(repo, str) and any(
+        record["repo"] == repo and record["dtype"] == "bfloat16" for record in _load_qualifications()
+    )

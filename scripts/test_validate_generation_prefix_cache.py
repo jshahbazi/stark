@@ -322,6 +322,57 @@ class PrefixQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "synthetic rejection"):
             harness.preflight_sessions(args, RejectCompletedToolCycle(), {})
 
+    def test_opt_in_user_assistant_sessions_never_use_tools_and_default_is_unchanged(self):
+        class AlternatingOnly:
+            """Accepts one leading system message, then strict user/assistant alternation, and no tools."""
+
+            def __init__(self):
+                self.renders = []
+
+            def render(self, **arguments):
+                messages = arguments["messages"]
+                if arguments.get("tools") is not None:
+                    raise ValueError("synthetic tools rejection")
+                roles = [message["role"] for message in messages if message["role"] != "system"]
+                if any(role != ("user" if index % 2 == 0 else "assistant") for index, role in enumerate(roles)):
+                    raise ValueError("synthetic role rejection")
+                if any("tool_calls" in message for message in messages):
+                    raise ValueError("synthetic tool-call rejection")
+                self.renders.append(len(messages))
+                return "synthetic rendering"
+
+        base = {
+            "seed": 11,
+            "mode": "exactness",
+            "tools": 2,
+            "instruction_paragraphs": 2,
+            "follow_up_sentences": (4, 3, 8),
+            "progress": False,
+        }
+        template = AlternatingOnly()
+        harness.preflight_sessions(SimpleNamespace(**base, session_kind="user-assistant"), template, {})
+        self.assertEqual(template.renders, [2, 4, 6, 8])
+        with self.assertRaisesRegex(ValueError, "synthetic tools rejection"):
+            harness.preflight_sessions(SimpleNamespace(**base, session_kind="tools"), AlternatingOnly(), {})
+        # The default and explicit "tools" kinds produce the same session and record.
+        default, explicit = harness.Session(11, tools=2), harness.Session(11, tools=2, session_kind="tools")
+        default.add_follow_up(4)
+        explicit.add_tool_step(4)
+        self.assertEqual(default.messages, explicit.messages)
+        self.assertEqual(harness.session_options(SimpleNamespace(**base)), harness.session_options(
+            SimpleNamespace(**base, session_kind="tools")))
+        self.assertNotIn("session_kind", harness.session_options(SimpleNamespace(**base)))
+        self.assertEqual(
+            harness.session_options(SimpleNamespace(**base, session_kind="user-assistant"))["session_kind"],
+            "user-assistant",
+        )
+        # The system and first user text are identical across kinds.
+        plain = harness.Session(11, tools=2, session_kind="user-assistant")
+        self.assertEqual(plain.messages, harness.Session(11, tools=2).messages)
+        self.assertEqual(plain.tools, [])
+        with self.assertRaises(ValueError):
+            harness.Session(11, session_kind="unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

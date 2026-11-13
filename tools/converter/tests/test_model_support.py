@@ -210,6 +210,32 @@ def test_floating_source_precision_is_not_confused_with_native_output_dtype(sour
     assert preflight_model(config, mode="text", dtype="float32")["reasons"] == ["unsupported_native_dtype"]
 
 
+@pytest.mark.parametrize("architecture", ["llama", "qwen2", "mistral"])
+def test_native_f16_output_is_limited_to_full_attention_dense_text_and_decision(architecture):
+    config = {"model_type": architecture, "torch_dtype": "float16"}
+    for mode in ("text", "decision"):
+        assert preflight_model(config, mode=mode, dtype="float16")["status"] == "conditional"
+        assert preflight_model(config, mode=mode, dtype="float32")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(config, mode="vision-language", dtype="float16")["status"] == "unsupported"
+    windowed = {
+        "llama": {**config, "layer_types": ["sliding_attention", "full_attention"]},
+        "qwen2": {**config, "use_sliding_window": True, "sliding_window": 4096},
+        "mistral": {**config, "sliding_window": 4096},
+    }[architecture]
+    assert preflight_model(windowed, mode="text", dtype="float16")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(windowed, mode="text")["status"] == "conditional"
+    if architecture == "qwen2":
+        inactive = {**config, "use_sliding_window": False, "sliding_window": 32768}
+        assert preflight_model(inactive, mode="text", dtype="float16")["status"] == "conditional"
+
+
+@pytest.mark.parametrize("architecture", ["qwen3", "gemma2", "phi3", "smollm3"])
+def test_native_f16_output_stays_blocked_outside_the_dense_f16_families(architecture):
+    config = {"model_type": architecture, "tie_word_embeddings": True}
+    assert preflight_model(config, mode="text", dtype="float16")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(config, dtype="float16")["status"] == "conditional"
+
+
 @pytest.mark.parametrize("bits", [4, 8])
 def test_mlx_text_representation_is_implemented_but_unqualified(bits):
     config = {"model_type": "qwen3", "quantization": {"bits": bits, "group_size": 64}}
@@ -227,7 +253,7 @@ def test_mlx_text_representation_is_implemented_but_unqualified(bits):
             {"model_type": "llama", "quantization_config": {"quant_method": "gptq", "bits": 4}},
             "unsupported_weight_format",
         ),
-        ({"model_type": "qwen2", "quantization": {"bits": 4, "group_size": 64}}, "unsupported_weight_format"),
+        ({"model_type": "granite", "quantization": {"bits": 4, "group_size": 64}}, "unsupported_weight_format"),
     ],
 )
 def test_explicit_unsupported_metadata_has_a_fixed_reason(config, reason):
@@ -246,6 +272,26 @@ def test_known_phi_annotation_is_validated_without_executing_custom_code():
     assert preflight_model(config, mode="text")["status"] == "conditional"
     config["auto_map"]["AutoConfig"] = "other.CustomConfig"
     assert preflight_model(config, mode="text")["status"] == "unsupported"
+
+
+@pytest.mark.parametrize("tied", [True, False])
+def test_phi3_embedding_layout_is_left_to_the_tensor_planner(tied):
+    report = preflight_model({"model_type": "phi3", "tie_word_embeddings": tied}, mode="text")
+    assert report["status"] == "conditional" and report["reasons"] == ["structural_path_implemented"]
+    phi = next(family for family in support_matrix()["families"] if family["family_id"] == "phi3")
+    assert all("tied_embeddings_required" not in mode["caveats"] for mode in phi["modes"].values())
+
+
+@pytest.mark.parametrize(
+    "width,heads,supported", [(3072, 24, True), (5120, 40, True), (3072, 32, False), (2560, 32, False)]
+)
+def test_phi3_head_dimension_without_a_metal_kernel_is_unsupported(width, heads, supported):
+    config = {"model_type": "phi3", "tie_word_embeddings": False, "hidden_size": width, "num_attention_heads": heads}
+    report = preflight_model(config, mode="text")
+    if supported:
+        assert report["status"] == "conditional"
+    else:
+        assert report["status"] == "unsupported" and report["reasons"] == ["unsupported_native_geometry"]
 
 
 def test_unknown_metadata_is_inconclusive_in_every_mode():
@@ -387,7 +433,7 @@ def test_resolver_rechecks_small_vision_processing_before_any_weights(tmp_path):
     assert all(not event[2].endswith(".safetensors") for event in hub.events if event[0] == "download")
 
 
-@pytest.mark.parametrize("architecture", ["phi3", "gemma2", "gemma3_text"])
+@pytest.mark.parametrize("architecture", ["gemma2", "gemma3_text"])
 def test_known_untied_layout_exclusion_precedes_weights(tmp_path, architecture):
     root = files(tmp_path / "source", model_type=architecture)
     (root / "config.json").write_text(json.dumps({"model_type": architecture, "tie_word_embeddings": False}))
@@ -445,7 +491,7 @@ def test_actual_conversion_mode_mismatch_stops_before_resolution(tmp_path, monke
     [
         ({"model_type": "qwen3", "num_experts": 8}, {}),
         ({"model_type": "qwen3", "auto_map": {"AutoModel": "private.Custom"}}, {}),
-        ({"model_type": "phi3", "tie_word_embeddings": False}, {}),
+        ({"model_type": "gemma2", "tie_word_embeddings": False}, {}),
         ({"model_type": "qwen3", "quantization": {"quant_method": "gptq", "bits": 4}}, {}),
         ({"model_type": "qwen3"}, {"dtype": "float16"}),
         ({"model_type": "qwen3"}, {"container": ".gguf"}),
@@ -498,7 +544,7 @@ def test_malformed_shared_tokenizer_metadata_leaves_no_conditional_alternatives(
     [
         ({"model_type": "qwen3", "num_experts": 8}, {}),
         ({"model_type": "qwen3", "auto_map": {"AutoModel": "private.Custom"}}, {}),
-        ({"model_type": "phi3", "tie_word_embeddings": False}, {}),
+        ({"model_type": "gemma2", "tie_word_embeddings": False}, {}),
         ({"model_type": "qwen3", "quantization": {"quant_method": "gptq", "bits": 4}}, {}),
         ({"model_type": "qwen3", "quantization_config": []}, {}),
         ({"model_type": "qwen3"}, {"dtype": "float16"}),

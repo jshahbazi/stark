@@ -86,6 +86,90 @@ load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
 
+The family registry lists uniform MLX affine 4-bit and 8-bit sources, imported
+without requantization, for Qwen3, Qwen2, Llama, Mistral, Gemma 3 text, Gemma 4
+text, OLMo 3, SmolLM3, Qwen3.5, Qwen3.5 MoE, Qwen3.8 Flash Next, LFM2 and
+LLaMBA. Each family's tensor planner still applies its own layout limits.
+Per-module overrides and five/six-bit widths remain limited to the families
+that document them.
+Qwen2 attention biases stay separate full-precision vectors beside the packed
+projection. Granite, Gemma 2 and Phi-3 reject quantized sources. App installs
+convert Qwen2 and Mistral MLX exports whose parameters are all F16 to native F16
+(described below), because converted to the default BF16 they miss the
+stock-MLX logit gates
+([20261112-DENSE-MLX-02/03](archive/runs/2026-11-12-dense-mlx-qwen2-mistral-qualification.md)).
+Only `mlx-community/Qwen2.5-0.5B-Instruct-4bit` converted to F16 is numerically
+qualified. A template-substituted diagnostic copy of the Mistral 7B v0.3 4-bit
+export also passes the logit, greedy and scorer gates
+([20261112-DENSE-MLX-04/05](archive/runs/2026-11-12-dense-f16-native-qualification.md)).
+The published Mistral revision converts through its named template list but is
+not promoted
+([20261112-DENSE-MLX-07](archive/runs/2026-11-12-install-auto-f16.md#published-mistral-export-named-template-list)).
+Other sizes, 8-bit exports and other publishers' exports of these families have
+no qualification of their own
+([20261112-DENSE-MLX-01](archive/runs/2026-11-12-dense-mlx-qwen2-mistral.md)).
+
+A `chat_template` given as a Hugging Face named list (`{"name", "template"}`
+objects with unique names) converts with its `default` entry, which is what
+Transformers renders when no name is given. The chosen string is validated
+like a plain template. A list without `default`, with duplicate names, with
+other keys or non-string fields, a name-to-template mapping, and any image or
+classifier conversion are refused. The receipt's `chat_template_selection`
+records the entry names, each entry's SHA-256 and the selected entry, and
+`config.json` is identical to a conversion of that `default` string. The other
+entries, such as `tool_use`, are never used. Tool calling for such an artifact
+reports `unavailable`, and its catalogue row offers no tools, until a
+reviewed parser admits that exact artifact.
+
+Some chat templates, such as that `default` entry, raise on any role other
+than alternating user and assistant, so they refuse a system message.
+Conversion test-renders every text artifact's template with fixed synthetic
+messages through the native template helper. When a user-only turn renders, a
+leading system message raises, and the folded turns render, the receipt
+records `chat_template_system_role`
+(`{"policy": "fold_into_first_user", "separator": "\n\n"}`).
+
+For such an artifact, rendering folds one leading system message into the
+first user message, joined by a blank line. It never folds into the last one,
+so earlier turns render identically and prefix reuse stays exact. Requests
+that cannot be folded fail with a clear error:
+
+- more than one system message;
+- a system message that is not first;
+- non-text system content;
+- a system message not immediately followed by a text user message.
+
+Templates that accept a system message, and artifacts without the record,
+render exactly as before. An artifact converted before this rule has no
+record, so it still refuses system messages until it is reinstalled.
+`config.json` is unchanged, and the loader honours only that exact recorded
+policy ([20261112-DENSE-MLX-08](archive/runs/2026-11-12-install-auto-f16.md#system-role-fold)).
+
+Native F16 is a separate precision profile for the plain full-attention dense
+graph of Llama, Qwen2 and Mistral artifacts. The engine selects it only when
+the converted decoder stores F16 tensors and no BF16 tensor. Weights,
+embeddings, norms, biases and MLX affine scales and biases stay F16, and packed
+affine codes are unchanged. Activations, the KV cache and the readout are F16.
+Matrix products, affine dequantization, normalization, RoPE and attention
+accumulate in F32, as on the BF16 path. Query/key norms, sliding windows,
+soft caps, sinks, gates, per-layer embeddings, image embeddings, MTP heads and
+speculators have no F16 path: such an F16 artifact fails to load with an
+unsupported-precision error. BF16 artifacts keep their existing policy, and BF16
+qualification does not transfer to an F16 artifact or the reverse.
+
+App installs (the Install button and guided setup) convert text artifacts with
+`--dtype auto`. The converter selects F16 only after download, from the planned
+source tensors' own dtypes: every floating tensor must be F16, every matrix
+must be an MLX affine plane set, the family must be Qwen2 or Mistral, the native
+F16 admission above must accept the metadata in the requested mode, and the
+repository must have no recorded BF16 native qualification. Everything else,
+including Llama, Qwen3, unquantized F16 checkpoints, mixed-dtype sources and
+sliding-window exports, converts to BF16 byte-for-byte as before. Llama stays
+on BF16 because no F16 Llama artifact has a model run and its MLX exports carry
+BF16 load qualifications. The receipt's `dtype_selection` records the choice
+and reason. Image installs and explicit `--dtype` values are unchanged
+([install check](archive/runs/2026-11-12-install-auto-f16.md)).
+
 Qwen3.5 MoE image conversion has two schema-3 profiles: affine-quantized source
 weights use `qwen35-moe-affine-merged-v4`, while complete BF16 source weights
 use `qwen35-moe-bf16-merged-v5`. Both produce BF16 artifacts; the BF16-source
@@ -118,6 +202,19 @@ engine build. See the
 [original E2B validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md)
 and [31B vision component record](archive/runs/2026-11-07-gemma4-larger-vision-qualified-component.md).
 
+Phi-3 dense (`phi3`) plans tied and untied embeddings. An untied checkpoint
+uses the dense planner's separate output embedding (`UntiedEmbeddingConfig`);
+tied plans are unchanged. An absent `partial_rotary_factor` means the full head,
+as in Transformers. The planner requires LongRoPE and refuses a `sliding_window`
+shorter than the context, because it plans full attention. Preflight refuses
+head dimensions without a Metal attention kernel (other than 64, 128, 256 or
+512), which excludes Phi-3 and Phi-3.5 mini (96). LongRoPE uses the long factors
+whenever the declared context exceeds the original one, as MLX-LM does;
+Transformers uses the short factors up to the original context. No real untied
+checkpoint is qualified yet; see
+[attempt 20261112-PHI-01](model-experiments/2026-11-12-phi3-untied-embeddings.md).
+Gemma 2 and Gemma 3 text still require tied embeddings.
+
 ## Browsing and removing models
 
 The app's **Manage Models** window has **Installed**, **Model Catalog** and
@@ -131,8 +228,9 @@ quantization and stored weight-file size. Missing metadata is omitted.
 Search text is transient; sort choices persist independently for **Installed**,
 the family overview and family detail. The saved-model view sorts by name A–Z or
 Z–A, or total disk bytes from its visible versions ascending or descending. The
-family overview sorts by name A–Z or Z–A; family detail sorts by name in either
-direction or model size ascending or descending. Unknown numeric values sort last
+family overview sorts by name A–Z or Z–A; family detail adds the two Top rated
+orders described below, name in either direction and model size ascending or
+descending. Unknown numeric values sort last
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
 
@@ -439,8 +537,10 @@ validation still follows.
 
 The matrix also records conversion containers, source formats and output dtypes.
 Source precision and native output precision are distinct: supported text
-conversion can cast floating source weights to BF16. F16/F32 output remains
-conversion-only where the native engine requires BF16. Packed formats have their
+conversion can cast floating source weights to BF16. F16 output loads natively
+only for full-attention Llama, Qwen2 and Mistral text and Decision use (the
+native F16 profile above); other F16 output and all F32 output remain
+conversion-only. Packed formats have their
 own family/layout constraints. Classifier conversion coverage does not imply
 that the desktop Chat or Decision workflow implements classification.
 
@@ -555,7 +655,8 @@ separate decision artifact. Normal conversion still selects its output through
 use before weights. Without that optional mode, the CLI retains its separate
 conversion-only paths. Explicit classifier conversion and F16/F32 export remain
 possible even though they do not establish support for the desktop's application
-modes.
+modes. With `--support-mode text` or `decision`, F16 output passes preflight only
+for Llama, Qwen2 and Mistral metadata without an active sliding window.
 
 The report is JSON on standard output. `conditional`, `unsupported` and
 `inconclusive` are successful report outcomes with exit status 0; callers inspect

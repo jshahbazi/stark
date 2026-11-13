@@ -313,13 +313,9 @@ def build_dense_plan(
         expected_types = ["sliding_attention" if window is not None else "full_attention" for window in windows]
         if layer_types != expected_types:
             unsupported.append("Layer attention types disagree with qualified sliding-window semantics")
-    quantization = parse_mlx_quantization(config) if family == "llama" else None
-    if family != "llama":
-        for key in ("quantization", "quantization_config"):
-            if config.get(key) is not None:
-                if not isinstance(config[key], dict) or not config[key]:
-                    raise ConversionError("Dense config has malformed quantization parameters")
-                raise UnsupportedConversion("Quantized checkpoint is outside qualified dense coverage")
+    # Uniform MLX affine 4/8-bit repacking is implemented for every dense
+    # family. Qwen2 attention biases remain separate full-precision vectors.
+    quantization = parse_mlx_quantization(config)
     operations: list[TensorOperation] = []
     expected: set[str] = set()
     metadata: dict[str, str] = {}
@@ -347,7 +343,7 @@ def build_dense_plan(
             or (name in tensors and tensors[name].dtype in {"I32", "U32"})
             for name in names
         ]
-        if family == "llama" and any(representations):
+        if any(representations):
             if quantization is None:
                 raise UnsupportedConversion("MLX checkpoint requires explicit quantization configuration")
             if not all(representations):

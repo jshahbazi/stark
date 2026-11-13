@@ -22,6 +22,7 @@ from .model_support import (
 from .registry import get_model, models
 from .sources import huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion
+from .template_compat import NamedTemplateError, is_named_template_list, select_named_chat_template
 from .vision_contract import REPO as EXACT_VISION_REPO
 from .vision_contract import REVISION as EXACT_VISION_REVISION
 
@@ -609,6 +610,32 @@ def _positive_int(value):
 
 
 def _source_chat_template(entry, repo, names, read):
+    """Return (template, blocker, from_named_list) for the template conversion would use.
+
+    A Hugging Face named list contributes its `default` entry, exactly as the
+    converter selects it; any other list or mapping stays unavailable.
+    """
+    template, blocker = _source_chat_template_value(entry, repo, names, read)
+    if blocker is not None:
+        return None, blocker, False
+    named = is_named_template_list(template)
+    if named:
+        try:
+            template, _selection = select_named_chat_template(template)
+        except NamedTemplateError:
+            return None, "chat_template_invalid", False
+    if not isinstance(template, str):
+        return None, "chat_template_missing", False
+    template = _GENERATION_BLOCK_TAG.sub("", template)
+    try:
+        if not template or len(template.encode("utf-8")) > _MAX_CHAT_TEMPLATE_BYTES:
+            return None, "chat_template_invalid", False
+    except UnicodeEncodeError:
+        return None, "chat_template_invalid", False
+    return template, None, named
+
+
+def _source_chat_template_value(entry, repo, names, read):
     """Read only same-revision metadata used by Stark's chat conversion path."""
     files = entry.get("files", {}) if isinstance(entry, dict) else {}
     tokenizer_spec = files.get("tokenizer_config") or {"repo": repo, "filename": "tokenizer_config.json"}
@@ -655,18 +682,12 @@ def _source_chat_template(entry, repo, names, read):
             template = _inline_text("chat_template", inline_id)
         except Exception:
             return None, "chat_template_inline_source_unavailable"
-    if not isinstance(template, str):
-        return None, "chat_template_missing"
-    template = _GENERATION_BLOCK_TAG.sub("", template)
-    try:
-        if not template or len(template.encode("utf-8")) > _MAX_CHAT_TEMPLATE_BYTES:
-            return None, "chat_template_invalid"
-    except UnicodeEncodeError:
-        return None, "chat_template_invalid"
     return template, None
 
 
-def _planning_metadata(family, config, info, names, sizes, *, chat_template=None, chat_template_blocker=None):
+def _planning_metadata(
+    family, config, info, names, sizes, *, chat_template=None, chat_template_blocker=None, chat_template_named=False
+):
     """Return bounded runtime-planning inputs without implying measured fit."""
     text = config.get("text_config", config)
     if not isinstance(text, dict):
@@ -700,7 +721,12 @@ def _planning_metadata(family, config, info, names, sizes, *, chat_template=None
 
     native_template = normalize_chat_template(chat_template) if isinstance(chat_template, str) else None
     chat_template_available = template_program_sha256(native_template) is not None
-    tool_parser = tool_parser_for({"prompt_template": native_template}) if chat_template_available else None
+    # A named list's tool entries are unreviewed, so its rows never advertise tools.
+    tool_parser = (
+        tool_parser_for({"prompt_template": native_template})
+        if chat_template_available and not chat_template_named
+        else None
+    )
     supports_tools = tool_parser is not None
     if not chat_template_available:
         blockers.append(chat_template_blocker or "chat_template_unavailable")
@@ -888,9 +914,12 @@ def _catalog_image_metadata(family, config, repo, revision, names, read):
             from .gemma3_contract import normalize_processor
 
             normalize_processor(_json(read("preprocessor_config.json", 65536)))
-            template, _reason = _source_chat_template(None, repo, names, read)
+            template, _reason, named = _source_chat_template(None, repo, names, read)
+            # Image artifacts pin their own reviewed template; named lists stay refused.
             return (
-                isinstance(template, str) and hashlib.sha256(template.encode()).hexdigest() == _GEMMA3_IMAGE_TEMPLATE
+                not named
+                and isinstance(template, str)
+                and hashlib.sha256(template.encode()).hexdigest() == _GEMMA3_IMAGE_TEMPLATE
             )
         if family == "gemma4_text":
             from .adapters.gemma4_vision import PROFILES
@@ -1331,9 +1360,11 @@ def family_catalog(
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
                 if parameters is None and quantization != "BF16" and not extra_weights:
                     parameters = _dense_config_parameters(config, family)
-                chat_template, chat_template_blocker = (None, None)
+                chat_template, chat_template_blocker, chat_template_named = (None, None, False)
                 if planning:
-                    chat_template, chat_template_blocker = _source_chat_template(entry, repo, names, read_pinned)
+                    chat_template, chat_template_blocker, chat_template_named = _source_chat_template(
+                        entry, repo, names, read_pinned
+                    )
                 item = {
                     "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
                     "repo": repo,
@@ -1361,6 +1392,7 @@ def family_catalog(
                         sizes,
                         chat_template=chat_template,
                         chat_template_blocker=chat_template_blocker,
+                        chat_template_named=chat_template_named,
                     )
                     item["task_tags"] = item["planning"]["task_tags"]
                     item["license"] = item["planning"]["license"]

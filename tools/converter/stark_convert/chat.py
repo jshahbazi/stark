@@ -23,7 +23,10 @@ from .mtp import mtp_capabilities, resolve_mtp
 from .reasoning import assistant_message, prompt_opens_reasoning, reasoning_options
 from .resource_budget import REQUEST_BUDGET_MIB, WIRE_BYTES
 from .template_runtime import (
+    SYSTEM_ROLE_FOLD,
+    SYSTEM_ROLE_POLICY,
     IsolatedTemplate,
+    SystemRoleError,
     TemplateCancelled,
     TemplateHelperMissing,
     TemplateRuntimeError,
@@ -166,9 +169,22 @@ class ChatImageError(ChatError):
         super().__init__(message)
 
 
+_SYSTEM_ROLE_MESSAGES = {
+    "system_message_repeated": "This model's chat template has no system role; send at most one system message.",
+    "system_message_not_first": "This model's chat template has no system role; the system message must come first.",
+    "system_content_not_text": "This model's chat template has no system role; the system message must be plain text.",
+    "system_message_without_user": (
+        "This model's chat template has no system role; a user message must follow the system message."
+    ),
+    "user_content_not_text": (
+        "This model's chat template has no system role; the first user message must be plain text."
+    ),
+}
+
+
 class _ChatTemplate(IsolatedTemplate):
-    def __init__(self, source):
-        super().__init__(runtime_template_source(source))
+    def __init__(self, source, *, system_role=None):
+        super().__init__(runtime_template_source(source), system_role=system_role)
 
     def render_with_cancellation(self, cancelled, **arguments):
         try:
@@ -177,6 +193,8 @@ class _ChatTemplate(IsolatedTemplate):
             raise ChatCancelled("Request cancelled.") from None
         except TemplateSizeLimit:
             raise ChatRequestTooLarge("Conversation exceeds the template request limit; use /reset.") from None
+        except SystemRoleError as error:
+            raise ChatError(_SYSTEM_ROLE_MESSAGES[error.reason]) from None
         except TemplateRuntimeError:
             raise ChatError("The model's chat template is unsupported or exceeded its resource limits.") from None
 
@@ -307,8 +325,18 @@ def load_template(model, *, expected_hashes=None):
                 )
             ):
                 raise ValueError
-        template = _ChatTemplate(source)
-        return codec, template
+        from .api_tools import codec_with_template_review
+        from .model_inventory import template_review_receipt
+
+        review = template_review_receipt(model)
+        # The converter recorded that this program refuses the system role.
+        # Only the exact policy is honoured; any other recorded value fails.
+        policy = review.get("chat_template_system_role")
+        if policy is not None and policy != SYSTEM_ROLE_POLICY:
+            raise ValueError
+        template = _ChatTemplate(source, system_role=SYSTEM_ROLE_FOLD if policy is not None else None)
+        # A template selected from a named list keeps tool calling unavailable.
+        return codec_with_template_review(codec, review), template
     except TemplateHelperMissing:
         raise ChatError("Native chat-template helper is missing; rebuild or reinstall Stark.") from None
     except (OSError, ValueError, KeyError, TypeError, ConversionError, TemplateError, SyntaxError):

@@ -47,7 +47,7 @@ def source_fixture(path: Path, family: str = "qwen3", *, sharded=False):
     elif family in {"gemma2", "gemma3_text"}:
         gemma_fixture(path, family, sharded=sharded)
     elif family == "phi3":
-        phi_fixture(path, sharded=sharded)
+        phi_fixture(path, sharded=sharded, model_dim=128)
     elif family in {"granite", "smollm3"}:
         scalar_family_fixture(path, case=family, sharded=sharded)
     else:

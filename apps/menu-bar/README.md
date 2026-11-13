@@ -239,8 +239,11 @@ available quantization or precision, such as **4-bit**, **8-bit** and **BF16**.
 When the labels exceed the available width, a dropdown offers the same filters.
 Floating-point badges describe the app's output weight precision: supported
 FP16 and FP32 source checkpoints appear as **BF16** because the app converts
-their weights to BF16. Qwen3.8 Flash Next currently offers the implemented
-quantized import paths.
+their weights to BF16. MLX 4-bit and 8-bit Qwen2 and Mistral exports whose
+parameters are all F16 keep their quantization badge and install with native
+F16 parameters; see
+[Model-family support](../../docs/MODEL_SUPPORT.md).
+Qwen3.8 Flash Next currently offers the implemented quantized import paths.
 Search narrows the selected tab and sorting applies to its matching rows.
 Entering another family starts at **All models**.
 Catalog cards use a compact heading and a row of quantization, parameter count
@@ -251,9 +254,17 @@ row of a multi-variant card, opens its exact Hugging Face repository, including
 the publisher of a quantized export.
 Each row shows its text or text-and-image capability. Downloads automatically
 include image support when available for that artifact. Sort
-the family overview by name A–Z or Z–A; family detail sorts by name in either
-direction or model size ascending or descending. Unknown numeric values stay last
-in either direction. Download and preparation progress
+the family overview by name A–Z or Z–A. Family detail opens on
+**Top rated (coding)**, with **Top rated (general)**, name in either direction
+and model size ascending or descending beside it. Unknown numeric values stay
+last in either direction. **Hide Unsupported**, checked by default, leaves out
+rows Stark cannot download; unchecked, they appear as **Unavailable** with the
+reason. A GPU-server export (AWQ, GPTQ and similar) that declares its original
+model is folded under that model's row instead of listed on its own. Rows
+appear as each candidate is checked, and GGUF-only repositories are skipped
+because the family catalogues do not offer GGUF downloads.
+[Browsing and removing models](../../docs/MODEL_SUPPORT.md#browsing-and-removing-models)
+gives the ordering, hiding and folding rules. Download and preparation progress
 stay in the browser. A completed download appears in **Installed** without
 selecting it; choose it and **Run** when ready. Some image installations stop
 the running model for their required local checks.
