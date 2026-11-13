@@ -498,6 +498,19 @@ fn checkpoint_geometry(g: &Geometry) -> [usize; 4] {
     [g.context, g.kv_heads * g.head_dim, g.index_dim, g.ratio]
 }
 
+fn checkpoint_attention_replacement_bytes(
+    g: &Geometry,
+    capacity: usize,
+) -> Option<usize> {
+    if g.ratio == 0 || capacity == 0 || capacity > g.context {
+        return None;
+    }
+    // Full padded device inventory, including overwritten query/selection
+    // scratch, plus the largest zero-padded host upload still in scope.
+    g.graph_cache_bytes(capacity)?
+        .checked_add(capacity.checked_mul((g.kv_heads * g.head_dim).max(g.index_dim))?.checked_mul(4)?)
+}
+
 fn checkpoint_attention(
     saved: &AttentionCheckpoint,
     g: &Geometry,
@@ -540,6 +553,31 @@ fn checkpoint_attention(
 }
 
 impl State {
+    pub(super) fn checkpoint_replacement_bytes(
+        &self,
+        saved: &Checkpoint,
+        g: &Geometry,
+    ) -> Option<usize> {
+        if saved.layers.len() != self.layers.len() || saved.geometry != checkpoint_geometry(g) {
+            return None;
+        }
+        self.layers.iter().zip(&saved.layers).try_fold(0_usize, |bytes, (source, saved)| {
+            let attention = match (&source.attention, &saved.attention) {
+                (Some(_), Some(saved)) => checkpoint_attention_replacement_bytes(g, saved.capacity)?,
+                (None, None) => 0,
+                _ => return None,
+            };
+            let ple = match (&source.ple, &saved.ple_history) {
+                (Some(source), Some(history)) if history.len() == source.history.len => {
+                    source.history.len.checked_add(source.scratch.len)?.checked_mul(4)?
+                },
+                (None, None) => 0,
+                _ => return None,
+            };
+            bytes.checked_add(attention)?.checked_add(ple)
+        })
+    }
+
     pub(super) fn capture_checkpoint(
         &self,
         g: &Geometry,
@@ -1223,6 +1261,32 @@ mod checkpoint_tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn private_graph_checkpoint_replacement_charges_capacity_and_overwritten_scratch() {
+        let g = Geometry {
+            context: 64,
+            kv_heads: 1,
+            head_dim: 8,
+            index_dim: 4,
+            ratio: 4,
+            index_heads: 2,
+            heads: 2,
+            budget: 16,
+            ..Geometry::default()
+        };
+        let one_token_snapshot = (2 * 8 + 4) * 4;
+        let replacement = checkpoint_attention_replacement_bytes(&g, 32).unwrap();
+        assert!(replacement == 4064 && replacement > one_token_snapshot);
+        assert!(replacement == g.graph_cache_bytes(32).unwrap() + 32 * 8 * 4);
+        assert!(checkpoint_attention_replacement_bytes(&g, 0).is_none());
+        assert!(checkpoint_attention_replacement_bytes(&g, 65).is_none());
+        let invalid = Geometry {
+            ratio: 0,
+            ..g
+        };
+        assert!(checkpoint_attention_replacement_bytes(&invalid, 32).is_none());
+    }
 
     fn values(
         count: usize,

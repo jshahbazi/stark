@@ -96,7 +96,7 @@ impl Weights {
     pub(in crate::engine::hybrid) fn prepare_edge0_mtp_head(
         &self,
         extra_dynamic_bytes: usize,
-    ) -> Result<()> {
+    ) -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
         let data = self.edge0.as_ref().ok_or(Error::Invalid("Edge0 MTP storage unavailable"))?;
         if data.mtp_admitted.load(Ordering::Acquire) {
             return Err(Error::Invalid("Edge0 MTP head already admitted"));
@@ -115,7 +115,16 @@ impl Weights {
         data.mtp_admitted
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::Invalid("Edge0 MTP head already admitted"))?;
-        Ok(())
+        Ok(data.mtp_admitted.clone())
+    }
+
+    pub(in crate::engine::hybrid) fn owns_edge0_mtp_head(
+        &self,
+        admission: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        self.edge0.as_ref().is_some_and(|data| {
+            std::sync::Arc::ptr_eq(&data.mtp_admitted, admission) && admission.load(Ordering::Acquire)
+        })
     }
 
     fn admitted_edge0_mtp(&self) -> Result<&Edge0Data> {

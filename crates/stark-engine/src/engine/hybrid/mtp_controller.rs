@@ -1,12 +1,12 @@
-//! Backend-neutral, synchronous MTP control foundation. No backend capability
-//! is enabled by this module. Native integration must supply complete private,
-//! model/policy-bound target AND draft checkpoints before using this stream.
+//! Backend-neutral, synchronous MTP control. The private Edge0 evaluation
+//! adapter supplies complete model/policy-bound target AND draft checkpoints.
+//! No worker capability is enabled by this module.
 //!
 //! The initial target verifier uses ordinary single-token steps. The sampler
 //! owns exact stochastic rejection and its independent draft randomness; this
 //! controller makes no same-seed MTP-on/off identity claim.
 
-#![allow(dead_code, reason = "model-free MTP foundation awaiting qualified native-head integration")]
+#![allow(dead_code, reason = "private evaluation integration does not enable production MTP")]
 
 use std::{collections::VecDeque, time::Instant};
 
@@ -293,6 +293,7 @@ mod tests {
         Target,
         TargetAt(usize),
         Rewind(usize),
+        RewindAfterMutation(usize),
         DraftShape,
         TargetShape,
         DraftNonfinite,
@@ -385,6 +386,10 @@ mod tests {
             self.draft = checkpoint.1.clone();
             self.target.extend_from_slice(inputs);
             self.draft.extend_from_slice(inputs);
+            if self.fault == Fault::RewindAfterMutation(self.rewinds) {
+                self.target.push(7);
+                return Err(Error::Invalid("fake partial rewind fault"));
+            }
             Ok(())
         }
         fn fence(&mut self) {
@@ -410,6 +415,8 @@ mod tests {
         calls: Rc<RefCell<Calls>>,
         draft_error: bool,
         target_error: bool,
+        draft_error_at: Option<usize>,
+        target_error_at: Option<usize>,
         seen_proposals: Vec<Option<u32>>,
     }
 
@@ -424,6 +431,8 @@ mod tests {
                 calls: Rc::new(RefCell::new(Calls::default())),
                 draft_error: false,
                 target_error: false,
+                draft_error_at: None,
+                target_error_at: None,
                 seen_proposals: Vec::new(),
             }
         }
@@ -439,7 +448,7 @@ mod tests {
         ) -> Result<u32> {
             assert_eq!(logits, &[1.0; 8]);
             self.calls.borrow_mut().draft += 1;
-            if self.draft_error {
+            if self.draft_error || self.draft_error_at == Some(self.calls.borrow().draft) {
                 return Err(Error::Invalid("fake sampler draft fault"));
             }
             self.proposals.pop_front().ok_or(Error::Invalid("fake proposals exhausted"))
@@ -452,7 +461,7 @@ mod tests {
             assert_eq!(logits, &[2.0; 8]);
             self.calls.borrow_mut().target += 1;
             self.seen_proposals.push(proposal);
-            if self.target_error {
+            if self.target_error || self.target_error_at == Some(self.calls.borrow().target) {
                 return Err(Error::Invalid("fake sampler target fault"));
             }
             self.outputs.pop_front().ok_or(Error::Invalid("fake outputs exhausted"))
@@ -527,6 +536,104 @@ mod tests {
                     budget
                 }
             );
+        }
+    }
+
+    #[stark_test]
+    fn mtp_controller_exhaustive_budget_tails_and_rejection_rounds() {
+        for drafts in 1..=3 {
+            for acceptance in 0..=drafts {
+                for budget in 0..=12 {
+                    let mut remaining = budget;
+                    let mut proposals = Vec::new();
+                    let mut expected = Vec::new();
+                    let mut rounds = 0;
+                    let mut accepted = 0;
+                    while remaining > 0 {
+                        let count = drafts.min(remaining - 1);
+                        let prefix = acceptance.min(count);
+                        proposals.extend_from_slice(&[1, 2, 3][..count]);
+                        expected.extend_from_slice(&[1, 2, 3][..prefix]);
+                        expected.push(5);
+                        remaining -= prefix + 1;
+                        accepted += prefix;
+                        rounds += 1;
+                    }
+                    let mut backend = Backend::new(Fault::None);
+                    let mut sampler = Sampler::new(&proposals, &expected);
+                    let mut stats = MtpStats::default();
+                    let outputs = {
+                        let mut stream =
+                            MtpDecode::new(&mut backend, &mut sampler, &mut stats, 0, budget, drafts).unwrap();
+                        let outputs = stream.by_ref().collect::<Result<Vec<_>>>().unwrap();
+                        stream.finish().unwrap();
+                        outputs
+                    };
+                    assert_eq!(outputs, expected);
+                    let expected_state = if budget == 0 {
+                        Vec::new()
+                    } else {
+                        std::iter::once(0).chain(expected[..budget - 1].iter().copied()).collect::<Vec<_>>()
+                    };
+                    assert_eq!(backend.target, expected_state);
+                    assert_eq!(backend.draft, expected_state);
+                    assert!(!backend.fenced);
+                    assert_eq!(backend.target_calls, budget);
+                    assert_eq!(stats.rounds, rounds);
+                    assert_eq!(stats.proposed, proposals.len());
+                    assert_eq!(stats.accepted, accepted);
+                    assert_eq!(stats.verified_rows, budget);
+                    assert_eq!(sampler.calls.borrow().target, budget);
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    fn mtp_controller_every_acceptance_early_finish_drop_and_cancel() {
+        for drafts in 1..=3 {
+            for accepted in 0..=drafts {
+                let mut expected = [1, 2, 3][..accepted].to_vec();
+                expected.push(5);
+                for delivered in 0..=expected.len() {
+                    // Cover both cleanup entry points and cancellation at
+                    // every output boundary of every possible round shape.
+                    for cleanup in 0..3 {
+                        let mut backend = Backend::new(Fault::None);
+                        let mut sampler = Sampler::new(&[1, 2, 3][..drafts], &expected);
+                        let calls = Rc::clone(&sampler.calls);
+                        let mut stats = MtpStats::default();
+                        let before;
+                        {
+                            let mut stream =
+                                MtpDecode::new(&mut backend, &mut sampler, &mut stats, 0, 4, drafts).unwrap();
+                            let outputs = stream.by_ref().take(delivered).collect::<Result<Vec<_>>>().unwrap();
+                            assert_eq!(outputs, expected[..delivered]);
+                            before = *calls.borrow();
+                            match cleanup {
+                                0 => {},
+                                1 => stream.finish().unwrap(),
+                                _ => stream.cancel().unwrap(),
+                            }
+                        }
+                        assert_eq!(*calls.borrow(), before);
+                        let expected_state = if delivered == 0 {
+                            Vec::new()
+                        } else {
+                            std::iter::once(0).chain(expected[..delivered - 1].iter().copied()).collect::<Vec<_>>()
+                        };
+                        if cleanup == 2 {
+                            assert!(backend.fenced);
+                            assert_eq!(backend.first_fenced_state, Some((expected_state.clone(), expected_state)));
+                            assert!(backend.target.is_empty() && backend.draft.is_empty());
+                        } else {
+                            assert!(!backend.fenced);
+                            assert_eq!(backend.target, expected_state);
+                            assert_eq!(backend.draft, expected_state);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -614,6 +721,8 @@ mod tests {
             Fault::TargetAt(2),
             Fault::Rewind(1),
             Fault::Rewind(2),
+            Fault::RewindAfterMutation(1),
+            Fault::RewindAfterMutation(2),
             Fault::DraftShape,
             Fault::TargetShape,
             Fault::DraftNonfinite,
@@ -681,6 +790,39 @@ mod tests {
             assert_eq!(*sampler.calls.borrow(), Calls::default());
             assert!(backend.fenced);
             assert!(backend.target.is_empty() && backend.draft.is_empty());
+        }
+    }
+
+    #[stark_test]
+    fn mtp_controller_sampler_failures_at_every_draft_and_verify_boundary() {
+        for drafts in 1..=3 {
+            for drafting in [true, false] {
+                let calls = if drafting {
+                    drafts
+                } else {
+                    drafts + 1
+                };
+                for at in 1..=calls {
+                    let mut backend = Backend::new(Fault::None);
+                    let mut sampler = Sampler::new(&[1, 2, 3][..drafts], &[1, 2, 3, 4]);
+                    if drafting {
+                        sampler.draft_error_at = Some(at);
+                    } else {
+                        sampler.target_error_at = Some(at);
+                    }
+                    let mut stats = MtpStats::default();
+                    {
+                        let mut stream = MtpDecode::new(&mut backend, &mut sampler, &mut stats, 0, 4, drafts).unwrap();
+                        assert!(stream.next().unwrap().is_err());
+                        assert!(stream.next().is_none());
+                        assert!(stream.finish().is_err());
+                    }
+                    assert!(backend.fenced);
+                    assert!(backend.target.is_empty() && backend.draft.is_empty());
+                    assert_eq!(stats.rounds, 0);
+                    assert_eq!(stats.verified_rows, 0);
+                }
+            }
         }
     }
 

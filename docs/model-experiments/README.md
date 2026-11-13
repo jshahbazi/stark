@@ -1,5 +1,6 @@
 # Model change and experiment ledger
 
+- [20261113-EDGE0-09: combined restoration and exact sampling](2026-11-13-edge0-mtp-integration.md): implementation in progress for private native evaluation; worker MTP and prefix reuse remain unavailable.
 - [20261113-EDGE0-08: native MTP head component](2026-11-13-edge0-mtp-head.md): independent F64 head/catch-up/chain gates and actual component replay/branch-refusal gates passed; private virtual head only, with one-shot admission. Combined restoration, exact sampling and MTP performance/default gates remain unfinished; worker capabilities stay unavailable.
 - [20261113-EDGE0-07: native MTP foundation](2026-11-13-edge0-mtp.md): checked four-plane draft storage, controller and checkpoint component gates passed; actual short target-state replay/reset/stale-handle gate passed. Head integration and MTP sampling/performance remain unfinished; capabilities stay unavailable.
 - [20261112-EDGE0-06: Metal graph and grouped prefill](2026-11-12-edge0-metal.md): bounded Phase 4 gate passed for virtual/resident native graph variants, with complete-readout comparison, matched fixed-work timing, corrected cold memory admission and worker lifecycle checks; cap 512, MTP/reuse unavailable, app/catalogue excluded.

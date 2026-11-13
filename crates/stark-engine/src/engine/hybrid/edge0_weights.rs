@@ -94,7 +94,7 @@ pub(super) struct Edge0Data {
     #[cfg(feature = "metal")]
     metal_resident: std::sync::atomic::AtomicBool,
     #[cfg(feature = "metal")]
-    mtp_admitted: std::sync::atomic::AtomicBool,
+    mtp_admitted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Edge0Data {
@@ -797,7 +797,7 @@ impl Weights {
             #[cfg(feature = "metal")]
             metal_resident: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "metal")]
-            mtp_admitted: std::sync::atomic::AtomicBool::new(false),
+            mtp_admitted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         #[cfg(feature = "metal")]
         {

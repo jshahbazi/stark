@@ -15,7 +15,11 @@ mod tests;
 #[path = "qwen_mtp_actual_tests.rs"]
 mod actual_tests;
 
+#[path = "qwen_mtp_state.rs"]
+mod state;
 use std::{collections::BTreeMap, sync::Arc};
+
+pub(in crate::engine::hybrid) use state::CombinedCheckpoint;
 
 use super::{Geometry, QwenModel, checkpoint, edge0};
 use crate::engine::hybrid::{
@@ -214,6 +218,7 @@ pub(in crate::engine::hybrid) struct WideResidual {
     pub(super) values: DeviceVector,
     pub(super) tag: checkpoint::StateTag,
     pub(super) row: usize,
+    pub(super) _resource_reservation: Option<state::Reservation>,
 }
 
 pub(in crate::engine::hybrid) struct HeadOutput {
@@ -241,6 +246,9 @@ pub(in crate::engine::hybrid) struct Head {
     identity: Arc<()>,
     epoch: u64,
     selectors: u64,
+    // Drop device owners before the last lease can release admission.
+    _resource_reservation: Option<state::Reservation>,
+    lease: Option<state::HeadLease>,
 }
 
 /// Exact valid-prefix K/V snapshot. No scratch, visibility mask, immutable
@@ -253,6 +261,8 @@ pub(in crate::engine::hybrid) struct HeadCheckpoint {
     next_cell: usize,
     keys: Box<[f32]>,
     values: Box<[f32]>,
+    target_tag: Option<checkpoint::StateTag>,
+    _resource_reservation: Option<state::Reservation>,
 }
 
 impl HeadCheckpoint {
@@ -375,13 +385,16 @@ impl Head {
             identity: Arc::new(()),
             epoch: 0,
             selectors: checkpoint::state_selector_bits(),
+            _resource_reservation: None,
+            lease: None,
         })
     }
 
     pub(in crate::engine::hybrid) fn for_target(model: &mut QwenModel) -> Result<Self> {
         let g = HeadGeometry::target(&model.geometry)?;
         // Admission precedes head allocation and any MTP raw projection.
-        model.weights.prepare_edge0_mtp_head(512 * 1024 * 1024)?;
+        let lease = state::HeadLease::new(model.weights.prepare_edge0_mtp_head(state::HEAD_DYNAMIC_BYTES)?);
+        let reservation = lease.reserve(state::head_live_bytes(g))?;
         let mut head = Self::new(
             g,
             &ActualWeights {
@@ -391,6 +404,8 @@ impl Head {
             },
         )?;
         head.target_tag = Some(model.checkpoint_state_tag(checkpoint::StagingPolicy::Edge0MetalSingleStepV1)?);
+        head._resource_reservation = Some(reservation);
+        head.lease = Some(lease);
         Ok(head)
     }
 
@@ -428,6 +443,7 @@ impl Head {
     fn fence(&mut self) {
         self.fenced = true;
         self.next_cell = 0;
+        self.target_tag = None;
         if let Some(epoch) = self.epoch.checked_add(1) {
             self.epoch = epoch;
         } else {
@@ -437,10 +453,8 @@ impl Head {
         let _ = new_graph().and_then(|graph| graph.finish(&[]));
     }
 
-    /// Clear draft state and invalidate every previously issued handle. A
-    /// target reset changes its tag. Current one-shot diagnostic admission
-    /// requires a model reload for a fresh binding; resource leasing and
-    /// transactional target/head rebinding are not integrated yet.
+    /// Clear draft state and invalidate every previously issued handle.
+    /// Actual target callers use `rebind_reset` to bind the cleared head.
     pub(in crate::engine::hybrid) fn reset(&mut self) -> Result<()> {
         self.fence();
         if !self.policy_matches() {
@@ -465,6 +479,7 @@ impl Head {
                 return Err(Error::Invalid("private MTP checkpoint policy"));
             }
             let used = self.next_cell * self.geometry.kv_heads * self.geometry.head_dim;
+            let reservation = self.reserve(used * 8)?;
             let rows = if used == 0 {
                 new_graph()?.finish(&[])?;
                 Vec::new()
@@ -491,6 +506,8 @@ impl Head {
                 next_cell: self.next_cell,
                 keys,
                 values,
+                target_tag: self.target_tag.clone(),
+                _resource_reservation: reservation,
             })
         })();
         if result.is_err() {
@@ -504,36 +521,8 @@ impl Head {
         saved: &HeadCheckpoint,
     ) -> Result<()> {
         let result = (|| {
-            if self.fenced
-                || !self.policy_matches()
-                || !Arc::ptr_eq(&self.identity, &saved.identity)
-                || self.epoch != saved.epoch
-                || saved.geometry != self.checkpoint_geometry()
-                || saved.selectors != self.selectors
-                || saved.next_cell > self.geometry.context
-            {
-                return Err(Error::Invalid("private MTP checkpoint ownership or policy"));
-            }
-            let width = self.geometry.kv_heads * self.geometry.head_dim;
-            let used = saved.next_cell * width;
-            if saved.keys.len() != used
-                || saved.values.len() != used
-                || saved.keys.iter().chain(saved.values.iter()).any(|v| !v.is_finite())
-            {
-                return Err(Error::Invalid("private MTP checkpoint prefix"));
-            }
-            // Allocate and populate complete independent owners before swapping
-            // either live cache. A failed allocation cannot partially restore.
-            let mut keys = vec![0.0; self.geometry.context * width];
-            let mut values = vec![0.0; self.geometry.context * width];
-            keys[..used].copy_from_slice(&saved.keys);
-            values[..used].copy_from_slice(&saved.values);
-            let replacement = Cache {
-                keys: DecodeGraph::upload(&keys)?,
-                values: DecodeGraph::upload(&values)?,
-                dummy_index: DecodeGraph::zeros(self.geometry.context)?,
-                visible: self.cache.visible.clone(),
-            };
+            let _reservation = self.reserve(state::head_replacement_bytes(self.geometry))?;
+            let replacement = self.stage_checkpoint(saved)?;
             new_graph()?.finish(&[])?;
             self.cache = replacement;
             self.next_cell = saved.next_cell;
@@ -543,6 +532,40 @@ impl Head {
             self.fence();
         }
         result
+    }
+
+    fn stage_checkpoint(
+        &self,
+        saved: &HeadCheckpoint,
+    ) -> Result<Cache> {
+        if self.fenced
+            || !self.policy_matches()
+            || !Arc::ptr_eq(&self.identity, &saved.identity)
+            || self.epoch != saved.epoch
+            || saved.geometry != self.checkpoint_geometry()
+            || saved.selectors != self.selectors
+            || saved.next_cell > self.geometry.context
+        {
+            return Err(Error::Invalid("private MTP checkpoint ownership or policy"));
+        }
+        let width = self.geometry.kv_heads * self.geometry.head_dim;
+        let used = saved.next_cell * width;
+        if saved.keys.len() != used
+            || saved.values.len() != used
+            || saved.keys.iter().chain(saved.values.iter()).any(|v| !v.is_finite())
+        {
+            return Err(Error::Invalid("private MTP checkpoint prefix"));
+        }
+        let mut keys = vec![0.0; self.geometry.context * width];
+        let mut values = vec![0.0; self.geometry.context * width];
+        keys[..used].copy_from_slice(&saved.keys);
+        values[..used].copy_from_slice(&saved.values);
+        Ok(Cache {
+            keys: DecodeGraph::upload(&keys)?,
+            values: DecodeGraph::upload(&values)?,
+            dummy_index: DecodeGraph::zeros(self.geometry.context)?,
+            visible: self.cache.visible.clone(),
+        })
     }
 
     fn norm(
@@ -662,9 +685,8 @@ impl Head {
     }
 
     /// Actual callers must bind every residual to the same loaded target,
-    /// live branch and state policy. Successful target restore changes that
-    /// branch, deliberately refusing this bound head until a future combined
-    /// target/head/pending-wide restore can rebind all three transactionally.
+    /// live branch and state policy. A standalone target restore refuses the
+    /// old binding; `CombinedCheckpoint` restores all three owners together.
     /// Synthetic tests use the explicit raw component API.
     pub(in crate::engine::hybrid) fn target_step(
         &mut self,

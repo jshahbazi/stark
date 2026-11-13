@@ -13,7 +13,7 @@ use std::sync::Arc;
 use super::{Geometry, Mixer, QwenModel, decode_graph};
 use crate::engine::hybrid::{Error, Result, qwen_metal, weight_metal::DecodeGraph};
 
-const MAX_CHECKPOINT_BYTES: usize = 256 * 1024 * 1024;
+pub(super) const MAX_CHECKPOINT_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StagingPolicy {
@@ -207,6 +207,13 @@ pub(crate) struct Checkpoint {
 }
 
 impl Checkpoint {
+    pub(super) fn contains_state_tag(
+        &self,
+        tag: &StateTag,
+    ) -> bool {
+        Arc::ptr_eq(&self.identity, &tag.identity) && self.epoch == tag.epoch && self.policy == tag.policy
+    }
+
     pub(crate) fn position(&self) -> usize {
         self.position
     }
@@ -234,6 +241,33 @@ fn valid_boundary(
 }
 
 impl QwenModel {
+    pub(super) fn checkpoint_replacement_bytes(
+        &self,
+        checkpoint: &Checkpoint,
+    ) -> Result<usize> {
+        let mut bytes = match (&self.graph, &checkpoint.graph) {
+            (Some(current), Some(saved)) => current.checkpoint_replacement_bytes(saved, &self.geometry),
+            _ => None,
+        }
+        .ok_or(Error::Invalid("checkpoint replacement graph inventory"))?;
+        for layer in &self.layers {
+            if let Mixer::Delta(state) = &layer.mixer {
+                bytes = bytes
+                    .checked_add(
+                        state
+                            .metal
+                            .as_ref()
+                            .and_then(|state| state.checkpoint_replacement_bytes())
+                            .ok_or(Error::Invalid("checkpoint replacement recurrent inventory"))?,
+                    )
+                    .ok_or(Error::Invalid("checkpoint replacement size overflow"))?;
+            }
+        }
+        bytes
+            .checked_add(checkpoint.history.len() * 4)
+            .ok_or(Error::Invalid("checkpoint replacement history inventory"))
+    }
+
     pub(super) fn checkpoint_state_tag(
         &mut self,
         staging: StagingPolicy,

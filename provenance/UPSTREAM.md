@@ -163,6 +163,13 @@ component evidence belongs to
 [attempt `20261113-EDGE0-08`](../docs/model-experiments/2026-11-13-edge0-mtp-head.md).
 The Strata MIT and GGML notices remain separate from the model-weight licenses.
 
+The combined target/head/pending-wide transactions, exclusive resource lease and
+native sampling adapter are original Stark orchestration. They retain the head's
+source and precision policy above and reuse Stark's existing `MtpSampler` and
+`ExactMtpSampler` rejection contract. Their local evaluation gates are recorded in
+[attempt `20261113-EDGE0-09`](../docs/model-experiments/2026-11-13-edge0-mtp-integration.md);
+they do not enable worker MTP or change model-weight licensing.
+
 ### Edge0 native reader and block components
 
 The independent native Strata readers and the new Q4_0 (GGML 2), IQ4_NL

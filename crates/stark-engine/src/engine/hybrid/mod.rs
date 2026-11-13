@@ -1013,6 +1013,34 @@ impl Model {
         MtpStats::default()
     }
 
+    /// Explicit local Edge0 evaluation hook. This does not enable worker MTP
+    /// or change advertised model capabilities. The callback owns the private
+    /// output and can stop cleanly with `false` or cancel by returning an error.
+    #[doc(hidden)]
+    pub fn evaluate_edge0_mtp(
+        &mut self,
+        tokens: &[u32],
+        max_outputs: usize,
+        drafts: usize,
+        sampler: &mut dyn MtpSampler,
+        on_output: &mut dyn FnMut(u32) -> Result<bool>,
+    ) -> Result<MtpStats> {
+        if std::env::var_os("STARK_EDGE0_REFERENCE").is_none_or(|value| value != "1")
+            || std::env::var_os("STARK_EDGE0_METAL").is_none_or(|value| value != "1")
+            || std::env::var_os("STARK_EDGE0_RESIDENT").is_some_and(|value| value == "1")
+        {
+            return Err(Error::Unsupported("local Edge0 MTP evaluation policy"));
+        }
+        match &mut self.forward {
+            #[cfg(feature = "metal")]
+            Forward::Qwen(model) => model.evaluate_edge0_mtp(tokens, max_outputs, drafts, sampler, on_output),
+            _ => {
+                let _ = (tokens, max_outputs, drafts, sampler, on_output);
+                Err(Error::Unsupported("local Edge0 MTP evaluation unavailable"))
+            },
+        }
+    }
+
     /// Complete a pending GLM prompt and draw its first token without a host
     /// vocabulary copy. The explicit native stage has its own sampler policy.
     pub fn step_native_initial(

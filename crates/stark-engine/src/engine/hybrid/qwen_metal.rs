@@ -455,6 +455,15 @@ mod tests {
 }
 
 impl Gdn {
+    pub(super) fn checkpoint_replacement_bytes(&self) -> Option<usize> {
+        self.history
+            .length()
+            .checked_add(self.recurrent.length())?
+            .checked_add(self.convolved.length())?
+            .checked_add(self.result.length())?
+            .checked_add(self.convolved.length().max(self.result.length()))
+    }
+
     pub(super) fn capture_checkpoint(&self) -> Result<Checkpoint> {
         let read = |buffer: &Buffer, count: usize| -> Result<Box<[f32]>> {
             if count.checked_mul(4) != Some(buffer.length()) {

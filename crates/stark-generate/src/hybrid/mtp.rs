@@ -8,6 +8,10 @@
 
 use std::collections::VecDeque;
 
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+#[path = "edge0_mtp_evaluation_tests.rs"]
+mod edge0_evaluation_tests;
+
 use stark_engine::engine::hybrid::{Error, MtpSampler, Result};
 
 use super::{

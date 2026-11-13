@@ -28,6 +28,10 @@ mod checkpoint;
 pub(super) mod mtp;
 
 #[cfg(feature = "metal")]
+#[path = "qwen_mtp_sampling.rs"]
+mod mtp_sampling;
+
+#[cfg(feature = "metal")]
 // Reserved for the private native-target adapter; no production caller is enabled.
 #[allow(unused_imports)]
 pub(super) use checkpoint::{Checkpoint, StagingPolicy};
@@ -1567,6 +1571,7 @@ impl QwenModel {
                     values,
                     tag,
                     row,
+                    _resource_reservation: None,
                 },
             ))
         });
