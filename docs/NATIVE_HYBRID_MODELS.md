@@ -66,6 +66,11 @@ All 60 [matched requests](benchmarks/2026-11-13-edge0-worker-mtp.md) completed,
 but no timing group met the host screens. Default remains off, with no qualified
 speed claim or draft-depth ranking. Prefix reuse, wider contexts, quality and
 product admission remain unqualified; the local non-commercial scope is unchanged.
+Two stricter-admission reruns also deferred every group. The
+[worker-memory investigation](model-experiments/2026-11-13-edge0-worker-memory.md)
+adds explicitly enabled self-task diagnostics: warmups show task-charged
+decompressions, while global paging and CPU/GPU activity prevent timing admission.
+These accounting observations preserve every screen and establish no speed claim.
 
 Inspect only its pinned small metadata and bounded skeleton header with:
 

@@ -568,7 +568,7 @@ Task decompressions count events charged to worker task/thread execution;
 page-ins are a different counter. Compressed bytes are the task's internal
 compressed accounting balance. These gauges do not establish complete model
 page ownership, physical compressed storage or GPU residency. The two native
-reads are sequential and include their own query cost. Clients should bracket
+reads are sequential; endpoint deltas can include query overhead. Clients should bracket
 queries with monotonic clocks and keep global paging gates independent. No
 prompt, response, token, address, identifier or raw native error is included.
 Raw evaluation receipts remain private; publish only aggregates and hashes.

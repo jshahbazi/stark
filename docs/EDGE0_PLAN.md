@@ -3,8 +3,10 @@
 Status: phases 3 and 4 and bounded Phase 5 worker correctness/lifecycle gates
 passed for local non-commercial evaluation, 2026-11-13. Sixty matched worker
 requests completed, with no eligible timing group; MTP remains off by default.
-The subsequent unchanged-screen rerun deferred all six groups at stricter quiet
-admission, after 12 matching warmups and before any measured arm.
+Two subsequent reruns each deferred all six groups at strict quiet admission,
+after 12 matching warmups and before any measured arm. Worker self-task memory
+diagnostics now identify execution-charged warmup decompressions; global activity
+and CPU/GPU gate failures still prevent performance qualification.
 Phase 5 performance qualification and phases 6–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
@@ -370,9 +372,18 @@ The [paging investigation and rerun](model-experiments/2026-11-13-edge0-mtp-pagi
 confirmed native/CLI global-counter agreement and decompressions without a live
 evaluation worker. All six successor groups failed combined strict admission;
 12 warmups matched, zero measured arms ran, and no counter threshold was relaxed.
-The source of global activity and the per-host-gate deferral split remain
-unresolved. [Separate receipts](benchmarks/2026-11-13-edge0-mtp-paging.md)
+That attempt did not attribute global activity or split host-gate deferrals.
+[Separate receipts](benchmarks/2026-11-13-edge0-mtp-paging.md)
 preserve the result without replacing the predecessor evidence.
+The [worker-memory successor](model-experiments/2026-11-13-edge0-worker-memory.md)
+adds explicit self-task diagnostics and host rejection counts. Its 12 warmups
+match the predecessor, but all six groups again defer with zero measured arms.
+Warmups record 2,563,986 worker-task decompressions; admission waits record
+three task decompressions and separately bracketed global 95,080. CPU/GPU gates
+also fail. These are execution-accounting observations with fixed warmup order,
+not complete page ownership, route rankings or performance results. Every prior
+screen is retained; [new receipts](benchmarks/2026-11-13-edge0-worker-memory.md)
+bind the new worker and observer separately.
 Default remains off and timing qualification remains pending. The 512-token cap,
 disabled prefix reuse and local non-commercial scope remain in force.
 

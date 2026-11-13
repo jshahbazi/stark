@@ -17,6 +17,11 @@ The [separate strict-admission rerun](2026-11-13-edge0-mtp-paging.md) deferred a
 six groups after 12 matching warmups, with zero measured arms. Native/CLI counters
 agree; decompressions were observed without a live evaluation worker. The source
 of paging remains unresolved and every existing performance screen is retained.
+The [worker-memory successor](2026-11-13-edge0-worker-memory.md) adds task-level
+decompression/gauge snapshots and host rejection counts. Twelve warmups match,
+but all six groups again defer before measured arms. Worker-charged warmup churn
+and idle global activity are documented separately, with no route ranking or
+performance promotion.
 
 ## Current result
 
