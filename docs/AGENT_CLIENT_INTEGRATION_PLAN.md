@@ -44,7 +44,8 @@ make Stark the coding client's inference provider.
 
 ### GUI placement
 
-Pi setup belongs exclusively under **Advanced → Connections → Apps → Pi**.
+Pi setup belongs exclusively under **Advanced → Connect to... → Apps → Pi**
+in the Connections window.
 Keep Pi out of Beginner Guided Setup, Adjust Setup, task/client choices and
 beginner model recommendations. Codex and Claude connection controls also belong
 under Connections when their integrations become available.

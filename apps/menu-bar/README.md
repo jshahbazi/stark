@@ -42,7 +42,7 @@ logic in its owning repository, then update the snapshot and lock together.
 
 ## Pi in Connections
 
-In **Advanced → Connections → Apps**, start a Chat model with tool support and
+In **Advanced → Connect to... → Apps**, start a Chat model with tool support and
 choose **Set Up Pi**. Stark detects Pi 1.5.2 and Node.js 22.19 or newer, validates
 the running model's public metadata, and writes a guarded profile under
 `~/Library/Application Support/Stark/Pi/profile-*`. It also saves Stark as the
