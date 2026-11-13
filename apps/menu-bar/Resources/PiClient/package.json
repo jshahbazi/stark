@@ -1,0 +1,17 @@
+{
+  "name": "stark-agent-clients",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Manual Pi integration and model-free protocol qualification for Stark",
+  "license": "MIT",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": {
+    "configure": "node src/configure.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2"
+  }
+}

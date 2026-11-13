@@ -4254,6 +4254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return .terminateNow
     }
     func applicationWillTerminate(_ notification: Notification) {
+        PiConnectionController.clearCopiedKey()
         updater.prepareForTermination()
         engine.shutdown()
     }

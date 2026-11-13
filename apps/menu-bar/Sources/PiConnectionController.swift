@@ -24,17 +24,20 @@ final class PiConnectionController: ObservableObject {
     private let root: URL
     private let defaults: UserDefaults
     private let runner: Runner
+    private let finder: () -> Tools?
     private var tools: Tools?
     private var refreshed = false
     private static let profilePreference = "stark.pi.manualProfile.v1"
+    private static let clipboard = ConnectionClipboardLease()
 
     init(resources: URL = Bundle.main.resourceURL?.appendingPathComponent("PiClient") ?? URL(fileURLWithPath: "/nonexistent"),
          root: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Stark/Pi", isDirectory: true),
          defaults: UserDefaults = .standard, tools: Tools? = nil,
+         finder: @escaping () -> Tools? = { PiConnectionController.findTools() },
          runner: @escaping Runner = PiConnectionController.runHelper) {
         self.resources = resources; self.root = root; self.defaults = defaults
-        self.tools = tools; self.runner = runner
+        self.tools = tools; self.finder = finder; self.runner = runner
     }
 
     func matches(baseURL: String, modelID: String) -> Bool {
@@ -48,7 +51,7 @@ final class PiConnectionController: ObservableObject {
         guard FileManager.default.fileExists(atPath: resources.appendingPathComponent("src/desktop-setup.mjs").path) else {
             message = "Pi setup is unavailable in this build."; return
         }
-        tools = tools ?? Self.findTools()
+        if force || tools == nil { tools = finder() }
         guard tools != nil else { installed = false; message = "Install Pi 1.5.2 and Node.js 22.19 or newer, then check again."; return }
         var arguments = ["--action", "inspect", "--pi", tools!.pi.path]
         if let saved = defaults.string(forKey: Self.profilePreference), ownedProfilePath(saved) {
@@ -180,13 +183,10 @@ final class PiConnectionController: ObservableObject {
     }
 
     private static func copyKey(_ key: String) -> Bool {
-        guard ConnectionClipboard.write(key, sensitive: true) else { return false }
-        let change = NSPasteboard.general.changeCount
-        DispatchQueue.main.asyncAfter(deadline: .now() + 120) {
-            if NSPasteboard.general.changeCount == change { NSPasteboard.general.clearContents() }
-        }
-        return true
+        clipboard.write(key)
     }
+
+    static func clearCopiedKey() { clipboard.clear() }
 
     private static func openTerminal(_ command: URL, completion: @escaping (Bool) -> Void) {
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")

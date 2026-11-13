@@ -28,9 +28,10 @@ Run commands from the repository root. Keep dependencies locked: `Cargo.lock`, `
 
 `tools/data_exporter`, `tools/gpu_trace` and `tools/model_compare` are inherited from Uzu and are not part of the product.
 
-Pi Connections uses public resources pinned from the separate private
-`stark-agent-clients` checkout. Pass it to `scripts/build_menubar.py` with
-`--pi-client-source`; see the [menu bar guide](apps/menu-bar/README.md#pi-in-connections).
+Pi Connections uses an immutable public resource snapshot pinned from the
+separate `stark-agent-clients` repository. Clean builds use the checked-in
+snapshot without a private checkout. `--pi-client-source` optionally verifies a
+source checkout against the same lock; see the [menu bar guide](apps/menu-bar/README.md#pi-in-connections).
 For Pi setup changes run `scripts/test_pi_connection.py`,
 `scripts/test_pi_client_resources.py` and the native window checks, together with
 the integration repository's `npm test`.

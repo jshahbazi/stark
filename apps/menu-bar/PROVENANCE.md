@@ -19,8 +19,11 @@ The `pi_client` record identifies the separate integration repository, immutable
 revision, lock hash and complete public file closure. `Resources/PiClient.lock.json`
 pins the setup helper, launcher, guard, their local dependencies and license.
 Each delivered `PiClient/` file is also in `resources_sha256`. The builder reads
-the matching private checkout with `--pi-client-source` and refuses hash changes;
-the app performs no package installation. The normal installed Pi executable
+the immutable `Resources/PiClient` snapshot by default and refuses hash changes.
+An explicit `--pi-client-source` checkout must match the same lock; a sibling
+checkout is never implicitly consumed. Client logic remains owned in the separate
+repository; update the snapshot mechanically, without local edits. The app
+performs no package installation. The normal installed Pi executable
 supplies its own public provider API and is checked for version 1.5.2.
 
 The original app's `application_version`, `build_number` and `build_channel` are

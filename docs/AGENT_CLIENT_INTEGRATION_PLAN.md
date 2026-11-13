@@ -51,7 +51,8 @@ running model, create a separate Stark-owned profile with the required guard,
 and open Terminal for a user-selected folder. **Copy Key & Open Pi…** explicitly
 copies the key for Terminal's hidden prompt. Generated files and command
 arguments contain no key; the helper and Pi receive it through their environment.
-The clipboard item expires after two minutes unless it has been replaced.
+While running, Stark schedules the unchanged clipboard item for clearing after
+two minutes and clears it on normal quit. A crash or force quit cannot run cleanup.
 The default Pi profile is unchanged. Switching to Beginner hides Connections.
 
 The Pi entry identifies the installed client/version, uses the running model,
@@ -67,9 +68,11 @@ folder. Old profiles remain available to existing sessions; no unrelated Pi
 settings are merged or overwritten. Model/port changes require Update Setup, and
 launch rechecks metadata and version. Profiles cap replies at the lower of
 1,024 tokens and the API ceiling, disable automatic retries/compaction, and do
-not persist conversations. Building Stark requires the matching private
-integration checkout via `--pi-client-source`; the app bundles the exact locked
-source closure without runtime dependency installation.
+not persist conversations. Clean builds consume a checked-in immutable public
+snapshot of the separate integration repository, verified against its revision
+and all file hashes. An optional `--pi-client-source` checkout must match the same
+lock. Client logic remains maintained in the owning repository; snapshot updates
+must be mechanical. The app performs no runtime dependency installation.
 
 ## Current Stark contract
 

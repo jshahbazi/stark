@@ -11,7 +11,9 @@ and **Copy Key & Open Pi…**. This manual Pi 1.5.2 flow creates an isolated gua
 profile and opens Terminal for a chosen folder. Its key is supplied through the
 setup/Pi process environment and an explicit concealed/transient clipboard copy,
 then pasted into a hidden prompt. Files and command arguments contain no key;
-the clipboard item expires after two minutes if unchanged. Pi is excluded from
+while running Stark schedules the unchanged clipboard item for clearing after
+two minutes and also clears it on normal quit. Crashes/force quits cannot run
+cleanup. Pi is excluded from
 Beginner setup and has no managed grant or scoped Disconnect. See
 [Pi setup](../apps/menu-bar/README.md#pi-in-connections).
 

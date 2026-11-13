@@ -31,12 +31,14 @@ uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install -
 
 The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory; `--runtime`, `--worker`, `--score-worker` and `--template-worker` select a different CLI bundle, generation binary, scoring binary or native template evaluator. Native binaries default to their corresponding `target/release/` paths.
 
-Pi's public setup/guard resources come from the separate private
-`stark-agent-clients` repository. Provide its matching checkout with
-`--pi-client-source /absolute/path/to/stark-agent-clients`; the builder also
-recognizes a sibling checkout with that name. `Resources/PiClient.lock.json`
-pins the exact revision and complete file hashes. Missing or changed resources
-stop the build before installation. No npm install runs in the app.
+Pi's public setup/guard resources come from the separate `stark-agent-clients`
+repository. `Resources/PiClient` is an immutable distribution snapshot;
+`Resources/PiClient.lock.json` pins its exact revision and complete file hashes.
+Clean local and hosted builds use it without a private checkout, download or
+credential. `--pi-client-source /absolute/path/to/stark-agent-clients` optionally
+checks a separate checkout against the same lock. Missing or changed resources
+stop the build before installation. No npm install runs in the app. Change client
+logic in its owning repository, then update the snapshot and lock together.
 
 ## Pi in Connections
 
@@ -54,7 +56,9 @@ Choose **Copy Key & Open Pi…**, select a working folder, then paste the copied
 at Terminal's hidden prompt. This manual setup keeps the master key in process
 environments and the explicitly requested, concealed/transient clipboard item;
 it writes no key into public profiles, launch scripts or command arguments.
-The clipboard item is cleared after two minutes unless replaced. Pi can edit
+While Stark runs, it schedules the unchanged clipboard item for clearing after
+two minutes and also clears it on normal quit. Crashes and force quits cannot
+run cleanup. Pi can edit
 files and run commands, sessions are not saved, automatic retries/compaction are
 disabled, and the reply ceiling is 1,024 tokens or the lower API limit.
 
@@ -66,6 +70,8 @@ This flow adds no managed Connect/Disconnect or client-scoped credential grants.
 Updated bundled setup/guard code requires a fresh profile. Pi's executable and
 resolved symlink directories are included in its isolated PATH so installed
 companion tools such as `fd` are available.
+After replacing Pi or Node choose **Check Installation**; it rediscovers their
+paths. A missing saved executable requires fresh setup instead of a stale launch.
 
 Focused checks: `scripts/test_pi_connection.py`, `scripts/test_pi_client_resources.py`
 and `scripts/test_menubar_windows.py`, plus the integration repository's tests.

@@ -23,7 +23,10 @@ FILES = (
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024
 LOCK_LIMIT_BYTES = 16 * 1024
-LOCK_PATH = Path(__file__).resolve().parent.parent / "apps/menu-bar/Resources/PiClient.lock.json"
+LOCK_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "apps/menu-bar/Resources/PiClient.lock.json"
+)
 
 
 class PiClientResourceError(Exception):
@@ -65,15 +68,26 @@ def read_lock(path: Path = LOCK_PATH) -> dict:
                 break
             data.extend(block)
         after = os.fstat(descriptor)
-        if (
-            len(data) != before.st_size
-            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        if len(data) != before.st_size or (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
         ):
             raise ValueError
         lock = json.loads(data, object_pairs_hook=_unique_object)
         if not isinstance(lock, dict) or set(lock) != {
-            "schema_version", "repository", "revision", "files_sha256"
+            "schema_version",
+            "repository",
+            "revision",
+            "files_sha256",
         }:
             raise ValueError
         files = lock["files_sha256"]
@@ -86,8 +100,7 @@ def read_lock(path: Path = LOCK_PATH) -> dict:
             or not isinstance(files, dict)
             or set(files) != set(FILES)
             or any(
-                not isinstance(digest, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
                 for digest in files.values()
             )
         ):
@@ -154,10 +167,18 @@ def _read_source_file(root_descriptor: int, name: str) -> bytes:
                 break
             data.extend(block)
         after = os.fstat(descriptor)
-        if (
-            len(data) != before.st_size
-            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        if len(data) != before.st_size or (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
         ):
             raise ValueError
         return bytes(data)
@@ -244,9 +265,12 @@ def install_pi_client(
     lockfile: Path = LOCK_PATH,
 ) -> dict:
     """Copy only the exact public file closure authorized by the lock."""
-    if source is None:
-        _fail("pi_client_source_required")
     lock = read_lock(lockfile)
+    snapshot = source is None
+    if snapshot:
+        source = Path(lockfile).parent / "PiClient"
+        if not source.exists() and not source.is_symlink():
+            _fail("pi_client_snapshot_missing")
     root = _open_source_root(source)
     try:
         payload = {name: _read_source_file(root, name) for name in FILES}

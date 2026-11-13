@@ -36,7 +36,6 @@ PYTHON = Path("libexec/python/bin/python3.13")
 CONVERTER = Path("libexec/python/lib/python3.13/site-packages/stark_convert")
 OPENWORK_CONNECTOR_LOCK = ROOT / "apps/menu-bar/Resources/OpenWorkConnector.lock.json"
 PI_CLIENT_LOCK = ROOT / "apps/menu-bar/Resources/PiClient.lock.json"
-DEFAULT_PI_CLIENT_SOURCE = ROOT.parent / "stark-agent-clients"
 OPENWORK_CONNECTOR_REPOSITORY = "https://github.com/jshahbazi/stark-openwork"
 OPENWORK_CONNECTOR_FILES = (
     "package.json",
@@ -1116,13 +1115,10 @@ def build(options: argparse.Namespace) -> Path:
             source=getattr(options, "openwork_connector", None),
             allow_development=getattr(options, "allow_development_connector", False),
         )
-        pi_client_source = getattr(options, "pi_client_source", None)
-        if pi_client_source is None and DEFAULT_PI_CLIENT_SOURCE.is_dir():
-            pi_client_source = DEFAULT_PI_CLIENT_SOURCE
         try:
             pi_client = install_pi_client(
                 resources,
-                source=pi_client_source,
+                source=getattr(options, "pi_client_source", None),
                 lockfile=PI_CLIENT_LOCK,
             )
         except PiClientResourceError as error:

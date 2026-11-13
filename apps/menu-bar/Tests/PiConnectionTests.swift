@@ -97,6 +97,43 @@ struct PiConnectionTests {
         defer { UserDefaults.standard.removePersistentDomain(forName: suite + ".refused") }
         refused.refresh(); refused.setup(baseURL: baseURL, modelID: "public-model", key: key)
         require(failed && refused.profile == nil)
+
+        var discovered = tools
+        var executions: [String] = []
+        let recovering = PiConnectionController(resources: directory.appendingPathComponent("resources"), root: root,
+            defaults: UserDefaults(suiteName: suite + ".recovery")!, tools: tools, finder: { discovered },
+            runner: { node, _, _, completion in
+                executions.append(node.path); completion(["ok": true, "version": "1.5.2"])
+            })
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite + ".recovery") }
+        recovering.refresh()
+        discovered = .init(node: URL(fileURLWithPath: "/replacement/node"), pi: URL(fileURLWithPath: "/replacement/pi"))
+        recovering.refresh(force: true)
+        require(executions == [tools.node.path, discovered.node.path] && recovering.installed)
+
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        var expirations: [() -> Void] = []
+        let lease = ConnectionClipboardLease(pasteboard: pasteboard, schedule: { delay, action in
+            require(delay == 120); expirations.append(action)
+        })
+        require(lease.write(key))
+        expirations.removeFirst()()
+        require(pasteboard.string(forType: .string) == nil)
+        require(lease.write(key))
+        require(ConnectionClipboard.write("replacement user copy", to: pasteboard))
+        lease.clear()
+        require(pasteboard.string(forType: .string) == "replacement user copy")
+        require(lease.write(key))
+        lease.clear() // Same operation used by normal application termination.
+        require(pasteboard.string(forType: .string) == nil)
+        require(lease.write("first synthetic copy"))
+        let oldExpiration = expirations.last!
+        require(lease.write(key))
+        oldExpiration()
+        require(pasteboard.string(forType: .string) == key)
+        lease.clear()
+        require(pasteboard.string(forType: .string) == nil)
         print("Pi controller checks passed")
     }
 }

@@ -18,18 +18,39 @@ class PiConnectionTests(unittest.TestCase):
             executable = Path(temporary) / "pi-controller-checks"
             sources = ROOT / "apps/menu-bar"
             compiled = subprocess.run(
-                ["xcrun", "swiftc", "-parse-as-library", "-target", "arm64-apple-macosx26.4",
-                 str(sources / "Sources/PiConnectionController.swift"),
-                 str(sources / "Sources/ConnectionClipboard.swift"),
-                 str(sources / "Tests/PiConnectionTests.swift"), "-o", str(executable)],
-                stdin=subprocess.DEVNULL, capture_output=True,
-                timeout=120, check=False,
+                [
+                    "xcrun",
+                    "swiftc",
+                    "-parse-as-library",
+                    "-target",
+                    "arm64-apple-macosx26.4",
+                    str(sources / "Sources/PiConnectionController.swift"),
+                    str(sources / "Sources/ConnectionClipboard.swift"),
+                    str(sources / "Tests/PiConnectionTests.swift"),
+                    "-o",
+                    str(executable),
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=120,
+                check=False,
             )
             self.assertEqual(compiled.returncode, 0, "pi_controller_compilation_failed")
-            checked = subprocess.run([str(executable)], stdin=subprocess.DEVNULL,
-                                     capture_output=True, timeout=20, check=False)
+            checked = subprocess.run(
+                [str(executable)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
             diagnostic = checked.stderr.decode("utf-8", errors="replace").strip()
-            self.assertEqual(checked.returncode, 0, diagnostic if diagnostic.startswith("pi_connection_check_failed_") else "pi_controller_check_failed")
+            self.assertEqual(
+                checked.returncode,
+                0,
+                diagnostic
+                if diagnostic.startswith("pi_connection_check_failed_")
+                else "pi_controller_check_failed",
+            )
 
 
 if __name__ == "__main__":

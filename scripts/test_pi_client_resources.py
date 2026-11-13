@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,7 +50,9 @@ class PiClientResourceTests(unittest.TestCase):
             "schema_version": 1,
             "repository": repository or pi_resources.REPOSITORY,
             "revision": revision,
-            "files_sha256": files if files is not None else {
+            "files_sha256": files
+            if files is not None
+            else {
                 name: hashlib.sha256(data).hexdigest()
                 for name, data in self.payload.items()
             },
@@ -74,7 +77,10 @@ class PiClientResourceTests(unittest.TestCase):
         self.assertEqual(result["repository"], pi_resources.REPOSITORY)
         self.assertEqual(result["revision"], "a" * 40)
         self.assertEqual(set(result["files_sha256"]), set(pi_resources.FILES))
-        self.assertEqual(set(result["resources_sha256"]), {f"PiClient/{name}" for name in pi_resources.FILES})
+        self.assertEqual(
+            set(result["resources_sha256"]),
+            {f"PiClient/{name}" for name in pi_resources.FILES},
+        )
         for name, data in self.payload.items():
             staged = self.resources / "PiClient" / name
             self.assertEqual(staged.read_bytes(), data)
@@ -86,11 +92,51 @@ class PiClientResourceTests(unittest.TestCase):
         self.assert_code("pi_client_hash_mismatch", self.install)
         self.assertFalse((self.resources / "PiClient").exists())
 
-    def test_missing_source_has_fixed_error(self):
-        self.assert_code(
-            "pi_client_source_required",
-            lambda: pi_resources.install_pi_client(self.resources, source=None, lockfile=self.lock),
+    def test_default_snapshot_is_staged_from_lock_directory(self):
+        snapshot = self.lock.parent / "PiClient"
+        shutil.copytree(self.source, snapshot)
+        result = pi_resources.install_pi_client(
+            self.resources,
+            source=None,
+            lockfile=self.lock,
         )
+        self.assertEqual(result["revision"], "a" * 40)
+        self.assertEqual(
+            {
+                name: hashlib.sha256(
+                    (self.resources / "PiClient" / name).read_bytes()
+                ).hexdigest()
+                for name in pi_resources.FILES
+            },
+            result["files_sha256"],
+        )
+
+    def test_missing_default_snapshot_has_fixed_error(self):
+        self.assert_code(
+            "pi_client_snapshot_missing",
+            lambda: pi_resources.install_pi_client(
+                self.resources, source=None, lockfile=self.lock
+            ),
+        )
+
+    def test_committed_snapshot_stages_in_a_clean_consumer_without_source_checkout(
+        self,
+    ):
+        # Exercise the real lock and bytes, then relocate them into a clean
+        # consumer that cannot find an adjacent integration checkout.
+        consumer = self.root / "clean-stark" / "apps/menu-bar/Resources"
+        consumer.mkdir(parents=True)
+        shutil.copy2(pi_resources.LOCK_PATH, consumer / "PiClient.lock.json")
+        shutil.copytree(
+            pi_resources.LOCK_PATH.parent / "PiClient", consumer / "PiClient"
+        )
+        result = pi_resources.install_pi_client(
+            self.resources, source=None, lockfile=consumer / "PiClient.lock.json"
+        )
+        self.assertEqual(
+            result["files_sha256"], pi_resources.read_lock()["files_sha256"]
+        )
+        self.assertEqual(set(result["files_sha256"]), set(pi_resources.FILES))
 
     def test_source_symlink_is_rejected(self):
         path = self.source / "LICENSE"
@@ -119,7 +165,9 @@ class PiClientResourceTests(unittest.TestCase):
         self.assert_code("pi_client_lock_invalid", self.install)
 
     def test_invalid_package_manifest_is_rejected(self):
-        self.payload["package.json"] = b'{"name":"other","type":"module","private":true}\n'
+        self.payload["package.json"] = (
+            b'{"name":"other","type":"module","private":true}\n'
+        )
         self.write_lock()
         (self.source / "package.json").write_bytes(self.payload["package.json"])
         self.assert_code("pi_client_package_invalid", self.install)
