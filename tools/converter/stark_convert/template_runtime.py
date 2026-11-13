@@ -51,6 +51,93 @@ class TemplateHelperMissing(TemplateRuntimeError):
     """The native evaluator must be built or installed before rendering."""
 
 
+# Some chat programs, such as the `default` entry of the published Mistral 7B
+# v0.3 MLX export, raise on any role but alternating user/assistant. A
+# conversion that proves this by test-rendering records this policy; rendering
+# then folds one leading system message into the FIRST user message, so earlier
+# rendered tokens never change between turns. Mistral's own v0.3 template joins
+# its system message to user text with the same separator.
+SYSTEM_ROLE_FOLD = "fold_into_first_user"
+SYSTEM_FOLD_SEPARATOR = "\n\n"
+SYSTEM_ROLE_POLICY = {"policy": SYSTEM_ROLE_FOLD, "separator": SYSTEM_FOLD_SEPARATOR}
+_PROBE_SYSTEM = "Synthetic system probe."
+_PROBE_USER = "Synthetic user probe."
+_PROBE_ASSISTANT = "Synthetic assistant probe."
+
+
+class SystemRoleError(TemplateRuntimeError):
+    """A system message that cannot be folded for a template without a system role."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def fold_system_message(messages):
+    """Fold one leading system message into the first user message, or fail closed.
+
+    Conversations without a system message are returned unchanged. Accepted:
+    exactly one system message, at index 0, with string content, immediately
+    followed by a user message with string content.
+    """
+    if not isinstance(messages, (list, tuple)):
+        return messages
+    roles = [message.get("role") if isinstance(message, dict) else None for message in messages]
+    if "system" not in roles:
+        return messages
+    if roles.count("system") != 1:
+        raise SystemRoleError("system_message_repeated")
+    if roles[0] != "system":
+        raise SystemRoleError("system_message_not_first")
+    system = messages[0].get("content")
+    if not isinstance(system, str):
+        raise SystemRoleError("system_content_not_text")
+    if len(messages) < 2 or roles[1] != "user":
+        raise SystemRoleError("system_message_without_user")
+    user = messages[1].get("content")
+    if not isinstance(user, str):
+        raise SystemRoleError("user_content_not_text")
+    folded = {**messages[1], "content": system + SYSTEM_FOLD_SEPARATOR + user}
+    return [folded, *messages[2:]]
+
+
+def probe_system_role(source, *, bos_token="", eos_token=""):
+    """Test-render a chat program; return SYSTEM_ROLE_POLICY when it refuses only the system role.
+
+    Returns None when the program accepts a leading system message, or when it
+    cannot render a plain user turn either (nothing is inferred). Uses fixed
+    synthetic messages only. TemplateHelperMissing propagates.
+    """
+    from .tool_protocols import runtime_template_source
+
+    common = {"add_generation_prompt": True, "bos_token": bos_token or "", "eos_token": eos_token or ""}
+    system = {"role": "system", "content": _PROBE_SYSTEM}
+    user = {"role": "user", "content": _PROBE_USER}
+    turns = [system, user, {"role": "assistant", "content": _PROBE_ASSISTANT}, dict(user)]
+    try:
+        template = IsolatedTemplate(runtime_template_source(source))
+        template.render(messages=[user], **common)
+    except TemplateHelperMissing:
+        raise
+    except TemplateRuntimeError:
+        return None
+    try:
+        template.render(messages=[system, user], **common)
+        return None
+    except TemplateHelperMissing:
+        raise
+    except TemplateRuntimeError:
+        pass
+    try:
+        template.render(messages=fold_system_message([system, user]), **common)
+        template.render(messages=fold_system_message(turns), **common)
+    except TemplateHelperMissing:
+        raise
+    except TemplateRuntimeError:
+        return None
+    return dict(SYSTEM_ROLE_POLICY)
+
+
 def _check_value(value):
     """Bound expanded containers, including repeated aliases, before conversion."""
     pending = [(value, 0)]
@@ -124,7 +211,10 @@ def _template_executable():
 class IsolatedTemplate:
     """A source-only handle; compilation and every render use a fresh Rust helper."""
 
-    def __init__(self, source):
+    def __init__(self, source, *, system_role=None):
+        if system_role not in (None, SYSTEM_ROLE_FOLD):
+            raise TemplateRuntimeError(ERROR)
+        self._system_role = system_role
         if not isinstance(source, str) or not source or len(source) > MAX_SOURCE_BYTES:
             raise TemplateRuntimeError(ERROR)
         try:
@@ -140,6 +230,8 @@ class IsolatedTemplate:
         return self.render_with_cancellation(None, **arguments)
 
     def render_with_cancellation(self, cancelled, **arguments):
+        if self._system_role == SYSTEM_ROLE_FOLD and "messages" in arguments:
+            arguments = {**arguments, "messages": fold_system_message(arguments["messages"])}
         return self._evaluate(arguments, cancelled)
 
     def _evaluate(self, arguments, cancelled):

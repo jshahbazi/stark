@@ -58,7 +58,7 @@ def test_pinned_12b_metadata_preflight_uses_its_own_processor_bytes(tmp_path, mo
 def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification():
     matrix = support_matrix()
     assert matrix["schema_version"] == 1 and matrix["modes"] == list(model_support.MODES)
-    assert len(matrix["families"]) == len(model_support.CONFIG_ADAPTERS) + 2
+    assert len(matrix["families"]) == len(model_support.CONFIG_ADAPTERS) + 3
     assert len(json.dumps(matrix).encode()) < 65536
     assert matrix["qualification"] == {
         "status": "not_assessed",
@@ -210,6 +210,32 @@ def test_floating_source_precision_is_not_confused_with_native_output_dtype(sour
     assert preflight_model(config, mode="text", dtype="float32")["reasons"] == ["unsupported_native_dtype"]
 
 
+@pytest.mark.parametrize("architecture", ["llama", "qwen2", "mistral"])
+def test_native_f16_output_is_limited_to_full_attention_dense_text_and_decision(architecture):
+    config = {"model_type": architecture, "torch_dtype": "float16"}
+    for mode in ("text", "decision"):
+        assert preflight_model(config, mode=mode, dtype="float16")["status"] == "conditional"
+        assert preflight_model(config, mode=mode, dtype="float32")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(config, mode="vision-language", dtype="float16")["status"] == "unsupported"
+    windowed = {
+        "llama": {**config, "layer_types": ["sliding_attention", "full_attention"]},
+        "qwen2": {**config, "use_sliding_window": True, "sliding_window": 4096},
+        "mistral": {**config, "sliding_window": 4096},
+    }[architecture]
+    assert preflight_model(windowed, mode="text", dtype="float16")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(windowed, mode="text")["status"] == "conditional"
+    if architecture == "qwen2":
+        inactive = {**config, "use_sliding_window": False, "sliding_window": 32768}
+        assert preflight_model(inactive, mode="text", dtype="float16")["status"] == "conditional"
+
+
+@pytest.mark.parametrize("architecture", ["qwen3", "gemma2", "phi3", "smollm3"])
+def test_native_f16_output_stays_blocked_outside_the_dense_f16_families(architecture):
+    config = {"model_type": architecture, "tie_word_embeddings": True}
+    assert preflight_model(config, mode="text", dtype="float16")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(config, dtype="float16")["status"] == "conditional"
+
+
 @pytest.mark.parametrize("bits", [4, 8])
 def test_mlx_text_representation_is_implemented_but_unqualified(bits):
     config = {"model_type": "qwen3", "quantization": {"bits": bits, "group_size": 64}}
@@ -227,7 +253,7 @@ def test_mlx_text_representation_is_implemented_but_unqualified(bits):
             {"model_type": "llama", "quantization_config": {"quant_method": "gptq", "bits": 4}},
             "unsupported_weight_format",
         ),
-        ({"model_type": "qwen2", "quantization": {"bits": 4, "group_size": 64}}, "unsupported_weight_format"),
+        ({"model_type": "granite", "quantization": {"bits": 4, "group_size": 64}}, "unsupported_weight_format"),
     ],
 )
 def test_explicit_unsupported_metadata_has_a_fixed_reason(config, reason):
@@ -427,7 +453,7 @@ def test_resolver_rejects_changed_explicit_immutable_revision_before_metadata(tm
 def test_cli_family_listing_and_local_preflight_need_no_output(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["stark-convert", "--list-families"])
     assert cli.main() == 0
-    assert len(json.loads(capsys.readouterr().out)["families"]) == len(model_support.CONFIG_ADAPTERS) + 2
+    assert len(json.loads(capsys.readouterr().out)["families"]) == len(model_support.CONFIG_ADAPTERS) + 3
     root = files(tmp_path / "source")
     monkeypatch.setattr(
         "sys.argv", ["stark-convert", str(root), "--preflight", "--offline", "--support-mode", "decision"]

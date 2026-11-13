@@ -205,6 +205,30 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
         }
     }
 
+    /// Activation dtype implied by the decoder's floating-point storage, read
+    /// from the tensor index without allocating weights. A decoder that stores
+    /// F16 tensors and no BF16 tensor runs F16 activations; every other
+    /// artifact keeps the established BF16 policy unchanged. F32 tensors (small
+    /// controls) never select a policy on their own.
+    pub(crate) fn decoder_activation_data_type(&self) -> DataType {
+        let mut f16 = false;
+        for (name, tensor) in &self.index {
+            if !name.starts_with("decoder.") {
+                continue;
+            }
+            match tensor.data_type {
+                DataType::BF16 => return DataType::BF16,
+                DataType::F16 => f16 = true,
+                _ => {},
+            }
+        }
+        if f16 {
+            DataType::F16
+        } else {
+            DataType::BF16
+        }
+    }
+
     /// Inspect both target and predictor storage, without allocating weights.
     /// A BF16 predictor attached to a packed/mixed target is not eligible.
     /// The qualified head retains Legacy norms; other incoming policies stay intact.
@@ -572,6 +596,40 @@ mod payload_tests {
             r#"{"type":"MLXSpec","bits":4,"group_size":64,"layout":"output_input"}"#.into(),
         );
         assert!(!loader.qwen_target_and_head_full_bf16());
+        assert_eq!(loader.allocated_buffer_bytes.get(), 0);
+    }
+
+    #[stark_test]
+    fn decoder_activation_dtype_selects_f16_only_for_bf16_free_f16_decoders() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(1, &[0]);
+        let mut loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+        let set = |loader: &mut ParameterLoader<Cpu>, name: &str, data_type: DataType| {
+            loader.index.insert(
+                name.into(),
+                super::ParameterMetadata {
+                    shape: vec![1].into_boxed_slice(),
+                    data_type,
+                    offset: 0,
+                    size: data_type.size_in_bytes(),
+                },
+            );
+        };
+        // No floating decoder storage: the established BF16 policy.
+        assert_eq!(loader.decoder_activation_data_type(), DataType::BF16);
+        set(&mut loader, "decoder.layers.0.mlp.up_projection.weights", DataType::U32);
+        set(&mut loader, "decoder.output_norm.scales", DataType::F32);
+        assert_eq!(loader.decoder_activation_data_type(), DataType::BF16);
+        // F16 tensors outside the decoder never select a policy.
+        set(&mut loader, "mtp.norm.scales", DataType::F16);
+        set(&mut loader, "vision.patch.weights", DataType::F16);
+        assert_eq!(loader.decoder_activation_data_type(), DataType::BF16);
+        set(&mut loader, "decoder.embedding.scales", DataType::F16);
+        set(&mut loader, "decoder.embedding.biases", DataType::F16);
+        assert_eq!(loader.decoder_activation_data_type(), DataType::F16);
+        // Any BF16 decoder tensor keeps the BF16 policy (mixed storage is not F16).
+        set(&mut loader, "decoder.layers.0.mixer.qkv_projection.biases", DataType::BF16);
+        assert_eq!(loader.decoder_activation_data_type(), DataType::BF16);
         assert_eq!(loader.allocated_buffer_bytes.get(), 0);
     }
 

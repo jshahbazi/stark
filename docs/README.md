@@ -21,8 +21,10 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Native hybrid sampling](NUMERICAL_SAMPLING.md) | Exact nucleus-prefix proof, reference-order fallbacks, precision and scratch lifetime |
 | [OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) | Native text paths, Gemma 4 BF16 image profiles, encoder-free and MoE paths, precision policy and validation boundaries |
 | [Gemma 4 assistants](GEMMA4_ASSISTANT_PLAN.md) | Pinned E2B/E4B companion metadata and staged conversion, target activation/KV, text MTP and cache qualification work |
+| [Edge0-145B plan](EDGE0_PLAN.md) | Pinned metadata intake, storage and arithmetic gaps against the native Flash-Next path, and staged work; nothing implemented or run |
 | [Gemma 3 images](GEMMA3_IMAGES.md) | Source-bound SigLIP image artifacts, 4B/12B/27B admission, exact processor semantics and qualification boundaries |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
+| [Ripple-65B Preview](RIPPLE.md) | Native Rust/Metal architecture, pinned Q4_K_M and Q8_0 preparation, precision and validation limits |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
 | [Local API](LOCAL_API.md) | The loopback OpenAI-style chat API: authentication, endpoints, parameters, limits, error codes, tested clients |
 
@@ -44,6 +46,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Adding model support](MODEL_ONBOARDING.md) | Required tool-calling assessment, prefix reuse, artifact qualification and lifecycle checks for each new inference path |
 | [Model changes and experiments](model-experiments/README.md) | Attempt ledger, image-support retrospective, failed approaches, promotion decisions and a template for future correctness/performance work |
 | [Technical guide](TECHNICAL_OVERVIEW.md) | Components, engine module layout, feature flags, Python package layout, the app control protocol |
+| [Codex, Claude and Pi integration plan](AGENT_CLIENT_INTEGRATION_PLAN.md) | Proposed client setup, external protocol adapters, authentication, implementation milestones and qualification gates; no runtime integration added |
 | [CI and security checks](CI.md) | Workflows, what they cover and do not cover, dependency gates, caches, local equivalents |
 | [Releasing](RELEASING.md) | Signed and prebuilt release workflows, verification on a receiving Mac, DMG handling |
 | [Cargo troubleshooting](CARGO_TROUBLESHOOTING.md) | Repairing a corrupted registry cache |

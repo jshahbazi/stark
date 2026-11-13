@@ -16,8 +16,8 @@ using namespace stark::activation_transform;
 #define EMITS_GROUP_SUMS (ops == ActivationTransformOp::QuantizeWithGroupSums)
 
 template <typename T, typename BiasT>
-VARIANTS(T, float, bfloat)
-VARIANTS(BiasT, float, bfloat)
+VARIANTS(T, float, half, bfloat)
+VARIANTS(BiasT, float, half, bfloat)
 PUBLIC KERNEL(ActivationTransform)(
     const device T* input OPTIONAL(!in_place),
     device T* fp_out OPTIONAL(!QUANTIZED),

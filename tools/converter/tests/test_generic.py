@@ -16,6 +16,7 @@ from tokenizers import Tokenizer, models
 
 from stark_convert import cli
 from stark_convert.contracts import ConversionRequest
+from stark_convert.model_support import NATIVE_F16_FAMILIES, native_f16_sliding_window
 from stark_convert.sources import resolve_source
 from stark_convert.streaming import ConversionError, UnsupportedConversion
 
@@ -68,6 +69,36 @@ def test_generic_probe_needs_explicit_architecture_and_never_qualifies_source():
     assert result.native_loading == "unverified"
     assert result.source_validation == "not_performed"
     assert cli.capability(ConversionRequest(REPOS["qwen3"], architecture="llama")).conversion == "unsupported"
+
+
+@pytest.mark.parametrize("architecture", sorted(REPOS))
+def test_f16_output_is_native_loadable_only_for_full_attention_dense_families(tmp_path, architecture):
+    source = future_source(tmp_path / "source", architecture)
+    config = json.loads((source / "config.json").read_text())
+    native_f16 = architecture in NATIVE_F16_FAMILIES and not native_f16_sliding_window(architecture, config)
+    receipt = cli.convert(snapshot(source), tmp_path / "output", repo=FUTURE, dtype="float16", chunk_bytes=4096)
+    assert receipt["native_qualification"] is None
+    assert receipt["capability"]["native_loading"] == ("unverified" if native_f16 else "runtime_blocked")
+    request = ConversionRequest(FUTURE, dtype="float16", metadata_profile="hf-generic", architecture=architecture)
+    probe = cli.capability(request).native_loading
+    assert probe == ("unverified" if architecture in NATIVE_F16_FAMILIES else "runtime_blocked")
+    assert cli.capability(replace(request, dtype="float32")).native_loading == "runtime_blocked"
+    catalogued = cli.capability(ConversionRequest(REPOS[architecture], dtype="float16")).native_loading
+    if cli.capability(ConversionRequest(REPOS[architecture])).conversion == "implemented":
+        assert catalogued == ("unverified" if architecture in NATIVE_F16_FAMILIES else "runtime_blocked")
+
+
+def test_f16_sliding_window_plan_is_runtime_blocked(tmp_path):
+    source = future_source(tmp_path / "source", "mistral")
+    config = json.loads((source / "config.json").read_text())
+    config["sliding_window"] = 4
+    (source / "config.json").write_text(json.dumps(config))
+    receipt = cli.convert(snapshot(source), tmp_path / "f16", repo=FUTURE, dtype="float16", chunk_bytes=4096)
+    assert receipt["capability"]["native_loading"] == "runtime_blocked"
+    assert receipt["capability"]["reason"] == "native_f16_sliding_window"
+    receipt = cli.convert(snapshot(source), tmp_path / "bf16", repo=FUTURE, chunk_bytes=4096)
+    assert receipt["capability"]["native_loading"] == "unverified"
+    assert receipt["capability"]["reason"] is None
 
 
 @pytest.mark.parametrize("bits", [4, 8])

@@ -202,14 +202,66 @@ def test_listing_fields_reject_sources_without_any_repository_request(tmp_path, 
     assert listings and all(event[2]["expand"] == ["sha", "pipeline_tag", "tags", "siblings"] for event in listings)
 
 
-def test_screened_sources_use_positions_so_a_page_reaches_further(tmp_path, skip_headers, monkeypatch):
+SAFETENSORS_REQUIRED = "This checkpoint requires a supported Safetensors file or a complete shard index."
+
+
+def test_gguf_only_listing_is_screened_while_other_weight_layouts_are_inspected(tmp_path, skip_headers, monkeypatch):
+    hub = ListingHub()
+    config = {"model_type": "qwen3", "torch_dtype": "float16"}
+    gguf = {"model-Q4_K_M.gguf": 400, "model-Q8_0.gguf": 800}
+    sources = {
+        # Inspected, this would be an unavailable row asking for Safetensors.
+        "someone/GgufOnly": (gguf, ["config.json", "README.md", *gguf]),
+        "someone/Mixed": (
+            {"model.safetensors": 1234567890, **gguf},
+            ["config.json", "model.safetensors", *gguf],
+        ),
+        "someone/BinOnly": ({"pytorch_model.bin": 1234}, ["config.json", "pytorch_model.bin"]),
+        "someone/GgufAndBin": (
+            {"pytorch_model.bin": 1234, **gguf},
+            ["config.json", "pytorch_model.bin", *gguf],
+        ),
+        "someone/GgufSeed": (gguf, ["config.json", *gguf]),
+        "someone/GgufUnlisted": (gguf, None),
+    }
+    for repo, (names, listing_names) in sources.items():
+        hub.add(tmp_path / "hub", repo, config, names=names)
+        if listing_names is not None:
+            hub.listing[repo] = listed(listing_names)
+    hub.discovered["qwen3"] = list(sources)
+    # A seeded source has no listing of its own, even when the search also returns it.
+    monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: ["someone/GgufSeed"])
+
+    result = catalog.family_catalog("qwen3", hub=hub)
+
+    inspected = sorted(event[1] for event in requests(hub, "info"))
+    assert inspected == sorted(repo for repo in sources if repo != "someone/GgufOnly")
+    assert not [event for event in hub.events if "someone/GgufOnly" in event[1:2]]
+    rows = {item["repo"]: item for item in result["items"]}
+    assert sorted(rows) == inspected
+    assert rows["someone/Mixed"]["downloadable"] is True
+    for repo in ("someone/BinOnly", "someone/GgufAndBin", "someone/GgufSeed", "someone/GgufUnlisted"):
+        assert rows[repo]["downloadable"] is False
+        assert rows[repo]["unavailable_reason"] == SAFETENSORS_REQUIRED
+    assert result["next_offset"] is None
+
+
+@pytest.mark.parametrize(
+    "screened",
+    [
+        listed(["config.json", "model.safetensors"], pipeline_tag="feature-extraction"),
+        listed(["config.json", "model-Q4_K_M.gguf", "README.md"]),
+    ],
+    ids=["other-task", "gguf-only"],
+)
+def test_screened_sources_use_positions_so_a_page_reaches_further(tmp_path, skip_headers, monkeypatch, screened):
     hub = ListingHub()
     config = {"model_type": "qwen3", "torch_dtype": "float16"}
     order = []
     for index in range(6):
         skipped, kept = f"someone/Skip{index}", f"someone/Keep{index}"
         hub.add(tmp_path / "hub", kept, config)
-        hub.listing[skipped] = listed(["config.json", "model.safetensors"], pipeline_tag="feature-extraction")
+        hub.listing[skipped] = screened
         hub.listing[kept] = listed(["config.json", "model.safetensors"])
         order.extend([skipped, kept])
     hub.discovered["qwen3"] = order

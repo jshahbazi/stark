@@ -28,6 +28,50 @@ from .sources import SourceSnapshot, _verified_hashes, huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion, load_checkpoint, read_safetensors_header
 
 SOURCES = {
+    "ripple-q4-k-m": {
+        "architecture": "ricursive",
+        "weights_repo": "AtomicChat/Ripple-65B-Preview-GGUF",
+        "weights_revision": "df550a7178a87bbfb6ee2bdbd37603c553d536ee",
+        "weights_patterns": ["Ripple-65B-Preview-Q4_K_M.gguf", "README.md"],
+        "metadata_repo": "ricursiveAI/Ripple-65B-Preview",
+        "metadata_revision": "e27e171792f303d74c048184e8259ba663cfa0d5",
+        "weight_bytes": 38_798_820_576,
+        "weight_shards": 1,
+        "weight_extension": ".gguf",
+        "required_weight_files": ["Ripple-65B-Preview-Q4_K_M.gguf"],
+        "required_files": ["LICENSE", "chat_template.jinja"],
+        "quantization": "Q4_K_M",
+    },
+    "ripple-q8": {
+        "architecture": "ricursive",
+        "weights_repo": "AtomicChat/Ripple-65B-Preview-GGUF",
+        "weights_revision": "57066fdb2348a53f2261f096e0a793b9554b4106",
+        "weights_patterns": ["Ripple-65B-Preview-Q8_0-*.gguf", "README.md"],
+        "metadata_repo": "ricursiveAI/Ripple-65B-Preview",
+        "metadata_revision": "e27e171792f303d74c048184e8259ba663cfa0d5",
+        "weight_bytes": 68_840_113_568,
+        "weight_shards": 2,
+        "weight_extension": ".gguf",
+        "required_weight_files": [
+            "Ripple-65B-Preview-Q8_0-00001-of-00002.gguf",
+            "Ripple-65B-Preview-Q8_0-00002-of-00002.gguf",
+        ],
+        "required_files": ["LICENSE", "chat_template.jinja"],
+        "quantization": "Q8_0",
+    },
+    "ripple-bf16": {
+        "architecture": "ricursive",
+        "weights_repo": "ricursiveAI/Ripple-65B-Preview",
+        "weights_revision": "e27e171792f303d74c048184e8259ba663cfa0d5",
+        "weights_patterns": ["model-*-of-*.safetensors", "model.safetensors.index.json", "README.md"],
+        "metadata_repo": "ricursiveAI/Ripple-65B-Preview",
+        "metadata_revision": "e27e171792f303d74c048184e8259ba663cfa0d5",
+        "weight_bytes": 129_565_519_472,
+        "weight_shards": 16,
+        "required_weight_files": [f"model-{index:05}-of-00016.safetensors" for index in range(1, 17)],
+        "required_files": ["LICENSE", "chat_template.jinja"],
+        "quantization": "BF16",
+    },
     "flint-int4": {
         "architecture": "flint",
         "weights_repo": "RecursiveSI/flint-int4",
@@ -135,9 +179,14 @@ def _finish_metadata(directory: Path, source: dict) -> dict:
     text = config.get("text_config", config)
     tokenizer = _json(directory / "tokenizer_config.json", 2 * 1024 * 1024)
     template_file = directory / "chat_template.jinja"
-    if template_file.is_file() and template_file.stat().st_size > 256 * 1024:
-        raise ValueError("excessive chat template")
-    template = template_file.read_text() if template_file.is_file() else tokenizer.get("chat_template")
+    if template_file.exists() or template_file.is_symlink():
+        if template_file.is_symlink() or not template_file.is_file() or template_file.stat().st_size > 256 * 1024:
+            raise ValueError("invalid chat template file")
+        template = template_file.read_text()
+    elif "chat_template.jinja" in source.get("required_files", []):
+        raise ValueError("missing pinned chat template")
+    else:
+        template = tokenizer.get("chat_template")
     if isinstance(template, list):
         template = next((item.get("template") for item in template if item.get("name") == "default"), None)
     if not isinstance(template, str) or not 0 < len(template.encode()) <= 256 * 1024:
@@ -498,11 +547,15 @@ def prepared_identity(directory: Path) -> dict | None:
         codec = config.get("token_codec_config")
         if not isinstance(codec, dict) or codec.get("type") != "ChatCodecConfig" or not codec.get("prompt_template"):
             return None
-        extension = ".gguf" if source["architecture"] == "glm5_next" else ".safetensors"
+        extension = source.get(
+            "weight_extension", ".gguf" if source["architecture"] == "glm5_next" else ".safetensors"
+        )
         files = list(directory.glob("*" + extension))
         if not 1 <= len(files) <= 512 or any(path.is_symlink() or not path.is_file() for path in files):
             return None
         if "weight_shards" in source and len(files) != source["weight_shards"]:
+            return None
+        if "required_weight_files" in source and {path.name for path in files} != set(source["required_weight_files"]):
             return None
         required_files = source.get("required_files", [])
         if any(not (directory / name).is_file() or (directory / name).is_symlink() for name in required_files):
@@ -741,6 +794,10 @@ def prepare(
         raise ValueError("invalid prepared weight files")
     if "weight_shards" in source and len(weights) != source["weight_shards"]:
         raise ValueError("incomplete pinned weight shard set")
+    if "required_weight_files" in source and {path.name for path in weights} != set(source["required_weight_files"]):
+        raise ValueError("pinned weight shard names changed")
+    if any(not (stage / name).is_file() or (stage / name).is_symlink() for name in source.get("required_files", [])):
+        raise ValueError("missing pinned model metadata")
     weight_bytes = sum(path.stat().st_size for path in weights)
     expected_shards_bytes = source["weight_bytes"] - (
         source.get("ngram_bytes", 0) if source.get("ngram_in_weight_bytes") else 0

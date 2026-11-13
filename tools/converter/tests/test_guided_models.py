@@ -1166,6 +1166,33 @@ def test_quantized_recipe_requires_bf16_parameters_and_allows_f32_normalization(
     assert not guided.matches_recipe(incompatible, recipe)
 
 
+@pytest.mark.parametrize("architecture", ["qwen2", "mistral", "llama", "qwen3"])
+def test_auto_selected_f16_storage_matches_only_auto_f16_family_recipes(tmp_path, architecture):
+    item = catalog_candidate()
+    item["planning"]["architecture"] = architecture
+    recipe = guided.recipe_from_catalog(item)
+    automatic = {"requested": "auto", "selected": "float16", "reason": "all_f16_mlx_affine_source"}
+    f16 = artifact(tmp_path / "f16", recipe, parameter_dtype="F16")
+    # Without the converter's selection record, F16 parameters stay a reference copy.
+    assert not guided.matches_recipe(f16, recipe)
+    receipt = json.loads((f16 / "conversion.json").read_text())
+    (f16 / "conversion.json").write_text(json.dumps({**receipt, "dtype_selection": automatic}))
+    assert guided.matches_recipe(f16, recipe) == (architecture in {"qwen2", "mistral"})
+    (f16 / "conversion.json").write_text(
+        json.dumps({**receipt, "dtype_selection": {**automatic, "selected": "bfloat16"}})
+    )
+    assert not guided.matches_recipe(f16, recipe)
+    # A BF16 install keeps matching whatever auto recorded; mixed storage never does.
+    bf16 = artifact(tmp_path / "bf16", recipe)
+    receipt = json.loads((bf16 / "conversion.json").read_text())
+    (bf16 / "conversion.json").write_text(
+        json.dumps({**receipt, "dtype_selection": {**automatic, "selected": "bfloat16", "reason": "x"}})
+    )
+    assert guided.matches_recipe(bf16, recipe)
+    (bf16 / "conversion.json").write_text(json.dumps({**receipt, "dtype_selection": automatic}))
+    assert not guided.matches_recipe(bf16, recipe)
+
+
 def test_guided_precision_accepts_row_partitioned_integer_weights(tmp_path):
     recipe = replace(guided.RECIPES[0], quantization="4-bit / 6-bit")
     path = partitioned_artifact(artifact(tmp_path / "partitioned", guided.RECIPES[0]))

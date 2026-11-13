@@ -22,6 +22,7 @@ from .model_support import (
 from .registry import get_model, models
 from .sources import huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion
+from .template_compat import NamedTemplateError, is_named_template_list, select_named_chat_template
 from .vision_contract import REPO as EXACT_VISION_REPO
 from .vision_contract import REVISION as EXACT_VISION_REVISION
 
@@ -147,6 +148,10 @@ def _listing_rejects(repo, listing):
 
     Only outcomes that the per-repository checks reach from the same fields
     are settled here: another task, no model configuration, or no weights.
+    A source whose only weights are GGUF files is also dropped. Inspection
+    could only show it as unavailable for want of Safetensors weights, and
+    some publishers give every GGUF repository the same placeholder
+    configuration, which would list it under an unrelated family.
     """
     if isinstance(_field(listing, "tags"), list) and not _application_source(listing, repo):
         return True
@@ -158,9 +163,12 @@ def _listing_rejects(repo, listing):
         return False
     if "config.json" not in names and get_model(repo) is None:
         return True
-    return not any(
-        name.endswith(_WEIGHT_SUFFIXES) and not PurePosixPath(name).name.startswith("adapter_model") for name in names
-    )
+    weights = [
+        name
+        for name in names
+        if name.endswith(_WEIGHT_SUFFIXES) and not PurePosixPath(name).name.startswith("adapter_model")
+    ]
+    return all(name.endswith(".gguf") for name in weights)
 
 
 def _unsupported_quantization(config):
@@ -602,6 +610,32 @@ def _positive_int(value):
 
 
 def _source_chat_template(entry, repo, names, read):
+    """Return (template, blocker, from_named_list) for the template conversion would use.
+
+    A Hugging Face named list contributes its `default` entry, exactly as the
+    converter selects it; any other list or mapping stays unavailable.
+    """
+    template, blocker = _source_chat_template_value(entry, repo, names, read)
+    if blocker is not None:
+        return None, blocker, False
+    named = is_named_template_list(template)
+    if named:
+        try:
+            template, _selection = select_named_chat_template(template)
+        except NamedTemplateError:
+            return None, "chat_template_invalid", False
+    if not isinstance(template, str):
+        return None, "chat_template_missing", False
+    template = _GENERATION_BLOCK_TAG.sub("", template)
+    try:
+        if not template or len(template.encode("utf-8")) > _MAX_CHAT_TEMPLATE_BYTES:
+            return None, "chat_template_invalid", False
+    except UnicodeEncodeError:
+        return None, "chat_template_invalid", False
+    return template, None, named
+
+
+def _source_chat_template_value(entry, repo, names, read):
     """Read only same-revision metadata used by Stark's chat conversion path."""
     files = entry.get("files", {}) if isinstance(entry, dict) else {}
     tokenizer_spec = files.get("tokenizer_config") or {"repo": repo, "filename": "tokenizer_config.json"}
@@ -648,18 +682,12 @@ def _source_chat_template(entry, repo, names, read):
             template = _inline_text("chat_template", inline_id)
         except Exception:
             return None, "chat_template_inline_source_unavailable"
-    if not isinstance(template, str):
-        return None, "chat_template_missing"
-    template = _GENERATION_BLOCK_TAG.sub("", template)
-    try:
-        if not template or len(template.encode("utf-8")) > _MAX_CHAT_TEMPLATE_BYTES:
-            return None, "chat_template_invalid"
-    except UnicodeEncodeError:
-        return None, "chat_template_invalid"
     return template, None
 
 
-def _planning_metadata(family, config, info, names, sizes, *, chat_template=None, chat_template_blocker=None):
+def _planning_metadata(
+    family, config, info, names, sizes, *, chat_template=None, chat_template_blocker=None, chat_template_named=False
+):
     """Return bounded runtime-planning inputs without implying measured fit."""
     text = config.get("text_config", config)
     if not isinstance(text, dict):
@@ -693,7 +721,12 @@ def _planning_metadata(family, config, info, names, sizes, *, chat_template=None
 
     native_template = normalize_chat_template(chat_template) if isinstance(chat_template, str) else None
     chat_template_available = template_program_sha256(native_template) is not None
-    tool_parser = tool_parser_for({"prompt_template": native_template}) if chat_template_available else None
+    # A named list's tool entries are unreviewed, so its rows never advertise tools.
+    tool_parser = (
+        tool_parser_for({"prompt_template": native_template})
+        if chat_template_available and not chat_template_named
+        else None
+    )
     supports_tools = tool_parser is not None
     if not chat_template_available:
         blockers.append(chat_template_blocker or "chat_template_unavailable")
@@ -881,9 +914,12 @@ def _catalog_image_metadata(family, config, repo, revision, names, read):
             from .gemma3_contract import normalize_processor
 
             normalize_processor(_json(read("preprocessor_config.json", 65536)))
-            template, _reason = _source_chat_template(None, repo, names, read)
+            template, _reason, named = _source_chat_template(None, repo, names, read)
+            # Image artifacts pin their own reviewed template; named lists stay refused.
             return (
-                isinstance(template, str) and hashlib.sha256(template.encode()).hexdigest() == _GEMMA3_IMAGE_TEMPLATE
+                not named
+                and isinstance(template, str)
+                and hashlib.sha256(template.encode()).hexdigest() == _GEMMA3_IMAGE_TEMPLATE
             )
         if family == "gemma4_text":
             from .adapters.gemma4_vision import PROFILES
@@ -941,7 +977,7 @@ def family_catalog(
     from .catalog_cache import VerdictCache
     from .catalog_ranking import host_memory, reference_scores
     from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
-    from .native_catalog import FLINT_FAMILY_ID
+    from .native_catalog import FLINT_FAMILY_ID, RIPPLE_FAMILY_ID
     from .native_catalog import catalog_items as native_catalog_items
     from .native_catalog import unavailable_item as native_unavailable_item
 
@@ -955,7 +991,7 @@ def family_catalog(
     if type(planning) is not bool or type(deadline_seconds) not in (int, float) or not 0 < deadline_seconds <= 600:
         return report(family_id or "", "error", "The model catalogue request is invalid.")
 
-    native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID}
+    native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID, RIPPLE_FAMILY_ID}
     family = family_id if native_family else normalize_architecture(family_id)
     definition = next((item for item in support_matrix()["families"] if item["family_id"] == family), None)
     if definition is None or not any(
@@ -966,6 +1002,22 @@ def family_catalog(
         return report(family, "error", "The model catalogue request is invalid.")
     if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
         return report(family, "offline", "Connect to the internet to browse models.")
+    if family == RIPPLE_FAMILY_ID:
+        # Both quantizations share a repository but have distinct pinned
+        # revisions. Keep their exact artifact identities rather than collapsing
+        # them through the generic repository discovery map below.
+        choices = native_catalog_items(family)
+        items = choices[offset : offset + limit]
+        if on_item is not None:
+            for item in items:
+                on_item(item)
+        return report(
+            family,
+            "ready",
+            "Choose a model to download." if items else "No more models are available.",
+            items,
+            next_offset=offset + len(items) if offset + len(items) < len(choices) else None,
+        )
     if hub is None:
         import huggingface_hub
 
@@ -1308,9 +1360,11 @@ def family_catalog(
                 parameters = _parameters(info, quantization != "BF16" or extra_weights)
                 if parameters is None and quantization != "BF16" and not extra_weights:
                     parameters = _dense_config_parameters(config, family)
-                chat_template, chat_template_blocker = (None, None)
+                chat_template, chat_template_blocker, chat_template_named = (None, None, False)
                 if planning:
-                    chat_template, chat_template_blocker = _source_chat_template(entry, repo, names, read_pinned)
+                    chat_template, chat_template_blocker, chat_template_named = _source_chat_template(
+                        entry, repo, names, read_pinned
+                    )
                 item = {
                     "id": hashlib.sha256((repo + "@" + revision).encode()).hexdigest()[:32],
                     "repo": repo,
@@ -1338,6 +1392,7 @@ def family_catalog(
                         sizes,
                         chat_template=chat_template,
                         chat_template_blocker=chat_template_blocker,
+                        chat_template_named=chat_template_named,
                     )
                     item["task_tags"] = item["planning"]["task_tags"]
                     item["license"] = item["planning"]["license"]

@@ -37,10 +37,12 @@ template <
     GemmAPrologueKind A_PROLOGUE,
     uint A_GROUP_SIZE,
     bool SOURCE_F32_FRAGMENTS>
-VARIANTS(AT, bfloat, float)
-VARIANTS(BT, bfloat, float)
-VARIANTS(DT, bfloat, float)
+VARIANTS(AT, bfloat, half, float)
+VARIANTS(BT, bfloat, half, float)
+VARIANTS(DT, bfloat, half, float)
 CONSTRAINT(BT != "float" || (AT == "float" && DT == "float"))
+// F16 operands run only as an all-F16 product with F32 accumulation.
+CONSTRAINT((AT == "half") == (BT == "half") && (AT == "half") == (DT == "half"))
 VARIANTS(
     GEMM_TILING,
     GemmTiling::Tile8x32x32_Simdgroups1x1,
