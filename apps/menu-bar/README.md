@@ -376,9 +376,9 @@ Quality alternatives must be within 10 cached task-score points of the best
 admitted model and represent distinct parent models. A distant or unknown
 score does not fill an alternative slot; without cached coverage, the guide
 offers one fallback. Cards show the reference score and its quantization
-limitation. If a higher-scoring option passes the other resource checks but
-needs more available memory, the guide explains its memory requirement and
-offers a fresh check.
+limitation. Model offers use installed RAM and the GPU memory budget. Current
+available memory can add a reminder to free memory before starting; changes
+in current memory do not alter the model ranking.
 No recommendation click requests the leaderboard. Speed selects the highest
 cached task score above its reference floor within an export-weight budget of
 25% of physical RAM, after the normal resource checks. A missing qualifying
@@ -428,14 +428,15 @@ n-gram table. Full accounting and its bounds are documented in
 [recommendation evidence](../../docs/MODEL_RECOMMENDATIONS.md). GLM and the
 original mixed export use conservative full-weight GPU estimates, which can
 exclude them from the guide on a 128 GiB Mac despite their Advanced load path.
-Recommendations and startup share the current available-memory check; new
+Recommendations use installed physical RAM and the GPU budget. New
 downloads additionally need enough space for
 source and converted copies plus setup reserves. Native preparation downloads
 into the library volume and publishes by rename, so it needs one weight copy
 plus metadata and the preparation helper's 4 GiB reserve. It does not require a
 second weight-sized copy in the Hugging Face cache. Starting rechecks available
-memory after releasing the previous worker. A running model's memory is never
-assumed to be reclaimable during recommendations.
+memory after releasing the previous worker. Actual preparation retains a
+2 GiB available-memory working allowance. Current memory pressure never
+hides or reorders otherwise eligible recommendations.
 
 Fallback ranking first prefers comfortable memory headroom. **Balanced** next
 prefers source task tags when available, then scales its memory penalty to this Mac: its

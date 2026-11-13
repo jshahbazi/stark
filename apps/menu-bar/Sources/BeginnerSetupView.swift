@@ -163,10 +163,6 @@ struct BeginnerSetupView: View {
                     detail: choice.availabilityMessage != nil ? "The saved model inventory changed." : installed == nil ? "You can change models later." : "No new download is needed.")
             modelCard(choice)
             deviceSummary
-            if let advice = snapshot.memoryAdvice {
-                Text(advice).font(.caption).foregroundStyle(.secondary)
-                Button("Check models again") { requestChoices() }.disabled(installInProgress)
-            }
             if let unavailable = choice.availabilityMessage {
                 notice(unavailable, symbol: "exclamationmark.triangle", color: .orange)
             }
@@ -212,9 +208,6 @@ struct BeginnerSetupView: View {
         } else {
             heading("No suitable starting model is available.", detail: snapshot.choicesError ?? "Stark could not establish a memory plan for another supported model on this Mac. Your current setup is kept.")
             deviceSummary
-            if let advice = snapshot.memoryAdvice {
-                Text(advice).font(.caption).foregroundStyle(.secondary)
-            }
             HStack {
                 Button("Check again") { requestChoices() }.buttonStyle(.borderedProminent)
                 if session.modelPriority == .speed {

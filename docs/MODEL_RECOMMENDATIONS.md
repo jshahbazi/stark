@@ -27,16 +27,17 @@ Unqualified native plans include a 3 GiB loading/workspace allowance and round s
 and GPU estimates up to GiB. These are conservative estimates, not observed
 peak RSS or a guarantee that the loader will admit a machine under memory
 pressure. The guide retains the 2 GiB physical reserve and 85% Metal budget
-check. Recommendations and startup use the same `execution_allowed` predicate:
-current available memory must cover the effective system plan. Startup rereads
-memory and revalidates the actual artifact after releasing its previous worker.
+check. Recommendations use `recommendation_allowed`: installed physical RAM,
+GPU budget and setup storage determine which models the Mac can support.
+Current available memory does not filter or reorder offers, including when
+the available-memory probe is missing. The card can advise freeing memory
+before starting. Actual preparation retains a separate 2 GiB current-memory
+working allowance for new installs. Startup uses `execution_allowed`, rereads
+available memory and revalidates the actual artifact after releasing its
+previous worker; available memory must then cover the effective startup plan.
 An installed copy waives download space, never current execution headroom.
-When a higher-scoring cached Quality candidate passes installation, total RAM,
-GPU and disk checks but lacks current available memory, the guide names that
-option and shows its required and currently available memory. It remains
-outside actionable offers until a fresh check passes. This explanation uses
-the same exact parent binding and startup memory plan as admission; it does
-not suggest freeing memory for a source that also fails another resource gate.
+The [installed-RAM policy check](archive/runs/2026-11-13-guided-capacity-recommendations.md)
+records stable native offers across different available-memory observations.
 
 For the 128 GiB / 107.52 GB Metal-budget envelope, the current 32K-context
 estimates are 29 GiB for Flint, 87 GiB system for qualified Lily and 88 GiB for
@@ -51,7 +52,7 @@ are not freshly rehashed. Fresh recommendations obtain the same resident plan
 from a SHA-256 binding to the complete pinned native preparation profile,
 including source revisions, geometry, precision metadata, templates and file
 inventory. They do not require an installed copy. A changed or unknown profile
-retains conservative planning. Disk, current RAM and GPU checks still apply.
+retains conservative planning. Disk, installed RAM and GPU capacity checks still apply.
 An existing copy is independently revalidated; if it fails exact artifact
 checks, the report and startup both use its conservative plan. A source-only
 estimate never authorizes an unverified installed copy. At <=32K context and
@@ -88,7 +89,7 @@ The recommendation path never requests whatmodel.sh. Hardware checks and support
 
 ### Selection policy
 
-1. Exclude candidates without a complete supported conversion/native route, usable chat template, tool parser, 32K context and adequate current RAM, GPU budget and disk. Leaderboard rank never grants compatibility.
+1. Exclude candidates without a complete supported conversion/native route, usable chat template, tool parser, 32K context and adequate installed RAM, GPU budget and disk. Current available memory affects startup readiness, never recommendation eligibility or rank. Leaderboard rank never grants compatibility.
 2. Select the largest cached RAM bucket no greater than this Mac's physical RAM in GiB. Below the smallest bucket, cached coverage is unavailable; above the largest, use the largest bucket with actual resource checks.
 3. Match exact parent repositories from the pinned source catalogue. Reviewed export-to-parent bindings also require the exact export repository and revision. No fuzzy names, quantization labels or mutable commands establish identity. Ambiguous parents have no automatic score. A changed export revision requires another review.
 4. **Quality** selects descending task score after admission. Alternatives must have a cached score within **10 points** of the best admitted model on the same task scale, and each offer must represent a distinct parent model. Equal scores retain deterministic fallback order. Unknown scores never fill alternatives behind a scored choice. With no cached scores, offer one explicitly unknown benchmark/resource fallback. The 10-point distance is an editorial product threshold, reviewed with snapshot refreshes; it does not establish comparable measured artifact quality. Signed relative scores are not percentages or native artifact accuracy measurements. Parent scores do not establish export equivalence.

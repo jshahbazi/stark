@@ -1,5 +1,9 @@
 # Guided alternatives and missing stronger candidates
 
+This record describes the initial implementation at `a3c1a382`. The
+available-memory recommendation policy below was superseded by the user's
+installed-RAM direction; see the [capacity-policy follow-up](2026-11-13-guided-capacity-recommendations.md).
+
 Date: 2026-11-13. Base source: `fab5ae05` (`origin/main` when this work began).
 Changes and regressions are on `codex/competitive-guided-alternatives`.
 The installed app inspected was Stark 0.21.1. Its guided ranking, discovery
@@ -120,6 +124,13 @@ source inspection priority, subprocess arguments and task-specific caching.
 Swift checks exercise native report parsing, card score presentation and
 memory advice using synthetic data. A full app source typecheck also passed.
 Final test counts are recorded in the implementation PR.
+
+At the initial implementation (`a3c1a382`), the full converter suite reported
+7,746 passed / 95 skipped, and 80 app/setup/build/window harness checks passed.
+The final memory-message adjustment at that revision was separately checked
+by 213 affected converter tests and a 19-test beginner harness rerun. These
+results describe the initial selection policy; the capacity-policy follow-up
+records validation for the user's revised direction separately.
 
 No answer-quality benchmark, model load, generation, installation, release or
 installed-app replacement was performed. This record establishes recommendation

@@ -217,7 +217,7 @@ def test_resources_select_starting_choices_and_installed_reuse():
     pressure = resources(available_memory_bytes=0, free_disk_bytes=0, download_free_disk_bytes=0)
     assert guided.recommendation_report(pressure, {})["items"] == []
     reused = guided.recommendation_report(pressure, {guided.RECIPES[0].id: ["same-copy"]})
-    assert reused["items"] == []
+    assert [item["id"] for item in reused["items"]] == [guided.RECIPES[0].id]
 
 
 def catalog_candidate(number=1, *, weights=2 * guided.GIB, parameters=2_000_000_000, tags=()):
@@ -589,18 +589,15 @@ def test_resident_start_plan_does_not_relax_physical_or_gpu_fit(host, monkeypatc
         host.run_guided_worker(host.epoch, "installed-flash", paged_start_recipe(), {}, "start-request")
 
 
-@pytest.mark.parametrize("available_gib,requires_more", [(98, False), (82, True)])
-def test_paged_model_recommendation_requires_the_startup_working_set(available_gib, requires_more):
+@pytest.mark.parametrize("available_gib", [98, 82])
+def test_paged_model_recommendation_survives_current_memory_pressure(available_gib):
     recipe = paged_start_recipe()
     report = guided.recommendation_report(
         start_resources(available_gib=available_gib), {recipe.id: ["installed"]}, candidates=[recipe]
     )
-    if requires_more:
-        assert report["items"] == []
-    else:
-        item = report["items"][0]
-        assert "More memory must be available" not in item["recommendation_reason"]
-        assert item["runtime_memory_bytes_estimate"] == 112 * guided.GIB
+    item = report["items"][0]
+    assert item["id"] == recipe.id
+    assert item["runtime_memory_bytes_estimate"] == 112 * guided.GIB
 
 
 def test_installed_start_working_set_is_bound_to_the_checked_artifact(monkeypatch):
@@ -615,12 +612,12 @@ def test_installed_start_working_set_is_bound_to_the_checked_artifact(monkeypatc
     assert not guided.matches_recipe("/unused", recipe)
 
 
-def test_current_worker_memory_pressure_removes_choices_that_cannot_start():
+def test_current_worker_memory_pressure_does_not_remove_static_fit_choices():
     candidate = guided.recipe_from_catalog(catalog_candidate())
     host = gpu_resources()
     host["available_memory_bytes"] = 2 * guided.GIB
     report = guided.recommendation_report(host, {}, candidates=[candidate])
-    assert report["items"] == []
+    assert [item["id"] for item in report["items"]] == [candidate.id]
 
 
 @pytest.mark.parametrize(
@@ -731,12 +728,27 @@ def test_explicit_coding_tag_aliases_and_declared_quantized_capacity():
         {"physical_memory_bytes": 4 * guided.GIB},
         {"free_disk_bytes": 1},
         {"download_free_disk_bytes": 1},
-        {"available_memory_bytes": None},
     ],
 )
 def test_unknown_or_insufficient_resources_fail_closed(changes):
     report = guided.recommendation_report(resources(**changes), {})
     assert report["status"] == "unavailable" and report["items"] == []
+
+
+@pytest.mark.parametrize("available", [0, None, 2 * guided.GIB, 120 * guided.GIB])
+def test_native_128gb_recommendations_ignore_current_free_memory(available):
+    recipe = next(recipe for recipe in guided.native_recipes() if recipe.native_choice == "qwen38-mlx-serve-mixed")
+    host = resources(
+        physical_memory_bytes=128 * guided.GIB,
+        available_memory_bytes=available,
+        free_disk_bytes=256 * guided.GIB,
+        download_free_disk_bytes=0,
+        gpu_available=True,
+        unified_memory=True,
+        gpu_memory_budget_bytes=115_448_725_504,
+    )
+    report = guided.recommendation_report(host, {}, candidates=[recipe], benchmarks=guided.load_registry())
+    assert [item["id"] for item in report["items"]] == [recipe.id]
 
 
 def test_exact_receipt_match_rejects_changed_config_source_and_profile(tmp_path):

@@ -690,13 +690,14 @@ def setup_credit(recipe, host):
     )
 
 
-def installation_allowed(recipe, host, *, installed=False):
+def recommendation_allowed(recipe, host, *, installed=False):
+    """Offer models against installed hardware capacity and setup storage."""
     if recipe.installed_only and not installed:
         return False
     if host.get("supported") is not True:
         return False
     physical = host.get("physical_memory_bytes")
-    if type(physical) is not int or physical < recipe.minimum_memory:
+    if type(physical) is not int or physical < max(recipe.minimum_memory, recipe.runtime_memory + 2 * GIB):
         return False
     if recipe.native_choice is not None and "gpu_available" not in host:
         return False
@@ -708,21 +709,25 @@ def installation_allowed(recipe, host, *, installed=False):
             or type(budget) is not int
             or budget <= 0
             or recipe.gpu_runtime_memory * 100 > budget * 85
-            or recipe.runtime_memory + 2 * GIB > physical
         ):
             return False
     if installed:
         return True
-    available = host.get("available_memory_bytes")
     space, download_space = host.get("free_disk_bytes"), host.get("download_free_disk_bytes")
     return (
-        type(available) is int
-        and available >= 2 * GIB
-        and type(space) is int
+        type(space) is int
         and space + setup_credit(recipe, host) >= recipe.setup_bytes
         and (
             recipe.native_choice is not None or type(download_space) is int and download_space >= recipe.download_bytes
         )
+    )
+
+
+def installation_allowed(recipe, host, *, installed=False):
+    """Recheck capacity plus the small working allowance for preparation."""
+    available = host.get("available_memory_bytes")
+    return recommendation_allowed(recipe, host, installed=installed) and (
+        installed or type(available) is int and available >= 2 * GIB
     )
 
 
@@ -733,10 +738,10 @@ def _planning_budget(host):
 
 
 def execution_allowed(recipe, host):
-    """Shared current-memory gate for recommendations and fresh worker starts."""
+    """Recheck current available memory immediately before a worker starts."""
     available = host.get("available_memory_bytes")
     return (
-        installation_allowed(recipe, host, installed=True)
+        recommendation_allowed(recipe, host, installed=True)
         and type(available) is int
         and available >= recipe.startup_memory
     )
@@ -917,8 +922,7 @@ def recommendation_report(
         recipe
         for recipe in candidates
         if recipe.id not in excluded_recipe_ids
-        and installation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
-        and execution_allowed(recipe, host)
+        and recommendation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
     ]
     eligible.sort(key=lambda recipe: _ranking_key(recipe, host, installed, task, preference))
     benchmarks = load_registry() if benchmarks is None else benchmarks
@@ -934,34 +938,6 @@ def recommendation_report(
         # Historical benchmark evidence stays visible as reference information;
         # it cannot claim to have determined a different final ordering.
         benchmark_used = set()
-    # Explain a stronger known option blocked only by current free memory.
-    # Keep it outside actionable offers: startup and installation gates stay intact.
-    memory_limited = []
-    best_score = None
-    if guide_preference == "quality" and guide_task in {"general", "coding"}:
-        best_score = max(
-            (
-                records[benchmarks.model_id(recipe)]["score"]
-                for recipe in eligible
-                if benchmarks.model_id(recipe) in records
-            ),
-            default=None,
-        )
-        for recipe in candidates:
-            parent = benchmarks.model_id(recipe)
-            if (
-                recipe.id not in excluded_recipe_ids
-                and parent in records
-                and (best_score is None or records[parent]["score"] > best_score)
-                and installation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
-                and not execution_allowed(recipe, host)
-            ):
-                memory_limited.append(recipe)
-    memory_option = min(
-        memory_limited,
-        key=lambda recipe: (-records[benchmarks.model_id(recipe)]["score"], recipe.startup_memory, recipe.id),
-        default=None,
-    )
     items = []
     for recipe in eligible[:3]:
         evidence, benchmark_details = benchmarks.evidence(recipe, task, cohort, benchmark_used)
@@ -982,7 +958,7 @@ def recommendation_report(
             reason = (
                 "Selected using the cached whatmodel.sh "
                 + ("Coding" if guide_task == "coding" else "General Work")
-                + " leaderboard among models admitted by Stark's RAM, GPU, current memory and disk checks. "
+                + " leaderboard among models admitted by Stark's installed RAM, GPU and disk checks. "
                 + (
                     "This model has a published parent-model score; this Stark artifact has not been benchmarked."
                     if recipe.id in leaderboard_used
@@ -995,7 +971,7 @@ def recommendation_report(
                 "Selected by cached task score within a weight budget of 25% of this Mac's RAM, "
                 f"with a minimum parent-model reference score of {speed_limits['minimum_score']}. "
                 "Exact export weights determine the budget; quantized answer quality and response speed "
-                "have not been measured by this ranking. Stark's RAM, GPU, current memory and disk checks also pass."
+                "have not been measured by this ranking. Stark's installed RAM, GPU and disk checks also pass."
             )
         ids = list(installed.get(recipe.id, ()))
         license_name = (
@@ -1100,14 +1076,6 @@ def recommendation_report(
         "message": message,
         "host": dict(host),
         "items": items,
-        "memory_limited_model": {
-            "name": memory_option.display_name or memory_option.name,
-            "reference_score": str(records[benchmarks.model_id(memory_option)]["score"]),
-            "compared_with_score": str(best_score) if best_score is not None else None,
-            "required_available_memory_bytes": memory_option.startup_memory,
-        }
-        if memory_option is not None
-        else None,
         "quality_policy": {
             "maximum_alternative_score_gap": QUALITY_MAX_SCORE_GAP,
             "distinct_parent_models": True,

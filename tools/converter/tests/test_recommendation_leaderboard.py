@@ -209,11 +209,13 @@ def test_speed_does_not_recommend_below_floor_half_billion_model_on_high_ram(tas
     assert [item["id"] for item in result["items"]] == [useful.id]
 
 
-def test_speed_quality_floor_and_payload_budget_do_not_bypass_current_memory_admission():
-    blocked = replace(recipe("blocked", 16, weights=16 * guided.GIB), estimated_runtime_bytes=101 * guided.GIB)
+def test_speed_recommendation_uses_capacity_and_startup_still_checks_current_memory():
+    large = replace(recipe("large", 16, weights=16 * guided.GIB), estimated_runtime_bytes=101 * guided.GIB)
     small = recipe("small", 1)
-    result = report([blocked, small], snapshot({"blocked": 99, "small": 50}), preference="speed")
-    assert [item["id"] for item in result["items"]] == [small.id]
+    machine = host()
+    result = report([large, small], snapshot({"large": 99, "small": 50}), preference="speed", machine=machine)
+    assert [item["id"] for item in result["items"]] == [large.id, small.id]
+    assert not guided.execution_allowed(large, machine)
 
 
 @pytest.mark.parametrize("scores", [{"small": None}, {"small": 34}])
@@ -317,26 +319,25 @@ def test_quality_does_not_offer_multiple_exports_of_the_same_parent():
     assert [item["id"] for item in result["items"]] == ["duplicate", "alternative"]
 
 
-def test_stronger_memory_blocked_model_is_explained_and_reappears_after_memory_recovers():
+@pytest.mark.parametrize("preference", ["quality", "speed"])
+@pytest.mark.parametrize("available_gib", [None, 0, 1, 72, 100])
+def test_scored_offers_are_stable_across_current_memory_changes(preference, available_gib):
     strong = replace(recipe("strong", 100), estimated_runtime_bytes=87 * guided.GIB)
     small = recipe("small", 1)
-    cached = snapshot({"strong": 76.1, "small": 73.7})
-    pressured = host(available_memory_bytes=72 * guided.GIB)
-    result = report([strong, small], cached, task="coding", machine=pressured)
-    assert [item["id"] for item in result["items"]] == ["small"]
-    assert result["memory_limited_model"] == {
-        "name": "strong",
-        "reference_score": "76.1",
-        "compared_with_score": "73.7",
-        "required_available_memory_bytes": 87 * guided.GIB,
-    }
-    recovered = report([strong, small], cached, task="coding")
-    assert [item["id"] for item in recovered["items"]] == ["strong", "small"]
-    assert recovered["memory_limited_model"] is None
+    machine = host(available_memory_bytes=None if available_gib is None else available_gib * guided.GIB)
+    result = report(
+        [strong, small],
+        snapshot({"strong": 76.1, "small": 73.7}),
+        task="coding",
+        preference=preference,
+        machine=machine,
+    )
+    assert [item["id"] for item in result["items"]] == ["strong", "small"]
+    assert guided.execution_allowed(strong, machine) is (available_gib is not None and available_gib >= 87)
 
 
 @pytest.mark.parametrize("blocker", ["gpu", "disk", "excluded", "unknown-score"])
-def test_memory_advice_does_not_suggest_options_with_other_blockers(blocker):
+def test_capacity_policy_preserves_other_resource_and_score_gates(blocker):
     strong = replace(recipe("strong", 100, weights=20 * guided.GIB), estimated_runtime_bytes=87 * guided.GIB)
     small = recipe("small", 1)
     machine = host(available_memory_bytes=72 * guided.GIB)
@@ -355,16 +356,7 @@ def test_memory_advice_does_not_suggest_options_with_other_blockers(blocker):
         benchmarks=registry(),
         leaderboard=cached,
     )
-    assert result["memory_limited_model"] is None
     assert [item["id"] for item in result["items"]] == ["small"]
-
-
-def test_memory_advice_remains_available_when_no_model_can_run():
-    strong = replace(recipe("strong", 100), estimated_runtime_bytes=87 * guided.GIB)
-    result = report([strong], snapshot({"strong": 76.1}), machine=host(available_memory_bytes=72 * guided.GIB))
-    assert result["status"] == "unavailable" and result["items"] == []
-    assert result["memory_limited_model"]["name"] == "strong"
-    assert result["memory_limited_model"]["compared_with_score"] is None
 
 
 def test_packaged_snapshot_loads_both_tasks_all_ram_buckets_and_known_reference_scores():
