@@ -21,7 +21,7 @@ from pathlib import Path
 from . import __version__
 from .adapters.gemma4_vision import PROFILES as GEMMA4_IMAGE_PROFILES
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
-from .model_support import MODES, preflight_source, support_matrix
+from .model_support import MODES, NATIVE_F16_FAMILIES, preflight_source, support_matrix
 from .profiles import GENERIC_PROFILE, generic_entry
 from .progress import FDProgressSink, ProgressCallback, ProgressReporter, converter_failure_category, reporter
 from .provenance import file_hash, toolchain_provenance
@@ -48,6 +48,11 @@ from .vision_family import (
     validate_family_output_header,
     validate_family_plan,
 )
+
+
+def _native_f16(dtype: str, adapter: str | None) -> bool:
+    """F16 output that the native dense engine can load (full attention only)."""
+    return dtype == "float16" and adapter in NATIVE_F16_FAMILIES
 
 
 def capability(request: ConversionRequest) -> CapabilityResult:
@@ -134,7 +139,9 @@ def capability(request: ConversionRequest) -> CapabilityResult:
             adapter=request.architecture if supported else None,
             model_kind=request.model_kind,
             conversion="implemented" if supported else "unsupported",
-            native_loading="runtime_blocked" if supported and request.dtype != "bfloat16" else "unverified",
+            native_loading="runtime_blocked"
+            if supported and request.dtype != "bfloat16" and not _native_f16(request.dtype, request.architecture)
+            else "unverified",
             reason=None if supported else "checkpoint_architecture_required",
         )
     kind = {"LanguageModelSpec": "language", "ClassifierModelSpec": "classifier", "TTSModelSpec": "tts"}
@@ -146,7 +153,7 @@ def capability(request: ConversionRequest) -> CapabilityResult:
     if supported and entry["adapter"] in {"qwen3_5", "lfm2", "llamba", "modernbert"}:
         native = "unverified"
     if supported and request.dtype != "bfloat16":
-        native = "runtime_blocked"
+        native = "unverified" if _native_f16(request.dtype, entry["adapter"]) else "runtime_blocked"
     return CapabilityResult(
         adapter=entry["adapter"] if supported else None,
         model_kind=actual_kind,
@@ -358,6 +365,12 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             result = replace(result, native_loading="runtime_blocked", reason="native_delta_net_dimensions")
         if mixer["type"] in {"DeltaNetConfig", "ShortConvConfig", "Mamba2Config"} and mixer["kernel_size"] < 2:
             result = replace(result, native_loading="runtime_blocked", reason="native_convolution_kernel")
+        if (
+            request.dtype == "float16"
+            and result.native_loading != "runtime_blocked"
+            and mixer.get("sliding_window_size") is not None
+        ):
+            result = replace(result, native_loading="runtime_blocked", reason="native_f16_sliding_window")
     return PlannedConversion(request, result, tensors, config, artifact_contract)
 
 

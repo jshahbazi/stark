@@ -210,6 +210,32 @@ def test_floating_source_precision_is_not_confused_with_native_output_dtype(sour
     assert preflight_model(config, mode="text", dtype="float32")["reasons"] == ["unsupported_native_dtype"]
 
 
+@pytest.mark.parametrize("architecture", ["llama", "qwen2", "mistral"])
+def test_native_f16_output_is_limited_to_full_attention_dense_text_and_decision(architecture):
+    config = {"model_type": architecture, "torch_dtype": "float16"}
+    for mode in ("text", "decision"):
+        assert preflight_model(config, mode=mode, dtype="float16")["status"] == "conditional"
+        assert preflight_model(config, mode=mode, dtype="float32")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(config, mode="vision-language", dtype="float16")["status"] == "unsupported"
+    windowed = {
+        "llama": {**config, "layer_types": ["sliding_attention", "full_attention"]},
+        "qwen2": {**config, "use_sliding_window": True, "sliding_window": 4096},
+        "mistral": {**config, "sliding_window": 4096},
+    }[architecture]
+    assert preflight_model(windowed, mode="text", dtype="float16")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(windowed, mode="text")["status"] == "conditional"
+    if architecture == "qwen2":
+        inactive = {**config, "use_sliding_window": False, "sliding_window": 32768}
+        assert preflight_model(inactive, mode="text", dtype="float16")["status"] == "conditional"
+
+
+@pytest.mark.parametrize("architecture", ["qwen3", "gemma2", "phi3", "smollm3"])
+def test_native_f16_output_stays_blocked_outside_the_dense_f16_families(architecture):
+    config = {"model_type": architecture, "tie_word_embeddings": True}
+    assert preflight_model(config, mode="text", dtype="float16")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(config, dtype="float16")["status"] == "conditional"
+
+
 @pytest.mark.parametrize("bits", [4, 8])
 def test_mlx_text_representation_is_implemented_but_unqualified(bits):
     config = {"model_type": "qwen3", "quantization": {"bits": bits, "group_size": 64}}

@@ -35,6 +35,21 @@ _MLX = {
     "lfm2",
     "llamba",
 }
+# The native engine runs F16 activations only for the plain full-attention
+# dense graph of these families; every other native path requires BF16.
+NATIVE_F16_FAMILIES = frozenset({"llama", "qwen2", "mistral"})
+
+
+def native_f16_sliding_window(architecture: str, config: dict) -> bool:
+    """Whether metadata declares an active sliding window (no native F16 kernels)."""
+    if architecture == "mistral" and config.get("sliding_window") is not None:
+        return True
+    if architecture == "qwen2" and config.get("use_sliding_window") is True:
+        return True
+    layer_types = config.get("layer_types")
+    return isinstance(layer_types, list) and any(layer != "full_attention" for layer in layer_types)
+
+
 _FAMILY_DEFINITIONS = (
     ("qwen3", "Qwen3 dense", "HFQwen3Config", ()),
     ("qwen2", "Qwen2 dense", "HFQwen2Config", ()),
@@ -291,13 +306,20 @@ def preflight_model(
         return _report(
             family, mode, "unsupported", "unsupported_output_dtype", "The requested output dtype is not implemented."
         )
-    if mode is not None and dtype != "bfloat16":
+    native_f16 = (
+        dtype == "float16"
+        and mode in {"text", "decision"}
+        and architecture in NATIVE_F16_FAMILIES
+        and not native_f16_sliding_window(architecture, config)
+    )
+    if mode is not None and dtype != "bfloat16" and not native_f16:
         return _report(
             family,
             mode,
             "unsupported",
             "unsupported_native_dtype",
-            "Native app modes require BF16 output; floating-point sources can be converted to BF16.",
+            "Native app modes require BF16 output, except F16 text and Decision output for full-attention "
+            "Llama, Qwen2 and Mistral; floating-point sources can be converted to BF16.",
         )
     if architecture in {"phi3", "gemma2", "gemma3_text"} and config.get("tie_word_embeddings") is False:
         return _report(
