@@ -2,7 +2,8 @@
 """Manage the temporary Apple credentials used by Stark's signing job.
 
 Credentials stay in the runner's private files, process memory and temporary
-Keychain. Command output and exception details must never reach the job log.
+Keychain. Only fixed progress labels reach the job log; command output and
+exception details must never reach it.
 """
 
 from __future__ import annotations
@@ -78,12 +79,20 @@ def read_search_list(root: Path) -> list[str]:
     return original
 
 
+def report_stage(stage: str) -> None:
+    """Report a caller-supplied literal, never command arguments or tool output."""
+    print(f"apple_credentials_setup_stage={stage}", flush=True)
+
+
 def preflight(keychain: Path, identity: str) -> None:
     source = keychain.parent / "signing-probe.c"
     binary = keychain.parent / "signing-probe"
     try:
+        report_stage("signing_probe_write")
         write_private(source, b"int main(void) { return 0; }\n")
+        report_stage("signing_probe_compile")
         run("/usr/bin/xcrun", "clang", str(source), "-o", str(binary))
+        report_stage("signing_probe_sign")
         run(
             "/usr/bin/codesign",
             "--force",
@@ -96,6 +105,7 @@ def preflight(keychain: Path, identity: str) -> None:
             "--timestamp=none",
             str(binary),
         )
+        report_stage("signing_probe_verify")
         run("/usr/bin/codesign", "--verify", "--strict", str(binary))
     finally:
         source.unlink(missing_ok=True)
@@ -103,6 +113,7 @@ def preflight(keychain: Path, identity: str) -> None:
 
 
 def setup() -> None:
+    report_stage("validate_inputs")
     if any(not os.environ.get(name) for name in REQUIRED):
         raise CredentialError
     identity = os.environ["MACOS_SIGNING_IDENTITY"]
@@ -122,6 +133,7 @@ def setup() -> None:
     if not certificate_bytes or not key_bytes:
         raise CredentialError
 
+    report_stage("prepare_workspace")
     root = workspace()
     root.mkdir(mode=0o700)
     write_private(root / MARKER, b"stark-signing-v1\n")
@@ -130,17 +142,23 @@ def setup() -> None:
     keychain = root / "signing.keychain-db"
     password = secrets.token_urlsafe(48)
     try:
+        report_stage("read_keychain_search_list")
         original = shlex.split(
             run("/usr/bin/security", "list-keychains", "-d", "user").decode()
         )
+        report_stage("write_private_credentials")
         write_private(root / SEARCH_LIST, json.dumps(original).encode())
         # Validate saved recovery state before any Keychain mutation.
         read_search_list(root)
         write_private(certificate, certificate_bytes)
         write_private(api_key, key_bytes)
+        report_stage("create_keychain")
         run("/usr/bin/security", "create-keychain", "-p", password, str(keychain))
+        report_stage("configure_keychain")
         run("/usr/bin/security", "set-keychain-settings", "-lut", "3600", str(keychain))
+        report_stage("unlock_keychain")
         run("/usr/bin/security", "unlock-keychain", "-p", password, str(keychain))
+        report_stage("import_certificate")
         run(
             "/usr/bin/security",
             "import",
@@ -152,6 +170,7 @@ def setup() -> None:
             "-T",
             "/usr/bin/codesign",
         )
+        report_stage("configure_private_key_access")
         run(
             "/usr/bin/security",
             "set-key-partition-list",
@@ -162,6 +181,7 @@ def setup() -> None:
             password,
             str(keychain),
         )
+        report_stage("activate_keychain_search_list")
         run(
             "/usr/bin/security",
             "list-keychains",
@@ -172,6 +192,7 @@ def setup() -> None:
             *original,
         )
         preflight(keychain, identity)
+        report_stage("store_notary_credentials")
         run(
             "/usr/bin/xcrun",
             "notarytool",
