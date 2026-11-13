@@ -316,7 +316,7 @@ def test_missing_followup_image_is_rejected_before_inference(desktop):
 def test_recoverable_failure_does_not_commit_image_or_history_and_retry_passes(desktop):
     controller, root = desktop
     controller.worker.next_error = ChatImageError("invalid_image_request")
-    with pytest.raises(DesktopError, match="could not be prepared"):
+    with pytest.raises(DesktopError, match="could not be decoded"):
         controller.generate(controller.epoch, "first", stage(root))
     assert not controller.messages and controller.image_identity is None
     assert not list(root.iterdir())
@@ -350,6 +350,21 @@ def test_capability_requires_paired_attachment_store(desktop):
     controller.attachments = None
     assert controller.settings_summary()["images"] is False
     assert controller.settings_summary()["max_image_bytes"] == MAX_IMAGE_BYTES
+
+
+def test_image_limits_come_from_loaded_worker_without_a_shared_pixel_cap(desktop):
+    controller, _root = desktop
+    for pixels, patches, tokens in [(16_777_216, 65_536, 16_384), (645_120, 2520, 280)]:
+        limits = {
+            "max_source_pixels": 32_000_000,
+            "max_processed_pixels": pixels,
+            "max_patches": patches,
+            "max_image_tokens": tokens,
+        }
+        controller.worker.image_input = limits
+        assert controller.settings_summary()["image_limits"] == limits
+    controller.worker = None
+    assert controller.settings_summary()["image_limits"] is None
 
 
 def test_stale_epoch_does_not_claim_or_publish(desktop):

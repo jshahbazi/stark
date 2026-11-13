@@ -18,6 +18,16 @@ pub trait DeltaNetTreeVerify: Sized + Send + Sync {
         arguments: TreeVerifyEncodeArguments<'_, Self::Backend>,
         command_buffer: &mut <<Self::Backend as Backend>::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<<Self::Backend as Backend>::ScratchBuffer, <Self::Backend as Backend>::Error>;
+
+    /// Optional exact flat-chain specialization. An unsupported geometry keeps
+    /// the serial T=1 verifier and StateAdvance reference path.
+    fn encode_short_chain(
+        &self,
+        _arguments: TreeVerifyEncodeArguments<'_, Self::Backend>,
+        _command_buffer: &mut <<Self::Backend as Backend>::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<<Self::Backend as Backend>::ScratchBuffer>, <Self::Backend as Backend>::Error> {
+        Ok(None)
+    }
 }
 
 impl<B: Backend<Kernels: Kernels<DeltaNetTreeVerify = Unsupported<B>>>> DeltaNetTreeVerify for Unsupported<B> {

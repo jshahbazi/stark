@@ -29,6 +29,24 @@ pub trait Context: Sized + Send + Sync {
 
     fn peak_memory_usage(&self) -> Option<usize>;
 
+    fn max_buffer_length(&self) -> Option<usize> {
+        None
+    }
+
+    fn sparse_page_size(&self) -> Option<usize> {
+        None
+    }
+
+    /// Fully free allocator-owned pages, excluding live/in-flight resources.
+    fn cached_memory_bytes(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    /// Fence deferred destruction and release free cached pages under pressure.
+    fn reclaim_cached_memory(&self) -> Result<usize, <Self::Backend as Backend>::Error> {
+        Ok(0)
+    }
+
     fn enable_capture();
 
     fn start_capture(

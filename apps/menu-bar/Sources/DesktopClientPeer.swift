@@ -95,30 +95,53 @@ struct DesktopApplicationIdentity {
         }
     }
 
+    /// AppKit discovery stays on the main queue; only these immutable fields
+    /// cross to the background verifier.
+    struct Candidate: Sendable {
+        let pid: pid_t
+        let bundleURL: URL
+    }
+
+    static func candidates(_ client: DesktopClient) -> [Candidate] {
+        precondition(Thread.isMainThread)
+        return NSWorkspace.shared.runningApplications.compactMap { app in
+            guard app.bundleIdentifier == client.bundleID, app.activationPolicy == .regular,
+                  app.isFinishedLaunching, !app.isTerminated, let url = app.bundleURL else { return nil }
+            return Candidate(pid: app.processIdentifier, bundleURL: url)
+        }
+    }
+
     /// Called on the main queue. A command-line invocation of the signed
     /// interpreter is not an approved, regular LaunchServices application.
     static func running(_ client: DesktopClient, configurationRoot: URL? = nil) -> DesktopApplicationIdentity? {
+        precondition(Thread.isMainThread)
+        return running(client, configurationRoot: configurationRoot, candidates: candidates(client))
+    }
+
+    /// Verifies a main-queue AppKit snapshot. Call from a worker queue when
+    /// polling status so process and code-signature checks cannot stall UI.
+    /// Existing connection controllers may also call it synchronously on main.
+    static func running(_ client: DesktopClient, configurationRoot: URL?, candidates: [Candidate]) -> DesktopApplicationIdentity? {
         let key = client.bundleID + "\n" + (configurationRoot?.path ?? "")
-        for app in NSWorkspace.shared.runningApplications {
-            guard app.bundleIdentifier == client.bundleID, app.activationPolicy == .regular,
-                  app.isFinishedLaunching, !app.isTerminated, let url = app.bundleURL,
-                  let identity = DesktopProcessIdentity.read(app.processIdentifier) else { continue }
+        for candidate in candidates {
+            guard let identity = DesktopProcessIdentity.read(candidate.pid) else { continue }
             if let cached = verified[key], cached.process == identity, identity.isCurrent { return cached }
             guard DesktopClientPeer.verify(pid: identity.pid, identifier: client.bundleID, client: client),
                   let configPath = DesktopClientPeer.launchEnvironment(identity.pid, client: client)?.configDirectory,
                   identity.isCurrent else { continue }
-            let candidate = Self(client: client, process: identity, bundleURL: url.resolvingSymlinksInPath(), profile: configurationRoot)
+            let application = Self(client: client, process: identity,
+                                   bundleURL: candidate.bundleURL.resolvingSymlinksInPath(), profile: configurationRoot)
             if let configurationRoot {
                 // Electron may remove the parent's OPENCODE_CONFIG_DIR before
                 // launching its engine. Bind isolated tests to the verified
                 // descendant's actual native configuration, never a different
                 // regular client profile.
                 let direct = DesktopClientPeer.isWithin(configPath, root: configurationRoot)
-                let engine = client == .openWork ? DesktopClientPeer.engineConfigDirectory(application: candidate) : nil
+                let engine = client == .openWork ? DesktopClientPeer.engineConfigDirectory(application: application) : nil
                 guard direct || engine.map({ DesktopClientPeer.isWithin($0.path, root: configurationRoot) }) == true else { continue }
             }
-            verified[key] = candidate
-            return candidate
+            verified[key] = application
+            return application
         }
         return nil
     }

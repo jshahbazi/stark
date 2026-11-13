@@ -117,6 +117,19 @@ def test_ripple_catalog_is_pinned_text_only_and_uses_native_preparation(monkeypa
     assert model_catalog.family_catalog("ricursive", offline=True, hub=NoHub())["status"] == "offline"
 
 
+def test_ripple_catalog_pagination_preserves_both_same_repository_artifacts(monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    emitted = []
+    first = model_catalog.family_catalog("ricursive", limit=1, on_item=emitted.append)
+    assert first["items"] == [native_catalog.catalog_item("ripple-q8")]
+    assert emitted == first["items"]
+    assert first["next_offset"] == 1
+    second = model_catalog.family_catalog("ricursive", limit=1, offset=first["next_offset"])
+    assert second["items"] == [native_catalog.catalog_item("ripple-q4-k-m")]
+    assert second["next_offset"] is None
+    assert model_catalog.family_catalog("ricursive", offset=2)["items"] == []
+
+
 def test_ripple_q8_recipe_selects_only_q8_and_keeps_publisher_provenance():
     source = hybrid.SOURCES["ripple-q8"]
     assert source["weights_repo"] == "AtomicChat/Ripple-65B-Preview-GGUF"

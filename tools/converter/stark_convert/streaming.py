@@ -13,7 +13,7 @@ import math
 import os
 import struct
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO
 
@@ -194,6 +194,7 @@ class ConversionPlan:
     input_bytes: int
     source_tensors: int
     input_tensors: tuple[TensorInfo, ...] = ()
+    mtp_config: dict | None = None
 
 
 def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, TensorInfo]]:
@@ -210,17 +211,34 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
             header_bytes = stream.read(header_size)
             if len(header_bytes) != header_size or not header_bytes.startswith(b"{"):
                 raise ConversionError("Invalid safetensors JSON header")
-            header = json.loads(header_bytes, object_pairs_hook=_unique_object)
-    except (OSError, ValueError, UnicodeError) as exc:
+    except OSError as exc:
         raise ConversionError("Cannot read safetensors header") from exc
+    metadata, headers = parse_safetensors_header(header_bytes, signature[2])
+    return metadata, {
+        name: TensorInfo(path, dtype, shape, offset, nbytes, signature)
+        for name, (dtype, shape, offset, nbytes) in headers.items()
+    }
+
+
+def parse_safetensors_header(header_bytes: bytes, file_size: int):
+    """Validate header records and byte ranges without reading any tensors."""
+    try:
+        header = json.loads(header_bytes, object_pairs_hook=_unique_object)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise ConversionError("Cannot parse safetensors header") from exc
+    return safetensors_header_records(header, 8 + len(header_bytes), file_size)
+
+
+def safetensors_header_records(header, data_start: int, file_size: int):
+    """Validate a decoded header whose tensor data begins at ``data_start``."""
     if not isinstance(header, dict):
         raise ConversionError("Safetensors header must be an object")
+    header = dict(header)
     metadata = header.pop("__metadata__", {})
     if not isinstance(metadata, dict) or any(
         not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items()
     ):
         raise ConversionError("Safetensors metadata must contain strings")
-    data_start = 8 + header_size
     tensors = {}
     spans = []
     for name, info in header.items():
@@ -234,12 +252,12 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
         if not isinstance(offsets, list) or len(offsets) != 2 or any(type(x) is not int for x in offsets):
             raise ConversionError("Invalid safetensors tensor offsets")
         start, end = offsets
-        if start < 0 or end < start or data_start + end > signature[2]:
+        if start < 0 or end < start or data_start + end > file_size:
             raise ConversionError("Safetensors tensor byte size or offset mismatch")
         nbytes = bounded_tensor_bytes(shape, DTYPE_BYTES[dtype], end - start)
-        if start < 0 or end < start or end - start != nbytes or data_start + end > signature[2]:
+        if start < 0 or end < start or end - start != nbytes or data_start + end > file_size:
             raise ConversionError("Safetensors tensor byte size or offset mismatch")
-        tensors[name] = TensorInfo(path, dtype, tuple(shape), data_start + start, nbytes, signature)
+        tensors[name] = (dtype, tuple(shape), data_start + start, nbytes)
         if len(tensors) > MAX_SOURCE_TENSORS:
             raise ConversionError("Tensor inventory exceeds the metadata planning budget")
         spans.append((start, end))
@@ -248,7 +266,7 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
         if start != cursor:
             raise ConversionError("Safetensors data has gaps or overlapping tensors")
         cursor = end
-    if data_start + cursor != signature[2]:
+    if data_start + cursor != file_size:
         raise ConversionError("Safetensors file has unindexed trailing data")
     return metadata, tensors
 
@@ -620,6 +638,25 @@ def transpose_f32(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int) -> int
     return peak
 
 
+def transpose_vision_patch(op: TensorOperation, output: BinaryIO, chunk_bytes: int) -> int:
+    """Restore MLX Conv3d [H,T,P,P,C] to HF [H,C,T,P,P] without float casts."""
+    if len(op.sources) != 1 or len(op.sources[0].shape) != 5 or op.dtype != "BF16":
+        raise ConversionError("Invalid vision patch transpose")
+    source = op.sources[0]
+    h, t, p, q, c = source.shape
+    if source.dtype != "BF16" or not 0 < h <= 4096 or not 0 < t <= 8 or not 0 < p <= 64 or q != p or c != 3:
+        raise ConversionError("Invalid vision patch geometry")
+    if op.shape != (h, c, t, p, p):
+        raise ConversionError("Invalid vision patch output geometry")
+    count = t * p * p
+    row_bytes = count * c * source.itemsize
+    peak = 0
+    for row in range(h):
+        view = replace(source, shape=(count, c), offset=source.offset + row * row_bytes, nbytes=row_bytes)
+        peak = max(peak, transpose_tensor(view, output, chunk_bytes))
+    return peak
+
+
 class _HashingWriter:
     """Hash successful sequential writes without rereading the output payload.
 
@@ -687,11 +724,11 @@ def write_plan(
         for op in operations
     ):
         raise ConversionError("invalid_scalar_transform")
-    if any(op.kind in {"mlx_repack", "mlx_params"} for op in operations):
+    if any(op.kind in {"mlx_repack", "mlx_params", "mlx_widen"} for op in operations):
         from .compressed import validate_mlx_operation
 
         for op in operations:
-            if op.kind in {"mlx_repack", "mlx_params"}:
+            if op.kind in {"mlx_repack", "mlx_params", "mlx_widen"}:
                 validate_mlx_operation(op)
     for op in operations:
         if op.kind == "transpose_f32" and (
@@ -741,10 +778,16 @@ def write_plan(
                     peak = max(peak, transpose_tensor(op.sources[0], output, chunk_bytes))
                 elif op.kind == "transpose_f32" and len(op.sources) == 1:
                     peak = max(peak, transpose_f32(op.sources[0], output, chunk_bytes))
+                elif op.kind == "vision_patch_transpose":
+                    peak = max(peak, transpose_vision_patch(op, output, chunk_bytes))
                 elif op.kind == "mlx_params":
                     from .compressed import write_mlx_params
 
                     peak = max(peak, write_mlx_params(op, output, chunk_bytes))
+                elif op.kind == "mlx_widen":
+                    from .compressed import write_mlx_widen
+
+                    peak = max(peak, write_mlx_widen(op, output, chunk_bytes))
                 else:
                     raise ConversionError("Conversion plan has an invalid operation")
                 if output.tell() - before != op.nbytes:

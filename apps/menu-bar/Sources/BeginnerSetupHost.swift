@@ -1,0 +1,380 @@
+import AppKit
+import SwiftUI
+
+@MainActor
+final class BeginnerOpenWorkStatus: ObservableObject {
+    private let client: DesktopClient
+    init(client: DesktopClient = .openWork) { self.client = client }
+    @Published private(set) var applicationURL: URL?
+    @Published private(set) var running = false
+    @Published private(set) var liveConnection = false
+    @Published private(set) var scope = UUID().uuidString
+    @Published var message: String?
+    private var applicationChecked = false
+    private var connectionBasis = ""
+    private var verifiedClientBasis = ""
+    private var wasApproved = false
+    private var refreshID = UUID()
+    private var refreshInFlight = false
+    private var pendingRefresh: (input: ScanInput, completions: [(Bool) -> Void])?
+
+    private struct ScanInput: Sendable {
+        var client: DesktopClient = .openWork
+        var previousURL: URL?
+        var shouldResolveApplication: Bool
+        var profile: URL?
+        var candidates: [DesktopApplicationIdentity.Candidate]
+        var hasDiscoveredModel: Bool
+        var discoveryScope: String
+        var brokerPath: String
+        var apiBaseURL: String
+    }
+
+    private struct ScanResult: Sendable {
+        var applicationURL: URL?
+        var applicationVerified: Bool
+        var running: Bool
+        var liveConnection: Bool
+        var verifiedClientBasis: String
+        var connectionBasis: String
+    }
+
+    func refresh(engine: EngineController, force: Bool = false, completion: ((Bool) -> Void)? = nil) {
+        if refreshInFlight && !force { return }
+        let openWork = engine.desktopConnections.openWork
+        let openCode = engine.desktopConnections.openCode
+        let approved = client == .openWork ? openWork.approved : openCode.approved
+        if wasApproved && !approved { scope = UUID().uuidString }
+        wasApproved = approved
+        let previousURL = applicationURL
+        let shouldResolveApplication = force || !applicationChecked || previousURL.map { !FileManager.default.fileExists(atPath: $0.path) } == true
+        let apiID = engine.activeModel?.apiID ?? ""
+        let contextTokens = engine.apiContextTokens
+        let input = ScanInput(client: client, previousURL: previousURL, shouldResolveApplication: shouldResolveApplication,
+            profile: DesktopConnectionTesting.profile,
+            candidates: DesktopApplicationIdentity.candidates(client),
+            hasDiscoveredModel: client == .openWork ? openWork.hasDiscoveredModel(apiID: apiID, contextTokens: contextTokens)
+                : openCode.hasDiscoveredModel(apiID: apiID, contextTokens: contextTokens),
+            discoveryScope: client == .openWork ? openWork.discoveryScope : openCode.discoveryScope,
+            brokerPath: engine.desktopConnections.brokerPath ?? "",
+            apiBaseURL: engine.apiBaseURL)
+
+        if refreshInFlight {
+            if var pending = pendingRefresh {
+                pending.input = input
+                if let completion { pending.completions.append(completion) }
+                pendingRefresh = pending
+            } else {
+                pendingRefresh = (input, completion.map { [$0] } ?? [])
+            }
+            return
+        }
+        startScan(input, completions: completion.map { [$0] } ?? [])
+    }
+
+    private func startScan(_ input: ScanInput, completions: [(Bool) -> Void]) {
+        let requestID = UUID()
+        refreshID = requestID
+        refreshInFlight = true
+
+        Task.detached(priority: .utility) { [weak self] in
+            let url: URL?
+            if input.shouldResolveApplication {
+                let candidate = DesktopConnectionTesting.application(input.client)
+                    ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: input.client.bundleID)
+                url = candidate.flatMap { DesktopClientPeer.verifyApplication($0, client: input.client) ? $0 : nil }
+            } else {
+                url = input.previousURL
+            }
+            let application = DesktopApplicationIdentity.running(input.client,
+                configurationRoot: input.profile, candidates: input.candidates)
+            let running = application != nil
+            let verified = application.map { $0.process.instanceID + "|" + ($0.profile?.path ?? "") } ?? ""
+            let result = ScanResult(
+                applicationURL: application?.bundleURL ?? url,
+                applicationVerified: url != nil || application != nil,
+                running: running,
+                liveConnection: input.hasDiscoveredModel && running,
+                verifiedClientBasis: verified,
+                connectionBasis: (application?.bundleURL.path ?? url?.path ?? "") + "|" + verified + "|" +
+                    input.discoveryScope + "|" + input.brokerPath + "|" + input.apiBaseURL
+            )
+            await self?.apply(result, requestID: requestID, completions: completions)
+        }
+    }
+
+    private func apply(_ result: ScanResult, requestID: UUID, completions: [(Bool) -> Void]) {
+        guard refreshID == requestID else { return }
+        if let pending = pendingRefresh {
+            pendingRefresh = nil
+            refreshInFlight = false
+            startScan(pending.input, completions: completions + pending.completions)
+            return
+        }
+        refreshInFlight = false
+        applicationURL = result.applicationURL
+        applicationChecked = result.applicationVerified
+        running = result.running
+        liveConnection = result.liveConnection
+        verifiedClientBasis = result.verifiedClientBasis
+        if !connectionBasis.isEmpty, connectionBasis != result.connectionBasis {
+            scope = UUID().uuidString
+        }
+        connectionBasis = result.connectionBasis
+        for completion in completions { completion(result.liveConnection) }
+    }
+}
+
+/// Adapts real engine/connector state into the guide without a second installer.
+struct BeginnerSetupHost: View {
+    @ObservedObject var engine: EngineController
+    @ObservedObject var openWork: OpenWorkConnectionController
+    @ObservedObject var openCode: OpenCodeConnectionController
+    @ObservedObject var session: BeginnerSetupSession
+    @ObservedObject var interface: StarkInterfacePreferences
+    @ObservedObject var observation: BeginnerOpenWorkStatus
+    @ObservedObject var openCodeObservation: BeginnerOpenWorkStatus
+    private var selectedObservation: BeginnerOpenWorkStatus {
+        session.client == .openWork ? observation : openCodeObservation
+    }
+    let selectInterface: (StarkInterfaceMode) -> Void
+    let openChat: () -> Void
+
+    private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                StarkInterfacePicker(preferences: interface, selected: selectInterface)
+                HStack { Text("Stark").font(.headline); Spacer() }
+            }.padding(.horizontal, 20).padding(.vertical, 14)
+            Divider()
+            BeginnerSetupView(session: session, snapshot: snapshot, actions: actions)
+        }
+        // The minimum includes the interface header and the setup content.
+        .frame(minWidth: 700, minHeight: 600)
+        .onAppear { refreshOpenWork() }
+        .onReceive(refresh) { _ in refreshOpenWork() }
+        .onChange(of: openWork.approved) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: openCode.approved) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: session.client) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: engine.apiBaseURL) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: engine.activeModel?.apiID) { _, _ in refreshOpenWork(force: true) }
+        .onChange(of: engine.apiContextTokens) { _, _ in refreshOpenWork(force: true) }
+    }
+
+    var snapshot: BeginnerSetupSnapshot {
+        var result = BeginnerSetupSnapshot()
+        result.client = session.client
+        result.choices = (engine.beginnerReport?.items ?? []).map { item in
+            BeginnerModelChoice(id: item.id, name: item.displayName,
+                summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
+                downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
+                contextTokens: item.contextTokens, source: item.source, revision: item.revision,
+                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL,
+                variantName: item.variantName)
+                .resolvingInstalledCopy(as: item.installedIDs.first { id in engine.models.contains(where: { $0.id == id }) })
+        }
+        if let item = engine.beginnerInstallChoice,
+           !result.choices.contains(where: { $0.id == item.id }),
+           engine.beginnerInstallState != "idle", (session.installingChoiceID == item.id || session.selectedChoiceID == item.id) {
+            result.choices.append(BeginnerModelChoice(id: item.id, name: item.displayName,
+                summary: item.beginnerSummary(availableMemoryBytes: engine.beginnerReport?.availableMemoryBytes),
+                downloadBytes: item.downloadBytes, installedBytes: item.installedBytes, setupBytes: item.setupBytes,
+                contextTokens: item.contextTokens, source: item.source, revision: item.revision,
+                qualification: item.beginnerDetails, benchmarkSourceURL: item.benchmarkReference?.sourceURL,
+                variantName: item.variantName))
+        }
+        result.choicesLoading = engine.beginnerChoicesLoading
+        result.choicesError = engine.beginnerChoicesError
+        result.deviceSummary = engine.beginnerReport?.deviceSummary ?? ""
+        result.installChoiceID = engine.beginnerInstallChoice?.id
+        result.installedResultID = engine.beginnerInstalledResultID
+        result.installPhase = installationPhase
+        result.downloadFraction = engine.downloadProgress.totalBytes == nil ? nil : engine.downloadProgress.fraction
+        result.preparationFraction = engine.conversionProgress.totalBytes == nil ? nil : engine.conversionProgress.fraction
+        result.installMessage = engine.beginnerInstallState == "installed" ? "Download and preparation complete." : engine.message
+        result.installError = engine.beginnerInstallError
+        result.canInstall = !engine.busy && !engine.beginnerChoicesLoading
+        result.canStartModel = !engine.busy
+        result.runningModelID = engine.loadedID
+        result.runningModelName = engine.activeModel?.displayName ?? ""
+        result.runningModelVariantName = engine.activeModel?.display?.quantization ?? ""
+        result.runningModelRepositoryURL = engine.activeModel?.display?.repositoryURL
+        let runningChoiceID = engine.beginnerReport?.items.first { $0.installedIDs.contains(engine.loadedID) }?.id
+        if let running = result.choices.first(where: {
+            session.installedID(for: $0, in: result) == engine.loadedID || $0.id == runningChoiceID
+        }) {
+            result.runningModelName = running.name
+            if result.runningModelVariantName.isEmpty { result.runningModelVariantName = running.variantName }
+            result.runningModelRepositoryURL = running.repositoryURL
+        }
+        result.modelReady = engine.modelReady && engine.loadedMode == .chat
+        result.modelStarting = engine.state == "loading"
+        result.modelGenerating = engine.state == "generating"
+        result.localAPIAvailable = !engine.apiBaseURL.isEmpty
+        result.runningSupportsTools = engine.supportsTools
+        result.runningContextKnown = engine.contextCapacityKnown
+        result.engineBusy = engine.busy; result.engineMessage = engine.message; result.engineError = engine.errorMessage
+        let observation = selectedObservation
+        result.openWorkInstalled = observation.applicationURL != nil; result.openWorkRunning = observation.running
+        result.openWorkScope = observation.scope
+        if session.client == .openWork {
+            result.openWorkApproved = openWork.approved
+            // Query against this snapshot's model and budget. The application scan
+            // is periodic; its cached connection result may belong to a prior model.
+            result.openWorkClientActive = observation.running && openWork.hasDiscoveredModel(
+                apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
+            result.openWorkBusy = openWork.busy
+            result.openWorkPreparing = openWork.beginnerPreparing
+            result.openWorkPreparedModelID = openWork.beginnerIsPrepared(
+                apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens) ? engine.loadedID : nil
+            result.openWorkMessage = engine.apiBaseURL.isEmpty ? engine.apiMessage : (observation.message ?? openWork.message)
+        } else {
+            result.openWorkApproved = openCode.approved
+            result.openCodeApprovalPending = openCode.pendingEngine != nil
+            result.openWorkBusy = openCode.busy
+            result.openWorkPreparing = false
+            result.openWorkPreparedModelID = nil
+            result.openWorkClientActive = observation.running && openCode.hasDiscoveredModel(
+                apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
+            result.openWorkMessage = engine.apiBaseURL.isEmpty ? engine.apiMessage : (observation.message ?? openCode.message)
+            // Scope confirmation to the API session, engine, model and context.
+            result.openWorkScope += "|" + openCode.discoveryScope + "|" + engine.apiBaseURL + "|" + String(engine.apiContextTokens)
+        }
+        let choice = session.choice(in: result)
+        if let choice, session.installedID(for: choice, in: result) == engine.loadedID {
+            result.choiceRequiresRestart = BeginnerContextPolicy.requiresRestart(expected: choice.contextTokens,
+                local: engine.options.contextTokens, api: engine.apiContextTokens)
+        }
+        return result
+    }
+
+    private var installationPhase: BeginnerInstallPhase {
+        if engine.beginnerCancelPending { return .cancelling }
+        switch engine.beginnerInstallState {
+        case "installed": return .ready
+        case "cancelled": return .cancelled
+        case "failed": return .failed
+        case "installing":
+            if engine.conversionProgress.state == "running" { return .preparing }
+            if engine.downloadProgress.state == "running" { return .downloading }
+            return .checking
+        default: return .idle
+        }
+    }
+
+    private var actions: BeginnerSetupActions {
+        BeginnerSetupActions(
+            refreshChoices: { task, excluded, preference in
+                engine.requestBeginnerModels(task: task.rawValue, excludingModelID: excluded, preference: preference)
+            },
+            install: { engine.installBeginnerModel(recipeID: $0.id) },
+            cancelInstall: engine.cancelBeginnerInstallation,
+            startModel: { choice in
+                guard let id = choice.installedModelID else { return false }
+                return engine.startBeginnerModel(recipeID: choice.id, modelID: id)
+            },
+            openOpenWork: openOpenWork,
+            downloadOpenWork: {
+                NSWorkspace.shared.open(URL(string: session.client == .openWork
+                    ? "https://openworklabs.com/download" : "https://opencode.ai/download")!)
+            },
+            connectOpenWork: {
+                selectedObservation.message = nil
+                if session.client == .openWork { openWork.connectBeginner() }
+                else { openCode.connect() }
+            },
+            allowOpenCodeEngine: openCode.allow,
+            denyOpenCodeEngine: openCode.deny,
+            checkConnection: {
+                selectedObservation.message = nil
+                if session.client == .openWork {
+                    openWork.prepareBeginnerModel(apiID: engine.activeModel?.apiID ?? "",
+                        contextTokens: engine.apiContextTokens, retry: true)
+                }
+                selectedObservation.refresh(engine: engine, force: true)
+            },
+            openChat: openChat,
+            showAdvanced: { selectInterface(.advanced) },
+            retryLocalAPI: { selectedObservation.message = nil; engine.retryAPI() })
+    }
+
+    private func refreshOpenWork(force: Bool = false) {
+        selectedObservation.refresh(engine: engine, force: force)
+        if session.client == .openWork, session.stage == .openOpenWork, snapshot.canUseOpenWork {
+            openWork.prepareBeginnerModel(apiID: engine.activeModel?.apiID ?? "", contextTokens: engine.apiContextTokens)
+        }
+    }
+
+    private func openOpenWork() {
+        selectedObservation.refresh(engine: engine, force: true)
+        selectedObservation.message = nil
+        if session.client == .openWork { openWork.openApplication() }
+        else if let url = selectedObservation.applicationURL {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        }
+    }
+}
+
+struct BeginnerChatView: View {
+    @ObservedObject var engine: EngineController
+    @ObservedObject var interface: StarkInterfacePreferences
+    let selectInterface: (StarkInterfaceMode) -> Void
+    let setup: () -> Void
+    let tryAnotherModel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            GeometryReader { viewport in
+                ScrollView {
+                    content.frame(minHeight: viewport.size.height, alignment: .topLeading)
+                }
+            }
+            if engine.loadedMode == .chat, !engine.loadedID.isEmpty {
+                HStack {
+                    Button("Guided setup", action: setup).buttonStyle(.link)
+                    Spacer()
+                    Button("Try a different model", action: tryAnotherModel).disabled(!engine.modelReady)
+                }.font(.caption)
+            }
+        }.padding(20).frame(minWidth: 520, minHeight: 600)
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ZStack {
+                StarkInterfacePicker(preferences: interface, selected: selectInterface)
+                HStack { Text("Stark").font(.title3.weight(.semibold)); Spacer() }
+                    .allowsHitTesting(false)
+            }
+            if engine.loadedMode == .chat, !engine.loadedID.isEmpty {
+                RunningModelLabel(engine: engine).font(.callout.weight(.medium))
+                if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
+                ChatContentView(engine: engine)
+            } else {
+                Text("Start a model with guided setup, then come back for your first chat.").foregroundStyle(.secondary)
+                Button("Continue setup", action: setup).buttonStyle(.borderedProminent)
+                Spacer()
+            }
+        }
+    }
+}
+
+struct AdvancedModelsHost: View {
+    @ObservedObject var engine: EngineController
+    @ObservedObject var navigation: ModelManagementState
+    @ObservedObject var interface: StarkInterfacePreferences
+    let selectInterface: (StarkInterfaceMode) -> Void
+    let close: () -> Void
+    let run: (String) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack { Spacer(); StarkInterfacePicker(preferences: interface, selected: selectInterface); Spacer() }
+                .padding(.horizontal, 20).padding(.vertical, 12)
+            Divider()
+            ModelsView(engine: engine, navigation: navigation, onDone: close, onRun: run)
+        }
+    }
+}

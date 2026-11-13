@@ -12,6 +12,7 @@ struct Arguments {
     model: PathBuf,
     staging: Option<PathBuf>,
     prefix_cache: bool,
+    validation_gemma_text_only: bool,
 }
 
 fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<Arguments, &'static str> {
@@ -26,6 +27,7 @@ fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<Arguments, &'st
         model: PathBuf::from(path),
         staging: None,
         prefix_cache: false,
+        validation_gemma_text_only: false,
     };
     while let Some(flag) = args.next() {
         if flag == OsStr::new("--vision-staging-root") && parsed.staging.is_none() {
@@ -33,6 +35,11 @@ fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<Arguments, &'st
             parsed.staging = Some(PathBuf::from(root));
         } else if flag == OsStr::new("--prefix-cache") && !parsed.prefix_cache {
             parsed.prefix_cache = true;
+        } else if cfg!(feature = "gemma4-assistant-staging")
+            && flag == OsStr::new("--validation-gemma-text-only")
+            && !parsed.validation_gemma_text_only
+        {
+            parsed.validation_gemma_text_only = true;
         } else {
             return Err("invalid_arguments");
         }
@@ -77,7 +84,10 @@ pub fn main() {
             model: path,
             staging,
             prefix_cache,
+            validation_gemma_text_only,
         } = arguments(std::env::args_os().skip(1))?;
+        // Validate operator resource policy before model loading allocates native state.
+        let _request_budget = stark_resource_budget::Budget::from_environment()?;
         #[cfg(feature = "metal")]
         {
             let cancellation = crate::cancel::CancelSignal::from_environment()?;
@@ -85,7 +95,7 @@ pub fn main() {
             // write FD is transferred exclusively to the sampler.
             _gpu_memory_sampler = unsafe { stark_engine::backends::metal::memory_usage::start_from_environment() };
             let media = staging.as_deref().map(crate::media::MediaStore::open).transpose()?;
-            let hybrid = if media.is_none() {
+            let hybrid = {
                 match stark_engine::engine::hybrid::recognizes(&path) {
                     Ok(hybrid) => hybrid,
                     // Preserve the ordinary loader's established unavailable-
@@ -93,22 +103,26 @@ pub fn main() {
                     Err(stark_engine::engine::hybrid::Error::Io(_)) => false,
                     Err(_) => return Err("invalid_model_config"),
                 }
-            } else {
-                false
             };
             if hybrid {
-                if media.is_some() {
-                    return Err("images_not_supported");
+                if validation_gemma_text_only {
+                    return Err("validation_family_not_supported");
                 }
-                let backend = crate::hybrid::HybridBackend::load(&path, cancellation)?;
-                let mut worker = crate::generation::GenerationWorker::new_with_options(backend, None, prefix_cache)?;
+                let backend = if media.is_some() {
+                    crate::hybrid::HybridBackend::load_vision(&path, cancellation)?
+                } else {
+                    crate::hybrid::HybridBackend::load(&path, cancellation)?
+                };
+                let mut worker = crate::generation::GenerationWorker::new_with_options(backend, media, prefix_cache)?;
                 return crate::generation::run_lines(
                     &mut worker,
                     &mut crate::prefix_cache::StandardInput::reader(),
                     &mut output,
                 );
             }
-            let backend = if media.is_some() {
+            let backend = if validation_gemma_text_only {
+                crate::native::NativeBackend::load_gemma4_text_validation(&path, cancellation)?
+            } else if media.is_some() {
                 crate::native::NativeBackend::load_vision(&path, cancellation)?
             } else {
                 crate::native::NativeBackend::load(&path, cancellation)?
@@ -118,7 +132,7 @@ pub fn main() {
         }
         #[cfg(not(feature = "metal"))]
         {
-            let _ = (path, staging, prefix_cache);
+            let _ = (path, staging, prefix_cache, validation_gemma_text_only);
             Err::<(), _>("native_backend_unavailable")
         }
     }));
@@ -171,6 +185,19 @@ mod tests {
             vec!["--model-path", "/model", "--vision-staging-root", "/media", "--vision-staging-root", "/other"],
         ] {
             assert_eq!(parse(&args), Err("invalid_arguments"));
+        }
+    }
+
+    #[test]
+    fn gemma_text_comparison_is_explicit_and_staging_only() {
+        let ordinary = arguments(["--model-path", "/model"].into_iter().map(OsString::from)).unwrap();
+        assert!(!ordinary.validation_gemma_text_only);
+        let validation =
+            arguments(["--model-path", "/model", "--validation-gemma-text-only"].into_iter().map(OsString::from));
+        if cfg!(feature = "gemma4-assistant-staging") {
+            assert!(validation.unwrap().validation_gemma_text_only);
+        } else {
+            assert_eq!(validation, Err("invalid_arguments"));
         }
     }
 }

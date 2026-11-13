@@ -15,7 +15,15 @@ fn invoke(
 }
 
 fn bytes(data: &[u8]) -> Output {
+    bytes_with_budget(data, 1)
+}
+
+fn bytes_with_budget(
+    data: &[u8],
+    budget_mib: usize,
+) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_stark-template"))
+        .env("STARK_REQUEST_BUDGET_MIB", budget_mib.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -90,6 +98,18 @@ fn python_json_spacing_sorting_ascii_and_html_escaping_match() {
     success("{{ value | tojson }}", json!({"value": [1e-5, 1e16, -0.0]}), b"[1e-05, 1e+16, -0.0]");
     rejected("{{ ('nan' | float) | tojson }}", json!({}));
     rejected("{{ [('inf' | float)] | tojson }}", json!({}));
+    success(
+        "{{ value | tojson(ensure_ascii=false) }}",
+        json!({"value": {"é": "é😀<&>'\u{0}\n\u{85}"}}),
+        "{\"é\": \"é😀\\u003c\\u0026\\u003e\\u0027\\u0000\\n\u{85}\"}".as_bytes(),
+    );
+    success(
+        "{{ value | tojson(indent=2, ensure_ascii=false) }}",
+        json!({"value": {"é": ["é"]}}),
+        "{\n  \"é\": [\n    \"é\"\n  ]\n}".as_bytes(),
+    );
+    rejected("{{ value | tojson(ensure_ascii='false') }}", json!({"value": "synthetic"}));
+    rejected("{{ value | tojson(ensure_ascii=false, unknown=true) }}", json!({"value": "synthetic"}));
 }
 
 #[test]
@@ -114,6 +134,68 @@ fn methods_filters_namespaces_loopcontrols_and_slices_work() {
         "{{ text[::-1] }};{{ messages[1:] | join(',') }}",
         json!({"text": "abcdef", "messages": ["a", "b", "c"]}),
         b"fedcba;b,c",
+    );
+}
+
+#[test]
+fn adjacent_tool_results_keep_group_boundaries_across_completed_tool_cycles() {
+    let source = "{% for message in messages %}{% if message.role == 'tool' %}{% if loop.previtem and loop.previtem.role != 'tool' %}[{% endif %}{{ message.content }}{% if not loop.last and loop.nextitem.role != 'tool' %}]{% elif loop.last %}]{% else %},{% endif %}{% endif %}{% endfor %}";
+    success(
+        source,
+        json!({"messages": [{"role": "user"}, {"role": "assistant"}, {"role": "tool", "content": "first"}, {"role": "assistant"}, {"role": "tool", "content": "second"}, {"role": "assistant"}]}),
+        b"[first][second]",
+    );
+    success(
+        source,
+        json!({"messages": [{"role": "user"}, {"role": "assistant"}, {"role": "tool", "content": "first"}, {"role": "tool", "content": "second"}, {"role": "assistant"}, {"role": "tool", "content": "third"}]}),
+        b"[first,second][third]",
+    );
+}
+
+#[test]
+fn declared_single_underscore_temporaries_remain_bounded_data_only() {
+    success(
+        "{% set _args=arguments if arguments is mapping else dict() %}{{ _args | tojson }}",
+        json!({"arguments": {"key": "synthetic"}}),
+        br#"{"key": "synthetic"}"#,
+    );
+    success(
+        "{% for key,_value in arguments.items() %}{{ key }}={{ _value }};{% endfor %}",
+        json!({"arguments": {"key": "synthetic"}}),
+        b"key=synthetic;",
+    );
+    success("{% set _args %}synthetic{% endset %}{{ _args }}", json!({}), b"synthetic");
+    // String lookup remains a native string operation, with no Python object
+    // or introspection attributes behind an ordinary data value.
+    success("{% set _args='synthetic' %}{{ _args['__class__'] | default('unavailable') }}", json!({}), b"unavailable");
+    for source in [
+        "{{ _args }}",
+        "{% set __args='synthetic' %}{{ __args }}",
+        "{% set _args='synthetic' %}{{ _args.__class__ }}",
+        "{% set _args='synthetic' %}{{ _args._private }}",
+        "{% set _args=dict() %}{% set _private='synthetic' %}{{ _args._private }}",
+        "{% set _args='synthetic' %}{{ _args | attr('__class__') }}",
+        "{% set _args='synthetic' %}{{ _args.__getitem__('__class__') }}",
+        "{% set ns=namespace() %}{% set ns._args='synthetic' %}",
+    ] {
+        rejected(source, json!({"_args": "synthetic"}));
+    }
+}
+
+#[test]
+fn private_root_arguments_cannot_supply_unbound_template_locals() {
+    for source in [
+        "{{ _args }}{% set _args=1 %}",
+        "{% if false %}{% set _args=1 %}{% endif %}{{ _args }}",
+        "{% for _args in [] %}{% endfor %}{{ _args }}",
+    ] {
+        success(source, json!({"_args": "caller-private"}), b"");
+    }
+    success("{{ value }}", json!({"value": "public", "_unused": "ignored"}), b"public");
+    success(
+        "{% set _args=value %}{{ _args['_private'] }}",
+        json!({"value": {"_private": "nested data"}, "_args": "caller-private"}),
+        b"nested data",
     );
 }
 
@@ -232,14 +314,45 @@ fn fuel_limits_busy_templates_and_macro_recursion() {
 
 #[test]
 fn source_request_output_and_structure_limits_are_enforced() {
+    let budget = stark_resource_budget::Budget::for_mib(1).unwrap();
     rejected(&"x".repeat(256 * 1024 + 1), Value::Null);
     rejected(&"{{ value }}".repeat(20000), Value::Null);
     rejected("{{ values }}", json!({"values": vec![0; 16385]}));
-    rejected("{{ value }}", json!({"value": "x".repeat(1024 * 1024 + 1)}));
-    rejected("{% for n in range(2000) %}{{ value }}{% endfor %}", json!({"value": "x".repeat(1024)}));
-    let result = bytes(&vec![b' '; 2 * 1024 * 1024 + 1]);
+    rejected("{{ value }}", json!({"value": "x".repeat(budget.input_bytes + 1)}));
+    rejected(
+        "{% for n in range(16000) %}{{ value }}{% endfor %}",
+        json!({"value": "x".repeat(budget.input_bytes / 16000 + 1)}),
+    );
+    let result = bytes(&vec![b' '; budget.wire_bytes + 1]);
     assert_eq!(result.stdout, b"L");
     assert!(!result.status.success());
+}
+
+#[test]
+fn large_conversation_and_escaped_transport_render_successfully() {
+    let value = "synthetic control ".repeat(70000);
+    assert!(value.len() > 1024 * 1024);
+    let request = serde_json::to_vec(&json!({"source": "{{ value }}", "arguments": {"value": value}})).unwrap();
+    let result = bytes_with_budget(&request, 16);
+    assert!(result.status.success());
+    assert_eq!(&result.stdout[1..], value.as_bytes());
+    let escaped = "\u{0001}".repeat(400000);
+    let request = serde_json::to_vec(&json!({"source": "{{ value }}", "arguments": {"value": escaped}})).unwrap();
+    let result = bytes_with_budget(&request, 16);
+    assert!(result.status.success());
+    assert_eq!(&result.stdout[1..], escaped.as_bytes());
+}
+
+#[test]
+fn configured_budget_is_validated_before_reading_content() {
+    let result = Command::new(env!("CARGO_BIN_EXE_stark-template"))
+        .env("STARK_REQUEST_BUDGET_MIB", "private invalid setting")
+        .arg("--self-test")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(result.stdout, b"E");
+    assert!(result.stderr.is_empty());
 }
 
 #[test]

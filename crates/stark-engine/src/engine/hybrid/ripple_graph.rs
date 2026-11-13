@@ -297,12 +297,7 @@ impl State {
             }
             // Geometric growth amortizes small-request copies. Beyond 16K,
             // 4K increments bound unused global-prefix allocation.
-            let capacity = if count <= 16_384 {
-                count.checked_next_power_of_two().ok_or(Error::Invalid("ripple_graph_cache_capacity"))?.max(16)
-            } else {
-                count.checked_add(4095).ok_or(Error::Invalid("ripple_graph_cache_capacity"))? / 4096 * 4096
-            }
-            .min(limit);
+            let capacity = c.graph_capacity(count, sliding).ok_or(Error::Invalid("ripple_graph_cache_capacity"))?;
             let replacement = cache_elements(c, capacity)?;
             // Include the old layer's live buffers until its copy completes,
             // and persistent softmax scratch, in the same checked bound.

@@ -14,7 +14,7 @@ use crate::{
     data_type::DataType,
     encodable_block::{
         batch_topology::BatchTopology,
-        mixer::MixerState,
+        mixer::{MixerState, MixerStateSnapshot},
         normalization::{Normalization, NormalizationNewError, PostLayerScalar, ShortcutMode},
         transformer_layer::{TransformerLayer, TransformerLayerError},
     },
@@ -40,6 +40,21 @@ pub struct TransformerState<B: Backend> {
 pub struct TransformerEncodeOutput<B: Backend> {
     pub output: Option<B::ScratchBuffer>,
     pub hidden_features: Option<Box<[B::ScratchBuffer]>>,
+}
+
+pub(crate) struct TransformerPrefix<B: Backend> {
+    layers: Box<[Option<Box<dyn MixerStateSnapshot<B>>>]>,
+    position: u32,
+}
+
+impl<B: Backend> TransformerPrefix<B> {
+    pub(crate) fn position(&self) -> u32 {
+        self.position
+    }
+
+    pub(crate) fn payload_bytes(&self) -> usize {
+        self.layers.iter().flatten().map(|state| state.payload_bytes()).sum()
+    }
 }
 
 /// Shift rotary positions after image prefill without changing physical KV indices.
@@ -72,6 +87,153 @@ fn scoring_cache_only_requested(
 }
 
 impl<B: Backend> TransformerState<B> {
+    pub(crate) fn capture_assistant_local_handoff(
+        &self,
+        suffix_rows: u32,
+        context: &B::Context,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<crate::encodable_block::mixer::attention::AssistantAttentionHandoff<B>>, B::Error> {
+        if self.rotary_position_delta.is_some() {
+            return Ok(None);
+        }
+        let position =
+            self.context_length.checked_add(suffix_rows).ok_or(InvalidInput("assistant position overflow"))?;
+        for (index, state) in self.layer_states.iter().enumerate().rev() {
+            let TransformerLayerStateType::Owned(state) = state else {
+                continue;
+            };
+            let Some(attention) = (state.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<crate::encodable_block::mixer::attention::AttentionState<B>>()
+            else {
+                continue;
+            };
+            if attention.view().ring_params().is_some() {
+                return attention.capture_assistant_handoff(index as u32, position, suffix_rows, context, command);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The source Gemma assistant consumes the last owning KV of each kind.
+    pub fn last_committed_attention_kv(
+        &self,
+        ring: bool,
+    ) -> Option<crate::encodable_block::mixer::attention::CommittedAttentionKV<'_, B>> {
+        for index in (0..self.layer_states.len()).rev() {
+            if !matches!(self.layer_states[index], TransformerLayerStateType::Owned(_)) {
+                continue;
+            }
+            if let Some(view) = self.committed_attention_kv(index)
+                && view.is_ring() == ring
+            {
+                return Some(view);
+            }
+        }
+        None
+    }
+
+    /// A read-only borrow keeps the selected target owner immutable while an
+    /// external assistant reads it. The loaded model must separately validate
+    /// state identity and target/companion geometry before constructing a round.
+    pub fn committed_attention_kv(
+        &self,
+        layer_index: usize,
+    ) -> Option<crate::encodable_block::mixer::attention::CommittedAttentionKV<'_, B>> {
+        if self.rotary_position_delta.is_some() {
+            return None;
+        }
+        let owner = match self.layer_states.get(layer_index)? {
+            TransformerLayerStateType::Owned(_) => layer_index,
+            TransformerLayerStateType::Shared(owner) => *owner as usize,
+        };
+        let TransformerLayerStateType::Owned(state) = self.layer_states.get(owner)? else {
+            return None;
+        };
+        let attention = (state.as_ref() as &dyn std::any::Any).downcast_ref()?;
+        crate::encodable_block::mixer::attention::CommittedAttentionKV::new(
+            attention,
+            u32::try_from(owner).ok()?,
+            self.context_length,
+        )
+    }
+
+    pub(crate) fn resident_payload_bytes(&self) -> Option<usize> {
+        self.layer_states.iter().try_fold(0usize, |bytes, state| match state {
+            TransformerLayerStateType::Owned(state) => bytes.checked_add(state.resident_payload_bytes()?),
+            // A shared KV view does not own a second allocation.
+            TransformerLayerStateType::Shared(_) => Some(bytes),
+        })
+    }
+
+    pub(crate) fn capture_prefix(
+        &self,
+        context: &B::Context,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<TransformerPrefix<B>>, B::Error> {
+        if self.rotary_position_delta.is_some() {
+            return Ok(None);
+        }
+        let mut layers = Vec::with_capacity(self.layer_states.len());
+        for state in &self.layer_states {
+            match state {
+                TransformerLayerStateType::Owned(state) => {
+                    let Some(snapshot) = state.capture_prefix(self.context_length, context, command)? else {
+                        return Ok(None);
+                    };
+                    layers.push(Some(snapshot));
+                },
+                TransformerLayerStateType::Shared(_) => layers.push(None),
+            }
+        }
+        Ok(Some(TransformerPrefix {
+            layers: layers.into_boxed_slice(),
+            position: self.context_length,
+        }))
+    }
+
+    pub(crate) fn can_restore_prefix(
+        &self,
+        prefix: &TransformerPrefix<B>,
+    ) -> bool {
+        self.rotary_position_delta.is_none()
+            && self.context_length >= prefix.position
+            && self.layer_states.len() == prefix.layers.len()
+            && self.layer_states.iter().zip(prefix.layers.iter()).all(|(state, saved)| match (state, saved) {
+                (TransformerLayerStateType::Owned(state), Some(saved)) => saved.can_restore(state.as_ref()),
+                (TransformerLayerStateType::Shared(_), None) => true,
+                _ => false,
+            })
+    }
+
+    pub(crate) fn restore_prefix(
+        &mut self,
+        prefix: &TransformerPrefix<B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> bool {
+        if !self.can_restore_prefix(prefix) {
+            return false;
+        }
+        for (state, saved) in self.layer_states.iter_mut().zip(prefix.layers.iter()) {
+            if let (TransformerLayerStateType::Owned(state), Some(saved)) = (state, saved)
+                && !saved.restore(state.as_mut(), command)
+            {
+                return false;
+            }
+        }
+        self.context_length = prefix.position;
+        true
+    }
+    #[cfg(test)]
+    pub(crate) fn attention_state_for_test(
+        &self,
+        layer_index: usize,
+    ) -> Option<&crate::encodable_block::mixer::attention::AttentionState<B>> {
+        match self.layer_states.get(layer_index)? {
+            TransformerLayerStateType::Owned(state) => (state.as_ref() as &dyn std::any::Any).downcast_ref(),
+            TransformerLayerStateType::Shared(source) => self.attention_state_for_test(*source as usize),
+        }
+    }
+
     /// Allow the final attention layer to skip its query path for prompt
     /// chunks whose logits are not read. Only `score_next_token` opts a state
     /// in; the pruning additionally requires a flat batch, no requested output
@@ -186,12 +348,26 @@ pub struct Transformer<B: Backend> {
     rope_tables: Box<[super::mixer::attention::rope::RoPETableCache]>,
     layers: Box<[(TransformerLayer<B>, Option<usize>)]>,
     output_norm: Normalization<B>,
+    captured_output_norm: Normalization<B>,
     model_dim: u32,
     multimodal_positions_supported: bool,
+    scalar_image_positions_supported: bool,
     residual_add: <B::Kernels as Kernels>::TensorAddScaleKernel,
 }
 
 impl<B: Backend> Transformer<B> {
+    #[cfg(test)]
+    pub(crate) fn validation_first_layer(
+        &self
+    ) -> Option<(&crate::encodable_block::transformer_layer::TransformerLayer<B>, Option<&AnyRoPEConfig>)> {
+        let (layer, rope) = self.layers.first()?;
+        Some((layer, rope.map(|index| &self.ropes[index])))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validation_output_norm(&self) -> &Normalization<B> {
+        &self.output_norm
+    }
     pub fn new(
         context: &B::Context,
         output_norm_hadamard_factors: Option<B::GlobalBuffer>,
@@ -242,6 +418,19 @@ impl<B: Backend> Transformer<B> {
             &parameter_tree.subtree("output_norm"),
             context,
         )?;
+        // Captured residuals already include their shortcut. MTP history uses
+        // the same output RMS configuration and weights without adding that
+        // shortcut again or applying readout-only Hadamard factors.
+        let captured_output_norm = Normalization::new(
+            transformer_config.model_dim,
+            None,
+            ShortcutMode::None,
+            PostLayerScalar::None,
+            data_type,
+            &transformer_config.output_norm_config,
+            &parameter_tree.subtree("output_norm"),
+            context,
+        )?;
 
         let residual_add = <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, false)
             .map_err(TransformerNewError::Backend)?;
@@ -249,12 +438,29 @@ impl<B: Backend> Transformer<B> {
         Ok(Self {
             multimodal_positions_supported: !ropes.is_empty()
                 && ropes.iter().all(|rope| matches!(rope, AnyRoPEConfig::Qwen35MRoPEConfig(_))),
+            scalar_image_positions_supported: !ropes.is_empty()
+                && ropes.iter().all(|rope| {
+                    matches!(
+                        rope,
+                        AnyRoPEConfig::UnscaledRoPEConfig(_)
+                            | AnyRoPEConfig::ProportionalRoPEConfig(_)
+                            | AnyRoPEConfig::LinearScalingRoPEConfig(_)
+                    )
+                })
+                && transformer_config.layer_configs.iter().all(|layer| {
+                    matches!(
+                        &layer.mixer_config,
+                        crate::config::token_mixer::AnyTokenMixerConfig::AttentionConfig(attention)
+                            if attention.is_causal
+                    ) && layer.rope_config.is_some()
+                }),
             #[cfg(feature = "rope-cache")]
             rope_tables: ropes.iter().map(super::mixer::attention::rope::RoPETableCache::new).collect(),
             #[cfg(not(feature = "rope-cache"))]
             ropes: ropes.into_boxed_slice(),
             layers,
             output_norm,
+            captured_output_norm,
             model_dim: transformer_config.model_dim,
             residual_add,
         })
@@ -273,6 +479,15 @@ impl<B: Backend> Transformer<B> {
         Ok(output)
     }
 
+    pub(crate) fn normalize_captured_output(
+        &self,
+        hidden: impl BufferRef<Backend = B>,
+        rows: u32,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        self.captured_output_norm.encode(hidden, 0, rows, None::<&mut B::ScratchBuffer>, command)
+    }
+
     pub fn speculation_supported(&self) -> bool {
         !self.multimodal_positions_supported
             && self.layers.iter().all(|(layer, _rope)| layer.mixer.speculation_supported())
@@ -280,6 +495,10 @@ impl<B: Backend> Transformer<B> {
 
     pub(crate) fn multimodal_positions_supported(&self) -> bool {
         self.multimodal_positions_supported
+    }
+
+    pub(crate) fn scalar_image_positions_supported(&self) -> bool {
+        self.scalar_image_positions_supported
     }
 
     pub fn max_context_length(&self) -> Option<u32> {
@@ -292,12 +511,54 @@ impl<B: Backend> Transformer<B> {
         })
     }
 
+    pub(crate) fn memory_estimate_with_prefix(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+        sequence_tokens: u32,
+        irregular_prefill: bool,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        self.layers.iter().try_fold(
+            crate::encodable_block::memory::MemoryEstimate::default(),
+            |estimate, (layer, _)| {
+                estimate.sequential(layer.memory_estimate_with_prefix(
+                    context_tokens,
+                    input_tokens,
+                    sequence_tokens,
+                    irregular_prefill,
+                    self.model_dim,
+                )?)
+            },
+        )
+    }
+
+    pub(crate) fn context_cache_buffer_bytes(
+        &self,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        self.layers.iter().try_fold(0usize, |maximum, (layer, _)| {
+            if layer.kv_source_layer_index.is_some() {
+                Some(maximum)
+            } else {
+                layer.mixer.context_cache_buffer_bytes(context_tokens).map(|bytes| maximum.max(bytes))
+            }
+        })
+    }
+
     /// Every owned layer cache can be rewound; shared KV layers own no state.
     pub(crate) fn prefix_reuse_supported(&self) -> bool {
         !self.multimodal_positions_supported
             && self.layers.iter().all(|(layer, _rope_index)| {
                 layer.kv_source_layer_index.is_some() || layer.mixer.prefix_reuse_supported()
             })
+    }
+
+    /// Text-only snapshots do not carry image position state. Unlike simple
+    /// rewind, they can retain recurrent layers through explicit snapshots.
+    pub(crate) fn prefix_snapshot_supported(&self) -> bool {
+        self.layers
+            .iter()
+            .all(|(layer, _)| layer.kv_source_layer_index.is_some() || layer.mixer.prefix_snapshot_supported())
     }
 
     pub fn prefill_cache_layer_count(&self) -> usize {
@@ -340,6 +601,59 @@ impl<B: Backend> Transformer<B> {
             #[cfg(feature = "scoring-last-layer-pruning")]
             scoring_last_layer_pruning: false,
         })
+    }
+
+    /// Populate the owned KV cache for a single flat attention layer, without
+    /// computing its attention output or feed-forward path.
+    pub(crate) fn encode_cache_only(
+        &self,
+        input: B::ScratchBuffer,
+        batch_dim: &BatchTopology,
+        state: &mut TransformerState<B>,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), B::Error> {
+        if self.layers.len() != 1
+            || state.layer_states.len() != 1
+            || !batch_dim.is_flat()
+            || !batch_dim.full_accept()
+            || batch_dim.size() == 0
+            || batch_dim.rotary_positions().is_some()
+            || state.rotary_position_delta.is_some()
+        {
+            return Err(InvalidInput("cache-only transformer requires one flat scalar-position layer").into());
+        }
+        let (layer, rope_index) = &self.layers[0];
+        if layer.kv_source_layer_index.is_some() || !layer.supports_cache_only() {
+            return Err(InvalidInput("cache-only transformer requires owned attention KV").into());
+        }
+        let context_length = state.context_length;
+        state.prepare(context_length, batch_dim.size())?;
+        let token_positions = batch_dim
+            .heights()
+            .map(|relative| scalar_continuation_position(context_length, relative, 0).map_err(Into::into))
+            .collect::<Result<Box<[_]>, B::Error>>()?;
+        let precalculated_rope = match rope_index {
+            None => None,
+            Some(index) => {
+                #[cfg(not(feature = "rope-cache"))]
+                let rope = PrecalculatedRoPE::<B>::precalculate(&self.ropes[*index], &token_positions, command_buffer)?;
+                #[cfg(feature = "rope-cache")]
+                let rope = self.rope_tables[*index].precalculate::<B>(&token_positions, command_buffer)?;
+                Some(rope)
+            },
+        };
+        let mut shortcut = command_buffer.allocate_scratch(input.size())?;
+        let TransformerLayerStateType::Owned(layer_state) = &mut state.layer_states[0] else {
+            return Err(InvalidInput("cache-only transformer requires owned attention state").into());
+        };
+        layer.encode_cache_only(
+            input,
+            &mut shortcut,
+            precalculated_rope.as_ref(),
+            batch_dim,
+            layer_state.as_mut(),
+            command_buffer,
+        )
     }
 
     pub fn encode(

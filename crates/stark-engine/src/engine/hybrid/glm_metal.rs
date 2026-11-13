@@ -20,6 +20,15 @@ use super::{
 
 type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 
+#[path = "glm_control_prefill.rs"]
+mod control_prefill;
+#[path = "glm_kda_prefill.rs"]
+mod kda_prefill;
+
+#[cfg(test)]
+#[path = "glm_prefix_metal_tests.rs"]
+mod prefix_tests;
+
 struct Executor {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     #[cfg(test)]
@@ -44,6 +53,7 @@ fn executor() -> Result<&'static Executor> {
                 include_str!("glm_metal.metal"),
                 include_str!("glm_control_split.metal"),
                 include_str!("glm_control_fused_parallel.metal"),
+                include_str!("glm_control_prefill.metal"),
             ]
             .concat();
             let library = device
@@ -106,6 +116,13 @@ fn executor() -> Result<&'static Executor> {
                 "glm_control_mix_split32_simd",
                 "glm_control_input",
                 "glm_control_post",
+                "glm_control_prefill_project",
+                "glm_control_prefill_project_parts",
+                "glm_control_prefill_rms_project_split32",
+                "glm_control_prefill_mix",
+                "glm_control_prefill_mix_simd",
+                "glm_control_prefill_input",
+                "glm_control_prefill_post",
                 "glm_index_pool",
                 "glm_index_scores",
                 "glm_index_sort",
@@ -127,8 +144,15 @@ fn executor() -> Result<&'static Executor> {
                 if pipeline.max_total_threads_per_threadgroup() < 256 {
                     return Err("Metal GLM graph execution width is unsupported");
                 }
-                if matches!(name, "glm_control_project" | "glm_router_parallel")
-                    && pipeline.thread_execution_width() != 32
+                if matches!(
+                    name,
+                    "glm_control_project"
+                        | "glm_router_parallel"
+                        | "glm_control_prefill_project"
+                        | "glm_control_prefill_project_parts"
+                        | "glm_control_prefill_rms_project_split32"
+                        | "glm_control_prefill_mix_simd"
+                ) && pipeline.thread_execution_width() != 32
                 {
                     return Err("Metal GLM control SIMD width is unsupported");
                 }
@@ -142,6 +166,13 @@ fn executor() -> Result<&'static Executor> {
                 && candidate.max_total_threads_per_threadgroup() >= 768
             {
                 graph_pipelines.insert("glm_control_fused_parallel", candidate);
+            }
+            if let Some(function) = library.new_function_with_name("glm_control_prefill_fused_parallel")
+                && let Ok(candidate) = device.new_compute_pipeline_state_with_function(&function)
+                && candidate.thread_execution_width() == 32
+                && candidate.max_total_threads_per_threadgroup() >= 768
+            {
+                graph_pipelines.insert("glm_control_prefill_fused_parallel", candidate);
             }
             Ok(Executor {
                 device,
@@ -168,6 +199,12 @@ pub(super) struct Kda {
     heads: usize,
     state_values: usize,
     transposed_state: bool,
+}
+
+pub(super) struct KdaSnapshot {
+    parameters: [u32; 6],
+    transposed_state: bool,
+    values: Vec<f32>,
 }
 
 pub(super) struct Geometry {
@@ -254,6 +291,44 @@ impl Kda {
         // The model serializes decisions, so reset has exclusive buffer access.
         unsafe { self.state.contents().as_ptr().cast::<f32>().write_bytes(0, self.state_values) };
         unsafe { self.failure.contents().as_ptr().cast::<u32>().write(0) };
+    }
+
+    /// The owning model has drained every command before this exclusive read.
+    pub(super) fn snapshot(&self) -> Result<KdaSnapshot> {
+        self.check_completed()?;
+        let values =
+            unsafe { std::slice::from_raw_parts(self.state.contents().as_ptr().cast::<f32>(), self.state_values) }
+                .to_vec();
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("Metal GLM KDA snapshot values"));
+        }
+        Ok(KdaSnapshot {
+            parameters: self.parameters,
+            transposed_state: self.transposed_state,
+            values,
+        })
+    }
+
+    pub(super) fn restore(
+        &mut self,
+        snapshot: &KdaSnapshot,
+    ) -> Result<()> {
+        if self.parameters != snapshot.parameters
+            || self.transposed_state != snapshot.transposed_state
+            || self.state_values != snapshot.values.len()
+        {
+            return Err(Error::Invalid("Metal GLM KDA snapshot geometry"));
+        }
+        // All writers are fenced; preserve the exact stored F32 bits.
+        unsafe {
+            self.state
+                .contents()
+                .as_ptr()
+                .cast::<f32>()
+                .copy_from_nonoverlapping(snapshot.values.as_ptr(), self.state_values);
+            self.failure.contents().as_ptr().cast::<u32>().write(0);
+        }
+        Ok(())
     }
 
     pub(super) fn inner(&self) -> usize {
@@ -1020,7 +1095,25 @@ pub(super) struct Attention {
     capacity: usize,
 }
 
+/// Completed pool and latent rows remain in the model's unchanged prefix.
+/// The incomplete pool is overwritten by later requests, so copy its tail.
+pub(super) struct AttentionSnapshot {
+    position: usize,
+    tail_keys: Vec<f32>,
+    tail_gates: Vec<f32>,
+}
+
 impl Attention {
+    /// Capacity is published only after both replacement owners exist. Failed
+    /// growth therefore cannot grant speculative allocation credit.
+    pub(super) fn resident_capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub(super) fn can_append_without_growth(&self) -> bool {
+        self.position < self.capacity
+    }
+
     #[cfg(test)]
     pub(super) fn test_pool_keys(&self) -> DeviceVector {
         self.pool_keys.clone()
@@ -1066,6 +1159,58 @@ impl Attention {
 
     pub(super) fn reset(&mut self) {
         self.position = 0;
+    }
+
+    pub(super) fn snapshot(&self) -> Result<AttentionSnapshot> {
+        let length = (self.position % self.geometry.pool) * self.geometry.index_dim;
+        let read = |vector: &DeviceVector| {
+            unsafe {
+                std::slice::from_raw_parts(
+                    vector.buffer.contents().as_ptr().byte_add(vector.offset).cast::<f32>(),
+                    length,
+                )
+            }
+            .to_vec()
+        };
+        let tail_keys = read(&self.tail_keys);
+        let tail_gates = read(&self.tail_gates);
+        if tail_keys.iter().chain(&tail_gates).any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("Metal GLM attention snapshot values"));
+        }
+        Ok(AttentionSnapshot {
+            position: self.position,
+            tail_keys,
+            tail_gates,
+        })
+    }
+
+    pub(super) fn restore(
+        &mut self,
+        snapshot: &AttentionSnapshot,
+    ) -> Result<()> {
+        let length = (snapshot.position % self.geometry.pool) * self.geometry.index_dim;
+        if self.position != 0
+            || snapshot.position == 0
+            || snapshot.position > self.capacity
+            || snapshot.position >= self.geometry.context
+            || snapshot.tail_keys.len() != length
+            || snapshot.tail_gates.len() != length
+        {
+            return Err(Error::Invalid("Metal GLM attention snapshot admission"));
+        }
+        for (vector, values) in [(&self.tail_keys, &snapshot.tail_keys), (&self.tail_gates, &snapshot.tail_gates)] {
+            unsafe {
+                vector
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .byte_add(vector.offset)
+                    .cast::<f32>()
+                    .copy_from_nonoverlapping(values.as_ptr(), length);
+            }
+        }
+        self.position = snapshot.position;
+        Ok(())
     }
 
     fn parameters(&self) -> [u32; 12] {

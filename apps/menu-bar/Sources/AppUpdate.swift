@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Darwin
+import OSLog
 import SwiftUI
 
 struct ReleaseVersion: Comparable, Equatable {
@@ -89,7 +90,7 @@ struct AppRelease: Decodable {
     }
 }
 
-struct AppUpdateDownload {
+struct AppUpdateDownload: Equatable {
     let version: String
     let url: URL
     let sha256: String
@@ -271,9 +272,16 @@ struct AppUpdateOperations {
             let app = try await Task.detached {
                 try AppUpdateFiles.prepare(file, release: release, workspace: root)
             }.value
+            try Task.checkCancellation()
             prepared = true
             return PreparedAppUpdate(workspace: root, app: app)
         }, install: { prepared, release in
+            // A prepared app can wait for hours before the user upgrades.
+            // Recheck its trust before executing its bundled Python helper.
+            try await Task.detached {
+                try AppUpdateFiles.verifySignature(prepared.app, app: true)
+                try AppUpdateFiles.verifyMetadata(prepared.app, version: release.version)
+            }.value
             guard let resources = Bundle.main.resourceURL else { throw AppUpdateError.helper }
             let workspace = prepared.workspace
             for name in ["update_app.py", "install_app.py"] {
@@ -315,30 +323,67 @@ struct AppUpdateOperations {
 }
 
 @MainActor
+struct AppUpdateSchedule {
+    var start: (TimeInterval, @escaping @MainActor () async -> Void) -> Void
+    var stop: () -> Void
+
+    static func live(scheduler: NSBackgroundActivityScheduler = NSBackgroundActivityScheduler(
+        identifier: "com.starkengine.menubar.update-check")) -> Self {
+        return Self(start: { interval, check in
+            scheduler.interval = interval
+            scheduler.tolerance = 60
+            scheduler.repeats = true
+            scheduler.qualityOfService = .utility
+            scheduler.schedule { completion in
+                Task { @MainActor in
+                    // Keep the background activity alive through download and
+                    // verification, even when every Stark window is closed.
+                    await check()
+                    completion(.finished)
+                }
+            }
+        }, stop: { scheduler.invalidate() })
+    }
+}
+
+@MainActor
 final class AppUpdateController: ObservableObject {
     @Published private(set) var message = ""
     @Published private(set) var busy = false
     @Published private(set) var available: AppUpdateDownload?
+    @Published private(set) var downloading = false
     private var task: Task<Void, Never>?
-    private var automaticChecks: Task<Void, Never>?
+    private var automaticChecks: UUID?
     private var lastCheck: Date?
     private var installFailed = false
+    private var preparedUpdate: PreparedAppUpdate?
     private let installedBuild: InstalledAppBuild
     private let operations: AppUpdateOperations
     private let now: () -> Date
     private let automaticCheckInterval: TimeInterval
+    private let schedule: AppUpdateSchedule
     private static let backgroundCheckInterval: TimeInterval = 15 * 60
+    private static let logger = Logger(subsystem: "com.starkengine.menubar", category: "AppUpdate")
 
     var actionTitle: String {
-        if let available { return "Upgrade to \(available.version)" }
-        return "Check for Updates…"
+        if downloading { return "Downloading..." }
+        if available != nil { return "Upgrade" }
+        return "Check for Upgrades"
     }
 
     var versionLabel: String { installedBuild.label }
 
+    isolated deinit {
+        schedule.stop()
+        if let preparedUpdate {
+            try? FileManager.default.removeItem(at: preparedUpdate.workspace)
+        }
+    }
+
     init(installed: String? = nil, installedBuild: InstalledAppBuild? = nil,
          operations: AppUpdateOperations? = nil, now: @escaping () -> Date = Date.init,
-         automaticCheckInterval: TimeInterval = 60 * 60, restorePreviousFailure: Bool = true) {
+         automaticCheckInterval: TimeInterval = 15 * 60, restorePreviousFailure: Bool = true,
+         schedule: AppUpdateSchedule? = nil) {
         if let installedBuild {
             self.installedBuild = installedBuild
         } else if let installed {
@@ -349,6 +394,7 @@ final class AppUpdateController: ObservableObject {
         self.operations = operations ?? .live()
         self.now = now
         self.automaticCheckInterval = automaticCheckInterval
+        self.schedule = schedule ?? .live()
         if restorePreviousFailure, let path = UserDefaults.standard.string(forKey: "appUpdateWorkspace") {
             let previous = URL(fileURLWithPath: path)
             if let data = try? Data(contentsOf: previous.appendingPathComponent("result.json")),
@@ -365,27 +411,35 @@ final class AppUpdateController: ObservableObject {
 
     func performAction() {
         guard !busy else { return }
-        if let available { upgrade(available); return }
-        check()
+        upgrade(available)
     }
 
     func startAutomaticChecks() {
         guard automaticChecks == nil else { return }
+        let identity = UUID()
+        automaticChecks = identity
         checkIfNeeded()
-        let interval = automaticCheckInterval
-        automaticChecks = Task { [weak self] in
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(interval)) }
-                catch { return }
-                guard let self else { return }
-                self.checkIfNeeded()
-            }
+        schedule.start(automaticCheckInterval) { [weak self] in
+            // Invalidation can race with an already queued scheduler callback.
+            guard let self, self.automaticChecks == identity else { return }
+            Self.logger.notice("Scheduled background update activity started.")
+            // macOS may deliver within the scheduler's early tolerance window.
+            // The menu cooldown must not skip an otherwise due scheduled check.
+            self.check(background: true)
+            await self.task?.value
+            Self.logger.notice("Scheduled background update activity finished.")
         }
     }
 
     func stopAutomaticChecks() {
-        automaticChecks?.cancel()
         automaticChecks = nil
+        schedule.stop()
+    }
+
+    func prepareForTermination() {
+        stopAutomaticChecks()
+        task?.cancel()
+        discardPreparedUpdate()
     }
 
     func checkIfNeeded() {
@@ -397,18 +451,36 @@ final class AppUpdateController: ObservableObject {
 
     private func check(background: Bool) {
         guard !busy else { return }
+        if background { Self.logger.notice("Background update metadata check started.") }
         lastCheck = now()
         busy = true
         if !background { message = "Checking for updates…" }
         task = Task {
+            var preparing = false
+            let previousFailure = background && installFailed ? message : nil
+            defer { if let previousFailure { message = previousFailure } }
             do {
-                available = try await operations.fetch(installedBuild.updateComparisonVersion)
+                try Task.checkCancellation()
+                let release = try await operations.fetch(installedBuild.updateComparisonVersion)
+                try Task.checkCancellation()
+                Self.logger.notice("Update metadata check completed.")
+                if release != available {
+                    discardPreparedUpdate()
+                }
+                available = release
                 if !background || !installFailed {
                     message = available == nil ? (background ? "" : "Stark is up to date.") : "A new version is available."
                     installFailed = false
                 }
+                if let release, !hasPreparedUpdate {
+                    preparing = true
+                    try await prepare(release)
+                } else if let release, !installFailed {
+                    message = "Stark \(release.version) is ready to upgrade."
+                }
             } catch {
-                if !background {
+                Self.logger.notice("Update check or preparation did not complete.")
+                if !background || preparing && !installFailed {
                     message = (error as? AppUpdateError)?.localizedDescription ?? AppUpdateError.download.localizedDescription
                 }
             }
@@ -417,13 +489,69 @@ final class AppUpdateController: ObservableObject {
         }
     }
 
-    private func upgrade(_ release: AppUpdateDownload) {
-        busy = true; message = "Downloading Stark \(release.version)…"
+    private func discardPreparedUpdate() {
+        if let preparedUpdate {
+            try? FileManager.default.removeItem(at: preparedUpdate.workspace)
+        }
+        preparedUpdate = nil
+    }
+
+    private var hasPreparedUpdate: Bool {
+        guard let preparedUpdate else { return false }
+        guard FileManager.default.fileExists(atPath: preparedUpdate.app.path) else {
+            discardPreparedUpdate()
+            return false
+        }
+        return true
+    }
+
+    private func prepare(_ release: AppUpdateDownload) async throws {
+        downloading = true
+        defer { downloading = false }
+        Self.logger.notice("Update download and verification started.")
+        message = "Downloading Stark \(release.version)…"
+        let update = try await operations.prepare(release) { [weak self] status in self?.message = status }
+        // Preparation may finish after quit cancelled this task (for example,
+        // while detached verification was running). It still owns its workspace.
+        guard !Task.isCancelled else {
+            try? FileManager.default.removeItem(at: update.workspace)
+            throw CancellationError()
+        }
+        preparedUpdate = update
+        Self.logger.notice("Update download and verification completed; ready to upgrade.")
+        message = "Stark \(release.version) is ready to upgrade."
+    }
+
+    private func upgrade(_ selectedRelease: AppUpdateDownload?) {
+        busy = true
         installFailed = false
+        if selectedRelease == nil { message = "Checking for updates…" }
         task = Task {
+            defer { task = nil }
             var installing = false
             do {
-                let update = try await operations.prepare(release) { [weak self] status in self?.message = status }
+                try Task.checkCancellation()
+                let release: AppUpdateDownload
+                if let selectedRelease {
+                    release = selectedRelease
+                } else {
+                    lastCheck = now()
+                    let latest = try await operations.fetch(installedBuild.updateComparisonVersion)
+                    try Task.checkCancellation()
+                    if latest != available { discardPreparedUpdate() }
+                    available = latest
+                    guard let latest else {
+                        message = "Stark is up to date."
+                        busy = false
+                        return
+                    }
+                    release = latest
+                }
+                if !hasPreparedUpdate { try await prepare(release) }
+                guard let update = preparedUpdate else { throw AppUpdateError.helper }
+                // The helper owns this workspace from here, including any
+                // recovery backup. Never discard it after an install failure.
+                preparedUpdate = nil
                 installing = true
                 message = "Preparing to relaunch Stark \(release.version)…"
                 try await operations.install(update, release)
@@ -437,7 +565,6 @@ final class AppUpdateController: ObservableObject {
                 installFailed = true
                 busy = false
             }
-            task = nil
         }
     }
 }
@@ -461,8 +588,10 @@ struct AppUpdateView: View {
                 Text(updater.message).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if updater.available != nil && !updater.busy {
-                Text("Upgrading restarts Stark and clears the current conversation.")
+            if !updater.busy {
+                Text(updater.available == nil
+                     ? "If an update is found, it installs and restarts Stark, clearing the current conversation."
+                     : "Upgrading restarts Stark and clears the current conversation.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

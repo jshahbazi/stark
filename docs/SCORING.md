@@ -35,6 +35,7 @@ stark-score --score-model-path PATH [--consecutive-cache]
 | `load_seconds` | Model load time |
 | `vocab_size` | Upper bound for every token ID |
 | `max_context_tokens` | Loaded model's context maximum, or `null` when it has no finite maximum |
+| `request_budget_bytes`, `max_request_bytes` | Configured logical content budget and encoded request-line budget; see [resource budget](WORKER_PROTOCOLS.md#resource-budget) |
 | `peak_memory_bytes` | Engine peak memory, or `null` when unavailable |
 
 ## Requests
@@ -60,7 +61,27 @@ stark-score --score-model-path PATH [--consecutive-cache]
 | `context_tokens` | Positive 32-bit integer at most the model maximum reported in readiness; `input_token_ids` may be at most this long |
 | `temperature` | Finite and positive; the calibration temperature applied to the candidate distribution |
 
-The worker applies the loaded model's configured context capacity. It has no separate fixed token ceiling. The shared worker-line byte limit still applies to every request.
+The worker applies the loaded model's configured context capacity. It has no separate fixed token ceiling. The [automatic shared resource budget](WORKER_PROTOCOLS.md#resource-budget) applies to request content, four-byte-per-ID token storage and encoded lines. Available RAM at startup selects a logical budget with a 16 MiB floor and no fixed content ceiling; encoded request lines allow six times that content budget plus 2 MiB for JSON escaping and framing. `STARK_REQUEST_BUDGET_MIB` is a developer/operator override accepting positive integers whose derived byte allowances fit the platform's allocation address space. Resource admission does not guarantee every encoding of a full token window or establish full-context accuracy or performance.
+
+Before a fresh native score, the worker also admits the loaded model's state and
+workspace estimate against current available RAM after a 256 MiB reserve for
+transient request serialization and host bookkeeping. Scoring and generation
+share this admission policy. A generic decoder under pressure can wait for
+resource retirement, release fully free allocator pages and recheck actual
+headroom before retrying admission. It never adds a hypothetical freed-byte
+allowance to the final check. A matching logits-cache hit bypasses native
+allocation admission entirely.
+Generic scoring retains independent scratch pools for every 1,024-token prompt
+chunk until completion, so its peak estimate counts all those pools. Sparse
+finite state counts the actual input span; dense and undeclared state count the
+selected allocation. Scoring does not reserve generation token history or the
+generation sampler workspace. Hybrid families inspect persistent owners and
+use a scoring-specific readback/workspace allowance without generation prefix
+snapshots.
+The prompt may exactly fill the context because scoring reserves no output token.
+An insufficient-memory rejection clears cached logits and leaves the worker
+available for a smaller retry. Admission is an estimate, not a memory reservation
+or hard RSS ceiling.
 
 The reply:
 
@@ -96,10 +117,10 @@ Errors are replies of the form `{"error":CODE,"cache":{...}}`. Every error disca
 
 | Class | Codes |
 | --- | --- |
-| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_scoring_request` (bounds or duplicate candidates), `context_overflow` (context above the model maximum, or input longer than `context_tokens`), `invalid_tokenization_request` (empty text), `tokenization_failed` |
+| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_scoring_request` (bounds or duplicate candidates), `context_overflow` (context above the model maximum, or input longer than `context_tokens`), `resource_budget_exceeded` (content, token storage or native memory admission exceeds the resource allowance), `invalid_tokenization_request` (empty text), `tokenization_failed` |
 | Fencing (error reply, then `{"ready":false,"error":"native_operation_failed"}` and exit 1) | `native_scoring_failed`, `invalid_score_values` (non-finite or wrong-sized logits) |
-| Terminating (error reply, then exit 0) | `request_too_large` (line over 1 MiB) |
-| Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `output_setup_failed`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_operation_failed` (panic during startup) |
+| Terminating (error reply, then exit 0) | `request_too_large` (line exceeds the configured encoded-frame budget) |
+| Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `invalid_resource_budget`, `output_setup_failed`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_operation_failed` (panic during startup) |
 
 ## Digest probe
 
@@ -108,6 +129,15 @@ Errors are replies of the form `{"error":CODE,"cache":{...}}`. Every error disca
 ## State and privacy
 
 Every score request creates a fresh native state, runs the prompt in batches of up to 1,024 tokens, reads the logits at the final position, and drops the state. The worker suppresses native diagnostics and capture variables as described in [worker protocols](WORKER_PROTOCOLS.md#privacy-and-diagnostics) and opens no network listener.
+
+For native mixed-precision Qwen models, both workers maintain the Metal queue
+every 500 ms while waiting for a new complete request. Maintenance runs on the
+request owner thread, changes no model state or cached logits, and leaves hit
+and native-call counters unchanged. Buffered input and EOF bypass the wait.
+Input or maintenance failure discards the cache and exits with a static fatal
+error so the host can reload the worker. Dense scoring retains its existing
+blocking input wait. The [cross-backend wake study](benchmarks/2026-11-08-cross-backend-idle-wake.md)
+records the qualified artifact and cache/parity controls.
 
 ## Validation
 

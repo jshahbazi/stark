@@ -99,7 +99,8 @@ class FakeWorker:
                 raise result
             return result
         if on_delta is not None:
-            on_delta("synthetic delta")
+            # Match Worker.request_image's validated stream/final-text contract.
+            on_delta("synthetic answer")
         return {
             "text": "synthetic answer",
             "input_tokens": 17,
@@ -115,6 +116,7 @@ def make_desktop(worker):
     desktop = object.__new__(Desktop)
     desktop.lock = threading.RLock()
     desktop.write_lock = threading.Lock()
+    desktop.converter_termination_lock = threading.Lock()
     desktop.output = io.StringIO()
     desktop.output_failed = False
     desktop.epoch = 1
@@ -176,7 +178,7 @@ def test_image_api_uses_prepared_image_path_and_full_token_usage_without_leaking
 
     assert response["choices"][0]["message"]["content"] == "synthetic answer"
     assert response["usage"] == {"prompt_tokens": 17, "completion_tokens": 2, "total_tokens": 19}
-    assert deltas == ["synthetic delta"]
+    assert deltas == ["synthetic answer"]
     assert worker.text_calls == []
     assert len(worker.image_calls) == 1
     call = worker.image_calls[0]
@@ -198,6 +200,54 @@ def test_image_api_uses_prepared_image_path_and_full_token_usage_without_leaking
     assert "synthetic answer" not in output
     assert desktop.job is None
     assert desktop.api_queue == []
+
+
+@pytest.mark.parametrize("prompt_open", [False, True])
+def test_image_api_reasoning_stream_matches_buffered_response(prompt_open):
+    class ReasoningImageWorker(FakeWorker):
+        def request_image(self, prompt, image, options, on_delta=None, cancelled=None, on_progress=None):
+            reply = super().request_image(
+                prompt, image, options, on_delta=None, cancelled=cancelled, on_progress=on_progress
+            )
+            generated = ("" if prompt_open else "<think>") + "Synthetic reasoning</think>Visible answer"
+            if on_delta is not None:
+                for character in generated:
+                    on_delta(character)
+            return {**reply, "text": generated}
+
+    worker = ReasoningImageWorker()
+    desktop = make_desktop(worker)
+    if prompt_open:
+        desktop.template = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True).from_string(
+            TEMPLATE + "<think>\n"
+        )
+    deltas = []
+    response = desktop.api_complete(payload(stream=True), on_delta=deltas.append)
+    message = response["choices"][0]["message"]
+    assert message == {"role": "assistant", "content": "Visible answer", "reasoning_content": "Synthetic reasoning"}
+    assert "".join(item for item in deltas if isinstance(item, str)) == message["content"]
+    assert (
+        "".join(item["reasoning_content"] for item in deltas if isinstance(item, dict)) == message["reasoning_content"]
+    )
+    assert not worker.closed and desktop.worker is worker
+
+
+def test_image_api_rejects_stream_that_disagrees_with_final_text(monkeypatch):
+    worker = FakeWorker()
+    desktop = make_desktop(worker)
+    original = worker.request_image
+
+    def mismatched(prompt, image, options, on_delta=None, **kwargs):
+        reply = original(prompt, image, options, on_delta=None, **kwargs)
+        on_delta("different streamed text")
+        return reply
+
+    monkeypatch.setattr(worker, "request_image", mismatched)
+    with pytest.raises(APIError) as failed:
+        desktop.api_complete(payload(stream=True), on_delta=lambda _: None)
+    assert failed.value.code == "generation_failed"
+    assert worker.closed and desktop.worker is None
+    assert desktop.job is None and desktop.api_queue == []
 
 
 def test_image_capability_false_rejects_before_worker_dispatch():

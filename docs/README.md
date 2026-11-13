@@ -10,10 +10,21 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Menu bar app](../apps/menu-bar/README.md) | Building, updating and using the app, Connections, where the app keeps state |
 | [Converter guide](../tools/converter/README.md) | `stark convert` usage, every option and limit, supported models, MLX and GGUF routes, offline replay, errors |
 | [Model-family support](MODEL_SUPPORT.md) | Family downloads, saved-model removal, mode/format coverage and installation checks |
+| [Model image status](MODEL_IMAGE_STATUS.md) | All registered families and pinned checkpoint entries, image implementation/validation status, text optimization gaps and remaining work |
+| [Default-image text parity worklist](IMAGE_DEFAULT_PARITY_PLAN.md) | Prioritized family/artifact work and mandatory future-model gates for cache correctness, text performance and supported text MTP with images loaded |
+| [Tool-calling coverage](TOOL_CALLING.md) | Supported tool formats, checkpoint evidence, import status and remaining parser work |
+| [Model recommendations](MODEL_RECOMMENDATIONS.md) | Beginner's native/hybrid planning coverage, resource assumptions, offline RAM/task leaderboards and manual refresh workflow |
 | [Native hybrid models](NATIVE_HYBRID_MODELS.md) | GLM-5.3-Flash GGUF, Qwen3.8-Flash-Next native-source preparation and typed Uzu text artifacts, execution and validation |
+| [Experimental GLM wide prefill](validation/GLM_WIDE_PREFILL.md) | Wider token scheduling, batched controls, register KDA, memory admission and qualification requirements |
+| [Experimental GLM batched matrices](validation/GLM_BATCHED_MATRICES.md) | Dense-wide, grouped expert and MLA matrix batching selectors and qualification requirements |
+| [Optional GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) | Pinned MLX core, explicit experimental BF16 native profile, worker defaults and source-bound prefix validation |
 | [Native hybrid sampling](NUMERICAL_SAMPLING.md) | Exact nucleus-prefix proof, reference-order fallbacks, precision and scratch lifetime |
+| [OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) | Native text paths, Gemma 4 BF16 image profiles, encoder-free and MoE paths, precision policy and validation boundaries |
+| [Gemma 4 assistants](GEMMA4_ASSISTANT_PLAN.md) | Pinned E2B/E4B companion metadata and staged conversion, target activation/KV, text MTP and cache qualification work |
+| [Edge0-145B plan](EDGE0_PLAN.md) | Pinned metadata intake, storage and arithmetic gaps against the native Flash-Next path, and staged work; nothing implemented or run |
+| [Gemma 3 images](GEMMA3_IMAGES.md) | Source-bound SigLIP image artifacts, 4B/12B/27B admission, exact processor semantics and qualification boundaries |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
-| [Ripple-65B Preview](RIPPLE.md) | Native Rust/Metal architecture, pinned Q8 preparation, precision and validation limits |
+| [Ripple-65B Preview](RIPPLE.md) | Native Rust/Metal architecture, pinned Q4_K_M and Q8_0 preparation, precision and validation limits |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
 | [Local API](LOCAL_API.md) | The loopback OpenAI-style chat API: authentication, endpoints, parameters, limits, error codes, tested clients |
 
@@ -23,7 +34,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | --- | --- |
 | [Worker protocols](WORKER_PROTOCOLS.md) | Conventions shared by both workers: framing, readiness and version tags, error classes, privacy |
 | [Text generation](GENERATION.md) | `stark-generate` requests, replies, streaming, stop sequences, cancellation, error codes, and the terminal chat client |
-| [Native image implementation](MULTIMODAL_IMPLEMENTATION.md) | Native Qwen3.5 conversion, preprocessing, tower, fusion and image transport |
+| [Native image implementation](MULTIMODAL_IMPLEMENTATION.md) | Qwen and Gemma image profiles, preprocessing, tower, fusion, transport and qualification boundaries |
 | [Vision model families](VISION_FAMILY_CONTRACT.md) | Merged BF16 Qwen3.5 admission, automatic installation checks and evidence levels |
 | [Probability scoring](SCORING.md) | `stark-score` requests, replies, the consecutive cache, error codes and the digest probe |
 
@@ -32,7 +43,10 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | Page | What it covers |
 | --- | --- |
 | [Contributing](../CONTRIBUTING.md) | Toolchains, local checks, test layout, running a model-bound smoke test, where validation records go |
+| [Adding model support](MODEL_ONBOARDING.md) | Required tool-calling assessment, prefix reuse, artifact qualification and lifecycle checks for each new inference path |
+| [Model changes and experiments](model-experiments/README.md) | Attempt ledger, image-support retrospective, failed approaches, promotion decisions and a template for future correctness/performance work |
 | [Technical guide](TECHNICAL_OVERVIEW.md) | Components, engine module layout, feature flags, Python package layout, the app control protocol |
+| [Codex, Claude and Pi integration plan](AGENT_CLIENT_INTEGRATION_PLAN.md) | Proposed client setup, external protocol adapters, authentication, implementation milestones and qualification gates; no runtime integration added |
 | [CI and security checks](CI.md) | Workflows, what they cover and do not cover, dependency gates, caches, local equivalents |
 | [Releasing](RELEASING.md) | Signed and prebuilt release workflows, verification on a receiving Mac, DMG handling |
 | [Cargo troubleshooting](CARGO_TROUBLESHOOTING.md) | Repairing a corrupted registry cache |
@@ -43,6 +57,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 
 | Location | What it holds |
 | --- | --- |
+| [Model experiment ledger](model-experiments/README.md) | Cross-model attempt index and recording template, including failed/inconclusive work, artifact-specific results and adoption status |
 | [benchmarks/](benchmarks/README.md) | Engine comparisons with a current-versus-superseded index, optimization records, and [conversion benchmarks](benchmarks/CONVERSION_BENCHMARKS.md) |
 | [validation/](validation/) | [Scoring parity](validation/SCORING_PARITY.md) against frozen Uzu references and [ColGrep generation acceptance](validation/GENERATION_COLGREP.md), each bound to a named build |
 | [archive/conversion/](archive/conversion/) | The converter replacement plan, milestone packets and their reviews |
@@ -51,6 +66,14 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [brand/](brand/README.md) | Logo provenance and colour tokens |
 
 New validation runs belong in the pull request that made the change, or under `archive/runs/` when they must be preserved; reference pages describe current behaviour only.
+
+The [Qwen 4 preparation record](archive/runs/2026-11-08-qwen4-release-readiness.md)
+records verified release signals, the existing preview conversion boundary,
+pinned metadata-only intake results and the release-specific implementation queue.
+
+The [Gemma 3 image run](archive/runs/2026-11-07-gemma3-images.md) records exact
+4B native parity, source-bound worker/API lifecycle, preservation controls
+and the 12B/27B execution limits.
 
 The [Qwen3.5 family installation run](archive/runs/2026-10-27-qwen35-family-installation.md)
 records changed-weight conversion and automatic local image checks through the
@@ -72,6 +95,17 @@ timing for agent follow-ups and a long-prompt prefill profile.
 The [Qwen3.8 prefix reuse run](archive/runs/2026-11-02-hybrid-prefix-reuse.md)
 records the same checks for recurrent-state snapshots on the native Lily-format
 Qwen3.8 backend.
+The [GLM batched-matrix research record](archive/runs/2026-11-03-glm-batched-matrix-research.md)
+records bounded readout and expert-batching results, and the qualification
+gaps that prevent selector promotion.
+The [GLM EXL3 backend record](archive/runs/2026-11-03-glm-exl3-backend.md)
+records the optional native bridge and its separate artifact qualification.
+The [GLM EXL3 artifact run](archive/runs/2026-11-04-glm-exl3-qualification.md)
+records the verified pack, residency integration, full-state restoration and
+worker qualification against sealed executables.
+The [GLM mlx-stream comparison](benchmarks/2026-11-04-glm-mlx-stream-comparison.md)
+tracks configuration differences, measured effects and the ongoing prefill and
+decode investigation.
 The [live OpenWork Qwen3.8 run](archive/runs/2026-11-02-openwork-qwen38-live-prefix-reuse.md)
 records reuse and first-text timing for one real agent session.
 The [OpenCode Desktop managed-client record](archive/runs/2026-11-01-opencode-managed-client.md)

@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#171b19">
+  <meta name="description" content="Local inference for Apple silicon. Explore supported models, developer tools and performance.">
+  <meta property="og:title" content="Technical details — Stark">
+  <meta property="og:description" content="Explore Stark’s models, local API and Apple silicon performance.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://starkengine.app/technical.html">
+  <meta property="og:image" content="https://starkengine.app/assets/stark-social-card.jpg?v=2">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Stark's black cat logo beside the words Run local AI on your Mac.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://starkengine.app/assets/stark-social-card.jpg?v=2">
+  <link rel="canonical" href="https://starkengine.app/technical.html">
+  <link rel="icon" href="assets/stark-engine.jpg" type="image/jpeg">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+  <title>Technical details — Stark</title>
+</head>
+<body class="technical-page">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="wordmark" href="index.html#" aria-label="Stark home">STARK<span>ENGINE / APPLE SILICON</span></a>
+    <nav aria-label="Main navigation">
+<a href="/">Home</a><a href="technical.html" aria-current="page">Technical details</a><a href="docs.html">Documentation</a><a href="index.html#privacy">Privacy</a><a href="index.html#start">Get started</a><a class="repo-link" href="https://github.com/jshahbazi/stark">GitHub <span aria-hidden="true">↗</span></a>
+</nav>
+  </header>
+
+  <main id="main">
+    <section class="technical-hero wrap" aria-labelledby="technical-title">
+      <p class="eyebrow">TECHNICAL DETAILS / APPLE SILICON</p>
+      <div class="technical-hero-grid">
+        <h1 id="technical-title">Inside<br>the engine.</h1>
+        <div class="technical-intro"><p>Native inference for Apple silicon, with a model catalog, local API and developer tools.</p><a class="text-link" href="docs.html">Documentation <span aria-hidden="true">↗</span></a></div>
+      </div>
+    </section>
+    <nav class="technical-nav" aria-label="On this page">
+      <div class="wrap"><a href="#engine"><span>01</span> Integration</a><a href="#models"><span>02</span> Models &amp; memory</a><a href="#followups"><span>03</span> Conversation reuse</a><a href="#benchmarks"><span>04</span> Benchmarks</a></div>
+    </nav>
+        <section class="developer-guide section-pad" id="engine" aria-labelledby="engine-title">
+      <div class="wrap">
+        <div class="section-heading"><p class="eyebrow">01 / DEVELOPER INTEGRATION</p><h2 id="engine-title">Build with Stark.</h2><p>Bring local models into your app with an OpenAI-style API or native workers.</p></div>
+        <div class="engine-grid">
+          <div class="capabilities">
+            <article><span class="index">01</span><div><h3>Local HTTP API</h3><p>Streaming chat and function tools for compatible apps and models.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md">API reference</a></p></div></article>
+            <article><span class="index">02</span><div><h3>Native workers</h3><p>Run generation and scoring directly from your app.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/WORKER_PROTOCOLS.md">Worker documentation</a></p></div></article>
+            <article><span class="index">03</span><div><h3>Decision scoring</h3><p>Compare a set of choices with a local language model.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Scoring guide</a></p></div></article>
+          </div>
+          <div class="integration-example"><div class="terminal">
+            <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>LOCAL API / STREAMING CHAT</span></div>
+            <pre tabindex="0" role="region" aria-label="Local API example"><code id="command-code">POST /v1/chat/completions
+Authorization: Bearer &lt;API_KEY&gt;
+Content-Type: application/json
+
+{
+  "messages": [
+    {"role": "user", "content": "Reply with OK."}
+  ],
+  "stream": true
+}</code></pre>
+            <div class="terminal-bottom"><span>OpenAI-style chat</span><button type="button" class="copy-button" data-copy="command-code" data-copy-status="copy-status">Copy example</button></div>
+            <p class="copy-status" id="copy-status" aria-live="polite"></p>
+          </div><p class="integration-example-note">Find connection details in Stark’s <strong>Connections</strong> window. The API is authenticated and local to your Mac.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="models-section section-pad" id="models" aria-labelledby="models-title">
+      <div class="wrap">
+        <div class="models-heading"><div><p class="eyebrow">02 / MODELS, MEMORY &amp; TOOLS</p><h2 id="models-title">Models for your Mac.</h2></div><p>Explore Qwen, GLM Flash, Flint and more. Guided setup helps you find a starting point.</p></div>
+        <div class="fit-guide" id="model-fit" aria-labelledby="fit-title">
+          <div class="fit-intro"><h3 id="fit-title">What fits on your Mac?</h3><p>More memory opens up more models. These examples are a starting point.</p></div>
+          <div class="memory-guide" aria-label="Suggested models by unified memory">
+            <article><h4>16 GiB</h4><p>Qwen3 4B · 4-bit<br>Qwen3 0.6B · BF16</p></article>
+            <article><h4>32 GiB</h4><p>Qwen3 14B · 4-bit</p><p class="memory-estimate">Estimated fit</p></article>
+            <article><h4>64 GiB</h4><p>Qwen3 14B · BF16</p></article>
+            <article><h4>128 GiB</h4><p>Qwen3.8-Flash-Next · mixed 4/8-bit<br>GLM-5.3-Flash · UD-Q2_K_XL</p></article>
+          </div>
+          <p class="memory-note">Fit depends on available memory and context length. Use Guided setup to check your Mac before downloading.</p>
+        </div>
+        <div class="model-directory">
+          <div class="tool-support-note" id="tool-workflows"><p>Tool calling depends on the model and app version. <a href="docs.html#models">Tool compatibility guide <span aria-hidden="true">↗</span></a></p></div>
+
+          <div class="model-category-heading"><h3>Featured models</h3><a href="https://github.com/jshahbazi/stark/blob/main/README.md#supported-model-families">Compatibility guide <span aria-hidden="true">↗</span></a></div>
+          <div class="model-tabs" role="tablist" aria-label="Model groups">
+            <button type="button" role="tab" id="models-tab-text" aria-controls="text-models" aria-selected="true" tabindex="0" data-model-group="text-models">Text</button>
+            <button type="button" role="tab" id="models-tab-images" aria-controls="image-models" aria-selected="false" tabindex="-1" data-model-group="image-models">Images</button>
+            <button type="button" role="tab" id="models-tab-decision" aria-controls="decision-models" aria-selected="false" tabindex="-1" data-model-group="decision-models">Decision</button>
+          </div>
+          <div class="model-group-panel" id="text-models" role="tabpanel" aria-labelledby="models-tab-text" tabindex="0">
+            <div class="model-family-grid" id="model-family-list">
+<details class="model-family"><summary><span><strong>Qwen3.8-Flash-Next</strong><span>Text models</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints">Lily Q4-XL and mixed 4/8-bit exports. <a href="https://github.com/jshahbazi/stark/blob/main/docs/NATIVE_HYBRID_MODELS.md">Compatibility &amp; setup</a>.</div></details>
+<details class="model-family" id="qwen27-model"><summary><span><strong>Qwen3.8-27B</strong><span>Dense 27B</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints">The oQ4e checkpoint with multi-token prediction. <a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md#dense-qwen38-27b-oq4e-mtp">Compatibility &amp; setup</a>.</div></details>
+<details class="model-family"><summary><span><strong>GLM-5.3 Flash</strong><span>Text models</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints">The prepared UD-Q2_K_XL checkpoint. <a href="https://github.com/jshahbazi/stark/blob/main/docs/NATIVE_HYBRID_MODELS.md">Compatibility &amp; setup</a>.</div></details>
+<details class="model-family"><summary><span><strong>Recursive Flint</strong><span>Text models</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints">The official Flint INT4 checkpoint. <a href="https://github.com/jshahbazi/stark/blob/main/docs/FLINT.md">Compatibility &amp; setup</a>.</div></details>
+<details class="model-family" id="ripple-model"><summary><span><strong>Ripple-65B Preview</strong><span>65B · Text models</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints">Native text generation with the pinned Q4_K_M (38.8 GB) and Q8_0 (68.8 GB) downloads. Tested on an M5 Max with 128 GB memory; runtime and context need additional memory. Available in source builds containing Ripple support. Tool calling, image input and context reuse are not enabled. <a href="https://github.com/jshahbazi/stark/blob/main/docs/RIPPLE.md">Compatibility, setup &amp; validation</a>.</div></details>
+<details class="model-family"><summary><span><strong>Qwen3</strong><span>Small to large</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints">Dense models from 0.6B to 32B parameters. <a href="https://github.com/jshahbazi/stark/blob/main/docs/MODEL_SUPPORT.md">Compatibility &amp; setup</a>.</div></details>
+<details class="model-family"><summary><span><strong>Qwen3.5</strong><span>Text and images</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints">Text models and compatible BF16 vision models. <a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md">Compatibility &amp; setup</a>.</div></details>
+</div>
+            <p class="model-format-note"><a href="https://github.com/jshahbazi/stark/blob/main/README.md#supported-model-families">See all supported families and checkpoints <span aria-hidden="true">↗</span></a></p>
+          </div>
+          <div class="model-group-panel" id="image-models" role="tabpanel" aria-labelledby="models-tab-images" tabindex="0">
+            <div class="compact-image-model"><div><p class="eyebrow">IMAGES · DENSE BF16</p><h3>Qwen3.5</h3><p>Compatible Qwen3.5 BF16 models support PNG and JPEG input.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md">Image compatibility <span aria-hidden="true">↗</span></a></div>
+            <div class="compact-image-model"><div><p class="eyebrow">DEVELOPMENT UPDATE / UNDER REVIEW</p><h3>More Qwen and Gemma image paths.</h3><p>New source builds add quantized Qwen dense and MoE decoders, retained Lily Flash-Next, Gemma 3 and Gemma 4. Validation is recorded for specific checkpoints; larger profiles still need full-model checks. Check your build and model’s image readiness before attaching a picture.</p></div><a href="docs.html#image-support">Coverage and validation <span aria-hidden="true">↗</span></a></div>
+          </div>
+          <div class="model-group-panel" id="decision-models" role="tabpanel" aria-labelledby="models-tab-decision" tabindex="0">
+            <div class="compact-image-model"><div><p class="eyebrow">LOCAL DECISIONS / MODEL CONFIDENCE</p><h3>JevK5</h3><p>Compare options with JevK5 and see confidence across the choices you provide. <a href="https://huggingface.co/alibiserikbay/JevK5">Model details</a>.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Decision and confidence guide <span aria-hidden="true">↗</span></a></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="followup-section section-pad" id="followups" aria-labelledby="followup-title">
+      <div class="wrap"><div class="story-heading"><p class="eyebrow">03 / CONTEXT REUSE</p><h2 id="followup-title">Less repeated work.</h2><p>On supported models, Stark reuses the unchanged beginning of the previous request to reduce prompt processing in follow-up turns.</p></div><a class="text-link" href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md#prefix-reuse">How context reuse works <span aria-hidden="true">↗</span></a></div>
+    </section>
+
+    <section class="benchmark-section section-pad" id="benchmarks" aria-labelledby="benchmark-title">
+      <div id="bench-engines" aria-hidden="true"></div>
+      <div class="wrap">
+        <div class="benchmark-overview"><p class="eyebrow">04 / BENCHMARKS &amp; EVIDENCE</p><h2 id="benchmark-title">Measured on Apple silicon.</h2><p>Measured on an Apple M5 Max with 128 GiB memory. Results vary by workload; each report includes the setup and limitations. These studies do not establish answer-quality equivalence.</p></div>
+        <div class="benchmark-tabs" role="tablist" aria-label="Benchmark study">
+          <button type="button" role="tab" id="benchmark-tab-qwen38" aria-selected="true" aria-controls="qwen38-benchmark" tabindex="0" data-benchmark-panel="qwen38-benchmark">Qwen3.8-Flash-Next<small>Maximum observed decode</small></button>
+          <button type="button" role="tab" id="benchmark-tab-qwen38-mtp" aria-selected="false" aria-controls="qwen38-mtp-benchmark" tabindex="-1" data-benchmark-panel="qwen38-mtp-benchmark">Qwen3.8-Flash-Next MTP<small>Stark enabled vs disabled</small></button>
+          <button type="button" role="tab" id="benchmark-tab-qwen35" aria-selected="false" aria-controls="qwen35-benchmark" tabindex="-1" data-benchmark-panel="qwen35-benchmark">Qwen3.5-2B<small>Six end-to-end workloads</small></button>
+        </div>
+        <div class="benchmark-panel qwen38-study" id="qwen38-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen38" tabindex="0">
+        <p class="eyebrow">30 OCTOBER 2026 / SAMPLED GENERATION</p>
+        <h3 id="qwen38-title">Qwen3.8-Flash-Next.</h3>
+        <p class="qwen38-intro">Stark recorded <strong>9.2% higher maximum observed decode throughput</strong> than MLX-Serve using identical checkpoint files and quantization.</p>
+        <div class="benchmark-specs"><span>APPLE M5 MAX / 40 GPU CORES</span><span>128 GiB MEMORY</span><span>4,096 INPUT / 256 OUTPUT TOKENS</span><span>NO SPECULATION</span></div>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Qwen3.8 decode benchmark results">
+          <table class="benchmark-table qwen38-table">
+            <caption class="sr-only">Qwen3.8-Flash-Next maximum observed useful decode throughput and measured request ranges, using identical checkpoint files and quantization.</caption>
+            <thead><tr><th scope="col">Engine / checkpoint</th><th scope="col">Maximum decode<span>tokens / second</span></th><th scope="col">Observed range<span>tokens / second</span></th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Stark</th><td><strong>66.81</strong><span class="bar stark-bar" style="--bar:100%" aria-hidden="true"></span></td><td class="qwen38-range">57.2–66.8</td></tr>
+              <tr><th scope="row">MLX-Serve<small>26.10.3 / same mixed 4/8-bit</small></th><td>61.17<span class="bar mlx-bar" style="--bar:91.5632%" aria-hidden="true"></span></td><td class="qwen38-range">55.6–61.2</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="table-note qwen38-conditions">Maximum observed decode rate with the same mixed 4/8-bit checkpoint and speculation disabled. Input processing is excluded.</p>
+
+        <div class="benchmark-links"><a class="text-link" href="https://github.com/jshahbazi/stark/blob/3d22b4dfb41aab4b10001bef6bbdf37a4f5cb86b/docs/benchmarks/QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md">Read the benchmark report <span aria-hidden="true">↗</span></a></div>
+        </div>
+        <div class="benchmark-panel qwen38-mtp-study" id="qwen38-mtp-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen38-mtp" tabindex="0">
+          <p class="eyebrow">31 OCTOBER 2026 / MULTI-TOKEN PREDICTION</p>
+          <h3 id="qwen38-mtp-title">Qwen3.8-Flash-Next MTP.</h3>
+          <p class="qwen38-intro">Multi-token prediction increased pooled decode throughput by <strong>13.54% on Lily Q4-XL</strong> and <strong>14.69% on mixed 4/8-bit</strong> in these two-draft studies.</p>
+          <div class="benchmark-specs"><span>APPLE M5 MAX / 128 GiB</span><span>4,096 INPUT / 256 OUTPUT TOKENS</span><span>TOP-K 20 / TOP-P 0.95</span><span>TEMPERATURE 1 / SEED 42</span></div>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Qwen3.8 Stark MTP enabled versus disabled results">
+            <table class="benchmark-table mtp-table">
+              <caption class="sr-only">Pooled decode throughput for Stark with MTP disabled and two drafts enabled, measured separately for two Qwen3.8 checkpoints with top-k 20 sampling.</caption>
+              <thead><tr><th scope="col">Checkpoint</th><th scope="col">MTP disabled<span>tokens / second</span></th><th scope="col">MTP: two drafts<span>tokens / second</span></th><th scope="col">Decode gain</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Lily Q4-XL<small>fabiogreter / lily-q4-xl<br>16 on/off pairs</small></th><td>72.97</td><td><strong>82.85</strong></td><td class="gain">+13.54%</td></tr>
+                <tr><th scope="row">Mixed 4/8-bit<small>ddalcu / MLX-Serve-mixed-4-8bit<br>16 on/off pairs</small></th><td>56.69</td><td><strong>65.02</strong></td><td class="gain">+14.69%</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note qwen38-conditions">MTP enabled versus disabled, measured separately on each checkpoint with top-k 20 sampling. Rates exclude input processing.</p>
+
+          <div class="benchmark-links"><a class="text-link" href="https://github.com/jshahbazi/stark/blob/4ebdbf15fce9fe6dca584a8bb9df7c183c55aaba/docs/benchmarks/QWEN38_MTP_COMBINATION_2026_10_31.md">Lily report <span aria-hidden="true">↗</span></a><a class="text-link" href="https://github.com/jshahbazi/stark/blob/688975102703563992c67065d9506c06c104e794/docs/benchmarks/QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md">Mixed 4/8-bit report <span aria-hidden="true">↗</span></a></div>
+        </div>
+        <div class="benchmark-panel qwen35-study" id="qwen35-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen35" tabindex="0">
+          <p class="eyebrow">22 OCTOBER 2026 / SIX WORKLOADS</p>
+          <h3>Qwen3.5-2B.</h3>
+          <p class="qwen38-intro"><strong>12.2% higher aggregate throughput</strong> than MLX-LM across six workloads in this five-engine comparison.</p>
+        <div class="benchmark-specs"><span>APPLE M5 MAX / 40 GPU CORES</span><span>128 GiB MEMORY</span><span>QWEN3.5-2B / 4-BIT</span><span>ONE REQUEST AT A TIME</span></div>
+        <div class="chart-toolbar benchmark-controls">
+          <label class="workload-control" for="benchmark-workload">Workload<select id="benchmark-workload"><option value="0">Overall · six workloads</option><option value="1">Fibonacci module</option><option value="2">GPU explanation</option><option value="3">Copy editing</option><option value="4">Medium context</option><option value="5">Long context</option><option value="6">Long output</option></select></label>
+          <div class="view-switch" role="group" aria-label="Throughput display"><button type="button" class="active" aria-pressed="true" data-view="rate">Tokens / second</button><button type="button" aria-pressed="false" data-view="relative">Speedup vs MLX-LM</button></div>
+        </div>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Inference engine benchmark results">
+          <table class="benchmark-table engine-table"><caption class="sr-only" id="benchmark-caption">Overall Qwen3.5-2B generation speed on Apple M5 Max.</caption><thead><tr><th scope="col">Engine / configuration</th><th scope="col" id="rate-heading">End-to-end throughput <span>tokens / second</span></th></tr></thead><tbody><tr data-engine-id="stark_optimized" data-engine-rates='[245.48144704370287,276.31621897547257,267.13780837183396,252.56375840543475,232.6324170876747,178.97504707070985,281.926929702027]'><th scope="row">Stark</th><td><strong class="engine-value">245.5</strong><span class="bar stark-bar" style="--bar:100.0000%" aria-hidden="true"></span></td></tr><tr data-engine-id="mlx_lm" data-engine-rates='[218.81852712598177,247.72745592087333,240.93737920754808,219.34304025128668,216.57173146384548,166.0990834297762,233.09521303955685]'><th scope="row">MLX-LM<small>0.32.3.dev6 / MLX 0.32.4</small></th><td><span class="engine-value">218.8</span><span class="bar mlx-bar" style="--bar:89.1385%" aria-hidden="true"></span></td></tr><tr data-engine-id="vllm_metal" data-engine-rates='[174.68448499154846,211.28186822363207,210.85941767700234,167.31427522587936,148.7829422088259,135.9297446897513,188.48210845420343]'><th scope="row">vLLM Metal<small>0.32.0</small></th><td><span class="engine-value">174.7</span><span class="bar mlx-bar" style="--bar:71.1600%" aria-hidden="true"></span></td></tr><tr data-engine-id="llama_cpp" data-engine-rates='[147.85765513164188,163.62367418322808,159.76496598178034,151.30676303193542,146.02269734563347,113.02800568631247,160.0554339805759]'><th scope="row">llama.cpp<sup>*</sup><small>b11747 / Q4_K_M</small></th><td><span class="engine-value">147.9</span><span class="bar mlx-bar" style="--bar:60.2317%" aria-hidden="true"></span></td></tr><tr data-engine-id="tensorfold_default" data-engine-rates='[125.59457889128592,132.77343702082464,131.77978666455064,192.54283886917725,114.09649431691601,70.53956409061944,144.754783388587]'><th scope="row">TensorFold<small>1.1.1 / drafting on</small></th><td><span class="engine-value">125.6</span><span class="bar mlx-bar" style="--bar:51.1626%" aria-hidden="true"></span></td></tr><tr data-engine-id="tensorfold_plain" data-engine-rates='[118.51925691695729,142.53116827964016,140.91531116975267,121.82449912066,113.32710800866127,70.39190386269959,141.9954205686144]'><th scope="row">TensorFold<small>1.1.1 / drafting off</small></th><td><span class="engine-value">118.5</span><span class="bar mlx-bar" style="--bar:48.2803%" aria-hidden="true"></span></td></tr></tbody></table>
+        </div>
+        <p class="chart-selection" id="chart-selection" aria-live="polite">Overall · geometric mean of six workloads</p>
+        <p class="table-note">End-to-end request throughput, including input processing and generation. Loading and warmup are excluded. * llama.cpp uses a different 4-bit quantizer.</p>
+        <div class="benchmark-links"><a class="text-link" href="https://github.com/jshahbazi/stark/blob/b64daf27015d346761e369885ea320b55222b846/docs/QWEN35_ENGINE_COMPARISON_2026_10_22.md">Read the benchmark report <span aria-hidden="true">↗</span></a></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <section class="wrap contact-note" aria-labelledby="contact-title">
+      <div>
+        <h2 id="contact-title">Questions or ideas?</h2>
+        <p>Email me with questions, feature ideas, or model requests.</p>
+      </div>
+      <a href="mailto:john@starkengine.app">john@starkengine.app</a>
+    </section>
+    <div class="wrap footer-top"><a class="wordmark" href="index.html#">STARK<span>Run local AI on your Mac</span></a><div><a href="https://github.com/jshahbazi/stark">GitHub</a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/SECURITY.md">Security</a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/LICENSE">MIT license</a></div></div>
+    <section class="wrap cat-note" aria-labelledby="cat-title">
+      <img src="assets/stark-cat.jpg" width="480" height="360" alt="Stark, a black cat with golden eyes, relaxing on a lap" loading="lazy" decoding="async">
+      <div>
+        <p class="cat-eyebrow">THE CAT BEHIND THE NAME</p>
+        <h2 id="cat-title">Meet Stark</h2>
+        <p class="cat-description">Named after my cat, Stark. Excellent company, with strong opinions about lap availability.</p>
+      </div>
+    </section>
+    <div class="wrap footer-bottom"><p>An open-source Rust/Metal engine derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a>.</p><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Upstream provenance <span aria-hidden="true">↗</span></a></div>
+  </footer>
+</body>
+</html>

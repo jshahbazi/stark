@@ -9,6 +9,7 @@ pub mod mlp;
 pub mod model;
 pub mod normalization;
 pub mod per_layer_embedding;
+pub mod qwen_mtp;
 pub mod rope;
 pub mod speculator;
 pub mod token_codec;

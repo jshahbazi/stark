@@ -22,7 +22,8 @@ Run commands from the repository root. Keep dependencies locked: `Cargo.lock`, `
 | Workers | `crates/stark-generate/src`, `crates/stark-score/src` | Unit tests inside each module; `scripts/test_generation_process.py`, `scripts/test_scoring_process.py` |
 | Template evaluator | `crates/stark-template/src` | Rust unit tests and `tools/converter/tests/test_template_runtime.py` |
 | Converter, chat, API, app backend | `tools/converter/stark_convert` | `tools/converter/tests` (pytest, model-free, fixtures with recorded provenance) |
-| Menu bar app | `apps/menu-bar/Sources` | `scripts/test_build_menubar.py`, `scripts/test_app_update.py`, `scripts/test_menubar_controller.py`, `scripts/test_menubar_windows.py`, `scripts/test_desktop_connections.py`, `scripts/test_openwork_connector_installer.py`, `DesktopConnectionsTests`, `OpenWorkConnectorInstallerTests` (some need Xcode, not run in CI) |
+| Flash Next image qualification | `scripts/qualify_flashnext_images.py` | `scripts/test_qualify_flashnext_images.py` (pytest, synthetic worker counterexamples; actual model runs remain separate) |
+| Menu bar app | `apps/menu-bar/Sources` | `scripts/test_build_menubar.py`, `scripts/test_app_update.py`, `scripts/test_menubar_controller.py`, `scripts/test_menubar_windows.py`, `scripts/test_desktop_connections.py`, `scripts/test_openwork_connector_installer.py`, `scripts/test_openwork_beginner_handoff.py`, `DesktopConnectionsTests`, `OpenWorkConnectorInstallerTests` (some need Xcode, not run in CI) |
 | Installer and release | `install.sh`, `scripts/stark`, `scripts/*.py`, `.github/workflows` | `scripts/test_*.py`, `scripts/ci/test_*.py` |
 
 `tools/data_exporter`, `tools/gpu_trace` and `tools/model_compare` are inherited from Uzu and are not part of the product.
@@ -40,7 +41,7 @@ For API credential or connection-setting changes, also run `uv run --project too
 Then run the checks for the area you changed; the complete list, matching CI, is in [CI local checks](docs/CI.md#local-checks). Most changes need these checks. Build the native template evaluator before running the converter suite:
 
 ```sh
-cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template --check
+cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template -p stark-resource-budget --check
 cargo +1.98.1 build --release --locked -p stark-template
 HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
 ```
@@ -103,6 +104,13 @@ printf '%s\n' '{"operation":"score","input_token_ids":[151644,872,198],"candidat
 `runtime/` is ignored by Git. Delete the converted model when you are done. For an end-to-end check through the app, build it with `scripts/build_menubar.py --install --open` as described in the [menu bar guide](apps/menu-bar/README.md#build-and-install).
 
 ## Documentation and validation records
+
+New model families, backends, conversion routes and state-affecting inference
+paths must follow the [model onboarding workflow](docs/MODEL_ONBOARDING.md).
+Generation prefix reuse is part of that work: implement it when exact state
+restoration is possible, qualify the actual artifact, or record a concrete
+blocker with the capability disabled for that path. A new quantization or format
+does not inherit another artifact's numerical validation.
 
 - Reference pages under `docs/` describe current behaviour. When a change alters a protocol, a limit, an option or a default, update the page in the same pull request.
 - Write Markdown without emojis and without shell heredocs in examples.

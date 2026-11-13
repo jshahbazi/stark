@@ -3,8 +3,11 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{
-        Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding,
-        kernel::{GatedActMul, GatedActMulSettings, Kernels, TensorAddBiasKernel, TensorAddScaleKernel},
+        Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput,
+        kernel::{
+            GatedActMul, GatedActMulSettings, Kernels, MaterializedBF16AddScaleKernel, TensorAddBiasKernel,
+            TensorAddScaleKernel,
+        },
     },
     config::{
         activation::AnyActivation,
@@ -21,6 +24,8 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum PerLayerEmbeddingError<B: Backend> {
+    #[error(transparent)]
+    InvalidInput(#[from] InvalidInput),
     #[error("Backend error: {0}")]
     BackendError(#[source] B::Error),
     #[error("Normalization error: {0}")]
@@ -36,14 +41,26 @@ pub struct PerLayerEmbedding<B: Backend> {
     model_projection: Box<dyn Linear<B>>,
     projection_norm: Normalization<B>,
     add_scale: <B::Kernels as Kernels>::TensorAddScaleKernel,
+    reference_scale: Option<<B::Kernels as Kernels>::TensorAddScaleKernel>,
     ple_dim: u32,
     num_layers: u32,
     model_dim: u32,
     fused_token_scale: f32,
+    model_projection_scale: f32,
+    input_scale: f32,
     data_type: DataType,
 }
 
 impl<B: Backend> PerLayerEmbedding<B> {
+    pub(crate) fn add_memory_scratch(
+        &self,
+        rows: u32,
+        estimate: &mut crate::encodable_block::memory::MemoryEstimate,
+    ) -> Option<()> {
+        estimate.add_scratch(&[rows, self.num_layers, self.ple_dim], 4, 4)?;
+        estimate.add_scratch(&[rows, self.model_dim], 4, 2)
+    }
+
     pub fn new(
         context: &B::Context,
         config: &PLEModelConfig,
@@ -52,6 +69,9 @@ impl<B: Backend> PerLayerEmbedding<B> {
         parameter_tree: &ParameterTree<B>,
     ) -> Result<Self, PerLayerEmbeddingError<B>> {
         let total_ple_dim = config.num_layers * config.ple_dim;
+        if config.reference_bf16 && data_type != DataType::BF16 {
+            return Err(InvalidInput("materialized PLE reference arithmetic requires BF16").into());
+        }
 
         let token_embedding = EmbeddingTable::load(
             context,
@@ -59,6 +79,7 @@ impl<B: Backend> PerLayerEmbedding<B> {
             config.ple_vocab_size,
             total_ple_dim,
             data_type,
+            config.reference_bf16,
         )?;
 
         let model_projection = <dyn Linear<B>>::new(
@@ -73,14 +94,20 @@ impl<B: Backend> PerLayerEmbedding<B> {
         let scale_squared = config.model_projection_scale * config.model_projection_scale;
         let projection_norm_config = {
             let mut adjusted = config.norm_config.clone();
-            adjusted.epsilon /= scale_squared;
+            if !config.reference_bf16 {
+                adjusted.epsilon /= scale_squared;
+            }
             adjusted
         };
         let projection_norm = Normalization::new(
             config.ple_dim,
             None,
             ShortcutMode::None,
-            PostLayerScalar::ScaleOutput(config.input_scale),
+            if config.reference_bf16 {
+                PostLayerScalar::None
+            } else {
+                PostLayerScalar::ScaleOutput(config.input_scale)
+            },
             data_type,
             &projection_norm_config,
             &parameter_tree.subtree("projection_norm"),
@@ -89,16 +116,29 @@ impl<B: Backend> PerLayerEmbedding<B> {
 
         let add_scale = <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, false)
             .map_err(PerLayerEmbeddingError::BackendError)?;
+        let reference_scale = config
+            .reference_bf16
+            .then(|| <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, true))
+            .transpose()
+            .map_err(PerLayerEmbeddingError::BackendError)?;
 
         Ok(Self {
             token_embedding,
             model_projection,
             projection_norm,
             add_scale,
+            reference_scale,
             ple_dim: config.ple_dim,
             num_layers: config.num_layers,
             model_dim,
-            fused_token_scale: config.ple_embed_scale * config.input_scale,
+            fused_token_scale: config.ple_embed_scale
+                * if config.reference_bf16 {
+                    1.0
+                } else {
+                    config.input_scale
+                },
+            model_projection_scale: config.model_projection_scale,
+            input_scale: config.input_scale,
             data_type,
         })
     }
@@ -128,7 +168,28 @@ impl<B: Backend> PerLayerEmbedding<B> {
         let mut model_projection_input =
             command_buffer.allocate_scratch_for_shape(&[batch_dim, self.model_dim], self.data_type)?;
         command_buffer.encode_copy(inner_features, &mut model_projection_input);
-        let model_projected = self.model_projection.encode(model_projection_input, batch_dim, command_buffer)?;
+        let mut model_projected = self.model_projection.encode(model_projection_input, batch_dim, command_buffer)?;
+
+        // Canonical Gemma 4 casts the scaled projection before RMS, then casts the
+        // normalized projection, token sum and final input scale separately.
+        // Moving the scales into epsilon/gain is algebraically equivalent only
+        // in real arithmetic, not for BF16 model activations.
+        let reference_zero = self
+            .reference_scale
+            .as_ref()
+            .map(|_| command_buffer.allocate_constant_from_slice(&[half::bf16::ZERO]))
+            .transpose()?;
+        if let (Some(scale), Some(zero)) = (&self.reference_scale, &reference_zero) {
+            scale.encode(
+                None::<&B::ScratchBuffer>,
+                zero,
+                &mut model_projected,
+                1,
+                total_elements,
+                self.model_projection_scale,
+                command_buffer,
+            );
+        }
 
         let model_normed = self.projection_norm.encode(
             &model_projected,
@@ -149,6 +210,17 @@ impl<B: Backend> PerLayerEmbedding<B> {
             1.0,
             command_buffer,
         );
+        if let (Some(scale), Some(zero)) = (&self.reference_scale, &reference_zero) {
+            scale.encode(
+                None::<&B::ScratchBuffer>,
+                zero,
+                &mut per_layer_inputs,
+                1,
+                total_elements,
+                self.input_scale,
+                command_buffer,
+            );
+        }
 
         command_buffer.pop_debug_group();
 
@@ -163,15 +235,26 @@ pub struct PerLayerEmbeddingProjection<B: Backend> {
     gate_act_mul: GatedActMul<B>,
     residual_finalize: <B::Kernels as Kernels>::TensorAddBiasKernel,
     residual_combine: <B::Kernels as Kernels>::TensorAddScaleKernel,
+    source_residual_combine: Option<<B::Kernels as Kernels>::MaterializedBF16AddScaleKernel>,
     model_dim: u32,
     ple_dim: u32,
     num_layers: u32,
     activation: AnyActivation,
     post_layer_scalar: f32,
+    reference_bf16: bool,
     data_type: DataType,
 }
 
 impl<B: Backend> PerLayerEmbeddingProjection<B> {
+    pub(crate) fn add_memory_scratch(
+        &self,
+        rows: u32,
+        estimate: &mut crate::encodable_block::memory::MemoryEstimate,
+    ) -> Option<()> {
+        estimate.add_scratch(&[rows, self.ple_dim], 4, 3)?;
+        estimate.add_scratch(&[rows, self.model_dim], 4, 3)
+    }
+
     pub fn new(
         context: &B::Context,
         config: &PLELayerConfig,
@@ -181,6 +264,9 @@ impl<B: Backend> PerLayerEmbeddingProjection<B> {
         data_type: DataType,
         parameter_tree: &ParameterTree<B>,
     ) -> Result<Self, PerLayerEmbeddingError<B>> {
+        if config.reference_bf16 && data_type != DataType::BF16 {
+            return Err(InvalidInput("materialized PLE layer arithmetic requires BF16").into());
+        }
         let gate = <dyn Linear<B>>::new(
             model_dim,
             [config.ple_dim],
@@ -219,6 +305,11 @@ impl<B: Backend> PerLayerEmbeddingProjection<B> {
             .map_err(PerLayerEmbeddingError::BackendError)?;
         let residual_combine = <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, true)
             .map_err(PerLayerEmbeddingError::BackendError)?;
+        let source_residual_combine =
+            (data_type == DataType::BF16 && config.reference_bf16 && config.norm_config.mlx_bf16_reduction)
+                .then(|| <B::Kernels as Kernels>::MaterializedBF16AddScaleKernel::new(context, true))
+                .transpose()
+                .map_err(PerLayerEmbeddingError::BackendError)?;
 
         Ok(Self {
             gate,
@@ -227,11 +318,13 @@ impl<B: Backend> PerLayerEmbeddingProjection<B> {
             gate_act_mul,
             residual_finalize,
             residual_combine,
+            source_residual_combine,
             model_dim,
             ple_dim: config.ple_dim,
             num_layers,
             activation: config.activation.clone(),
             post_layer_scalar,
+            reference_bf16: config.reference_bf16,
             data_type,
         })
     }
@@ -279,15 +372,45 @@ impl<B: Backend> PerLayerEmbeddingProjection<B> {
         let projected = self.projection.encode(activated, batch_dim, command_buffer)?;
         let normed = self.norm.encode(&projected, 0, batch_dim, None::<&mut B::ScratchBuffer>, command_buffer)?;
 
+        if let Some(combine) = &self.source_residual_combine {
+            combine.encode(
+                None::<&B::ScratchBuffer>,
+                &normed,
+                outputs,
+                length,
+                length,
+                self.post_layer_scalar,
+                command_buffer,
+            );
+            command_buffer.pop_debug_group();
+            return Ok(());
+        }
+
         self.residual_combine.encode(
             None::<&B::ScratchBuffer>,
             &normed,
-            outputs,
+            outputs.reborrow(),
             length,
             length,
-            self.post_layer_scalar,
+            if self.reference_bf16 {
+                1.0
+            } else {
+                self.post_layer_scalar
+            },
             command_buffer,
         );
+        if self.reference_bf16 {
+            let zero = command_buffer.allocate_constant_from_slice(&[half::bf16::ZERO])?;
+            self.residual_combine.encode(
+                None::<&B::ScratchBuffer>,
+                &zero,
+                outputs,
+                1,
+                length,
+                self.post_layer_scalar,
+                command_buffer,
+            );
+        }
 
         command_buffer.pop_debug_group();
 

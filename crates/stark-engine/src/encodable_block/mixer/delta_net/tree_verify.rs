@@ -1,4 +1,7 @@
-use crate::{backends::common::Backend, data_type::DataType};
+use crate::{
+    backends::common::{Backend, Buffer, Subbuffer},
+    data_type::DataType,
+};
 
 #[derive(Clone, Copy)]
 pub struct TreeVerifyNewArguments {
@@ -11,13 +14,13 @@ pub struct TreeVerifyNewArguments {
 
 #[derive(Clone, Copy)]
 pub struct TreeVerifyEncodeArguments<'a, B: Backend> {
-    pub q: &'a B::ScratchBuffer,
-    pub k: &'a B::ScratchBuffer,
-    pub v: &'a B::ScratchBuffer,
+    pub q: Subbuffer<'a, B::ScratchBuffer, false>,
+    pub k: Subbuffer<'a, B::ScratchBuffer, false>,
+    pub v: Subbuffer<'a, B::ScratchBuffer, false>,
     pub trie: &'a B::ConstantBuffer,
-    pub log_decay: &'a B::ScratchBuffer,
-    pub beta: &'a B::ScratchBuffer,
-    pub h0: &'a B::GlobalBuffer,
+    pub log_decay: Subbuffer<'a, B::ScratchBuffer, false>,
+    pub beta: Subbuffer<'a, B::ScratchBuffer, false>,
+    pub h0: &'a dyn Buffer<Backend = B>,
     pub tree_size: u32,
 }
 

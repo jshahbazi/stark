@@ -21,6 +21,17 @@ pub struct UntiedReadout<B: Backend> {
 }
 
 impl<B: Backend> UntiedReadout<B> {
+    pub(crate) fn coarse_affine(
+        &self,
+        context: &B::Context,
+        bits: u32,
+    ) -> Result<Option<LinearMatmul<B>>, LinearMatmulError<B>> {
+        if self.input_rht.is_some() {
+            return Ok(None);
+        }
+        self.linear.coarse_affine(context, bits)
+    }
+
     pub fn load(
         context: &B::Context,
         tree: &ParameterTree<B>,
@@ -64,7 +75,7 @@ impl<B: Backend> UntiedReadout<B> {
             .read_buffer()?;
         let preparation = LinearInputPreparation {
             rht_signs,
-            activation_quantization: linear.prepare_a8(context),
+            activation_quantization: linear.prepare_a8(context)?,
         };
         let input_rht = InputRht::new(context, data_type, preparation, /* in_place */ false)
             .map_err(LinearMatmulError::BackendError)?;

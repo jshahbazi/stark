@@ -4,6 +4,10 @@ use crate::backends::common::gpu_types::gemm::GemmTiling;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum GemmSpecializationError {
+    #[error("internal three-bit draft weights support only the dedicated GEMV readout")]
+    InternalDraftRequiresGemv,
+    #[error("packed five/six-bit GEMM requires unsigned BF16 group64 affine weights and full-precision activations")]
+    UnsupportedPackedAffine,
     #[error("unsupported A group size {a_group_size:?}; expected None or 32/64/128")]
     InvalidAGroupSize {
         a_group_size: Option<u32>,

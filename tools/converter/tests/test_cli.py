@@ -1,6 +1,7 @@
 """End-to-end synthetic conversion and fail-closed orchestration contracts."""
 
 import json
+import os
 import shutil
 from dataclasses import asdict
 from pathlib import Path
@@ -12,6 +13,7 @@ from test_granite_smollm import fixture as scalar_family_fixture
 from test_mlx import mlx_qwen_fixture
 from test_mlx_dense import mlx_dense_fixture
 from test_mlx_gemma import mlx_gemma_fixture
+from test_mlx_qwen35 import mlx_qwen35_fixture
 from test_phi import phi_fixture
 from test_qualifications import evidence_record
 from test_sources import Hub
@@ -210,6 +212,25 @@ def test_dense_catalog_profile_rejects_compressed_checkpoint(tmp_path):
     with pytest.raises(UnsupportedConversion, match="registered compressed profile"):
         run(snapshot.root, tmp_path / "output", repo=REPOS["qwen3"])
     assert not (tmp_path / "output").exists() and not list(tmp_path.glob(".stark-convert-*"))
+
+
+def test_uniform_qwen35_catalog_rejects_mixed_width_override(tmp_path):
+    source = tmp_path / "primary"
+    mlx_qwen35_fixture(source, bits=4)
+    external = source_fixture(tmp_path / "external")
+    for name in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+        shutil.copyfile(external / name, source / name)
+    config_path = source / "config.json"
+    config = json.loads(config_path.read_text())
+    for name in ("quantization", "quantization_config"):
+        config[name]["model.layers.0.self_attn.q_proj"] = {"bits": 8, "group_size": 32}
+    config_path.write_text(json.dumps(config))
+    repo = "mlx-community/Qwen3.5-0.8B-MLX-4bit"
+    repositories = {rule["repo"]: external for rule in get_model(repo)["files"].values() if rule["repo"] != repo}
+    snapshot = resolve_source(repo, hub=Hub({**repositories, repo: source}))
+    with pytest.raises(ConversionError, match="packing disagrees"):
+        run(snapshot, tmp_path / "output", repo=repo)
+    assert not (tmp_path / "output").exists()
 
 
 def test_mlx_parameter_writer_failure_removes_private_staging(tmp_path, monkeypatch):
@@ -415,7 +436,7 @@ def test_source_or_tool_mutation_prevents_publication(source, tmp_path, source_t
 @pytest.mark.parametrize(
     "error,code,category",
     [
-        (RuntimeError("sensitive exception details"), 1, "RuntimeError"),
+        (RuntimeError("sensitive exception details"), 1, "conversion_failed"),
         (KeyboardInterrupt("private interruption"), 130, "interrupted"),
     ],
 )
@@ -433,6 +454,39 @@ def test_cli_emits_only_fixed_error_category(source, tmp_path, monkeypatch, caps
     assert captured.out == ""
     assert json.loads(captured.err) == {"status": "error", "error_category": category}
     assert "private" not in captured.err and "sensitive" not in captured.err and str(source) not in captured.err
+
+
+def test_cli_sends_fixed_failure_category_over_progress_pipe(source, tmp_path, monkeypatch):
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "stark-convert",
+            str(source),
+            "--repo",
+            REPOS["qwen3"],
+            "--output",
+            str(tmp_path / "output"),
+            "--progress-fd",
+            str(write_fd),
+        ],
+    )
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("sensitive exception details")
+
+    monkeypatch.setattr(cli, "convert", fail)
+    try:
+        assert cli.main() == 1
+    finally:
+        os.close(write_fd)
+    try:
+        payload = os.read(read_fd, 4096)
+    finally:
+        os.close(read_fd)
+    events = [json.loads(line) for line in payload.splitlines()]
+    assert events[-1] == {"phase": "failure", "category": "conversion_failed"}
+    assert b"sensitive" not in payload and b"private" not in payload
 
 
 def test_removed_external_backend_argument_does_not_echo_private_values(monkeypatch, capsys):

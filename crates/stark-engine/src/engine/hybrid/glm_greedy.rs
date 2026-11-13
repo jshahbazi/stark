@@ -51,6 +51,28 @@ impl GlmModel {
         tokens: &[u32],
         before_token: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
+        // All modes fence every writer before returning. Split on the reuse
+        // grid (divisible by both admitted 4/8-token batch widths) so capture
+        // never changes the token grouping, kernels or arithmetic.
+        let split = self.capture_at.and_then(|position| position.checked_sub(self.position));
+        if let Some(split) = split.filter(|&split| split > 0 && split <= tokens.len()) {
+            let result = self.ingest_prefix_uncaptured(&tokens[..split], before_token).and_then(|_| {
+                self.capture_prefix_if_ready()?;
+                self.ingest_prefix_uncaptured(&tokens[split..], before_token)
+            });
+            if result.is_err() {
+                self.reset();
+            }
+            return result;
+        }
+        self.ingest_prefix_uncaptured(tokens, before_token)
+    }
+
+    fn ingest_prefix_uncaptured(
+        &mut self,
+        tokens: &[u32],
+        before_token: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
         // Capture once per bulk request; scalar ingest remains synchronous.
         if std::env::var_os("STARK_GLM53_PREFILL_MMA").is_some_and(|value| value == "1") {
             let limit = match prefill_batch::chunk_limit(std::env::var_os("STARK_GLM53_PREFILL_CHUNK").as_deref()) {
@@ -436,7 +458,13 @@ impl GreedyDecode<'_> {
     }
 
     fn encode_ahead(&mut self) -> Result<()> {
-        if self.produced + 1 < self.remaining {
+        // Growth replaces the model's cache owners while its copy is still
+        // encoded in this graph. An EOS exit may discard that graph, so only
+        // reserve ahead when every attention cache already has capacity.
+        let can_reserve = self.model.decode.as_ref().is_some_and(|decode| {
+            decode.attention.iter().flatten().all(|attention| attention.can_append_without_growth())
+        });
+        if self.produced + 1 < self.remaining && can_reserve {
             self.ahead = Some(self.model.encode_pass(Some(self.gpu_greedy))?);
         }
         Ok(())
@@ -465,7 +493,13 @@ impl GreedyDecode<'_> {
         let token = self.finish_current()?;
         self.produced += 1;
         if self.produced < self.remaining {
-            let next = self.ahead.take().ok_or(Error::Invalid("GLM greedy future command missing"))?;
+            // At a growth boundary encode only after the predecessor is
+            // fenced, then submit immediately. No discardable graph owns the
+            // only copy of a retained prefix's completed attention rows.
+            let next = match self.ahead.take() {
+                Some(next) => next,
+                None => self.model.encode_pass(Some(self.gpu_greedy))?,
+            };
             self.submit(next, token)?;
             self.encode_ahead()?;
         }
@@ -484,7 +518,17 @@ impl GreedyDecode<'_> {
             self.model.cleanup_failed = true;
         }
         if discarded || pending || self.failed {
+            // A healthy drain only rewinds speculative request metadata. Its
+            // completed prefill snapshot remains valid for the collector to
+            // publish on EOS/stop. Request failures and cancellation still
+            // discard it in the worker before another request is admitted.
+            let captured = if !self.failed {
+                self.model.captured.take()
+            } else {
+                None
+            };
             self.model.reset();
+            self.model.captured = captured;
         }
     }
 }
@@ -535,6 +579,71 @@ mod tests {
         for values in [vec![], vec![0.0, 1.0], vec![-1.0], vec![0.5], vec![3.0]] {
             assert!(greedy_index(&values, 3).is_err());
         }
+    }
+
+    /// Source-bound small weights exercise the same EOS drop path as the
+    /// worker. The private fixture contains no production conversation data.
+    #[stark_test]
+    #[ignore]
+    fn glm_greedy_early_stop_preserves_prefix_at_discarded_growth_boundary() {
+        let path = std::env::var_os("STARK_GLM_REFERENCE_FIXTURE_PATH")
+            .map(std::path::PathBuf::from)
+            .expect("GLM private fixture path required");
+        let config: Value = serde_json::from_slice(&std::fs::read(path.join("config.json")).unwrap()).unwrap();
+        let seed: Vec<u32> = serde_json::from_slice(&std::fs::read(path.join("tokens.json")).unwrap()).unwrap();
+        assert!(!seed.is_empty());
+        let mut model = GlmModel::new(Weights::open(&path).unwrap(), &config).unwrap();
+        model.config.max_context = 4096;
+        assert!(model.supports_greedy_readout(), "GLM overlap flags required");
+        let chunk = model.prefill_chunk_tokens();
+        let prompt: Vec<_> = seed.iter().copied().cycle().take(chunk * 2 - 2).collect();
+        let followup: Vec<_> = seed.iter().copied().cycle().take(chunk + 17).collect();
+        model.capture_prefix_at(chunk).unwrap();
+        model.ingest_prefix(&prompt[..prompt.len() - 1], &mut || Ok(())).unwrap();
+        let first = model.step_greedy(*prompt.last().unwrap()).unwrap();
+        let mut stream = model.greedy_decode(first, 8).unwrap();
+        stream.next().unwrap().unwrap();
+        assert!(stream.current.is_some(), "test must drain a submitted successor");
+        assert!(stream.ahead.is_none(), "growth must not publish owners from a discardable graph");
+        assert_eq!(stream.model.position, chunk * 2);
+        let attention = stream.model.decode.as_ref().unwrap().attention.iter().flatten().collect::<Vec<_>>();
+        assert!(!attention.is_empty());
+        assert!(attention.iter().all(|attention| attention.resident_capacity() == chunk * 2));
+        // EOS/stop causes the collector to drop the iterator at this point.
+        drop(stream);
+        assert_eq!(model.position, 0);
+        let snapshot = model.take_prefix_snapshot().expect("healthy EOS drain lost its completed prefill snapshot");
+        assert_eq!(snapshot.position(), chunk);
+        model.restore_prefix(&snapshot).unwrap();
+        model.ingest_prefix(&followup[chunk..followup.len() - 1], &mut || Ok(())).unwrap();
+        let resumed = model.step(*followup.last().unwrap()).unwrap();
+        model.reset();
+        model.ingest_prefix(&followup[..followup.len() - 1], &mut || Ok(())).unwrap();
+        let fresh = model.step(*followup.last().unwrap()).unwrap();
+        assert!(
+            resumed.len() == fresh.len() && resumed.iter().zip(&fresh).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "EOS resume after discarded growth changed logits"
+        );
+
+        // Successful draining may retain a snapshot; a failed GPU completion
+        // must poison the model and discard the same snapshot.
+        model.captured = Some(snapshot);
+        let mut graph = DecodeGraph::new().unwrap();
+        let huge = DecodeGraph::upload(&[f32::MAX]).unwrap();
+        let overflow = graph.add(&huge, &huge).unwrap();
+        let pending = graph.submit(&[overflow]).unwrap();
+        drop(GreedyDecode {
+            model: &mut model,
+            first: 0,
+            remaining: 1,
+            produced: 0,
+            current: Some(pending),
+            ahead: None,
+            failed: false,
+            gpu_greedy: false,
+        });
+        assert!(model.is_fenced(), "failed EOS drain did not fence the model");
+        assert!(model.take_prefix_snapshot().is_none(), "failed EOS drain retained a snapshot");
     }
 
     #[stark_test]

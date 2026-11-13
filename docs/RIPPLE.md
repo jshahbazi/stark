@@ -98,6 +98,16 @@ capacity from amortized growth. Its checked 32 GiB bound includes these buffers
 and the old layer allocation while that layer's replacement is copied. The
 payload estimates above exclude this overhead.
 
+Request admission reserves the complete rounded target cache, a conservative
+single-layer replacement overlap, uploaded normalization controls and the
+512 MiB graph workspace ceiling. It checks per-buffer device limits and the
+32 GiB cache bound before generation. Previous request state is released before
+the worker samples available memory; no prefix-reuse credit is applied. The
+staged fallback reserves its F32 cache, descriptor growth and activation
+workspace plus a conservative 16 GiB Metal view/staging allowance covering the
+8 GiB streaming cache and in-flight views surviving eviction. These admission
+estimates do not qualify long-context model quality.
+
 At head dimension 128, preparation distributes independent coordinates across
 SIMD lanes while retaining the original RMS summation order. Softmax similarly
 parallelizes exponentials and divisions for counts at least eight while

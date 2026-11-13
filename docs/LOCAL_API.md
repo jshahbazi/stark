@@ -27,7 +27,7 @@ Request rules enforced before any endpoint runs:
 - The `Host` header must name `127.0.0.1`, `localhost` or `::1`.
 - Requests carrying an `Origin` header are rejected, so browser pages and webviews cannot use the API. `OPTIONS` preflight returns 501 because there is no CORS handler.
 - Duplicate `Host` or `Authorization` headers are rejected.
-- Text-only request bodies are limited to 1 MiB. When `capabilities.images` is true, a request containing an image part may use up to 6 MiB; text-only bodies remain limited to 1 MiB. Every request must carry exactly one `Content-Length` and must not use `Transfer-Encoding`. When `Content-Type` is present it must be `application/json`. JSON with duplicate keys, `NaN` or infinities is rejected.
+- Text-only request bodies use the [automatic shared resource budget](WORKER_PROTOCOLS.md#resource-budget), selected from available memory at startup with a 16 MiB logical content floor and no fixed content ceiling. Encoded JSON permits six times that content allowance plus 2 MiB for framing. When `capabilities.images` is true, a request containing an image part has 6 MiB of additional body allowance; the compressed image remains limited to 4 MiB. Every request must carry exactly one `Content-Length` and must not use `Transfer-Encoding`. When `Content-Type` is present it must be `application/json`. JSON with duplicate keys, `NaN` or infinities is rejected. A structural scan rejects more than 65,536 nodes or 64 nested containers before allocating the parsed tree.
 
 Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except the connection-limit response described under [limits](#limits-queueing-and-cancellation). Stark writes no access log and never logs prompts, replies or keys.
 
@@ -42,6 +42,15 @@ Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except t
 | `POST /v1/chat/completions` | One completion, buffered or streamed; one inline PNG/JPEG image when `capabilities.images` is true |
 
 Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length`, `context_capacity_known`, `max_output_tokens`, `tool_calling`, `capabilities.mtp` and `defaults.mtp`. Embeddings, the Responses API, structured output and batching are not available. Function tools require the supported template/parser below.
+
+Managed OpenWork and OpenCode discovery uses the same API-specific output cap.
+For a model with a 262,144-token native capacity running with the guide's
+32,768-token API context, the connector advertises at most 32,767 output tokens.
+The desktop control protocol exposes this as `api_max_output_tokens`, separately
+from the native `max_output_tokens` ceiling. Native model capacity and Advanced
+playground limits remain separate. A connector observation with zero output
+capacity or output capacity greater than its context does not complete the
+guide's model-discovery check.
 
 When a supported template/parser produces function calls, Stark validates and returns them in the completion response. The API does not execute the named functions. The client decides whether to execute a returned call, applies its own approval policy, and sends any result back as conversation history. Treat returned calls and arguments as model output, not as trusted instructions.
 
@@ -63,7 +72,7 @@ The [reference catalog](../tools/converter/stark_convert/vision_runtime_qualific
 
 ## Chat completions
 
-Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user`, `metadata`, `mtp`, `tools`, `tool_choice`, `parallel_tool_calls` and `store`. Unknown fields are rejected.
+Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user`, `metadata`, `mtp`, `thinking`, `reasoning_effort`, `tools`, `tool_choice`, `parallel_tool_calls` and `store`. Unknown fields are rejected.
 
 **Storage.** Omit `store` or use `false`/`null`. Stark does not store completions. `store: true` and non-boolean values return `unsupported_parameter`; they do not enable retention.
 
@@ -73,9 +82,15 @@ The service accepts PNG or JPEG file bytes up to 4 MiB after Base64 decoding the
 
 **Context limit.** `/v1/models` reports a declared finite model maximum as `context_length`, with `context_capacity_known: true`. The combined rendered input and requested output must fit that context. A backend without a declared finite maximum reports `context_length: null` and `context_capacity_known: false`; its unsigned 32-bit protocol ceiling is not advertised as a model capacity. For these models, text requests reserve only the rendered input plus requested output, while any custom playground conversation budget still applies. Image requests require a declared finite context. There is no global 16,384-token context cap. Request byte limits and available memory still apply; a published context capacity does not establish full-length performance or memory qualification on this Mac.
 
-**Output limit.** `max_tokens` and `max_completion_tokens` are aliases; supply at most one. The default is the smaller of 512 and the model's limit. Requests may go up to the model's limit, which is capped at 4,096 and shown as `max_output_tokens` in `/v1/models`; a larger value returns 400 rather than being clamped. `n` must be 1. A completion that reaches the output or context limit reports `finish_reason: "length"`.
+**Output limit.** `max_tokens` and `max_completion_tokens` are aliases; supply at most one. When both are omitted, Stark tokenizes the rendered conversation and uses the remaining finite context as the output budget, bounded by the worker’s output-storage allowance. Generation stops on EOS, a stop condition, the context boundary, cancellation or a deadline. Explicit output limits are honored and must fit beside the actual input. `/v1/models` reports `max_output_tokens` as the smaller of context capacity minus one and the resource budget’s four-byte-per-token storage allowance. For models without a declared finite maximum, that storage allowance bounds the unsigned 32-bit protocol range. There is no separate 4,096-token output cap or 512-token default. Generated content remains subject to the shared resource budget. `n` must be 1. A completion that reaches the output or context limit reports `finish_reason: "length"`.
+
+Text models advertising [native memory planning](WORKER_PROTOCOLS.md#automatic-execution-for-undeclared-contexts) admit omitted output limits after tokenization. The worker selects an execution allowance from the loaded model's cache/state geometry and current memory headroom, bounded by any declared finite context. The planned allowance does not change the model's reported capacity. Models without a declared capacity continue to report `context_length: null`; Stark never reserves the unsigned 32-bit protocol ceiling. No context or output configuration is required. A worker predating memory planning keeps remaining-context Auto for finite models; undeclared-context Auto reports recoverable 503 `automatic_output_unavailable` and needs updating. Explicit output limits remain compatible with that worker.
 
 **Sampling.** `temperature` defaults to 0, which selects greedy decoding. A positive finite temperature up to 2 selects stochastic sampling with `top_p` (greater than 0, at most 1), `top_k` (1 through the vocabulary size), `min_p` (0 through 1) and `seed` (unsigned 64-bit, default 0). These values are accepted without effect at temperature 0. Non-zero `presence_penalty` or `frequency_penalty`, `logprobs: true`, `top_logprobs` above 0, and any `response_format` other than `{"type":"text"}` return 400 `unsupported_parameter`; the neutral values are accepted. `user` and `metadata` are accepted within their size bounds and discarded.
+
+**Reasoning.** `thinking` is a boolean, defaulting to `false`, passed to templates that support a boolean reasoning control. Qwen clients can enable it with `thinking: true`. The reviewed GLM-5.3 template always opens reasoning and supports effort levels instead: `thinking: false` selects Low effort and `thinking: true` selects Max. Explicit `reasoning_effort: "low"`, `"high"` or `"max"` overrides that mapping for GLM-5.3; other templates reject `reasoning_effort` with `unsupported_parameter`. Low effort does not disable GLM reasoning.
+
+When the rendered prompt opens a `<think>` block, or output begins with an explicit `<think>` opener, assistant replies separate `reasoning_content` from visible `content`. The closing marker is omitted from both fields. An unfinished reasoning block returns an empty visible `content` and its partial `reasoning_content`; finish reason and token usage retain the worker's values. Later literal thinking tags in ordinary content remain visible. Streaming uses `delta.reasoning_content` for reasoning and `delta.content` for visible text, including when boundary tags span worker deltas. Replay both fields in assistant history. Playground and terminal output retain their raw display while keeping structured assistant history in memory.
 
 **Stop sequences.** `stop` is one string or up to four non-empty strings of at most 1,024 characters. The worker matches them against decoded text, including across chunks, and withholds the match and everything after it. Usage counts still include the token that completed the match.
 
@@ -98,14 +113,20 @@ enable support.
 Each backend chooses its maximum and recommended draft count. Unsupported or
 missing worker capabilities produce `supported: false`, zero counts and an
 empty operation list. Capabilities are cleared when the worker stops or the
-model changes; Decision mode does not expose MTP. These fields prepare the
-backend for a UI toggle; no new UI control is implemented here.
+model changes; Decision mode does not expose MTP. The app shows a
+**Multi-token prediction (MTP)** toggle under **Advanced Options** when the
+loaded model supports it. **Apply and New Chat** saves the choice with the other
+options; **Restore Defaults** selects that model's MTP default.
 
 `defaults.mtp` is the active model's effective saved choice. Registered models
-start off, and each model remembers its own boolean preference in the private
-model registry across stops, switches and application restarts. The preference
-becomes inactive when the loaded worker lacks support and is retained for a
-later supported worker. Saving it does not reload the model or clear the chat.
+default off for Gemma and full-BF16 Qwen3.5-0.8B; other supported models retain
+their existing default on. Each model remembers its own
+boolean preference in the private model registry across stops, switches and
+application restarts. Existing registry entries without a saved choice also
+use that model-specific default; an explicit saved choice is preserved. The preference becomes
+inactive when the loaded worker lacks support and is retained for a later
+supported worker. The preference-only command below preserves the chat; applying
+Advanced Options starts a new chat without reloading the model.
 
 A completion may send `"mtp": true` or `"mtp": false` to override that default
 for one request. `true` selects the model's recommended count. Omission
@@ -121,8 +142,8 @@ returns 400 `mtp_not_supported`. Exact sampling and stored quantization remain
 unchanged. A supported worker's completion acknowledgement must match its
 selected mode, depth and policy; a contradiction closes that worker.
 
-The desktop's private JSON-lines backend accepts the following command for
-the future UI, using the internal `model_id` from its `ready` event:
+The desktop's private JSON-lines backend accepts the following command to save
+the preference, using the internal `model_id` from its `ready` event:
 
 ```json
 {"command":"configure_mtp","model_id":"registered-model-id","enabled":true}
@@ -136,16 +157,47 @@ capabilities and `mtp_enabled`. Desktop `ready` events expose those settings
 alongside the existing limits. These private commands use library IDs;
 HTTP completions continue using the public IDs described above.
 
+The app's `configure` command can include both `model_id` and boolean
+`mtp_enabled` to save MTP with the other Advanced Options before starting a new
+chat. It validates the loaded model, live support and all options before saving;
+a save failure leaves the preference, conversation and other options unchanged.
+Omitting both fields preserves the MTP preference.
+
 ## Function tools
 
 `/v1/capabilities` reports `tool_calling`, `tool_parser` and `tool_choices` for the running model. Tool support means that the loaded chat template has an implemented, tested wire-format parser. Stark recognizes the reviewed originals below by source SHA-256 and also accepts syntax-equivalent Jinja programs, independently of the model name or saved installation metadata:
 
 | Parser | Supported template sources | Template SHA-256 |
 | --- | --- | --- |
+| `qwen3-hermes-v1` | Qwen/Qwen2.5-0.5B-Instruct, revision `7ae557604adf67be50417f59c2c2f167def9a775`; matching program in reviewed Qwen2.5-Coder-3B-Instruct | `cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f` |
 | `qwen3-hermes-v1` | Official Qwen3-0.6B | `a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8` |
 | `qwen3-hermes-v1` | `mlx-community/Qwen3-4B-4bit`, revision `4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25` | `87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5` |
 | `qwen38-xml-v1` | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83`; identical template in installed `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit` | `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041` |
 | `qwen35-xml-v1` | `alibiserikbay/JevK5`, revision `c4f7fdb3aeab5582336406e78d3bef11bf98833d` | `a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715` |
+| `glm53-xml-v1` | `zai-org/GLM-5.3-Flash`, revision `04c4e9e95c5da8862dced7e5056455116f83a7e0`, used by native preparation | `34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891` |
+| `glm53-xml-v1` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | `7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6ae29733466` |
+
+Additional reviewed sources use the protocols below. Full pinned revisions,
+original and normalized hashes, program fingerprints and licenses are in the
+[source fixture manifest](../tools/converter/tests/fixtures/tool_templates/README.md).
+
+| Parser | Reviewed sources | Framing |
+| --- | --- | --- |
+| `mistral-json-v1` | Mistral-7B-Instruct-v0.3 | `[TOOL_CALLS]` followed by a JSON list |
+| `llama-json-v1` | Llama-3.1-8B-Instruct and Llama-3.2-1B-Instruct public-mirror templates | Bare JSON object with `name` and `parameters`; optional `<\|python_tag\|>` |
+| `granite30-json-v1` / `granite33-json-v1` | Granite 3.0, 3.1 and 3.3 Instruct | `<\|tool_call\|>` followed by a JSON list |
+| `smollm2-json-v1` | SmolLM2-1.7B-Instruct | JSON list inside `<tool_call>`; empty list means no call |
+| `smollm3-hermes-v1` | SmolLM3-3B | Hermes objects inside `<tool_call>` |
+| `lfm2-pythonic-v1` | LFM2-1.2B and LFM2.5-1.2B-Instruct / 350M template programs | `<\|tool_call_start\|>[name(key=value)]<\|tool_call_end\|>` |
+| `phi4-json-v1` | Phi-4-mini-instruct | Bare JSON list or `<\|tool_call\|>` / `<\|/tool_call\|>` |
+| `functiongemma-v1` | FunctionGemma-270M public-mirror templates | `<start_function_call>call:name{key:<escape>value<escape>}<end_function_call>` |
+| `qwen3-hermes-v1` | rnj-1-instruct | Hermes objects inside `<tool_call>` |
+
+The [coverage matrix](TOOL_CALLING.md) lists family boundaries and separately
+recorded task evidence. Newly admitted Qwen2.5, GLM and Flint programs have native
+template, parser and synthetic API coverage; model-generated workflow
+qualification is pending. Their unchanged upstream fixtures and licenses are
+recorded in [fixture provenance](../tools/converter/tests/fixtures/tool_template_additions.provenance.md).
 
 The compatibility check parses templates using the same locked Jinja version, immutable sandbox and whitespace settings as chat rendering. A versioned program fingerprint ignores source locations, comments, equivalent string quoting/escapes, redundant parentheses and expression spacing. Adjacent literal text split by a comment is joined without changing its contents. Newline/indentation changes are accepted only when Jinja produces the same program. Literal output, tool instructions/markers, emitted whitespace, values, lookup style, filters, calls, branches, loops and their ordering remain part of the fingerprint. Changed instructions or a new tool format still require review and an updated registration or parser; model names and marker presence never establish support. Matching does not compile or execute the candidate. Sources are limited to 256 KiB of UTF-8, with bounded traversal work/depth and an eight-entry in-memory template cache; malformed or over-limit candidates remain unsupported.
 
@@ -155,11 +207,14 @@ The 4B template is preserved as an upstream fixture with source and license prov
 - `tool_choice` accepts `auto`, `none`, `required`, or `{"type":"function","function":{"name":"supplied_name"}}`. Named choice renders only that definition. Required/named output is checked after generation; failure returns `tool_choice_not_satisfied`, without synthesizing a call. `none` omits definitions from rendering and rejects generated tool markers.
 - `parallel_tool_calls` is a boolean, default true. False permits at most one generated call; a violation fails the completion. At most 16 calls are returned, in generation order, with distinct stable IDs within the response and JSON-object argument strings.
 - Assistant history may contain null or omitted text alongside `tool_calls`. Each call requires `id`, `type: function`, and a function name/argument string. Tool-result messages require string/text-part content and the matching `tool_call_id`. All outstanding results must be returned before another assistant/user turn. Duplicate, orphaned and incomplete transactions are rejected. The loaded template receives complete history, argument objects, definitions, and results ordered by their call IDs.
-- Hermes calls contain JSON objects inside `<tool_call>`. XML calls contain `<function=NAME>` and named `<parameter=NAME>` blocks. Only complete calls from a normally terminated generation become executable requests. Duplicate keys/parameters, nonfinite numbers, unknown names, invalid argument representations, truncated markers, quoted examples, extra trailing text and limit violations fail. Code fences, blockquotes, HTML comments and HTML code/quotation containers in the visible prefix are rejected conservatively, including completed blocks. Balanced inline-code mentions and completed thinking before an actual call remain supported. No guessed repairs occur. Malformed output does not unload an otherwise aligned worker.
+- Hermes calls contain JSON objects inside `<tool_call>`. Qwen XML calls contain `<function=NAME>` and named `<parameter=NAME>` blocks. GLM calls place the function name directly after `<tool_call>`, followed by paired `<arg_key>`/`<arg_value>` blocks; strings retain exact contents and non-string values use JSON. Only complete calls from a normally terminated generation become executable requests. Duplicate keys/parameters, nonfinite numbers, unknown names, invalid argument representations, truncated markers, quoted examples, extra trailing text and limit violations fail. Code fences, blockquotes, HTML comments and HTML code/quotation containers in the visible prefix are rejected conservatively, including completed blocks. Balanced inline-code mentions and completed thinking before an actual call remain supported. No guessed repairs occur. Malformed output does not unload an otherwise aligned worker.
 - XML schemas require directly named root properties. Parameters can declare types, constrain types through JSON `enum`/`const` literals, or use typed `anyOf`/`oneOf` alternatives or bounded local JSON Pointer references. Parameter names use the same bounded ASCII identifier syntax as function names. Root references/composition, dynamic parameter names, malformed schemas, remote/cyclic/unresolved references and resolution-budget exhaustion return `tool_schema_unsupported` before generation, with a fixed unsupported-form category.
 - Empty or annotation-only parameter schemas are forwarded unchanged as model hints, so an unused unconstrained parameter does not block ordinary chat or other tool calls. XML cannot determine the representation of a generated unconstrained value: using such a parameter fails the entire completion with `tool_argument_type_unsupported`, without returning any calls. Types are never guessed from generated text.
+- Mistral v0.3 rendering applies a hash-checked packaged correction to its upstream JSON serializer. Render-only IDs use nine alphanumeric characters and results are JSON-escaped; API IDs retain their original values. Llama permits one call per assistant turn. Mistral, Llama and Granite reject history combining visible text with a call when the native template cannot retain both, using `tool_history_unsupported` before queue admission.
+- LFM Pythonic syntax is parsed as bounded data and never executed. Attribute access, nested calls, positional arguments, unpacking and executable expressions are rejected. Function and root parameter names must be Python identifiers. Its documented trailing prose is returned as text; other formats require clean call framing. Llama holds a possible initial JSON object during streaming; Phi holds a possible initial JSON list.
+- FunctionGemma requires concrete parameter types and representable named keys. References, schema composition, dynamic properties, reserved schema-key parameter names and native delimiter strings are rejected with `tool_schema_unsupported` or `tool_history_unsupported`. Its required response marker is tokenized to one native stop-token ID for tool requests, preserving the allowance of four client stop strings. An incompatible tokenizer returns `tool_tokenizer_unsupported`. Protocol compatibility does not establish native model loading: the tested BF16 artifact currently fails that step.
 - XML strings retain their original contents; structured values use JSON. The Qwen3.5 template's top-level boolean/null scalars use its canonical `True`/`False`/`None` representation. Ambiguous string/non-string union values and strings containing reserved wire delimiters are rejected rather than coerced. These checks decode types; clients still validate the complete schema before executing anything.
-- Definitions together are limited to 256 KiB; each argument object to 64 KiB; each tool result to 256 KiB; parsed tool output to 512 KiB. JSON depth is limited to 32 and item count to 16,384. The ordinary 1 MiB body/worker-line limits and model context limits also apply. Tool use and image input cannot be combined.
+- Definitions together, each argument object and parsed tool output use the shared logical byte budget, selected automatically from available memory with a 16 MiB floor. Tool results use the aggregate message-text budget without a separate per-result cap. Tool JSON depth remains limited to 32 and item count to 16,384. The shared encoded-body/worker-frame budgets and actual model context also apply. Tool use and image input cannot be combined.
 
 Buffered completions return `message.tool_calls`, optional text (null when absent), and `finish_reason: "tool_calls"`. Tool-enabled streaming delivers ordinary text as it is generated. Possible tool markers and their arguments stay private through the terminal worker frame and strict parsing, then indexed `delta.tool_calls` are emitted exactly once, followed by the terminal reason, optional usage and `[DONE]`. Trailing whitespace is held until it can be distinguished from the separator before a call. Invalid or truncated calls produce a stream error after any provisional text; they never produce executable tool deltas. Usage includes all generated framing/argument tokens and tokens completing a stop sequence. Cancellation/deadline checks remain active throughout generation.
 
@@ -183,26 +238,37 @@ Qwen/Qwen3-0.6B with unquantized BF16 weights completed a narrowly prompted two-
 
 The pinned MLX Qwen3-4B 4-bit/group-64 artifact completed a bounded two-read task in OpenWork, including client-side execution, result return and a correct final calculation. A looser variant repeated a read until cancelled. Use explicit task limits and client approvals; this is a narrow workflow qualification. The [desktop validation record](archive/runs/OPENWORK_KEYCHAIN_E2E_2026_10_31.md) separates protocol, model behavior and signed-package evidence.
 
+When the rendered generation prompt opens a thinking block, the host carries
+that state into tool-call validation. Generated text must close the block before
+an executable call. The flag comes from the rendered prompt; client parameters
+and worker reply fields cannot enable it. Templates such as Flint that do not
+open a thinking block continue to reject unmatched closing tags. The final
+pre-call text is separated into `reasoning_content` and visible `content` after
+the complete raw output passes the existing tool validation. Streaming keeps
+tool calls private until that validation completes.
+
 ## Limits, queueing and cancellation
 
 - The server accepts at most 16 concurrent connections. Excess connections receive a bare 429 with `Retry-After: 1` and no `X-Request-Id` header.
 - One completion runs at a time. Up to eight more wait in FIFO order; a ninth receives 429 `queue_full`, and a queued request that waits more than 30 seconds receives 429 `queue_timeout`.
-- After its body has been read and parsed, each completion has a 300-second deadline covering queueing and execution; reaching it returns 504 `request_timeout`.
+- After its body has been read and parsed, each completion has a 300-second inactivity deadline covering queueing and execution. Validated native generation progress renews it, including progress during prefill; an active request can run longer than five minutes. A stalled request returns 504 `request_timeout`.
 - The handler polls the client connection every 50 ms while a request runs. A closed connection cancels the native generation at the next safe boundary and, when a response can still be written, returns 499 `request_cancelled`. Closing only the write side of the socket counts as a disconnect.
 - Stopping or changing the model in Stark fails waiting and running requests with 503 `model_changed`; cancellation and deadlines keep the model loaded.
-- The body limit and the worker's own 1 MiB request line are separate. Worker requests include the rendered prompt (system prompt, template framing and all messages) or token IDs, JSON encoding and the terminating newline. A request that exceeds this encoded line limit returns 400 `request_too_large` before writing that request to the worker. The model stays loaded, and a shorter conversation can be retried.
-- The server reserves declared raw body bytes against a shared 24 MiB pending-body budget before reading. It holds that reservation through completion and releases it on success, parse failure, disconnect or cancellation. This bounds concurrent request bodies, not total process RSS: JSON parsing and decoded image bytes add memory beyond the raw-body reservation.
+- Body admission, logical content and rendered worker framing each apply the [automatic shared policy](WORKER_PROTOCOLS.md#resource-budget). Normal app use requires no configuration; `STARK_REQUEST_BUDGET_MIB` is a developer/operator override accepting positive integers whose derived allowances fit the platform's allocation address space. Worker requests include the rendered prompt (system prompt, template framing and all messages) or token IDs, JSON encoding and the terminating newline. A request that exceeds the effective encoded line limit returns 400 `request_too_large` before being written to the worker. The model stays loaded, and a smaller request can be retried.
+- The server reserves declared raw body bytes against an aggregate budget of two maximum image bodies before reading. It holds that reservation through completion and releases it on success, parse failure, disconnect or cancellation. This bounds concurrent request bodies, not total process RSS: JSON parsing and decoded image bytes add memory beyond the raw-body reservation. Structural admission also bounds compact arrays and objects before parsing.
+- Bodies larger than 1 MiB also reserve estimated parsing headroom of twelve times the raw size against current available memory. This admission is serialized across concurrent readers and released after parsing; resident queued bodies remain reflected in available-memory telemetry. The estimate covers temporary Unicode and JSON expansion, and is not an RSS guarantee. Insufficient headroom returns recoverable 429 `memory_pressure` before reading.
 - The image service starts the worker with an empty, owner-private 0700 staging directory and stages each accepted image as a 0600 regular file with an opaque identifier. The worker validates the reference, owner, type, private permissions, size, link count, stable metadata and image signature, then immediately unlinks the name. It retains the opened-file lease through completion. Host cleanup removes remaining staged names when the transaction exits; worker teardown removes only opaque, owner-private, single-link regular files in its pinned directory. Media references and image bytes are not logged.
-- Image preparation, generation, streaming reads, frame writes and discard share one worker transaction deadline, with a 300-second default. The timeout does not reset for each operation. Recoverable cancellation drains native work and clears prepared state before reuse; a protocol or cleanup failure closes and reaps the worker before another request can run.
+- Image preparation, generation, streaming reads, frame writes and discard share one worker inactivity deadline, with a 300-second default. Validated generation progress or deltas renew it; operation boundaries and activity after cancellation do not. Local image verification retains its absolute time limit. Recoverable cancellation drains native work and clears prepared state before reuse; a protocol or cleanup failure closes and reaps the worker before another request can run.
 
 ### Prefix reuse
 
 Each request is tokenized in full. For eligible text models, the worker can then reuse the state of the prompt prefix that the request shares with the immediately preceding request, and process only the remainder:
 
 - Full-attention models such as Qwen3 dense rewind their attention cache on a 1,024-token grid. A later step of an agent conversation waits only for its new messages plus at most about 1,024 tokens.
-- The native Qwen3.8 backend resumes from a recurrent-state snapshot at the start of the previous prompt's final 4,096-token prefill pass. A later step waits for its new messages plus at most about 4,096 tokens, provided nothing before that point changed; an earlier change processes the whole prompt. MTP must be on or off for both requests.
+- Native GLM-5.3 resumes from a snapshot at the start of the previous prompt's final 1,024-token reuse chunk. It restores recurrent/convolution state and the incomplete MLA/indexer pool while keeping completed attention rows in the loaded model.
+- Native mixed-precision Qwen3.8 resumes from a recurrent-state snapshot at the start of the previous prompt's final 4,096-token prefill pass. Lily-format and admitted external mixed-affine models, including `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, use this route. MTP must be on or off for both requests.
 
-Reuse follows the worker's prefill grid, so outputs are identical to processing the whole prompt. The [generation contract](GENERATION.md#prefix-reuse) describes the rules; the [Qwen3-4B record](archive/runs/2026-11-01-generation-prefix-reuse.md) and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) the measurements.
+For either native snapshot route, a follow-up processes its new messages plus the previous prompt's final chunk when the entire snapshot prefix is unchanged. An earlier change processes the whole prompt. Reuse follows the worker's prefill grid and must preserve fresh-state outputs. The [generation contract](GENERATION.md#prefix-reuse) describes the rules; the [Qwen3-4B record](archive/runs/2026-11-01-generation-prefix-reuse.md), [Lily-format Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) and [GLM/external mixed-affine record](archive/runs/2026-11-03-glm-qwen-prefix-reuse.md) retain their own artifact and build scope.
 
 The cache holds one entry, in worker memory only. It is never written to disk, logged or returned. Each principal has its own random, in-memory scope:
 
@@ -219,7 +285,7 @@ A request never reuses another principal's entry, so first-token timing cannot r
 - after 600 seconds without requests
 - when the model stops or changes
 
-It costs the KV memory of the previous request (about 2.7 GiB after an 18,500-token step on Qwen3-4B) while idle. On Qwen3.8 it adds a snapshot of about 110 MiB to the caches the loaded model already keeps. No more than one request's state is held at a time.
+It costs the KV memory of the previous request (about 2.7 GiB after an 18,500-token step on Qwen3-4B) while idle. Native GLM-5.3 and Qwen3.8 add a snapshot to the completed attention caches the loaded model already keeps; the pinned Lily-format Qwen3.8 snapshot is about 110 MiB. Snapshot size depends on the admitted graph. No more than one request's state is held at a time.
 
 ## Progress in Stark
 
@@ -235,26 +301,29 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 | --- | --- | --- |
 | 400 | `invalid_request` | Duplicate headers, missing or invalid `Content-Length`, incomplete or non-object body, invalid field values |
 | 400 | `length_required` | `Content-Length` missing (411 with the same code when `Transfer-Encoding` is present) |
-| 400 | `invalid_json` | Malformed JSON, duplicate keys, `NaN` or infinity |
+| 400 | `invalid_json` | Malformed JSON, duplicate keys, `NaN`, infinity or excessive JSON structure |
 | 400 | `unsupported_parameter` | Penalties, log probabilities or response formats the API does not implement |
 | 400 | `mtp_not_supported` | Explicit MTP enable request on an unsupported model/worker or an image request |
 | 400 | `invalid_messages` | The chat template rejected the messages |
 | 400 | `images_unsupported`, `too_many_images`, `invalid_image_url`, `invalid_image_detail`, `invalid_image` | No active passing image evidence, multiple images, remote or malformed data URL, unsupported detail, invalid or mismatched image bytes |
 | 400 | `context_length_exceeded` | Prompt plus output limit exceeds the context budget |
 | 400 | `context_capacity_unknown` | Image inference requires a model with a declared finite context capacity |
-| 400 | `request_too_large` | Rendered worker request exceeds the 1 MiB encoded line limit |
+| 503 | `automatic_output_unavailable` | Worker lacks automatic memory planning; rebuild or update the worker |
+| 400 | `request_too_large` | Input, encoded worker request or generated output exceeds the resource budget |
 | 400 | `tools_unsupported` | Running model/template has no supported parser |
 | 502 | `invalid_tool_call`, `tool_choice_not_satisfied` | Invalid, truncated, unknown or disallowed generated call, or unsatisfied required/named choice; no executable call returned |
 | 401 | `invalid_api_key` | Missing or wrong bearer key |
 | 403 | `origin_not_allowed`, `host_not_allowed` | `Origin` header present, or non-loopback `Host` |
 | 404 | `not_found`, `model_not_found` | Unknown path, or `model` is not the running model |
-| 413 | `body_too_large` | Body exceeds the active body cap: 1 MiB normally, or 6 MiB when image capability is enabled |
+| 413 | `body_too_large` | Body exceeds the configured encoded body budget |
+| 413 | `text_too_large` | Aggregate logical message text exceeds the configured content budget |
 | 413 | `image_too_large` | Decoded image exceeds the 4 MiB service limit |
 | 415 | `unsupported_media_type` | `Content-Type` other than `application/json` |
 | 429 | `server_busy`, `queue_full`, `queue_timeout`, `body_budget_full` | Connection limit, queue limit, queue wait expired, or shared pending raw-body budget reached |
+| 429 | `memory_pressure` | Available RAM is too low to admit a large body before reading or parsing it; a smaller request can be retried |
 | 499 | `request_cancelled` | Client disconnected |
 | 503 | `model_not_loaded`, `model_changed`, `server_stopped`, `server_shutdown`, `request_stopped`, `streaming_unavailable`, `stop_sequences_unavailable`, `generation_failed` | No model in Chat mode, model stopped or changed, Stark quitting, worker lacks a capability, or native generation failed |
-| 504 | `request_timeout` | 300-second deadline reached |
+| 504 | `request_timeout` | No execution progress for 300 seconds |
 | 500 | `internal_error`, `http_error` | Unexpected failure |
 
 ## Managed OpenWork connection

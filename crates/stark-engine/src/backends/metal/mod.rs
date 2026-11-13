@@ -12,4 +12,9 @@ mod metal_extensions;
 pub use backend::Metal;
 pub use context::MetalContext; // TODO: This should be removed
 #[cfg(test)]
+pub(crate) use error::MetalError;
+#[cfg(test)]
+pub(crate) use kernel::SourceRoPEFrequencyProbeMetalKernel;
+#[cfg(test)]
 pub use kernel::matmul::gemm::GemmEngine;
+pub(crate) use metal_extensions::DeviceExt;

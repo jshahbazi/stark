@@ -35,6 +35,9 @@ pub struct QuantParams {
     layout: QuantParamsLayout,
     row_count: u32,
     group_count: u32,
+    materialize_affine_input_sum: bool,
+    source_output_widths: [u32; 4],
+    source_output_count: u8,
 }
 
 impl QuantParams {
@@ -47,7 +50,45 @@ impl QuantParams {
             layout,
             row_count,
             group_count,
+            materialize_affine_input_sum: false,
+            source_output_widths: [0; 4],
+            source_output_count: 0,
         }
+    }
+
+    pub const fn with_materialized_affine_input_sum(
+        mut self,
+        enabled: bool,
+    ) -> Self {
+        self.materialize_affine_input_sum = enabled;
+        self
+    }
+
+    pub const fn materializes_affine_input_sum(self) -> bool {
+        self.materialize_affine_input_sum
+    }
+
+    /// Original linear output widths represented by consecutive row spans.
+    /// An empty slice means one source projection with this matrix's full N.
+    /// This describes concatenated rows, never alternating-row interleaving.
+    pub fn source_output_widths(&self) -> &[u32] {
+        &self.source_output_widths[..self.source_output_count as usize]
+    }
+
+    pub fn with_source_output_widths(
+        mut self,
+        widths: &[u32],
+    ) -> Result<Self, &'static str> {
+        if widths.is_empty() || widths.len() > self.source_output_widths.len() || widths.contains(&0) {
+            return Err("source output widths require one to four nonzero contiguous spans");
+        }
+        if widths.iter().try_fold(0u32, |sum, width| sum.checked_add(*width)) != Some(self.row_count) {
+            return Err("source output widths must exactly cover the weight matrix rows");
+        }
+        self.source_output_widths.fill(0);
+        self.source_output_widths[..widths.len()].copy_from_slice(widths);
+        self.source_output_count = widths.len() as u8;
+        Ok(self)
     }
 
     pub const fn layout(self) -> QuantParamsLayout {

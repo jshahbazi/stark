@@ -4,6 +4,7 @@ import json
 import socket
 import struct
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -297,6 +298,39 @@ class LocalAPITest(unittest.TestCase):
         finally:
             api.close()
 
+    def test_stream_reasoning_and_content_use_separate_wire_fields(self):
+        def complete(payload, on_delta=None):
+            if on_delta is not None:
+                on_delta({"reasoning_content": "Synthetic reasoning"})
+                on_delta("Visible answer")
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Visible answer",
+                            "reasoning_content": "Synthetic reasoning",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+
+        api = LocalAPI(lambda: [{"id": "stark"}], complete, api_key="a" * 64, port=0)
+        info = api.start()
+        try:
+            status, _, body = self.request_to(info, {"stream": True})
+            self.assertEqual(status, 200)
+            deltas = [
+                json.loads(line[6:])["choices"][0]["delta"]
+                for line in body.decode().splitlines()
+                if line.startswith("data: {")
+            ]
+            self.assertEqual("".join(delta.get("content", "") for delta in deltas), "Visible answer")
+            self.assertEqual("".join(delta.get("reasoning_content", "") for delta in deltas), "Synthetic reasoning")
+        finally:
+            api.close()
+
     def test_empty_stream_and_usage_keep_one_stream_metadata(self):
         def complete(payload, on_delta=None):
             return {
@@ -470,6 +504,28 @@ class LocalAPITest(unittest.TestCase):
             status, _, _ = self.request_to(info, {})
             self.assertEqual(status, 200)
             self.assertTrue(cancelled.wait(2))
+        finally:
+            api.close()
+
+    def test_execution_progress_renews_inactivity_deadline_then_stall_cancels(self):
+        observed = []
+
+        def complete(payload, on_delta, request_cancelled):
+            started = time.monotonic()
+            for _ in range(8):
+                request_cancelled.last_activity = time.monotonic()
+                self.assertFalse(request_cancelled.wait(0.05))
+            observed.append(time.monotonic() - started)
+            self.assertTrue(request_cancelled.wait(2))
+            self.assertEqual(request_cancelled.reason, "deadline")
+            return {"choices": [{"finish_reason": "stop"}]}
+
+        api = LocalAPI(lambda: [], complete, api_key="a" * 64, port=0, cancellable=True, request_timeout=0.25)
+        info = api.start()
+        try:
+            status, _, _ = self.request_to(info, {})
+            self.assertEqual(status, 200)
+            self.assertGreater(observed[0], 0.25)
         finally:
             api.close()
 
@@ -660,7 +716,9 @@ class LocalAPITest(unittest.TestCase):
         try:
             conn.putrequest("POST", "/v1/chat/completions")
             conn.putheader("Authorization", "Bearer " + self.info["api_key"])
-            conn.putheader("Content-Length", str(1024 * 1024 + 1))
+            from stark_convert.local_api import MAX_TEXT_BODY_BYTES
+
+            conn.putheader("Content-Length", str(MAX_TEXT_BODY_BYTES + 1))
             conn.endheaders()
             self.assertEqual(conn.getresponse().status, 413)
         finally:

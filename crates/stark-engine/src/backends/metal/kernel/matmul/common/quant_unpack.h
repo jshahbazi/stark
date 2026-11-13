@@ -81,7 +81,7 @@ STARK_CONST uint W4_NIBBLE_MASK = 0x0F0F0F0Fu;
 
 template <typename U, int N, int bits>
 inline void dequantize(const device uint8_t* w, U scale, U bias, threadgroup U* w_local, const bool signed_codes) {
-  static_assert(bits == 4 || bits == 8, "Only int4 and int8 supported");
+  static_assert(bits == 4 || bits == 5 || bits == 6 || bits == 8, "unsupported affine code width");
 
   if constexpr (bits == 4) {
     U s0 = scale;
@@ -98,6 +98,21 @@ inline void dequantize(const device uint8_t* w, U scale, U bias, threadgroup U* 
         w_local[2 * i] = s0 * (w[i] & 0x0f) + bias;
         w_local[2 * i + 1] = s1 * (w[i] & 0xf0) + bias;
       }
+    }
+  } else if constexpr (bits == 5 || bits == 6) {
+    // Keep the widened-W8 affine arithmetic: the packed codes are unsigned
+    // integers with unchanged scale/bias planes and unchanged value order.
+    METAL_PRAGMA_UNROLL
+    for (int i = 0; i < N; i++) {
+      const uint bit = uint(i * bits);
+      const uint byte = bit / 8;
+      const uint shift = bit % 8;
+      uint code = uint(w[byte]);
+      if (shift + bits > 8) {
+        code |= uint(w[byte + 1]) << 8;
+      }
+      code = (code >> shift) & ((1u << bits) - 1u);
+      w_local[i] = scale * U(code) + bias;
     }
   } else if constexpr (bits == 8) {
     if (signed_codes) {

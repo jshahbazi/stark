@@ -195,6 +195,10 @@ def assert_reference_export(
     reference = json.loads(reference_path.read_text())
     case = reference["cases"][case_name(bits, group_size, source_dtype, target, layout, variant)]
     source = tmp_path / "source"
+    # These frozen loader references cover target tensors and omit MTP. The
+    # old input generator's two-by-two dummy predictor is intentionally partial;
+    # complete predictor preservation has its own source-bound tests.
+    options = {**options, "mtp": False} if options.get("mtp") else options
     _, tensors = mlx_qwen35_fixture(
         source, bits=bits, group_size=group_size, dtype=source_dtype, layout=layout, sharded=True, **options
     )
@@ -225,6 +229,70 @@ def test_packed_word_sign_does_not_change_output_bytes(tmp_path, bits, packed_dt
     _, converted = read_safetensors_header(output)
     name = "decoder.embedding.input_embedding.weights"
     assert tensor_bytes(converted[name]) == tensors["model.embed_tokens.weight"][1].tobytes()
+
+
+def test_mixed_affine_widths_widen_losslessly_through_qwen35_row_fusion(tmp_path):
+    source = tmp_path / "source"
+    config, tensors = mlx_qwen35_fixture(source, wrapper=True, vl_wrapper=True, nested_head=True)
+    q = "language_model.model.layers.1.self_attn.q_proj"
+    v = "language_model.model.layers.1.self_attn.v_proj"
+    gate = "language_model.model.layers.0.mlp.gate_proj"
+    for stem, bits in ((q, 5), (v, 6), (gate, 8)):
+        rows = tensors[stem + ".weight"][1].shape[0]
+        payload = b"".join(
+            sum(((column + row * 17) % (1 << bits)) << (column * bits) for column in range(128)).to_bytes(
+                128 * bits // 8, "little"
+            )
+            for row in range(rows)
+        )
+        tensors[stem + ".weight"] = "U32", np.frombuffer(payload, dtype="<u4").reshape(rows, 4 * bits)
+        for key in ("quantization", "quantization_config"):
+            config[key][stem] = {"bits": bits, "group_size": 32, "mode": "affine"}
+    (source / "config.json").write_text(json.dumps(config))
+    save_mlx_fixture(source, tensors)
+    plan = build_qwen35_plan(source)
+    output = tmp_path / "converted.safetensors"
+    stats = write_plan(plan, output, chunk_bytes=96)
+    metadata, converted = read_safetensors_header(output)
+    assert stats["peak_buffer_bytes"] <= 96
+    assert {json.loads(value)["bits"] for value in metadata.values() if json.loads(value)["type"] == "MLXSpec"} <= {
+        4,
+        8,
+    }
+
+    def codes(stem, bits):
+        values = tensors[stem + ".weight"][1]
+        return np.array(
+            [
+                [
+                    (int.from_bytes(row.tobytes(), "little") >> (column * bits)) & ((1 << bits) - 1)
+                    for column in range(128)
+                ]
+                for row in values
+            ],
+            dtype=np.uint8,
+        )
+
+    q_codes = codes(q, 5)
+    rows = [
+        *(q_codes[h * 64 : h * 64 + 32] for h in range(4)),
+        codes(q.replace("q_proj", "k_proj"), 4),
+        codes(v, 6),
+        *(q_codes[h * 64 + 32 : h * 64 + 64] for h in range(4)),
+    ]
+    attn_out = "decoder.transformer.layers.1.mixer.qkvg_projection.weights"
+    assert json.loads(metadata[attn_out + ".spec"])["bits"] == 8
+    assert tensor_bytes(converted[attn_out + ".weights"]) == np.concatenate(rows).tobytes()
+    mlp_out = "decoder.transformer.layers.0.mlp.up_projection.weights"
+    assert json.loads(metadata[mlp_out + ".spec"])["bits"] == 8
+    assert (
+        tensor_bytes(converted[mlp_out + ".weights"])
+        == np.concatenate([codes(gate.replace("gate_proj", "up_proj"), 4), codes(gate, 8)]).tobytes()
+    )
+    # Widening integer codes leaves the original affine parameter bits intact.
+    for suffix in ("scales", "biases"):
+        originals = [tensors[gate.replace("gate_proj", "up_proj") + "." + suffix][1], tensors[gate + "." + suffix][1]]
+        assert tensor_bytes(converted[mlp_out + "." + suffix]) == np.concatenate(originals).T.tobytes()
 
 
 @pytest.mark.parametrize("plane", ("weight", "scales", "biases"))
@@ -357,14 +425,12 @@ def test_sliced_mlx_plane_source_change_is_rejected(tmp_path):
         write_plan(plan, tmp_path / "output.safetensors", chunk_bytes=96)
 
 
-@pytest.mark.parametrize(
-    "namespace,vl_wrapper", (("model.visual", False), ("mtp", False), ("vision_tower", True), ("mtp", True))
-)
+@pytest.mark.parametrize("namespace,vl_wrapper", (("model.visual", False), ("vision_tower", True)))
 def test_omitted_quantized_wrapper_auxiliary_source_is_verified(tmp_path, namespace, vl_wrapper):
     from test_streaming import save_tensors
 
     source = tmp_path / "source"
-    _, tensors = mlx_qwen35_fixture(source, wrapper=True, mtp=True, vl_wrapper=vl_wrapper)
+    _, tensors = mlx_qwen35_fixture(source, wrapper=True, vl_wrapper=vl_wrapper)
     auxiliary = {name: value for name, value in tensors.items() if name.startswith(namespace + ".")}
     text = {name: value for name, value in tensors.items() if name not in auxiliary}
     save_tensors(source / "model.safetensors", text)
@@ -380,13 +446,27 @@ def test_omitted_quantized_wrapper_auxiliary_source_is_verified(tmp_path, namesp
         write_plan(plan, tmp_path / "output.safetensors", chunk_bytes=96)
 
 
+@pytest.mark.parametrize("vl_wrapper", (False, True))
+def test_partial_quantized_wrapper_predictor_cannot_be_omitted(tmp_path, vl_wrapper):
+    source = tmp_path / "source"
+    mlx_qwen35_fixture(source, wrapper=True, mtp=True, vl_wrapper=vl_wrapper)
+    with pytest.raises(ConversionError, match="missing its fusion matrix"):
+        build_qwen35_plan(source)
+
+
 @pytest.mark.parametrize("namespace", ("vision", "mtp"))
 def test_mlx_wrapper_omission_requires_declaration(tmp_path, namespace):
     source = tmp_path / "source"
-    config, _ = mlx_qwen35_fixture(source, wrapper=True, mtp=True)
-    config.pop("vision_config" if namespace == "vision" else "mtp_num_hidden_layers")
+    if namespace == "mtp":
+        from test_qwen35_mtp import complete_mtp_fixture
+
+        config, _ = complete_mtp_fixture(source)
+        config["text_config"].pop("mtp_num_hidden_layers")
+    else:
+        config, _ = mlx_qwen35_fixture(source, wrapper=True)
+        config.pop("vision_config")
     (source / "config.json").write_text(json.dumps(config))
-    with pytest.raises(ConversionError, match="unexpected"):
+    with pytest.raises(ConversionError, match="explicitly declared predictor" if namespace == "mtp" else "unexpected"):
         build_qwen35_plan(source)
 
 

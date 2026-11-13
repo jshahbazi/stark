@@ -19,6 +19,43 @@ fn config() -> Value {
         "gate_full_precision":true, "use_valres":true})
 }
 
+#[stark_test]
+fn request_memory_covers_cache_rounding_overlap_and_rejects_excessive_context() {
+    let mut c = Config::parse(&config()).unwrap();
+    c.context = 65_536;
+    c.window = 8_192;
+    assert_eq!(c.graph_capacity(1, false), Some(16));
+    assert_eq!(c.graph_capacity(16_384, false), Some(16_384));
+    assert_eq!(c.graph_capacity(16_385, false), Some(20_480));
+    assert_eq!(c.graph_capacity(16_385, true), Some(8_192));
+    let per_row = (2 * c.kv_heads * c.dim + c.heads) * 4;
+    let target_and_overlap = (8_192 + 20_480 + 8_192 + 20_480) * per_row;
+    assert!(c.graph_request_memory_bytes(16_385).unwrap() >= target_and_overlap + 512 * 1024 * 1024);
+    assert_eq!(c.graph_request_memory_bytes(0), None);
+    assert_eq!(c.graph_request_memory_bytes(65_537), None);
+    c.context = 16_777_216;
+    c.kv_heads = 512;
+    c.dim = 512;
+    assert_eq!(c.graph_request_memory_bytes(c.context), None);
+}
+
+#[stark_test]
+fn request_admission_releases_previous_ripple_state_and_preserves_reset_outputs() {
+    let fixture = Fixture::new(&tensors(), &config());
+    let mut model = fixture.load(&config()).unwrap();
+    assert!(model.request_memory_bytes(6).is_some());
+    assert_eq!(model.request_memory_bytes(0), None);
+    assert_eq!(model.request_memory_bytes(7), None);
+    let expected = model.step(1).unwrap();
+    assert!(model.prepare_request_memory());
+    assert_eq!(model.position, 0);
+    assert!(model.states.iter().all(|state| state.keys.is_empty() && state.values.is_empty()));
+    #[cfg(feature = "metal")]
+    assert!(model.graph.is_none());
+    assert!(!model.prepare_request_memory());
+    assert_eq!(model.step(1).unwrap(), expected);
+}
+
 fn tensors() -> Tensors {
     let c = Config::parse(&config()).unwrap();
     let mut tensors = Tensors::new();

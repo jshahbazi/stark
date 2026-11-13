@@ -22,6 +22,32 @@ pub trait MatmulKernel: Sized + Send + Sync {
         output_data_type: DataType,
     ) -> Result<Self, <Self::Backend as Backend>::Error>;
 
+    /// Preserve the widened affine matrix's row reduction policy after a
+    /// storage-only partition. CPU reduction is already independent of N and
+    /// packed width; backends with shape-dependent reductions override this.
+    fn set_row_arithmetic_reference(
+        &mut self,
+        _output_dim: u32,
+    ) {
+    }
+
+    /// Keep one F32 contraction before the declared output cast. Backends
+    /// whose optimized reductions round partial outputs override this hook.
+    /// This is enabled only by an explicitly admitted numerical profile.
+    fn set_reference_accumulation(&mut self) {}
+
+    /// Isolated test-only contraction witness. Production builds omit this
+    /// scope; backends without the witness keep their ordinary implementation.
+    #[cfg(test)]
+    fn with_reference_dot_witness<R>(run: impl FnOnce() -> R) -> R {
+        run()
+    }
+
+    #[cfg(test)]
+    fn reference_dot_witness_active() -> bool {
+        false
+    }
+
     fn encode(
         &mut self,
         arguments: MatmulArguments<

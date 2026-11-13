@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 static ALLOCATOR: limits::BoundedAllocator = limits::BoundedAllocator;
 
 fn main() {
-    if !limits::install_process_limits() {
+    if limits::configure().is_err() || !limits::install_process_limits() {
         limits::terminate();
     }
     std::panic::set_hook(Box::new(|_| limits::terminate()));
@@ -26,7 +26,7 @@ fn main() {
         limits::terminate();
     }
     let mut data = Vec::new();
-    if std::io::stdin().take((engine::MAX_REQUEST_BYTES + 1) as u64).read_to_end(&mut data).is_err() {
+    if std::io::stdin().take((limits::wire_bytes() + 1) as u64).read_to_end(&mut data).is_err() {
         limits::terminate();
     }
     let (status, output) = match engine::evaluate(&data) {

@@ -237,6 +237,10 @@ def run(
             hardware=hardware_identity(),
             prefill_configuration_flags={name: os.environ.get(name) for name in (
                 "STARK_GLM53_PREFILL_MMA", "STARK_GLM53_PREFILL_CHUNK",
+                "STARK_GLM53_PREFILL_WIDE", "STARK_GLM53_CONTROL_PREFILL_BATCH",
+                "STARK_GLM53_KDA_REGISTER_PREFILL",
+                "STARK_GLM53_EXPERT_PREFILL_BATCH", "STARK_GLM53_PREFILL_DENSE_WIDE",
+                "STARK_GLM53_MLA_PREFILL_BATCH", "STARK_GLM53_PREFILL_PROFILE",
                 "STARK_GLM53_PREFILL_OVERLAP", "STARK_GLM53_PREFILL_QUEUED",
                 "STARK_GLM53_KDA_PARALLEL_NORM",
                 "STARK_GLM53_IQ_FUSED_GATE_UP", "STARK_GLM53_IQ_FUSED_GATE_UP_R2",

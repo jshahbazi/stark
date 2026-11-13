@@ -6,4 +6,6 @@ use crate::config::{decoder::DecoderConfig, model::generation::GenerationConfig}
 pub struct LanguageModelConfig {
     pub decoder_config: DecoderConfig,
     pub generation_config: GenerationConfig,
+    #[serde(default)]
+    pub mtp_config: Option<crate::config::qwen_mtp::QwenMtpConfig>,
 }

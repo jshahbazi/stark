@@ -27,6 +27,8 @@ pub fn bindgen(
     let kernel_name = kernel.name.as_ref();
     let trait_name = format_ident!("{}Kernel", kernel_name);
     let struct_name = format_ident!("{}MetalKernel", kernel_name);
+    // This private coefficient observer has no production caller or API.
+    let test_only = (kernel_name == "SourceRoPEFrequencyProbe").then(|| quote! { #[cfg(test)] });
 
     let variant_binds = variants::parse(kernel)?;
     let specialize_emission =
@@ -89,6 +91,7 @@ pub fn bindgen(
     });
 
     let kernel_tokens = quote! {
+        #test_only
         pub struct #struct_name {
             pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
             #(#conditional_buffer_fields,)*
@@ -96,6 +99,7 @@ pub fn bindgen(
             #(#retained_specialization_fields,)*
         }
 
+        #test_only
         #[allow(clippy::style, clippy::complexity, clippy::perf)]
         impl #trait_implementation_for #struct_name {
             #associate_backend

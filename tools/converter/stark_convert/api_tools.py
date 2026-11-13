@@ -1,4 +1,4 @@
-"""Bounded Chat Completions tools and reviewed Qwen tool wire formats.
+"""Bounded Chat Completions tools and reviewed model tool wire formats.
 
 Tools are requests for client execution. JSON schemas are supplied to the model
 as hints; this module does not promise schema-constrained generation. The client
@@ -9,19 +9,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import keyword
 import math
 import re
 from typing import Any
 
+from .json_budget import check_json_structure
 from .local_api import APIError
+from .resource_budget import INPUT_BYTES
 from .template_compat import MAX_TEMPLATE_BYTES, template_program_sha256
+from .tool_protocols import (
+    FORMATS,
+    TEMPLATE_HASHES,
+    TEMPLATE_PROGRAMS,
+    adapt_history,
+    adapt_tools,
+    functiongemma_values_supported,
+    validate_functiongemma_tools,
+)
 
 MAX_TOOLS = 64
 MAX_CALLS = 16
-MAX_ARGUMENT_BYTES = 64 * 1024
-MAX_SCHEMA_BYTES = 256 * 1024
-MAX_TOOL_RESULT_BYTES = 256 * 1024
-MAX_TOOL_OUTPUT_BYTES = 512 * 1024
+MAX_ARGUMENT_BYTES = INPUT_BYTES
+MAX_SCHEMA_BYTES = INPUT_BYTES
+MAX_TOOL_OUTPUT_BYTES = INPUT_BYTES
 MAX_JSON_DEPTH = 32
 MAX_JSON_NODES = 16384
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
@@ -29,7 +40,10 @@ _CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _PARSER = "qwen3-hermes-v1"
 _XML_PARSER = "qwen38-xml-v1"
 _QWEN35_XML_PARSER = "qwen35-xml-v1"
-_XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER})
+_GLM_PARSER = "glm53-xml-v1"
+_XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER, _GLM_PARSER})
+_HERMES_PARSERS = frozenset({_PARSER, "smollm3-hermes-v1"})
+TOOL_PARSERS = frozenset({*_HERMES_PARSERS, *_XML_PARSERS, *FORMATS})
 # Official Qwen/Qwen3-0.6B tokenizer_config.json chat_template at revision
 # c1899de289a04d12100db370d81485cdf75e47ca, verified 2026-10-31. Admission
 # binds the reviewed template program, not a model name.
@@ -38,7 +52,8 @@ QWEN3_TEMPLATE_SHA256 = "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d
 # revision 4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25, independently reviewed
 # for the same Qwen3-Hermes tool-call wire markers and history ordering.
 QWEN3_4B_TEMPLATE_SHA256 = "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5"
-_SUPPORTED_TEMPLATE_HASHES = frozenset({QWEN3_TEMPLATE_SHA256, QWEN3_4B_TEMPLATE_SHA256})
+QWEN25_TEMPLATE_SHA256 = "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f"
+_SUPPORTED_TEMPLATE_HASHES = frozenset({QWEN3_TEMPLATE_SHA256, QWEN3_4B_TEMPLATE_SHA256, QWEN25_TEMPLATE_SHA256})
 # fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl tokenizer_config.json chat_template,
 # revision 0f94842e3682b49acace4daeb4cf2e65a6f94f83. The same exact program
 # is retained in the raw checkpoint's token_codec_config. Unlike Hermes JSON,
@@ -50,13 +65,26 @@ QWEN38_XML_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa
 # synthetic history. Its top-level boolean/null values use the exact
 # literals True/False/None; nested object/array values still use JSON.
 QWEN35_XML_TEMPLATE_SHA256 = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
-# Version-1 Jinja AST fingerprints of the four hash-verified sources above.
+GLM53_TEMPLATE_SHA256 = "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891"
+FLINT_TEMPLATE_SHA256 = "7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6ae29733466"
+# Version-1 Jinja AST fingerprints of the hash-verified sources above.
 # They admit only syntax-equivalent programs, independently of model metadata.
 _SUPPORTED_TEMPLATE_PROGRAMS = {
     "2537497c84cb9ae2a885de78e7531cd44c62f38dadfcfa7565793ce9e38481ac": _PARSER,
     "813d6e292f35cf32a98357c5382ec57ae39ddb658e5b16559c957b119a2859b5": _PARSER,
+    # Qwen/Qwen2.5-0.5B-Instruct, revision
+    # 7ae557604adf67be50417f59c2c2f167def9a775. Same Hermes envelope;
+    # independently rendered definitions, typed calls and result history.
+    "8f92b77faedd343fd1d45a534e1fc93a77efb76adddd98a6819e6cd17a0b9bfa": _PARSER,
     "ece3bd43a4194cae4a2d3b6079214373b84f9083ff6258940d0b03634e93f08e": _XML_PARSER,
     "a0feb6a6a23bced6ef842bcb46dad27dc43738bf9acd5751606f24aa343610d8": _QWEN35_XML_PARSER,
+    # zai-org/GLM-5.3-Flash metadata revision
+    # 04c4e9e95c5da8862dced7e5056455116f83a7e0: bare function name and
+    # paired arg_key/arg_value tags, raw strings and JSON non-string values.
+    "55dff1823a10de87fa2f4ca4c0986498cd577ed4d495642f6c371e0abbcc243a": _GLM_PARSER,
+    # RecursiveSI/flint-int4, revision 3b93f9053b530488405ae9fca51d4900d6ce21f0.
+    # The same raw-string/JSON arg-key/value wire format; independently rendered.
+    "c61d6063b6aeb383d9a6e80cb62f48164363c6fabb4369d85005c0ae9b9237b8": _GLM_PARSER,
 }
 _XML_TYPES = frozenset({"string", "integer", "number", "boolean", "null", "object", "array"})
 _XML_UNKNOWN = object()
@@ -149,8 +177,10 @@ def strict_arguments(value: Any) -> dict:
     if not isinstance(value, str):
         raise _bad("Function arguments must be a JSON object encoded as a string.")
     try:
-        if len(value.encode("utf-8")) > MAX_ARGUMENT_BYTES:
+        encoded = value.encode("utf-8")
+        if len(encoded) > MAX_ARGUMENT_BYTES:
             raise _bad("Function arguments exceed the byte limit.")
+        check_json_structure(encoded)
         parsed = json.loads(value, object_pairs_hook=_pairs, parse_constant=_constant)
     except (UnicodeEncodeError, ValueError, RecursionError):
         raise _bad("Function arguments must contain one complete, unambiguous JSON object.") from None
@@ -267,7 +297,12 @@ def render_tools(request: dict) -> list[dict] | None:
     return request["tools"] or None
 
 
-def template_messages(messages: list[dict]) -> list[dict]:
+def template_tools(tools, *, parser=None):
+    """Adapt definitions for a reviewed renderer; parsing uses original schemas."""
+    return adapt_tools(tools, parser)
+
+
+def template_messages(messages: list[dict], *, parser=None, tools=None) -> list[dict]:
     """Render call arguments as objects and align parallel results by call ID.
 
     The pinned Qwen template represents calls/results by order, with no call-ID
@@ -303,7 +338,7 @@ def template_messages(messages: list[dict]) -> list[dict]:
             ]
         result.append(copy)
         index += 1
-    return result
+    return adapt_history(result, parser, tools)
 
 
 def tool_parser_for(codec: dict | None) -> str | None:
@@ -317,13 +352,38 @@ def tool_parser_for(codec: dict | None) -> str | None:
     if len(encoded) > MAX_TEMPLATE_BYTES:
         return None
     digest = hashlib.sha256(encoded).hexdigest()
+    if digest in TEMPLATE_HASHES:
+        return TEMPLATE_HASHES[digest]
     if digest in _SUPPORTED_TEMPLATE_HASHES:
         return _PARSER
     if digest == QWEN38_XML_TEMPLATE_SHA256:
         return _XML_PARSER
     if digest == QWEN35_XML_TEMPLATE_SHA256:
         return _QWEN35_XML_PARSER
-    return _SUPPORTED_TEMPLATE_PROGRAMS.get(template_program_sha256(source))
+    if digest in {GLM53_TEMPLATE_SHA256, FLINT_TEMPLATE_SHA256}:
+        return _GLM_PARSER
+    program = template_program_sha256(source)
+    return _SUPPORTED_TEMPLATE_PROGRAMS.get(program) or TEMPLATE_PROGRAMS.get(program)
+
+
+def tool_support_for(codec: dict | None) -> dict:
+    """Report template protocol support without claiming model task competence."""
+    source = codec.get("prompt_template") if isinstance(codec, dict) else None
+    digest = None
+    if isinstance(source, str) and 0 < len(source) <= MAX_TEMPLATE_BYTES:
+        try:
+            encoded = source.encode("utf-8")
+            if len(encoded) <= MAX_TEMPLATE_BYTES:
+                digest = hashlib.sha256(encoded).hexdigest()
+        except UnicodeEncodeError:
+            pass
+    parser = tool_parser_for(codec) if digest is not None else None
+    return {
+        "status": "available" if parser else "unavailable" if digest else "unchecked",
+        "parser": parser,
+        "template_sha256": digest,
+        "model_behavior": "unverified",
+    }
 
 
 def _xml_schema_error(reason="parameter_type"):
@@ -474,9 +534,34 @@ def validate_parser_tools(tools: list[dict], parser: str | None) -> None:
     """
     if parser in _XML_PARSERS:
         _xml_tool_schemas(tools)
+    if parser == "functiongemma-v1":
+        validate_functiongemma_tools(tools)
+    if parser == "lfm2-pythonic-v1":
+        for tool in tools:
+            function = tool["function"]
+            properties = function.get("parameters", {}).get("properties", {})
+            if not isinstance(properties, dict):
+                raise _bad("This tool format requires named function parameters.", "tool_schema_unsupported")
+            names = [function["name"], *properties]
+            if any(
+                not isinstance(name, str)
+                or len(name) > 64
+                or not name.isascii()
+                or not name.isidentifier()
+                or keyword.iskeyword(name)
+                for name in names
+            ):
+                raise _bad(
+                    "This tool format requires Python-style function and parameter identifiers.",
+                    "tool_schema_unsupported",
+                )
 
 
-def _tool_prefix_safe(prefix):
+def _tool_prefix_safe(prefix, *, initial_thinking=False):
+    if initial_thinking:
+        # The trusted renderer may have opened this block in the input prompt.
+        # Generated text must close it before an executable call can begin.
+        prefix = "<think>" + prefix
     visible = []
     cursor = 0
     while cursor < len(prefix):
@@ -546,11 +631,14 @@ def _tool_prefix_safe(prefix):
 
 
 def _xml_parameter_value(body, types, invalid, parser):
-    if any(marker in body for marker in _XML_RESERVED):
+    reserved = _XML_RESERVED + (
+        ("<arg_key", "</arg_key", "<arg_value", "</arg_value") if parser == _GLM_PARSER else ()
+    )
+    if any(marker in body for marker in reserved):
         raise invalid("format")
-    # The pinned renderer adds exactly one LF before and after each value.
+    # The Qwen renderers add exactly one LF before and after each value.
     # Inline values are also lossless; a half frame cannot be repaired safely.
-    if body.startswith("\n") or body.endswith("\n"):
+    if parser != _GLM_PARSER and (body.startswith("\n") or body.endswith("\n")):
         if len(body) < 2 or not (body.startswith("\n") and body.endswith("\n")):
             raise invalid("format")
         body = body[1:-1]
@@ -560,6 +648,7 @@ def _xml_parameter_value(body, types, invalid, parser):
         value = {"True": True, "False": False, "None": None}[body]
     else:
         try:
+            check_json_structure(body.encode("utf-8"))
             value = json.loads(body, object_pairs_hook=_pairs, parse_constant=_constant)
         except (ValueError, RecursionError):
             if "string" in types:
@@ -676,6 +765,228 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
     return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
 
 
+def _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid):
+    """Decode the pinned GLM arg-key/value grammar without repairing output."""
+    schemas = _xml_tool_schemas(tools)
+    calls = []
+    cursor = start
+    while cursor < len(text):
+        if len(calls) >= MAX_CALLS:
+            raise invalid("count")
+        if not text.startswith("<tool_call>", cursor):
+            raise invalid("trailing" if calls else "format")
+        cursor += len("<tool_call>")
+        end = text.find("<", cursor, cursor + 66)
+        if end < 0:
+            raise invalid("format")
+        name = text[cursor:end]
+        if not _NAME.fullmatch(name):
+            raise invalid("format")
+        if name not in names:
+            raise invalid("tool")
+        cursor = end
+        arguments = {}
+        argument_bytes = 0
+        while text.startswith("<arg_key>", cursor):
+            cursor += len("<arg_key>")
+            end = text.find("</arg_key>", cursor, cursor + 65 + len("</arg_key>"))
+            if end < 0:
+                raise invalid("format")
+            parameter = text[cursor:end]
+            if not _NAME.fullmatch(parameter) or parameter not in schemas[name] or parameter in arguments:
+                raise invalid("argument")
+            cursor = end + len("</arg_key>")
+            if not text.startswith("<arg_value>", cursor):
+                raise invalid("format")
+            cursor += len("<arg_value>")
+            end = text.find("</arg_value>", cursor, cursor + MAX_ARGUMENT_BYTES + len("</arg_value>") + 1)
+            if end < 0:
+                raise invalid("limits" if text.find("</arg_value>", cursor) >= 0 else "format")
+            body = text[cursor:end]
+            argument_bytes += len(parameter.encode("utf-8")) + len(body.encode("utf-8"))
+            if argument_bytes > MAX_ARGUMENT_BYTES:
+                raise invalid("limits")
+            if schemas[name][parameter] is _XML_UNKNOWN:
+                raise APIError(
+                    502,
+                    "The model selected a tool argument whose schema does not determine its XML value type. "
+                    "No tool calls from this completion were released.",
+                    "tool_argument_type_unsupported",
+                )
+            try:
+                arguments[parameter] = _xml_parameter_value(body, schemas[name][parameter], invalid, _GLM_PARSER)
+                bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+            except APIError as error:
+                if error.code in {"invalid_tool_call", "tool_argument_type_unsupported"}:
+                    raise
+                raise invalid("limits") from None
+            cursor = end + len("</arg_value>")
+        if not text.startswith("</tool_call>", cursor):
+            raise invalid("format")
+        calls.append(
+            {
+                "id": f"call_{call_id_prefix}_{len(calls)}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                },
+            }
+        )
+        cursor += len("</tool_call>")
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+    if not parallel_tool_calls and len(calls) != 1:
+        raise invalid("count")
+    return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
+
+
+def _pythonic_frame(body, closing, invalid):
+    """Find a frame boundary outside quoted literals in one bounded pass."""
+    cursor, quote = 0, None
+    while cursor < len(body):
+        if quote is not None:
+            if body[cursor] == "\\":
+                cursor += 2
+                continue
+            if body.startswith(quote, cursor):
+                cursor += len(quote)
+                quote = None
+                continue
+        elif body.startswith(closing, cursor):
+            return body[:cursor].strip(), body[cursor + len(closing) :]
+        elif body[cursor] in "\"'":
+            quote = body[cursor] * (3 if body.startswith(body[cursor] * 3, cursor) else 1)
+            cursor += len(quote)
+            continue
+        cursor += 1
+    raise invalid("format")
+
+
+def _parse_additional_output(
+    text, tools, parser, finish_reason, parallel, call_id_prefix, choice, initial_thinking, invalid
+):
+    opening, closing, kind, argument_key = FORMATS[parser]
+    start = text.find(opening)
+    bare_prefix = "{" if parser == "llama-json-v1" else "["
+    bare = parser in {"llama-json-v1", "phi4-json-v1"} and start < 0 and text.lstrip().startswith(bare_prefix)
+    if bare:
+        start = len(text) - len(text.lstrip())
+        body_start = start
+    else:
+        body_start = start + len(opening)
+    if start < 0:
+        if any(marker in text for marker in TOOL_MARKERS):
+            raise invalid("markup")
+        if choice == "required" or isinstance(choice, dict):
+            raise APIError(502, "The model did not satisfy the requested tool choice.", "tool_choice_not_satisfied")
+        return {"role": "assistant", "content": text}, "length" if finish_reason in {"length", "context"} else "stop"
+    if choice == "none" or not tools:
+        raise invalid("disabled")
+    if finish_reason not in {"eos", "stop_token", "stop"}:
+        raise invalid("limit" if finish_reason in {"length", "context"} else "unfinished")
+    if not isinstance(call_id_prefix, str) or not _CALL_ID.fullmatch(call_id_prefix) or len(call_id_prefix) > 100:
+        raise ValueError("Invalid private tool-call ID prefix")
+    prefix = text[:start]
+    if any(marker in prefix for marker in TOOL_MARKERS):
+        raise invalid("markup")
+    if parser != "lfm2-pythonic-v1" and prefix.strip():
+        raise invalid("prefix")
+    if not _tool_prefix_safe(prefix, initial_thinking=initial_thinking):
+        raise invalid("prefix")
+    body = text[body_start:].strip()
+    suffix = ""
+    if kind == "pythonic":
+        body, suffix = _pythonic_frame(text[body_start:], closing, invalid)
+        if any(marker in suffix for marker in TOOL_MARKERS):
+            raise invalid("markup")
+    elif closing and not bare:
+        if not body.endswith(closing):
+            raise invalid("format")
+        body = body[: -len(closing)].strip()
+    if kind == "pythonic":
+        from .tool_pythonic import parse_pythonic_payload
+
+        functions = parse_pythonic_payload(body, invalid=invalid)
+    elif kind == "functiongemma":
+        from .tool_functiongemma import parse_functiongemma_calls
+
+        functions = parse_functiongemma_calls(text[start:], invalid=invalid)
+    else:
+        try:
+            check_json_structure(body.encode("utf-8"))
+            decoded = json.loads(body, object_pairs_hook=_pairs, parse_constant=_constant)
+        except (ValueError, RecursionError):
+            raise invalid("format") from None
+        items = [decoded] if kind == "object" else decoded
+        if not isinstance(items, list) or len(items) > MAX_CALLS:
+            raise invalid("count")
+        if not items:
+            if parser != "smollm2-json-v1":
+                raise invalid("count")
+            if choice == "required" or isinstance(choice, dict):
+                raise APIError(
+                    502, "The model did not satisfy the requested tool choice.", "tool_choice_not_satisfied"
+                )
+            return {"role": "assistant", "content": prefix.rstrip() or None}, "stop"
+        functions, identifiers = [], set()
+        for item in items:
+            allowed = {"name", argument_key} | ({"id"} if parser == "mistral-json-v1" else set())
+            if not isinstance(item, dict) or set(item) - allowed or not {"name", argument_key} <= set(item):
+                raise invalid("format")
+            if "id" in item:
+                identifier = item["id"]
+                if (
+                    not isinstance(identifier, str)
+                    or re.fullmatch(r"[A-Za-z0-9]{9}", identifier) is None
+                    or identifier in identifiers
+                ):
+                    raise invalid("format")
+                identifiers.add(identifier)
+            functions.append((item["name"], item[argument_key]))
+    names = {tool["function"]["name"] for tool in tools}
+    if isinstance(choice, dict):
+        names &= {choice["function"]["name"]}
+    calls = []
+    for name, arguments in functions:
+        if not isinstance(name, str) or not _NAME.fullmatch(name) or name not in names:
+            raise invalid("tool")
+        if not isinstance(arguments, dict):
+            raise invalid("format")
+        if parser == "functiongemma-v1" and not functiongemma_values_supported(arguments):
+            raise invalid("value")
+        try:
+            bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+        except APIError:
+            raise invalid("limits") from None
+        calls.append(
+            {
+                "id": f"call_{call_id_prefix}_{len(calls)}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False, allow_nan=False)},
+            }
+        )
+    if not parallel and len(calls) != 1:
+        raise invalid("count")
+    return {"role": "assistant", "content": (prefix.rstrip() + suffix) or None, "tool_calls": calls}, "tool_calls"
+
+
+TOOL_MARKERS = tuple(
+    dict.fromkeys(
+        [
+            "<tool_call",
+            "</tool_call",
+            *(
+                marker
+                for opening, closing, _kind, _argument in FORMATS.values()
+                for marker in (opening, closing)
+                if marker
+            ),
+        ]
+    )
+)
+
+
 class ToolTextStream:
     """Stream only text before a possible call; calls require terminal validation.
 
@@ -687,8 +998,11 @@ class ToolTextStream:
 
     _markers = ("<tool_call", "</tool_call")
 
-    def __init__(self, deliver):
+    def __init__(self, deliver, *, parser=None):
         self.deliver = deliver
+        self._markers = TOOL_MARKERS if parser in FORMATS else self._markers
+        self._bare_pending = parser in {"llama-json-v1", "phi4-json-v1"}
+        self._bare_prefix = "{" if parser == "llama-json-v1" else "["
         self.tail = ""
         self.whitespace = []
         self.blocked = False
@@ -707,6 +1021,16 @@ class ToolTextStream:
             self.tail = ""
             self.whitespace.clear()
             return
+        if self._bare_pending:
+            text = self.tail + text
+            self.tail = ""
+            if not text.strip():
+                self.tail = text
+                return
+            self._bare_pending = False
+            if text.lstrip().startswith(self._bare_prefix):
+                self.blocked = True
+                return
         value = self.tail + text
         self.tail = ""
         positions = [position for marker in self._markers if (position := value.find(marker)) >= 0]
@@ -755,6 +1079,7 @@ def parse_tool_output(
     parallel_tool_calls: bool = True,
     call_id_prefix: str,
     tool_choice: str | dict = "auto",
+    initial_thinking: bool = False,
 ) -> tuple[dict, str]:
     """Parse only complete calls after generation; never repair model output.
 
@@ -780,8 +1105,25 @@ def parse_tool_output(
             "invalid_tool_call",
         )
 
+    if parser in FORMATS:
+        return _parse_additional_output(
+            text,
+            tools,
+            parser,
+            finish_reason,
+            parallel_tool_calls,
+            call_id_prefix,
+            tool_choice,
+            initial_thinking,
+            invalid,
+        )
+
     start = text.find("<tool_call")
     if start < 0 and "</tool_call" not in text:
+        if parser == _GLM_PARSER and any(
+            marker in text for marker in ("<arg_key", "</arg_key", "<arg_value", "</arg_value")
+        ):
+            raise invalid("markup")
         if parser in _XML_PARSERS and any(
             marker in text for marker in ("<function", "</function", "<parameter", "</parameter")
         ):
@@ -790,7 +1132,7 @@ def parse_tool_output(
             raise APIError(502, "The model did not satisfy the requested tool choice.", "tool_choice_not_satisfied")
         return message, reason
 
-    if parser not in {_PARSER, *_XML_PARSERS} or tool_choice == "none" or not tools:
+    if parser not in TOOL_PARSERS or tool_choice == "none" or not tools:
         raise invalid("disabled")
     if finish_reason not in {"eos", "stop_token", "stop"}:
         raise invalid("limit" if reason == "length" else "unfinished")
@@ -798,11 +1140,17 @@ def parse_tool_output(
         raise ValueError("Invalid private tool-call ID prefix")
     if start < 0 or "</tool_call" in text[:start]:
         raise invalid("markup")
-    if not _tool_prefix_safe(text[:start]):
+    if parser == _GLM_PARSER and any(
+        marker in text[:start] for marker in ("<arg_key", "</arg_key", "<arg_value", "</arg_value")
+    ):
+        raise invalid("markup")
+    if not _tool_prefix_safe(text[:start], initial_thinking=initial_thinking):
         raise invalid("prefix")
     names = {tool["function"]["name"] for tool in tools}
     if isinstance(tool_choice, dict):
         names &= {tool_choice["function"]["name"]}
+    if parser == _GLM_PARSER:
+        return _parse_glm_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid)
     if parser in _XML_PARSERS:
         return _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser)
     calls = []

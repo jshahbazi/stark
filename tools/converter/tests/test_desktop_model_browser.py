@@ -142,6 +142,97 @@ def test_catalogue_accepts_optional_model_group_descriptor(host):
     assert host.catalog_report(value, "qwen3")["items"][0]["model_group"] == value["items"][0]["model_group"]
 
 
+def test_legacy_catalogue_more_flag_without_offset_is_not_pageable(host):
+    value = report()
+    value["has_more"] = True
+    normalized = host.catalog_report(value, "qwen3")
+    assert normalized["has_more"] is False and normalized["next_offset"] is None
+
+
+def test_catalogue_page_offsets_are_correlated_and_bounded(host):
+    value = report()
+    value.update(offset=30, next_offset=60, has_more=True)
+    assert host.catalog_report(value, "qwen3", 30)["next_offset"] == 60
+    for change in (
+        {"offset": 29},
+        {"offset": True},
+        {"next_offset": 30},
+        {"next_offset": True},
+        {"next_offset": 10_000_001},
+        {"next_offset": None},
+    ):
+        invalid = {**value, **change}
+        with pytest.raises(ValueError):
+            host.catalog_report(invalid, "qwen3", 30)
+    with pytest.raises(ValueError):
+        host.catalog_report(value, "qwen3", 31)
+    with pytest.raises(ValueError):
+        host.catalog_report({**value, "offset": None}, "qwen3")
+
+
+def test_catalogue_append_keeps_earlier_rows_installable(host, monkeypatch):
+    first = report()["items"][0]
+    second = {**first, "id": "d" * 32, "repo": "owner/NextModel", "name": "NextModel"}
+    host.catalog_request_id, host.catalog_family_id = "request", "qwen3"
+    host.catalog_next_offset, host.catalog_active_offset = 30, 30
+    host.catalog_entries = {first["id"]: dict(first)}
+    value = report()
+    value.update(items=[second], offset=30, next_offset=60, has_more=True)
+    monkeypatch.setattr(host, "run_catalog_check", lambda *_args: value)
+
+    host.load_catalog("qwen3", "request", host.catalog_generation, 30)
+
+    assert host.catalog_entries.keys() == {first["id"], second["id"]}
+    assert host.catalog_next_offset == 60 and host.catalog_active_offset is None
+    emitted = events(host)[-1]["report"]
+    assert emitted["offset"] == 30 and emitted["items"][0]["id"] == second["id"]
+    called = []
+    monkeypatch.setattr(host, "start", lambda *args, **kwargs: called.append((args, kwargs)))
+    host.install_catalog(
+        {
+            "command": "install_catalog",
+            "catalog_request_id": "request",
+            "entry_id": first["id"],
+            "artifact_mode": "text",
+            "support_request_id": "support",
+        }
+    )
+    assert called and called[0][0][0] == host.install
+
+
+def test_catalogue_failed_append_retains_retry_offset_and_previous_rows(host, monkeypatch):
+    first = report()["items"][0]
+    host.catalog_request_id, host.catalog_family_id = "request", "qwen3"
+    host.catalog_next_offset, host.catalog_active_offset = 30, 30
+    host.catalog_entries = {first["id"]: dict(first)}
+    value = report()
+    value.update(status="error", items=[], offset=30, next_offset=None, has_more=False)
+    monkeypatch.setattr(host, "run_catalog_check", lambda *_args: value)
+
+    host.load_catalog("qwen3", "request", host.catalog_generation, 30)
+
+    assert host.catalog_next_offset == 30
+    assert host.catalog_entries == {first["id"]: first}
+    assert events(host)[-1]["report"]["offset"] == 30
+
+
+def test_catalogue_rejects_unrequested_offsets_and_stale_page_ids(host):
+    with pytest.raises(DesktopError):
+        host.start_catalog("qwen3", "request", 30)
+    host.catalog_request_id, host.catalog_family_id = "request", "qwen3"
+    host.catalog_next_offset = 30
+    host.catalog_active_offset = None
+    with pytest.raises(DesktopError):
+        host.start_catalog("qwen3", "stale", 30)
+    with pytest.raises(DesktopError):
+        host.start_catalog("qwen3", "request", 60)
+    with pytest.raises(DesktopError):
+        host.start_catalog("qwen3", "request", True)
+    host.catalog_active_offset = 30
+    with pytest.raises(DesktopError):
+        host.start_catalog("qwen3", "request", 30)
+
+
 def test_catalogue_download_resolves_server_cache_and_pins_mode_and_revision(host, monkeypatch):
     item = report()["items"][0]
     host.catalog_request_id, host.catalog_entries = "request", {item["id"]: item}
@@ -162,7 +253,28 @@ def test_catalogue_download_resolves_server_cache_and_pins_mode_and_revision(hos
     assert len(called) == 1 and events(host)[-1]["request_id"] == "install"
 
 
-@pytest.mark.parametrize("family,choice", [("glm5_next", "glm53-q2"), ("ricursive", "ripple-q8")])
+def test_unavailable_catalogue_item_explains_the_reason_and_cannot_start_download(host, monkeypatch):
+    value = report()
+    item = value["items"][0]
+    item["downloadable"] = False
+    with pytest.raises(ValueError):
+        host.catalog_report(value, "qwen3")
+    reason = "Expert weights use 3-bit packing with groups of 128."
+    item["unavailable_reason"] = reason
+    host.catalog_request_id, host.catalog_family_id = "request", "qwen3"
+    monkeypatch.setattr(host, "run_catalog_check", lambda *_args: value)
+    host.load_catalog("qwen3", "request", host.catalog_generation)
+    assert events(host)[-1]["report"]["items"][0]["unavailable_reason"] == reason
+    with pytest.raises(DesktopError, match=reason):
+        host.install_catalog(
+            {"catalog_request_id": "request", "entry_id": item["id"], "support_request_id": "install"}
+        )
+    assert host.job is None
+
+
+@pytest.mark.parametrize(
+    "family,choice", [("glm5_next", "glm53-q2"), ("ricursive", "ripple-q8"), ("ricursive", "ripple-q4-k-m")]
+)
 def test_native_catalogue_download_uses_only_the_offered_pinned_native_choice(host, monkeypatch, family, choice):
     item = native_catalog.catalog_item(choice)
     host.catalog_request_id, host.catalog_family_id = "request", family
@@ -191,12 +303,84 @@ def test_native_catalogue_download_uses_only_the_offered_pinned_native_choice(ho
     assert len(called) == 1
 
 
+def test_install_progress_replaces_support_status_and_fences_stale_events(host):
+    host.begin_install_progress(host.epoch, "native")
+    host.status("installing", "Checking model support…", host.epoch)
+    host.progress(host.epoch, "download", "running")
+    host.progress(host.epoch, "download", "running", 2)
+    host.progress(host.epoch - 1, "conversion", "running")
+    messages = [event["message"] for event in events(host) if event["event"] == "status"]
+    assert messages == ["Checking model support…", "Downloading model files…"]
+    host.progress(host.epoch, "download", "complete", 4, 4)
+    host.progress(host.epoch, "conversion", "running")
+    assert [event["message"] for event in events(host) if event["event"] == "status"][-1] == "Preparing model…"
+    before = events(host)
+    host.progress(host.epoch, "download", "running", 3)
+    assert events(host) == before
+
+
+def test_download_progress_keeps_network_bytes_separate_and_rejects_stale_updates(host):
+    host.begin_install_progress(host.epoch, "native")
+    # Buffered reconstruction can sit at a few KB while GB arrive over Xet.
+    for received in (2_000_000_000, 3_000_000_000):
+        frame = module.converter_progress(
+            {
+                "phase": "download",
+                "state": "running",
+                "completed_bytes": 78_000,
+                "total_bytes": None,
+                "transferred_bytes": received,
+            }
+        )
+        assert frame is not None
+        host.progress(host.epoch, **frame)
+    assert host.install_progress["download"]["completed_bytes"] == 78_000
+    assert host.install_progress["download"]["transferred_bytes"] == 3_000_000_000
+    before = events(host)
+    host.progress(host.epoch - 1, "download", "running", 78_000, transferred_bytes=4_000_000_000)
+    assert events(host) == before
+    host.progress(host.epoch, "download", "complete", 1_000_000_000, 1_000_000_000)
+    assert host.install_progress["download"]["transferred_bytes"] == 3_000_000_000
+
+
+def test_qwen_mixed_catalogue_download_uses_the_offered_native_choice(host, monkeypatch):
+    item = native_catalog.catalog_item(native_catalog.QWEN_CHOICE)
+    host.catalog_request_id, host.catalog_family_id = "request", native_catalog.QWEN_FAMILY_ID
+    host.catalog_entries = {item["id"]: item}
+    called = []
+    monkeypatch.setattr(host, "start", lambda *args, **kwargs: called.append((args, kwargs)))
+
+    host.install_catalog(
+        {
+            "catalog_request_id": "request",
+            "entry_id": item["id"],
+            "support_request_id": "install",
+            "artifact_mode": "text",
+        }
+    )
+
+    args, kwargs = called[0]
+    assert args[3:] == ("native", native_catalog.QWEN_CHOICE, "text", "text", "install", item["revision"])
+    assert kwargs == {"request_id": "install"}
+    host.catalog_entries[item["id"]] = {**item, "repo": "untrusted/Replacement"}
+    with pytest.raises(DesktopError):
+        host.install_catalog(
+            {
+                "catalog_request_id": "request",
+                "entry_id": item["id"],
+                "support_request_id": "install",
+                "artifact_mode": "text",
+            }
+        )
+
+
 @pytest.fixture
 def native_download(host, monkeypatch):
     from test_hybrid_prepare import metadata
 
     source = {**hybrid_prepare.SOURCES["glm53-q2"], "weight_bytes": 4}
     monkeypatch.setitem(hybrid_prepare.SOURCES, "glm53-q2", source)
+    monkeypatch.setitem(module.NATIVE_SOURCES, "glm53-q2", source)
 
     def snapshot(repo, **options):
         root = Path(options["local_dir"])
@@ -281,7 +465,7 @@ def test_glm_registry_failure_keeps_completed_download_for_retry(host, native_do
 
 
 def test_glm_download_stage_rejects_concurrent_installers_and_symlinks(host, tmp_path, native_download):
-    with module.native_download_stage(host.data_dir):
+    with module.native_download_stage(host.data_dir, "glm53-q2"):
         with pytest.raises(DesktopError, match="already being downloaded"):
             host.install(
                 host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"]
@@ -291,7 +475,7 @@ def test_glm_download_stage_rejects_concurrent_installers_and_symlinks(host, tmp
     other.mkdir()
     (other / "native-downloads").symlink_to(host.data_dir / "native-downloads")
     with pytest.raises(DesktopError, match="unavailable"):
-        with module.native_download_stage(other):
+        with module.native_download_stage(other, "glm53-q2"):
             pytest.fail("followed native download directory symlink")
 
 
@@ -417,12 +601,20 @@ def test_bounded_catalogue_child_and_cancellation_reap_process(host):
 
 
 def test_cli_family_catalogue_has_no_source_or_output_and_no_weights(monkeypatch, capsys):
+    called = []
     monkeypatch.setattr(
-        model_catalog, "family_catalog", lambda family, **kwargs: report() if family == "qwen3" else None
+        model_catalog,
+        "family_catalog",
+        lambda family, **kwargs: called.append((family, kwargs)) or report() if family == "qwen3" else None,
     )
-    monkeypatch.setattr(sys, "argv", ["stark-convert", "--family-models", "qwen3", "--offline"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["stark-convert", "--family-models", "qwen3", "--catalog-offset", "30", "--offline"],
+    )
     assert cli.main() == 0
     assert json.loads(capsys.readouterr().out)["status"] == "ready"
+    assert called == [("qwen3", {"offset": 30, "offline": True})]
 
 
 @pytest.mark.parametrize("managed", [True, False])

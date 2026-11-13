@@ -20,11 +20,34 @@ def test_normalizes_messages_and_defaults():
     assert result["messages"] == [{"role": "system", "content": "ab"}, {"role": "assistant", "content": ""}]
     assert result["sampling"] == {"mode": "greedy"}
     assert result["mtp"] is None
+    assert result["maximum"] is None
 
 
 @pytest.mark.parametrize("enabled", [True, False])
 def test_mtp_boolean_override_is_preserved(enabled):
     assert parse(mtp=enabled)["mtp"] is enabled
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_thinking_boolean_is_preserved(enabled):
+    assert parse(thinking=enabled)["thinking"] is enabled
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_thinking_requires_an_explicit_boolean(value):
+    with pytest.raises(APIError):
+        parse(thinking=value)
+
+
+@pytest.mark.parametrize("value", ["low", "high", "max"])
+def test_reasoning_effort_is_preserved(value):
+    assert parse(reasoning_effort=value)["reasoning_effort"] == value
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, True, "medium", "none", [], {}])
+def test_reasoning_effort_rejects_unknown_or_nontext_values(value):
+    with pytest.raises(APIError):
+        parse(reasoning_effort=value)
 
 
 @pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
@@ -100,7 +123,7 @@ def test_accepts_neutral_compatibility_flags():
         user="u",
         metadata={"x": 1},
     )
-    assert result["maximum"] == 512
+    assert result["maximum"] is None
 
 
 @pytest.mark.parametrize("store", [False, None])

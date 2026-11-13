@@ -21,6 +21,7 @@ pub(super) struct GemmSpecialization {
     pub(super) b_group_size: Option<u32>,
     pub(super) signed_codes: bool,
     pub(super) a_group_size: Option<u32>,
+    pub(super) source_f32_fragments: bool,
 }
 
 impl GemmSpecialization {
@@ -46,12 +47,25 @@ impl GemmSpecialization {
             b_group_size: shape.b_group_size,
             signed_codes: shape.signed_codes,
             a_group_size,
+            source_f32_fragments: false,
         };
         specialization.validate()?;
         Ok(specialization)
     }
 
     pub(super) fn validate(&self) -> Result<(), GemmSpecializationError> {
+        if self.bits_per_b == Some(3) {
+            return Err(GemmSpecializationError::InternalDraftRequiresGemv);
+        }
+        if matches!(self.bits_per_b, Some(5 | 6))
+            && (self.b_prologue != GemmBPrologueKind::ScaleBiasDequant
+                || self.b_group_size != Some(64)
+                || self.weights_data_type != DataType::BF16
+                || self.signed_codes
+                || self.a_prologue != GemmAPrologueKind::FullPrecision)
+        {
+            return Err(GemmSpecializationError::UnsupportedPackedAffine);
+        }
         let valid_activation_group = match self.a_prologue {
             GemmAPrologueKind::FullPrecision => self.a_group_size.is_none(),
             GemmAPrologueKind::Int8Symmetric => matches!(self.a_group_size, Some(32 | 64 | 128)),

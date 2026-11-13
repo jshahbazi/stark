@@ -9,8 +9,11 @@ license.workspace = true
 [features]
 default = ["metal"]
 metal = ["dep:stark-engine", "stark-engine/metal"]
+glm-exl3 = ["metal", "stark-engine/glm-exl3"]
+gemma4-assistant-staging = ["metal"]
 
 [dependencies]
+stark-resource-budget = { path = "../stark-resource-budget" }
 stark-engine = { path = "../stark-engine", default-features = false, optional = true }
 serde.workspace = true
 serde_json.workspace = true

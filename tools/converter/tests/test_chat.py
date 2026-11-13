@@ -40,11 +40,20 @@ class FakeWorker:
             "ready": True,
             "mode": "text-generation-v1",
             "max_context_tokens": self.context_limit,
-            "max_new_tokens": 4096,
+            "max_new_tokens": 6144,
+            "generation_budget": "memory-context-v1",
         }
 
     def request(self, payload):
         self.requests.append(payload)
+        if payload["operation"] == "plan_generation":
+            context = min(payload["context_tokens"], payload["input_tokens"] + 6144)
+            return {
+                "context_tokens": context,
+                "max_new_tokens": context - payload["input_tokens"],
+                "context_capacity_known": self.context_limit != 0xFFFFFFFF,
+                "budget_kind": "memory",
+            }
         return {"token_count": 20} if payload["operation"] == "tokenize" else {"text": "reply fixture"}
 
 
@@ -52,6 +61,31 @@ def options(model, **kwargs):
     values = dict(model_path=model, context_tokens=1024, max_new_tokens=32, system=None, thinking=False)
     values.update(kwargs)
     return Namespace(**values)
+
+
+@pytest.mark.parametrize("prompt_open", [True, False])
+def test_terminal_reasoning_history_replays_structured_fields(model, prompt_open):
+    config = json.loads((model / "config.json").read_text())
+    config["token_codec_config"]["prompt_template"] = (
+        "{% for m in messages %}{{ m.role }}:{{ m.content }}"
+        "{% if m.reasoning_content is defined %}|reasoning={{ m.reasoning_content }}{% endif %};{% endfor %}"
+        + ("assistant:<think>\n" if prompt_open else "assistant:")
+    )
+    (model / "config.json").write_text(json.dumps(config))
+
+    class ReasoningWorker(FakeWorker):
+        def request(self, payload):
+            reply = super().request(payload)
+            if payload["operation"] == "generate":
+                return {"text": ("" if prompt_open else "<think>") + "Synthetic reasoning</think>Answer"}
+            return reply
+
+    worker = ReasoningWorker()
+    with patch("sys.stdin", io.StringIO("first turn\nsecond turn\n/exit\n")):
+        assert run_chat(options(model, thinking=True), worker) == 0
+    prompts = [request["text"] for request in worker.requests if request["operation"] == "tokenize"]
+    assert "assistant:Answer|reasoning=Synthetic reasoning;" in prompts[1]
+    assert "assistant:Synthetic reasoning</think>" not in prompts[1]
 
 
 @pytest.mark.parametrize("context_limit", [512, 32768, 262144, 1048576])
@@ -103,6 +137,146 @@ def test_unknown_context_capacity_cli_still_enforces_custom_budget(model, capsys
         assert run_chat(options(model, context_tokens=21), worker) == 0
     assert all(request["operation"] != "generate" for request in worker.requests)
     assert "Conversation exceeds the context budget" in capsys.readouterr().out
+
+
+def test_automatic_cli_output_uses_remaining_finite_context(model):
+    worker = FakeWorker(context_limit=512)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None, max_new_tokens=None), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert generated[0]["max_new_tokens"] == 492
+    assert generated[0]["context_tokens"] == 512
+
+
+def test_automatic_cli_output_uses_memory_admission_below_finite_capacity(model):
+    worker = FakeWorker(context_limit=32768)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None, max_new_tokens=None), worker) == 0
+    planned = [request for request in worker.requests if request["operation"] == "plan_generation"]
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert planned == [{"operation": "plan_generation", "input_tokens": 20, "context_tokens": 32768}]
+    assert generated[0]["context_tokens"] == 6164
+    assert generated[0]["max_new_tokens"] == 6144
+
+
+def test_legacy_finite_worker_uses_remaining_context_without_planner(model):
+    worker = FakeWorker(context_limit=512)
+    read = worker.read
+    worker.read = lambda: {key: value for key, value in read().items() if key != "generation_budget"}
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None, max_new_tokens=None), worker) == 0
+    assert not any(request["operation"] == "plan_generation" for request in worker.requests)
+    assert worker.requests[-1]["max_new_tokens"] == 492
+
+
+def test_automatic_cli_output_uses_custom_budget_for_unknown_context(model):
+    worker = FakeWorker(context_limit=0xFFFFFFFF)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=2048, max_new_tokens=None), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert generated[0]["max_new_tokens"] == 2028
+    assert generated[0]["context_tokens"] == 2048
+
+
+def test_automatic_cli_output_plans_unknown_context_without_user_options(model):
+    worker = FakeWorker(context_limit=0xFFFFFFFF)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None, max_new_tokens=None), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert generated[0]["context_tokens"] == 6164
+    assert generated[0]["max_new_tokens"] == 6144
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"context_tokens": True},
+        {"context_tokens": 0xFFFFFFFF, "max_new_tokens": 0xFFFFFFFF - 20},
+        {"context_tokens": 9000, "max_new_tokens": 8980},
+        {"max_new_tokens": True},
+        {"max_new_tokens": 1},
+        {"budget_kind": "model"},
+    ],
+)
+@pytest.mark.parametrize("known", [False, True])
+def test_automatic_budget_rejects_unsafe_or_inconsistent_worker_allowances(invalid, known):
+    from types import SimpleNamespace
+
+    from stark_convert.chat import automatic_generation_budget
+
+    response = {
+        "context_tokens": 8192,
+        "max_new_tokens": 8172,
+        "context_capacity_known": known,
+        "budget_kind": "memory",
+        **invalid,
+    }
+    worker = SimpleNamespace(generation_budget=True, max_new_tokens=8192, request=lambda *_args, **_kwargs: response)
+    with pytest.raises(ChatError, match="Invalid automatic execution budget"):
+        automatic_generation_budget(worker, 20, 8192, context_capacity_known=known)
+
+
+@pytest.mark.parametrize("known", [False, True])
+@pytest.mark.parametrize("reported", [False, True, 0, 1, None])
+def test_automatic_budget_requires_exact_capacity_contract(known, reported):
+    from types import SimpleNamespace
+
+    from stark_convert.chat import automatic_generation_budget
+
+    response = {
+        "context_tokens": 8192,
+        "max_new_tokens": 8172,
+        "context_capacity_known": reported,
+        "budget_kind": "memory",
+    }
+    worker = SimpleNamespace(generation_budget=True, max_new_tokens=8192, request=lambda *_args, **_kwargs: response)
+    if reported is known:
+        assert automatic_generation_budget(worker, 20, 8192, context_capacity_known=known) == (8192, 8172)
+    else:
+        with pytest.raises(ChatError, match="Invalid automatic execution budget"):
+            automatic_generation_budget(worker, 20, 8192, context_capacity_known=known)
+
+
+@pytest.mark.parametrize("request_metadata_supported", [False, True])
+def test_automatic_budget_negotiates_request_identity_without_breaking_older_workers(request_metadata_supported):
+    from types import SimpleNamespace
+
+    from stark_convert.chat import automatic_generation_budget
+
+    requests = []
+    response = {
+        "context_tokens": 128,
+        "max_new_tokens": 126,
+        "context_capacity_known": True,
+        "budget_kind": "memory",
+    }
+
+    def request(payload, **kwargs):
+        requests.append((payload, kwargs))
+        return response
+
+    worker = SimpleNamespace(
+        generation_budget=True,
+        generation_budget_inputs=request_metadata_supported,
+        max_new_tokens=128,
+        request=request,
+    )
+    scope = "0123456789abcdef0123456789abcdef"
+    sampling = {"mode": "stochastic", "temperature": 0.7, "top_p": 0.9}
+    assert automatic_generation_budget(
+        worker,
+        2,
+        128,
+        context_capacity_known=True,
+        input_token_ids=[1, 2],
+        cache_scope=scope,
+        mtp_drafts=0,
+        sampling=sampling,
+    ) == (128, 126)
+    expected = {"operation": "plan_generation", "input_tokens": 2, "context_tokens": 128}
+    if request_metadata_supported:
+        expected.update(input_token_ids=[1, 2], cache_scope=scope, mtp_drafts=0, sampling=sampling)
+    assert requests == [(expected, {})]
 
 
 def test_history_reset_and_eof(model):
@@ -207,6 +381,70 @@ def test_worker_real_pipes_timeout_and_cleanup(tmp_path):
     assert worker.process.poll() is not None
 
 
+def test_prefill_progress_keeps_active_worker_alive_past_inactivity_timeout(tmp_path):
+    executable = tmp_path / "progress worker"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys, time\n"
+        "print(json.dumps({'ready': True}), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    for i in range(8):\n"
+        "        print(json.dumps({'event': 'progress', 'input_tokens': 20000, 'sampled_tokens': 0,\n"
+        "            'output_token_budget': 8, 'elapsed_seconds': i * 0.05, 'prefill_seconds': None}), flush=True)\n"
+        "        time.sleep(0.05)\n"
+        "    print(json.dumps({'text': ''}), flush=True)\n"
+    )
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 5)
+    try:
+        assert worker.read() == {"ready": True}
+        worker.timeout = 0.25
+        observed = []
+        assert worker.request(
+            {"operation": "generate", "stream": True},
+            on_delta=lambda _text: None,
+            on_progress=observed.append,
+        ) == {"text": ""}
+        assert len(observed) == 8
+        assert observed[-1]["elapsed_seconds"] > worker.timeout
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("vision", [False, True])
+@pytest.mark.parametrize("supported", [False, True])
+def test_worker_requests_text_prefix_reuse_for_both_artifact_types_but_trusts_readiness(tmp_path, vision, supported):
+    if vision:
+        (tmp_path / "config.json").write_text(json.dumps({"type": "Qwen35VisionLanguageModelConfig"}))
+    executable = tmp_path / "capability worker"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, stat, sys\n"
+        "assert sys.argv.count('--prefix-cache') == 1\n"
+        f"assert ('--vision-staging-root' in sys.argv) is {vision!r}\n"
+        "if '--vision-staging-root' in sys.argv:\n"
+        "    root = pathlib.Path(sys.argv[sys.argv.index('--vision-staging-root') + 1])\n"
+        "    assert stat.S_IMODE(root.stat().st_mode) == 0o700 and not list(root.iterdir())\n"
+        f"supported = {supported!r}\n"
+        "print(json.dumps({'ready': True, 'operations': ['generate', 'reset_cache'],\n"
+        "    'state_policy': 'consecutive-prefix-v1' if supported else 'fresh-per-request',\n"
+        "    'prefix_cache': {'supported': supported, 'enabled': supported, 'chunk_tokens': 1024}}), flush=True)\n"
+        "for _line in sys.stdin: pass\n"
+    )
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 5)
+    staging = worker.media.root if vision else None
+    try:
+        assert worker.read()["ready"] is True
+        assert worker.prefix_cache is supported
+        assert worker.prefix_chunk_tokens == (1024 if supported else None)
+        assert worker.images is False
+    finally:
+        worker.close()
+    if staging is not None:
+        assert not staging.exists()
+
+
 def test_main_suppresses_exception_payload_and_cleans_up(model, capsys):
     worker = FakeWorker()
     worker.close = lambda: None
@@ -239,11 +477,14 @@ def test_worker_rejects_invalid_reply_or_exit(tmp_path, reply):
     assert worker.process.poll() is not None
 
 
-def test_request_limit_is_checked_before_write(tmp_path):
+def test_request_limit_is_checked_before_write(tmp_path, monkeypatch):
+    from stark_convert import chat
+
+    monkeypatch.setattr(chat, "WIRE_BYTES", 128)
     worker = Worker(sys.executable, tmp_path, 2)
     try:
         with pytest.raises(ChatRequestTooLarge, match="request limit"):
-            worker.request({"text": "x" * 1024 * 1024})
+            worker.request({"text": "x" * 256})
     finally:
         worker.close()
 
@@ -256,7 +497,9 @@ def test_worker_request_limit_counts_encoded_bytes_and_newline(unit, over_limit)
     worker = Worker.__new__(Worker)
     worker.process = SimpleNamespace(stdin=io.BytesIO())
     worker.read = lambda: {"accepted": True}
-    limit = 1024 * 1024
+    from stark_convert import chat
+
+    limit = chat.WIRE_BYTES
     overhead = len(json.dumps({"text": ""}).encode()) + 1
     unit_bytes = len(json.dumps(unit, ensure_ascii=False).encode()) - 2
     count, padding = divmod(limit - overhead + int(over_limit), unit_bytes)
@@ -268,6 +511,32 @@ def test_worker_request_limit_counts_encoded_bytes_and_newline(unit, over_limit)
     else:
         assert worker.request(payload) == {"accepted": True}
         assert worker.process.stdin.tell() == limit
+
+
+def test_worker_request_respects_smaller_advertised_limit(monkeypatch):
+    from types import SimpleNamespace
+
+    from stark_convert import chat
+
+    monkeypatch.setattr(chat, "WIRE_BYTES", 128)
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    worker.read = lambda: {"accepted": True}
+    worker.max_request_bytes = 64
+    with pytest.raises(ChatRequestTooLarge):
+        worker.request({"text": "x" * 100})
+    assert worker.process.stdin.tell() == 0
+
+
+@pytest.mark.parametrize("error", ["request_too_large", "resource_budget_exceeded"])
+def test_worker_resource_budget_reply_is_recoverable(error):
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    worker.read = lambda: {"error": error}
+    with pytest.raises(ChatRequestTooLarge):
+        worker.request({"text": "short request"})
 
 
 def test_startup_failure_does_not_echo_worker_diagnostics(model, capsys):

@@ -93,9 +93,64 @@ pub(super) fn packed_code(
     bits: usize,
     index: usize,
 ) -> u8 {
-    let codes_per_byte = 8 / bits;
-    let byte = codes[index / codes_per_byte];
-    (byte >> ((index % codes_per_byte) * bits)) & ((1u16 << bits) - 1) as u8
+    let bit = index * bits;
+    let offset = bit / 8;
+    let shift = bit % 8;
+    let mut value = u16::from(codes[offset]);
+    if shift + bits > 8 {
+        value |= u16::from(codes[offset + 1]) << 8;
+    }
+    ((value >> shift) & ((1u16 << bits) - 1)) as u8
+}
+
+/// Source-compatible single-row W4 correction. Dot products and accumulation
+/// stay F32; each four-value input sum materializes BF16 additions, and each
+/// affine contribution is evaluated before adding it to the F32 prior.
+pub(super) unsafe fn materialized_affine_dot(
+    weights: &WeightData,
+    input: *const u8,
+    row: usize,
+    column: usize,
+    k: usize,
+) -> f32 {
+    let WeightData::Quantized {
+        weights,
+        weights_size,
+        scales,
+        biases: Some(biases),
+        scale_strides,
+        group_size,
+        ..
+    } = weights
+    else {
+        unreachable!();
+    };
+    let codes = unsafe { std::slice::from_raw_parts(weights.as_ptr(), *weights_size) };
+    let mut result = 0.0f32;
+    for begin in (0..k).step_by(16) {
+        let end = (begin + 16).min(k);
+        let mut dot = 0.0f32;
+        let mut sum = 0.0f32;
+        for quad in (begin..end).step_by(4) {
+            let mut values = [bf16::ZERO; 4];
+            let mut subtotal = 0.0f32;
+            for (index, value) in values.iter_mut().enumerate() {
+                if quad + index < end {
+                    *value = unsafe { *(input as *const bf16).add(row * k + quad + index) };
+                    let code = packed_code(codes, 4, column * k + quad + index);
+                    subtotal += value.to_f32() * f32::from(code);
+                }
+            }
+            dot += subtotal;
+            sum += (((values[0] + values[1]) + values[2]) + values[3]).to_f32();
+        }
+        let metadata =
+            column * scale_strides.output_stride as usize + (begin / group_size) * scale_strides.group_stride as usize;
+        let scale = unsafe { read_f32(scales.as_ptr(), DataType::BF16, metadata) };
+        let bias = unsafe { read_f32(biases.as_ptr(), DataType::BF16, metadata) };
+        result += scale * dot + bias * sum;
+    }
+    result
 }
 
 #[inline]
@@ -142,6 +197,17 @@ mod packed_tail_tests {
         assert_eq!(packed_code(&[0xd3], 8, 0), 0xd3);
         assert_eq!(packed_code(&[0xd3], 4, 0), 3);
         assert_eq!(packed_code(&[0xd3], 4, 1), 13);
+        for bits in [3, 5, 6] {
+            let expected = (0..64).map(|index| (index * 17 + 3) & ((1 << bits) - 1)).collect::<Vec<_>>();
+            let mut packed = vec![0u8; expected.len() * bits / 8];
+            for (index, &code) in expected.iter().enumerate() {
+                for bit in 0..bits {
+                    let position = index * bits + bit;
+                    packed[position / 8] |= (((code >> bit) & 1) as u8) << (position % 8);
+                }
+            }
+            assert!(expected.iter().enumerate().all(|(index, &code)| packed_code(&packed, bits, index) == code as u8));
+        }
         let codes = [0x10, 0x32, 0x54, 0x76, 0x98, 0xba];
         for index in 0..12 {
             assert_eq!(packed_code(&codes, 4, index), index as u8);

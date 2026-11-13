@@ -86,12 +86,24 @@ impl<B: Backend> WeaverLayer<B> {
                 sliding_window_size: None,
                 scale: Some(attention_scale),
                 data_type: DATA_TYPE,
+                materialize_prefill_scores: false,
+                logit_soft_cap: None,
+                source_bf16_prefill: false,
             },
         )
         .map_err(WeaverNewError::Backend)?;
-        let attention_prepare =
-            <B::Kernels as Kernels>::AttentionPrepareKernel::new(context, DATA_TYPE, ROPE_DATA_TYPE, true, true, false)
-                .map_err(WeaverNewError::Backend)?;
+        let attention_prepare = <B::Kernels as Kernels>::AttentionPrepareKernel::new(
+            context,
+            DATA_TYPE,
+            ROPE_DATA_TYPE,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .map_err(WeaverNewError::Backend)?;
         let pre_attention_norm = Normalization::new(
             model_dim,
             None,
@@ -167,6 +179,10 @@ impl<B: Backend> WeaverLayer<B> {
             Some(values),
             Some(&rope.cosines),
             Some(&rope.sines),
+            None::<&B::ConstantBuffer>,
+            None,
+            None,
+            None::<&B::ConstantBuffer>,
             self.num_heads,
             Some(self.num_heads),
             self.head_dim,

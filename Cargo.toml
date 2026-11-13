@@ -5,6 +5,7 @@ members = [
     "crates/stark-score",
     "crates/stark-generate",
     "crates/stark-template",
+    "crates/stark-resource-budget",
 ]
 resolver = "3"
 exclude = ["vendor/cxx", "vendor/lily-core"]

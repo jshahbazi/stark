@@ -1,0 +1,342 @@
+--- a/src/arch/glm5_next/module.zig
++++ b/src/arch/glm5_next/module.zig
+@@ -100,6 +100,8 @@
+     decode: Decode = .{},
+     /// The MTP draft lane (`mtp_lane`; mtp.zig), installed at construction; null: the serial control.
+     mtp: ?*mtp.Lane = null,
++    /// Preloaded, still fully billed head while a request uses the headless path.
++    parked_mtp: ?*mtp.Lane = null,
+     /// With the lane: the request's token ids by position (a pair's next token), allocated at the billed positions.
+     history: []u32 = &.{},
+     /// The request's sampler (mlx-stream's one stream): the first token and every serial step's, a clean request's.
+@@ -112,6 +114,8 @@
+     /// The three passes the construction installed (`ttft_tail: deferred`: a prompt pass hands the request's next call
+     /// the tail's passes, `Passes.deferTail`, which run the tail and put these back before their own work).
+     installed: Installed = undefined,
++    installed_serial: Installed = undefined,
++    installed_mtp: Installed = undefined,
+     /// The request's prompt tail: its prompt length and the parts timed in the prompt pass (the tail line).
+     tail: Tail = .{},
+     /// The rate tally's file (`expert_tally.pathOf`; null: none, as in test builds or under `expert_tally_file: off`)
+@@ -390,6 +394,13 @@
+         self.step_pass = stepPassOf(stepRoute(&self.c), self.c.decode_glue, self.c.expert_family);
+         self.round_pass = roundPassOf(self.c.decode_glue, self.c.expert_family);
+         self.installed = .{ .prompt = self.prompt_pass, .step = self.step_pass, .round = self.round_pass };
++        self.installed_mtp = self.installed;
++        const serial_prompt_route: PromptRoute = if (self.c.dumpDir() != null) .dump else .served;
++        var serial_prompt = promptPassOf(serial_prompt_route, self.c.expert_family);
++        if (self.c.prompt.ttft_tail == .deferred)
++            serial_prompt = deferredPromptOf(serial_prompt_route, self.c.expert_family) orelse serial_prompt;
++        self.installed_serial = .{ .prompt = serial_prompt,
++            .step = stepPassOf(.served, self.c.decode_glue, self.c.expert_family), .round = self.round_pass };
+         if (self.c.dumpDir()) |d| {
+             log.info("glm5_next logits_dump: on dir={s} chunk_rows={d} chunk_bytes={d} (one safetensors file per prompt pass: logits F32 [prompt rows, {d}], token_ids I32, ids_int32_sha256; written before the request returns)\n", .{ d, graph.dump_chunk_rows, dump.chunkBytes(graph.dump_chunk_rows, model.vocab_size, model.hidden_size), model.vocab_size });
+         }
+@@ -596,7 +607,8 @@
+         };
+         self.closeTally();
+         self.closeUsage();
+-        if (self.mtp) |lane| {
++        const owned_head: ?*mtp.Lane = if (self.mtp) |lane| lane else self.parked_mtp;
++        if (owned_head) |lane| {
+             lane.deinit(&self.g);
+             self.gpa.free(self.history);
+         }
+@@ -638,6 +650,54 @@
+         return self.cache.len;
+     }
+ 
++    /// Only the staged bridge calls this, after a full request drain/reset.
++    /// The construction config/bill still includes the preloaded head.
++    pub fn starkSetMtpEnabled(self: *Module, enabled: bool) !void {
++        if (self.cache.len != 0) return error.StarkNativeModeBusy;
++        if (enabled and self.mtp == null and self.parked_mtp == null) return error.NoDraftLane;
++        if (enabled and self.mtp == null) {
++            const lane = self.parked_mtp.?;
++            lane.reset(&self.g);
++            lane.side.reset(&self.g);
++            lane.chain_start = null;
++            self.mtp = lane;
++            self.parked_mtp = null;
++        } else if (!enabled and self.mtp != null) {
++            const lane = self.mtp.?;
++            lane.reset(&self.g);
++            lane.side.reset(&self.g);
++            lane.chain_start = null;
++            self.parked_mtp = lane;
++            self.mtp = null;
++        }
++        self.installed = if (enabled) self.installed_mtp else self.installed_serial;
++        self.prompt_pass = self.installed.prompt;
++        self.step_pass = self.installed.step;
++        self.round_pass = self.installed.round;
++        self.tail = .{};
++    }
++
++    pub fn starkDrainRoutes(self: *Module) !void {
++        switch (self.src) { inline else => |s| try s.starkRequestDrain() }
++    }
++
++    /// Called after the request's complete drain. An unused deferred catch-up
++    /// need not execute: no continuation is promised after this boundary.
++    /// Logical head lengths/views are cleared without overwriting lane bytes
++    /// protected by a taken prompt checkpoint's owner epoch.
++    pub fn starkDiscardTail(self: *Module) void {
++        self.requestEnd();
++        self.prompt_pass = self.installed.prompt;
++        self.step_pass = self.installed.step;
++        self.round_pass = self.installed.round;
++        self.tail = .{};
++        if (self.mtp) |head| {
++            head.reset(&self.g);
++            head.side.reset(&self.g);
++            head.chain_start = null;
++        }
++    }
++
+     /// The longest prompt this load billed (the host refuses a longer one before any work).
+     pub fn maxContext(self: *const Module) u64 {
+         return self.reserve;
+@@ -680,7 +740,7 @@
+     }
+ 
+     pub fn capturePrefixAt(self: *Module, checkpoint: u32) !void {
+-        if (self.mtp != null or self.cache.len != 0 or checkpoint == 0 or checkpoint % graph.prompt_call_rows != 0 or checkpoint >= self.reserve)
++        if (self.cache.len != 0 or checkpoint == 0 or checkpoint % graph.prompt_call_rows != 0 or checkpoint >= self.reserve)
+             return error.StarkPrefixBoundary;
+         self.clearPrefixCapture();
+         self.prefix_capture_at = checkpoint;
+@@ -720,6 +780,8 @@
+                 try src.beginPrefill();
+                 _ = try src.chooseReadSchedule(ids.len);
+                 try stark_prefix.restore(self, snapshot, ids);
++                if (self.mtp != null)
++                    break :blk try Passes(family).resumeLane(self, ids, snapshot.position);
+                 const logits = try Passes(family).promptCalls(self, ids[snapshot.position..], .last, {});
+                 errdefer self.g.release(logits);
+                 self.tail = .{ .prompt_tokens = ids.len };
+@@ -959,12 +1021,23 @@
+ 
+         fn promptLaneWith(self: *Module, ids: []const u32, comptime tail: prompt_levers.TtftTail) anyerror!T {
+             try beginPrompt(self, ids);
++            return promptLaneFrom(self, ids, 0, tail);
++        }
++
++        pub fn resumeLane(self: *Module, ids: []const u32, start: u32) anyerror!T {
++            return switch (self.c.prompt.ttft_tail) {
++                .off => promptLaneFrom(self, ids, start, .off),
++                .deferred => promptLaneFrom(self, ids, start, .deferred),
++            };
++        }
++
++        fn promptLaneFrom(self: *Module, ids: []const u32, start: usize, comptime tail: prompt_levers.TtftTail) anyerror!T {
+             const lane = self.mtp.?;
+             @memcpy(self.history[0..ids.len], ids);
+             var logits: ?T = null;
+             errdefer if (logits) |x| self.g.release(x);
+             self.tail = .{ .prompt_tokens = ids.len };
+-            var at: usize = 0;
++            var at: usize = start;
+             while (at < ids.len) {
+                 const end = @min(ids.len, at + graph.prompt_call_rows);
+                 if (logits) |x| self.g.release(x);
+@@ -980,6 +1053,9 @@
+                 self.tail.pend_ns = t1 - t0;
+                 self.tail.catchup_ns = self.nowNs() - t1;
+                 at = end;
++                // MTP checkpoints use the normalized NONFINAL call boundary:
++                // append consumed every known pair, leaving only the last row.
++                if (end < ids.len) try self.capturePrefixIfReady(logits.?);
+             }
+             const t2 = self.nowNs();
+             try self.g.evalAll(&.{logits.?});
+--- a/src/arch/glm5_next/experts.zig
++++ b/src/arch/glm5_next/experts.zig
+@@ -467,6 +467,11 @@
+             try self.sdk_stream.settleRoutes();
+         }
+ 
++        /// Staged request end/abort: retire GPU work and all speculative reads.
++        pub fn starkRequestDrain(self: *Self) !void {
++            try self.settle();
++        }
++
+         fn setCacheLimit(bytes: usize) void {
+             var previous: usize = 0;
+             _ = mlx.mlx_set_cache_limit(&previous, bytes);
+--- a/src/arch/glm5_next/stark_prefix.zig
++++ b/src/arch/glm5_next/stark_prefix.zig
+@@ -42,6 +42,18 @@
+ };
+ const Kda = struct { conv: Tensor = .{}, rec: Tensor = .{} };
+ const Tail = struct { rows: Tensor = .{}, end: u32 = 0 };
++const Head = struct {
++    latent_len: u32,
++    index_len: u32,
++    pending_count: u32,
++    pending: Tensor = .{},
++    tail: Tail = .{},
++
++    fn free(h: *Head, a: std.mem.Allocator) void {
++        h.pending.free(a);
++        h.tail.rows.free(a);
++    }
++};
+ 
+ pub const Snapshot = struct {
+     allocator: std.mem.Allocator,
+@@ -52,11 +64,13 @@
+     tokens: []u32,
+     kda: []Kda,
+     tails: []Tail,
++    head: ?Head = null,
+ 
+     pub fn deinit(s: *Snapshot) void {
+         const a = s.allocator;
+         for (s.kda) |*k| { k.conv.free(a); k.rec.free(a); }
+         for (s.tails) |*t| t.rows.free(a);
++        if (s.head) |*h| h.free(a);
+         a.free(s.kda);
+         a.free(s.tails);
+         @memset(s.tokens, 0);
+@@ -67,7 +81,7 @@
+ 
+ pub fn capture(m: anytype, full_prompt: []const u32, logits: T) !*Snapshot {
+     const a = m.gpa;
+-    if (m.mtp != null or m.cache.len == 0 or m.cache.len % graph.prompt_call_rows != 0 or m.cache.len > full_prompt.len)
++    if (m.cache.len == 0 or m.cache.len % graph.prompt_call_rows != 0 or m.cache.len > full_prompt.len)
+         return error.StarkPrefixBoundary;
+     // Keep exactly the arithmetic/call shapes upstream used. This hook only
+     // evaluates/copies existing state after the whole call has finished.
+@@ -76,6 +90,15 @@
+     try evals.append(a, logits);
+     try m.cache.stateArrays(&evals, a);
+     for (m.cache.tails) |t| if (t.rows) |r| try evals.append(a, r);
++    if (m.mtp) |h| {
++        if (m.cache.len >= full_prompt.len or h.tracked() != m.cache.len or
++            h.latent.len != m.cache.len - 1 or h.latent.len != h.index.len or h.pending == null or
++            h.n_pending != 1 or
++            h.chain_start != null or h.side.lat != null or h.side.idx != null)
++            return error.StarkPrefixBoundary;
++        try evals.append(a, h.pending.?);
++        if (h.tail.rows) |r| try evals.append(a, r);
++    }
+     try m.g.evalAll(evals.items);
+     switch (m.src) { inline else => |src| try src.flush() }
+     try mlx.check(mlx.mlx_synchronize(m.g.s));
+@@ -89,9 +112,11 @@
+     for (ts) |*t| t.* = .{};
+     const tokens = try a.dupe(u32, full_prompt[0..m.cache.len]);
+     errdefer a.free(tokens);
++    var head: ?Head = null;
+     errdefer {
+         for (ks) |*k| { k.conv.free(a); k.rec.free(a); }
+         for (ts) |*t| t.rows.free(a);
++        if (head) |*h| h.free(a);
+     }
+     for (ks, m.cache.kda) |*dst, st| {
+         dst.conv = try Tensor.capture(a, &m.g, st.conv orelse return error.StarkPrefixEmptyState);
+@@ -101,13 +126,23 @@
+         dst.rows = try Tensor.capture(a, &m.g, tail.rows orelse return error.StarkPrefixEmptyState);
+         dst.end = tail.end;
+     }
++    if (m.mtp) |h| {
++        head = .{ .latent_len = h.latent.len, .index_len = h.index.len, .pending_count = h.n_pending };
++        head.?.pending = try Tensor.capture(a, &m.g, h.pending.?);
++        if (head.?.pending.dtype != .bfloat16 or head.?.pending.rank != 2 or
++            head.?.pending.shape[0] != @as(c_int, @intCast(h.n_pending)) or
++            head.?.pending.shape[1] != @as(c_int, @intCast(m.c.model.hidden_size)))
++            return error.StarkPrefixShape;
++        if (h.tail.rows) |r| head.?.tail.rows = try Tensor.capture(a, &m.g, r);
++        head.?.tail.end = h.tail.end;
++    }
+     s.* = .{ .allocator = a, .owner = m.prefix_owner, .epoch = m.prefix_epoch,
+-        .position = m.cache.len, .context = m.reserve, .tokens = tokens, .kda = ks, .tails = ts };
++        .position = m.cache.len, .context = m.reserve, .tokens = tokens, .kda = ks, .tails = ts, .head = head };
+     return s;
+ }
+ 
+ pub fn admits(m: anytype, s: *const Snapshot, full_prompt: []const u32) bool {
+-    return m.mtp == null and s.owner == m.prefix_owner and s.epoch == m.prefix_epoch and
++    return (m.mtp != null) == (s.head != null) and s.owner == m.prefix_owner and s.epoch == m.prefix_epoch and
+         s.context == m.reserve and s.position > 0 and s.position % graph.prompt_call_rows == 0 and
+         s.position < full_prompt.len and full_prompt.len <= m.reserve and m.cache.len == 0 and
+         s.kda.len == m.cache.kda.len and s.tails.len == m.cache.tails.len and
+@@ -132,6 +167,31 @@
+         tail.rows = m.g.keep(rows);
+         tail.end = copy.end;
+         try evals.append(m.gpa, tail.rows.?);
++    }
++    if (s.head) |*copy| {
++        const head = m.mtp orelse return error.StarkPrefixAdmission;
++        if (copy.latent_len != copy.index_len or copy.latent_len + 1 != s.position or copy.pending_count != 1 or
++            head.latent.buf == null or head.index.buf == null or
++            head.latent.cap < copy.latent_len or head.index.cap < copy.index_len)
++            return error.StarkPrefixMissingKv;
++        // No snapshot retains the MLX lane handles. Their prefix bytes remain
++        // owned by this module/epoch; fresh prompts invalidate before overwrite.
++        head.reset(&m.g);
++        head.side.reset(&m.g);
++        head.chain_start = null;
++        head.latent.len = copy.latent_len;
++        head.index.len = copy.index_len;
++        const pending = try copy.pending.array(&m.g);
++        head.pending = m.g.keep(pending);
++        head.n_pending = copy.pending_count;
++        try evals.append(m.gpa, head.pending.?);
++        if (copy.tail.rows.rank != 0) {
++            const rows = try copy.tail.rows.array(&m.g);
++            head.tail.rows = m.g.keep(rows);
++            try evals.append(m.gpa, head.tail.rows.?);
++        }
++        head.tail.end = copy.tail.end;
++        @memcpy(m.history[0..s.position], s.tokens);
+     }
+     try m.g.evalAll(evals.items);
+     try mlx.check(mlx.mlx_synchronize(m.g.s));
+@@ -168,8 +228,7 @@
+ 
+ /// Validation-only aggregate hash. Includes all numerical state and absolute
+ /// logical positions; excludes tokens, source identity/epoch and request counters.
+-pub fn liveFingerprint(m: anytype, out: *[32]u8) !void {
+-    if (m.mtp != null) return error.StarkPrefixMtpUnsupported;
++fn trunkFingerprint(m: anytype, out: *[32]u8) !void {
+     const mark = m.g.mark();
+     defer m.g.resetTo(mark);
+     var evals: std.ArrayList(T) = .empty;
+@@ -204,3 +263,35 @@
+     try mlx.checkError();
+     h.final(out);
+ }
++
++pub fn liveFingerprint(m: anytype, out: *[32]u8) !void {
++    const head = m.mtp orelse return trunkFingerprint(m, out);
++    if (head.chain_start != null or head.side.lat != null or head.side.idx != null)
++        return error.StarkPrefixBoundary;
++    var trunk: [32]u8 = undefined;
++    try trunkFingerprint(m, &trunk);
++    const mark = m.g.mark();
++    defer m.g.resetTo(mark);
++    var evals: std.ArrayList(T) = .empty;
++    defer evals.deinit(m.gpa);
++    if (head.latent.buf) |b| try evals.append(m.gpa, b);
++    if (head.index.buf) |b| try evals.append(m.gpa, b);
++    if (head.tail.rows) |r| try evals.append(m.gpa, r);
++    if (head.pending) |r| try evals.append(m.gpa, r);
++    if (evals.items.len > 0) try m.g.evalAll(evals.items);
++    switch (m.src) { inline else => |src| try src.flush() }
++    try mlx.check(mlx.mlx_synchronize(m.g.s));
++    var h = std.crypto.hash.sha2.Sha256.init(.{});
++    h.update("stark-glm-live-state-mtp-v1");
++    h.update(&trunk);
++    hashCount(&h, head.latent.len);
++    try hashTensor(m, &h, try head.latent.view(&m.g));
++    hashCount(&h, head.index.len);
++    try hashTensor(m, &h, try head.index.view(&m.g));
++    hashCount(&h, head.tail.end);
++    try hashTensor(m, &h, head.tail.rows);
++    hashCount(&h, head.n_pending);
++    try hashTensor(m, &h, head.pending);
++    try mlx.checkError();
++    h.final(out);
++}

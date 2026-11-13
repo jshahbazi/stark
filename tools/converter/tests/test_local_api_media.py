@@ -99,12 +99,14 @@ def test_maximum_supported_image_body_passes_real_http_server():
 
 
 @pytest.mark.parametrize("images", [False, True])
-def test_text_body_above_one_mib_is_rejected_even_when_images_are_enabled(images):
+def test_text_body_above_input_cap_is_rejected_even_when_images_are_enabled(images, monkeypatch):
+    monkeypatch.setattr(local_api_module, "MAX_TEXT_BODY_BYTES", 256)
+    monkeypatch.setattr(local_api_module, "MAX_IMAGE_BODY_BYTES", 512)
     called = []
     api, info, port = start_api(lambda *_args: called.append(True) or {"choices": []}, images=images)
     try:
         body = json.dumps(
-            {"messages": [{"role": "user", "content": "x" * (1024 * 1024 + 1)}]},
+            {"messages": [{"role": "user", "content": "x" * 300}]},
             separators=(",", ":"),
         ).encode("ascii")
         assert len(body) > local_api_module.MAX_TEXT_BODY_BYTES
@@ -171,6 +173,126 @@ def test_pending_body_budget_rejects_before_read_and_releases_on_disconnect(monk
         if first is not None:
             first.close()
         assert wait_for_pending(api, 0)
+        api.close()
+
+
+def test_memory_pressure_rejects_large_body_before_read_and_allows_small_retry(monkeypatch):
+    monkeypatch.setattr(local_api_module, "available_memory_bytes", lambda: 1024)
+    called = []
+    api, info, port = start_api(lambda *_args: called.append(True) or {"choices": []})
+    connection = None
+    try:
+        connection = send_headers(port, info["api_key"], 1024 * 1024 + 1)
+        response = b""
+        while chunk := connection.recv(4096):
+            response += chunk
+        assert b"HTTP/1.1 429" in response
+        assert b"memory_pressure" in response
+        assert not called
+        assert wait_for_pending(api, 0)
+        status, _ = post_bytes(info, port, b"{}")
+        assert status == 200
+        assert called == [True]
+    finally:
+        if connection is not None:
+            connection.close()
+        api.close()
+
+
+def test_memory_admission_accounts_for_mixed_unicode_json_peak(monkeypatch):
+    # One supplementary-plane character widens the ASCII-heavy decoded JSON
+    # and parsed content to four bytes per character in CPython.
+    body = json.dumps(
+        {"messages": [{"role": "user", "content": "x" * (1024 * 1024) + "\U0001f600"}]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    monkeypatch.setattr(local_api_module, "available_memory_bytes", lambda: 6 * len(body))
+    called = []
+    api, info, port = start_api(lambda *_args: called.append(True) or {"choices": []})
+    connection = None
+    try:
+        connection = send_headers(port, info["api_key"], len(body))
+        response = b""
+        while chunk := connection.recv(4096):
+            response += chunk
+        assert b"HTTP/1.1 429" in response
+        assert b"memory_pressure" in response
+        assert not called
+        with api._body_lock:
+            assert api._pending_body_bytes == api._pending_parse_bytes == 0
+    finally:
+        if connection is not None:
+            connection.close()
+        api.close()
+
+
+def test_concurrent_large_bodies_reserve_parse_headroom_before_read(monkeypatch):
+    length = 1024 * 1024 + 1
+    monkeypatch.setattr(local_api_module, "available_memory_bytes", lambda: 18 * length)
+    api, info, port = start_api(lambda *_args: {"choices": []})
+    first = second = None
+    try:
+        first = send_headers(port, info["api_key"], length)
+        assert wait_for_pending(api, length)
+        second = send_headers(port, info["api_key"], length)
+        response = b""
+        while chunk := second.recv(4096):
+            response += chunk
+        assert b"HTTP/1.1 429" in response
+        assert b"memory_pressure" in response
+        with api._body_lock:
+            assert api._pending_body_bytes == length
+            assert api._pending_parse_bytes == 12 * length
+        first.close()
+        first = None
+        assert wait_for_pending(api, 0)
+        with api._body_lock:
+            assert api._pending_parse_bytes == 0
+        assert post_bytes(info, port, b"{}")[0] == 200
+    finally:
+        if second is not None:
+            second.close()
+        if first is not None:
+            first.close()
+        api.close()
+
+
+def test_parse_reservation_released_while_parsed_completion_waits(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    length = 1024 * 1024 + 1
+    monkeypatch.setattr(local_api_module, "available_memory_bytes", lambda: 18 * length)
+
+    def complete(*_args):
+        entered.set()
+        assert release.wait(3)
+        return {"choices": []}
+
+    api, info, port = start_api(complete)
+    first = second = None
+    try:
+        first = send_headers(port, info["api_key"], length)
+        first.sendall(b"{}" + b" " * (length - 2))
+        assert entered.wait(2)
+        with api._body_lock:
+            assert api._pending_body_bytes == length
+            assert api._pending_parse_bytes == 0
+        # The parsed request's actual resident memory is reflected in current
+        # telemetry; its transient allowance must not remain reserved in queue.
+        second = send_headers(port, info["api_key"], length)
+        assert wait_for_pending(api, 2 * length)
+        with api._body_lock:
+            assert api._pending_parse_bytes == 12 * length
+    finally:
+        if second is not None:
+            second.close()
+        release.set()
+        if first is not None:
+            first.close()
+        assert wait_for_pending(api, 0)
+        with api._body_lock:
+            assert api._pending_parse_bytes == 0
         api.close()
 
 

@@ -183,6 +183,22 @@ def _case_name(dtype, target, layout, tied=False, wrapper=False, biased=False, e
     )
 
 
+def complete_qwen35_mtp_fixture(path, *, wrapper=False):
+    """Complete eight-wide predictor; the frozen input generator stays unchanged."""
+    config, tensors = qwen35_fixture(path, wrapper=wrapper)
+    config["mtp_num_hidden_layers"] = 1
+    prefix = "model.language_model" if wrapper else "model"
+    for name, value in list(tensors.items()):
+        if name.startswith(prefix + ".layers.1."):
+            tensors[name.replace(prefix + ".layers.1.", "mtp.layers.0.")] = value
+    for name in ("pre_fc_norm_embedding", "pre_fc_norm_hidden", "norm"):
+        tensors[f"mtp.{name}.weight"] = tensors[prefix + ".norm.weight"]
+    tensors["mtp.fc.weight"] = "BF16", np.zeros((8, 16), dtype="<u2")
+    (path / "config.json").write_text(json.dumps(config))
+    save_tensors(path / "model.safetensors", tensors)
+    return config, tensors
+
+
 CASES = [
     (source, target, layout, False, False, False, False)
     for source, target, layout in itertools.product(DTYPES, DTYPES, ("split", "direct", "grouped"))
@@ -199,9 +215,24 @@ CASES += [
 
 
 CASES = [(*case, False) for case in CASES]
-CASES += [
-    (source, target, "split", False, True, False, False, True) for source, target in itertools.product(DTYPES, DTYPES)
-]
+
+
+def assert_frozen_export(source, output, tensors, case, target):
+    plan = build_qwen35_plan(source, dtype=DTYPES[target])
+    stats = write_plan(plan, output, chunk_bytes=96)
+    metadata, converted = read_safetensors_header(output)
+    assert stats["peak_buffer_bytes"] <= 96
+    assert plan.source_tensors == len(tensors)
+    assert plan.input_bytes == sum(array.nbytes for _, array in tensors.values())
+    assert plan.mtp_config is None
+    assert plan.decoder_config == case["decoder_config"]
+    assert {key: json.loads(value) for key, value in metadata.items()} == case["metadata"]
+    assert set(converted) == set(case["arrays"])
+    for name, info in converted.items():
+        expected = case["arrays"][name]
+        assert list(info.shape) == expected["shape"]
+        assert info.dtype == expected["dtype"]
+        assert hashlib.sha256(tensor_bytes(info)).hexdigest() == expected["sha256"]
 
 
 @pytest.mark.parametrize("source_dtype,target,layout,tied,wrapper,biased,gate,mtp", CASES)
@@ -223,20 +254,24 @@ def test_complete_exports_match_frozen_actual_loader(
     case = json.loads(REFERENCE.read_text())["cases"][
         _case_name(source_dtype, target, layout, tied, wrapper, biased, gate, mtp)
     ]
-    plan = build_qwen35_plan(source, dtype=DTYPES[target])
-    stats = write_plan(plan, tmp_path / "output.safetensors", chunk_bytes=96)
-    metadata, converted = read_safetensors_header(tmp_path / "output.safetensors")
-    assert stats["peak_buffer_bytes"] <= 96
-    assert plan.source_tensors == len(tensors)
-    assert plan.input_bytes == sum(array.nbytes for _, array in tensors.values())
-    assert plan.decoder_config == case["decoder_config"]
-    assert {key: json.loads(value) for key, value in metadata.items()} == case["metadata"]
-    assert set(converted) == set(case["arrays"])
-    for name, info in converted.items():
-        expected = case["arrays"][name]
-        assert list(info.shape) == expected["shape"]
-        assert info.dtype == expected["dtype"]
-        assert hashlib.sha256(tensor_bytes(info)).hexdigest() == expected["sha256"]
+    assert_frozen_export(source, tmp_path / "output.safetensors", tensors, case, target)
+
+
+@pytest.mark.parametrize("source_dtype,target", list(itertools.product(DTYPES, DTYPES)))
+def test_headless_trunk_preserves_frozen_legacy_mtp_omission_output(tmp_path, source_dtype, target):
+    source = tmp_path / "source"
+    config, tensors = qwen35_fixture(source, dtype=source_dtype, wrapper=True, mtp=True)
+    # These historical exports omitted an incomplete auxiliary namespace.
+    # Compare their frozen trunk bytes using an explicitly headless source;
+    # partial-head acceptance is tested separately as an error below.
+    tensors = {name: value for name, value in tensors.items() if not name.startswith("mtp.")}
+    config.pop("mtp_num_hidden_layers")
+    (source / "config.json").write_text(json.dumps(config))
+    save_tensors(source / "model.safetensors", tensors)
+    case = json.loads(REFERENCE.read_text())["cases"][
+        _case_name(source_dtype, target, "split", wrapper=True, mtp=True)
+    ]
+    assert_frozen_export(source, tmp_path / "output.safetensors", tensors, case, target)
 
 
 def test_wrapper_config_merge_uses_top_level_overrides():
@@ -280,7 +315,7 @@ def test_malformed_tensor_layouts_fail_closed(tmp_path, case):
 @pytest.mark.parametrize(
     "field,value,error",
     [
-        ("model_type", "qwen3_5_moe", UnsupportedConversion),
+        ("model_type", "qwen3_5_moe", ConversionError),
         ("model_type", "qwen3_5_text_moe", UnsupportedConversion),
         ("layer_types", ["linear_attention"], ConversionError),
         ("layer_types", ["linear_attention", "unknown"], ConversionError),
@@ -307,12 +342,30 @@ def test_malformed_tensor_layouts_fail_closed(tmp_path, case):
         ("pretraining_tp", 2, UnsupportedConversion),
     ],
 )
-def test_unsupported_and_malformed_config_variants(tmp_path, field, value, error):
+def test_unsupported_and_malformed_config_variants(tmp_path, monkeypatch, field, value, error):
+    # The planner's own dropout check stays covered; the shared normalizer's
+    # separate inactive-dropout rewrite is switched off for this test.
+    monkeypatch.setattr("stark_convert.config_normalization.ZERO_INACTIVE_ATTENTION_DROPOUT", False)
     source = tmp_path / "source"
     config, _ = qwen35_fixture(source)
     config[field] = value
     (source / "config.json").write_text(json.dumps(config))
     with pytest.raises(error):
+        build_qwen35_plan(source)
+
+
+def test_qwen38_swish_annotation_preserves_sigmoid_attention_plan(tmp_path):
+    source = tmp_path / "source"
+    config, _ = qwen35_fixture(source)
+    baseline = build_qwen35_plan(source)
+    config.update(output_gate_type="swish", language_model_only=False)
+    config["rope_parameters"]["type"] = config["rope_parameters"].pop("rope_type", "default")
+    (source / "config.json").write_text(json.dumps(config))
+    candidate = build_qwen35_plan(source)
+    assert candidate.decoder_config == baseline.decoder_config
+    config["output_gate_type"] = "relu"
+    (source / "config.json").write_text(json.dumps(config))
+    with pytest.raises(UnsupportedConversion, match="gate annotation"):
         build_qwen35_plan(source)
 
 
@@ -330,8 +383,9 @@ def test_declared_vision_extraction_preserves_input_signatures(tmp_path):
 
 def test_text_only_config_alias_preserves_the_decoder_plan(tmp_path):
     source = tmp_path / "source"
-    config, _ = qwen35_fixture(source, mtp=True)
+    config, _ = complete_qwen35_mtp_fixture(source)
     original = build_qwen35_plan(source)
+    assert original.mtp_config is not None
     config.update(model_type="qwen3_5_text", partial_rotary_factor=1.0)
     (source / "config.json").write_text(json.dumps(config))
     text = build_qwen35_plan(source)
@@ -398,10 +452,10 @@ def test_input_change_after_projection_slice_planning_is_rejected(tmp_path):
         write_plan(plan, tmp_path / "output.safetensors", chunk_bytes=96)
 
 
-@pytest.mark.parametrize("declaration", (None, 0, True, -1, "1"))
-def test_mtp_omission_requires_a_positive_integer_declaration(tmp_path, declaration):
+@pytest.mark.parametrize("declaration", (None, 0, True, -1, "1", 2))
+def test_complete_mtp_requires_one_positive_integer_declaration(tmp_path, declaration):
     source = tmp_path / "source"
-    config, _ = qwen35_fixture(source, wrapper=True, mtp=True)
+    config, _ = complete_qwen35_mtp_fixture(source, wrapper=True)
     if declaration is None:
         config.pop("mtp_num_hidden_layers")
     else:
@@ -411,10 +465,20 @@ def test_mtp_omission_requires_a_positive_integer_declaration(tmp_path, declarat
         build_qwen35_plan(source)
 
 
-@pytest.mark.parametrize("namespace", ("mtp", "model.visual"))
-def test_omitted_auxiliary_shard_change_is_rejected_after_text_writes(tmp_path, namespace):
+def test_partial_mtp_payload_rejects_missing_fusion_matrix(tmp_path):
     source = tmp_path / "source"
-    _, tensors = qwen35_fixture(source, wrapper=True, mtp=True)
+    qwen35_fixture(source, wrapper=True, mtp=True)
+    with pytest.raises(ConversionError, match="missing its fusion matrix"):
+        build_qwen35_plan(source)
+
+
+@pytest.mark.parametrize("namespace", ("mtp", "model.visual"))
+def test_predictor_or_omitted_vision_shard_change_is_rejected_after_text_writes(tmp_path, namespace):
+    source = tmp_path / "source"
+    if namespace == "mtp":
+        _, tensors = complete_qwen35_mtp_fixture(source, wrapper=True)
+    else:
+        _, tensors = qwen35_fixture(source, wrapper=True)
     auxiliary = {name: value for name, value in tensors.items() if name.startswith(namespace + ".")}
     text = {name: value for name, value in tensors.items() if name not in auxiliary}
     save_tensors(source / "model.safetensors", text)
@@ -423,7 +487,9 @@ def test_omitted_auxiliary_shard_change_is_rejected_after_text_writes(tmp_path, 
     (source / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
     plan = build_qwen35_plan(source)
     assert len(plan.input_tensors) == len(tensors)
-    assert not any(info.path.name == "auxiliary.safetensors" for op in plan.operations for info in op.sources)
+    uses_auxiliary = any(info.path.name == "auxiliary.safetensors" for op in plan.operations for info in op.sources)
+    assert uses_auxiliary == (namespace == "mtp")
+    assert (plan.mtp_config is not None) == (namespace == "mtp")
     with (source / "auxiliary.safetensors").open("ab") as stream:
         stream.write(b"changed")
     with pytest.raises(ConversionError, match="changed"):
@@ -432,7 +498,7 @@ def test_omitted_auxiliary_shard_change_is_rejected_after_text_writes(tmp_path, 
 
 def test_declared_mtp_does_not_authorize_other_namespaces(tmp_path):
     source = tmp_path / "source"
-    _, tensors = qwen35_fixture(source, wrapper=True, mtp=True)
+    _, tensors = complete_qwen35_mtp_fixture(source, wrapper=True)
     tensors["model.mtp.weight"] = "BF16", np.zeros((2,), dtype="<u2")
     save_tensors(source / "model.safetensors", tensors)
     with pytest.raises(ConversionError, match="unexpected"):

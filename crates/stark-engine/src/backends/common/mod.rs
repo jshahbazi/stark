@@ -44,7 +44,7 @@ pub(crate) use buffer::{
     constant::ConstantBuffer,
     cpu_accessible::BufferCpuAccessible,
     global::GlobalBuffer,
-    reference::{BufferMut, BufferRef},
+    reference::{BufferMut, BufferRef, Subbuffer},
     scratch::ScratchBuffer,
     sparse::SparseBuffer,
 };

@@ -10,9 +10,10 @@ use std::collections::VecDeque;
 
 use stark_engine::engine::hybrid::{Error, MtpSampler, Result};
 
-#[cfg(test)]
-use super::sampling_distribution;
-use super::{Distribution, ProbabilityMapper, Sampling, nucleus::NucleusSampler, sample_with_mapper, uniform};
+use super::{
+    Distribution, ProbabilityMapper, Sampling, nucleus::NucleusSampler, sample_with_mapper, sampling_distribution,
+    uniform,
+};
 
 const SPARSE_LOOKUP_LIMIT: usize = 256;
 const DRAFT_SEED_DOMAIN: u64 = 0x4d54_505f_4452_4146;
@@ -68,7 +69,7 @@ enum Phase {
     Finished,
 }
 
-pub(super) struct ExactMtpSampler<'a> {
+pub(crate) struct ExactMtpSampler<'a> {
     sampling: &'a Sampling,
     rng: &'a mut u64,
     draft_rng: u64,
@@ -80,10 +81,11 @@ pub(super) struct ExactMtpSampler<'a> {
     phase: Phase,
     vocabulary: Option<usize>,
     failed: bool,
+    dense_filters: bool,
 }
 
 impl<'a> ExactMtpSampler<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         sampling: &'a Sampling,
         rng: &'a mut u64,
         mapper: &'a mut ProbabilityMapper,
@@ -101,12 +103,32 @@ impl<'a> ExactMtpSampler<'a> {
             phase: Phase::Drafting,
             vocabulary: None,
             failed: false,
+            dense_filters: false,
         }
+    }
+
+    /// Dense GPU sampling intersects top-k with nucleus mass measured against
+    /// the full vocabulary. Keep that contract when enabling speculative decode.
+    pub(crate) fn new_dense(
+        sampling: &'a Sampling,
+        rng: &'a mut u64,
+        mapper: &'a mut ProbabilityMapper,
+    ) -> Self {
+        let mut sampler = Self::new(sampling, rng, mapper);
+        sampler.dense_filters = matches!(
+            sampling,
+            Sampling::Stochastic {
+                top_k: Some(_),
+                top_p: Some(_),
+                ..
+            }
+        );
+        sampler
     }
 
     /// The prompt's first draw has no proposal. It uses exactly the ordinary
     /// sampler, before the first draft round begins.
-    pub(super) fn sample_initial(
+    pub(crate) fn sample_initial(
         &mut self,
         logits: &[f32],
     ) -> std::result::Result<u32, &'static str> {
@@ -114,7 +136,14 @@ impl<'a> ExactMtpSampler<'a> {
             self.failed = true;
             return Err("native_generation_failed");
         }
-        let result = sample_with_mapper(logits, self.sampling, self.rng, Some(&mut *self.mapper));
+        let result = if self.dense_filters {
+            dense_distribution(logits, self.sampling, &mut *self.mapper).and_then(|distribution| {
+                draw(&distribution, self.rng, matches!(self.sampling, Sampling::Greedy {}))
+                    .map_err(|_| "native_generation_failed")
+            })
+        } else {
+            sample_with_mapper(logits, self.sampling, self.rng, Some(&mut *self.mapper))
+        };
         self.failed |= result.is_err();
         if result.is_ok() {
             self.vocabulary = Some(logits.len());
@@ -128,6 +157,12 @@ impl<'a> ExactMtpSampler<'a> {
     ) -> Result<Distribution> {
         if self.failed || self.vocabulary.is_some_and(|size| size != logits.len()) {
             return Err(Error::Invalid("MTP sampler vocabulary or state"));
+        }
+        if self.dense_filters {
+            let distribution = dense_distribution(logits, self.sampling, &mut *self.mapper)
+                .map_err(|_| Error::Invalid("MTP sampling distribution"))?;
+            self.vocabulary = Some(logits.len());
+            return Ok(distribution);
         }
         #[cfg(test)]
         let distribution = if self.reference_distribution {
@@ -198,6 +233,36 @@ impl<'a> ExactMtpSampler<'a> {
             },
         }
     }
+}
+
+fn dense_distribution(
+    logits: &[f32],
+    sampling: &Sampling,
+    mapper: &mut ProbabilityMapper,
+) -> std::result::Result<Distribution, &'static str> {
+    let Sampling::Stochastic {
+        temperature,
+        top_k: Some(top_k),
+        top_p,
+        min_p,
+    } = sampling
+    else {
+        return sampling_distribution(logits, sampling, Some(mapper));
+    };
+    let mut distribution = sampling_distribution(
+        logits,
+        &Sampling::Stochastic {
+            temperature: *temperature,
+            top_k: None,
+            top_p: *top_p,
+            min_p: *min_p,
+        },
+        Some(mapper),
+    )?;
+    distribution.indices.truncate(*top_k as usize);
+    distribution.weights.truncate(*top_k as usize);
+    distribution.total = distribution.weights.iter().sum();
+    Ok(distribution)
 }
 
 impl MtpSampler for ExactMtpSampler<'_> {
@@ -299,6 +364,33 @@ fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dense_mtp_keeps_full_vocabulary_nucleus_mass_when_top_k_is_enabled() {
+        // Four equal logits, k=2 and p=0.4 keep two IDs under the dense
+        // full-vocabulary policy, but only one under the hybrid top-k policy.
+        let sampling = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: Some(2),
+            top_p: Some(0.4),
+            min_p: None,
+        };
+        let logits = [0.0; 4];
+        let mut mapper = ProbabilityMapper::default();
+        assert_eq!(sampling_distribution(&logits, &sampling, Some(&mut mapper)).unwrap().indices, vec![0]);
+        let dense = dense_distribution(&logits, &sampling, &mut mapper).unwrap();
+        assert_eq!(dense.indices, vec![0, 1]);
+        assert_eq!(dense.total, 2.0);
+        for seed in 0..64 {
+            let mut rng = seed;
+            let mut sampler = ExactMtpSampler::new_dense(&sampling, &mut rng, &mut mapper);
+            assert!(sampler.sample_initial(&logits).unwrap() < 2);
+            sampler.begin_round();
+            let draft = sampler.draft(&logits).unwrap();
+            assert_eq!(sampler.target(&logits, Some(draft)).unwrap(), draft);
+            assert!(sampler.target(&logits, None).unwrap() < 2);
+        }
+    }
 
     #[test]
     fn nucleus_mtp_matches_reference_accept_reject_bonus_and_both_rng_streams() {
@@ -566,6 +658,41 @@ mod tests {
             let proposal = sampler.draft(&draft_logits).unwrap();
             assert!(proposal == 1);
             assert!(sampler.target(&target_logits, Some(proposal)).unwrap() == 0);
+        }
+    }
+
+    #[test]
+    fn shortlist_proposals_keep_full_target_support_and_exact_rejection_mass() {
+        let sampling = Sampling::Stochastic {
+            temperature: 0.6,
+            top_k: Some(20),
+            top_p: Some(0.95),
+            min_p: None,
+        };
+        let mut draft = vec![f32::MIN; 128];
+        draft[7] = 1.0;
+        draft[91] = 2.0;
+        let target = vec![0.0; 128];
+        let p = sampling_distribution(&target, &sampling, None).unwrap();
+        let q = sampling_distribution(&draft, &sampling, None).unwrap();
+        let lookup = ProbabilityLookup::new(&q, draft.len());
+        assert_eq!(lookup.get(0), 0.0);
+        assert_eq!(lookup.get(127), 0.0);
+        let rejection = 1.0 - p.indices.iter().map(|&id| probability(&p, id).min(lookup.get(id))).sum::<f64>();
+        let residual = residual_distribution(&p, &lookup).unwrap();
+        for id in 0..128 {
+            let accepted = probability(&p, id).min(lookup.get(id));
+            assert!((accepted + rejection * probability(&residual, id) - probability(&p, id)).abs() < 2e-15);
+        }
+        for seed in 0..64 {
+            let mut rng = seed;
+            let mut mapper = ProbabilityMapper::default();
+            let mut sampler = ExactMtpSampler::new(&sampling, &mut rng, &mut mapper);
+            sampler.begin_round();
+            let token = sampler.draft(&draft).unwrap();
+            assert!(token == 7 || token == 91);
+            let draw = sampler.target(&target, Some(token)).unwrap();
+            assert!(draw < 128);
         }
     }
 

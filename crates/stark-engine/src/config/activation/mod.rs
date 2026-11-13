@@ -12,7 +12,11 @@ pub struct Activation;
 impl AnyActivation {
     pub fn act_type(&self) -> ActivationType {
         match self {
+            AnyActivation::SiLU(config) if config.materialize_sigmoid => ActivationType::SILUMaterializedSigmoid,
             AnyActivation::SiLU(_) => ActivationType::SILU,
+            AnyActivation::GELU(config) if config.approximate && config.materialize_polynomial => {
+                ActivationType::GELUMaterializedPolynomial
+            },
             AnyActivation::GELU(gelu::GELU {
                 approximate: true,
                 ..

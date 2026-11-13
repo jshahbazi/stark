@@ -5,6 +5,24 @@ import Metal
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum WorkerPipeReader {
+    /// Read one currently available chunk. FileHandle.readData(ofLength:) can
+    /// wait for the entire requested length while a persistent worker is alive.
+    static func readChunk(from handle: FileHandle) -> Data? {
+        var bytes = Data(count: 65_536)
+        let amount = bytes.withUnsafeMutableBytes { buffer -> Int in
+            while true {
+                let count = Darwin.read(handle.fileDescriptor, buffer.baseAddress!, buffer.count)
+                if count < 0 && errno == EINTR { continue }
+                return count
+            }
+        }
+        guard amount >= 0 else { return nil }
+        bytes.count = amount
+        return bytes
+    }
+}
+
 enum ImageAttachmentError: Error {
     case invalid, tooLarge, unavailable
 
@@ -83,6 +101,27 @@ struct ImageAttachment {
     }
 }
 
+struct ModelImageLimits {
+    let sourcePixels: Int64
+    let processedPixels: Int64
+    let imageTokens: Int64
+
+    init?(_ value: Any?) {
+        guard let value = value as? [String: Any],
+              let source = SupportMetadata.integer(value["max_source_pixels"]), source > 0,
+              let processed = SupportMetadata.integer(value["max_processed_pixels"]), processed > 0,
+              let tokens = SupportMetadata.integer(value["max_image_tokens"]), tokens > 0 else { return nil }
+        sourcePixels = source; processedPixels = processed; imageTokens = tokens
+    }
+
+    var summary: String { "Image processing: up to \(processedPixels.formatted()) pixels" }
+    var help: String {
+        "Attach one PNG or JPEG up to 4 MiB and \(sourcePixels.formatted()) source pixels. " +
+        "This model processes up to \(processedPixels.formatted()) pixels (\(imageTokens.formatted()) image tokens), " +
+        "subject to available memory and conversation context."
+    }
+}
+
 final class AttachmentStaging {
     let root: URL
     private let descriptor: Int32
@@ -146,6 +185,33 @@ final class AttachmentStaging {
     }
 }
 
+enum ModelToolSupport: String {
+    case available, unavailable, unchecked
+
+    init(_ value: Any?) {
+        guard let raw = value as? [String: Any],
+              let status = raw["status"] as? String,
+              let parsed = Self(rawValue: status) else { self = .unchecked; return }
+        self = parsed
+    }
+
+    var title: String {
+        switch self {
+        case .available: return "Tools available"
+        case .unavailable: return "Tools unavailable"
+        case .unchecked: return "Tools unchecked"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .available: return "Stark supports this model’s tool-call format. Tool-use quality needs a separate model test."
+        case .unavailable: return "This model’s template has no reviewed tool-call parser in Stark."
+        case .unchecked: return "Stark could not inspect this model’s tool-call format."
+        }
+    }
+}
+
 struct InstalledModelDisplay: Equatable {
     let groupID: String
     let groupName: String
@@ -153,6 +219,7 @@ struct InstalledModelDisplay: Equatable {
     let quantization: String?
     let weightBytes: Int64?
     let sourceRevision: String?
+    let toolSupport: ModelToolSupport
 
     var repositoryURL: URL? {
         guard groupID.hasPrefix("repo:") else { return nil }
@@ -183,6 +250,7 @@ struct InstalledModelDisplay: Equatable {
         }
         self.groupID = groupID; self.groupName = groupName; self.familyID = familyID
         self.quantization = quantization; weightBytes = bytes; sourceRevision = revision
+        toolSupport = ModelToolSupport(value["tool_support"])
     }
 
     private static func text(_ value: Any?, maximum: Int) -> String? {
@@ -230,11 +298,14 @@ struct InstalledModel: Identifiable, Equatable {
     let display: InstalledModelDisplay?
     let artifactMode: ModelArtifactMode?
     let removal: InstalledModelRemoval?
+    let source: String?
+
+    var displayName: String { ModelsInventory.readableName(name, display: display) }
 
     init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil,
-         artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil) {
+         artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil, source: String? = nil) {
         self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.display = display
-        self.artifactMode = artifactMode; self.removal = removal
+        self.artifactMode = artifactMode; self.removal = removal; self.source = source
     }
 }
 
@@ -262,13 +333,13 @@ struct ChatOptions {
     var useModelSystemPrompt = true
     var systemPrompt = ""
     var contextTokens = 0
-    var maxNewTokens = 512
+    var maxNewTokens = 0
     var thinking = false
 
-    static func defaults(contextLimit: Int, outputLimit: Int) -> ChatOptions {
+    static func defaults(contextLimit: Int, outputLimit _: Int) -> ChatOptions {
         var options = ChatOptions()
         options.contextTokens = contextLimit
-        options.maxNewTokens = min(512, outputLimit, max(0, contextLimit - 1))
+        options.maxNewTokens = 0
         return options
     }
 }
@@ -277,6 +348,9 @@ struct InstallProgress {
     var state = "waiting"
     var completedBytes: Int64 = 0
     var totalBytes: Int64?
+    var transferredBytes: Int64?
+
+    var showsProgressBar: Bool { (totalBytes ?? 0) > 0 }
 
     var fraction: Double {
         if state == "complete" || state == "skipped" { return 1 }
@@ -292,7 +366,20 @@ struct InstallProgress {
         case "failed": return "Failed"
         case "waiting": return "Waiting"
         default:
-            guard let total = totalBytes, total > 0 else { return "Preparing…" }
+            if phase == "download", totalBytes == nil, let received = transferredBytes {
+                return received > 0
+                    ? ByteCountFormatter.string(fromByteCount: received, countStyle: .file) + " received"
+                    : "Downloading…"
+            }
+            guard let total = totalBytes, total > 0 else {
+                if phase == "download" {
+                    if completedBytes > 0 {
+                        return ByteCountFormatter.string(fromByteCount: completedBytes, countStyle: .file)
+                    }
+                    return "Downloading…"
+                }
+                return "Preparing…"
+            }
             if completedBytes >= total { return phase == "download" ? "Verifying…" : "Finalizing…" }
             return String(format: "%.0f%%", fraction * 100)
         }
@@ -415,13 +502,17 @@ struct ModelFamily: Identifiable {
         case "qwen3": return "Qwen3"
         case "qwen2": return "Qwen2"
         case "qwen3_5": return "Qwen3.5"
+        case "qwen3_5_moe": return "Qwen3.5 MoE"
         case "qwen4_exp": return "Qwen3.8 Flash Next"
         case "glm5_next": return "GLM-5.3 Flash"
         case "ricursive": return "Ripple-65B Preview"
         case "llama": return "Llama"
         case "mistral": return "Mistral"
         case "gemma2": return "Gemma 2"
+        case "gemma3": return "Gemma 3 images"
         case "gemma3_text": return "Gemma 3"
+        case "gemma4_text": return "Gemma 4"
+        case "olmo3": return "OLMo 3"
         case "phi3": return "Phi-3"
         case "granite": return "Granite"
         case "smollm3": return "SmolLM3"
@@ -490,11 +581,59 @@ struct CatalogModelGroup: Equatable {
     }
 }
 
+/// A published score for the model a catalogue row is, or is a quantized export of.
+/// It orders the catalogue; the row itself was not benchmarked.
+struct CatalogReferenceScore: Equatable {
+    enum Relationship: String {
+        case benchmarkedModel = "benchmarked_model", reviewedExport = "reviewed_export"
+        case declaredQuantization = "declared_quantization", namedQuantization = "named_quantization"
+    }
+    let modelID: String
+    let relationship: Relationship
+    let general: Double?
+    let coding: Double?
+    let sourceURL: URL
+    let captured: String
+
+    init?(_ value: Any?) {
+        func score(_ value: Any?) -> Double?? {
+            guard let value, !(value is NSNull) else { return .some(nil) }
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, abs(number.doubleValue) <= 1000 else { return nil }
+            return .some(number.doubleValue)
+        }
+        guard let raw = value as? [String: Any],
+              Set(raw.keys) == ["model_id", "relationship", "general", "coding", "source_url", "captured"],
+              let modelID = SupportMetadata.string(raw["model_id"], maximum: 256), modelID.split(separator: "/").count == 2,
+              let relationship = (raw["relationship"] as? String).flatMap(Relationship.init(rawValue:)),
+              let general = score(raw["general"]), let coding = score(raw["coding"]), general != nil || coding != nil,
+              let source = SupportMetadata.string(raw["source_url"], maximum: 256),
+              source.hasPrefix("https://whatmodel.sh/model/"), let sourceURL = URL(string: source),
+              let captured = SupportMetadata.string(raw["captured"], maximum: 10), captured.utf8.count == 10 else { return nil }
+        self.modelID = modelID; self.relationship = relationship; self.general = general; self.coding = coding
+        self.sourceURL = sourceURL; self.captured = captured
+    }
+
+    /// The score a sort order ranks by and shows. General and coding scores are on
+    /// separate scales, so a rating order never substitutes one for the other.
+    func score(for sort: ModelBrowserSort) -> (value: Double, task: String)? {
+        switch sort {
+        case .ratingGeneral: return general.map { ($0, "general") }
+        case .ratingCoding: return coding.map { ($0, "coding") }
+        default: return general.map { ($0, "general") } ?? coding.map { ($0, "coding") }
+        }
+    }
+}
+
 enum ModelBrowserSort: String, CaseIterable {
-    case nameAscending, nameDescending, sizeAscending, sizeDescending
+    case ratingGeneral, ratingCoding, nameAscending, nameDescending, sizeAscending, sizeDescending
+
+    var isRating: Bool { self == .ratingGeneral || self == .ratingCoding }
 
     var title: String {
         switch self {
+        case .ratingGeneral: return "Top rated (general)"
+        case .ratingCoding: return "Top rated (coding)"
         case .nameAscending: return "Name (A–Z)"
         case .nameDescending: return "Name (Z–A)"
         case .sizeAscending: return "Size (smallest first)"
@@ -522,9 +661,13 @@ enum ModelBrowserSort: String, CaseIterable {
 enum ModelBrowserScope: String, CaseIterable {
     case saved, families, catalog
     var preferenceKey: String { "modelBrowser.sort." + rawValue }
-    var defaultSort: ModelBrowserSort { self == .catalog ? .sizeAscending : .nameAscending }
+    var defaultSort: ModelBrowserSort { self == .catalog ? .ratingCoding : .nameAscending }
     var sorts: [ModelBrowserSort] {
-        self == .families ? [.nameAscending, .nameDescending] : ModelBrowserSort.allCases
+        switch self {
+        case .families: return [.nameAscending, .nameDescending]
+        case .saved: return [.nameAscending, .nameDescending, .sizeAscending, .sizeDescending]
+        case .catalog: return ModelBrowserSort.allCases
+        }
     }
 }
 
@@ -539,6 +682,19 @@ enum ModelBrowserPreferences {
         guard scope.sorts.contains(sort) else { return }
         defaults.set(sort.rawValue, forKey: scope.preferenceKey)
     }
+
+    static let hideUnsupportedKey = "modelBrowser.catalog.hideUnsupported"
+
+    /// Family detail hides rows Stark cannot download unless the user chose to see them.
+    static func hidesUnsupported(defaults: UserDefaults = .standard) -> Bool {
+        guard let stored = defaults.object(forKey: hideUnsupportedKey) as? NSNumber,
+              CFGetTypeID(stored) == CFBooleanGetTypeID() else { return true }
+        return stored.boolValue
+    }
+
+    static func saveHidesUnsupported(_ hides: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(hides, forKey: hideUnsupportedKey)
+    }
 }
 
 enum ModelBrowserSearch {
@@ -550,6 +706,7 @@ enum ModelBrowserSearch {
     static func matches(_ query: String, fields: [String]) -> Bool {
         let query = query.replacingOccurrences(of: "(?i)\\b([48])[-_ ]*bits?\\b", with: "$1bit", options: .regularExpression)
         let terms = query.split(whereSeparator: \.isWhitespace).map { normalized(String($0)) }.filter { !$0.isEmpty }
+        guard !terms.isEmpty else { return true }
         let text = fields.map(normalized).joined(separator: " ")
         return terms.allSatisfy { text.contains($0) }
     }
@@ -569,8 +726,12 @@ struct FamilyModelCatalog {
         let artifactModes: [ModelArtifactMode]
         let defaultArtifactMode: ModelArtifactMode
         let downloadable: Bool
+        let unavailableReason: String?
         let installedIDs: [String]
         let modelGroup: CatalogModelGroup?
+        let referenceScore: CatalogReferenceScore?
+        /// The repository an export Stark cannot import says it was made from.
+        let originalRepo: String?
 
         init?(_ raw: [String: Any]) {
             guard let id = SupportMetadata.string(raw["id"], maximum: 512),
@@ -587,6 +748,8 @@ struct FamilyModelCatalog {
                   installedIDs.allSatisfy({ $0.utf8.count <= 128 }), Set(installedIDs).count == installedIDs.count else { return nil }
             let artifactModes = modes.compactMap(ModelArtifactMode.init(rawValue:))
             guard artifactModes.count == modes.count else { return nil }
+            let unavailableReason = SupportMetadata.string(raw["unavailable_reason"], maximum: 240)
+            guard downloadable ? raw["unavailable_reason"] == nil : unavailableReason != nil else { return nil }
             if let size = raw["size_label"], !(size is NSNull), SupportMetadata.string(size, maximum: 64) == nil { return nil }
             for key in ["parameter_count", "weight_bytes"] {
                 if let value = raw[key], !(value is NSNull), SupportMetadata.integer(value) == nil { return nil }
@@ -596,7 +759,32 @@ struct FamilyModelCatalog {
             weightBytes = SupportMetadata.integer(raw["weight_bytes"]); self.quantization = quantization
             self.artifactModes = artifactModes; defaultArtifactMode = defaultMode
             self.downloadable = downloadable; self.installedIDs = installedIDs
+            self.unavailableReason = unavailableReason
             modelGroup = CatalogModelGroup(raw["model_group"])
+            if let reference = raw["reference_score"], !(reference is NSNull) {
+                guard let parsed = CatalogReferenceScore(reference) else { return nil }
+                referenceScore = parsed
+            } else { referenceScore = nil }
+            if let original = raw["original_repo"], !(original is NSNull) {
+                // Only a row that cannot be downloaded may point at another repository.
+                guard !downloadable, let parsed = SupportMetadata.string(original, maximum: 193),
+                      parsed.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$",
+                                   options: .regularExpression) != nil,
+                      parsed.lowercased() != repo.lowercased() else { return nil }
+                originalRepo = parsed
+            } else { originalRepo = nil }
+        }
+
+        /// Whether the weights alone fit the guide's memory budget: 85% of physical
+        /// memory with 2 GiB held back. Context and working state need more, so
+        /// this only rules out models that are clearly too large.
+        func fits(physicalMemory: UInt64?) -> Bool {
+            guard let bytes = weightBytes, let memory = physicalMemory else { return true }
+            return UInt64(bytes) + 2 * 1024 * 1024 * 1024 <= memory / 100 * 85
+        }
+
+        var installationMode: ModelArtifactMode {
+            artifactModes.contains(.visionLanguage) ? .visionLanguage : .text
         }
 
         var detailLabels: [String] {
@@ -622,6 +810,8 @@ struct FamilyModelCatalog {
     let message: String
     let items: [Item]
     let hasMore: Bool
+    let offset: Int64
+    let nextOffset: Int64?
 
     init?(_ raw: [String: Any]) {
         guard SupportMetadata.schemaOne(raw),
@@ -632,8 +822,29 @@ struct FamilyModelCatalog {
               let hasMore = SupportMetadata.boolean(raw["has_more"]) else { return nil }
         let items = rawItems.compactMap(Item.init)
         guard items.count == rawItems.count, Set(items.map(\.id)).count == items.count else { return nil }
+        let offset = raw["offset"].flatMap(SupportMetadata.integer) ?? 0
+        if let value = raw["offset"], SupportMetadata.integer(value) == nil { return nil }
+        let nextOffset = raw["next_offset"].flatMap(SupportMetadata.integer)
+        if let value = raw["next_offset"], !(value is NSNull), nextOffset == nil { return nil }
+        if let nextOffset, (!hasMore || status != .ready || nextOffset <= offset) { return nil }
+        if raw["next_offset"] != nil, hasMore != (nextOffset != nil) { return nil }
         self.familyID = familyID; self.status = status; self.message = message; self.hasMore = hasMore
-        self.items = items
+        self.items = items; self.offset = offset; self.nextOffset = nextOffset
+    }
+
+    /// Merges a page into the rows already shown. A partial page carries rows
+    /// checked so far, so it keeps the continuation position already known.
+    init(page: Self, previous: Self?, partial: Bool = false) {
+        let paging = partial ? (previous ?? page) : page
+        familyID = page.familyID; status = page.status; message = page.message
+        hasMore = paging.hasMore; offset = paging.offset; nextOffset = paging.nextOffset
+        var combined = previous?.items ?? []
+        var positions = Dictionary(uniqueKeysWithValues: combined.enumerated().map { ($0.element.id, $0.offset) })
+        for item in page.items {
+            if let index = positions[item.id] { combined[index] = item }
+            else { positions[item.id] = combined.count; combined.append(item) }
+        }
+        items = combined
     }
 }
 
@@ -667,6 +878,10 @@ struct CatalogBrowserInventory {
         let name: String
         let publisher: String
         let items: [FamilyModelCatalog.Item]
+        /// Exports of the shown rows that Stark cannot import, folded under them.
+        var exports: [FamilyModelCatalog.Item] = []
+        /// The search matched one of `exports` and none of the group's own rows.
+        var foundByExport = false
 
         func size(for sort: ModelBrowserSort) -> Double? {
             let values = items.compactMap(\.numericSize)
@@ -675,14 +890,97 @@ struct CatalogBrowserInventory {
     }
     let groups: [Group]
 
+    /// Exports that restate a listed, downloadable model in a format Stark cannot
+    /// import, keyed by that model's lowercased repository. The link is the export
+    /// publisher's own declaration, so it only moves a row that could never be
+    /// downloaded under one that can; it never changes what a download fetches.
+    static func foldedExports(_ items: [FamilyModelCatalog.Item]) -> [String: [FamilyModelCatalog.Item]] {
+        let downloadable = Set(items.filter(\.downloadable).map { $0.repo.lowercased() })
+        var folded: [String: [FamilyModelCatalog.Item]] = [:]
+        for item in items where !item.downloadable {
+            guard let original = item.originalRepo?.lowercased(), downloadable.contains(original) else { continue }
+            folded[original, default: []].append(item)
+        }
+        return folded
+    }
+
+    static let maximumNamedExports = 6
+
+    /// One sentence naming a model's folded exports, each linked to its repository.
+    static func exportSummary(_ exports: [FamilyModelCatalog.Item]) -> AttributedString {
+        let named = Array(exports.prefix(maximumNamedExports)), more = exports.count - named.count
+        var text = AttributedString("Also published as ")
+        for (index, export) in named.enumerated() {
+            if index > 0 { text += AttributedString(index == named.count - 1 && more == 0 ? " and " : ", ") }
+            var link = AttributedString(export.quantization + " by " + export.repo.components(separatedBy: "/")[0])
+            link.link = URL(string: "https://huggingface.co/" + export.repo)
+            text += link
+        }
+        if more > 0 { text += AttributedString(" and \(more) more") }
+        text += AttributedString(exports.count == 1
+            ? ". Stark cannot import that format, so this original is listed instead."
+            : ". Stark cannot import those formats, so this original is listed instead.")
+        return text
+    }
+
+    /// The rows family detail lists. A folded export is shown under its original and
+    /// never as a row. Any other row that cannot be downloaded, whether for an
+    /// unsupported format or another stated reason, is left out when hiding.
+    static func listed(_ items: [FamilyModelCatalog.Item], hidingUnsupported: Bool) -> [FamilyModelCatalog.Item] {
+        let folded = Set(foldedExports(items).values.joined().map(\.id))
+        return items.filter { !folded.contains($0.id) && (!hidingUnsupported || $0.downloadable) }
+    }
+
+    /// Top-rated order: rows that can be downloaded and fit this Mac first, then the
+    /// higher score, with unscored rows last and the smaller download breaking ties.
+    static func ratingPrecedes(_ first: FamilyModelCatalog.Item, _ second: FamilyModelCatalog.Item,
+                               sort: ModelBrowserSort, physicalMemory: UInt64?) -> Bool? {
+        if first.downloadable != second.downloadable { return first.downloadable }
+        let fits = (first.fits(physicalMemory: physicalMemory), second.fits(physicalMemory: physicalMemory))
+        if fits.0 != fits.1 { return fits.0 }
+        let scores = (first.referenceScore?.score(for: sort)?.value, second.referenceScore?.score(for: sort)?.value)
+        if scores.0 != scores.1 {
+            guard let firstScore = scores.0 else { return false }
+            guard let secondScore = scores.1 else { return true }
+            return firstScore > secondScore
+        }
+        if first.weightBytes != second.weightBytes {
+            guard let firstBytes = first.weightBytes else { return false }
+            guard let secondBytes = second.weightBytes else { return true }
+            return firstBytes < secondBytes
+        }
+        return nil
+    }
+
     init(items: [FamilyModelCatalog.Item], query: String = "", sort: ModelBrowserSort = .sizeAscending,
-         quantization: CatalogQuantizationFilter = .all) {
+         quantization: CatalogQuantizationFilter = .all, physicalMemory: UInt64? = nil,
+         exports: [String: [FamilyModelCatalog.Item]] = [:]) {
         let quantization = quantization.resolved(for: items)
         func makeGroup(id: String, name: String, publisher: String, items: [FamilyModelCatalog.Item]) -> Group? {
-            let visible = items.filter {
+            var visible = items.filter {
                 quantization.matches($0) && ModelBrowserSearch.matches(query, fields: [name, publisher, $0.name, $0.repo, $0.revision,
                                                            $0.sizeLabel ?? "", $0.quantization] + $0.artifactModes.map(\.title))
-            }.sorted { first, second in
+            }
+            var foundByExport = false
+            if visible.isEmpty, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // A search for an export Stark cannot import lands on the model it was made from.
+                let matched = Set(items.filter { quantization.matches($0) && $0.downloadable }.compactMap { item in
+                    (exports[item.repo.lowercased()] ?? []).contains {
+                        ModelBrowserSearch.matches(query, fields: [$0.name, $0.repo, $0.quantization])
+                    } ? item.id : nil
+                })
+                visible = items.filter { matched.contains($0.id) }
+                foundByExport = !visible.isEmpty
+            }
+            let shownRepos = Set(visible.map { $0.repo.lowercased() })
+            let folded = shownRepos.flatMap { exports[$0] ?? [] }.sorted {
+                let order = $0.quantization.localizedStandardCompare($1.quantization)
+                return order == .orderedSame ? $0.repo < $1.repo : order == .orderedAscending
+            }
+            visible.sort { first, second in
+                if sort.isRating, let rated = Self.ratingPrecedes(first, second, sort: sort, physicalMemory: physicalMemory) {
+                    return rated
+                }
                 let rowSort: ModelBrowserSort = sort == .sizeDescending ? .sizeDescending : .sizeAscending
                 if first.numericSize != second.numericSize {
                     return rowSort.precedes(first.name, id: first.id, size: first.numericSize,
@@ -693,7 +991,8 @@ struct CatalogBrowserInventory {
                 return ModelBrowserSort.nameAscending.precedes(first.repo, id: first.id, size: nil,
                                                                second.repo, id: second.id, size: nil)
             }
-            return visible.isEmpty ? nil : Group(id: id, name: name, publisher: publisher, items: visible)
+            return visible.isEmpty ? nil : Group(id: id, name: name, publisher: publisher, items: visible,
+                                                 exports: folded, foundByExport: foundByExport)
         }
         let candidates = Dictionary(grouping: items) { $0.modelGroup.map { "group:" + $0.id } ?? "repo:" + $0.repo }
         groups = candidates.flatMap { id, entries -> [Group] in
@@ -707,8 +1006,13 @@ struct CatalogBrowserInventory {
             }
             return makeGroup(id: id, name: name, publisher: publisher, items: entries).map { [$0] } ?? []
         }.sorted { first, second in
-            sort.precedes(first.name, id: first.id, size: first.size(for: sort),
-                          second.name, id: second.id, size: second.size(for: sort))
+            // A group ranks by its best row, which sorts first within it.
+            if sort.isRating, let best = first.items.first, let other = second.items.first,
+               let rated = Self.ratingPrecedes(best, other, sort: sort, physicalMemory: physicalMemory) {
+                return rated
+            }
+            return sort.precedes(first.name, id: first.id, size: first.size(for: sort),
+                                 second.name, id: second.id, size: second.size(for: sort))
         }
     }
 }
@@ -773,9 +1077,47 @@ final class ModelManagementState: ObservableObject {
 }
 
 struct ModelsInventory {
+    static func readableName(_ savedName: String, display: InstalledModelDisplay?) -> String {
+        let generatedSuffix = "-[0-9a-f]{8,40}$"
+        let generated = savedName.range(of: generatedSuffix, options: .regularExpression) != nil
+        let savedBase = savedName.replacingOccurrences(of: generatedSuffix, with: "", options: .regularExpression)
+        func sourceKey(_ name: String) -> String {
+            name.replacingOccurrences(of: "(?i)-MLX(?:-Serve)?(?=-|$)", with: "", options: .regularExpression)
+                .lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+        var title = savedName
+        if let display, display.repositoryURL != nil, sourceKey(savedBase) == sourceKey(display.groupName) {
+            title = display.groupName
+        } else if generated, savedBase.range(of: "^qwen38-flash-next-(?:mixed-4-8bit|lily-q4-xl)$",
+                                            options: .regularExpression) != nil {
+            // Legacy native installs used these preparation names plus a revision.
+            title = savedBase
+        }
+        // Packaging and precision already have their own metadata columns.
+        if display?.quantization != nil {
+            title = title.replacingOccurrences(
+                of: "(?i)-(?:MLX(?:-Serve)?-)?(?:mixed-[48][_-][48]bit|lily-q4-xl|[48]-?bit|bf16|fp16|gguf)$",
+                with: "", options: .regularExpression)
+        }
+        title = title.replacingOccurrences(of: "(?i)-MLX(?:-Serve)?(?=-|$)", with: "", options: .regularExpression)
+        title = title.replacingOccurrences(of: "(?i)^qwen38(?=-|$)", with: "Qwen3.8", options: .regularExpression)
+        title = title.replacingOccurrences(of: "(?i)^qwen(?=[0-9])", with: "Qwen", options: .regularExpression)
+        title = title.replacingOccurrences(of: "(?i)^glm(?=-|[0-9])", with: "GLM", options: .regularExpression)
+        let words = title.replacingOccurrences(of: "_", with: "-").split(separator: "-")
+        let readable = words.map { word in
+            if word.range(of: "^(?:[0-9]+(?:\\.[0-9]+)?[bB]|[qQ][0-9]+)$", options: .regularExpression) != nil {
+                return word.uppercased()
+            }
+            return word.prefix(1).uppercased() + word.dropFirst()
+        }.joined(separator: " ")
+        return readable.isEmpty ? savedName : readable.replacingOccurrences(
+            of: "(?i)Mixed 4 8bit$", with: "(Mixed 4/8-bit)", options: .regularExpression)
+    }
+
     struct Model: Identifiable {
         let id: String
         let name: String
+        let displayName: String
         let isRunning: Bool
         let quantization: String?
         let weightBytes: Int64?
@@ -784,11 +1126,23 @@ struct ModelsInventory {
         let artifactMode: ModelArtifactMode?
         let sourceName: String
         let repositoryURL: URL?
+        let toolSupport: ModelToolSupport
+
+        var variantLabel: String? {
+            // Native preparation supplies these labels independently of the saved name.
+            switch quantization?.components(separatedBy: " (").first {
+            case "Lily q4-xl": return "Lily q4"
+            case "MLX mixed 4/8-bit": return "MLX"
+            case "MLX-Serve mixed 4/8-bit": return "MLX-Serve"
+            default: return nil
+            }
+        }
 
         var detailLabels: [String] {
             [quantization,
              weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
              artifactMode == .visionLanguage ? "Text and images" : nil,
+             toolSupport.title,
              sourceRevision.map { "Version " + $0.prefix(7) }].compactMap { $0 }
         }
     }
@@ -816,12 +1170,14 @@ struct ModelsInventory {
     init(models: [InstalledModel], loadedID: String, registry: ModelFamilyRegistry?,
          query: String = "", sort: ModelBrowserSort = .nameAscending) {
         func row(_ model: InstalledModel) -> Model {
-            Model(id: model.id, name: model.name, isRunning: !loadedID.isEmpty && model.id == loadedID,
+            Model(id: model.id, name: model.name, displayName: model.displayName,
+                  isRunning: !loadedID.isEmpty && model.id == loadedID,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
                   sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode,
-                  sourceName: model.display?.groupID ?? model.apiID, repositoryURL: model.display?.repositoryURL)
+                  sourceName: model.display?.groupID ?? model.apiID, repositoryURL: model.display?.repositoryURL,
+                  toolSupport: model.display?.toolSupport ?? .unchecked)
         }
-        let allModels = models.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }.map(row)
+        let allModels = models.map(row).sorted { Self.ordered($0.displayName, $1.displayName, $0.id, $1.id) }
         let candidates = Dictionary(grouping: models) { model in model.display.map { "source:" + $0.groupID } ?? "model:" + model.id }
         let allGroups = candidates.flatMap { key, entries -> [Group] in
             let first = entries[0]
@@ -834,21 +1190,23 @@ struct ModelsInventory {
                           family: first.display?.familyID.flatMap(ModelFamily.displayName(for:)), models: rows)]
         }
         func groupOrder(_ first: Group, _ second: Group) -> Bool {
-            let firstName = first.models.count == 1 ? first.models[0].name : first.name
-            let secondName = second.models.count == 1 ? second.models[0].name : second.name
+            let firstName = first.models.count == 1 ? first.models[0].displayName : first.name
+            let secondName = second.models.count == 1 ? second.models[0].displayName : second.name
             return sort.precedes(firstName, id: first.id, size: first.totalBytes,
                                  secondName, id: second.id, size: second.totalBytes)
         }
+        let hasSearchQuery = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         groups = allGroups.compactMap { group in
             var visible = group.models.filter { model in
-                ModelBrowserSearch.matches(query, fields: [group.name, group.family ?? "", model.name, model.sourceName,
+                !hasSearchQuery ||
+                ModelBrowserSearch.matches(query, fields: [group.name, group.family ?? "", model.name, model.displayName, model.sourceName,
                                                            model.sourceRevision ?? "", model.artifactMode?.title ?? "",
                                                            model.isRunning ? "Running" : ""] + model.detailLabels)
             }
             if sort == .sizeAscending || sort == .sizeDescending {
                 visible.sort { first, second in
-                    sort.precedes(first.name, id: first.id, size: first.weightBytes.map(Double.init),
-                                  second.name, id: second.id, size: second.weightBytes.map(Double.init))
+                    sort.precedes(first.displayName, id: first.id, size: first.weightBytes.map(Double.init),
+                                  second.displayName, id: second.id, size: second.weightBytes.map(Double.init))
                 }
             }
             return visible.isEmpty ? nil : Group(id: group.id, name: group.name, family: group.family, models: visible)
@@ -1032,11 +1390,20 @@ struct GenerationTimingProgress {
 final class EngineController: ObservableObject {
     @Published var models: [InstalledModel] = []
     @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? ""
-    @Published var loadedID = ""
+    @Published var loadedID = "" {
+        didSet {
+            if loadedID != oldValue {
+                supportsMTP = false; mtpEnabled = false
+                pendingOptions = nil; pendingOptionsModelID = nil
+            }
+        }
+    }
     @Published var state = "idle" {
         didSet {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
             if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
+            if ["idle", "error", "stopping", "loading"].contains(state) { supportsMTP = false; mtpEnabled = false }
+            if ["idle", "error", "stopping", "loading"].contains(state) { pendingOptions = nil; pendingOptionsModelID = nil }
             if state != "generating" {
                 generationProgress = nil
                 if let id = apiProgressID { retiredAPIProgressID = id }
@@ -1055,13 +1422,19 @@ final class EngineController: ObservableObject {
     @Published private(set) var apiPort: Int
     @Published private(set) var supportsTools = false
     @Published private(set) var toolParser = ""
+    @Published private(set) var supportsMTP = false
+    @Published private(set) var mtpEnabled = false
+    private var mtpVerificationPolicy = ""
     @Published var apiContextTokens = 0
     @Published var apiMaxNewTokens = 0
     @Published var messages: [ChatMessage] = []
     @Published var draft = ""
     @Published private(set) var draftImage: ImageAttachment?
     @Published private(set) var conversationImage: ImageAttachment?
-    @Published private(set) var supportsImages = false
+    @Published private(set) var supportsImages = false {
+        didSet { if !supportsImages { imageLimits = nil } }
+    }
+    @Published private(set) var imageLimits: ModelImageLimits?
     @Published private(set) var imageVerification = "unverified"
     @Published private(set) var imageProgress = ""
     @Published private(set) var attachmentLoading = false
@@ -1094,15 +1467,29 @@ final class EngineController: ObservableObject {
     @Published private(set) var catalogInstallFailed = false
     @Published private(set) var removingModelID: String?
     @Published private(set) var removalError: String?
+    @Published private(set) var beginnerReport: BeginnerModelReport?
+    @Published private(set) var beginnerChoicesLoading = false
+    @Published private(set) var beginnerChoicesError: String?
+    @Published private(set) var beginnerInstallChoice: BeginnerModelReport.Item?
+    @Published private(set) var beginnerInstalledResultID: String?
+    @Published private(set) var beginnerInstallState = "idle"
+    @Published private(set) var beginnerInstallError: String?
+    @Published private(set) var beginnerCancelPending = false
     @Published var options = ChatOptions()
     @Published var contextLimit = 0
     @Published var contextCapacityKnown = false
     @Published var outputLimit = 512
     var onInstalled: (() -> Void)?
+    var onModelInventory: (() -> Void)?
     private var process: Process?
     private var input: FileHandle?
     private var output: FileHandle?
     private var pending = Data()
+    // Older backends omit budget metadata. Current backends supply their
+    // memory-derived allowance before accepting content commands.
+    private let legacyWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
+    private var maxWorkerWireBytes = 6 * 64 * 1024 * 1024 + 2 * 1024 * 1024
+    private let workerWireLimitLock = NSLock()
     private let reader = DispatchQueue(label: "stark.desktop.reader")
     private var shuttingDown = false
     private var pendingMessageID: UUID?
@@ -1110,13 +1497,25 @@ final class EngineController: ObservableObject {
     private var apiProgressID: String?
     private var retiredAPIProgressID: String?
     private var pendingOptions: ChatOptions?
+    private var pendingOptionsModelID: String?
     private var pendingDecisionAnswers: [String]?
     private var attachmentStaging: AttachmentStaging?
     private var attachmentSelection = UUID()
     private var pendingSupportRequestID: String?
     private var installErrorMessage: String?
     private var catalogRequestID: String?
+    private var pendingCatalogOffset: Int64?
+    // Rows shown before the pending page was requested; its own partial rows are not counted.
+    private var catalogPageKnownIDs = Set<String>()
+    private var loadRemainingCatalog = false
+    private var stoppedModel: (id: String, mode: PlaygroundMode)?
     private var activeInstallRequestID: String?
+    private var beginnerRequestID: String?
+    private var beginnerInstallRequestID: String?
+    private var beginnerInstallRecommendationID: String?
+    private var beginnerRunRequestID: String?
+    private var beginnerRunBackup: (selectedID: String, mode: PlaygroundMode, state: String, message: String,
+                                   tools: Bool, parser: String, gpu: Int64?)?
     private var removalRequestID: String?
     private var removalAction: InstalledModelRemoval.Action?
     private let gpuMemoryBudgetBytes: UInt64?
@@ -1179,6 +1578,25 @@ final class EngineController: ObservableObject {
     }
     var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
     var activeName: String { activeModel?.name ?? "No model running" }
+    var defaultMTPEnabled: Bool {
+        if mtpVerificationPolicy.hasPrefix("gemma4-") { return false }
+        guard let display = activeModel?.display else { return true }
+        return !(display.familyID?.hasPrefix("gemma") == true
+            || ((display.groupID == "repo:Qwen/Qwen3.5-0.8B" || activeModel?.source == "huggingface:Qwen/Qwen3.5-0.8B")
+                && display.quantization == "BF16"))
+    }
+    var startableModel: InstalledModel? {
+        if let stoppedModel, let model = models.first(where: { $0.id == stoppedModel.id }) { return model }
+        return models.first { $0.id == selectedID }
+    }
+    var canStartModel: Bool { !busy && loadedID.isEmpty && startableModel != nil }
+    var canStopCurrentModel: Bool { canStopModel(id: modelControlID) }
+
+    func startModel() {
+        guard canStartModel, let model = startableModel else { return }
+        if let stoppedModel, stoppedModel.id == model.id { changeMode(stoppedModel.mode) }
+        runModel(id: model.id)
+    }
     var gpuMemoryFraction: Double? {
         guard let bytes = gpuMemoryBytes, let budget = gpuMemoryBudgetBytes, budget > 0 else { return nil }
         return Double(bytes) / Double(budget)
@@ -1213,13 +1631,6 @@ final class EngineController: ObservableObject {
             .compactMap { $0 }.joined(separator: " · ")
     }
     var canAttachImage: Bool { modelReady && supportsImages && conversationImage == nil }
-    var imageVerificationNote: String {
-        switch imageVerification {
-        case "locally_tested": return "Image support checked on this Mac. Reference parity is unverified."
-        case "reference_verified": return "Image support has reference-parity verification."
-        default: return "Image support available."
-        }
-    }
     var hasConversation: Bool { !messages.isEmpty || draftImage != nil || conversationImage != nil }
     var canSendMessage: Bool {
         modelReady && !attachmentLoading &&
@@ -1283,12 +1694,7 @@ final class EngineController: ObservableObject {
                 self.attachmentStaging = nil
             }
         }
-        output = outgoing.fileHandleForReading
-        output?.readabilityHandler = { [weak self] handle in
-            let bytes = handle.availableData
-            guard !bytes.isEmpty else { handle.readabilityHandler = nil; return }
-            self?.reader.async { [weak self] in self?.receive(bytes) }
-        }
+        observeBackendOutput(outgoing.fileHandleForReading)
         do {
             try child.run()
             process = child
@@ -1303,18 +1709,34 @@ final class EngineController: ObservableObject {
         }
     }
 
+    private func observeBackendOutput(_ handle: FileHandle) {
+        output = handle
+        handle.readabilityHandler = { [weak self] handle in
+            guard let bytes = WorkerPipeReader.readChunk(from: handle), !bytes.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            self?.reader.async { [weak self] in self?.receive(bytes) }
+        }
+    }
+
     private func receive(_ bytes: Data) {
         pending.append(bytes)
-        guard pending.count <= 20 * 1024 * 1024 else {
-            pending.removeAll()
-            DispatchQueue.main.async { self.stop(); self.message = "Worker reply exceeded the size limit." }
-            return
-        }
         while let boundary = pending.firstIndex(of: 10) {
             let line = pending.prefix(upTo: boundary)
             pending.removeSubrange(...boundary)
+            guard line.count + 1 <= workerWireLimit() else {
+                pending.removeAll()
+                DispatchQueue.main.async { self.stop(); self.message = "Worker reply exceeded the size limit." }
+                return
+            }
             guard let value = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             DispatchQueue.main.async { [weak self] in self?.apply(value) }
+        }
+        guard pending.count <= workerWireLimit() else {
+            pending.removeAll()
+            DispatchQueue.main.async { self.stop(); self.message = "Worker reply exceeded the size limit." }
+            return
         }
     }
 
@@ -1333,11 +1755,32 @@ final class EngineController: ObservableObject {
                 return InstalledModel(id: id, name: name, path: path, apiID: $0["api_id"] as? String ?? name,
                                       display: InstalledModelDisplay($0["display"]),
                                       artifactMode: $0["artifact_mode"] == nil ? .text : ModelArtifactMode(rawValue: $0["artifact_mode"] as? String ?? ""),
-                                      removal: InstalledModelRemoval($0["removal"]))
+                                      removal: InstalledModelRemoval($0["removal"]), source: $0["source"] as? String)
             }
             if !models.contains(where: { $0.id == selectedID }) && !(catalogInstallation != nil && selectedID.isEmpty) {
                 selectedID = models.first?.id ?? ""
             }
+            onModelInventory?()
+        case "guided_models":
+            guard let expected = beginnerRequestID, event["request_id"] as? String == expected else { return }
+            beginnerChoicesLoading = false
+            guard let raw = event["report"] as? [String: Any], let report = BeginnerModelReport(raw) else {
+                beginnerChoicesError = "Could not check starting models. Try again or use Advanced."
+                beginnerReport = nil
+                return
+            }
+            beginnerReport = report
+            beginnerChoicesError = report.items.isEmpty ? report.message : nil
+        case "install_cancelled":
+            guard let expected = beginnerInstallRequestID, event["request_id"] as? String == expected,
+                  expected == activeInstallRequestID else { return }
+            beginnerCancelPending = false; beginnerInstallState = "cancelled"
+            beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
+            endInstallProgress("cancelled")
+        case "install_cancel_error":
+            guard let expected = beginnerInstallRequestID, event["request_id"] as? String == expected else { return }
+            beginnerCancelPending = false
+            beginnerInstallError = event["message"] as? String ?? "Could not cancel setup. Wait for it to finish."
         case "model_families":
             guard let raw = event["report"] as? [String: Any], let registry = ModelFamilyRegistry(raw) else { return }
             modelFamilies = registry
@@ -1351,9 +1794,24 @@ final class EngineController: ObservableObject {
             guard let expected = catalogRequestID, event["request_id"] as? String == expected,
                   event["family_id"] as? String == catalogFamilyID,
                   let raw = event["report"] as? [String: Any], let result = FamilyModelCatalog(raw),
-                  result.familyID == catalogFamilyID else { return }
-            catalog = result; catalogLoading = false
+                  let pendingOffset = pendingCatalogOffset, catalogLoading,
+                  result.familyID == catalogFamilyID, result.offset == pendingOffset else { return }
+            let shown = catalog?.familyID == result.familyID && catalog?.status == .ready ? catalog : nil
+            if event["partial"] as? Bool == true {
+                // Rows checked so far for the pending page. The page stays pending until its full report.
+                guard result.status == .ready, !result.items.isEmpty else { return }
+                catalog = FamilyModelCatalog(page: result, previous: shown, partial: true)
+                return
+            }
+            let addedItems = result.items.contains { !catalogPageKnownIDs.contains($0.id) }
+            if result.status == .ready {
+                catalog = FamilyModelCatalog(page: result, previous: pendingOffset > 0 ? catalog : nil)
+            } else if pendingOffset == 0 { catalog = result }
+            catalogLoading = false; pendingCatalogOffset = nil
             catalogError = result.status == .ready ? nil : (result.message.isEmpty ? "Could not load these models. Try again." : result.message)
+            if result.status == .ready, result.nextOffset != nil, loadRemainingCatalog || !addedItems {
+                requestMoreModelCatalog(loadRemaining: loadRemainingCatalog)
+            }
         case "model_removed", "model_remove_error":
             guard let expected = removalRequestID, event["request_id"] as? String == expected,
                   event["model_id"] as? String == removingModelID else { return }
@@ -1389,24 +1847,48 @@ final class EngineController: ObservableObject {
                   !["idle", "error", "stopping"].contains(state) else { return }
             gpuMemoryBytes = SupportMetadata.integer(event["gpu_memory_bytes"])
         case "ready":
+            if let expected = beginnerRunRequestID {
+                guard event["request_id"] as? String == expected else { return }
+            }
             guard let readyMode = PlaygroundMode(rawValue: event["mode"] as? String ?? "chat"), readyMode == mode,
                   event["model_id"] as? String == selectedID, state != "stopping" else { return }
+            guard applyResourceBudget(event) else {
+                state = "error"
+                message = "The runtime reported an invalid request budget. Quit and reopen Stark."
+                errorMessage = message
+                beginnerRunRequestID = nil; beginnerRunBackup = nil
+                return
+            }
+            if beginnerRunRequestID != nil {
+                clearConversation(); clearDecision()
+                beginnerRunRequestID = nil; beginnerRunBackup = nil
+                UserDefaults.standard.set(selectedID, forKey: "selectedModel")
+                UserDefaults.standard.set(mode.rawValue, forKey: "playgroundMode")
+            }
             loadedID = event["model_id"] as? String ?? selectedID
-            apiContextTokens = event["max_context_tokens"] as? Int ?? 0
-            apiMaxNewTokens = event["max_output_tokens"] as? Int ?? 0
+            apiContextTokens = event["api_context_tokens"] as? Int ?? event["max_context_tokens"] as? Int ?? 0
+            // The worker's native output ceiling can exceed the guide's API
+            // context. Connector metadata must advertise the API-specific cap.
+            let apiOutput = event["api_max_output_tokens"] as? Int ?? event["max_output_tokens"] as? Int ?? 0
+            apiMaxNewTokens = max(0, min(apiOutput, apiContextTokens > 0 ? apiContextTokens - 1 : 0))
             loadedMode = readyMode
             applyLimits(event)
             applyImageCapabilities(event)
+            applyMTPCapabilities(event)
             state = "ready"
             message = "Ready"
         case "configured":
-            guard let configured = pendingOptions else { return }
+            guard let configured = pendingOptions,
+                  pendingOptionsModelID == loadedID, loadedMode == .chat, mode == .chat,
+                  event["model_id"] == nil || event["model_id"] as? String == loadedID else { return }
             options = configured
             pendingOptions = nil
+            pendingOptionsModelID = nil
             applyLimits(event)
             applyImageCapabilities(event)
+            applyMTPCapabilities(event)
+            clearConversation()
             if state == "configuring" {
-                clearConversation()
                 state = "ready"
                 message = "Ready"
             }
@@ -1414,6 +1896,15 @@ final class EngineController: ObservableObject {
             if let requestID = event["support_request_id"] as? String {
                 guard requestID == activeInstallRequestID else { return }
             } else if catalogInstallation != nil { return }
+            if let expected = beginnerInstallRequestID {
+                guard event["support_request_id"] as? String == expected,
+                      expected == activeInstallRequestID,
+                      let model = event["model"] as? [String: Any], let id = model["id"] as? String else { return }
+                beginnerInstalledResultID = id; beginnerInstallState = "installed"; beginnerCancelPending = false
+                beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
+                // Installation does not select or load a different model.
+                return
+            }
             pendingSupportRequestID = nil
             activeInstallRequestID = nil
             if let completed = catalogInstallation {
@@ -1474,7 +1965,7 @@ final class EngineController: ObservableObject {
             loadedID = ""; loadedMode = nil; supportsImages = false; imageVerification = "unverified"
             gpuMemoryBytes = nil
             clearConversation(); clearDecision()
-            message = "Checking image support on this Mac…"
+            message = "Loading model…"
         case "decision":
             guard mode == .decision, loadedMode == .decision, state == "deciding",
                   let expected = pendingDecisionAnswers else { return }
@@ -1493,6 +1984,28 @@ final class EngineController: ObservableObject {
             pendingDecisionAnswers = nil
         case "error":
             let requestID = event["request_id"] as? String
+            if let expected = beginnerRunRequestID, requestID == expected {
+                if let previous = beginnerRunBackup {
+                    selectedID = previous.selectedID; mode = previous.mode
+                    supportsTools = previous.tools; toolParser = previous.parser; gpuMemoryBytes = previous.gpu
+                }
+                beginnerRunRequestID = nil; beginnerRunBackup = nil
+                errorMessage = event["message"] as? String ?? "Could not start this model. Try again."
+                return
+            }
+            if requestID == beginnerRequestID, beginnerRequestID != nil {
+                beginnerChoicesLoading = false; beginnerReport = nil
+                beginnerChoicesError = event["message"] as? String ?? "Could not check starting models. Try again."
+                return
+            }
+            if let expected = beginnerInstallRequestID, requestID == expected {
+                beginnerInstallError = event["message"] as? String ?? "Could not prepare this model. Try again."
+                beginnerInstallState = "failed"; beginnerCancelPending = false
+                beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
+                endInstallProgress("failed")
+                // The backend restores ready/idle without replacing the loaded model.
+                return
+            }
             if let requestID = requestID, requestID == removalRequestID {
                 removalError = event["message"] as? String ?? "Could not remove this model. Try again."
                 removalRequestID = nil; removingModelID = nil; removalAction = nil
@@ -1528,13 +2041,20 @@ final class EngineController: ObservableObject {
                 message = loadedID.isEmpty ? "Stopped" : "Ready"
             }
         case "progress":
+            if let requestID = event["request_id"] as? String, requestID != activeInstallRequestID { return }
+            if beginnerInstallRequestID != nil && event["request_id"] as? String != beginnerInstallRequestID { return }
             guard let phase = event["phase"] as? String, ["download", "conversion"].contains(phase),
                   let progressState = event["state"] as? String,
                   ["waiting", "running", "complete", "skipped", "cancelled", "failed"].contains(progressState),
                   let completed = event["completed_bytes"] as? Int64, completed >= 0 else { return }
             let total = event["total_bytes"] as? Int64
             guard total == nil || (total! >= 0 && completed <= total!) else { return }
-            let progress = InstallProgress(state: progressState, completedBytes: completed, totalBytes: total)
+            let transferred = SupportMetadata.integer(event["transferred_bytes"])
+            if event["transferred_bytes"] != nil {
+                guard phase == "download", let transferred, transferred >= 0 else { return }
+            }
+            let progress = InstallProgress(state: progressState, completedBytes: completed, totalBytes: total,
+                                           transferredBytes: transferred)
             if phase == "download" { downloadProgress = progress } else { conversionProgress = progress }
         default: break
         }
@@ -1566,6 +2086,24 @@ final class EngineController: ObservableObject {
         outputLimit = event["max_output_tokens"] as? Int ?? outputLimit
         options.contextTokens = event["context_tokens"] as? Int ?? options.contextTokens
         options.maxNewTokens = event["max_new_tokens"] as? Int ?? options.maxNewTokens
+        if let budget = SupportMetadata.integer(event["api_context_tokens"]), budget > 0, budget <= Int64(UInt32.max) {
+            apiContextTokens = Int(budget)
+        }
+    }
+
+    private func applyMTPCapabilities(_ event: [String: Any]) {
+        guard loadedMode == .chat, let capability = event["mtp"] as? [String: Any],
+              SupportMetadata.boolean(capability["supported"]) == true,
+              let maximum = SupportMetadata.integer(capability["max_drafts"]), maximum > 0,
+              let recommended = SupportMetadata.integer(capability["recommended_drafts"]),
+              recommended > 0, recommended <= maximum,
+              let operations = capability["operations"] as? [String], operations.contains("generate"),
+              let enabled = SupportMetadata.boolean(event["mtp_enabled"]) else {
+            supportsMTP = false; mtpEnabled = false; mtpVerificationPolicy = ""
+            return
+        }
+        mtpVerificationPolicy = capability["verification"] as? String ?? ""
+        supportsMTP = true; mtpEnabled = enabled
     }
 
     private func applyImageCapabilities(_ event: [String: Any]) {
@@ -1577,6 +2115,7 @@ final class EngineController: ObservableObject {
         let verification = event["image_verification"] as? String ?? "unverified"
         imageVerification = supportsImages && ["locally_tested", "reference_verified"].contains(verification)
             ? verification : "unverified"
+        imageLimits = supportsImages ? ModelImageLimits(event["image_limits"]) : nil
         if !supportsImages {
             draftImage = nil; conversationImage = nil; attachmentSelection = UUID(); attachmentLoading = false
         }
@@ -1657,16 +2196,23 @@ final class EngineController: ObservableObject {
     }
 
     @discardableResult
-    func configure(_ updated: ChatOptions) -> Bool {
+    func configure(_ updated: ChatOptions, mtpEnabled: Bool? = nil, modelID: String? = nil) -> Bool {
         guard modelReady, mode == .chat else { return false }
+        if let modelID, modelID != loadedID { return false }
+        if mtpEnabled != nil && !supportsMTP { return false }
         errorMessage = nil
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "command": "configure", "context_tokens": updated.contextTokens,
             "max_new_tokens": updated.maxNewTokens, "thinking": updated.thinking,
             "system_prompt": updated.useModelSystemPrompt ? NSNull() : updated.systemPrompt as Any
         ]
+        if let mtpEnabled {
+            payload["model_id"] = loadedID
+            payload["mtp_enabled"] = mtpEnabled
+        }
         guard send(payload) else { return false }
         pendingOptions = updated
+        pendingOptionsModelID = loadedID
         state = "configuring"
         message = "Applying advanced options…"
         return true
@@ -1678,7 +2224,7 @@ final class EngineController: ObservableObject {
             state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark."
             return false
         }
-        guard bytes.count < 1024 * 1024 else {
+        guard bytes.count + 1 <= workerWireLimit() else {
             errorMessage = "The prompt is too large. Send a shorter message."
             state = loadedID.isEmpty ? "idle" : "ready"
             message = loadedID.isEmpty ? "Stopped" : "Ready"
@@ -1687,6 +2233,39 @@ final class EngineController: ObservableObject {
         bytes.append(10)
         do { try input.write(contentsOf: bytes); return true }
         catch { state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark."; return false }
+    }
+
+    private func applyResourceBudget(_ event: [String: Any]) -> Bool {
+        guard let budget = event["resource_budget"] as? [String: Any] else {
+            setWorkerWireLimit(legacyWorkerWireBytes)
+            return true
+        }
+        guard let requestMiBValue = SupportMetadata.integer(budget["request_budget_mib"]),
+              let requestMiB = Int(exactly: requestMiBValue),
+              requestMiB >= 1,
+              // Match the shared budget's largest derived allocation. This
+              // bound prevents integer overflow without capping host capacity.
+              requestMiB <= (Int.max - 32 * 1024 * 1024) / (32 * 1024 * 1024),
+              let inputBytesValue = SupportMetadata.integer(budget["input_bytes"]),
+              let inputBytes = Int(exactly: inputBytesValue),
+              inputBytes == requestMiB * 1024 * 1024,
+              let maxRequestBytesValue = SupportMetadata.integer(budget["max_request_bytes"]),
+              let maxRequestBytes = Int(exactly: maxRequestBytesValue),
+              maxRequestBytes == 6 * inputBytes + 2 * 1024 * 1024 else { return false }
+        setWorkerWireLimit(maxRequestBytes)
+        return true
+    }
+
+    private func workerWireLimit() -> Int {
+        workerWireLimitLock.lock()
+        defer { workerWireLimitLock.unlock() }
+        return maxWorkerWireBytes
+    }
+
+    private func setWorkerWireLimit(_ value: Int) {
+        workerWireLimitLock.lock()
+        maxWorkerWireBytes = value
+        workerWireLimitLock.unlock()
     }
 
     /// Credential bytes travel only over the private app/backend pipe.
@@ -1773,6 +2352,8 @@ final class EngineController: ObservableObject {
     @discardableResult
     func run() -> Bool {
         guard !selectedID.isEmpty, !busy else { return false }
+        // A new run becomes the restart target even if loading later fails.
+        stoppedModel = nil
         UserDefaults.standard.set(selectedID, forKey: "selectedModel")
         errorMessage = nil
         clearConversation()
@@ -1836,6 +2417,105 @@ final class EngineController: ObservableObject {
         if !send(payload) { pendingSupportRequestID = nil; activeInstallRequestID = nil; endInstallProgress("failed") }
     }
 
+    func requestBeginnerModels(task: String, excludingModelID: String? = nil, preference: String = "quality") {
+        guard ["general", "coding"].contains(task) else { return }
+        guard ["speed", "quality"].contains(preference) else { return }
+        let requestID = UUID().uuidString.lowercased()
+        beginnerRequestID = requestID; beginnerChoicesLoading = true; beginnerChoicesError = nil
+        beginnerReport = nil
+        let device = MTLCreateSystemDefaultDevice()
+        // Native Metal data only narrows the backend's independently measured RAM/storage checks.
+        let hardware: [String: Any] = ["gpu_available": device != nil,
+            "gpu_name": device?.name ?? "Unavailable", "unified_memory": device?.hasUnifiedMemory ?? false,
+            "gpu_memory_budget_bytes": device?.recommendedMaxWorkingSetSize ?? 0,
+            "cpu_cores": ProcessInfo.processInfo.processorCount]
+        var payload: [String: Any] = ["command": "guided_models", "request_id": requestID, "task": task,
+                                      "preference": preference, "hardware": hardware]
+        if let id = excludingModelID, !id.isEmpty { payload["excluded_model_ids"] = [id] }
+        if !send(payload) {
+            beginnerChoicesLoading = false
+            beginnerChoicesError = "Could not check starting models. Reopen Stark and try again."
+        }
+    }
+
+    @discardableResult
+    func installBeginnerModel(recipeID: String) -> Bool {
+        guard !busy else {
+            errorMessage = "Wait for the current request to finish, then try setting up this model again."
+            return false
+        }
+        guard let recommendation = beginnerRequestID,
+              let choice = beginnerReport?.items.first(where: { $0.id == recipeID }),
+              choice.installedIDs.allSatisfy({ id in !models.contains(where: { $0.id == id }) }) else {
+            errorMessage = "This starting choice changed. Check the recommendation again before downloading it."
+            return false
+        }
+        resetInstallProgress(kind: "huggingface")
+        errorMessage = nil; beginnerInstallError = nil; beginnerCancelPending = false
+        let requestID = UUID().uuidString.lowercased()
+        beginnerInstallChoice = choice; beginnerInstalledResultID = nil; beginnerInstallState = "installing"
+        beginnerInstallRecommendationID = recommendation; beginnerInstallRequestID = requestID
+        activeInstallRequestID = requestID; pendingSupportRequestID = requestID
+        state = "installing"; message = "Checking the starting model…"
+        if !send(["command": "install_guided", "recommendation_request_id": recommendation,
+                  "recipe_id": recipeID, "support_request_id": requestID]) {
+            beginnerInstallState = "failed"; beginnerInstallError = "Could not start setup. Reopen Stark and try again."
+            beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
+            endInstallProgress("failed")
+            state = loadedID.isEmpty ? "idle" : "ready"
+            return false
+        }
+        return true
+    }
+
+    func cancelBeginnerInstallation() {
+        guard let requestID = beginnerInstallRequestID, requestID == activeInstallRequestID,
+              !beginnerCancelPending else { return }
+        beginnerCancelPending = true
+        if !send(["command": "cancel_install", "request_id": requestID]) {
+            beginnerCancelPending = false
+            beginnerInstallError = "Could not cancel setup. Reopen Stark if it stops responding."
+        }
+    }
+
+    @discardableResult
+    func startBeginnerModel(recipeID: String, modelID: String) -> Bool {
+        guard !busy else {
+            errorMessage = "Wait for the current request to finish, then try starting this model again."
+            return false
+        }
+        guard models.contains(where: { $0.id == modelID }) else {
+            errorMessage = "This model is no longer installed. Check the recommendation again."
+            return false
+        }
+        let recommendation: String?
+        if beginnerReport?.items.contains(where: { $0.id == recipeID && $0.installedIDs.contains(modelID) }) == true {
+            recommendation = beginnerRequestID
+        } else if beginnerInstallChoice?.id == recipeID, beginnerInstalledResultID == modelID {
+            recommendation = beginnerInstallRecommendationID
+        } else { recommendation = nil }
+        guard let recommendation else {
+            errorMessage = "This starting choice changed. Check the recommendation again before starting it."
+            return false
+        }
+        let requestID = UUID().uuidString.lowercased()
+        beginnerRunBackup = (selectedID, mode, state, message, supportsTools, toolParser, gpuMemoryBytes)
+        beginnerRunRequestID = requestID
+        mode = .chat; selectedID = modelID; errorMessage = nil
+        state = "loading"; message = "Checking and starting the selected model…"
+        if !send(["command": "run_guided", "request_id": requestID,
+                  "recommendation_request_id": recommendation, "recipe_id": recipeID, "model_id": modelID]) {
+            if let previous = beginnerRunBackup {
+                selectedID = previous.selectedID; mode = previous.mode; state = previous.state; message = previous.message
+                supportsTools = previous.tools; toolParser = previous.parser; gpuMemoryBytes = previous.gpu
+            }
+            beginnerRunBackup = nil; beginnerRunRequestID = nil
+            errorMessage = "Could not start this model. Reopen Stark and try again."
+            return false
+        }
+        return true
+    }
+
     func requestModelCatalog(familyID: String) {
         guard SupportMetadata.string(familyID, maximum: 128) != nil else { return }
         let changedFamily = catalogFamilyID != familyID
@@ -1846,9 +2526,24 @@ final class EngineController: ObservableObject {
             if !busy { resetInstallProgress(kind: "huggingface") }
         }
         let requestID = UUID().uuidString.lowercased()
-        catalogRequestID = requestID; catalogFamilyID = familyID; catalogLoading = true
+        catalogRequestID = requestID; catalogFamilyID = familyID; catalogLoading = true; pendingCatalogOffset = 0
+        catalogPageKnownIDs = []
         if !send(["command": "catalog", "family_id": familyID, "request_id": requestID]) {
-            catalogLoading = false; catalogError = "Could not reach Stark. Reopen the app and try again."
+            catalogLoading = false; pendingCatalogOffset = nil
+            catalogError = "Could not reach Stark. Reopen the app and try again."
+        }
+    }
+
+    func requestMoreModelCatalog(loadRemaining: Bool = true) {
+        guard !catalogLoading, (!busy || loadRemainingCatalog), let requestID = catalogRequestID, let familyID = catalogFamilyID,
+              let catalog, catalog.familyID == familyID, catalog.status == .ready,
+              let offset = catalog.nextOffset else { return }
+        loadRemainingCatalog = loadRemaining
+        catalogLoading = true; pendingCatalogOffset = offset; catalogError = nil
+        catalogPageKnownIDs = Set(catalog.items.map(\.id))
+        if !send(["command": "catalog", "family_id": familyID, "request_id": requestID, "offset": offset]) {
+            catalogLoading = false; pendingCatalogOffset = nil
+            catalogError = "Could not reach Stark. Reopen the app and try again."
         }
     }
 
@@ -1856,17 +2551,19 @@ final class EngineController: ObservableObject {
         if let requestID = catalogRequestID, catalogInstallation?.catalogRequestID != requestID {
             send(["command": "catalog_cancel", "request_id": requestID])
         }
-        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil
+        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil; pendingCatalogOffset = nil
+        loadRemainingCatalog = false
     }
 
     func catalogItemIsDownloaded(_ item: FamilyModelCatalog.Item, artifactMode: ModelArtifactMode) -> Bool {
         models.contains { item.installedIDs.contains($0.id) && $0.artifactMode == artifactMode }
     }
 
-    func installCatalogItem(id: String, artifactMode: ModelArtifactMode) {
+    func installCatalogItem(id: String) {
         guard !busy, let requestID = catalogRequestID, let catalog = catalog, catalog.status == .ready,
               let item = catalog.items.first(where: { $0.id == id }), item.downloadable,
-              item.artifactModes.contains(artifactMode), !catalogItemIsDownloaded(item, artifactMode: artifactMode) else { return }
+              !catalogItemIsDownloaded(item, artifactMode: item.installationMode) else { return }
+        let artifactMode = item.installationMode
         errorMessage = nil; resetInstallProgress(kind: "huggingface")
         let supportID = UUID().uuidString.lowercased()
         pendingSupportRequestID = supportID; activeInstallRequestID = supportID
@@ -1900,9 +2597,13 @@ final class EngineController: ObservableObject {
     }
 
     private func clearBrowserRequests() {
-        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil
+        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil; pendingCatalogOffset = nil
         activeInstallRequestID = nil; catalogInstallation = nil; catalogInstallMessage = nil; catalogInstallFailed = false
         removalRequestID = nil; removingModelID = nil; removalAction = nil; removalError = nil
+        beginnerRequestID = nil; beginnerChoicesLoading = false; beginnerReport = nil
+        if beginnerInstallRequestID != nil { beginnerInstallState = "cancelled" }
+        beginnerInstallRequestID = nil; beginnerCancelPending = false
+        beginnerRunRequestID = nil; beginnerRunBackup = nil
     }
 
     func generate() {
@@ -1978,6 +2679,10 @@ final class EngineController: ObservableObject {
     }
 
     func stop() {
+        let browsingFamilyID = catalogFamilyID
+        if let model = models.first(where: { $0.id == modelControlID }) {
+            stoppedModel = (model.id, loadedMode ?? mode)
+        }
         errorMessage = nil
         clearInstallSupport()
         if state == "installing" { endInstallProgress("cancelled") }
@@ -1988,7 +2693,11 @@ final class EngineController: ObservableObject {
         supportsImages = false
         imageVerification = "unverified"
         state = "stopping"; message = "Stopping…"
-        send(["command": "stop"])
+        if send(["command": "stop"]), let familyID = browsingFamilyID {
+            // Stop invalidates the backend catalogue session too. Reopen the
+            // selected family with a new request so stale replies stay fenced.
+            requestModelCatalog(familyID: familyID)
+        }
     }
 
     func resetInstallProgress(kind: String) {
@@ -2117,20 +2826,16 @@ struct SpeedView: View {
 struct RunningModelLabel: View {
     @ObservedObject var engine: EngineController
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(engine.activeName).lineLimit(1).truncationMode(.middle)
-            if !engine.activeVersionDetails.isEmpty {
-                Text(engine.activeVersionDetails).font(.caption).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
-                    .layoutPriority(1)
-            }
-        }.accessibilityElement(children: .combine)
+        Text(engine.activeModel?.displayName ?? engine.startableModel?.displayName ?? engine.activeName)
+            .lineLimit(1).truncationMode(.middle)
+            .help(engine.activeVersionDetails)
     }
 }
 
 struct MenuView: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var updater: AppUpdateController
+    @ObservedObject var interface = StarkInterfacePreferences()
     let manage: () -> Void
     let console: () -> Void
     let connection: () -> Void
@@ -2146,25 +2851,27 @@ struct MenuView: View {
                 }
                 Spacer()
             }
+            StarkInterfacePicker(preferences: interface).frame(maxWidth: .infinity)
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 StatusLine(engine: engine)
-                GPUMemoryView(engine: engine)
+                if interface.mode == .advanced { GPUMemoryView(engine: engine) }
             }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            Button("Manage Models", action: manage).buttonStyle(.borderedProminent)
-            if engine.mode == .chat { SpeedView(engine: engine) }
-            if engine.busy || !engine.loadedID.isEmpty {
-                HStack {
-                    Spacer()
-                    Button("Stop", action: engine.stop).disabled(engine.state == "stopping")
-                }
-            }
+            HStack(spacing: 8) {
+                Button(interface.mode == .beginner ? "Guided setup" : "Manage Models", action: manage)
+                    .buttonStyle(.borderedProminent)
+                Spacer(minLength: 0)
+                Button("Start model", action: engine.startModel).disabled(!engine.canStartModel)
+                    .help(engine.startableModel.map { "Start " + $0.displayName } ?? "Choose a model first")
+                Button("Stop model", action: engine.stop).disabled(!engine.canStopCurrentModel)
+            }.controlSize(.small)
+            if interface.mode == .advanced && engine.mode == .chat { SpeedView(engine: engine) }
             Divider()
-            Button("Connections", action: connection)
+            Button(interface.mode == .beginner ? "Adjust Setup" : "Connections", action: connection)
                 .frame(maxWidth: .infinity, alignment: .leading)
             AppUpdateView(updater: updater)
             HStack {
-                Button("Open Playground", action: console).buttonStyle(.link)
+                Button(interface.mode == .beginner ? "Open chat" : "Open Playground", action: console).buttonStyle(.link)
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }.buttonStyle(.link)
             }.font(.caption)
@@ -2184,19 +2891,19 @@ struct InstallStageView: View {
                 Text(progress.detail(for: phase)).font(.caption.monospacedDigit())
                     .foregroundStyle(progress.state == "failed" ? Color.red : .secondary)
             }
-            Group {
-                if progress.state == "running" && progress.totalBytes == nil {
-                    ProgressView()
-                } else {
-                    ProgressView(value: progress.fraction)
-                }
+            if progress.showsProgressBar {
+                ProgressView(value: progress.fraction)
+                    .progressViewStyle(.linear)
+                    .tint(progress.state == "failed" ? .red : .accentColor)
+                    .accessibilityLabel("\(title) progress")
+                    .accessibilityValue(progress.detail(for: phase))
             }
-            .progressViewStyle(.linear)
-            .tint(progress.state == "failed" ? .red : .accentColor)
-            .accessibilityLabel("\(title) progress")
-            .accessibilityValue(progress.detail(for: phase))
             if let total = progress.totalBytes, total > 0 {
                 Text("\(bytes(progress.completedBytes)) of \(bytes(total))")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            if phase == "download", let received = progress.transferredBytes, progress.totalBytes != nil {
+                Text("\(bytes(received)) received over network")
                     .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
             }
         }
@@ -2206,13 +2913,33 @@ struct InstallStageView: View {
     }
 }
 
+struct CatalogQuantizationPicker: View {
+    let choices: [CatalogQuantizationFilter]
+    @Binding var selection: CatalogQuantizationFilter
+
+    private var picker: some View {
+        Picker("Quantization", selection: $selection) {
+            ForEach(choices, id: \.self) { choice in Text(choice.title).tag(choice) }
+        }.labelsHidden().accessibilityLabel("Model quantization")
+    }
+
+    var body: some View {
+        // A segmented control's minimum width includes every full label. Keep
+        // that intrinsic width from expanding the fixed-size Manage Models view.
+        ViewThatFits(in: .horizontal) {
+            picker.pickerStyle(.segmented).fixedSize(horizontal: true, vertical: false)
+            picker.pickerStyle(.menu).frame(minWidth: 0, maxWidth: .infinity)
+                .help(selection.title)
+        }
+    }
+}
+
 struct ModelsView: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var navigation: ModelManagementState
     let onDone: () -> Void
     let onRun: (String) -> Void
     @State private var selectedFamily: ModelsInventory.Family?
-    @State private var artifactChoices: [String: ModelArtifactMode] = [:]
     @State private var removalConfirmation: ModelRemovalConfirmation?
     @State private var savedQuery = ""
     @State private var familiesQuery = ""
@@ -2221,6 +2948,7 @@ struct ModelsView: View {
     @State private var savedSort = ModelBrowserPreferences.load(.saved)
     @State private var familiesSort = ModelBrowserPreferences.load(.families)
     @State private var catalogSort = ModelBrowserPreferences.load(.catalog)
+    @State private var hideUnsupported = ModelBrowserPreferences.hidesUnsupported()
 
     private var inventory: ModelsInventory {
         ModelsInventory(models: engine.models, loadedID: engine.modelControlID, registry: engine.modelFamilies,
@@ -2234,7 +2962,7 @@ struct ModelsView: View {
     private var catalogItems: [FamilyModelCatalog.Item] {
         guard let family = selectedFamily, let catalog = engine.catalog,
               catalog.familyID == family.id, catalog.status == .ready else { return [] }
-        return catalog.items
+        return CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: hideUnsupported)
     }
 
     private var quantizationTabs: [CatalogQuantizationFilter] {
@@ -2279,6 +3007,8 @@ struct ModelsView: View {
     }
 
     var body: some View {
+        // Build once per render; the list accesses several inventory projections.
+        let inventory = self.inventory
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
                 if navigation.tab == .download, let family = selectedFamily {
@@ -2297,9 +3027,7 @@ struct ModelsView: View {
                             visionConversion: $navigation.visionConversion)
             } else {
                 if selectedFamily != nil {
-                    Picker("Quantization", selection: quantizationBinding) {
-                        ForEach(quantizationTabs, id: \.self) { choice in Text(choice.title).tag(choice) }
-                    }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("Model quantization")
+                    CatalogQuantizationPicker(choices: quantizationTabs, selection: quantizationBinding)
                 }
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -2312,6 +3040,23 @@ struct ModelsView: View {
                     Picker("Sort", selection: sortBinding) {
                         ForEach(browserScope.sorts, id: \.self) { Text($0.title).tag($0) }
                     }.labelsHidden().frame(width: 178).accessibilityLabel("Sort models")
+                }
+                if selectedFamily == nil && navigation.tab == .download {
+                    Label("Scroll to browse all model families", systemImage: "arrow.down")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if selectedFamily != nil {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        if catalogSort.isRating {
+                            HStack(spacing: 4) {
+                                Text("Models that fit this Mac come first, ranked by whatmodel.sh scores. Quantized versions show their original model's score.")
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Link("About scores", destination: URL(string: "https://whatmodel.sh/")!).fixedSize()
+                            }.font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                        Toggle("Hide Unsupported", isOn: $hideUnsupported).toggleStyle(.checkbox).fixedSize()
+                            .help("Hides models in a format Stark cannot import and models marked Unavailable")
+                    }
                 }
                 ScrollView {
                     if let family = selectedFamily { catalogContent(family) }
@@ -2338,7 +3083,7 @@ struct ModelsView: View {
                         else { LazyVStack(spacing: 4) {
                             ForEach(visibleFamilies(families)) { family in
                                 Button {
-                                    selectedFamily = family; artifactChoices = [:]; catalogQuery = ""; catalogQuantization = .all
+                                    selectedFamily = family; catalogQuery = ""; catalogQuantization = .all
                                     engine.requestModelCatalog(familyID: family.id)
                                 } label: {
                                     HStack {
@@ -2356,7 +3101,11 @@ struct ModelsView: View {
                         Text("Available families will appear when Stark is ready.")
                             .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 300)
                     }
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                }.scrollIndicators(.visible)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
             }
             if let installation = engine.catalogInstallation {
                 VStack(alignment: .leading, spacing: 9) {
@@ -2400,8 +3149,9 @@ struct ModelsView: View {
                 }
             }
         }.padding(24).frame(width: 640, height: 580)
-            .onAppear { selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all }
+            .onAppear { selectedFamily = nil; catalogQuantization = .all }
             .onChange(of: navigation.tab) { leaveFamily() }
+            .onChange(of: hideUnsupported) { ModelBrowserPreferences.saveHidesUnsupported(hideUnsupported) }
             .onChange(of: quantizationTabs) {
                 guard !engine.catalogLoading, engine.catalog?.status == .ready,
                       engine.catalog?.familyID == selectedFamily?.id else { return }
@@ -2450,13 +3200,22 @@ struct ModelsView: View {
     }
 
     private func savedModelRow(_ model: ModelsInventory.Model, family: String?) -> some View {
-        HStack(spacing: 10) {
-            Text(model.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
-                .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+        let variantLabel = model.variantLabel
+        return HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.displayName).font(.callout.weight(.medium)).lineLimit(2).truncationMode(.tail)
+                if let variantLabel {
+                    Text(variantLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+            .accessibilityHidden(true)
             Text(model.quantization ?? "—").font(.caption).foregroundStyle(.secondary)
                 .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
             Text(model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
                 .font(.caption).foregroundStyle(.secondary).frame(width: 76, alignment: .leading)
+            Text(model.toolSupport.title).font(.caption).foregroundStyle(.secondary)
+                .frame(width: 100, alignment: .leading).help(model.toolSupport.help)
             modelRepositoryLink(model).frame(width: 28, alignment: .leading)
             Group {
                 if model.id == engine.modelControlID {
@@ -2470,13 +3229,15 @@ struct ModelsView: View {
             removalButton(model).frame(width: 22)
         }.frame(minHeight: 32)
             .help(savedModelHelp(model, family: family))
-            .accessibilityElement(children: .contain).accessibilityLabel(model.name)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(variantLabel.map { model.displayName + ", " + $0 } ?? model.displayName)
     }
 
     private func savedModelHelp(_ model: ModelsInventory.Model, family: String?) -> String {
         var details = [model.name]
         if let family = family { details.append(family) }
         details.append(contentsOf: model.detailLabels.filter { !$0.hasPrefix("Version ") })
+        details.append(model.toolSupport.help)
         if let revision = model.sourceRevision { details.append("Version " + revision) }
         return details.joined(separator: "\n")
     }
@@ -2506,35 +3267,64 @@ struct ModelsView: View {
     }
 
     private func leaveFamily() {
-        selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all
+        selectedFamily = nil; catalogQuantization = .all
         engine.cancelModelCatalog()
-    }
-
-    private func selectedMode(_ item: FamilyModelCatalog.Item) -> ModelArtifactMode {
-        if let choice = artifactChoices[item.id], item.artifactModes.contains(choice) { return choice }
-        return item.defaultArtifactMode
     }
 
     @ViewBuilder
     private func catalogContent(_ family: ModelsInventory.Family) -> some View {
-        if engine.catalogLoading {
-            VStack(spacing: 10) { ProgressView(); Text("Finding models…").foregroundStyle(.secondary) }
-                .frame(maxWidth: .infinity, minHeight: 220)
-        } else if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
-            let groups = CatalogBrowserInventory(items: catalog.items, query: catalogQuery, sort: catalogSort,
-                                                 quantization: catalogQuantization).groups
-            if catalog.items.isEmpty {
-                VStack(spacing: 10) {
-                    Text("No models listed yet").font(.headline)
-                    Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
-                }.frame(maxWidth: .infinity, minHeight: 220)
-            } else if groups.isEmpty { noSearchResults("No matching models") }
-            else {
-                LazyVStack(spacing: 12) {
+        if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
+            let listed = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: hideUnsupported)
+            let exports = CatalogBrowserInventory.foldedExports(catalog.items)
+            // A folded export is represented by its original, so it is not counted as hidden.
+            let hidden = catalog.items.count - listed.count - exports.values.reduce(0) { $0 + $1.count }
+            let groups = CatalogBrowserInventory(items: listed, query: catalogQuery, sort: catalogSort,
+                                                 quantization: catalogQuantization,
+                                                 physicalMemory: ProcessInfo.processInfo.physicalMemory,
+                                                 exports: exports).groups
+            LazyVStack(spacing: 6) {
+                if catalog.items.isEmpty {
+                    Text(catalog.nextOffset == nil ? "No compatible models found" : "No compatible models found yet")
+                        .font(.headline).frame(maxWidth: .infinity, minHeight: 180)
+                } else if listed.isEmpty {
+                    // Everything found so far is hidden; say so instead of looking empty.
+                    VStack(spacing: 10) {
+                        Text(catalog.nextOffset == nil && !engine.catalogLoading
+                             ? "No supported models found" : "No supported models found yet").font(.headline)
+                        Button("Show \(hidden) unsupported") { hideUnsupported = false }
+                    }.frame(maxWidth: .infinity, minHeight: 180)
+                } else if groups.isEmpty { noSearchResults("No matching models") }
+                else {
                     ForEach(groups) { group in catalogGroup(group) }
-                    if catalog.hasMore { Text("More models may be available on Hugging Face.").font(.caption).foregroundStyle(.secondary) }
+                    if hidden > 0 {
+                        Text("\(hidden) unsupported hidden").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if engine.catalogLoading {
+                    HStack(spacing: 10) {
+                        ProgressView().controlSize(.small)
+                        Text("Checking HuggingFace... \(listed.count) available so far").foregroundStyle(.secondary)
+                    }
+                } else if let message = engine.catalogError {
+                    Text(message).font(.callout).foregroundStyle(.secondary)
+                    Text("The list is incomplete. Models already found are still available.").font(.caption).foregroundStyle(.secondary)
+                    Button("Retry remaining models") { engine.requestMoreModelCatalog() }.disabled(engine.busy)
+                } else if catalog.nextOffset != nil {
+                    if !catalogQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("Search filters the models loaded so far.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button("Load more models") {
+                        engine.requestMoreModelCatalog()
+                    }.disabled(engine.busy)
+                    Text("Checks all remaining results automatically. You can browse models as they arrive.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if catalog.items.isEmpty {
+                    Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
                 }
             }
+        } else if engine.catalogLoading {
+            VStack(spacing: 10) { ProgressView(); Text("Checking HuggingFace...").foregroundStyle(.secondary) }
+                .frame(maxWidth: .infinity, minHeight: 220)
         } else {
             VStack(spacing: 10) {
                 Text(engine.catalog?.status == .offline ? "You’re offline" : "Couldn’t load models").font(.headline)
@@ -2546,47 +3336,37 @@ struct ModelsView: View {
 
     private func catalogGroup(_ group: CatalogBrowserInventory.Group) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(group.name).font(.headline)
-                Text(group.publisher).font(.caption).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-            }.padding(.bottom, 10)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(group.name).font(.callout.weight(.semibold)).lineLimit(1).truncationMode(.middle)
+                    .help(group.name).frame(maxWidth: .infinity, alignment: .leading)
+                if group.items.count == 1, let item = group.items.first,
+                   let url = URL(string: "https://huggingface.co/" + item.repo) {
+                    Link(destination: url) { Label(group.publisher, systemImage: "arrow.up.right") }
+                        .font(.caption).fixedSize().help(item.repo)
+                        .accessibilityLabel("View " + item.repo + " on Hugging Face")
+                } else {
+                    Text(group.publisher).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }.padding(.bottom, 6)
             ForEach(group.items) { item in
-                if item.id != group.items.first?.id { Divider() }
-                catalogRow(item)
+                if item.id != group.items.first?.id { Divider().padding(.vertical, 6) }
+                CatalogModelRow(item: item,
+                    downloaded: engine.catalogItemIsDownloaded(item, artifactMode: item.installationMode),
+                    busy: engine.busy, showsRepositoryLink: group.items.count > 1,
+                    score: item.referenceScore?.score(for: catalogSort),
+                    exceedsMemory: !item.fits(physicalMemory: ProcessInfo.processInfo.physicalMemory)) {
+                        engine.installCatalogItem(id: item.id)
+                    }
             }
-        }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary, lineWidth: 1))
-    }
-
-    private func catalogRow(_ item: FamilyModelCatalog.Item) -> some View {
-        HStack(spacing: 12) {
-            Text(item.sizeLabel ?? "Unknown").font(.callout.weight(.medium))
-                .frame(width: 70, alignment: .leading)
-            Text(item.quantization).font(.callout).frame(width: 48, alignment: .leading)
-            Text(item.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
-                .font(.caption).foregroundStyle(.secondary).frame(width: 80, alignment: .leading)
-            if let repositoryURL = URL(string: "https://huggingface.co/" + item.repo) {
-                Link("link", destination: repositoryURL).font(.caption).fixedSize().help(repositoryURL.absoluteString)
+            // With unsupported rows hidden, the note appears only to explain a search
+            // that matched an export instead of the model's own rows.
+            if !group.exports.isEmpty, !hideUnsupported || group.foundByExport {
+                Divider().padding(.vertical, 6)
+                CatalogFoldedExports(exports: group.exports)
             }
-            Spacer(minLength: 0)
-            if item.artifactModes.count > 1 {
-                Picker("Install", selection: Binding(get: { selectedMode(item) }, set: { artifactChoices[item.id] = $0 })) {
-                    ForEach(item.artifactModes, id: \.self) { Text($0.title).tag($0) }
-                }.labelsHidden().frame(width: 145).controlSize(.small).disabled(engine.busy)
-                    .accessibilityLabel("Version for " + item.name)
-            }
-            if engine.catalogItemIsDownloaded(item, artifactMode: selectedMode(item)) {
-                Text("Downloaded").font(.caption).foregroundStyle(.secondary).frame(width: 88)
-            } else {
-                Button("Download") { engine.installCatalogItem(id: item.id, artifactMode: selectedMode(item)) }
-                    .controlSize(.small).frame(width: 88).disabled(engine.busy || !item.downloadable)
-                    .accessibilityLabel("Download " + item.name + " " + item.quantization)
-            }
-        }.padding(.vertical, 9).help(item.repo + "\nVersion " + item.revision)
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(item.name + ", version " + item.revision.prefix(7))
+        }.padding(.horizontal, 12).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 1))
     }
 }
 
@@ -2612,11 +3392,34 @@ struct InstallView: View {
     @Binding var kind: String
     @Binding var source: String
     @Binding var visionConversion: Bool
+    @State private var supportNotice = false
     var body: some View {
         ScrollView { form }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
             .onChange(of: visionConversion) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
+            .onChange(of: engine.installSupportReport?.status) { _, status in
+                supportNotice = status == .unsupported || status == .inconclusive
+            }
+            .sheet(isPresented: $supportNotice) {
+                if let report = engine.installSupportReport {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(report.status == .unsupported ? "This model isn’t supported" : "Model support couldn’t be verified")
+                            .font(.title2.weight(.semibold))
+                        InstallSupportView(report: report)
+                        if report.reasons.contains("unsupported_architecture") {
+                            Text("Stark needs an implemented engine and conversion path for this model family. Converting the files cannot add family support. Choose a supported family in Model Catalog.")
+                                .font(.callout)
+                        } else {
+                            Text("Stark stopped this installation. Check the source and format, or choose a compatible model from Model Catalog.")
+                                .font(.callout)
+                        }
+                        Text("Chat and tool use are checked separately. A converted model needs a working chat template; tool use also needs a format Stark recognizes. OpenWork requires tool support.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        HStack { Spacer(); Button("OK") { supportNotice = false }.keyboardShortcut(.defaultAction) }
+                    }.padding(24).frame(width: 460)
+                }
+            }
     }
 
     private var form: some View {
@@ -2646,11 +3449,16 @@ struct InstallView: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 Toggle("Enable image input when converting", isOn: $visionConversion).disabled(engine.busy)
-                Text("Image conversion supports compatible dense Qwen3.5 BF16 models and merged fine-tunes. Vision installs check support on this Mac and stop the running model.")
+                Text("Image input is available for compatible Qwen and Gemma models. Stark checks each model’s image support on this Mac during installation and stops the running model.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Text("Models stay on this Mac. Conversion may take several minutes.")
                 .font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Chat and tool compatibility").font(.callout.weight(.medium))
+                Text("Conversion prepares supported model weights and preserves the source’s chat template when available. It cannot add a missing template or teach a model to use tools. Stark enables tool use only for recognized tool formats; check the running model in Connections before using OpenWork.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if engine.catalogInstallation == nil {
                 if let report = engine.installSupportReport { InstallSupportView(report: report) }
                 VStack(spacing: 14) {
@@ -2711,14 +3519,22 @@ struct AdvancedOptionsView: View {
     @State private var context: String
     @State private var output: String
     @State private var thinking: Bool
+    @State private var mtpEnabled: Bool
+    @State private var modelID: String
 
     init(engine: EngineController) {
         self.engine = engine
+        _modelID = State(initialValue: engine.loadedID)
         _useModelSystemPrompt = State(initialValue: engine.options.useModelSystemPrompt)
         _systemPrompt = State(initialValue: engine.options.systemPrompt)
         _context = State(initialValue: String(engine.options.contextTokens))
-        _output = State(initialValue: String(engine.options.maxNewTokens))
+        _output = State(initialValue: engine.options.maxNewTokens == 0 ? "" : String(engine.options.maxNewTokens))
         _thinking = State(initialValue: engine.options.thinking)
+        _mtpEnabled = State(initialValue: engine.mtpEnabled)
+    }
+
+    private var usesRequiredReasoning: Bool {
+        engine.loadedID == modelID && engine.activeModel?.display?.familyID == "glm5_next"
     }
 
     private var validation: String? {
@@ -2727,8 +3543,13 @@ struct AdvancedOptionsView: View {
                 ? "Context size must be between 2 and \(engine.contextLimit) tokens."
                 : "Conversation budget must be between 2 and \(engine.contextLimit) tokens (protocol range)."
         }
-        guard let maximum = Int(output), (1...engine.outputLimit).contains(maximum) else {
-            return "Output limit must be between 1 and \(engine.outputLimit) tokens."
+        let outputValue = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let automatic = outputValue.isEmpty || outputValue.caseInsensitiveCompare("Auto") == .orderedSame
+        if automatic {
+            return nil
+        }
+        guard let maximum = Int(outputValue), (1...engine.outputLimit).contains(maximum) else {
+            return "Enter Auto or an output limit between 1 and \(engine.outputLimit) tokens."
         }
         return maximum < count ? nil : "Output limit must be smaller than context size."
     }
@@ -2754,43 +3575,59 @@ struct AdvancedOptionsView: View {
                 }
                 GridRow {
                     Text("Output limit (tokens)")
-                    TextField("Output limit", text: $output).textFieldStyle(.roundedBorder)
+                    TextField("Auto", text: $output).textFieldStyle(.roundedBorder)
                         .accessibilityLabel("Output limit in tokens")
                 }
             }
-            Text("Context includes the conversation and room for the full reply budget.")
+            Text("Auto uses the remaining context, within the model's limits and available memory.")
                 .font(.caption).foregroundStyle(.secondary)
             if !engine.contextCapacityKnown {
-                Text("This model does not declare a finite context maximum. The budget uses Stark's protocol range; memory and request byte limits still apply. Text requests allocate only the context they need.")
+                Text("This model does not declare a context maximum. Auto sizes execution from the model's state requirements and available memory.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Toggle("Thinking mode", isOn: $thinking)
-            Text("Enables reasoning when the model's chat template supports it.")
+            Toggle(usesRequiredReasoning ? "Maximum reasoning effort" : "Thinking mode", isOn: $thinking)
+            Text(usesRequiredReasoning
+                 ? "GLM-5.3 Flash always reasons. Off selects Low effort; on selects Max effort."
+                 : "Enables reasoning when the model supports a thinking toggle.")
                 .font(.caption).foregroundStyle(.secondary)
+            if engine.supportsMTP && engine.loadedID == modelID {
+                Toggle("Multi-token prediction (MTP)", isOn: $mtpEnabled)
+                Text(engine.defaultMTPEnabled
+                     ? "Can speed up text generation by drafting and verifying extra tokens. On by default; your choice is saved for this model. Image requests run with MTP off."
+                     : "Off by default for this model. You can turn it on for text generation; your choice is saved. Image requests run with MTP off.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
             Text(engine.contextCapacityKnown
-                 ? "Context defaults to the model's maximum. Custom limits stay in memory for this app session and are bounded by the running model."
-                 : "The default budget uses the protocol range without claiming a model context maximum. Custom budgets stay in memory for this app session.")
+                 ? "Context defaults to the model's maximum. Auto admits the reply within available memory."
+                 : "Auto chooses a memory-bounded execution allowance. A custom conversation budget sets an upper bound.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Restore Defaults") {
                     let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit)
                     useModelSystemPrompt = defaults.useModelSystemPrompt
                     systemPrompt = defaults.systemPrompt; thinking = defaults.thinking
+                    mtpEnabled = engine.defaultMTPEnabled
                     context = String(defaults.contextTokens)
-                    output = String(defaults.maxNewTokens)
+                    output = defaults.maxNewTokens == 0 ? "" : String(defaults.maxNewTokens)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Apply and New Chat") {
-                    guard let count = Int(context), let maximum = Int(output) else { return }
+                    guard let count = Int(context) else { return }
+                    let outputValue = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let maximum = outputValue.isEmpty || outputValue.caseInsensitiveCompare("Auto") == .orderedSame
+                        ? 0
+                        : (Int(outputValue) ?? -1)
+                    guard maximum >= 0 else { return }
                     var options = ChatOptions()
                     options.useModelSystemPrompt = useModelSystemPrompt
                     options.systemPrompt = systemPrompt
                     options.contextTokens = count; options.maxNewTokens = maximum; options.thinking = thinking
-                    if engine.configure(options) { dismiss() }
-                }.buttonStyle(.borderedProminent).disabled(validation != nil || engine.busy || engine.state != "ready")
+                    if engine.configure(options, mtpEnabled: engine.supportsMTP ? mtpEnabled : nil, modelID: modelID) { dismiss() }
+                }.buttonStyle(.borderedProminent)
+                    .disabled(validation != nil || !engine.modelReady || engine.loadedID != modelID)
             }
         }.padding(24).frame(width: 510)
     }
@@ -2851,7 +3688,7 @@ struct PlaygroundView: View {
             }
             if engine.mode == .chat { ChatContentView(engine: engine) }
             else { DecisionView(engine: engine) }
-        }.padding(20).frame(minWidth: 500, minHeight: 600)
+        }.padding(20).frame(minWidth: 500, minHeight: 720)
             .onChange(of: engine.selectedID) { engine.clearDecision() }
     }
 }
@@ -2926,41 +3763,55 @@ struct ChatContentView: View {
                     .disabled(engine.busy || !engine.hasConversation || engine.loadedID != engine.selectedID)
             }
             SpeedView(engine: engine)
-            ScrollViewReader { scroll in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        if engine.messages.isEmpty {
-                            VStack(spacing: 10) {
-                                Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 28)).foregroundStyle(.secondary)
-                                Text("Try a conversation").font(.headline)
-                                Text("Run a model in Manage Models, then send a message.")
-                                    .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                            }.frame(maxWidth: .infinity).padding(.vertical, 36)
+            GeometryReader { viewport in
+                ScrollViewReader { scroll in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            if engine.messages.isEmpty {
+                                VStack(spacing: 10) {
+                                    Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 28)).foregroundStyle(.secondary)
+                                    Text("Try a conversation").font(.headline)
+                                    Text("Run a model in Manage Models, then send a message.")
+                                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                                }.frame(maxWidth: .infinity).padding(.vertical, 12)
+                            }
+                            ForEach(engine.messages) { ChatBubble(message: $0) }
+                            if engine.state == "generating" {
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.small)
+                                    Text(engine.hasPlaygroundGeneration
+                                         ? (engine.imageProgress.isEmpty
+                                            ? (engine.generationProgress == nil ? "Preparing request…" : "Generating reply…")
+                                            : engine.imageProgress)
+                                         : engine.message)
+                                        .font(.callout).foregroundStyle(.secondary)
+                                    Button("Cancel", action: engine.stop)
+                                }.padding(.horizontal, 4)
+                            }
+                            if !engine.messages.isEmpty {
+                                Color.clear.frame(height: 1).id("latest")
+                            }
                         }
-                        ForEach(engine.messages) { ChatBubble(message: $0) }
-                        if engine.state == "generating" {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text(engine.hasPlaygroundGeneration
-                                     ? (engine.imageProgress.isEmpty
-                                        ? (engine.generationProgress == nil ? "Preparing request…" : "Generating reply…")
-                                        : engine.imageProgress)
-                                     : engine.message)
-                                    .font(.callout).foregroundStyle(.secondary)
-                                Button("Cancel", action: engine.stop)
-                            }.padding(.horizontal, 4)
-                        }
-                        Color.clear.frame(height: 1).id("latest")
-                    }.padding(14)
+                        .frame(width: max(0, viewport.size.width - 28))
+                        .frame(minHeight: max(0, viewport.size.height - 28),
+                               alignment: engine.messages.isEmpty ? .center : .topLeading)
+                        .padding(14)
+                    }
+                    .onChange(of: engine.messages.count) { withAnimation(.easeOut(duration: 0.15)) { scroll.scrollTo("latest", anchor: .bottom) } }
+                    .onChange(of: engine.messages.last?.text) {
+                        DispatchQueue.main.async { scroll.scrollTo("latest", anchor: .bottom) }
+                    }
+                    .onChange(of: engine.state) { if engine.state == "generating" { scroll.scrollTo("latest", anchor: .bottom) } }
                 }
-                .onChange(of: engine.messages.count) { withAnimation(.easeOut(duration: 0.15)) { scroll.scrollTo("latest", anchor: .bottom) } }
-                .onChange(of: engine.state) { if engine.state == "generating" { scroll.scrollTo("latest", anchor: .bottom) } }
-            }.frame(maxHeight: .infinity).background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+            }.frame(minHeight: 180, maxHeight: .infinity)
+                .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
             if ["length", "context"].contains(engine.finishReason) {
-                Text("Reply reached the token limit. Clear the conversation to start fresh.").font(.caption).foregroundStyle(.orange)
-            }
-            if engine.supportsImages {
-                Text(engine.imageVerificationNote).font(.caption).foregroundStyle(.secondary)
+                Text(engine.finishReason == "length" && engine.options.maxNewTokens > 0
+                     ? "Reply reached your output limit. Increase it or choose Auto in Advanced Options."
+                     : (engine.finishReason == "context"
+                        ? "Reply reached the current context limit. Review Advanced Options or start a new chat for more room."
+                        : "Reply reached the available context or execution budget."))
+                    .font(.caption).foregroundStyle(.orange)
             }
             if let image = engine.draftImage {
                 HStack {
@@ -2979,20 +3830,35 @@ struct ChatContentView: View {
                     Button("Cancel") { engine.removeImage() }
                 }
             }
-            ZStack(alignment: .topLeading) {
-                if engine.draft.isEmpty { Text("Message the model…").font(.body).foregroundStyle(.tertiary).padding(.horizontal, 9).padding(.top, 4).allowsHitTesting(false) }
-                TextEditor(text: $engine.draft).font(.body).scrollContentBackground(.hidden).frame(height: 70).padding(4)
-                    .focused($composerFocused).disabled(engine.busy).accessibilityLabel("Message")
-            }.overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+            VStack(alignment: .leading, spacing: 5) {
+                ZStack(alignment: .topLeading) {
+                    if engine.draft.isEmpty { Text("Message the model…").font(.body).foregroundStyle(.tertiary).padding(.horizontal, 9).padding(.top, 4).allowsHitTesting(false) }
+                    TextEditor(text: $engine.draft).font(.body).scrollContentBackground(.hidden).frame(height: 70).padding(4)
+                        .focused($composerFocused).disabled(engine.busy).accessibilityLabel("Message")
+                        .onKeyPress(keys: [.return], phases: .down) { press in
+                            // Let the input method confirm composed text before sending.
+                            guard press.modifiers.isEmpty,
+                                  (NSApp.keyWindow?.firstResponder as? NSTextInputClient)?.hasMarkedText() != true
+                            else { return .ignored }
+                            engine.generate()
+                            return .handled
+                        }
+                }.overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+                Text("↩ to send · ⇧↩ for a newline").font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("Return to send. Shift-Return for a newline.")
+            }
             HStack {
                 Button("Attach Image…", action: engine.selectImage)
                     .disabled(!engine.canAttachImage)
-                    .help(engine.supportsImages ? "Attach one PNG or JPEG image, up to 4 MiB." : "Run a qualified vision model to attach an image.")
+                    .help(engine.supportsImages ? engine.imageLimits?.help ?? "Attach one PNG or JPEG image, up to 4 MiB." : "Run a qualified vision model to attach an image.")
                 Text("Conversation stays in memory").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Send") { engine.generate(); composerFocused = true }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
                     .disabled(!engine.canSendMessage)
+            }
+            if engine.supportsImages, let limits = engine.imageLimits {
+                Text(limits.summary).font(.caption).foregroundStyle(.secondary).help(limits.help)
             }
         }
             .onDrop(of: [UTType.fileURL, .png, .jpeg], isTargeted: nil, perform: engine.acceptImageProviders)
@@ -3013,6 +3879,10 @@ private final class MenuPanel: NSPanel {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let engine: EngineController
+    private let interface: StarkInterfacePreferences
+    private let beginnerSession = BeginnerSetupSession()
+    private let beginnerOpenWork = BeginnerOpenWorkStatus()
+    private let beginnerOpenCode = BeginnerOpenWorkStatus(client: .openCode)
     private let modelManagement = ModelManagementState()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
@@ -3022,9 +3892,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var modelsWindow: NSWindow?
     private var promptWindow: NSWindow?
     private var connectionWindow: NSWindow?
+    private var beginnerWindow: NSWindow?
+    private var beginnerChatWindow: NSWindow?
+    private var windowParents: [ObjectIdentifier: NSWindow] = [:]
+    private var terminating = false
 
-    init(engine: EngineController = EngineController()) {
+    init(engine: EngineController = EngineController(), interface: StarkInterfacePreferences? = nil) {
         self.engine = engine
+        self.interface = interface ?? StarkInterfacePreferences()
         super.init()
     }
 
@@ -3074,15 +3949,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menuPanel.collectionBehavior = [.transient, .moveToActiveSpace, .fullScreenAuxiliary]
         menuPanel.onEscape = { [weak self] in self?.dismissMenu() }
         menuPanel.contentViewController = NSHostingController(rootView: MenuView(
-            engine: engine, updater: updater,
+            engine: engine, updater: updater, interface: interface,
             manage: { [weak self] in self?.showModels() },
             console: { [weak self] in self?.showPrompt() },
             connection: { [weak self] in self?.showConnection() })
+            .onChange(of: interface.mode) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.resizeMenuForUpdate() }
+            }
             .onChange(of: updater.message) { [weak self] _, _ in
                 DispatchQueue.main.async { self?.resizeMenuForUpdate() }
             }
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
             .clipShape(RoundedRectangle(cornerRadius: 13)))
+        engine.onModelInventory = { [weak self] in
+            guard let self else { return }
+            self.interface.resolveInitialMode(hasInstalledModels: !self.engine.models.isEmpty)
+        }
         engine.start()
         updater.startAutomaticChecks()
     }
@@ -3114,7 +3996,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return event }
             if event.type == .keyDown {
                 if event.keyCode == 53 { self.dismissMenu(); return nil }
-            } else if event.window !== self.menuPanel && event.window !== self.status.button?.window {
+            } else if event.window !== self.menuPanel && event.window !== self.status?.button?.window {
                 self.dismissMenu()
             }
             return event
@@ -3125,11 +4007,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func updateMenuHighlight() {
-        status.button?.highlight(menuPanel.isVisible)
+        status?.button?.highlight(menuPanel.isVisible)
         // AppKit clears the button's tracking highlight after dispatching its action.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.status.button?.highlight(self.menuPanel.isVisible)
+            self.status?.button?.highlight(self.menuPanel.isVisible)
         }
     }
 
@@ -3158,15 +4040,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         presentModels()
     }
 
-    private func presentModels(tab: ModelsSheetTab? = nil) {
+    private func presentModels(tab: ModelsSheetTab? = nil, parent: NSWindow? = nil) {
+        let origin = parent ?? navigationSource
+        if tab != nil {
+            interface.select(.advanced)
+            beginnerWindow?.orderOut(nil); beginnerChatWindow?.orderOut(nil)
+        }
+        if interface.mode == .beginner, tab == nil { showBeginner(parent: origin); return }
         dismissMenu()
         if let tab = tab { modelManagement.tab = tab }
         else if modelsWindow?.isVisible != true { modelManagement.tab = .initial }
         engine.requestModelFamilies()
         if modelsWindow?.isVisible != true {
-            let view = ModelsView(engine: engine, navigation: modelManagement,
-                                  onDone: { [weak self] in self?.modelsWindow?.close() },
-                                  onRun: { [weak self] identifier in self?.runSavedModel(identifier) })
+            let view = AdvancedModelsHost(engine: engine, navigation: modelManagement, interface: interface,
+                                  selectInterface: { [weak self] in self?.selectInterface($0) },
+                                  close: { [weak self] in self?.finishManagingModels() },
+                                  run: { [weak self] identifier in self?.runSavedModel(identifier) })
             if let modelsWindow = modelsWindow {
                 modelsWindow.contentViewController = NSHostingController(rootView: view)
             } else {
@@ -3174,7 +4063,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 modelsWindow?.delegate = self
             }
         }
-        present(modelsWindow)
+        present(modelsWindow, from: origin)
+    }
+
+    private func finishManagingModels() {
+        modelsWindow?.close()
     }
 
     private func runSavedModel(_ identifier: String) {
@@ -3182,33 +4075,124 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        guard let closing = notification.object as? NSWindow, closing === modelsWindow else { return }
-        engine.cancelModelCatalog()
+        guard let closing = notification.object as? NSWindow else { return }
+        if closing === modelsWindow { engine.cancelModelCatalog() }
+        let parent = removeWindowParent(of: closing)
+        guard !terminating, let parent else { return }
+        if parent === menuPanel {
+            if !menuPanel.isVisible { toggle() }
+        } else if parent.isVisible {
+            present(parent)
+        } else if !menuPanel.isVisible { toggle() }
+    }
+
+    private func removeWindowParent(of closing: NSWindow) -> NSWindow? {
+        let parent = windowParents.removeValue(forKey: ObjectIdentifier(closing))
+        // Closing an ancestor must not later resurrect it when its child closes.
+        for (identifier, candidate) in windowParents where candidate === closing {
+            windowParents[identifier] = parent ?? menuPanel
+        }
+        return parent
     }
 
     private func showPrompt() {
+        if interface.mode == .beginner { showBeginnerChat(); return }
+        let origin = navigationSource
         dismissMenu()
         if promptWindow == nil {
             promptWindow = window(title: "Stark — Playground",
                                   view: PlaygroundView(engine: engine,
                                                        connection: { [weak self] in self?.showConnection() },
                                                        manage: { [weak self] in self?.showModels() }), resizable: true)
+            promptWindow?.contentMinSize = NSSize(width: 520, height: 720)
+            promptWindow?.setContentSize(NSSize(width: 560, height: 750))
+            promptWindow?.delegate = self
         }
-        present(promptWindow)
+        present(promptWindow, from: origin)
     }
 
     private func showConnection() {
+        let origin = navigationSource
+        if interface.mode == .beginner {
+            beginnerOpenWork.refresh(engine: engine)
+            if beginnerSession.stage == .task, beginnerSession.task != nil, engine.modelReady, engine.loadedMode == .chat {
+                beginnerSession.continueAfterModel(snapshot: beginnerHost.snapshot)
+            }
+            showBeginner(parent: origin)
+            return
+        }
         dismissMenu()
         let view = ConnectionDetailsView(engine: engine,
                                          manage: { [weak self] in self?.showModels() },
                                          close: { [weak self] in self?.connectionWindow?.close() })
         if connectionWindow == nil {
             connectionWindow = window(title: "Stark — Connections", view: view, resizable: false)
+            connectionWindow?.delegate = self
         } else {
             // Reset the inspected model so each opening defaults to the running model.
             connectionWindow?.contentViewController = NSHostingController(rootView: view)
         }
-        present(connectionWindow)
+        present(connectionWindow, from: origin)
+    }
+
+    private var beginnerHost: BeginnerSetupHost {
+        BeginnerSetupHost(engine: engine, openWork: engine.desktopConnections.openWork, openCode: engine.desktopConnections.openCode,
+            session: beginnerSession, interface: interface, observation: beginnerOpenWork, openCodeObservation: beginnerOpenCode,
+            selectInterface: { [weak self] in self?.selectInterface($0) },
+            openChat: { [weak self] in self?.showBeginnerChat() })
+    }
+
+    private func showBeginner(parent: NSWindow? = nil) {
+        let origin = parent ?? navigationSource
+        dismissMenu()
+        if beginnerWindow == nil {
+            beginnerWindow = makeBeginnerWindow()
+        }
+        present(beginnerWindow, from: origin)
+    }
+
+    private func makeBeginnerWindow() -> NSWindow {
+        let result = window(title: "Stark — Guided Setup", view: beginnerHost, resizable: true)
+        // Set AppKit's initial size explicitly: SwiftUI's ideal size is not
+        // applied reliably when the hosting controller contains a ScrollView.
+        result.setContentSize(NSSize(width: 700, height: 800))
+        if let screen = result.screen ?? NSScreen.main {
+            var frame = result.frame
+            frame.size.width = min(frame.width, screen.visibleFrame.width)
+            frame.size.height = min(frame.height, screen.visibleFrame.height)
+            result.setFrame(frame, display: false)
+        }
+        result.center()
+        return result
+    }
+
+    private func showBeginnerChat() {
+        let origin = navigationSource
+        dismissMenu()
+        if beginnerChatWindow == nil {
+            let view = BeginnerChatView(engine: engine, interface: interface,
+                selectInterface: { [weak self] in self?.selectInterface($0) },
+                setup: { [weak self] in self?.showBeginner() },
+                tryAnotherModel: { [weak self] in
+                    guard let self else { return }
+                    self.beginnerOpenWork.refresh(engine: self.engine)
+                    self.beginnerSession.beginAnotherModel(snapshot: self.beginnerHost.snapshot)
+                    self.showBeginner()
+                })
+            beginnerChatWindow = window(title: "Stark — Chat", view: view, resizable: true)
+        }
+        present(beginnerChatWindow, from: origin)
+    }
+
+    private func selectInterface(_ mode: StarkInterfaceMode) {
+        interface.select(mode)
+        if mode == .beginner {
+            modelsWindow?.orderOut(nil); promptWindow?.orderOut(nil); connectionWindow?.orderOut(nil)
+            showBeginner(parent: menuPanel)
+        } else {
+            beginnerWindow?.orderOut(nil); beginnerChatWindow?.orderOut(nil)
+            presentModels(parent: menuPanel)
+        }
     }
 
     private func window<V: View>(title: String, view: V, resizable: Bool) -> NSWindow {
@@ -3218,12 +4202,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         result.isReleasedWhenClosed = false
         result.isRestorable = false
         result.disableSnapshotRestoration()
+        result.delegate = self
         result.center()
         return result
     }
 
-    private func present(_ window: NSWindow?) {
+    private var navigationSource: NSWindow? {
+        if menuPanel.isVisible { return menuPanel }
+        let managed = [modelsWindow, promptWindow, connectionWindow, beginnerWindow, beginnerChatWindow].compactMap { $0 }
+        return managed.first { $0 === NSApplication.shared.keyWindow && $0.isVisible }
+            ?? managed.first { $0 === NSApplication.shared.mainWindow && $0.isVisible }
+    }
+
+    private func rememberWindowParent(_ window: NSWindow, from parent: NSWindow) {
+        guard parent !== window else { return }
+        let previousParent = windowParents[ObjectIdentifier(window)] ?? menuPanel
+        var ancestor = parent
+        var visited = Set<ObjectIdentifier>()
+        while visited.insert(ObjectIdentifier(ancestor)).inserted,
+              let next = windowParents[ObjectIdentifier(ancestor)] {
+            if next === window {
+                // Reopening an ancestor from its child reverses that link.
+                windowParents[ObjectIdentifier(ancestor)] = previousParent
+                break
+            }
+            ancestor = next
+        }
+        windowParents[ObjectIdentifier(window)] = parent
+    }
+
+    private func present(_ window: NSWindow?, from parent: NSWindow? = nil) {
         guard let window else { return }
+        if let parent { rememberWindowParent(window, from: parent) }
         // Select the requested key/main window before activation. AppKit's
         // default activation brings those windows forward; never activate all.
         window.makeKeyAndOrderFront(nil)
@@ -3231,8 +4241,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        terminating = true
+        return .terminateNow
+    }
     func applicationWillTerminate(_ notification: Notification) {
-        updater.stopAutomaticChecks()
+        updater.prepareForTermination()
         engine.shutdown()
     }
 }

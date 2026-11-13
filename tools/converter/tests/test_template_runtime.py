@@ -74,6 +74,8 @@ def test_compile_time_constant_expansion_is_guarded(source):
         "{{ [messages[0]] * 1000000000 }}",
         "{{ [messages[0]] * 16000 | join }}",
         "{{ messages[0] | replace('x', messages[0]) }}",
+        "{{ messages[0].replace('x', messages[0]) }}",
+        "{{ messages[0].replace('', messages[0]) }}",
         "{{ messages[0] | tojson(indent=1000000000) }}",
         "{{ '%1000000000s' % messages[0] }}",
         "{{ '{:1000000000}'.format(messages[0]) }}",
@@ -85,10 +87,12 @@ def test_compile_time_constant_expansion_is_guarded(source):
         "{% set ns.x=[ns.x, ns.x] %}{% endfor %}{{ ns.x | striptags }}",
     ],
 )
-def test_unbounded_primitives_fail_with_fixed_errors_and_leave_control_healthy(source):
+def test_unbounded_primitives_fail_with_fixed_errors_and_leave_control_healthy(source, monkeypatch):
+    # Exercise a defined allocation boundary independently of host RAM.
+    monkeypatch.setattr(template_runtime, "REQUEST_BUDGET_MIB", 1)
     template = IsolatedTemplate(source)
     with pytest.raises(TemplateRuntimeError) as error:
-        template.render(messages=["x" * 1025])
+        template.render(messages=["x" * 8193])
     assert str(error.value) == template_runtime.ERROR
     assert source not in str(error.value)
     assert IsolatedTemplate("{{ messages[0] }}").render(messages=["healthy control"]) == "healthy control"
@@ -102,13 +106,18 @@ def test_unbounded_primitives_fail_with_fixed_errors_and_leave_control_healthy(s
         "{% for n in range(16000) %}{{ messages[0] }}{% endfor %}",
     ],
 )
-def test_all_output_buffers_are_capped(source):
+def test_all_output_buffers_are_capped(source, monkeypatch):
+    # Captured blocks are bounded by the native allocator as well as the final
+    # writer. A small test envelope exercises both without large allocations.
+    monkeypatch.setattr(template_runtime, "REQUEST_BUDGET_MIB", 1)
     with pytest.raises(TemplateRuntimeError):
-        IsolatedTemplate(source).render(messages=["x" * 1024])
+        IsolatedTemplate(source).render(messages=["x" * 8193])
 
 
 @pytest.mark.parametrize("route", ["capture", "concat", "list", "dict", "call", "method", "filter"])
-def test_aggregate_expansion_is_bounded_in_the_native_child(route):
+def test_aggregate_expansion_is_bounded_in_the_native_child(route, monkeypatch):
+    # Exercise the same allocator policy with a small developer-test envelope.
+    monkeypatch.setattr(template_runtime, "REQUEST_BUDGET_MIB", 1)
     # Individual results stay below the output cap; retained intermediates
     # exceed the native allocator's cumulative limit before they can escape.
     values = ["p * 16"] * 512
@@ -129,12 +138,13 @@ def test_aggregate_expansion_is_bounded_in_the_native_child(route):
         source = "{% set captured = dict(" + ",".join(f"k{index}={value}" for index, value in enumerate(values))
         source += ") %}ok"
     with pytest.raises(TemplateRuntimeError):
-        IsolatedTemplate(source).render(p="x" * (65536 if route in {"method", "filter"} else 4096))
+        IsolatedTemplate(source).render(p="x" * (131073 if route in {"method", "filter"} else 8193))
     assert IsolatedTemplate("{{ value }}").render(value="healthy control") == "healthy control"
 
 
 @pytest.mark.parametrize("route", ["list", "dict", "call"])
-def test_retained_slice_copies_are_bounded_in_the_native_child(route):
+def test_retained_slice_copies_are_bounded_in_the_native_child(route, monkeypatch):
+    monkeypatch.setattr(template_runtime, "REQUEST_BUDGET_MIB", 1)
     values = ["p[1:]"] * 512
     if route == "list":
         source = "{% set captured = [" + ",".join(values) + "] %}ok"
@@ -145,7 +155,7 @@ def test_retained_slice_copies_are_bounded_in_the_native_child(route):
         source = "{% set captured = dict(" + ",".join(f"k{index}={item}" for index, item in enumerate(values))
         source += ") %}ok"
     with pytest.raises(TemplateRuntimeError):
-        IsolatedTemplate(source).render(p="x" * 65536)
+        IsolatedTemplate(source).render(p="x" * 131073)
 
 
 def test_bounded_slicing_preserves_indexes_steps_and_empty_slices():
@@ -153,6 +163,27 @@ def test_bounded_slicing_preserves_indexes_steps_and_empty_slices():
     arguments = {"p": "abcdef", "messages": ["a", "b", "c"]}
     expected = chat_template_environment().from_string(source).render(**arguments)
     assert IsolatedTemplate(source).render(**arguments) == expected
+
+
+@pytest.mark.parametrize("text,old,new", [("abcabc", "a", "é"), ("é😀", "", "x"), ("abc", "z", ""), ("", "", "x")])
+@pytest.mark.parametrize("count", [None, -1, 0, 1, 2, 100])
+def test_string_replace_matches_python_including_empty_unicode_patterns(text, old, new, count):
+    source = "{{ text.replace(old, new" + (", count" if count is not None else "") + ") }}"
+    expected = text.replace(old, new) if count is None else text.replace(old, new, count)
+    assert IsolatedTemplate(source).render(text=text, old=old, new=new, count=count) == expected
+
+
+def test_reviewed_calendar_format_uses_local_date_and_rejects_other_formats():
+    import datetime
+
+    before = datetime.datetime.now().date()
+    result = IsolatedTemplate('{{ strftime_now("%d %B %Y") }}').render()
+    after = datetime.datetime.now().date()
+    months = ("January February March April May June July August September October November December").split()
+    expected = {f"{day.day:02} {months[day.month - 1]} {day.year}" for day in (before, after)}
+    assert result in expected
+    with pytest.raises(TemplateRuntimeError):
+        IsolatedTemplate('{{ strftime_now("%s") }}').render()
 
 
 def test_bounded_literal_containers_preserve_empty_values_and_unpacking():
@@ -163,6 +194,44 @@ def test_bounded_literal_containers_preserve_empty_values_and_unpacking():
     )
     expected = chat_template_environment().from_string(source).render()
     assert IsolatedTemplate(source).render() == expected
+
+
+@pytest.mark.parametrize("ensure_ascii", [True, False])
+@pytest.mark.parametrize("indent", [None, 2])
+def test_explicit_json_ascii_policy_matches_python_json_with_html_escaping(ensure_ascii, indent):
+    value = {"é": ["é😀<&>'\u0000\n\r\t\b\f\u001f\u007f\u0085\u2028"], "a": 1.0}
+    options = f"ensure_ascii={'true' if ensure_ascii else 'false'}"
+    if indent is not None:
+        options += f", indent={indent}"
+    source = "{{ value | tojson(" + options + ") }}"
+    expected = json.dumps(value, ensure_ascii=ensure_ascii, sort_keys=True, indent=indent)
+    for character, escaped in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"), ("'", "\\u0027")):
+        expected = expected.replace(character, escaped)
+    assert IsolatedTemplate(source).render(value=value) == expected
+
+
+@pytest.mark.parametrize("options", ["ensure_ascii=none", "ensure_ascii=1", "ensure_ascii='false'", "unknown=true"])
+def test_json_options_reject_unsupported_values_and_keywords(options):
+    with pytest.raises(TemplateRuntimeError):
+        IsolatedTemplate("{{ value | tojson(" + options + ") }}").render(value="synthetic")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{{ _args }}{% set _args=1 %}",
+        "{% if false %}{% set _args=1 %}{% endif %}{{ _args }}",
+        "{% for _args in [] %}{% endfor %}{{ _args }}",
+    ],
+)
+def test_private_root_arguments_do_not_supply_unbound_locals(source):
+    assert IsolatedTemplate(source).render(_args="caller-private") == ""
+
+
+def test_unused_private_root_keys_and_nested_json_keep_their_public_behavior():
+    assert IsolatedTemplate("{{ value }}").render(value="public", _unused="ignored") == "public"
+    source = "{% set _args=value %}{{ _args['_private'] }}"
+    assert IsolatedTemplate(source).render(value={"_private": "nested data"}, _args="caller-private") == "nested data"
 
 
 @pytest.mark.parametrize(
@@ -238,7 +307,7 @@ def test_source_input_and_ast_limits_fail_closed():
     with pytest.raises(TemplateRuntimeError):
         IsolatedTemplate("{{ x }}" * 20000)
     with pytest.raises(TemplateRuntimeError):
-        IsolatedTemplate("{{ messages }}").render(messages=["x" * template_runtime.MAX_REQUEST_BYTES])
+        IsolatedTemplate("{{ messages }}").render(messages=["x" * (template_runtime.MAX_OUTPUT_BYTES + 1)])
     with pytest.raises(TemplateRuntimeError):
         IsolatedTemplate("{{ messages }}").render(messages=[object()])
 

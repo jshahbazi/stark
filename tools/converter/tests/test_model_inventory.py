@@ -70,6 +70,66 @@ def bind_receipt(receipt):
     receipt["source_manifest_sha256"] = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def partitioned_artifact(path, *, segments=((3, 4, 64), (2, 6, 64)), malformed=None, uniform_widths=()):
+    model = artifact(path)
+    weights_path = path / "model.safetensors"
+    raw = weights_path.read_bytes()
+    header_length = struct.unpack("<Q", raw[:8])[0]
+    header = json.loads(raw[8 : 8 + header_length])
+    old_metadata = header["__metadata__"]
+    header = {"__metadata__": old_metadata}
+    metadata = {}
+    offset = 0
+    parent = "decoder.layer.mixer.in_proj.weights"
+    encoded_segments = []
+    for index, (rows, bits, group) in enumerate(segments):
+        actual_rows = rows + 1 if malformed == (index, "rows") else rows
+        columns = 64
+        base = f"{parent}.segment_{index}"
+        code_bytes = columns * bits // 8
+        header[base + ".weights"] = {
+            "dtype": "U8",
+            "shape": [actual_rows, code_bytes],
+            "data_offsets": [offset, offset + actual_rows * code_bytes],
+        }
+        offset += actual_rows * code_bytes
+        parameter_rows = actual_rows + (-actual_rows % 4)
+        for plane in ("scales", "biases"):
+            count = (columns // group) * parameter_rows
+            header[base + "." + plane] = {
+                "dtype": "BF16",
+                "shape": [columns // group, parameter_rows],
+                "data_offsets": [offset, offset + count * 2],
+            }
+            offset += count * 2
+        encoded_segments.append({"rows": rows, "bits": bits, "group_size": group})
+    for index, bits in enumerate(uniform_widths):
+        base = f"uniform{index}"
+        header[base + ".weights"] = {
+            "dtype": "U8",
+            "shape": [2, 4],
+            "data_offsets": [offset, offset + 8],
+        }
+        offset += 8
+        metadata[base + ".spec"] = json.dumps(
+            {"type": "MLXSpec", "layout": "output_input", "bits": bits, "group_size": 64}
+        )
+    if malformed == "width":
+        encoded_segments[0]["bits"] = 7
+    metadata[parent + ".spec"] = json.dumps(
+        {"type": "MLXRowPartitionedSpec", "layout": "output_input", "segments": encoded_segments}
+    )
+    header["__metadata__"] = metadata
+    encoded = json.dumps(header).encode()
+    weights_path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + b"\0" * offset)
+    receipt_path = path / "conversion.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["output_bytes"] = weights_path.stat().st_size
+    bind_receipt(receipt)
+    receipt_path.write_text(json.dumps(receipt))
+    return model
+
+
 @pytest.mark.parametrize(
     "specs,label",
     [
@@ -92,6 +152,23 @@ def test_storage_comes_from_actual_matrix_specs_not_names(tmp_path, specs, label
     assert result["family_id"] == "qwen3" and result["source_revision"] == "a" * 40
     assert result["weight_bytes"] == (tmp_path / "model.safetensors").stat().st_size
     assert "path" not in result and "qualification" not in result
+
+
+def test_row_partitioned_spec_expands_widths_for_inventory(tmp_path):
+    model = partitioned_artifact(tmp_path / "partitioned")
+    result = inventory.model_display(model)
+    assert result["quantization"] == "4-bit / 6-bit"
+
+
+def test_row_partitioned_inventory_preserves_other_matrix_widths(tmp_path):
+    model = partitioned_artifact(tmp_path / "partitioned", segments=((3, 4, 64), (2, 5, 64)), uniform_widths=(8,))
+    assert inventory.model_display(model)["quantization"] == "4-bit / 5-bit / 8-bit"
+
+
+@pytest.mark.parametrize("malformed", [(0, "rows"), "width"])
+def test_row_partitioned_inventory_rejects_bad_segment_metadata_or_shape(tmp_path, malformed):
+    model = partitioned_artifact(tmp_path / "partitioned", malformed=malformed)
+    assert inventory.model_display(model)["quantization"] is None
 
 
 def test_revisions_and_quantizations_group_same_repo_but_fine_tunes_remain_distinct(tmp_path):

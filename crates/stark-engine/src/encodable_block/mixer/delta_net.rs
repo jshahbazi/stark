@@ -8,7 +8,7 @@ use crate::backends::common::{CommandBufferExecutable, CommandBufferPending};
 use crate::{
     array::size_for_shape,
     backends::common::{
-        Backend, Buffer, BufferRef, CommandBuffer, CommandBufferEncoding, Context, Kernels,
+        Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, Context, Kernels,
         kernel::{
             Conv1dPackKernel, ConvTreeScanKernel, DeltaNetConvScanKernel, DeltaNetConvUpdateKernel,
             DeltaNetNormGateKernel, DeltaNetPrefillKernel, DeltaNetPrefillPrepKernel, DeltaNetUpdateKernel,
@@ -24,7 +24,7 @@ use crate::{
         batch_topology::BatchTopology,
         linear::{Linear, LinearBlockError},
         mixer::{
-            Mixer, MixerState,
+            Mixer, MixerState, MixerStateSnapshot,
             attention::rope::PrecalculatedRoPE,
             delta_net::tree_verify::{TreeVerifyEncodeArguments, TreeVerifyNewArguments},
         },
@@ -33,9 +33,13 @@ use crate::{
     utils::maybe_mut::MaybeMut,
 };
 
+#[cfg(test)]
+mod prefix_tests;
 mod reference_chunk;
 #[cfg(test)]
 mod reference_tests;
+#[cfg(all(test, backend = "metal"))]
+mod short_chain_tests;
 pub(crate) mod tree_verify;
 
 const INNER_DATA_TYPE: DataType = DataType::F32;
@@ -63,7 +67,71 @@ pub struct DeltaNetState<B: Backend> {
     state_advance: <B::Kernels as Kernels>::StateAdvanceKernel,
 }
 
+struct DeltaNetPrefix<B: Backend> {
+    conv: B::GlobalBuffer,
+    ssm: B::GlobalBuffer,
+}
+
+impl<B: Backend> MixerStateSnapshot<B> for DeltaNetPrefix<B> {
+    fn can_restore(
+        &self,
+        state: &dyn MixerState<B>,
+    ) -> bool {
+        (state as &dyn std::any::Any).downcast_ref::<DeltaNetState<B>>().is_some_and(|state| {
+            state.conv_state.size() == self.conv.size() && state.ssm_state.size() == self.ssm.size()
+        })
+    }
+    fn restore(
+        &self,
+        state: &mut dyn MixerState<B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> bool {
+        let Some(state) = (state as &mut dyn std::any::Any).downcast_mut::<DeltaNetState<B>>() else {
+            return false;
+        };
+        command.encode_copy(&self.conv, &mut state.conv_state);
+        command.encode_copy(&self.ssm, &mut state.ssm_state);
+        state.suffix_status = None;
+        #[cfg(feature = "deferred-state-init")]
+        {
+            state.needs_zero_initialization = false;
+        }
+        true
+    }
+    fn payload_bytes(&self) -> usize {
+        self.conv.size() + self.ssm.size()
+    }
+}
+
 impl<B: Backend> MixerState<B> for DeltaNetState<B> {
+    fn resident_payload_bytes(&self) -> Option<usize> {
+        self.conv_state.size().checked_add(self.ssm_state.size())
+    }
+
+    fn capture_prefix(
+        &self,
+        _position: u32,
+        context: &B::Context,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<Box<dyn MixerStateSnapshot<B>>>, B::Error> {
+        // Only a committed state can be retained. Tree scratch contains
+        // speculative rows and must have been consumed by encode_accept.
+        if self.suffix_status.is_some() {
+            return Ok(None);
+        }
+        #[cfg(feature = "deferred-state-init")]
+        if self.needs_zero_initialization {
+            return Ok(None);
+        }
+        let mut conv = context.create_buffer(self.conv_state.size())?;
+        let mut ssm = context.create_buffer(self.ssm_state.size())?;
+        command.encode_copy(&self.conv_state, &mut conv);
+        command.encode_copy(&self.ssm_state, &mut ssm);
+        Ok(Some(Box::new(DeltaNetPrefix {
+            conv,
+            ssm,
+        })))
+    }
     fn prepare(
         &mut self,
         _context_length: u32,
@@ -433,6 +501,7 @@ impl<B: Backend> DeltaNet<B> {
         in_projected: impl BufferRef<Backend = B>,
         batch_dim: &BatchTopology,
         state: &mut DeltaNetState<B>,
+        project_output: bool,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
         let tree_verify = self.tree_verify.as_ref().expect("DeltaNet tree verification is unsupported");
@@ -487,12 +556,12 @@ impl<B: Backend> DeltaNet<B> {
 
         let mut delta_output = tree_verify.encode(
             TreeVerifyEncodeArguments {
-                q: &q,
-                k: &k,
-                v: &v,
+                q: q.subrange(..),
+                k: k.subrange(..),
+                v: v.subrange(..),
                 trie: &trie,
-                log_decay: &log_decay,
-                beta: &beta,
+                log_decay: log_decay.subrange(..),
+                beta: beta.subrange(..),
                 h0: &state.ssm_state,
                 tree_size,
             },
@@ -513,7 +582,11 @@ impl<B: Backend> DeltaNet<B> {
             command_buffer,
         );
 
-        let output = self.out_projection.encode(delta_output, tree_size, command_buffer)?;
+        let output = if project_output {
+            self.out_projection.encode(delta_output, tree_size, command_buffer)?
+        } else {
+            delta_output
+        };
         state.suffix_status = Some(DeltaNetSuffixStatus::Tree {
             conv_states,
             k,
@@ -524,15 +597,218 @@ impl<B: Backend> DeltaNet<B> {
         });
         Ok(output)
     }
+
+    /// A tiny flat speculative chain uses the identical T=1 solve and state
+    /// advance arithmetic as serial target decoding. Closed-form multi-row
+    /// solves reorder FP32 operations and can change BF16 target decisions.
+    /// Projection and output projection still process all rows together.
+    fn encode_short_chain_verify(
+        &self,
+        projected: impl BufferRef<Backend = B>,
+        batch: &BatchTopology,
+        state: &mut DeltaNetState<B>,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        self.encode_short_chain_verify_with_mode(projected, batch, state, true, command)
+    }
+
+    fn encode_short_chain_verify_with_mode(
+        &self,
+        projected: impl BufferRef<Backend = B>,
+        batch: &BatchTopology,
+        state: &mut DeltaNetState<B>,
+        use_fused: bool,
+        command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        let count = batch.size();
+        let tree_verify = self.tree_verify.as_ref().expect("DeltaNet tree verification is unsupported");
+        // Verification must leave committed state untouched. Convolution
+        // history is a read-only tree scan with identical per-channel math.
+        let mut all_conv =
+            command.allocate_scratch_for_shape(&[count, self.conv_dim, self.kernel_size - 1], INNER_DATA_TYPE)?;
+        let mut all_q = command.allocate_scratch_for_shape(&[count, self.key_dim], self.outer_data_type)?;
+        let mut all_k = command.allocate_scratch_for_shape(&[count, self.key_dim], self.outer_data_type)?;
+        let mut all_v = command.allocate_scratch_for_shape(&[count, self.value_dim], self.outer_data_type)?;
+        let mut all_beta = command.allocate_scratch_for_shape(&[count, self.num_heads], INNER_DATA_TYPE)?;
+        let mut all_decay = command.allocate_scratch_for_shape(&[count, self.num_heads], INNER_DATA_TYPE)?;
+        let mut tree_projected =
+            command.allocate_scratch_for_shape(&[count, self.total_proj_dim], self.outer_data_type)?;
+        let parents = command.allocate_constant_from_slice(batch.parents())?;
+        self.conv_tree_scan.encode(
+            projected,
+            &self.conv_weight,
+            self.conv_bias.as_ref(),
+            &state.conv_state,
+            &parents,
+            &mut tree_projected,
+            &mut all_conv,
+            count,
+            self.total_proj_dim,
+            self.conv_dim,
+            command,
+        );
+        self.delta_net_tree_prep.encode(
+            &tree_projected,
+            &tree_projected,
+            &self.a_log,
+            &self.dt_bias,
+            &mut all_q,
+            &mut all_k,
+            Some(&mut all_v),
+            &mut all_beta,
+            &mut all_decay,
+            self.num_heads,
+            self.num_groups,
+            self.key_dim,
+            self.value_dim,
+            count,
+            self.total_proj_dim,
+            u32::from(self.reference_bf16),
+            command,
+        );
+        let nodes = [crate::backends::common::gpu_types::trie::TrieNode {
+            trie_start: 0,
+            trie_end: 0,
+            height: 0,
+        }];
+        let trie = command.allocate_constant_from_slice(&nodes)?;
+        let fused_output = if use_fused && batch.is_flat() && !self.reference_bf16 {
+            tree_verify.encode_short_chain(
+                TreeVerifyEncodeArguments {
+                    q: all_q.subrange(..),
+                    k: all_k.subrange(..),
+                    v: all_v.subrange(..),
+                    trie: &trie,
+                    beta: all_beta.subrange(..),
+                    log_decay: all_decay.subrange(..),
+                    h0: &state.ssm_state,
+                    tree_size: count,
+                },
+                command,
+            )?
+        } else {
+            None
+        };
+        let mut all_output = if let Some(output) = fused_output {
+            output
+        } else {
+            // Keep the exact serial T=1 verifier as the fallback and reference.
+            let mut working_ssm = command.allocate_scratch(state.ssm_state.size())?;
+            command.encode_copy(&state.ssm_state, &mut working_ssm);
+            let mut all_output = command.allocate_scratch_for_shape(&[count, self.value_dim], self.outer_data_type)?;
+            let accepted = command.allocate_constant_from_slice(&[0u32])?;
+            let key_bytes = self.key_dim as usize * self.outer_data_type.size_in_bytes();
+            let output_bytes = self.value_dim as usize * self.outer_data_type.size_in_bytes();
+            let scalar_bytes = self.num_heads as usize * INNER_DATA_TYPE.size_in_bytes();
+            for row in 0..count as usize {
+                let q = all_q.subrange(row * key_bytes..(row + 1) * key_bytes);
+                let k = all_k.subrange(row * key_bytes..(row + 1) * key_bytes);
+                let v = all_v.subrange(row * output_bytes..(row + 1) * output_bytes);
+                let beta = all_beta.subrange(row * scalar_bytes..(row + 1) * scalar_bytes);
+                let log_decay = all_decay.subrange(row * scalar_bytes..(row + 1) * scalar_bytes);
+                let output = tree_verify.encode(
+                    TreeVerifyEncodeArguments {
+                        q,
+                        k,
+                        v,
+                        trie: &trie,
+                        beta,
+                        log_decay,
+                        h0: &working_ssm,
+                        tree_size: 1,
+                    },
+                    command,
+                )?;
+                command.encode_copy(&output, all_output.subrange_mut(row * output_bytes..(row + 1) * output_bytes));
+                // The last speculative state is never consumed. Committing any
+                // accepted prefix later still uses the existing StateAdvance path.
+                if row + 1 < count as usize {
+                    state.state_advance.encode(k, v, log_decay, beta, &accepted, &mut working_ssm, 1, command);
+                }
+            }
+            all_output
+        };
+        self.delta_net_norm_gate.encode(
+            &mut all_output,
+            &tree_projected,
+            &self.norm_weight,
+            self.num_heads,
+            self.value_head_dim,
+            self.value_dim,
+            self.conv_dim,
+            self.total_proj_dim,
+            self.norm_epsilon,
+            count,
+            u32::from(self.reference_bf16),
+            command,
+        );
+        state.suffix_status = Some(DeltaNetSuffixStatus::Tree {
+            conv_states: all_conv,
+            k: all_k,
+            v: all_v,
+            beta: all_beta,
+            log_decay: all_decay,
+            parents: batch.parents().into(),
+        });
+        self.out_projection.encode(all_output, count, command)
+    }
 }
 
 impl<B: Backend> Mixer<B> for DeltaNet<B> {
+    fn prefix_snapshot_supported(&self) -> bool {
+        // DeltaNetPrefix preserves both convolution history and recurrent
+        // state after encode_accept has committed the complete flat chunk.
+        true
+    }
+
     fn speculation_supported(&self) -> bool {
         self.tree_verify.is_some()
     }
 
     fn max_context_length(&self) -> Option<u32> {
         None
+    }
+
+    fn memory_estimate(
+        &self,
+        _context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        use crate::encodable_block::memory::{MemoryEstimate, checked_bytes};
+        let inner = INNER_DATA_TYPE.size_in_bytes();
+        let outer = self.outer_data_type.size_in_bytes();
+        let state_rows = self.kernel_size.checked_sub(1)?;
+        let conv = checked_bytes(&[self.conv_dim, state_rows], inner)?;
+        let ssm = checked_bytes(&[self.num_heads, self.value_head_dim, self.head_dim], inner)?;
+        let mut estimate = MemoryEstimate::state(conv.checked_add(ssm)?);
+        estimate.prefix_snapshot_bytes = conv.checked_add(ssm)?;
+        for rows in [input_tokens.clamp(1, 1024), 1] {
+            let mut scratch = MemoryEstimate::default();
+            scratch.add_scratch(&[rows, self.total_proj_dim], outer, 2)?;
+            scratch.add_scratch(&[rows.checked_add(state_rows)?, self.total_proj_dim], inner, 1)?;
+            scratch.add_scratch(&[rows, self.value_dim], outer, 2)?;
+            scratch.add_scratch(&[rows, self.key_dim], inner, 2)?;
+            scratch.add_scratch(&[rows, self.num_heads], inner, 3)?;
+            scratch.add_scratch(&[self.conv_dim, state_rows], inner, 1)?;
+            if rows > 1 && (self.chunked.is_some() || self.reference_chunk.is_some()) {
+                let chunks = rows.div_ceil(64);
+                if self.chunked.is_some() {
+                    scratch.add_scratch(&[chunks, self.num_groups, 64, 64], inner, 1)?;
+                    // QK, packed blocks and inverse blocks are each no larger
+                    // than this full per-head chunk plane; plus BF16 T.
+                    scratch.add_scratch(&[chunks, self.num_heads, 64, 64], inner, 3)?;
+                    scratch.add_scratch(&[chunks, self.num_heads, 64, 64], 2, 1)?;
+                }
+                if self.reference_chunk.is_some() {
+                    scratch.add_scratch(&[chunks, self.num_heads, 64, 128], 4, 6)?;
+                    scratch.add_scratch(&[chunks, self.num_heads, 64, 64], 4, 2)?;
+                    scratch.add_scratch(&[chunks, self.num_heads, 64], 4, 1)?;
+                    scratch.add_scratch(&[self.num_heads, 64, 128], 4, 1)?;
+                }
+            }
+            estimate = estimate.sequential(scratch)?;
+        }
+        Some(estimate)
     }
 
     fn create_empty_state(
@@ -612,7 +888,11 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
         let mut in_projected = self.in_projection.encode(hidden, batch_dim.size(), command_buffer)?;
 
         if !batch_dim.full_accept() {
-            let output = self.encode_tree_verify(&in_projected, batch_dim, state, command_buffer)?;
+            let output = if batch_dim.is_flat() && (2..=4).contains(&batch_dim.size()) {
+                self.encode_short_chain_verify(&in_projected, batch_dim, state, command_buffer)?
+            } else {
+                self.encode_tree_verify(&in_projected, batch_dim, state, true, command_buffer)?
+            };
 
             command_buffer.pop_debug_group();
 

@@ -7,7 +7,141 @@
 
 ## Extraction and local changes
 
-Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision; vision execution remains excluded.
+Stark additionally admits indexed affine Flash Next exports whose declared
+per-projection precision matches the implemented Q4/group-64 experts, Q8/group-64
+ordinary projections, Q8/group-128 trunk shared experts and Q4/group-32 PLE
+ranges. The adapter preserves original tensor files and byte intervals, aliases
+the indexed PLE shard names into the existing paged table, and retains the
+source's Q8 embedding and shared-expert gates. Source PLE manifests and actual
+tensor headers are checked before installation. This is storage admission.
+indexed exports retain zero-centered norm deltas and select the existing
+ordinary arithmetic with F32 `1 + weight`, including HC normalization. The
+MLX-Serve folded-gain stock paths remain exclusive to their original contract.
+Indexed MLX Conv3d patch weights are admitted in `[out,T,H,W,C]` storage and
+their BF16 encodings are losslessly permuted once to `[out,C,T,H,W]` at load.
+The adapter bounds CPU temporaries to 12 MiB and preserves the source weight
+files and their hashes; the final tensor uses the canonical existing GPU layout.
+Checkpoint-specific numerical, cache, MTP and performance qualifications remain
+separate. No upstream arithmetic or quantization kernel is copied or changed
+for this adapter.
+
+Stark maintains the draft head during ordinary single-token decode in
+`src/qwen4exp/model.rs`. It reuses the existing prefill catch-up with views of
+the exact decode residual and input token before drawing. This covers the
+official affine N-1 prompt partition's held final token and subsequent
+caller-selected decode steps. Target arithmetic, precision and speculative
+verification's separate head maintenance remain unchanged. Private checkpoint
+tests compare initial draft readouts before and after a different request;
+their presence alone does not establish artifact qualification.
+
+Stark adds an allocation-only text-request inventory in
+`src/qwen4exp/request_memory.rs`, exposed from the loaded model. It uses the
+selected K/V format, loaded draft-head presence, cache growth alignment,
+decode/prefill scratch geometry and prefix-snapshot payloads for host admission.
+The incremental admission path subtracts resident state and scratch, charges
+new context-cache growth at its overlap peak, replacement decode scratch,
+prefill scratch growth, and up to two request snapshots. It does not change
+tensor construction, kernels, precision or cache execution.
+
+Stark adds an ignored in-module retained-vision source replay in
+`src/qwen4exp/vision_reference_tests.rs`. It uses the existing private tower
+loader and graph, reads only the 333 BF16 visual tensors, and exports no
+production API. Its CPU producer binds the exact retained artifact and the
+Qwen4Exp vision arithmetic from Transformers revision
+`2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397`, following the pinned upstream
+`tools/reference/hf_vision_reference.py` recipe. Prefix-depth observations and
+the full 27-block output use frozen pixels and numerical gates; qualification
+results remain separate from this test's presence.
+
+Stark changes `src/kernels/metal/vision.metal` attention to follow that pinned
+Transformers eager operation graph: BF16 QK output, a separate BF16 scaled-score
+boundary, F32 softmax statistics, and globally normalized BF16 probabilities
+before PV. Two tiled QK passes bound scratch independently of the image's
+quadratic attention matrix. This replaces the upstream online policy that
+rounded unnormalized exponentials before dividing accumulated PV. Text attention
+uses separate shaders. Optional CPU producer hooks observe unchanged source
+operators on their exact inputs; private ignored native controls replay those
+inputs and retain aggregate metrics. Intermediate BF16 boundaries use explicit
+integer RNE barriers, following the existing Stark GDN policy, because native
+promotion can erase floating BF16 constructors. Test-only stage observers must
+match ordinary attention output exactly. See the [source-bound numerical record](../../docs/archive/runs/2026-11-07-retained-lily-vision-numerics.md).
+
+The test-only `src/kernels/metal/vision_contraction_reference.metal` adapts
+Stark's main-engine reference four-stream patch/32-stream dense contraction
+bodies from PyTorch `5c4886908584029761b579af026dcfb627c84070`,
+`BlasKernel.cpp`, `ReducedPrecisionFloatGemvFastPathKernel.cpp` and
+`functional_base.h`. This matches the CPU fixture's exact Torch revision.
+The existing BSD/MIT notices are retained in
+`scripts/licenses/distribution/pytorch-LICENSE` and `ggml-LICENSE` at the
+repository root. It has no production selector; actual source-input controls
+record its BF16 output agreement separately from the retained NAX path.
+
+Following exact controls on all 14 actual source-input linears, the separate
+`src/kernels/metal/vision_contraction.metal` retains the same arithmetic body
+for production vision only. The internal adapter admits the seven measured
+K/N/stream combinations and otherwise preserves the original NAX dispatch.
+It checks the 8,192-row image budget, dimensions, BF16 types and output spans,
+and dispatches at most 32 rows / 147,456 output elements at a time. It uses
+existing input/output views, with no copied weights or new activation buffers.
+The independent test-only witness remains unchanged; production bit agreement
+and the unchanged full-tower numerical gate are separate checks. Text kernels
+are unchanged by this vision policy.
+
+`src/kernels/metal/vision_nonlinear.metal` retains the main engine's measured
+Torch BF16 Welford/affine and GELU arithmetic bodies, with only binding wrappers
+adapted. Source lineage is Torch `5c4886908584029761b579af026dcfb627c84070`
+`moments_utils.h`, `layer_norm_kernel.cpp`, `Gelu.h`, SLEEF
+`5a1d179df9cf652951b59010a2d2075372d67f68` tanh/df helpers, and the pinned
+Arm NEON erf polynomial. Existing BSD/Boost/Arm notices remain in
+`scripts/licenses/distribution`. Only the vision graph selects these helpers.
+The measured 1,152-wide norm checks at most 8,192 rows; other widths retain
+the old norm. GELU checks the same row budget and at most `8192 * 4608`
+elements, dispatching at most 262,144 elements per tile; wider rows retain the
+old activation. Independent test-only copies and source-input bit assertions
+remain separate from the production path. The optional all-finite BF16 GELU
+fixture and its environment selector exist only inside the ignored unit test.
+
+The separate `vision_position.metal` retains the upstream position body and
+its BF16 blend/add boundaries under scoped safe, uncontracted math. The
+measured 48-by-48, 1,152-wide table selects a unique entrypoint; other table
+geometries retain the old path. Grid products, the 8,192-patch budget and
+tensor dtype/spans are checked before dispatch. Coordinates and interpolation
+geometry are unchanged. An independent test-only safe body remains separate;
+both source-input position controls require exact production bit agreement.
+
+The retained H1152/head72 rotary path derives live F32 inverse frequencies
+with Rust powf, builds block-major angles, and uses the measured SLEEF
+ADVSIMD sinf/cosf u10 schedule from
+`5a1d179df9cf652951b59010a2d2075372d67f68` in `src/qwen4exp/vision_math.rs`.
+The independent test-only copy is `vision_math_reference.rs`. Original
+Naoki Shibata/contributors copyright is preserved in both source headers,
+`ATTRIBUTION.sleef` and `NOTICE`; the Boost text is retained in
+`LICENSE.sleef`. The distribution source manifest records the pinned source
+hashes and adaptation. No reference vectors or checkpoint weights are embedded.
+Two scratch-owned F32 coefficient buffers cover at most 8,192 by 36 elements
+each, are refreshed before each image pass, and remain alive until GPU
+completion. Angles are finite and below 4,096. Separate F32 products/addition
+are applied by the vision-only `vision_rotary.metal` before its BF16 store.
+Other retained geometries keep the existing rotary path. Exact source F32
+coefficient and BF16 application checks remain separate from the tower gate.
+
+`src/kernels/metal/vision_attention.metal` selects source-order streaming
+attention only for the measured H1152/head72/16-head vision geometry, N at
+most 8,192 and divisible by four, and a 32-lane execution width. QK retains
+the aligned64/32-stream reduction and separate eight-term tail; F32 softmax
+retains four interleaved sums, the crosswise fold, pinned SLEEF expf_u10 and
+reciprocal multiply; PV retains four F32 streams. Integer BF16 barriers
+preserve the QK, scaled-score and probability boundaries. Three streaming
+sweeps keep fixed register state without an N-by-N tensor or weight copies.
+Unsupported geometries retain the existing NAX route; text kernels are
+unchanged. Independent matrix reference kernels and a test-only observer
+compiled over the production body require source bit agreement and exact
+observed-versus-ordinary output. The distribution manifest records PyTorch,
+GGML and SLEEF source/license lineage; existing NOTICE and LICENSE.sleef apply.
+The retained component qualification is recorded in the numerical record;
+it does not itself qualify full-worker lifecycle or throughput.
+
+Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision. Explicitly admitted original-format image artifacts can load the retained BF16 vision tower; ordinary text loading keeps it disabled.
 
 Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary single-token decode graph. The bridge returns complete F32 vocabulary readouts to Stark's caller-owned exact sampler, without the upstream GPU sampler's 1,024-candidate cap or probability arithmetic. Draft distributions and acceptance stay request-local; head catch-up is disabled for ordinary non-MTP requests. Verification evaluates up to four positions in one layer-major graph with the ordinary decode's affine dot expressions, reductions, normalization and rounding boundaries. Recurrent state and pre-convolution inputs are retained for exact prefix rollback. The original serial verifier remains a reference. The engine adapter restores partially consumed groups when a stream stops early, without sampling during cleanup. Checkpoint quantization and the ordinary target's activation, state, cache and weight arithmetic are preserved. Numerical and performance qualification is recorded separately.
 
@@ -31,15 +165,39 @@ These host changes alter no GPU arithmetic or checkpoint precision.
 
 Upstream environment-variable selection and diagnostics are disabled in the Stark integration. Precision is selected per operation: BF16 inputs and activations, F32 reductions, F32 logit buffers and F32 GDN recurrent state, plus explicitly selected Q8 attention K/V. Official head values are rounded to BF16 before widening into the F32 buffer. This policy description does not itself establish numerical equivalence or answer quality; source-bound component and model controls are recorded separately.
 
-The upstream Metal shaders originate at the pinned revision. Stark modifies five of those files:
+The upstream Metal shaders originate at the pinned revision. Stark modifies six of those files:
 
 - `src/kernels/metal/hc.metal` adds cached-activation up/mix and row-axis verifier entry points reusing the original single-row bodies. These preserve weight staging, dot/reduction expressions and the BF16 activation boundary. Ordinary decode keeps its original dispatches.
+- `src/kernels/metal/vision.metal` uses the source-bound BF16 attention boundaries and bounded two-pass softmax described above.
 - `src/kernels/metal/gdn.metal` keeps the gated output's explicit BF16 round in a thread-local value. Its verifier scan retains one F32 state column per thread across up to four positions, preserving the decode expression order and recording F32 states for rollback. The ordinary recurrent-state helper and norm reduction remain unchanged.
 - `src/kernels/metal/attention.metal` adds row-axis query/key preparation copied from the decode bodies, preserving the norm reduction, BF16 rotary rounding and existing BF16/Q8 cache formats. Verifier attention retains the decode SDPA/QSA reductions.
 - `src/kernels/metal/quant.metal` adds GDN Q4 two-row input projection with a convolution epilogue. It calls the existing packed dot helper, preserves the BF16 projection boundary and copies the original convolution expression, tap order and window update. Other layouts retain separate projection and convolution.
 - `src/kernels/metal/moe.metal` adds a decode down/combine entry point whose row owner also performs the following hyperconnection injection. It copies the original dot and slot-ordered combine, retains the BF16 branch output, and applies the original F32 injection expression to that rounded branch. Decode orders both the branch output and residual streams before their next consumers. The original down/combine and injection kernels remain available for reference controls.
 
-The other nine upstream shader files retain their pinned source bytes. `stark_decode_rows.metal` and `stark_moe_decode_rows.metal` add verifier entry points compiled after the unchanged generic projection and expert shader bodies. Batch row is the fast grid axis, exposing parallel work and weight-cache reuse while retaining each row's original arithmetic. The original HC and generic projection/convolution entry points remain available for reference controls. These patches do not change checkpoint quantization or the selected precision policy. Numerical and performance qualification is recorded separately in the [kernel study](../../docs/benchmarks/QWEN38_KERNELS_2026_10_29.md) and [injection fusion study](../../docs/benchmarks/QWEN38_FUSION_2026_10_29.md).
+The experimental Flash-Next fixed-geometry gate/up and shared-first scheduling
+changes are withdrawn. `moe.metal`, `src/kernels/moe.rs` and `src/moe_ffn.rs`
+retain their original dispatch source from engine baseline
+`72b5aaef96c939809bc906d10d45a0eef70386c0`. Candidate patches, original licenses
+and bounded controls remain in the
+[MoE projection experiment](../../docs/benchmarks/2026-11-07-flashnext-moe-projections.md).
+The [sustained diagnosis](../../docs/benchmarks/2026-11-07-flashnext-sustained-diagnosis.md)
+records the follow-up single-model crossover and absence of an accepted
+whole-model benefit. No candidate numerical or performance result is relabeled
+as validation of the restored source.
+
+The Stark generation and scoring adapters invoke the existing
+`MetalContext::wake` empty queue signal every 500 ms while waiting for a new
+request under the Lily or official mixed-affine numerical policy. This adds no
+vendored shader or precision change. Owner-thread maintenance preserves model
+state and the prefix-cache idle deadline, and exits
+on a queue fault. The
+[idle wake fix](../../docs/benchmarks/2026-11-07-flashnext-idle-wake-fix.md)
+records the original production patch, matched latency, idle resource and state
+controls. The [cross-backend follow-up](../../docs/benchmarks/2026-11-08-cross-backend-idle-wake.md)
+extends adapter eligibility and scoring input scheduling without changing
+vendored model or kernel code.
+
+The other eight upstream shader files retain their pinned source bytes. `stark_decode_rows.metal` and `stark_moe_decode_rows.metal` add verifier entry points compiled after the unchanged generic projection and expert shader bodies. Batch row is the fast grid axis, exposing parallel work and weight-cache reuse while retaining each row's original arithmetic. The original HC and generic projection/convolution entry points remain available for reference controls. These patches do not change checkpoint quantization or the selected precision policy. Numerical and performance qualification is recorded separately in the [kernel study](../../docs/benchmarks/QWEN38_KERNELS_2026_10_29.md) and [injection fusion study](../../docs/benchmarks/QWEN38_FUSION_2026_10_29.md).
 
 `stark_packed_rows.metal` extends the pinned Q4 packed-dot expression to independent short token rows while sharing raw weight loads. `stark_gdn_projection_rows.metal` adds the guarded verifier projection/convolution/scatter entry points. They preserve the 16-lane reduction, BF16 projection boundary and runtime convolution tap order, retain the original window, write its alternate, and capture projected inputs for rollback. Ordinary decode and unsupported layouts keep their existing routes. These original Stark extensions retain Apache-2.0 licensing; `quant.metal` is unchanged by this addition. The host verifier also batches up to four sparse queries through the existing QSA split kernels, using independent query scratch and per-query visibility; dense queries retain ordinary decode. Source-bound qualification is in the [MTP optimization study](../../docs/benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md).
 
@@ -115,6 +273,24 @@ direct BF16 gates. Lily's affine HC, GDN, MoE and projection paths remain
 available under their existing precision and geometry admission checks.
 
 ## Validation boundary
+
+The retained vision adapter removes the extraction's two unconditional tower
+loading rejections. Config admission bounds individual dimensions and aggregate
+BF16 tower bytes before allocation. The external MLX config bridge preserves a
+declared tower and aliases `vision_tower.*` into its canonical namespace. The
+existing pinned tower, 3-axis positions and image-row overrides are reused.
+`prefill_with_vision_until` exposes the existing stop-between-chunks behavior
+with the final target readout enabled. The host bounds a single image to 65,536
+patches, disables image MTP, and excludes image state from prefix snapshots.
+Stark extends the retained streaming vision dispatch row guards to the pinned
+processor's 16,777,216-pixel ceiling (16-pixel patches, 2 x 2 merge). Shader
+arithmetic and source processor parameters are unchanged. A checked inventory
+charges vision scratch and host copies alongside decoder growth and checks the
+largest buffer against the actual Metal device. This ceiling is an admission
+bound; full-resolution quality and latency need separate artifact evidence.
+Cancellation waits for the submitted tower pass or text chunk to complete;
+submitted Metal commands cannot be safely interrupted. Checkpoint execution
+and numerical parity remain separately qualified.
 
 Stark bounds native shard header allocation against both a fixed maximum and
 the opened regular file's length. Native tensor admission checks offset

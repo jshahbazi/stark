@@ -1153,6 +1153,14 @@ class ConverterPackageTests(unittest.TestCase):
                 "model_support.py",
                 "model_inventory.py",
                 "model_catalog.py",
+                "guided_models.py",
+                "recommendation_leaderboard.py",
+                "recommendation_leaderboard.json",
+                "_third_party/whatmodel/README.md",
+                "_third_party/whatmodel/DATA-LICENSE.md",
+                "_third_party/whatmodel/LICENSE",
+                "_third_party/whatmodel/licenses/SHA256SUMS",
+                "_third_party/whatmodel/licenses/CC-BY-SA-4.0.txt",
                 "model_removal.py",
                 "vision_runtime_qualifications.json",
             ):
@@ -1190,6 +1198,7 @@ class ConverterPackageTests(unittest.TestCase):
                 "stark_convert/model_support.py",
                 "stark_convert/model_inventory.py",
                 "stark_convert/model_catalog.py",
+                "stark_convert/guided_models.py",
                 "stark_convert/model_removal.py",
                 "stark_convert/media.py",
                 "stark_convert/vision_runtime_qualifications.json",
@@ -1343,6 +1352,9 @@ print(String(data: try! JSONSerialization.data(withJSONObject: result), encoding
                 [
                     "swiftc",
                     str(swift),
+                    str(
+                        builder.ROOT / "apps/menu-bar/Sources/BeginnerModelReport.swift"
+                    ),
                     str(
                         builder.ROOT / "apps/menu-bar/Sources/APICredentialStore.swift"
                     ),

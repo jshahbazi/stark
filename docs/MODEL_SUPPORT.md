@@ -6,25 +6,117 @@ tab in the menu bar app's **Manage Models** window consume that registry. A fami
 entry describes implemented paths and constraints; a source preflight checks selected checkpoint
 metadata before weights are downloaded.
 
+**Model Catalog → Ripple-65B Preview** offers the pinned standard Q4_K_M
+(38,798,820,576 weight bytes) and Q8_0 (68,840,113,568 weight bytes) artifacts.
+Both use native Rust/Metal text inference for the custom `ricursive`
+architecture. Loading, generation and reference checks were run separately for
+each quantization on an M5 Max with 128 GB memory; runtime and context require
+memory beyond the weight download. Decision scoring, image input, tool calling
+and cross-request prefix reuse are not enabled. Use a source build containing
+Ripple support; this does not qualify earlier installed releases. See the
+[Ripple preparation, precision and validation guide](RIPPLE.md).
+
 The [native hybrid path](NATIVE_HYBRID_MODELS.md) loads prepared
 GLM-5.3-Flash UD-Q2_K_XL, Qwen3.8-Flash-Next mixed MLX and Flint checkpoints.
 Its helper pins native-source downloads for local import. **Model Catalog →
 GLM-5.3 Flash** offers the pinned `UD-Q2_K_XL` checkpoint through that same
 preparation path. GLM is a separate native family in the inventory; arbitrary
 GLM repositories remain outside generic converter preflight. The registry also
-includes a `qwen4_exp` converter for Lily-format Qwen3.8 text models. It writes
-a self-contained typed `Qwen38LanguageModelConfig` artifact with canonical
-MLX storage and unchanged mixed quantization, sharing the existing specialized
-Qwen kernels. Vision and MTP tensors are omitted. The
+supports two `qwen4_exp` text import paths. Lily-format sources can be
+converted to a typed `Qwen38LanguageModelConfig` artifact with canonical MLX
+storage and unchanged mixed quantization. This conversion omits vision and MTP
+tensors. Compatible external-table MLX-Serve sources are prepared for the
+native loader with their original weight shards, index, and n-gram table.
+With **Enable images** selected, Add Source prepares compatible retained
+Flash Next affine checkpoints through the shared native image backend. Admission
+uses the declared architecture, actual tensor packing, complete BF16 tower and
+supported processor/template programs. It does not require a repository entry
+in the catalog. Immutable source provenance and content hashes remain bound to
+each installed artifact; automatic local image execution checks must pass before
+registration. See [retained image preparation](NATIVE_HYBRID_MODELS.md#retained-lily-image-artifacts).
+Sources without a processor sidecar use the validated standard family recipe;
+generated processor provenance is recorded separately. Explicit unsupported
+processing programs, other weight formats and quantized towers remain outside
+this contract. Family recognition alone does not establish execution or image
+quality for an arbitrary export.
+
+The ordinary/catalog GLM GGUF path keeps MTP unavailable. The optional GLM EXL3/FP8
+backend has an unchanged `headless-reference` default and a separately staged
+`--profile bf16-native-experimental` profile that includes the BF16 draft head,
+native MTP, and prefix support. Only that profile defaults to three drafts; requests
+can explicitly disable MTP. Its evidence remains experimental: the worker
+matrix passed 41/41, while the quality smoke passed 22/24 and missed its
+all-pass gate. The 922.7/20.3 tok/s observation failed host screening and had
+unverified clocks, so it does not qualify production throughput. See the
+[backend reference](validation/GLM_EXL3_BACKEND.md) and the
 [Uzu-format study](benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records storage,
 readout and sampled-generation controls for the pinned converted artifact.
 The native loader validates tensors; generic Decision use still requires a
 direct-answer template and checkpoint checks.
 
-Neither result establishes that a complete model has loaded or executed. Exact
+This native GLM path covers Flash's `glm5_next` architecture. Full GLM-5.3 uses
+`glm_moe_dsa` and needs separate backend onboarding. A
+[dated recent-model intake](archive/runs/2026-11-07-glm-flint-tool-qualification.md#recent-release-intake)
+also records the unsupported architecture contracts for DeepSeek V4.1, Kimi
+K3.1, Beam, Nemotron 3.5 Bolt and Gemma 4. Metadata discovery does not provide
+native execution or tool qualification for those models.
+
+Dense `qwen3_5` text conversion also admits the registered
+`Jundot/Qwen3.8-27B-oQ4e-mtp` extension. Its mixed affine 4/5/6/8-bit matrices
+are preserved without requantization. Uniform five/six-bit matrices retain
+their packed bytes when they use group size 64, BF16 and output-input layout.
+Eligible mixed-width fused projections use `MLXRowPartitionedSpec` to retain
+contiguous output-row segments at their original widths; runtime planning keeps
+the original fused output dimension and W8 row arithmetic. Other layouts,
+including the input-output embedding, are widened losslessly to eight-bit
+storage.
+
+A complete, declared one-layer quantized MTP head becomes a typed native graph.
+Dense Qwen MTP supports up to three drafts, recommends three and remains
+disabled by default. The optional three/four-bit coarse draft readout uses a
+64-candidate shortlist rescored by the original head; omitting it keeps the full
+draft head. The target readout remains complete in every mode. These additions
+do not transfer qualification from Qwen3.8-Flash-Next. See the
+[original dense 27B record](benchmarks/2026-11-06-qwen38-27b-oq4e-mtp.md) and
+[packed-weight follow-up](benchmarks/2026-11-06-qwen38-27b-packed-followup.md).
+
+Converter inspection and catalog admission alone do not establish that a
+complete model has loaded or executed. Exact
 load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
+
+Qwen3.5 MoE image conversion has two schema-3 profiles: affine-quantized source
+weights use `qwen35-moe-affine-merged-v4`, while complete BF16 source weights
+use `qwen35-moe-bf16-merged-v5`. Both produce BF16 artifacts; the BF16-source
+route is image-only. Catalog discovery requires the source's
+supported processor and reviewed template before offering that mode; BF16 MoE
+text/Decision conversion remains unsupported. This is structural implementation
+coverage. Full official 35B execution and reference parity are unverified; each
+artifact still needs native admission and local image checks. The
+[vision family contract](VISION_FAMILY_CONTRACT.md) records the numerical policy,
+source layout, limits and disabled prefix-reuse disposition.
+
+New model and inference paths follow the [model onboarding workflow](MODEL_ONBOARDING.md),
+including generation prefix-reuse implementation where exact restoration is
+possible and a recorded blocker where it is unavailable. The family registry
+does not grant this runtime capability or transfer qualification between
+checkpoints and quantizations.
+[OLMo 3 and Gemma 4](OLMO3_GEMMA4.md) use the ordinary native Metal text path.
+OLMo 3 adds whole-projection Q/K normalization and post-norm residual branches.
+Gemma 4 text paths include dense PLE E2B/E4B and bounded no-PLE 31B layouts.
+Pinned schema-4 BF16 image profiles cover E2B, E4B, 12B unified, 26B-A4B and
+31B. Audio and video execution remain unsupported. E2B has a canonical HF CPU
+image-feature comparison within the 2% gate on three fixtures plus bounded
+worker and chat-client lifecycle checks; E4B has separate source and execution
+validation. The 12B embedder and 26B MoE paths have component checks. The pinned
+31B tower/projector passes all three unchanged canonical feature gates, with
+relative RMS at most 0.00110689. Full 12B/26B/31B checkpoint generation is
+unqualified. Installed desktop UI execution and image performance are
+unmeasured. Exact checkpoint evidence remains tied to its reference profile and
+engine build. See the
+[original E2B validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md)
+and [31B vision component record](archive/runs/2026-11-07-gemma4-larger-vision-qualified-component.md).
 
 ## Browsing and removing models
 
@@ -43,10 +135,47 @@ family overview sorts by name A–Z or Z–A; family detail sorts by name in eit
 direction or model size ascending or descending. Unknown numeric values sort last
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
-Conversion-only families are omitted. Cards offer text or image artifacts when
-both are available, with image output selected by default only when the full
-Qwen3.5 BF16 model's vision configuration and processing metadata pass inspection.
-An image choice still needs the normal installation and local runtime checks.
+
+Family detail opens on **Top rated (coding)**, with **Top rated (general)**
+beside it. Both use the bundled whatmodel.sh reference scores described in
+[Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
+Rows that can be downloaded and whose weights fit this Mac's memory budget come
+first, then the higher score, then the smaller download; unscored rows follow
+scored ones, then models likely too large for this Mac, then unavailable rows.
+A group is placed by its best row. A scored row shows its score as a link to the
+source page, and its tooltip names the model the score belongs to. A row whose
+weights exceed 85% of physical memory less 2 GiB is marked as likely too large;
+that is a coarse check on weights alone, not a runtime plan. The catalogue also
+inspects sources with a reference score before the rest of the first 300
+listing positions, preferring models from the RAM list this Mac can use, so the
+first pages hold the best-rated candidates. A saved sort choice is kept.
+
+**Hide Unsupported** is checked by default and the choice persists. It leaves
+out every row that cannot be downloaded: a weight format or quantization option
+Stark does not import, a tensor layout the family's importer rejects, a source
+without a usable Safetensors file or shard index, and a source whose tensor
+headers could not be verified. Quantization tabs and counts follow the listed
+rows. The list states how many rows are hidden, and when every row found so far
+is hidden it offers to show them. Unchecking it lists those rows as
+**Unavailable** with their reason.
+
+A GPU-server quantization export (AWQ, GPTQ, bitsandbytes and similar) that
+declares the model it was made from is folded under that model when the model
+is a downloadable row among those loaded. A folded export is never a row of its
+own and is not counted as hidden. With **Hide Unsupported** unchecked, the
+original's group names its folded exports, each linked to its repository, up to
+six with a count of the rest. Searching for a folded export's name, repository
+or format shows the original with the same note, so a search for an AWQ build
+lands on the model Stark can import. An export whose original is not loaded, or
+is itself unavailable, stays an **Unavailable** row and links to the declared
+original on Hugging Face. Folding follows the rows loaded so far, so a row can
+fold when a later page brings in its original.
+Conversion-only families are omitted. Cards show whether each model supports
+text or text and images. Downloads automatically include image support when
+available for that artifact. This requires metadata confirming a supported
+Qwen3.5 vision wrapper, BF16 vision tower and reviewed processor; decoder weights
+may use a supported affine profile. Image support still needs the normal
+installation and local runtime checks.
 The download and preparation progress remain in the browser. Completion adds
 the model to the library without selecting it for use.
 
@@ -56,7 +185,7 @@ precisions present in its current catalogue. Tabs come from the full current
 family list; search and sort narrow/reorder the selected tab without refetching
 metadata. If a selected format disappears after refresh, the view returns to
 **All models**. Switching families also resets that filter. The row's source ID,
-download status and text/image choice remain unchanged by filtering.
+download status and image capability remain unchanged by filtering.
 Same-publisher size and quantization variants share a card. Base, Instruct,
 Thinking, context-length variants and fine-tunes remain distinct. A cross-publisher
 group is allowed only for a registered MLX 4-bit/8-bit export whose tokenizer
@@ -67,32 +196,177 @@ metadata and does not change the immutable source entry ID. Family-size sorting
 uses the minimum or maximum known model size among the visible versions. Counts
 are never inferred from model names or quantized packed tensors.
 
-The download catalogue combines registered reference sources with a bounded live
-Hugging Face search. Parsed configuration identifies the family; repository
-names alone do not establish compatibility. At most 45 candidates are inspected
-and 30 choices are returned, preserving representative sizes and formats when
-available. Generic discovery offers supported floating Safetensors and implemented MLX 4-bit/8-bit
-paths. GLM instead has one fixed `UD-Q2_K_XL` GGUF entry, with its source
-revisions, four shards and 108,720,071,552 stored weight bytes owned by the native
-preparation helper. Browsing that entry uses bundled metadata and makes no Hub
-requests. Download uses the pinned weight and tokenizer repositories, preserves
-quantized bytes and validates the completed prepared identity before library
-registration. Download progress remains indeterminate until the stored byte
-total is verified. GLM image input and Decision mode are unavailable.
-Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
-its fixed Q8 control projections. Embedding/reranking tasks, known internal test
-models, quantized vision, unsupported MoE families, adapter-only and unsupported
-packed formats are excluded. The implemented Qwen3.8 text path includes its
-MoE graph.
-An uncatalogued compatible fine-tune can appear. This is
-a representative list, not an exhaustive inventory of Hugging Face.
+The download catalogue combines registered reference sources with bounded live
+Hugging Face searches. Architecture tags and model-name searches are interleaved
+so a large tag cannot delay every other export type. Parsed configuration
+identifies the family. Each page inspects up to 30 distinct candidates and
+retains unsupported family variants with an **Unavailable** reason.
+**Load more models** follows the remaining pages automatically, preserving
+results already loaded. Failed pages can be retried at the same offset.
 
-Discovery reads bounded metadata and repository file information, without
-requesting weight payloads or executing repository code. Parameter counts and
+The Hub listing itself carries each repository's head revision, task tags and
+file names. A source whose listing already shows another task, no model
+configuration, no weight file, or only GGUF weight files uses its position
+without any request of its own, so one page can pass up to 500 such positions
+and reach further down the family. The family catalogues do not offer GGUF
+downloads, and some publishers give every GGUF repository the same placeholder
+configuration, so a GGUF-only source would otherwise appear as an
+**Unavailable** row, sometimes under an unrelated family. A source that lists
+any other weight file (Safetensors, PyTorch or EXL3) beside its GGUF files is
+still inspected, and
+registered, pinned and native sources are never screened this way. Metadata files are bounded by the sizes in the pinned file inventory
+instead of a separate size request, and the Hub's parsed architecture rejects
+an unsupported head revision before its configuration is fetched.
+
+Rows appear as each source is checked; the page's sorted report follows. The
+app keeps verdicts in `catalog-cache` inside its data folder, keyed by
+repository and bound to the checked revision and the installed converter
+sources. An unchanged revision is answered from that cache without contacting
+the repository: for 30 days, or one hour when the outcome depended on access
+(gated or missing files, configuration borrowed from another repository). A
+registered source has no listed revision, so its head is confirmed with one
+request and then trusted for ten minutes. Verdicts that could not be verified
+are never stored. The cache holds public repository metadata only, and
+installing repeats the pinned preflight.
+
+Before enabling Download for a generic Safetensors source, the catalogue checks
+the pinned tensor headers with the same tensor planner used by conversion.
+Names, shapes, dtypes, affine packing and shard-index membership must match the
+importer. For a checkpoint with a shard index, one Hub API call returns every
+shard's parsed header; it is used only when the Hub labels it with the pinned
+revision and each header agrees with the pinned file sizes. A single-file
+checkpoint, a moved or older revision, or any reply that fails those checks is
+read from the pinned files with exact HTTP byte ranges instead, and every
+failure reason comes from those bytes. Header requests never consume weight
+payloads and reject servers that ignore the requested range. A header exceeding the
+catalogue's 4 MiB inspection limit remains unavailable with an explanation.
+Duplicate tied-tensor payload equality is checked during full conversion.
+Native loading and model execution remain separate checks.
+
+Each family planner admits an explicit set of `config.json` keys. Before a
+planner validates a configuration, one shared pass
+(`stark_convert/config_normalization.py`) rewrites a small set of reviewed
+forms that do not change the model. The planner applies it on the line that
+reads its configuration, so catalogue admission and the source-backed
+conversion that installs the model always judge the same normalized
+configuration. The source `config.json` is never modified. The pass:
+
+- drops publisher annotations and sampling defaults when their value has the
+  expected shape: `unsloth_fixed`, `unsloth_version`, `transformers.js_config`,
+  `model_name`, `generation_config`, `do_sample`, `top_p`, `top_k`,
+  `temperature`, `is_llama_config` and `init_method`. A malformed value is
+  refused rather than dropped;
+- drops `rope_interleaved` only when it is `false` and `rope_scaling` only
+  when it is `null`;
+- renames `dtype` to `torch_dtype` when `torch_dtype` is absent;
+- sets a nonzero `attention_dropout` within (0, 1] to 0.0. Dropout is inactive
+  at inference. This is a separate judgement call that
+  `ZERO_INACTIVE_ATTENTION_DROPOUT` turns off on its own;
+- for planners that read a single flat `rope_theta` and reject a nested
+  declaration (Qwen2, Mistral, Gemma 2, OLMo 3, Phi-3, Granite and SmolLM3),
+  flattens a plain `rope_parameters` object holding only `rope_theta` and an
+  absent or default `rope_type`. Qwen3, Llama and LFM2 already validate that
+  plain form themselves and see it unchanged;
+- for Gemma 2 and Gemma 3 text, drops `sliding_window_size` when it is an
+  integer equal to the required `sliding_window` the planner uses;
+- for LFM2, drops `tie_word_embeddings: true` unless `tie_embedding` is
+  `false` (the planner reads `tie_embedding`, default tied), and sets an absent
+  `block_ff_dim` from a positive integer `intermediate_size` (the Transformers
+  `Lfm2Config` stores one as the other).
+
+Gemma 4 and Qwen3.5 also apply the generic rules to their nested
+`text_config`. Everything else still fails closed in the planner: unknown keys,
+two differing declared RoPE bases, a plain `rope_parameters` beside a non-null
+`rope_scaling`, scaled, YaRN, linear, partial-rotary or per-attention-type RoPE
+forms, `rope_interleaved: true`, both `dtype` and `torch_dtype` declared, and
+dropout outside its valid range. The Gemma 3 image wrapper, the external
+Qwen3.8 profiles, LLaMBA and ModernBERT keep their configurations unchanged.
+Image-mode contract validators that read the configuration separately are not
+affected by this pass.
+
+An **Unavailable** row states one reason, chosen in this order:
+
+- **GPU-server quantization.** A `quantization_config` whose `quant_method` is
+  anything other than MLX (for example AWQ, GPTQ, bitsandbytes, FP8,
+  compressed-tensors, ModelOpt or AutoRound), with no MLX `quantization` block,
+  is named as that format. The row's quantization label is the method name
+  only, never a guessed bit width, and the reason says Stark imports the
+  model's original weights or its MLX exports. This takes precedence over
+  every other check, and no tensor header is requested for such a row. The
+  rule applies only where the import-format check already rejects the source,
+  so it never changes which rows can be downloaded. An MLX export, which
+  writes a `quantization` block and usually a matching `quantization_config`,
+  is not affected. When the Hub tags of such a row carry exactly one
+  `base_model:quantized:<repository>` entry naming another valid repository,
+  the row also carries that repository as its declared original. The tag comes
+  from the export's own model card and is not verified; it is used only to
+  place the row in the browser. The named repository is never requested on
+  the export's behalf, and the pointer never selects or alters a download.
+- **Configuration or format checks.** Preflight, quantization parsing and
+  container checks report their own message, such as an unsupported MLX
+  option, untied embeddings or a missing shard index.
+- **Importer rejection.** When the tensor planner or header inventory rejects
+  the checkpoint, the row shows the importer's own message, for example
+  "RoPE scaling is outside qualified dense coverage." These are fixed
+  messages written in the importer that name config fields and rules, never
+  file paths or tensor contents. A message is cut to the 240-byte reason
+  limit; one with control characters, and any unexpected exception type,
+  falls back to the general statement that tensor names, shapes or packing do
+  not match the family's importer.
+- **Access approval.** When the Hub marks a repository as gated and its tensor
+  headers cannot be read, the row asks the user to sign in to Hugging Face,
+  accept the model's terms and refresh. Like an unverified header read, this
+  verdict is never cached, so a refresh after approval checks the source
+  again. A gated source whose configuration cannot be read is still left out
+  of the list.
+- **Header limits.** A header beyond the 4 MiB inspection limit keeps its own
+  reason, and any other header read failure on a source that is not gated
+  still asks for a refresh.
+
+GLM and Flint searches also display other family exports with their import
+limitations. Their supported native installers currently bind exact artifacts.
+GLM's downloadable `UD-Q2_K_XL` GGUF entry keeps its source revisions, four
+shards and 108,720,071,552 stored weight bytes owned by the preparation helper.
+Flint keeps its pinned MLX affine INT4 checkpoint. These entries use bundled
+metadata, while discovery of other variants uses the Hub. Download preserves
+quantized bytes and validates the prepared identity before library registration.
+Native downloads show a progress bar for completed model files against the pinned
+weight total, with received network bytes separately. Partial allocations never
+advance the bar; final weight validation still gates completion.
+GLM image input and Decision mode are unavailable.
+Known Gemma 4 image choices use the immutable revisions bound by their image
+import profiles. Later repository revisions require their own image admission.
+Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
+its fixed Q8 control projections. The Qwen3.8 catalog also discovers compatible
+MLX-Serve external-table exports by config and file inventory, including
+importance-calibrated exports using the supported affine layout. Their download
+size includes the external n-gram table. The catalog checks the pinned shard
+headers, index, and n-gram table layout before enabling Download. Incompatible
+external-table candidates display an explanation in their catalog row.
+Embedding/reranking tasks, known internal test models and adapter-only
+repositories are excluded. Family variants with unsupported decoder geometry,
+quantization or containers retain their rejection reason. For example, Gemma 4
+quantized no-PLE global K=V exports explain their BF16 import requirement, and
+per-module affine formats explain the importer's quantization limit.
+Qwen image profiles can retain supported packed decoder matrices
+alongside a complete BF16 vision tower. The
+implemented Qwen3.8 text path includes its MoE graph; Qwen3.5 BF16 MoE image
+conversion is a separate image-only path.
+An uncatalogued compatible fine-tune can appear through its architecture tag or
+model name. Gated, inaccessible and malformed repositories may be omitted.
+An untagged repository whose name has no family search term can still require
+direct import.
+
+Discovery reads bounded metadata, tensor headers and repository file information.
+Parameter counts and
 download bytes appear only when usable metadata supplies them. Floating sources
 are shown as BF16, the native output format; packed tensor counts are not shown
 as logical parameter counts. Missing metadata can leave a size unknown or omit
 a candidate. Offline and failed discovery have fixed messages and can be retried.
+Guided setup continues past pages with no downloadable entries within a shared
+10-second budget and a maximum of ten pages per family. It reports when discovery
+remains incomplete. Family budgets are checked between network operations.
+The desktop host enforces cancellation and the overall child-process deadline.
 
 **Installed** groups saved versions by their bound,
 unambiguous source repository; local or incomplete metadata falls back to a
@@ -136,7 +410,7 @@ The registry uses these mode identifiers:
 | --- | --- |
 | `text` | Text chat through a converted language artifact and the generation worker. |
 | `decision` | Generic answer-choice scoring through a text artifact, compatible template/tokenizer and scoring worker. |
-| `vision-language` | Image chat through the supported full vision artifact and local image checks. |
+| `vision-language` | Image chat through supported full vision artifacts and model-specific host checks. Current paths include the Qwen3.5 schemas and Gemma 4 E2B BF16 schema 4. |
 
 Decision scoring uses temperature 1 and produces a comparative distribution over
 the supplied choices. A compatible family does not establish calibration or
@@ -169,6 +443,24 @@ conversion can cast floating source weights to BF16. F16/F32 output remains
 conversion-only where the native engine requires BF16. Packed formats have their
 own family/layout constraints. Classifier conversion coverage does not imply
 that the desktop Chat or Decision workflow implements classification.
+
+Conversion, template rendering and function tool parsing are separate support
+claims. A converter adapter recognizes architecture/configuration and maps the
+checkpoint's tensors into an artifact; it does not certify that the resulting
+chat template can be loaded and rendered by the app. A renderable chat template
+also does not imply tool calling: Stark enables function tools only when the
+loaded template matches a reviewed tool wire format with an implemented parser.
+The current parser registrations and their template identities are listed in
+the [Function tools reference](LOCAL_API.md#function-tools). An unsupported
+architecture stops raw-source installation before weight download with the
+message: “This model architecture has no implemented converter.” This marks a
+conversion boundary; adding a parser alone would not make that architecture
+runnable. Successful conversion alone never enables function tools.
+
+The [tool-calling coverage matrix](TOOL_CALLING.md) separates supported protocols
+from model-bound evidence. Import completion and Installed rows assess the exact
+artifact codec and show whether tools are available, unavailable or unchecked.
+Adding a model for agent use requires the [tool acceptance checks](MODEL_ONBOARDING.md#assess-and-qualify-function-tools).
 
 ## Installation checks before weights
 

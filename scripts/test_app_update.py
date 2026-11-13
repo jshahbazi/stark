@@ -889,6 +889,17 @@ print("Swift updater checks passed")
 CONTROLLER_DRIVER = r"""
 import Foundation
 
+final class RecordingScheduler: NSBackgroundActivityScheduler, @unchecked Sendable {
+    var callback: (@Sendable (@escaping NSBackgroundActivityScheduler.CompletionHandler) -> Void)?
+    var stopped = false
+
+    override func schedule(_ block: @escaping @Sendable (@escaping NSBackgroundActivityScheduler.CompletionHandler) -> Void) {
+        callback = block
+    }
+
+    override func invalidate() { stopped = true }
+}
+
 @MainActor
 final class Scenario {
     var date = Date(timeIntervalSince1970: 0)
@@ -906,12 +917,16 @@ final class Scenario {
     var fetchGate: CheckedContinuation<Void, Never>?
     var prepareGate: CheckedContinuation<Void, Never>?
     var installGate: CheckedContinuation<Void, Never>?
+    var scheduledCheck: (@MainActor () async -> Void)?
+    var scheduleStarts = 0
+    var scheduleStops = 0
+    var scheduledInterval: TimeInterval?
     var assertBusy: (() -> Void)?
     var workspaces: [URL] = []
     var expectedVersion = "0.3.0"
     var installedBuild: InstalledAppBuild?
 
-    func controller(interval: TimeInterval = 3600) -> AppUpdateController {
+    func controller(interval: TimeInterval = 900, schedule: AppUpdateSchedule? = nil) -> AppUpdateController {
         let effects = AppUpdateOperations(fetch: { [self] installed in
             precondition(installed == expectedVersion)
             fetchCount += 1
@@ -929,6 +944,7 @@ final class Scenario {
             let workspace = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
                 .appendingPathComponent("stark-controller-test-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false)
+            try FileManager.default.createDirectory(at: workspace.appendingPathComponent("Stark.app"), withIntermediateDirectories: false)
             workspaces.append(workspace)
             return PreparedAppUpdate(workspace: workspace, app: workspace.appendingPathComponent("Stark.app"))
         }, install: { [self] _, _ in
@@ -940,7 +956,12 @@ final class Scenario {
         })
         return AppUpdateController(installed: installedBuild == nil ? "0.3.0" : nil,
                                    installedBuild: installedBuild, operations: effects, now: { self.date },
-                                   automaticCheckInterval: interval, restorePreviousFailure: false)
+                                   automaticCheckInterval: interval, restorePreviousFailure: false,
+                                   schedule: schedule ?? AppUpdateSchedule(start: { interval, check in
+                                       self.scheduleStarts += 1
+                                       self.scheduledInterval = interval
+                                       self.scheduledCheck = check
+                                   }, stop: { self.scheduleStops += 1 }))
     }
 
     func cleanup() {
@@ -961,9 +982,128 @@ func waitFor(_ condition: () -> Bool) async {
 struct ControllerChecks {
     @MainActor
     static func main() async {
-        // Automatic discovery is immediate, idempotent and never downloads.
+        // Exercise the production scheduler adapter with every window closed:
+        // completion must wait for the download and verification to finish.
+        let nativeScheduler = RecordingScheduler(identifier: "com.starkengine.updater-test")
+        let background = Scenario()
+        background.latest = nil
+        let backgroundController = background.controller(schedule: .live(scheduler: nativeScheduler))
+        backgroundController.startAutomaticChecks()
+        await waitFor { !backgroundController.busy }
+        precondition(nativeScheduler.interval == 900 && nativeScheduler.tolerance == 60)
+        precondition(nativeScheduler.repeats && nativeScheduler.qualityOfService == .utility)
+        background.latest = Scenario().latest
+        background.blockPrepare = true
+        // macOS may fire a minute early within the tolerance window.
+        background.date += 840
+        var completed = false
+        nativeScheduler.callback? { result in
+            precondition(result == .finished)
+            Task { @MainActor in completed = true }
+        }
+        await waitFor { background.prepareGate != nil }
+        precondition(!completed && backgroundController.actionTitle == "Downloading...")
+        background.prepareGate?.resume()
+        await waitFor { completed }
+        precondition(!backgroundController.busy && backgroundController.actionTitle == "Upgrade")
+        precondition(background.events == ["fetch", "fetch", "download", "verify"])
+        backgroundController.stopAutomaticChecks()
+        precondition(nativeScheduler.stopped)
+        background.cleanup()
+
+        // A click before discovery carries through fetch, preparation and install.
+        let manual = Scenario()
+        manual.blockFetch = true
+        manual.blockPrepare = true
+        manual.blockInstall = true
+        let manualController = manual.controller()
+        manual.assertBusy = { precondition(manualController.busy) }
+        manualController.performAction()
+        await waitFor { manual.fetchGate != nil }
+        precondition(manualController.message == "Checking for updates…")
+        precondition(manualController.actionTitle == "Check for Upgrades")
+        manualController.performAction()
+        manualController.checkIfNeeded()
+        precondition(manual.fetchCount == 1 && manualController.busy)
+        manual.fetchGate?.resume()
+        await waitFor { manual.prepareGate != nil }
+        precondition(manualController.actionTitle == "Downloading...")
+        manualController.performAction()
+        precondition(manual.events == ["fetch", "download"] && manualController.busy)
+        manual.prepareGate?.resume()
+        await waitFor { manual.installGate != nil }
+        manualController.performAction()
+        precondition(manual.events == ["fetch", "download", "verify", "install"])
+        manual.installGate?.resume()
+        await waitFor { manual.events.last == "quit" }
+        precondition(manualController.busy)
+        manual.cleanup()
+
+        // No newer release finishes without downloading or restarting.
+        let current = Scenario()
+        current.latest = nil
+        let currentController = current.controller()
+        currentController.performAction()
+        await waitFor { !currentController.busy }
+        precondition(currentController.message == "Stark is up to date.")
+        precondition(currentController.available == nil && current.events == ["fetch"])
+        currentController.checkIfNeeded()
+        precondition(current.fetchCount == 1)
+        current.latest = manual.latest
+        currentController.performAction()
+        await waitFor { current.events.last == "quit" }
+        precondition(current.fetchCount == 2 && currentController.busy)
+        current.cleanup()
+
+        // Quitting during discovery or preparation must stop before installation,
+        // even when an awaited operation finishes successfully after cancellation.
+        for background in [false, true] {
+            for duringPreparation in [false, true] {
+                let cancelled = Scenario()
+                cancelled.blockFetch = !duringPreparation
+                cancelled.blockPrepare = duringPreparation
+                let cancelledController = cancelled.controller()
+                if background { cancelledController.checkIfNeeded() }
+                else { cancelledController.performAction() }
+                await waitFor {
+                    duringPreparation ? cancelled.prepareGate != nil : cancelled.fetchGate != nil
+                }
+                cancelledController.prepareForTermination()
+                if duringPreparation { cancelled.prepareGate?.resume() }
+                else { cancelled.fetchGate?.resume() }
+                await waitFor { !cancelledController.busy }
+                precondition(!cancelled.events.contains("install"))
+                if !duringPreparation { precondition(cancelled.events == ["fetch"]) }
+                precondition(cancelled.workspaces.allSatisfy {
+                    !FileManager.default.fileExists(atPath: $0.path)
+                })
+                cancelled.cleanup()
+            }
+        }
+
+        // Failed discovery or verification stays retryable and never installs.
+        for failure in [AppUpdateError.download, .checksum] {
+            let retry = Scenario()
+            if failure == .download { retry.fetchFailure = failure }
+            else { retry.prepareFailure = failure }
+            let retryController = retry.controller()
+            retryController.performAction()
+            await waitFor { !retryController.busy }
+            precondition(retryController.message == failure.localizedDescription)
+            precondition(!retry.events.contains("install"))
+            retry.fetchFailure = nil
+            retry.prepareFailure = nil
+            retryController.performAction()
+            await waitFor { retry.events.last == "quit" }
+            precondition(retryController.busy)
+            precondition(retry.events.filter { $0 == "install" }.count == 1)
+            retry.cleanup()
+        }
+
+        // Automatic discovery downloads and verifies, but never installs.
         let discovery = Scenario()
         discovery.blockFetch = true
+        discovery.blockPrepare = true
         let first = discovery.controller()
         first.startAutomaticChecks()
         first.startAutomaticChecks()
@@ -973,29 +1113,38 @@ struct ControllerChecks {
         precondition(discovery.fetchCount == 1 && first.busy && first.message.isEmpty)
         first.stopAutomaticChecks()
         discovery.fetchGate?.resume()
+        await waitFor { discovery.prepareGate != nil }
+        precondition(first.actionTitle == "Downloading...")
+        first.performAction()
+        first.check()
+        precondition(first.busy && discovery.events == ["fetch", "download"])
+        discovery.prepareGate?.resume()
         await waitFor { !first.busy }
         precondition(first.available?.version == "0.4.0")
-        precondition(first.actionTitle == "Upgrade to 0.4.0")
-        precondition(discovery.events == ["fetch"])
+        precondition(first.actionTitle == "Upgrade" && !first.downloading)
+        precondition(discovery.events == ["fetch", "download", "verify"])
+        precondition(first.message == "Stark 0.4.0 is ready to upgrade.")
 
-        // One click stays busy across download, verification and helper staging.
-        discovery.blockPrepare = true
+        // Rechecking identical metadata reuses the prepared app.
+        discovery.blockFetch = false
+        first.check()
+        await waitFor { !first.busy }
+        precondition(discovery.events == ["fetch", "download", "verify", "fetch"])
+
+        // One click installs the prepared app, without another download.
         discovery.blockInstall = true
         discovery.assertBusy = { precondition(first.busy) }
         first.performAction()
         first.performAction()
         first.check()
-        await waitFor { discovery.prepareGate != nil }
-        precondition(first.busy && discovery.events == ["fetch", "download"])
-        discovery.prepareGate?.resume()
         await waitFor { discovery.installGate != nil }
         first.performAction()
         first.checkIfNeeded()
         first.stopAutomaticChecks()
-        precondition(first.busy && discovery.events == ["fetch", "download", "verify", "install"])
+        precondition(first.busy && discovery.events == ["fetch", "download", "verify", "fetch", "install"])
         discovery.installGate?.resume()
         await waitFor { discovery.events.last == "quit" }
-        precondition(first.busy && discovery.fetchCount == 1)
+        precondition(first.busy && discovery.fetchCount == 2)
         discovery.cleanup()
 
         let development = Scenario()
@@ -1010,6 +1159,7 @@ struct ControllerChecks {
         developmentController.check()
         await waitFor { !developmentController.busy }
         precondition(development.fetchCount == 1 && developmentController.available?.version == "0.11.2")
+        development.cleanup()
 
         // Menu checks are throttled; manual checks can force a retry.
         let throttle = Scenario()
@@ -1026,31 +1176,40 @@ struct ControllerChecks {
         second.check()
         await waitFor { !second.busy }
         precondition(throttle.fetchCount == 3)
+        precondition(throttle.events.filter { $0 == "download" }.count == 1)
 
-        // Background failures retain availability and installation diagnostics.
+        // Changed release metadata discards the old candidate. Failed automatic
+        // verification never installs; clicking Upgrade retries from scratch.
+        let previousWorkspace = throttle.workspaces.last!
+        throttle.latest = AppUpdateDownload(
+            version: "0.5.0", url: URL(string: "https://example.invalid/new.dmg")!,
+            sha256: String(repeating: "b", count: 64), size: 100)
         throttle.prepareFailure = .checksum
-        second.performAction()
+        throttle.date += 900
+        second.checkIfNeeded()
         await waitFor { !second.busy }
+        precondition(!FileManager.default.fileExists(atPath: previousWorkspace.path))
         precondition(throttle.events.suffix(2) == ["download", "verify"])
         precondition(!throttle.events.contains("install"))
         precondition(second.message == AppUpdateError.checksum.localizedDescription)
+        precondition(!second.downloading && second.actionTitle == "Upgrade")
         let failure = second.message
         throttle.fetchFailure = .download
         throttle.date += 900
         second.checkIfNeeded()
         await waitFor { !second.busy }
-        precondition(second.available?.version == "0.4.0" && second.message == failure)
+        precondition(second.available?.version == "0.5.0" && second.message == failure)
         throttle.fetchFailure = nil
         throttle.latest = nil
         throttle.date += 900
         second.checkIfNeeded()
         await waitFor { !second.busy }
-        precondition(second.available == nil && second.message == failure)
+        precondition(second.available == nil)
         throttle.latest = discovery.latest
         throttle.date += 900
         second.checkIfNeeded()
         await waitFor { !second.busy }
-        precondition(second.actionTitle == "Upgrade to 0.4.0" && second.message == failure)
+        precondition(second.actionTitle == "Upgrade" && second.message == failure)
 
         // Retrying after preparation failure starts fresh and reaches installation.
         throttle.prepareFailure = nil
@@ -1059,27 +1218,108 @@ struct ControllerChecks {
         await waitFor { !second.busy }
         precondition(second.message == AppUpdateError.helper.localizedDescription)
         precondition(second.available?.version == "0.4.0")
+        let recoveryWorkspace = throttle.workspaces.last!
+        let installFailureMessage = second.message
+        throttle.date += 900
+        second.checkIfNeeded()
+        await waitFor { !second.busy }
+        precondition(second.message == installFailureMessage)
+        precondition(throttle.events.last == "verify")
         throttle.installFailure = nil
         second.performAction()
         await waitFor { throttle.events.last == "quit" }
         precondition(second.busy && throttle.events.filter { $0 == "install" }.count == 2)
+        precondition(FileManager.default.fileExists(atPath: recoveryWorkspace.path))
+        second.prepareForTermination()
+        precondition(FileManager.default.fileExists(atPath: recoveryWorkspace.path))
         throttle.cleanup()
+
+        // Lost temporary files trigger a fresh download on the Upgrade click.
+        let missing = Scenario()
+        let missingController = missing.controller()
+        missingController.check()
+        await waitFor { !missingController.busy }
+        try! FileManager.default.removeItem(at: missing.workspaces.last!)
+        missingController.performAction()
+        await waitFor { missing.events.last == "quit" }
+        precondition(missing.events.filter { $0 == "download" }.count == 2)
+        missing.cleanup()
+
+        // Changed metadata for the same version also invalidates the cache.
+        let republished = Scenario()
+        let republishedController = republished.controller()
+        republishedController.check()
+        await waitFor { !republishedController.busy }
+        let originalWorkspace = republished.workspaces.last!
+        republished.latest = AppUpdateDownload(
+            version: "0.4.0", url: republished.latest!.url,
+            sha256: String(repeating: "c", count: 64), size: 200)
+        republishedController.check()
+        await waitFor { !republishedController.busy }
+        precondition(republished.events.filter { $0 == "download" }.count == 2)
+        precondition(!FileManager.default.fileExists(atPath: originalWorkspace.path))
+        // A transient metadata failure keeps the verified download usable.
+        republished.fetchFailure = .download
+        republished.date += 900
+        republishedController.checkIfNeeded()
+        await waitFor { !republishedController.busy }
+        republishedController.performAction()
+        await waitFor { republished.events.last == "quit" }
+        precondition(republished.events.filter { $0 == "download" }.count == 2)
+        republished.cleanup()
+
+        // Normal quit removes a ready candidate without invoking installation.
+        let quitting = Scenario()
+        let quittingController = quitting.controller()
+        quittingController.check()
+        await waitFor { !quittingController.busy }
+        let quittingWorkspace = quitting.workspaces.last!
+        quittingController.prepareForTermination()
+        precondition(!FileManager.default.fileExists(atPath: quittingWorkspace.path))
+        precondition(!quitting.events.contains("install"))
+
+        // Withdrawn releases remove the prepared candidate without installing.
+        let withdrawn = Scenario()
+        let withdrawnController = withdrawn.controller()
+        withdrawnController.check()
+        await waitFor { !withdrawnController.busy }
+        let withdrawnWorkspace = withdrawn.workspaces.last!
+        withdrawn.latest = nil
+        withdrawnController.check()
+        await waitFor { !withdrawnController.busy }
+        precondition(withdrawnController.available == nil)
+        precondition(withdrawnController.actionTitle == "Check for Upgrades")
+        precondition(!FileManager.default.fileExists(atPath: withdrawnWorkspace.path))
+        precondition(!withdrawn.events.contains("install"))
 
         let quiet = Scenario()
         quiet.fetchFailure = .download
-        let third = quiet.controller(interval: 0.01)
+        let third = quiet.controller()
         third.startAutomaticChecks()
         third.startAutomaticChecks()
         await waitFor { !third.busy }
         precondition(third.message.isEmpty && third.available == nil)
+        precondition(quiet.scheduleStarts == 1 && quiet.scheduledInterval == 900)
+        precondition(third.actionTitle == "Check for Upgrades")
         quiet.fetchFailure = nil
-        quiet.date += 3600
+        quiet.date += 900
+        await quiet.scheduledCheck?()
         await waitFor { quiet.fetchCount == 2 && !third.busy }
-        precondition(third.available?.version == "0.4.0" && quiet.events == ["fetch", "fetch"])
+        precondition(third.available?.version == "0.4.0" && quiet.events == ["fetch", "fetch", "download", "verify"])
+        let staleCallback = quiet.scheduledCheck
         third.stopAutomaticChecks()
-        quiet.date += 3600
-        try? await Task.sleep(for: .milliseconds(30))
-        precondition(quiet.fetchCount == 2)
+        precondition(quiet.scheduleStops == 1)
+        quiet.date += 900
+        await quiet.scheduledCheck?()
+        precondition(quiet.fetchCount == 2 && !third.busy)
+        third.startAutomaticChecks()
+        precondition(quiet.scheduleStarts == 2)
+        await waitFor { !third.busy }
+        quiet.date += 900
+        await staleCallback?()
+        precondition(quiet.fetchCount == 3)
+        third.stopAutomaticChecks()
+        quiet.cleanup()
         print("Swift updater controller checks passed")
     }
 }
@@ -1138,13 +1378,17 @@ class SwiftUpdateTests(unittest.TestCase):
             root = Path(temporary)
             driver = root / "ControllerChecks.swift"
             driver.write_text(CONTROLLER_DRIVER)
+            source = root / "AppUpdate.swift"
+            source.write_text(
+                (ROOT / "apps/menu-bar/Sources/AppUpdate.swift").read_text()
+            )
             result = subprocess.run(
                 [
                     "xcrun",
                     "swiftc",
                     "-target",
                     "arm64-apple-macos26.4",
-                    str(ROOT / "apps/menu-bar/Sources/AppUpdate.swift"),
+                    str(source),
                     str(driver),
                     "-o",
                     str(root / "checks"),

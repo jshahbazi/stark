@@ -1,45 +1,80 @@
 # Stark website
 
-A static landing page: HTML, CSS and a small browser script, with no package installation, server-side code, analytics, external fonts or model execution. The logo is the owner-supplied image recorded in [brand provenance](../docs/brand/README.md).
+A static product website built with HTML, CSS and a small browser script.
+There are no package dependencies, analytics, external fonts or model execution.
 
 ## Build and preview
 
-From the repository root, with Node installed:
+From the repository root:
 
 ```sh
 node website/build.mjs
-python3 -m http.server 4173 --bind 127.0.0.1 --directory website/dist
+uv run --project tools/converter --locked --python 3.13.13 python -m http.server 4173 --bind 127.0.0.1 --directory website/dist
 ```
 
-Open `http://127.0.0.1:4173`. `public/` is the source and `dist/` is ignored generated output. From a standalone site checkout, run `node build.mjs`.
+`website/public/` is the source; `website/dist/` is ignored build output. A
+standalone Site checkout builds with `node build.mjs`.
 
-For a local review, serve the built files from the feature branch and share the loopback URL. Building and previewing do not publish the site. Changes to the hosted site use the separate publication workflow below.
+Check the build, local links, keyboard navigation and narrow-screen layout when
+changing the pages. Run the repository policy check before committing.
 
-Release copy is evergreen. Download and release-note links use GitHub's stable `releases/latest` URLs, so publishing a release requires no website rebuild. Update the site when installation steps, compatibility requirements or feature claims change. Benchmark, validation and provenance references stay pinned to the source revisions behind their evidence.
+## Content
 
-## Content and interactions
+- Ripple-65B Preview appears in the technical page's Text model list and the
+  documentation page, with the pinned Q4_K_M and Q8_0 downloads and a link to the
+  native support guide. Copy identifies the tested M5 Max 128 GB host and requires
+  a source build containing Ripple support.
 
-- The original logo is retained byte-for-byte in `public/assets/stark-engine.jpg`; [brand provenance](https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/docs/brand/README.md) records its source and hash.
-- The social preview card `public/assets/stark-social-card.jpg` (1200 by 630) is rendered from the original logo by `scripts/render_social_card.swift`, which places the unmodified logo in the hero's framed card beside the headline. The Open Graph and Twitter card tags reference it; the original logo remains the favicon and hero image.
-- The footer introduces Stark, the owner's cat and the app's namesake, with the supplied photo in `public/assets/stark-cat.jpg`, resized to 480 by 360 for its 160 by 120 display box. The full-resolution original remains in Git history at commit `c21f1b74`. The photo loads lazily below the main content.
-- The hero footnote and installation intro link to the latest release notes without displaying a release version or date.
-- The hero introduces local AI through Stark, OpenWork and OpenCode Desktop, retaining the experimental Uzu-derived Rust/Metal provenance. Get started explains what a model is and walks through four steps: install Stark, download a model from Model Catalog, run the model, then choose where to chat. The fourth step offers a short Playground test or connecting OpenWork or OpenCode Desktop, with direct links to both setup guides. The app plus terminal tools installer is an expandable alternative with PATH setup, a model-free `doctor` check and the app launch command. Download links use the latest signed, notarized release.
-- The model directory features concise JevK5 Decision and Qwen3.8-Flash-Next text-generation cards. The inventory shares a compact area with Text, Images and Decision tabs. Text includes GLM-5.3-Flash, Qwen3.8-Flash-Next and Flint alongside the converter families; their setup details remain inside their entries. Decision lists JevK5. Each tab has its own panel, selected state and roving keyboard focus, with arrow keys, Home and End navigation. Image and other group fragment links select the matching panel. Without JavaScript, all panels remain readable. Text families expand to show the root README's named checkpoints and sizes; compatibility, validation and preparation details are linked.
-- The Image models tab covers one PNG/JPEG through Playground, terminal chat and the Local API for admitted dense BF16 Qwen3.5 vision artifacts after local checks. Qwen3.8-Flash-Next is labelled for text input. Detailed family constraints and exact validation scope remain in the linked documentation.
-- The Apps section explains OpenWork for everyday files and OpenCode Desktop for code, with separate official download links and setup guides. Both use the Connect buttons under Stark's Connections → Apps without copying an API key. The guide includes OpenWork's local workspace and relaunch steps, OpenCode's per-engine approval, keeping Stark open, tool-capable model requirements and small example tasks without claiming general agent reliability. Connection controls are instructions to use in the Mac app; the website does not launch applications.
-- The Use it your way selector has three tabs: OpenWork, OpenCode Desktop and Integrate Stark. It supports click, arrow keys, Home/End and direct `#openwork-guide`, `#opencode-guide` and `#engine` links, including the For developers navigation link. All panels remain readable without JavaScript. The two desktop-app tabs share expandable first-run help and a manual-connection reference; these are hidden when the integration tab is selected.
-- The Integrate Stark tab is a developer reference for loopback HTTP endpoints, model/capability discovery, JSON-lines framing and readiness, process ownership and candidate token scoring. It states queueing, byte and output limits, authentication and capability boundaries. Direct worker integrations own their templates/tools; no SDK packages are published. Scoring distinguishes full-vocabulary log probabilities from probabilities normalized over the supplied candidates without claiming empirical calibration.
-- HTTP, Generate, Score and Convert example tabs show the HTTP request shape, single-line worker request frames and a conversion command. Each example has its own protocol label and integration notes. Token IDs and credentials are placeholders. The HTTP notes point to Stark's generated curl example for authentication without a key in argv or environment. Examples do not execute in the browser. Tabs support arrow keys, Home/End and copying with a selection fallback.
-- The shared benchmark section has three tabs: the original Qwen3.8-Flash-Next comparison first, Qwen3.8-Flash-Next MTP second, and Qwen3.5-2B last. Model tabs support arrow keys, Home/End and direct panel fragments; all three studies remain readable without JavaScript. The Qwen3.5-2B tab defaults to tokens/second and offers an overall view plus six workload selections across six configurations from five engines. Relative mode normalizes MLX-LM to 1.000× from the unrounded recorded rates; rounded display values are not used to reconstruct the speedups.
-- A semantic results table remains usable without JavaScript. Bar lengths compare engines within each workload. Narrow screens scroll the table within its own region.
-- Expandable methodology notes describe four independent loads, repeated workloads, complete request timing, worker-pipe versus local HTTP transports, quantizer differences and qualification limits. Exact engine revisions and answer-format checks remain in the linked immutable benchmark report. The page leads with installation; its summary band uses the Qwen3.8 maximum comparison, and the 12.2% result remains scoped to Qwen3.5-2B.
-- The Qwen3.8-Flash-Next tab leads with the audited maximum useful decode-phase throughput: 66.81 tok/s for Stark and 61.17 for MLX-Serve 26.10.3, using identical checkpoint files and quantization without speculation. It records that other apps were closed, the observed request ranges, the 255-useful-output timing convention, and the unestablished whole-model numerical/quality equivalence. It links the immutable report plus `public/benchmark-qwen38-results.json`, which is copied from the canonical aggregate record. Its figures and controls remain independent of the Qwen3.5 end-to-end study.
-- The Qwen3.8-Flash-Next MTP tab compares Stark MTP on/off within two separate checkpoint packs using 4K input, 256 sampled outputs, top-k 20, two drafts and exact sampling. Lily reports 82.85/72.97 tok/s (+13.54%, 16 pairs); official mixed-4/8-bit reports 65.02/56.69 (+14.69%, 16 pairs). Lily nucleus gain is 1.70%. These figures are not a new MLX comparison; the tab links the immutable reports and aggregate copies `public/benchmark-qwen38-mtp-lily-results.json` and `public/benchmark-qwen38-mtp-mixed48-results.json`. The weight packs are distinct, timing drift is reported, MTP remains off by default, and the results do not establish a general throughput floor.
-- Color, focus indicators, image descriptions, reduced-motion handling and keyboard controls are implemented directly in the source. Benchmark panels use a light background with dark text and muted gold accents; the STARK footer remains dark. The page declares a light color scheme only; there is no theme switch.
-- `robots.txt`, `sitemap.xml` and `404.html` ship beside the page. The site is one document, so the sitemap lists one URL. The 404 page uses absolute asset paths and is marked `noindex`; whether unknown paths return a 404 status depends on the hosting platform, which served the home page for unknown paths before this file existed.
+- The homepage introduces the app, shows its three product screenshots, gives a
+  short setup path and explains the OpenWork/OpenCode connections and local
+  processing. The new beginner flow offers General Work → OpenWork or Coding →
+  OpenCode, followed by Quality (the default) or Speed.
+- Technical details covers the local API, featured models, memory examples,
+  context reuse and three benchmark studies. Its tabs and copy control work
+  without external services; content remains readable without JavaScript.
+- Documentation provides an on-site quick start and organized guides for app
+  connections, model compatibility and developers. Full reference material stays
+  in the linked documents under `docs/`. The setup guide explains RAM-aware
+  recommendations, manually refreshed offline rankings and the distinction
+  between parent-model scores and quantized-export quality. Label the new flow
+  as development work until a release contains it. The owner-supplied setup
+  screenshot shows the new flow; it does not establish release availability.
+- The Images panel retains existing dense Qwen3.5 BF16 guidance and links to a
+  development update for the added Qwen dense/MoE, retained Lily and Gemma paths.
+  The on-site image coverage section distinguishes recorded complete-artifact
+  execution from component checks and unverified larger checkpoints. It labels
+  the new paths as source-build work under review, without making release or
+  image-performance claims.
+- Keep the homepage and technical overview concise. Setup trivia, troubleshooting,
+  API contracts, template coverage and validation matrices belong in Documentation
+  or its linked references.
+- Scope performance figures with a short description and a link to the original
+  report. Preserve exact checkpoints, conditions and limitations in the source
+  records. A timing result does not establish model quality or a universal
+  speedup.
+- Download and release-note links use GitHub's stable `releases/latest` URLs.
+  Model compatibility depends on the artifact and installed app version.
 
-When a benchmark changes, update its corresponding results JSON, the pinned report links in `public/index.html`, and the [benchmarks index](../docs/benchmarks/README.md) together. Qwen3.5 uses `public/benchmark-results.json`; the no-speculation Qwen3.8 comparison uses `public/benchmark-qwen38-results.json`; the Qwen3.8 MTP panel uses `public/benchmark-qwen38-mtp-lily-results.json` and `public/benchmark-qwen38-mtp-mixed48-results.json`, byte-identical copies of their respective canonical aggregate records under `docs/benchmarks/data/`.
+The three `benchmark-qwen38*.json` files in `public/` are byte-identical copies
+of canonical aggregate records under `docs/benchmarks/data/`. When changing benchmark data, update the
+source record, website copy and [benchmark index](../docs/benchmarks/README.md)
+together.
+
+The owner-supplied logo and screenshots retain their original bytes. See
+[brand provenance](../docs/brand/README.md) and the
+[latest screenshot replacement record](../docs/archive/runs/2026-11-11-website-screenshot-replacements.md).
+Keyboard-operable tabs, focus indicators, reduced-motion handling and the skip
+link remain part of the site. `robots.txt`, `sitemap.xml` and `404.html` ship
+alongside the three pages.
 
 ## Hosting
 
-The site identity is in `.openai/hosting.json` (a deployment project identifier, not a secret), with `dist` as the static directory. The public URL is [starkengine.app](https://starkengine.app/), which is also the canonical URL; [starkengine.io](https://starkengine.io/) serves the same site. Publication mirrors only the website source into a separate ignored checkout, builds it, and uploads `dist/` with the hosting manifest; credentials are supplied through the workflow's stdin and never stored. The domain setup and the first deployment are recorded in [the deployment record](../docs/archive/runs/WEBSITE_DEPLOYMENT_2026_10_21.md).
+`.openai/hosting.json` retains the existing Site identity and declares `dist` as
+the static directory. The canonical URL is [starkengine.app](https://starkengine.app/);
+[starkengine.io](https://starkengine.io/) serves the same Site.
+
+Publication opens the current Site source in a separate ignored checkout,
+mirrors only website files, builds and packages the static output, and publishes
+through Sites. Credentials are passed through the workflow's stdin and never
+stored. Preserve the Site's audience. See the
+[initial deployment record](../docs/archive/runs/WEBSITE_DEPLOYMENT_2026_10_21.md).

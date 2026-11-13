@@ -1,4 +1,4 @@
-use std::fmt::Write as _;
+use std::{collections::HashSet, fmt::Write as _};
 
 use minijinja::{
     AutoEscape, Environment, Error, ErrorKind, Value, filters, functions,
@@ -8,9 +8,7 @@ use minijinja::{
 use serde::Deserialize;
 use serde_json::Value as Json;
 
-pub const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SOURCE_BYTES: usize = 256 * 1024;
-const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_ITEMS: usize = 16384;
 const MAX_NODES: usize = 65536;
 const MAX_DEPTH: usize = 64;
@@ -79,7 +77,7 @@ fn check_json(
         },
         _ => *size += 32,
     }
-    if *size > MAX_OUTPUT_BYTES {
+    if *size > crate::limits::input_bytes() {
         return Err(Failure::Size);
     }
     Ok(())
@@ -121,6 +119,48 @@ fn membership_tuple_end(
     None
 }
 
+/// Single-underscore temporaries are ordinary template bindings, not members
+/// of a Python object. Recognize only plain set/for targets; member targets,
+/// undeclared names and dunder identifiers do not gain admission.
+fn declared_private_locals<'source>(tokens: &[(Token<'source>, minijinja::machinery::Span)]) -> HashSet<&'source str> {
+    let mut names = HashSet::new();
+    for (index, (token, _)) in tokens.iter().enumerate() {
+        if !matches!(token, Token::BlockStart) {
+            continue;
+        }
+        let is_set = match tokens.get(index + 1).map(|(token, _)| token) {
+            Some(Token::Ident("set")) => true,
+            Some(Token::Ident("for")) => false,
+            _ => continue,
+        };
+        let mut targets = Vec::new();
+        let mut expecting_name = true;
+        for (token, _) in tokens.iter().skip(index + 2) {
+            match token {
+                Token::Ident(name) if expecting_name => {
+                    targets.push(*name);
+                    expecting_name = false;
+                },
+                Token::Comma if !expecting_name => expecting_name = true,
+                Token::Assign if is_set && !expecting_name => {
+                    names.extend(targets.into_iter().filter(|name| name.starts_with('_') && !name.starts_with("__")));
+                    break;
+                },
+                Token::Ident("in") if !is_set && !expecting_name => {
+                    names.extend(targets.into_iter().filter(|name| name.starts_with('_') && !name.starts_with("__")));
+                    break;
+                },
+                Token::BlockEnd if is_set && !expecting_name && targets.len() == 1 => {
+                    names.extend(targets.into_iter().filter(|name| name.starts_with('_') && !name.starts_with("__")));
+                    break;
+                },
+                _ => break,
+            }
+        }
+    }
+    names
+}
+
 fn check_source(source: &str) -> Result<(), Failure> {
     if source.is_empty() || source.len() > MAX_SOURCE_BYTES {
         return Err(Failure::Runtime);
@@ -138,6 +178,7 @@ fn check_source(source: &str) -> Result<(), Failure> {
     if tokens.len() > MAX_TOKENS {
         return Err(Failure::Runtime);
     }
+    let private_locals = declared_private_locals(&tokens);
     let mut nesting = Vec::new();
     let mut previous_callable = false;
     let mut statement_start = false;
@@ -169,7 +210,14 @@ fn check_source(source: &str) -> Result<(), Failure> {
             // A set RHS also accepts bare tuples, including a single value
             // followed by a comma. Target-unpacking commas precede Assign.
             Token::Comma if set_rhs && nesting.is_empty() => return Err(Failure::Runtime),
-            Token::Ident(name) if name.starts_with('_') => return Err(Failure::Sandbox),
+            Token::Ident(name) if name.starts_with('_') => {
+                if name.starts_with("__")
+                    || tokens.get(index.wrapping_sub(1)).is_some_and(|(token, _)| matches!(token, Token::Dot))
+                    || !private_locals.contains(name)
+                {
+                    return Err(Failure::Sandbox);
+                }
+            },
             Token::Ident("autoescape" | "include" | "import" | "from" | "extends") => return Err(Failure::Sandbox),
             Token::ParenOpen | Token::BracketOpen | Token::BraceOpen => {
                 let membership_only = matches!(token, Token::ParenOpen)
@@ -315,6 +363,7 @@ fn check_serializable(
 fn quoted(
     value: &str,
     json: bool,
+    ensure_ascii: bool,
 ) -> String {
     let quote = if json || (value.contains('\'') && !value.contains('"')) {
         '"'
@@ -338,11 +387,16 @@ fn quoted(
             '<' | '>' | '&' | '\'' if json => {
                 let _ = write!(result, "\\u{:04x}", character as u32);
             },
-            character if json && (!character.is_ascii() || character.is_control()) => {
+            character
+                if json
+                    && ((ensure_ascii && (!character.is_ascii() || character.is_control()))
+                        || character < '\u{20}') =>
+            {
                 for unit in character.encode_utf16(&mut [0u16; 2]) {
                     let _ = write!(result, "\\u{unit:04x}");
                 }
             },
+            character if json => result.push(character),
             character if character.is_control() || character.escape_debug().count() > 1 => {
                 if character as u32 <= 255 {
                     let _ = write!(result, "\\x{:02x}", character as u32);
@@ -388,7 +442,7 @@ fn python_repr(
         ValueKind::String => {
             let text = value.as_str().ok_or_else(unsupported)?;
             if nested {
-                quoted(text, false)
+                quoted(text, false, false)
             } else {
                 text.to_owned()
             }
@@ -423,7 +477,7 @@ fn python_repr(
                     result.push_str(": ");
                     result.push_str(&python_repr(&value.get_item(&item)?, true, depth + 1, nodes)?);
                 }
-                if result.len() > MAX_OUTPUT_BYTES {
+                if result.len() > crate::limits::input_bytes() {
                     return Err(unsupported());
                 }
             }
@@ -436,7 +490,7 @@ fn python_repr(
         },
         _ => return Err(unsupported()),
     };
-    if result.len() > MAX_OUTPUT_BYTES {
+    if result.len() > crate::limits::input_bytes() {
         return Err(unsupported());
     }
     Ok(result)
@@ -446,9 +500,10 @@ fn write_json(
     value: &Json,
     output: &mut String,
     indent: Option<usize>,
+    ensure_ascii: bool,
     depth: usize,
 ) -> Result<(), Error> {
-    if depth > MAX_DEPTH || output.len() > MAX_OUTPUT_BYTES {
+    if depth > MAX_DEPTH || output.len() > crate::limits::input_bytes() {
         return Err(unsupported());
     }
     let newline = |output: &mut String, depth: usize| {
@@ -460,7 +515,7 @@ fn write_json(
         }
     };
     match value {
-        Json::String(value) => output.push_str(&quoted(value, true)),
+        Json::String(value) => output.push_str(&quoted(value, true, ensure_ascii)),
         Json::Number(value) if value.is_f64() => {
             output.push_str(&python_float(value.as_f64().ok_or_else(unsupported)?)?)
         },
@@ -486,7 +541,7 @@ fn write_json(
                     }
                 }
                 newline(output, depth + 1);
-                write_json(item, output, indent, depth + 1)?;
+                write_json(item, output, indent, ensure_ascii, depth + 1)?;
             }
             if !items.is_empty() {
                 newline(output, depth);
@@ -508,9 +563,9 @@ fn write_json(
                     }
                 }
                 newline(output, depth + 1);
-                output.push_str(&quoted(key, true));
+                output.push_str(&quoted(key, true, ensure_ascii));
                 output.push_str(": ");
-                write_json(item, output, indent, depth + 1)?;
+                write_json(item, output, indent, ensure_ascii, depth + 1)?;
             }
             if !items.is_empty() {
                 newline(output, depth);
@@ -518,7 +573,7 @@ fn write_json(
             output.push('}');
         },
     }
-    if output.len() > MAX_OUTPUT_BYTES {
+    if output.len() > crate::limits::input_bytes() {
         return Err(unsupported());
     }
     Ok(())
@@ -530,6 +585,15 @@ fn tojson(
     kwargs: Kwargs,
 ) -> Result<Value, Error> {
     let named: Option<Value> = kwargs.get("indent")?;
+    let ensure_ascii = if kwargs.has("ensure_ascii") {
+        let value: Value = kwargs.get("ensure_ascii")?;
+        if value.kind() != ValueKind::Bool {
+            return Err(unsupported());
+        }
+        value.is_true()
+    } else {
+        true
+    };
     kwargs.assert_all_used()?;
     let indent = positional.or(named).filter(|value| !value.is_none());
     let indent = match indent {
@@ -543,7 +607,7 @@ fn tojson(
     let value = serde_json::to_value(value).map_err(|_| unsupported())?;
     check_json(&value, 0, &mut 0, &mut 0).map_err(|_| unsupported())?;
     let mut result = String::new();
-    write_json(&value, &mut result, indent, 0)?;
+    write_json(&value, &mut result, indent, ensure_ascii, 0)?;
     Ok(Value::from(result))
 }
 
@@ -562,6 +626,7 @@ fn methods(
                 | "lstrip"
                 | "rstrip"
                 | "split"
+                | "replace"
                 | "lower"
                 | "upper"
                 | "capitalize"
@@ -585,6 +650,19 @@ fn methods(
         return Err(unsupported());
     }
     if let Some(text) = value.as_str() {
+        if method == "replace" {
+            let (old, new, count): (&str, &str, Option<i64>) = from_args(args)?;
+            let limit = count.filter(|count| *count >= 0).map_or(usize::MAX, |count| count as usize);
+            let replacements = text.matches(old).take(limit).count();
+            let size = replacements
+                .checked_mul(new.len())
+                .and_then(|added| text.len().checked_sub(replacements * old.len())?.checked_add(added))
+                .filter(|size| *size <= crate::limits::input_bytes())
+                .ok_or_else(unsupported)?;
+            let result = text.replacen(old, new, limit);
+            debug_assert_eq!(result.len(), size);
+            return Ok(Value::from(result));
+        }
         if matches!(method, "strip" | "lstrip" | "rstrip") {
             let (characters,): (Option<&str>,) = from_args(args)?;
             let predicate = |character: char| match characters {
@@ -643,6 +721,43 @@ fn methods(
     minijinja_contrib::pycompat::unknown_method_callback(state, value, method, args)
 }
 
+/// Only calendar-date formats used by reviewed programs are admitted. Keep the
+/// clock capability narrow and independent of locale-specific month tables.
+fn strftime_now(format: &str) -> Result<String, Error> {
+    if !matches!(format, "%d %B %Y" | "%d %b %Y" | "%B %d, %Y") {
+        return Err(unsupported());
+    }
+    let seconds =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| unsupported())?.as_secs();
+    let seconds = libc::time_t::try_from(seconds).map_err(|_| unsupported())?;
+    let mut calendar = std::mem::MaybeUninit::<libc::tm>::uninit();
+    if unsafe { libc::localtime_r(&seconds, calendar.as_mut_ptr()) }.is_null() {
+        return Err(unsupported());
+    }
+    let calendar = unsafe { calendar.assume_init() };
+    let months = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let month = months.get(calendar.tm_mon as usize).ok_or_else(unsupported)?;
+    let year = calendar.tm_year + 1900;
+    Ok(match format {
+        "%d %b %Y" => format!("{:02} {} {}", calendar.tm_mday, &month[..3], year),
+        "%B %d, %Y" => format!("{} {:02}, {}", month, calendar.tm_mday, year),
+        _ => format!("{:02} {} {}", calendar.tm_mday, month, year),
+    })
+}
+
 fn environment<'source>() -> Environment<'source> {
     let mut environment = Environment::new();
     let globals: Vec<_> = environment.globals().map(|(name, _)| name.to_owned()).collect();
@@ -652,6 +767,7 @@ fn environment<'source>() -> Environment<'source> {
     environment.add_function("range", bounded_range);
     environment.add_function("dict", functions::dict);
     environment.add_function("namespace", functions::namespace);
+    environment.add_function("strftime_now", strftime_now);
     environment.add_function("raise_exception", |_value: Value| -> Result<Value, Error> { Err(unsupported()) });
     for filter in [
         "attr",
@@ -698,7 +814,7 @@ impl std::io::Write for Output {
         &mut self,
         bytes: &[u8],
     ) -> std::io::Result<usize> {
-        if bytes.len() > MAX_OUTPUT_BYTES.saturating_sub(self.bytes.len()) {
+        if bytes.len() > crate::limits::input_bytes().saturating_sub(self.bytes.len()) {
             self.too_large = true;
             return Err(std::io::ErrorKind::OutOfMemory.into());
         }
@@ -711,7 +827,7 @@ impl std::io::Write for Output {
 }
 
 pub fn evaluate(data: &[u8]) -> Result<Vec<u8>, Failure> {
-    if data.len() > MAX_REQUEST_BYTES {
+    if data.len() > crate::limits::wire_bytes() {
         return Err(Failure::Size);
     }
     check_integer_tokens(data)?;
@@ -723,11 +839,18 @@ pub fn evaluate(data: &[u8]) -> Result<Vec<u8>, Failure> {
         }
         check_json(arguments, 0, &mut 0, &mut 0)?;
     }
+    // Private local names must not fall back to caller-provided root bindings
+    // when their declaration is later or is skipped. Keep nested JSON data
+    // unchanged, and bound the complete original input before filtering it.
+    let mut arguments = request.arguments;
+    if let Some(Json::Object(bindings)) = &mut arguments {
+        bindings.retain(|name, _| !name.starts_with('_'));
+    }
     let mut environment = environment();
     environment.add_template("model", &request.source).map_err(|_| Failure::Runtime)?;
     let template = environment.get_template("model").map_err(|_| Failure::Runtime)?;
     let mut output = Output::default();
-    if let Some(arguments) = request.arguments
+    if let Some(arguments) = arguments
         && template.render_captured_to(arguments, &mut output).is_err()
     {
         return Err(if output.too_large {

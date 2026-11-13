@@ -6,6 +6,7 @@ pub struct BatchTopology<'a> {
     is_flat: bool,
     full_accept: bool,
     rotary_positions: Option<&'a [[u32; 3]]>,
+    image_span: Option<[u32; 2]>,
 }
 
 impl<'a> BatchTopology<'a> {
@@ -35,6 +36,7 @@ impl<'a> BatchTopology<'a> {
             is_flat,
             full_accept,
             rotary_positions: None,
+            image_span: None,
         }
     }
 
@@ -59,6 +61,22 @@ impl<'a> BatchTopology<'a> {
 
     pub(crate) fn rotary_positions(&self) -> Option<&[[u32; 3]]> {
         self.rotary_positions
+    }
+
+    /// Admit a complete image block in this flat, non-speculative batch.
+    pub(crate) fn with_image_span(
+        mut self,
+        span: [u32; 2],
+    ) -> Result<Self, crate::backends::common::InvalidInput> {
+        if !self.is_flat || !self.full_accept || span[0] >= span[1] || span[1] > self.size() {
+            return Err(crate::backends::common::InvalidInput("image attention requires a complete flat image block"));
+        }
+        self.image_span = Some(span);
+        Ok(self)
+    }
+
+    pub(crate) fn image_span(&self) -> Option<[u32; 2]> {
+        self.image_span
     }
 
     pub fn nodes(&self) -> &'a [TrieNode] {

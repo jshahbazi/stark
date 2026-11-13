@@ -16,7 +16,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -26,6 +25,7 @@ from tokenizers import AddedToken, Tokenizer
 from stark_convert.profiles import GENERIC_PROFILE
 from stark_convert.registry import CONFIG_ADAPTERS, get_model, models
 from stark_convert.streaming import ConversionError, authorize_source_path, read_json, read_regular_bytes
+from stark_convert.template_compat import GENERATION_BLOCK_TAG as _GENERATION_BLOCK_TAG
 
 __all__ = ["SUPPORTED_METADATA_REPOS", "UnsupportedMetadata", "write_metadata"]
 
@@ -34,7 +34,6 @@ _OPTIONAL_THINKING_OUTPUT_PARSER_REGEX = (
     r"(?(1)(?:<think>)?(?P<chain_of_thought>.*?)(?:</think>\s*|\Z))"
     r"(?P<response>.*)\Z"
 )
-_GENERATION_BLOCK_TAG = re.compile(r"{%-?\s*(?:generation|endgeneration)\s*-?%}")
 _MODEL_TYPES = CONFIG_ADAPTERS
 _GRANITE_THINKING_OUTPUT_PARSER_REGEX = (
     r"(?s)<think>(?P<chain_of_thought>.*?)"
@@ -67,6 +66,16 @@ _INLINE_GENERATION = {
         "temperature": 0.8,
         "top_k": 40,
         "repetition_penalty": 1.15,
+        "suffix_repetition_length": 1024,
+    },
+    ("generation_params_overrides", "1e9d0c7d3febdfaeef2b3c552a742aa9b5431b564c1b818b30c6ba1a3a95b26b"): {
+        "top_k": 40,
+        "repetition_penalty": 1.15,
+        "suffix_repetition_length": 1024,
+    },
+    ("generation_params_overrides", "d21abf07fda599a2963cb67a162efc2bdfad13551e62b92c8fcaad58e9d1638d"): {
+        "top_k": 40,
+        "repetition_penalty": 1.10,
         "suffix_repetition_length": 1024,
     },
 }
@@ -390,7 +399,7 @@ def write_metadata(
     expected_type = _MODEL_TYPES.get(model_entry.get("config_class"))
     if expected_type is None:
         raise UnsupportedMetadata("Unsupported metadata architecture.")
-    if expected_type == "qwen3_5":
+    if expected_type in {"qwen3_5", "qwen3_5_moe"}:
         from .adapters.qwen35 import normalize_qwen35_config
 
         hf_config = normalize_qwen35_config(hf_config)

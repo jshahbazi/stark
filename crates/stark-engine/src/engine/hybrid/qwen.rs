@@ -22,6 +22,7 @@ use super::{
 };
 
 #[derive(Clone)]
+#[cfg_attr(test, derive(Default))]
 struct Geometry {
     dim: usize,
     vocab: usize,
@@ -330,6 +331,43 @@ struct DeltaNet {
 }
 
 impl DeltaNet {
+    fn additional_memory_bytes(
+        &self,
+        g: &Geometry,
+    ) -> Option<usize> {
+        let width =
+            g.key_heads.checked_mul(g.key_dim)?.checked_mul(2)?.checked_add(g.value_heads.checked_mul(g.value_dim)?)?;
+        let recurrent = g.value_heads.checked_mul(g.value_dim)?.checked_mul(g.key_dim)?;
+        #[cfg(feature = "metal")]
+        {
+            if self.metal.is_some() {
+                // A completed constructor owns every persistent control,
+                // recurrent and convolution buffer, including after reset.
+                return Some(0);
+            }
+            let controls = width
+                .checked_mul(g.conv_kernel)?
+                .checked_add(g.value_heads.checked_mul(2)?)?
+                .checked_add(g.value_dim)?;
+            super::memory::sum(&[
+                controls.checked_mul(2)?,
+                width.checked_mul(g.conv_kernel - 1)?,
+                recurrent,
+                width,
+                g.value_heads.checked_mul(g.value_dim)?,
+            ])?
+            .checked_mul(4)
+        }
+        #[cfg(not(feature = "metal"))]
+        super::memory::sum(&[
+            super::memory::vector_resize_bytes::<f32>(self.state.capacity(), recurrent)?,
+            super::memory::vector_resize_bytes::<f32>(
+                self.conv_state.history.capacity(),
+                width.checked_mul(g.conv_kernel - 1)?,
+            )?,
+        ])
+    }
+
     fn load(
         weights: &Weights,
         prefix: String,
@@ -907,7 +945,230 @@ pub struct QwenModel {
     graph_enabled: bool,
 }
 
+pub(super) fn forced_scalar_attention() -> bool {
+    std::env::var_os("STARK_QWEN38_SCALAR_ATTENTION").is_some_and(|value| value == "1")
+}
+
+impl Geometry {
+    fn attention_partial_elements(
+        &self,
+        count: usize,
+    ) -> Option<usize> {
+        self.heads
+            .checked_mul(count.div_ceil(256))?
+            .checked_mul(self.head_dim.checked_add(2)?)
+            .filter(|&elements| elements <= 8_000_000)
+    }
+
+    fn scalar_attention_capacity(
+        &self,
+        count: u32,
+        forced: bool,
+    ) -> Option<usize> {
+        // Every request passes through the short scalar prefix, even when its
+        // final step uses split attention. Oversized split workspace and the
+        // explicit scalar override can still need full request-sized arrays.
+        let rows = if forced || self.attention_partial_elements(count as usize).is_none() {
+            count
+        } else {
+            count.min(255)
+        };
+        super::memory::growth_capacity(rows, self.context, 16)
+    }
+
+    fn recurrent_inventory_bytes(
+        &self,
+        layers: usize,
+    ) -> Option<usize> {
+        super::memory::bytes(&[layers, self.value_heads, self.value_dim, self.key_dim], size_of::<f32>())
+    }
+
+    #[cfg(test)]
+    fn request_memory_bytes(
+        &self,
+        layer_count: usize,
+        attention_layers: usize,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        let _ = layer_count;
+        self.execution_workspace(context_tokens, attention_layers, true)
+    }
+
+    fn graph_cache_bytes(
+        &self,
+        capacity: usize,
+    ) -> Option<usize> {
+        let g = self;
+        let key_width = g.kv_heads.checked_mul(g.head_dim)?;
+        let pooled = (capacity / g.ratio).max(1);
+        super::memory::sum(&[
+            super::memory::bytes(&[capacity, key_width.checked_mul(2)?.checked_add(g.index_dim)?], 4)?,
+            super::memory::bytes(&[pooled, g.index_dim.checked_add(1)?], 4)?,
+            super::memory::bytes(&[capacity], 4)?,
+            super::memory::bytes(&[g.index_heads, g.index_dim], 4)?,
+            super::memory::bytes(&[2, g.heads, g.head_dim], 4)?,
+            super::memory::bytes(&[2, g.budget / g.ratio], 4)?,
+        ])
+    }
+
+    fn execution_workspace(
+        &self,
+        context_tokens: u32,
+        attention_layers: usize,
+        graph: bool,
+    ) -> Option<usize> {
+        let g = self;
+        let capacity = super::memory::growth_capacity(context_tokens, g.context, 16)?;
+        let cache = if graph {
+            // reset drops the graph and its attention owners. Each new graph
+            // owns only device rows, not a duplicate scalar F32 host cache.
+            let attention = super::memory::growing_owner_bytes(0, capacity, 16, |rows| g.graph_cache_bytes(rows))?;
+            let scalar_capacity = g.scalar_attention_capacity(context_tokens, forced_scalar_attention())?;
+            let scalar = super::memory::growing_owner_bytes(0, scalar_capacity, 16, |rows| {
+                super::memory::bytes(&[2, rows, g.heads], 4)
+            })?;
+            attention.checked_add(scalar)?.checked_mul(attention_layers)?
+        } else {
+            // Scalar row payloads are dropped by reset. Outer descriptor Vecs
+            // remain resident and are accounted separately from actual capacity.
+            super::memory::bytes(
+                &[
+                    attention_layers,
+                    context_tokens as usize,
+                    g.kv_heads.checked_mul(g.head_dim)?.checked_mul(2)?.checked_add(g.index_dim)?,
+                ],
+                4,
+            )?
+        };
+        let width = g
+            .dim
+            .checked_mul(g.streams)?
+            .max(g.expert_dim.checked_mul(g.active_experts)?)
+            .max(g.shared_dim)
+            .max(g.heads.checked_mul(g.head_dim)?)
+            .max(g.index_heads.checked_mul(g.index_dim)?)
+            .max(g.dim.checked_mul(g.active_experts)?);
+        let workspace = if graph {
+            // This is the actual per-command arena allocation ceiling, not a
+            // persistent model allocation. Do not also bill scalar activations.
+            // Initial embedding upload is outside that arena; its host repeat
+            // can coexist with the uploaded owner.
+            super::memory::sum(&[
+                512 * 1024 * 1024,
+                super::memory::bytes(&[g.dim.checked_mul(g.streams)?.checked_mul(2)?.checked_add(g.dim)?], 4)?,
+            ])?
+        } else {
+            // Scalar mapped kernels have layer-local host/device activation
+            // copies, without a DecodeGraph arena.
+            super::memory::bytes(&[width], 256)?
+        };
+        super::memory::sum(&[cache, workspace])
+    }
+}
+
 impl QwenModel {
+    pub(super) fn additional_scoring_device_readout(&self) -> bool {
+        #[cfg(feature = "metal")]
+        return !self.graph_enabled;
+        #[cfg(not(feature = "metal"))]
+        false
+    }
+
+    pub(super) fn prepare_request_memory(&mut self) -> Result<bool> {
+        if self.position != 0 {
+            return Err(Error::Invalid("Qwen request memory preparation requires reset state"));
+        }
+        #[cfg(feature = "metal")]
+        return Ok(self.graph.take().is_some());
+        #[cfg(not(feature = "metal"))]
+        Ok(false)
+    }
+    pub(super) fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        #[cfg(feature = "metal")]
+        if self.graph_enabled {
+            let g = &self.geometry;
+            let capacity = super::memory::growth_capacity(context_tokens, g.context, 16)?;
+            super::memory::gpu_buffer_fits(&[capacity, g.kv_heads, g.head_dim], 4)?;
+            super::memory::gpu_buffer_fits(&[capacity, g.index_dim], 4)?;
+            let scalar_capacity = g.scalar_attention_capacity(context_tokens, forced_scalar_attention())?;
+            super::memory::gpu_buffer_fits(&[scalar_capacity, g.heads], 4)?;
+        }
+        let g = &self.geometry;
+        #[cfg(feature = "metal")]
+        let graph = self.graph_enabled;
+        #[cfg(not(feature = "metal"))]
+        let graph = false;
+        let attention = self.layers.iter().filter(|layer| matches!(layer.mixer, Mixer::Attention(_))).count();
+        let mut bytes = g.execution_workspace(context_tokens, attention, graph)?;
+        for layer in &self.layers {
+            match &layer.mixer {
+                Mixer::Delta(state) => {
+                    bytes = bytes.checked_add(state.additional_memory_bytes(g)?)?;
+                },
+                Mixer::Attention(state) => {
+                    if graph {
+                        // Graph controls upload these immutable host weights
+                        // once per newly constructed graph state.
+                        let norms = state
+                            .q_norm
+                            .len()
+                            .checked_add(state.k_norm.len())?
+                            .checked_add(state.index_q_norm.len())?
+                            .checked_add(state.index_k_norm.len())?;
+                        bytes = bytes.checked_add(norms.checked_mul(4)?)?;
+                    } else {
+                        for capacity in [state.keys.capacity(), state.values.capacity(), state.index_keys.capacity()] {
+                            bytes = bytes.checked_add(super::memory::vector_growth_bytes::<Vec<f32>>(
+                                capacity,
+                                context_tokens as usize,
+                            )?)?;
+                        }
+                    }
+                },
+            }
+            if graph {
+                bytes = bytes.checked_add(
+                    layer.attn_hyper.norm.len().checked_add(layer.mlp_hyper.norm.len())?.checked_mul(4)?,
+                )?;
+            }
+            if let Some(ple) = &layer.ple {
+                let wide = g.dim.checked_mul(g.streams)?;
+                let history = wide.checked_mul(g.ple_kernel - 1)?.checked_mul(g.ngram_size)?;
+                if graph {
+                    let controls = super::memory::sum(&[
+                        ple.key_norm.len(),
+                        ple.query_norm.len(),
+                        ple.conv_norm.len(),
+                        ple.convolution.len(),
+                        history,
+                        wide,
+                    ])?;
+                    bytes = bytes.checked_add(controls.checked_mul(4)?)?;
+                    // Gathered PLE embeddings are separately uploaded for all
+                    // layers before the graph begins. One host gather and its
+                    // current row may overlap the last upload.
+                    bytes = bytes.checked_add(g.ple_dim.checked_mul(4)?)?;
+                } else {
+                    bytes = bytes.checked_add(super::memory::vector_resize_bytes::<f32>(
+                        ple.state.history.capacity(),
+                        history,
+                    )?)?;
+                }
+            }
+        }
+        if graph {
+            bytes = bytes.checked_add(self.final_mix.norm.len().checked_mul(4)?)?;
+            if self.layers.iter().any(|layer| layer.ple.is_some()) {
+                bytes = bytes.checked_add(g.ple_dim.checked_mul(8)?)?;
+            }
+        }
+        bytes = bytes.checked_add(super::memory::vector_growth_bytes::<u32>(self.history.capacity(), g.ngram_size)?)?;
+        Some(bytes)
+    }
+
     pub fn new(
         weights: Weights,
         config: &Value,
@@ -1001,8 +1262,8 @@ impl QwenModel {
         {
             return Err(Error::Unsupported("Qwen3.8 geometry or indexer grouping"));
         }
-        // A pathological configuration must not reserve gigabytes of recurrent
-        // state before tensor inventory validation or first-token admission.
+        // Preserve the native per-buffer kernel geometry limit. Recurrent
+        // owners are lazy and their aggregate bytes are admitted per request.
         if g.value_heads * g.value_dim * g.key_dim > 16_777_216 {
             return Err(Error::Invalid("Qwen3.8 recurrent state bounds"));
         }
@@ -1013,9 +1274,8 @@ impl QwenModel {
             .filter(|types| types.len() == count)
             .ok_or(Error::Invalid("Qwen3.8 layer schedule"))?;
         let recurrent_layers = layer_types.iter().filter(|kind| kind.as_str() == Some("linear_attention")).count();
-        if recurrent_layers * g.value_heads * g.value_dim * g.key_dim > 134_217_728 {
-            return Err(Error::Invalid("Qwen3.8 aggregate recurrent state bounds"));
-        }
+        g.recurrent_inventory_bytes(recurrent_layers)
+            .ok_or(Error::Invalid("Qwen3.8 aggregate recurrent state overflow"))?;
         let ple_layers =
             text.get("ple_layer_ids").and_then(Value::as_array).ok_or(Error::Invalid("Qwen3.8 PLE schedule"))?;
         let mut ple_ids = Vec::new();
@@ -1223,6 +1483,152 @@ mod tests {
     use super::*;
 
     #[stark_test]
+    fn qwen_request_inventory_covers_executing_graph_cache_growth_and_scores() {
+        let mut g = Geometry {
+            dim: 128,
+            streams: 4,
+            heads: 8,
+            kv_heads: 2,
+            head_dim: 64,
+            key_heads: 2,
+            value_heads: 4,
+            key_dim: 64,
+            value_dim: 64,
+            conv_kernel: 4,
+            active_experts: 2,
+            expert_dim: 256,
+            shared_dim: 256,
+            index_heads: 4,
+            index_dim: 32,
+            ratio: 4,
+            context: 4096,
+            ple_kernel: 4,
+            ngram_size: 3,
+            ..Geometry::default()
+        };
+        let at_64 = g.request_memory_bytes(4, 2, 64).unwrap();
+        assert_eq!(g.request_memory_bytes(4, 2, 63), Some(at_64));
+        let at_128 = g.request_memory_bytes(4, 2, 65).unwrap();
+        // Only the executing graph's cache is allocated. Its final growth
+        // keeps the previous half-size owners until the command completes.
+        let graph_row = (2 * 2 * 64 + 32 + 2 * 8 + 1) * 4;
+        let growth = 2 * 96 * graph_row + 2 * 24 * (32 + 1) * 4;
+        assert_eq!(at_128 - at_64, growth);
+        assert_eq!(
+            crate::encodable_block::memory::automatic_context(1, 4096, at_64, |context| {
+                g.request_memory_bytes(4, 2, context).map(crate::encodable_block::memory::MemoryEstimate::state)
+            }),
+            Some(64)
+        );
+        assert!(g.request_memory_bytes(4, 2, 4097).is_none());
+        g.heads = usize::MAX;
+        assert!(g.request_memory_bytes(4, 2, 64).is_none());
+    }
+
+    #[stark_test]
+    fn qwen_scalar_attention_inventory_tracks_short_prefix_and_long_fallback() {
+        let mut g = Geometry {
+            heads: 8,
+            head_dim: 128,
+            context: 262_144,
+            ..Geometry::default()
+        };
+        assert_eq!(g.scalar_attention_capacity(1, false), Some(16));
+        assert_eq!(g.scalar_attention_capacity(255, false), Some(256));
+        assert_eq!(g.scalar_attention_capacity(4096, false), Some(256));
+        assert_eq!(g.scalar_attention_capacity(262_144, false), Some(256));
+        assert_eq!(g.scalar_attention_capacity(4096, true), Some(4096));
+        g.heads = 64;
+        assert!(g.attention_partial_elements(262_144).is_none());
+        assert_eq!(g.scalar_attention_capacity(262_144, false), Some(262_144));
+        g.head_dim = usize::MAX;
+        assert!(g.attention_partial_elements(256).is_none());
+    }
+
+    #[stark_test]
+    fn qwen_lazy_recurrent_inventory_has_no_aggregate_memory_ceiling() {
+        let mut g = Geometry {
+            value_heads: 256,
+            value_dim: 256,
+            key_dim: 256,
+            ..Geometry::default()
+        };
+        // Nine individually valid native state buffers exceed the former
+        // aggregate 512 MiB load-time cap without allocating them at load.
+        assert_eq!(g.recurrent_inventory_bytes(9), Some(9 * 64 * 1024 * 1024));
+        g.value_heads = usize::MAX;
+        assert_eq!(g.recurrent_inventory_bytes(9), None);
+    }
+
+    #[stark_test]
+    fn qwen_recurrent_inventory_tracks_actual_retained_owners_after_reset() {
+        let g = Geometry {
+            key_heads: 1,
+            key_dim: 2,
+            value_heads: 2,
+            value_dim: 2,
+            conv_kernel: 3,
+            eps: 1e-5,
+            ..Geometry::default()
+        };
+        let width = 2 * g.key_heads * g.key_dim + g.value_heads * g.value_dim;
+        let mut state = DeltaNet {
+            prefix: String::new(),
+            convolution: vec![0.0; width * g.conv_kernel],
+            a_log: vec![0.0; g.value_heads],
+            dt_bias: vec![0.0; g.value_heads],
+            norm: vec![1.0; g.value_dim],
+            #[cfg(feature = "metal")]
+            metal: None,
+            #[cfg(not(feature = "metal"))]
+            conv_state: ConvState::default(),
+            #[cfg(not(feature = "metal"))]
+            state: Vec::new(),
+        };
+        let cold = state.additional_memory_bytes(&g).unwrap();
+        assert!(cold > 0);
+        #[cfg(feature = "metal")]
+        {
+            state.metal = Some(
+                super::super::weight_metal::QwenGdnState::new(
+                    super::super::weight_metal::QwenGdnGeometry {
+                        key_heads: g.key_heads,
+                        key_dim: g.key_dim,
+                        value_heads: g.value_heads,
+                        value_dim: g.value_dim,
+                        conv_kernel: g.conv_kernel,
+                        eps: g.eps,
+                        sigmoid_output: false,
+                    },
+                    &state.convolution,
+                    &state.a_log,
+                    &state.dt_bias,
+                    &state.norm,
+                )
+                .unwrap(),
+            );
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            state.state.resize(g.value_heads * g.value_dim * g.key_dim, 0.0);
+            state.conv_state.history.resize(width * (g.conv_kernel - 1), 0.0);
+        }
+        assert_eq!(state.additional_memory_bytes(&g), Some(0));
+        state.reset();
+        assert_eq!(state.additional_memory_bytes(&g), Some(0));
+        #[cfg(feature = "metal")]
+        {
+            state.metal = None;
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            state.state = Vec::new();
+            state.conv_state = ConvState::default();
+        }
+        assert_eq!(state.additional_memory_bytes(&g), Some(cold));
+    }
+
+    #[stark_test]
     fn qwen_ngram_history_stops_at_eos_without_losing_current_eos_context() {
         assert_eq!(shifted_tokens(9, &[2, 3], 3, 0), [9, 3, 2]);
         assert_eq!(shifted_tokens(9, &[2, 0], 3, 0), [9, 0, 0]);
@@ -1363,6 +1769,39 @@ mod tests {
         assert!(graph.graph.is_none());
         let reset = graph.step(tokens[0]).unwrap_or_else(|_| panic!("private Qwen graph reset failed"));
         assert!(reset == first, "private Qwen graph explicit reset differs");
+    }
+
+    /// A synthetic complete fixture may use a longer context without changing
+    /// its weights. This crosses the 255/256 scalar-to-split transition; it is
+    /// component evidence and does not qualify a production checkpoint.
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    #[ignore]
+    fn qwen_decode_graph_scalar_workspace_matches_staged_across_split_transition() {
+        let path = std::env::var_os("STARK_QWEN38_NUMERICAL_FIXTURE_PATH")
+            .map(std::path::PathBuf::from)
+            .expect("private Qwen numerical fixture path required");
+        assert!(!path.join("HEADER-ADMISSION-ONLY.json").exists());
+        let mut config: Value = serde_json::from_slice(&std::fs::read(path.join("config.json")).unwrap()).unwrap();
+        config["text_config"]["max_position_embeddings"] = serde_json::json!(512);
+        let tokens: Vec<u32> = serde_json::from_slice(&std::fs::read(path.join("tokens.json")).unwrap()).unwrap();
+        assert!(!tokens.is_empty());
+        let load = || QwenModel::new(Weights::open(&path).unwrap(), &config).unwrap();
+        let mut graph = load();
+        assert!(graph.weights.indexed_banks_admitted());
+        graph.graph_enabled = true;
+        let mut staged = load();
+        staged.graph_enabled = false;
+        for position in 0..257 {
+            let token = tokens[position % tokens.len()];
+            let expected = staged.step(token).expect("private Qwen staged step failed");
+            let actual = graph.step(token).expect("private Qwen graph step failed");
+            assert_eq!(actual.len(), expected.len());
+            assert!(
+                actual.iter().zip(expected).all(|(actual, expected)| (actual - expected).abs() <= 2e-5),
+                "private Qwen attention workspace changed full readout"
+            );
+        }
     }
 
     /// The private fixture preserves complete production headers and only the

@@ -4,7 +4,8 @@ use thiserror::Error;
 use crate::{
     array::size_for_shape,
     backends::common::{
-        Backend, CommandBuffer, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context, Kernels,
+        Backend, Buffer, CommandBuffer, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context,
+        Kernels,
         gpu_types::ActivationType,
         kernel::{
             Conv1dDecodeKernel, Conv1dPackKernel, Conv1dScanKernel, SSDPrefill64Kernel, SSDPrefillKernel,
@@ -31,6 +32,10 @@ pub struct Mamba2State<B: Backend> {
 }
 
 impl<B: Backend> MixerState<B> for Mamba2State<B> {
+    fn resident_payload_bytes(&self) -> Option<usize> {
+        self.conv_state.size().checked_add(self.ssm_state.size())
+    }
+
     fn prepare(
         &mut self,
         _context_length: u32,
@@ -221,6 +226,33 @@ impl<B: Backend> Mixer<B> for Mamba2<B> {
 
     fn max_context_length(&self) -> Option<u32> {
         None
+    }
+
+    fn memory_estimate(
+        &self,
+        _context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<crate::encodable_block::memory::MemoryEstimate> {
+        use crate::encodable_block::memory::{MemoryEstimate, checked_bytes};
+        let bytes = INNER_DATA_TYPE.size_in_bytes();
+        let conv = checked_bytes(&[self.conv_dim, self.kernel_size.checked_sub(1)?], bytes)?;
+        let ssm = checked_bytes(&[self.num_heads, self.head_dim, self.state_dim], bytes)?;
+        let mut estimate = MemoryEstimate::state(conv.checked_add(ssm)?);
+        for rows in [input_tokens.clamp(1, 1024), 1] {
+            let mut scratch = MemoryEstimate::default();
+            scratch.add_scratch(
+                &[rows, self.conv_dim.checked_add(self.inner_dim)?.checked_add(self.num_heads)?],
+                bytes,
+                1,
+            )?;
+            scratch.add_scratch(&[rows, self.conv_dim], bytes, 1)?;
+            scratch.add_scratch(&[rows, self.inner_dim], bytes, 3)?;
+            scratch.add_scratch(&[rows, self.num_heads], bytes, 1)?;
+            scratch.add_scratch(&[rows, self.num_groups, self.state_dim], bytes, 2)?;
+            scratch.add_scratch(&[rows.checked_add(self.kernel_size.checked_sub(1)?)?, self.conv_dim], bytes, 1)?;
+            estimate = estimate.sequential(scratch)?;
+        }
+        Some(estimate)
     }
 
     fn create_empty_state(

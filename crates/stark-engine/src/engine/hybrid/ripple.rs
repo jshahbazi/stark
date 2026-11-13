@@ -78,6 +78,69 @@ fn boolean(
 }
 
 impl Config {
+    #[cfg(any(feature = "metal", test))]
+    fn graph_capacity(
+        &self,
+        tokens: usize,
+        sliding: bool,
+    ) -> Option<usize> {
+        let limit = if sliding {
+            self.window.min(self.context)
+        } else {
+            self.context
+        };
+        let count = tokens.min(limit);
+        Some(
+            if count <= 16_384 {
+                count.checked_next_power_of_two()?.max(16)
+            } else {
+                count.checked_add(4095)? / 4096 * 4096
+            }
+            .min(limit),
+        )
+    }
+
+    #[cfg(any(feature = "metal", test))]
+    fn graph_request_memory_bytes(
+        &self,
+        tokens: usize,
+    ) -> Option<usize> {
+        if tokens == 0 || tokens > self.context {
+            return None;
+        }
+        let mut cache = 0usize;
+        let mut largest = 0usize;
+        for &sliding in &self.sliding {
+            let capacity = self.graph_capacity(tokens, sliding)?;
+            #[cfg(feature = "metal")]
+            {
+                super::memory::gpu_buffer_fits(&[capacity, self.kv_heads, self.dim], 4)?;
+                super::memory::gpu_buffer_fits(&[capacity, self.heads], 4)?;
+            }
+            let bytes = super::memory::bytes(
+                &[capacity, self.kv_heads.checked_mul(self.dim)?.checked_mul(2)?.checked_add(self.heads)?],
+                4,
+            )?;
+            cache = cache.checked_add(bytes)?;
+            largest = largest.max(bytes);
+        }
+        // One layer's previous cache can coexist with its replacement while
+        // copying. Charge the entire target and a full largest layer: no credit
+        // is taken for previous-request ownership (production reuse is disabled).
+        let peak = cache.checked_add(largest)?;
+        if peak > MAX_CACHE_BYTES {
+            return None;
+        }
+        let controls = super::memory::sum(&[
+            super::memory::bytes(
+                &[self.sliding.len(), self.hidden.checked_mul(4)?.checked_add(self.dim.checked_mul(2)?)?],
+                4,
+            )?,
+            super::memory::bytes(&[self.hidden], 4)?,
+        ])?;
+        super::memory::sum(&[peak, controls, 512 * 1024 * 1024])
+    }
+
     fn parse(c: &Value) -> Result<Self> {
         if c.get("model_type").and_then(Value::as_str) != Some("ricursive") {
             return Err(Error::Unsupported("ripple_architecture"));
@@ -219,6 +282,47 @@ pub struct RippleModel {
 }
 
 impl RippleModel {
+    pub(super) fn prepare_request_memory(&mut self) -> bool {
+        // No production prefix reuse: release the previous request's complete
+        // graph/cache before the worker samples current headroom.
+        let had_state = self.position != 0;
+        self.reset();
+        had_state
+    }
+
+    pub(super) fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+    ) -> Option<usize> {
+        let c = &self.config;
+        let tokens = context_tokens as usize;
+        if tokens == 0 || tokens > c.context {
+            return None;
+        }
+        #[cfg(feature = "metal")]
+        if self.use_graph() {
+            return c.graph_request_memory_bytes(tokens);
+        }
+        let cache = c.cache_bytes(tokens).ok()?;
+        let descriptors = c.sliding.iter().zip(&self.states).try_fold(0usize, |sum, (&sliding, state)| {
+            let rows = if sliding {
+                tokens.min(c.window)
+            } else {
+                tokens
+            };
+            sum.checked_add(super::memory::vector_growth_bytes::<Vec<f32>>(state.keys.capacity(), rows)?)?
+                .checked_add(super::memory::vector_growth_bytes::<Vec<f32>>(state.values.capacity(), rows)?)
+        })?;
+        let width = c.hidden.max(c.intermediate).max(c.heads.checked_mul(c.dim)?).max(tokens).max(c.vocab);
+        let work = super::memory::bytes(&[width], 256)?;
+        // Streaming can retain 8 GiB of mapped views plus up to 2 GiB of
+        // active views surviving eviction, with staging/page-rounding overhead.
+        // Reserve 16 GiB without crediting views retained from an old request.
+        #[cfg(feature = "metal")]
+        let work = work.checked_add(16 * 1024 * 1024 * 1024)?;
+        super::memory::sum(&[cache, descriptors, work])
+    }
+
     pub fn new(
         weights: Weights,
         config: &Value,
