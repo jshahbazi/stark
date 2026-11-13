@@ -2868,7 +2868,7 @@ struct MenuView: View {
             }.controlSize(.small)
             if interface.mode == .advanced && engine.mode == .chat { SpeedView(engine: engine) }
             Divider()
-            Button(interface.mode == .beginner ? "Adjust Setup" : "Connections", action: connection)
+            Button(interface.mode == .beginner ? "Adjust Setup" : "Connect to...", action: connection)
                 .frame(maxWidth: .infinity, alignment: .leading)
             AppUpdateView(updater: updater)
             HStack {
@@ -3666,7 +3666,7 @@ struct PlaygroundView: View {
             HStack {
                 Text("Stark").font(.title3.weight(.semibold))
                 Spacer()
-                Button("Connections", action: connection)
+                Button("Connect to...", action: connection)
                 Picker("Mode", selection: Binding(get: { engine.mode }, set: engine.changeMode)) {
                     ForEach(PlaygroundMode.allCases) { Text($0.title).tag($0) }
                 }.pickerStyle(.segmented).frame(width: 180).disabled(engine.busy)
