@@ -35,6 +35,27 @@ model used by ordinary Claude chat, Cowork, web or mobile is outside this plan.
 An MCP server exposing Stark as a tool is a separate integration: it does not
 make Stark the coding client's inference provider.
 
+### GUI placement
+
+Pi setup belongs exclusively under **Advanced → Connections → Apps → Pi**.
+Keep Pi out of Beginner Guided Setup, Adjust Setup, task/client choices and
+beginner model recommendations. Codex and Claude connection controls also belong
+under Connections when their integrations become available.
+
+There is no Pi-specific GUI entry yet. The current manual pilot uses
+**Advanced → Connections → Connect your own app** to obtain the existing API
+settings, followed by the separate integration repository's configuration helper
+and required streaming guard. The live CLI RPC result does not qualify a GUI
+setup flow.
+
+The future Pi entry should identify the installed client/version, show the
+running model and setup status, and provide an explicit setup action. Its first
+version must clearly identify manual API-key setup. Reserve managed
+Connect/Disconnect labels and automatic credential refresh for the reviewed
+grant/lifecycle implementation. Keep client configuration and extension logic in
+the integration repository; Stark owns the Connections presentation and approved
+public connection data.
+
 ## Current Stark contract
 
 The owning reference is [Local API](LOCAL_API.md). Recheck it and the source
@@ -210,8 +231,9 @@ no qualification from these checks. See the
 
 ### Manual setup
 
-1. Start the intended model in Stark's Chat mode and enable the local API through
-   Connections. Obtain the displayed Base URL and key through Stark's user flow.
+1. Select Advanced in Stark, start the intended model in Chat mode, and open
+   Connections → Connect your own app. Obtain the displayed Base URL and key
+   through Stark's user flow. Pi is not part of Beginner Guided Setup.
 2. Inspect authenticated `/v1/models` and `/v1/capabilities` without writing
    credentials or response payloads to logs. Record the public model ID, finite
    context capacity, API `max_output_tokens` ceiling and tool capability for
