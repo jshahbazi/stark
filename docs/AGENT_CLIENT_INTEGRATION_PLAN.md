@@ -184,19 +184,26 @@ environment credential reference. Optional JSON merging preserves the original
 file and rejects an existing `stark-local` entry. It installs nothing into the
 user's default Pi profile and adds no managed authentication.
 
-Twenty-two model-free checks pass, including the actual bundled Pi CLI loading
+Twenty-nine model-free checks pass, including the actual bundled Pi CLI loading
 generated configuration and completing read/edit/test/failed-tool rounds in a
 disposable workspace. Pi AI cancellation closes the fixture HTTP connection
 and permits a recovery request; native Stark and interactive CLI cancellation
 remain untested. The isolated pilot settings disable both provider and agent
 retries, plus automatic compaction. Context recovery needs separate qualification.
+The independent recheck fixed inferred vendor cache fields under inherited
+`PI_CACHE_RETENTION=long`, rejected duplicate JSON keys in discovery/config,
+and bounded merge reads to regular files. Explicit cache compatibility flags
+keep long-retention preferences from adding unsupported fields to Stark requests.
 
 Pi 1.5.2 reports a successful result with zero counters if upstream usage is
 missing. This is a characterized accounting gap, not a passing acceptance case.
 Keep the missing-accounting gate open until a client change or qualified guard
-fails closed. No artifact, backend, coding quality, native prefix reuse or live
-lifecycle result follows from these fixture checks. See the
-[foundation validation record](archive/runs/2026-11-12-pi-manual-foundation.md).
+fails closed. Pi also accepts EOF after a finish reason and usage without
+`[DONE]`; terminal-sentinel enforcement remains open. No artifact, backend,
+coding quality, native prefix reuse or live lifecycle result follows from these
+fixture checks. See the original
+[foundation validation record](archive/runs/2026-11-12-pi-manual-foundation.md)
+and the [independent recheck](archive/runs/2026-11-12-pi-manual-recheck.md).
 
 ### Manual setup
 
@@ -228,6 +235,8 @@ lifecycle result follows from these fixture checks. See the
         "supportsStrictMode": false,
         "supportsUsageInStreaming": true,
         "supportsFinishReason": true,
+        "supportsLongCacheRetention": false,
+        "promptCacheKeyMode": "disabled",
         "maxTokensField": "max_tokens"
       },
       "models": [
@@ -685,8 +694,9 @@ or numerical equivalence. Report task success separately.
 
 Current progress: milestone 0 has a pinned, inventoried Pi manual profile;
 other client contracts remain to be frozen. Milestone 1 has setup tooling and
-model-free evidence, with the full live artifact matrix and missing-accounting
-gate still open. Milestones 2–7 have no implementation from this work.
+model-free evidence, with the full live artifact matrix, missing-accounting and
+terminal-sentinel gates still open. Milestones 2–7 have no implementation from
+this work.
 
 | Milestone | Deliverable | Exit condition |
 | --- | --- | --- |
