@@ -6,8 +6,12 @@ Status: guarded Pi 1.5.2 CLI RPC pilot has artifact-bound live evidence as of
 `0bdcf4b3b4cc316fd7fd4f4ec2f6bc3a18268420`; the original plan was reviewed
 against `a171326271f6c5eaf31f4ea49bc21905f7e7a813`. Client implementation lives in
 the separate [stark-agent-clients repository](https://github.com/jshahbazi/stark-agent-clients).
-Codex/Claude Responses/Messages adapters remain planned. The Pi evidence below
-does not transfer to those clients, another artifact or the Swift GUI setup flow.
+Codex/Claude Responses/Messages adapters remain planned. Separate manual
+Connections setup evidence is recorded for installed development build
+`20261113133359056674` at `d5557bce3c637480f3c8cd2a34ce43f6b88348d7`.
+The Pi evidence does not transfer to other clients or artifacts. See the
+[Connections run record](archive/runs/2026-11-13-pi-connections.md) for its exact
+GUI, Terminal and installed-backend boundaries.
 
 ## Objective and delivery order
 
@@ -224,7 +228,9 @@ requires valid usage, a terminal reason and `[DONE]` before success or executabl
 tool handoff. Missing extension fails before inference. It adds no managed
 authentication or external adapter. Earlier unguarded profiles must be regenerated.
 
-Forty-three model-free checks and 21 real-model checks passed. Installed Pi 1.5.2
+Fifty model-free checks now pass, including desktop profile and Terminal-script
+checks. The earlier 21-check real-model record remains source-bound to its named
+build. Installed Pi 1.5.2
 used its official CLI RPC mode with the real `mlx-community/Qwen3-4B-4bit`
 artifact, context 40,960 and a 1,024-token output profile. Checks include actual
 read/edit/test/diff, failed tools, native-phase cancellation and recovery,
@@ -234,7 +240,10 @@ Raw/guarded matched short timing controls are recorded separately from quality.
 
 The guard closes the missing-usage and terminal-sentinel gaps in this profile.
 The isolated backend used an ephemeral manual key through the private host pipe;
-the Swift UI credential-entry flow was not run. Broad coding reliability,
+the Swift UI credential-entry flow was not run in that earlier matrix. The new
+Connections record separately covers installed GUI profile creation, folder
+selection and Terminal launch, plus eight fresh real-model checks through the
+bundled desktop setup/launch entry points. Broad coding reliability,
 another artifact/version, managed grants and full UI-consumer backpressure have
 no qualification from these checks. See the
 [guard/live record](archive/runs/2026-11-13-pi-guard-live.md) and model attempts
@@ -735,8 +744,10 @@ or numerical equivalence. Report task success separately.
 Current progress: milestone 0 has a pinned, inventoried Pi manual profile;
 other client contracts remain to be frozen. Milestone 1 has a passing bounded
 Pi 1.5.2 CLI RPC matrix with the named Qwen3-4B 4-bit artifact and installed
-Stark backend. The Swift setup flow and other versions/artifacts need their own
-evidence. Milestones 2–7 have no implementation from this work.
+Stark backend. Manual Connections setup has separate native UI/controller,
+Terminal-script and installed-backend evidence; user Terminal interaction remains
+an explicitly separate acceptance surface. Other versions/artifacts need their
+own evidence. Milestones 2–7 have no implementation from this work.
 
 | Milestone | Deliverable | Exit condition |
 | --- | --- | --- |

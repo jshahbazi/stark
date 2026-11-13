@@ -59,7 +59,7 @@ final class PiConnectionController: ObservableObject {
             if result["ok"] as? Bool == true {
                 self.installed = true
                 self.acceptProfile(result)
-                self.message = self.profile == nil ? "Pi 1.5.2 found. Start a model with tool support to set it up." : "Setup saved for \(self.configuredModel)."
+                self.message = self.profile == nil ? "Pi 1.5.2 found." : "Setup saved for \(self.configuredModel)."
             } else {
                 self.installed = false
                 self.message = Self.failure(result)
@@ -171,7 +171,8 @@ final class PiConnectionController: ObservableObject {
         case "tools_unsupported": return "Start a model with tool support, then update Pi setup."
         case "unknown_or_invalid_limits": return "The running model has no verified context limits. Choose another model."
         case "unsafe_setup_location": return "Pi's setup folder has unsafe permissions or a redirected path. Check the folder and try again."
-        case "model_unavailable_or_changed", "setup_stale": return "The running model changed. Update Pi setup."
+        case "model_unavailable_or_changed": return "The running model changed. Update Pi setup."
+        case "setup_stale": return "Pi setup is out of date. Update setup."
         case "setup_changed", "invalid_setup": return "The saved Pi setup changed. Set it up again."
         case "helper_timeout": return "Pi setup took too long. Check Stark and Pi, then try again."
         default: return "Pi setup could not finish. Check that the model and local API are running, then try again."

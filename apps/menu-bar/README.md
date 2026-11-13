@@ -63,6 +63,9 @@ client version, model metadata and profile integrity again. After key rotation,
 open a new Pi session with the current key. Setup creates a new profile and keeps
 old public profiles for existing sessions; quit Pi before deleting an old folder.
 This flow adds no managed Connect/Disconnect or client-scoped credential grants.
+Updated bundled setup/guard code requires a fresh profile. Pi's executable and
+resolved symlink directories are included in its isolated PATH so installed
+companion tools such as `fd` are available.
 
 Focused checks: `scripts/test_pi_connection.py`, `scripts/test_pi_client_resources.py`
 and `scripts/test_menubar_windows.py`, plus the integration repository's tests.
