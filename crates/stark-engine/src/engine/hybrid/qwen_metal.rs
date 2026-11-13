@@ -2,7 +2,7 @@
 //! Persistent Qwen GDN F32 state. Commands are encoded by `weight_metal` so
 //! projections, recurrent updates and output projection share one completion.
 
-use metal::{MTLBuffer, MTLDevice, MTLDeviceExt, MTLResourceOptions};
+use metal::{MTLBuffer, MTLDevice, MTLDeviceExt, MTLResource, MTLResourceOptions};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 
 use super::{Error, Result};

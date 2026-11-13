@@ -592,7 +592,7 @@ impl State {
             .map(|values| Some(values.into_boxed_slice()))
             .collect::<Vec<_>>();
         let mut take = |index: Option<usize>| -> Box<[f32]> {
-            index.map_or_else(|| Box::new([]), |index| captured[index].take().unwrap())
+            index.map_or_else(Box::<[f32]>::default, |index| captured[index].take().unwrap())
         };
         let layers = plans
             .into_iter()
