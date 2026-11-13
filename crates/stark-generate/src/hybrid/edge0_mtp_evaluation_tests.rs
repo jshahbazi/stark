@@ -94,7 +94,12 @@ fn edge0_actual_exact_sampling_and_restoration() {
     let path =
         PathBuf::from(std::env::var_os("STARK_EDGE0_SOURCE_PATH").unwrap_or_else(|| panic!("evaluation_source")));
     let mut model = Model::load(&path).unwrap_or_else(|_| panic!("evaluation_model_load"));
-    assert!(!model.supports_mtp() && model.mtp_capabilities().is_none(), "evaluation_worker_mtp_disabled");
+    assert!(
+        model.supports_mtp()
+            && model.mtp_capabilities().is_some_and(|caps| caps.max_drafts == 3)
+            && model.default_mtp_drafts() == 0,
+        "evaluation_worker_mtp_opt_in"
+    );
     let text = "A quiet morning brings clear light through the window. ".repeat(4);
     let encoding = model.tokenizer().encode(text, false).unwrap_or_else(|_| panic!("evaluation_tokenizer"));
     let prompt = encoding.get_ids().get(..12).unwrap_or_else(|| panic!("evaluation_prompt_length"));
@@ -271,7 +276,7 @@ fn edge0_actual_exact_sampling_and_restoration() {
         cases == 15 && paired_rows == 41 && depths_exercised == 7 && proposals > 0 && accepted <= proposals,
         "evaluation_gate_counts"
     );
-    assert!(!model.supports_mtp() && model.mtp_capabilities().is_none(), "evaluation_worker_mtp_stays_disabled");
+    assert!(model.supports_mtp() && model.default_mtp_drafts() == 0, "evaluation_worker_default_stays_off");
     println!(
         "{}",
         serde_json::json!({
@@ -279,7 +284,7 @@ fn edge0_actual_exact_sampling_and_restoration() {
             "cases": cases, "serial_target_bit_exact_pairs": paired_rows,
             "draft_depths_exercised": 3, "sampled_full_cases": 6, "tail_cases": 4,
             "early_stop_cases": 1, "failure_cases": 2, "same_model_recoveries": 2,
-            "proposed": proposals, "accepted": accepted, "worker_mtp_available": false
+        "proposed": proposals, "accepted": accepted, "worker_mtp_available": true
         })
     );
 }
