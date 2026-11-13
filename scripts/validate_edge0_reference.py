@@ -51,6 +51,10 @@ def write_new(path, value):
 class Worker:
     def __init__(self, binary, model, *, metal=False, resident=False):
         require(not resident or metal, "resident_requires_metal")
+        self.available_before = psutil.virtual_memory().available
+        require(
+            self.available_before >= (64 if metal else 16) * 1024**3, "available_memory"
+        )
         environment = {
             key: value
             for key, value in os.environ.items()
@@ -75,14 +79,19 @@ class Worker:
 
     def close(self):
         if self.process.poll() is None:
-            self.process.terminate()
+            if self.process.stdin is not None:
+                self.process.stdin.close()
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=5)
         for stream in (self.process.stdin, self.process.stdout):
-            if stream is not None:
+            if stream is not None and not stream.closed:
                 stream.close()
 
     def read(self, deadline=None):
@@ -230,6 +239,7 @@ def run(args):
         "maximum": 32,
         "seed": 42,
         "rss_limit_bytes": RSS_LIMIT,
+        "minimum_available_bytes": (64 if metal else 16) * 1024**3,
         "watchdog": "sampled-owned-worker-rss-100ms",
         "timeout_seconds_per_reply": TIMEOUT,
         "worker_selectors": {
@@ -261,7 +271,8 @@ def run(args):
     worker = None
     try:
         require(
-            registration["available_memory_before_bytes"] >= 16 * 1024**3,
+            registration["available_memory_before_bytes"]
+            >= (64 if metal else 16) * 1024**3,
             "available_memory",
         )
         expected = {}
@@ -279,7 +290,13 @@ def run(args):
                 "prefix_capability",
             )
             require(ready.get("mtp", {}).get("supported") is False, "mtp_capability")
-            report["stages"].append({"stage": "ready", "process": process_index})
+            report["stages"].append(
+                {
+                    "stage": "ready",
+                    "process": process_index,
+                    "available_before_bytes": worker.available_before,
+                }
+            )
             for name, request in requests.items():
                 summary = result_summary(worker.request(request))
                 if process_index == 0:

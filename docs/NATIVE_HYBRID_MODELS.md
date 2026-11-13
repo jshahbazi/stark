@@ -28,6 +28,18 @@ on the exact prepared artifact, with a 512-token runtime limit. MTP and prefix
 reuse remain unavailable; image input is N/A for this text-only source. This
 does not enable catalogue admission, full-model external numerical parity or
 broad quality/performance qualification.
+
+An additional explicit `STARK_EDGE0_METAL=1` selector selects the native Qwen
+Metal graph that passed the bounded local evaluation gate in
+[attempt `20261112-EDGE0-06`](model-experiments/2026-11-12-edge0-metal.md).
+It retains the original mixed weight bytes and uses F32 activations,
+accumulation, recurrence and attention caches. Its bounded prefill batches
+contain at most eight tokens. `STARK_EDGE0_RESIDENT=1` separately requests the
+existing residency manager for the complete expert/projection inventory.
+The owner selected continuing on this native Qwen graph; the plan records that
+decision. The 512-token limit and unavailable MTP/prefix reuse apply to both
+execution policies.
+
 Inspect only its pinned small metadata and bounded skeleton header with:
 
 ```sh
@@ -46,8 +58,9 @@ explicit Unicode range asset, tokenizer program and CPU-oracle proof. First
 run with `--preflight-only`; remove that flag to acquire and fully validate the
 69 pinned source files. The source-native proof is independent of the rejected
 borrowed-HF comparison. Both policies retain the local non-commercial scope.
-Native loading, Rust tokenizer parsing, streaming, MTP and reuse need their own
-later implementation and qualification.
+Native loading, the locked Rust tokenizer and bounded streamed generation are
+qualified separately in the F32 reference record. MTP, prefix reuse and broader
+runtime qualification remain unfinished.
 
 The preparation command pins these sources:
 

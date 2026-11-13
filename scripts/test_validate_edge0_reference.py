@@ -67,17 +67,24 @@ def test_rss_watchdog_rejects_before_reading_worker_output():
 
 def test_reaper_only_terminates_owned_worker():
     actions = []
+
+    class Input(io.BytesIO):
+        def close(self):
+            if not self.closed:
+                actions.append("close_stdin")
+            super().close()
+
     process = SimpleNamespace(
         poll=lambda: None,
         terminate=lambda: actions.append("terminate"),
         wait=lambda timeout: actions.append("wait"),
-        stdin=None,
+        stdin=Input(),
         stdout=None,
     )
     worker = object.__new__(qualification.Worker)
     worker.process = process
     worker.close()
-    assert actions == ["terminate", "wait"]
+    assert actions == ["close_stdin", "wait"]
 
 
 def test_progress_frames_share_one_request_deadline():
@@ -112,6 +119,11 @@ def test_explicit_candidate_selectors_are_passed_without_inherited_experiments(
 
     monkeypatch.setattr(qualification.subprocess, "Popen", spawn)
     monkeypatch.setattr(qualification.psutil, "Process", lambda _: object())
+    monkeypatch.setattr(
+        qualification.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(available=1 << 50),
+    )
     qualification.Worker("worker", "model", metal=metal, resident=resident)
     assert captured["STARK_EDGE0_REFERENCE"] == "1"
     assert (captured.get("STARK_EDGE0_METAL") == "1") == metal

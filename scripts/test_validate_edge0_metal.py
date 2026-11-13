@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 
 import numpy as np
@@ -144,7 +145,7 @@ def test_fixed_work_counts_prefill_once_and_all_forced_steps(monkeypatch):
     assert timing["prefill_seconds"] == 3
 
 
-def metadata(candidate=True, count=0):
+def metadata(candidate=True, count=0, resident=False):
     return {
         "backend": "edge0-metal-graph-v1" if candidate else "edge0-f32-reference",
         "activation_precision": "f32",
@@ -155,8 +156,10 @@ def metadata(candidate=True, count=0):
         "prefix_reuse": False,
         "source_binding": "0721afc5",
         "weights": {
-            "resident_enabled": candidate,
-            "registered_bank_bytes": 100 if candidate else 0,
+            "resident_enabled": resident,
+            "registered_bank_bytes": qualification.COMPLETE_BANK_BYTES
+            if candidate
+            else 0,
             "graph_scratch_high_water_bytes": 1024 if candidate else 0,
             "counters": {
                 "batched_matrix_calls": count,
@@ -249,3 +252,236 @@ def test_baseline_immutable_probe_may_omit_graph_scratch_metadata():
     baseline = metadata(candidate=False)
     baseline["weights"].pop("graph_scratch_high_water_bytes")
     assert qualification.execution_metadata(baseline, "baseline") == baseline
+
+
+@pytest.mark.parametrize(
+    "timeouts,mode,expected",
+    [
+        (0, "eof", ["stdin_close", "wait", "stdout_close", "gpu_close"]),
+        (
+            1,
+            "terminate",
+            ["stdin_close", "wait", "terminate", "wait", "stdout_close", "gpu_close"],
+        ),
+        (
+            2,
+            "kill",
+            [
+                "stdin_close",
+                "wait",
+                "terminate",
+                "wait",
+                "kill",
+                "wait",
+                "stdout_close",
+                "gpu_close",
+            ],
+        ),
+    ],
+)
+def test_teardown_tries_eof_before_owned_signal_fallbacks(
+    monkeypatch, timeouts, mode, expected
+):
+    calls = []
+    waits = 0
+
+    def wait(*, timeout):
+        nonlocal waits
+        assert timeout == 5
+        calls.append("wait")
+        waits += 1
+        if waits <= timeouts:
+            raise subprocess.TimeoutExpired("owned-probe", timeout)
+        return 0 if timeouts == 0 else -15 if timeouts == 1 else -9
+
+    probe = qualification.Probe.__new__(qualification.Probe)
+    probe.process = SimpleNamespace(
+        stdin=SimpleNamespace(close=lambda: calls.append("stdin_close")),
+        stdout=SimpleNamespace(close=lambda: calls.append("stdout_close")),
+        wait=wait,
+        terminate=lambda: calls.append("terminate"),
+        kill=lambda: calls.append("kill"),
+    )
+    probe.gpu_read = 101
+    probe.metrics = {}
+
+    def close_gpu(fd):
+        assert fd == 101
+        calls.append("gpu_close")
+
+    monkeypatch.setattr(qualification.os, "close", close_gpu)
+    monkeypatch.setattr(
+        qualification.psutil, "virtual_memory", lambda: SimpleNamespace(available=1234)
+    )
+    probe.close()
+    assert calls == expected
+    assert probe.metrics["teardown_mode"] == mode
+    assert probe.metrics["available_memory_after_close_bytes"] == 1234
+    assert "worker_exit_code" in probe.metrics
+    probe.close()
+    assert calls == expected
+
+
+def test_exited_worker_broken_stdin_still_reaps_without_signals(monkeypatch):
+    calls = []
+
+    def stdin_close():
+        calls.append("stdin_close")
+        raise BrokenPipeError
+
+    probe = qualification.Probe.__new__(qualification.Probe)
+    probe.process = SimpleNamespace(
+        stdin=SimpleNamespace(close=stdin_close),
+        stdout=SimpleNamespace(close=lambda: calls.append("stdout_close")),
+        wait=lambda **kwargs: 0,
+    )
+    probe.gpu_read = 101
+    probe.metrics = {}
+    monkeypatch.setattr(qualification.os, "close", lambda fd: calls.append("gpu_close"))
+    monkeypatch.setattr(
+        qualification.psutil, "virtual_memory", lambda: SimpleNamespace(available=1234)
+    )
+    probe.close()
+    assert calls == ["stdin_close", "stdout_close", "gpu_close"]
+    assert probe.metrics["teardown_mode"] == "eof"
+
+
+def test_resident_candidate_accepts_only_clean_eof_exit():
+    registration = {"candidate_selectors": {"STARK_EDGE0_RESIDENT": "1"}}
+    qualification.candidate_teardown_gate(
+        {"memory": {"teardown_mode": "eof", "worker_exit_code": 0}}, registration
+    )
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        {},
+        {"teardown_mode": "terminate", "worker_exit_code": 0},
+        {"teardown_mode": "kill", "worker_exit_code": -9},
+        {"teardown_mode": "eof", "worker_exit_code": 1},
+        {"teardown_mode": "eof", "worker_exit_code": -15},
+        {"teardown_mode": "eof", "worker_exit_code": False},
+        {"teardown_mode": "eof", "worker_exit_code": "0"},
+    ],
+)
+def test_resident_candidate_rejects_missing_abnormal_or_signalled_teardown(metrics):
+    registration = {"candidate_selectors": {"STARK_EDGE0_RESIDENT": "1"}}
+    with pytest.raises(
+        qualification.Failure, match="^candidate_resident_teardown_gate$"
+    ):
+        qualification.candidate_teardown_gate({"memory": metrics}, registration)
+
+
+@pytest.mark.parametrize("selectors", [{}, {"STARK_EDGE0_RESIDENT": "0"}])
+def test_virtual_candidate_does_not_acquire_resident_teardown_gate(selectors):
+    qualification.candidate_teardown_gate({}, {"candidate_selectors": selectors})
+
+
+def test_registration_declares_resident_teardown_condition_and_fixed_gates(monkeypatch):
+    monkeypatch.setattr(qualification, "bindings", lambda args: {})
+    registration = qualification.recipe(
+        SimpleNamespace(
+            candidate_env=["STARK_EDGE0_METAL=1", "STARK_EDGE0_RESIDENT=1"],
+            minimum_available_gib=64,
+        )
+    )
+    assert registration["candidate_selectors"]["STARK_EDGE0_RESIDENT"] == "1"
+    assert registration["candidate_teardown_gate"] == {
+        "condition": "candidate_selectors.STARK_EDGE0_RESIDENT equals 1",
+        "required_teardown_mode": "eof",
+        "required_worker_exit_code": 0,
+    }
+    assert (
+        registration["execution_gate"]["candidate_final_registered_bank_bytes"]
+        == 43_819_991_040
+    )
+    assert registration["execution_gate"]["resident_enabled_policy"] == (
+        "ready and final must equal requested arm selector: true exactly when STARK_EDGE0_RESIDENT=1, false otherwise"
+    )
+
+
+@pytest.mark.parametrize(
+    "requested", [{}, {"STARK_EDGE0_RESIDENT": "0"}, {"STARK_EDGE0_RESIDENT": "1"}]
+)
+@pytest.mark.parametrize("final", [False, True])
+def test_resident_policy_must_match_requested_arm_at_ready_and_final(requested, final):
+    resident = requested.get("STARK_EDGE0_RESIDENT") == "1"
+    value = metadata(count=3, resident=resident)
+    initial = metadata(resident=resident) if final else None
+    assert (
+        qualification.execution_metadata(
+            value, "candidate", initial, requested_selectors=requested
+        )
+        == value
+    )
+
+
+@pytest.mark.parametrize(
+    "requested,resident", [({"STARK_EDGE0_RESIDENT": "1"}, False), ({}, True)]
+)
+@pytest.mark.parametrize("final", [False, True])
+def test_wrong_residency_mode_cannot_pass_either_stage(requested, resident, final):
+    value = metadata(count=3, resident=resident)
+    with pytest.raises(qualification.Failure, match="^execution_residency_policy$"):
+        qualification.execution_metadata(
+            value,
+            "candidate",
+            metadata() if final else None,
+            requested_selectors=requested,
+        )
+
+
+@pytest.mark.parametrize("bank_bytes", [0, 43_819_991_039, 43_819_991_041])
+def test_final_inventory_must_equal_the_complete_pinned_bank_bytes(bank_bytes):
+    value = metadata(count=3)
+    value["weights"]["registered_bank_bytes"] = bank_bytes
+    with pytest.raises(
+        qualification.Failure, match="^execution_complete_bank_inventory$"
+    ):
+        qualification.execution_metadata(value, "candidate", metadata())
+
+
+def test_ready_can_report_empty_lazy_bank_registry():
+    value = metadata()
+    value["weights"]["registered_bank_bytes"] = 0
+    assert qualification.execution_metadata(value, "candidate") == value
+
+
+def test_run_session_rejects_wrong_resident_policy_before_dispatch(monkeypatch):
+    events = []
+
+    class WrongPolicyProbe:
+        def __init__(self, *args):
+            self.metrics = {}
+
+        def read(self):
+            return {
+                "ready": True,
+                "protocol": 1,
+                "vocab_size": 248320,
+                "max_context": 512,
+                "load_seconds": 0.0,
+                "request_memory_bytes": 0,
+                "execution": metadata(resident=False),
+            }
+
+        def request(self, *args, **kwargs):
+            pytest.fail("mismatched resident policy must reject before model requests")
+
+        def close(self):
+            events.append("closed")
+
+    monkeypatch.setattr(qualification, "Probe", WrongPolicyProbe)
+    registration = {
+        "candidate_selectors": {"STARK_EDGE0_METAL": "1", "STARK_EDGE0_RESIDENT": "1"},
+        "minimum_available_bytes": 0,
+    }
+    with pytest.raises(qualification.Failure, match="^execution_residency_policy$"):
+        qualification.run_session(
+            SimpleNamespace(candidate_probe="unused", model="unused"),
+            "candidate",
+            registration,
+            {},
+        )
+    assert events == ["closed"]

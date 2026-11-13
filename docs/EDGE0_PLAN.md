@@ -1,7 +1,7 @@
 # Edge0-145B native support plan
 
-Status: phase 3 reference gate passed for local non-commercial evaluation;
-phase 4 in progress, 2026-11-12.
+Status: phases 3 and 4 bounded runtime gates passed for local non-commercial
+evaluation, 2026-11-13; phases 5–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
@@ -17,7 +17,9 @@ native readers/decoders are tracked in
 The diagnostic reference path passed the bounded component and ordinary-chat
 gates in
 [`20261112-EDGE0-05`](model-experiments/2026-11-12-edge0-reference-forward.md).
-It requires an explicit local selector and retains a 512-token runtime limit;
+The native Metal graph also passed the bounded Phase 4 gates in
+[`20261112-EDGE0-06`](model-experiments/2026-11-12-edge0-metal.md).
+Both policies require explicit local selectors and retain a 512-token runtime limit;
 app/catalogue admission, MTP, prefix reuse and broad numerical/performance
 qualification remain unfinished. Follow
 [model onboarding](MODEL_ONBOARDING.md), the
@@ -140,7 +142,10 @@ and `U` products and uses integer dot products.
 Published scores and throughput are Edge0's own measurements. They are context
 and do not qualify Stark.
 
-## Mapping to Stark
+## Initial mapping to Stark
+
+This table records the intake baseline. Completed work and qualification are
+tracked by the phase results below; these original gaps are not current status.
 
 | Component | Stark today | Gap |
 | --- | --- | --- |
@@ -166,11 +171,16 @@ and do not qualify Stark.
    execution path also has no external inference process, and its prefix
    cache, MTP and readiness contracts belong to the worker. The Edge0
    repository is used as the format authority and as oracle source.
-3. **Two stages.** Bring the model up first in the F32 graph, which already
-   reads GGUF block formats through the shared reader. Then move it to the
-   mixed-precision backend for batched prefill, MTP and prefix reuse. If only
-   one path is affordable, go straight to the second stage and accept that the
-   synthetic fixture is the only reference.
+3. **Native graph stages.** Bring the model up first in the F32 reference,
+   which already reads GGUF block formats through the shared reader. The owner
+   selected retaining the native Qwen Metal graph on 2026-11-13 after reviewing
+   the bounded candidate's numerical and timing evidence. This supersedes the
+   original planned migration to `vendor/lily-core`. Batched prefill, MTP and
+   prefix reuse target that native graph. Existing Lily implementations remain
+   references for exact rejection sampling and state-restoration contracts;
+   their capabilities are not inherited by the native graph. Activations,
+   accumulation, recurrence and attention caches remain F32 until a separate
+   precision candidate qualifies.
 4. **Bytes are retained.** No requantization and no repacking of expert,
    projection, table or skeleton payloads. Q8_0 scales are F16 and are not
    re-encoded as BF16 affine planes.
@@ -300,6 +310,10 @@ whole-model external numerical equivalence or broad quality/speed result.
 
 ### Phase 4: mixed-precision Metal path
 
+The owner-approved backend is the native Qwen Metal graph, retaining the
+artifact's mixed stored weights and F32 device arithmetic. This phase does not
+require a Lily migration or reduced-precision activation/state promotion.
+
 Implementation and fixed qualification gates are registered in
 [attempt `20261112-EDGE0-06`](model-experiments/2026-11-12-edge0-metal.md).
 
@@ -317,19 +331,43 @@ Implementation and fixed qualification gates are registered in
 Gate: agreement with the phase 3 reference under the recorded numerical gates,
 plus matched decode and prefill measurements.
 
+Local gate passed on 2026-11-13 in
+[attempt `20261112-EDGE0-06`](model-experiments/2026-11-12-edge0-metal.md).
+Both virtual-wrapper and explicit-residency candidates passed all 34 paired
+readouts, reset/recovery checks and matched fixed-work prefill/decode runs.
+The corrected build passed cold allocation admission, generation-worker smokes
+and complete residency/clean-exit checks. This is a short-context local gate
+on a 128 GiB host; full-context, low-memory, quality and broad performance
+qualification remain separate. MTP and prefix reuse remain unavailable.
+
 ### Phase 5: MTP
 
-- Load the draft layer from `mtp/` and bind it to the existing Flash-Next head
-  graph; add the Q2_0 expert kernel once the bank format is confirmed.
+- Load the draft layer from `mtp/` and adapt the existing Flash-Next head
+  contract to the native Qwen graph; add the Q2_0 expert kernel once the bank
+  format is confirmed. Existing `Forward::Lily` MTP dispatch is not a native
+  Qwen implementation and must not advertise support for this artifact.
 - Keep Stark's exact rejection-sampling verification with one to three drafts.
   Four drafts and the restricted draft vocabulary are separate attempts.
+- Reuse the backend-independent `MtpSampler`/`ExactMtpSampler` contract.
+  Native verification initially executes ordinary single-token target steps;
+  tolerance agreement from batched prefill does not establish an identical
+  target sampling distribution. Retain the target's wide residual for the
+  draft input and implement bounded checkpoint/rewind of all affected state.
+- Test every acceptance length, output-budget tails, early stream drop,
+  cancellation and sampler/rollback failures with deterministic fake backends
+  before real-artifact qualification. Synthetic head/storage controls and actual
+  numerical, lifecycle and performance gates remain required.
 - Choose the default by a matched on/off measurement and keep the request
   override.
 
 ### Phase 6: prefix reuse
 
 - Complete the state inventory below against the implemented path.
-- Reuse the 4,096-token snapshot path of the mixed-precision backend.
+- Implement consistent export/import for the native graph using the existing
+  mixed-precision backend's 4,096-token snapshot contract as a reference.
+  The current 512-token cap cannot exercise that boundary. Address the recorded
+  wider-context indexer finite-check concern and qualify the larger context
+  before a 4,096-token reuse run.
 - Run `scripts/validate_generation_prefix_cache.py --reuse boundary` for
   exactness and timing on the exact artifact. The validator must learn this
   file set before it can hash it.
@@ -383,9 +421,12 @@ These are expectations from the Flash-Next inventory, not findings.
 2. The model is described as trained at 4 bits with quantized activations in
    the upstream arithmetic. Floating activations may differ from the trained
    forward.
-3. The scale conventions and the draft-layer expert format are not yet traced
-   to source.
-4. Tokenizer equivalence with Flash-Next is unproven.
+3. Main-path scale conventions are traced and component-qualified. The retained
+   draft's expected Q2_0 bank still needs executable head/storage qualification
+   and independent normalization checks before MTP admission.
+4. The borrowed Flash-Next tokenizer comparison failed. The separately qualified
+   source-native tokenizer is artifact/profile bound; other exports do not
+   inherit that proof.
 5. The release was published on the intake date. Revisions may change; every
    step binds the pinned ones.
 6. The intake host has 128 GiB. It cannot qualify low-memory behaviour without

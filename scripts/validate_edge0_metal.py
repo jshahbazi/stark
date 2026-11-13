@@ -37,6 +37,7 @@ PREFIX_LENGTHS = (32, 128)
 DECODE_STEPS = 16
 WARMUPS = 1
 REPEATS = 3
+COMPLETE_BANK_BYTES = 43_819_991_040
 TIMEOUT = 1200
 TEXT = (
     "The small workshop has a wooden table beside the window. "
@@ -123,6 +124,8 @@ def recipe(args):
             "attention_cache_precision": "f32",
             "prefix_reuse": False,
             "registered_bank_bytes_scope": "retained source-owner bank registration/virtual span bytes; not physical residency or total mapped weights; baseline Phase4 registry absent",
+            "resident_enabled_policy": "ready and final must equal requested arm selector: true exactly when STARK_EDGE0_RESIDENT=1, false otherwise",
+            "candidate_final_registered_bank_bytes": COMPLETE_BANK_BYTES,
             "candidate_required_counter_increases": [
                 "batched_matrix_calls",
                 "batched_q8_calls",
@@ -140,6 +143,13 @@ def recipe(args):
         "watchdog": "owned-worker RSS sampled while awaiting replies, at most 100ms select interval",
         "timing_scope": "engine-only synchronous ingest_prefix, initial step, forced decode steps; excludes IPC",
         "order": "baseline session reaped; candidate session reaped; each session includes reset and request rejection recovery",
+        "teardown": "close private stdin for EOF/model Drop, wait 5 seconds, then owned-process terminate/wait 5 seconds, then kill/wait 5 seconds",
+        "candidate_teardown_gate": {
+            "condition": "candidate_selectors.STARK_EDGE0_RESIDENT equals 1",
+            "required_teardown_mode": "eof",
+            "required_worker_exit_code": 0,
+        },
+        "available_memory_after_close_scope": "immediate system available-memory sample after owned process reap; does not establish complete asynchronous GPU reclamation",
         "inherited_stark_uzu_selectors_removed": True,
     }
 
@@ -152,7 +162,7 @@ def row(value, vocab):
     return result
 
 
-def execution_metadata(value, name, initial=None):
+def execution_metadata(value, name, initial=None, *, requested_selectors=None):
     require(isinstance(value, dict), "execution_metadata_shape")
     backend = "edge0-f32-reference" if name == "baseline" else "edge0-metal-graph-v1"
     batch = 1 if name == "baseline" else 8
@@ -173,6 +183,10 @@ def execution_metadata(value, name, initial=None):
     weights = value.get("weights")
     require(isinstance(weights, dict), "execution_weights")
     require(type(weights.get("resident_enabled")) is bool, "execution_residency")
+    resident_requested = (requested_selectors or {}).get("STARK_EDGE0_RESIDENT") == "1"
+    require(
+        weights["resident_enabled"] == resident_requested, "execution_residency_policy"
+    )
     require(
         type(weights.get("registered_bank_bytes")) is int
         and weights["registered_bank_bytes"] >= 0,
@@ -185,6 +199,10 @@ def execution_metadata(value, name, initial=None):
     )
     if name == "candidate" and initial is not None:
         require(scratch > 0, "execution_graph_scratch_missing")
+        require(
+            weights["registered_bank_bytes"] == COMPLETE_BANK_BYTES,
+            "execution_complete_bank_inventory",
+        )
     if name == "baseline":
         require(value.get("source_binding") == "0721afc5", "baseline_source_binding")
     counters = weights.get("counters")
@@ -200,6 +218,18 @@ def execution_metadata(value, name, initial=None):
                 "candidate_batched_dispatch_missing",
             )
     return value
+
+
+def candidate_teardown_gate(summary, registration):
+    if registration["candidate_selectors"].get("STARK_EDGE0_RESIDENT") != "1":
+        return
+    metrics = summary.get("memory", {})
+    require(
+        metrics.get("teardown_mode") == "eof"
+        and type(metrics.get("worker_exit_code")) is int
+        and metrics["worker_exit_code"] == 0,
+        "candidate_resident_teardown_gate",
+    )
 
 
 def row_hash(value):
@@ -328,17 +358,40 @@ class Probe:
         return self.read()
 
     def close(self):
-        if self.process.poll() is None:
-            self.process.terminate()
+        if getattr(self, "_closed", False):
+            return
+        started = time.monotonic()
+        mode = "eof"
+        try:
+            # EOF lets the Rust owner return normally and drop the model and
+            # residency manager. Signals are bounded fallbacks for this child.
+            if self.process.stdin is not None:
+                try:
+                    self.process.stdin.close()
+                except BrokenPipeError:
+                    pass
             try:
-                self.process.wait(timeout=5)
+                exit_code = self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
-        for stream in (self.process.stdin, self.process.stdout):
-            if stream is not None:
-                stream.close()
-        os.close(self.gpu_read)
+                mode = "terminate"
+                self.process.terminate()
+                try:
+                    exit_code = self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    mode = "kill"
+                    self.process.kill()
+                    exit_code = self.process.wait(timeout=5)
+            self.metrics["teardown_mode"] = mode
+            self.metrics["worker_exit_code"] = exit_code
+            self.metrics["available_memory_after_close_bytes"] = (
+                psutil.virtual_memory().available
+            )
+        finally:
+            if self.process.stdout is not None:
+                self.process.stdout.close()
+            os.close(self.gpu_read)
+            self.metrics["teardown_seconds"] = time.monotonic() - started
+            self._closed = True
 
 
 def forward(probe, tokens, length, *, reset=True):
@@ -396,7 +449,11 @@ def run_session(args, name, registration, summary, reference=None):
         summary["load_seconds"] = ready["load_seconds"]
         summary["request_memory_estimate_bytes"] = ready["request_memory_bytes"]
         summary["execution_ready"] = ready.get("execution")
-        execution_metadata(summary["execution_ready"], name)
+        execution_metadata(
+            summary["execution_ready"],
+            name,
+            requested_selectors=registration[name + "_selectors"],
+        )
         progress(name, "ready")
         tokens = probe.request("encode", text=TEXT)["ids"]
         require(len(tokens) >= max(PREFIX_LENGTHS) + DECODE_STEPS, "input_too_short")
@@ -478,7 +535,12 @@ def run_session(args, name, registration, summary, reference=None):
         summary["rejection_recovery_exact"] = True
         progress(name, "recovery_complete")
         summary["execution_final"] = probe.request("metadata")
-        execution_metadata(summary["execution_final"], name, summary["execution_ready"])
+        execution_metadata(
+            summary["execution_final"],
+            name,
+            summary["execution_ready"],
+            requested_selectors=registration[name + "_selectors"],
+        )
         return stored
     finally:
         summary["memory"] = probe.metrics
@@ -521,6 +583,7 @@ def main():
         reference = run_session(args, "baseline", expected, report["baseline"])
         report["candidate"] = {}
         run_session(args, "candidate", expected, report["candidate"], reference)
+        candidate_teardown_gate(report["candidate"], expected)
         require(
             report["baseline"]["input_ids_sha256"]
             == report["candidate"]["input_ids_sha256"],

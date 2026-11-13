@@ -123,6 +123,20 @@ a Stark-authored CPU bridge. New code does not copy the source runtime.
 Component, activation-control and actual checkpoint scopes are recorded
 separately in [attempt `20261112-EDGE0-05`](../docs/model-experiments/2026-11-12-edge0-reference-forward.md).
 
+### Edge0 Metal graph candidate
+
+The independently authored native graph candidate follows those same pinned
+container, quantization, routing, scale and GGUF transformation authorities.
+It adds bounded Q8_0/BF16 matrix batching, fused Q3_K gate/up/SwiGLU, IQ4_NL
+down products and routed-order U/reduction through Stark's existing Metal
+registry. Stored negative-A and tiled V-head conventions remain source-bound.
+No upstream runtime was copied, and no new source revision or license replaces
+the Apache-2.0, Strata MIT and GGML notices above. The original source bytes,
+model licenses and Phase 3 validation remain separate from
+[attempt `20261112-EDGE0-06`](../docs/model-experiments/2026-11-12-edge0-metal.md).
+That candidate uses the native F32 Qwen Metal graph with mixed stored weights;
+it does not establish a Lily-backend port or reduced-precision state validation.
+
 ### Edge0 native reader and block components
 
 The independent native Strata readers and the new Q4_0 (GGML 2), IQ4_NL
