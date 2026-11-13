@@ -82,4 +82,4 @@ stored. Preserve the Site's audience. See the
 
 ## Documentation site
 
-The Markdown manual lives in `docs-site/src/content/docs/`. Run `npm ci` and `npm run build` from `website/` to build the full site, then `uv run --no-project --python 3.12.13 python scripts/check_docs.py` from that directory to check generated docs links and assets. `node build.mjs` alone copies static assets only. See [documentation maintenance](docs-site/README.md). Preserve newer published homepage changes when synchronizing with the Sites repository.
+The Markdown manual lives in `docs-site/src/content/docs/`. Run `npm ci` and `npm run build` from `website/` to build the full site, then `uv run --no-project --python 3.12.13 python scripts/check_docs.py` from that directory to check generated docs links and assets. `node build.mjs` also builds the complete documentation and fails if dependencies or generated pages are missing. See [documentation maintenance](docs-site/README.md). Preserve newer published homepage changes when synchronizing with the Sites repository.
