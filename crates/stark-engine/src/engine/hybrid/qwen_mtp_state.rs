@@ -17,6 +17,8 @@ mod actual_tests;
 pub(super) const HEAD_DYNAMIC_BYTES: usize = 512 * 1024 * 1024;
 
 // Three graph segments, bounded host outputs, immutable norms and live K/V.
+// The 16 MiB reserve includes the compact eight-row target prefix wide
+// (at most 320 KiB), dropped before admitting the next prefix batch.
 // The remaining admission is shared by snapshots and staged replacements.
 pub(super) fn head_live_bytes(g: HeadGeometry) -> usize {
     3 * SCRATCH_BYTES + 16 * 1024 * 1024 + g.context * (2 * g.kv_heads * g.head_dim + 2) * 4

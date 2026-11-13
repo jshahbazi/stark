@@ -205,3 +205,76 @@ fn edge0_mtp_actual_head_and_target_wide_lifecycle() {
         })
     );
 }
+
+#[stark_test]
+#[ignore]
+fn edge0_mtp_actual_batched_prefix_matches_ordinary_target() {
+    assert!(
+        std::env::var("STARK_EDGE0_REFERENCE").ok().as_deref() == Some("1")
+            && std::env::var("STARK_EDGE0_METAL").ok().as_deref() == Some("1")
+            && std::env::var("STARK_EDGE0_RESIDENT").ok().as_deref() != Some("1"),
+        "actual_prefill_execution_policy"
+    );
+    let path = PathBuf::from(
+        std::env::var_os("STARK_EDGE0_SOURCE_PATH").unwrap_or_else(|| panic!("actual_prefill_source_required")),
+    );
+    let mut model = Model::load(&path).unwrap_or_else(|_| panic!("actual_prefill_load"));
+    let text = "A quiet morning brings clear light through the window. ".repeat(8);
+    let encoding = model.tokenizer().encode(text, false).unwrap_or_else(|_| panic!("actual_prefill_encode"));
+    let tokens = encoding.get_ids().get(..34).unwrap_or_else(|| panic!("actual_prefill_corpus_length"));
+    let Forward::Qwen(target) = &mut model.forward else {
+        panic!("actual_prefill_backend");
+    };
+    let mut pairs = 0;
+    let mut head_cells = 0;
+    let lengths = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 32];
+    for length in lengths {
+        target.reset();
+        target
+            .ingest_prefix(&tokens[..length - 1], || Ok(()))
+            .unwrap_or_else(|_| panic!("actual_prefill_ordinary_prefix"));
+        let mut expected = Vec::new();
+        for &token in &tokens[length - 1..length + 2] {
+            let row = target.step(token).unwrap_or_else(|_| panic!("actual_prefill_ordinary_target"));
+            expected.push(row.into_iter().map(f32::to_bits).collect::<Vec<_>>());
+        }
+        target.reset();
+        let mut head = Head::for_target(target).unwrap_or_else(|_| panic!("actual_prefill_head_admission"));
+        let mut offset = 0;
+        for batch in tokens[..length - 1].chunks(super::super::decode_graph::EDGE0_PREFILL_BATCH) {
+            let wides = target.ingest_batch_with_wide(batch).unwrap_or_else(|_| panic!("actual_prefill_wide_prefix"));
+            assert!(wides.len() == batch.len(), "actual_prefill_wide_count");
+            for (index, wide) in wides.iter().enumerate() {
+                assert!(wide.row == offset + index && wide.values.len == 10_240, "actual_prefill_wide_shape");
+                head.target_catch_up(target, wide, tokens[offset + index + 1], false)
+                    .unwrap_or_else(|_| panic!("actual_prefill_head_front"));
+                head_cells += 1;
+            }
+            offset += batch.len();
+        }
+        assert!(head.next_cell() == length - 1 && target.position == length - 1, "actual_prefill_causal_boundary");
+        let (row, _) =
+            target.step_with_wide(tokens[length - 1]).unwrap_or_else(|_| panic!("actual_prefill_initial_target"));
+        let mut actual = vec![row];
+        for &token in &tokens[length..length + 2] {
+            actual.push(target.step(token).unwrap_or_else(|_| panic!("actual_prefill_target_continuation")));
+        }
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!(actual.len() == 248_320 && actual.iter().all(|v| v.is_finite()), "actual_prefill_readout_shape");
+            assert!(actual.iter().map(|v| v.to_bits()).eq(expected), "actual_prefill_ordinary_target_bit_equality");
+            pairs += 1;
+        }
+    }
+    assert!(pairs == 36 && head_cells == 92, "actual_prefill_aggregate_counts");
+    assert!(target.ingest_batch_with_wide(&[]).is_err() && target.position == 0, "actual_prefill_empty_refusal");
+    assert!(
+        target.ingest_batch_with_wide(&tokens[..9]).is_err() && target.position == 0,
+        "actual_prefill_oversize_refusal"
+    );
+    println!(
+        "{}",
+        json!({"prompt_cases":12, "target_readout_pairs":pairs, "head_front_cells":head_cells,
+        "all_batch_tails":true, "empty_and_oversize_refused":true,
+        "ordinary_batched_prefix_exact":true, "mtp_sampling":false})
+    );
+}

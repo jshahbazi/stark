@@ -1,5 +1,6 @@
 # Model change and experiment ledger
 
+- [20261113-EDGE0-11: shared prompt arithmetic and matched stopped requests](2026-11-13-edge0-mtp-batched-worker.md): implementation and qualification in progress; ordinary off arithmetic retained and MTP default remains off.
 - [20261113-EDGE0-10: worker integration and matched MTP measurement](2026-11-13-edge0-mtp-worker.md): implementation and qualification in progress for local non-commercial evaluation; default remains off pending measurements.
 - [20261113-EDGE0-09: combined restoration and exact sampling](2026-11-13-edge0-mtp-integration.md): bounded actual-artifact combined replay/lease/rebind gates and 15 exact-sampler cases with 41 complete target-row pairs passed; native unit regression passed. Private local non-commercial evaluation only; worker integration, performance/default selection and prefix reuse remain unfinished.
 - [20261113-EDGE0-08: native MTP head component](2026-11-13-edge0-mtp-head.md): independent F64 head/catch-up/chain gates and actual component replay/branch-refusal gates passed; private virtual head with one-shot admission at that revision. Combined restoration and exact sampling subsequently qualified for private evaluation in attempt 09; worker MTP and performance/default gates remain unfinished.

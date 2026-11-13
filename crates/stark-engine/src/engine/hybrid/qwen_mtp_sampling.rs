@@ -205,15 +205,27 @@ impl QwenModel {
             draft_depth: 0,
             fenced: false,
         };
-        let mut initial = None;
-        for &input in tokens {
-            if let Some(wide) = backend.pending.as_ref() {
-                (backend.control)()?;
-                backend.head.target_catch_up(backend.target, wide, input, false)?;
+        // Match ordinary ingest_prefix on every prefix chunk. Single-token
+        // prompt stepping has a different floating-point batching schedule and
+        // cannot establish the ordinary MTP-off target distribution.
+        let prefix = &tokens[..tokens.len() - 1];
+        let mut offset = 0;
+        for batch in prefix.chunks(super::decode_graph::EDGE0_PREFILL_BATCH) {
+            (backend.control)()?;
+            let wides = backend.target.ingest_batch_with_wide(batch)?;
+            (backend.control)()?;
+            if wides.len() != batch.len() {
+                return Err(Error::Invalid("Edge0 prefix wide row inventory"));
             }
-            initial = Some(backend.target_logits(input)?);
+            for (index, wide) in wides.iter().enumerate() {
+                (backend.control)()?;
+                backend.head.target_catch_up(backend.target, wide, tokens[offset + index + 1], false)?;
+                (backend.control)()?;
+            }
+            offset += batch.len();
+            // The compact batch owner is dropped here before the next batch.
         }
-        let initial = initial.ok_or(Error::Invalid("Edge0 MTP initial readout"))?;
+        let initial = backend.target_logits(tokens[tokens.len() - 1])?;
         if initial.len() != backend.vocab_size() || initial.iter().any(|value| !value.is_finite()) {
             return Err(Error::Invalid("Edge0 MTP initial readout"));
         }

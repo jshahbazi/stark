@@ -6,7 +6,7 @@
 | --- | --- |
 | Registered / owner | 2026-11-13 / Codex, local non-commercial evaluation only |
 | Baseline | `0418a3d3b69cc57c08c4e5814be0e545297d1832`, qualified private combined restoration and exact sampler |
-| State / result | Implementation and qualification in progress |
+| State / result | Serial-target worker lifecycle passed; fixed-work benchmark failed before measurement; superseded by attempt 11 |
 | Governing plan | [Phase 5](../EDGE0_PLAN.md#phase-5-mtp), owner-approved native Qwen Metal graph |
 | Predecessor | [20261113-EDGE0-09](2026-11-13-edge0-mtp-integration.md) |
 | Promotion boundary | Explicit local worker opt-in only; no app/catalogue, distribution or installed-build promotion |
@@ -123,3 +123,37 @@ The matched benchmark is warm, same-process worker measurement. Loading, cold
 first-request time and both route warmups are excluded. Concrete source/build
 hashes, immutable receipts and the measured default decision will be recorded
 before completion.
+
+## Recorded results and successor
+
+At worker source `6a349590` plus the capability-only diagnostic update `64d3ab12`,
+the native unit suite passed 1,098 with 162 ignored; generator units passed 150
+with six ignored; four head controls, production Metal Clippy and CPU feature
+checking passed. The sealed release worker SHA-256 was
+`55b86698e1c973d3dbc4e7b00a786687cc732199beffece4755731a996f92940`.
+The 2,182-file source manifest was
+`9f2028e9c00a3db1364256c38f4f7bbe5aa358e8d9b01271826a325c00b7696e`.
+
+The normal worker passed all 26 registered cases and nine greedy output-hash
+comparisons with both same-model recoveries. It exited on stdin EOF with code 0.
+Peak sampled owned RSS was 840,204,288 bytes; available memory before launch was
+96,742,309,888 bytes. The diagnostic independently passed its 15 cases and 41
+complete target-row pairs, with 24 proposals and nine acceptances, against the
+serial-prompt target policy. Its source-bound log SHA-256 was
+`aae119b247731fdc40859479578556cf66ea9e192652b264048ed15ac5ba8813`.
+
+Two limits prevent a full Phase 5 claim from these results. The cancellation
+labelled decode fired after the initial prefill output, so it proves cancellation
+after the first delivered token and recovery, without demonstrating a verified
+tail output first. Also, off-route prompt ingestion used batches of eight while
+this candidate's MTP prompt ingestion was serial. The oracle used a serial prompt;
+cross-mode target-distribution identity is unverified for this revision.
+
+The first off-route benchmark warmup failed `unequal_work` before emitting the
+required full 16-token workload. No measured pair or speed result exists. The
+partial group and normal process exit are preserved; the gate was not relaxed
+retroactively and no default was promoted.
+
+The successor [attempt `20261113-EDGE0-11`](2026-11-13-edge0-mtp-batched-worker.md)
+aligns prompt arithmetic, strengthens the cancellation trigger, and separately
+registers matching natural-stop requests. Default remains off.

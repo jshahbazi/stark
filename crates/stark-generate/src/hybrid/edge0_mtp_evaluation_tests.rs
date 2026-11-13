@@ -45,9 +45,12 @@ fn ordinary_rows(
     count: usize,
 ) -> Vec<Vec<u32>> {
     model.reset();
-    for &input in &prompt[..prompt.len() - 1] {
-        model.step(input).unwrap_or_else(|_| panic!("evaluation_reference_ingest"));
-    }
+    // Match the ordinary MTP-off worker prompt path: its normal fast prefix
+    // ingestion followed by one final prompt step. Subsequent target decode
+    // remains single-token, including the continuation after an early stop.
+    model
+        .ingest_prefix(&prompt[..prompt.len() - 1], || Ok(()))
+        .unwrap_or_else(|_| panic!("evaluation_ordinary_off_ingest"));
     let mut rows = Vec::new();
     let mut input = *prompt.last().unwrap_or_else(|| panic!("evaluation_prompt"));
     for index in 0..count {
@@ -134,7 +137,7 @@ fn edge0_actual_exact_sampling_and_restoration() {
             assert!(outputs.len() == 5 && sampler.target_rows.len() == 5, "evaluation_output_budget");
             assert_stats(stats, 5, sampler.draft_calls);
             let reference = ordinary_rows(&mut model, prompt, &outputs, outputs.len());
-            assert!(sampler.target_rows == reference, "evaluation_serial_target_exact");
+            assert!(sampler.target_rows == reference, "evaluation_ordinary_off_target_exact");
             cases += 1;
             paired_rows += outputs.len();
             proposals += stats.proposed;

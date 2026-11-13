@@ -17,6 +17,19 @@ use crate::engine::hybrid::{
     weights::Weights,
 };
 
+// One compact copy of at most eight final four-stream residual rows. The
+// 320 KiB peak fits the head leases existing 16 MiB bounded-output reserve.
+fn edge0_wide_elements(
+    count: usize,
+    width: usize,
+    readout: bool,
+) -> Option<usize> {
+    if count == 0 || count > EDGE0_PREFILL_BATCH || width == 0 || width > 10_240 || (readout && count != 1) {
+        return None;
+    }
+    count.checked_mul(width)
+}
+
 struct HyperControls {
     norm: DeviceVector,
 }
@@ -876,10 +889,21 @@ impl State {
             || tokens.iter().any(|&token| token as usize >= g.vocab)
             || start.checked_add(count).is_none_or(|end| end > g.context)
             || (readout && count != 1)
-            || (wide_output.is_some() && (!readout || count != 1))
         {
             return Err(Error::Invalid("Edge0 graph token batch boundary"));
         }
+        let wide_elements = if wide_output.is_some() {
+            Some(
+                edge0_wide_elements(
+                    count,
+                    g.streams.checked_mul(g.dim).ok_or(Error::Invalid("Edge0 wide row width"))?,
+                    readout,
+                )
+                .ok_or(Error::Invalid("Edge0 wide batch geometry"))?,
+            )
+        } else {
+            None
+        };
         // Immutable gathers use each token's chronological history. Runtime
         // model history is published only after the entire batch succeeds.
         let mut history = model.history.clone();
@@ -1041,11 +1065,14 @@ impl State {
         for values in &hidden {
             graph.check_finite(values)?;
         }
-        // Only the private diagnostic path requests this compact owner. The
-        // ordinary target path encodes no extra allocation or copy command.
-        let saved_wide = if wide_output.is_some() {
-            let saved = DecodeGraph::zeros(g.streams * g.dim)?;
-            graph.copy_into(&hidden[0], &saved)?;
+        // The ordinary target path encodes no extra allocation or copy.
+        // Copies follow all target arithmetic and preserve its batch schedule.
+        let saved_wide = if let Some(elements) = wide_elements {
+            let saved = DecodeGraph::zeros(elements)?;
+            let width = g.streams * g.dim;
+            for (row, values) in hidden.iter().enumerate() {
+                graph.copy_into(values, &saved.slice(row * width, width)?)?;
+            }
             Some(saved)
         } else {
             None
@@ -1216,6 +1243,29 @@ pub(super) fn step_with_wide(
     Ok((logits, wide.ok_or(Error::Invalid("private MTP target wide residual missing"))?))
 }
 
+/// One ordinary bounded no-readout prefill batch, with compact final-wide
+/// copies for draft-front catch-up. This uses the identical target graph body.
+pub(super) fn prefill_batch_with_wide(
+    model: &mut QwenModel,
+    tokens: &[u32],
+) -> Result<DeviceVector> {
+    edge0_wide_elements(
+        tokens.len(),
+        model.geometry.streams.checked_mul(model.geometry.dim).ok_or(Error::Invalid("Edge0 wide row width"))?,
+        false,
+    )
+    .ok_or(Error::Invalid("Edge0 wide batch geometry"))?;
+    let mut state = match model.graph.take() {
+        Some(state) => state,
+        None => State::new(model)?,
+    };
+    let mut wide = None;
+    let result = state.encode_edge0_batch(model, tokens, false, Some(&mut wide));
+    model.graph = Some(state);
+    result?;
+    wide.ok_or(Error::Invalid("Edge0 prefix wide residual missing"))
+}
+
 pub(super) fn prefill(
     model: &mut QwenModel,
     tokens: &[u32],
@@ -1261,6 +1311,18 @@ mod checkpoint_tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn edge0_prefill_wide_batch_shape_is_bounded_and_readout_stays_single_token() {
+        for count in 1..=EDGE0_PREFILL_BATCH {
+            assert_eq!(edge0_wide_elements(count, 10_240, false), Some(count * 10_240));
+            assert_eq!(edge0_wide_elements(count, 10_240, true), (count == 1).then_some(10_240));
+        }
+        assert_eq!(edge0_wide_elements(8, 10_240, false).unwrap() * 4, 320 * 1024);
+        for (count, width) in [(0, 10_240), (9, 10_240), (usize::MAX, 10_240), (1, 0), (1, 10_241), (8, usize::MAX)] {
+            assert!(edge0_wide_elements(count, width, false).is_none());
+        }
+    }
 
     #[stark_test]
     fn private_graph_checkpoint_replacement_charges_capacity_and_overwritten_scratch() {

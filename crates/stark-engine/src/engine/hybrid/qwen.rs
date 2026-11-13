@@ -1655,6 +1655,41 @@ impl QwenModel {
         result
     }
 
+    /// Match one ordinary Edge0 prefix batch exactly while retaining one
+    /// compact final-wide row per token for the draft front. All rows carry the
+    /// same model/epoch/branch identity and retain their causal row positions.
+    #[cfg(feature = "metal")]
+    pub(super) fn ingest_batch_with_wide(
+        &mut self,
+        tokens: &[u32],
+    ) -> Result<Vec<mtp::WideResidual>> {
+        let result = objc2::rc::autoreleasepool(|_| {
+            if !self.geometry.edge0_metal || !self.graph_enabled {
+                return Err(Error::Unsupported("Edge0 prefix wide graph"));
+            }
+            let tag = self.checkpoint_state_tag(checkpoint::StagingPolicy::Edge0MetalSingleStepV1)?;
+            let start = self.position;
+            let width = self.geometry.streams * self.geometry.dim;
+            let values = decode_graph::prefill_batch_with_wide(self, tokens)?;
+            tokens
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    Ok(mtp::WideResidual {
+                        values: values.slice(index * width, width)?,
+                        tag: tag.clone(),
+                        row: start + index,
+                        _resource_reservation: None,
+                    })
+                })
+                .collect()
+        });
+        if result.is_err() {
+            self.reset();
+        }
+        result
+    }
+
     /// Advance recurrent, attention and n-gram state for a prefix token without
     /// computing the stateless final mixer and vocabulary projection.
     pub fn ingest(
