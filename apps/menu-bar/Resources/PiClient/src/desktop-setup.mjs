@@ -7,12 +7,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { discoverProvider, PilotError, validateBaseUrl, writeConfiguration } from './config.mjs';
+import { installDefaultProfile } from './default-profile.mjs';
 
 export const PI_VERSION = '1.5.2';
 const OWNER = 'com.starkengine.pi-profile/v1';
 const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
 const SOURCES = ['package.json', 'LICENSE', 'src/config.mjs', 'src/guarded-fetch.mjs',
-  'src/desktop-setup.mjs', 'src/desktop-launch.mjs', 'extensions/stark-stream-guard.mjs'];
+  'src/desktop-setup.mjs', 'src/desktop-launch.mjs', 'src/default-profile.mjs', 'extensions/stark-stream-guard.mjs'];
 const PROFILE_FILES = [...SOURCES, 'agent/models.json', 'agent/settings.json', 'terminal.zsh'];
 const fail = (code) => { throw new PilotError(code); };
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -110,7 +111,7 @@ exit $pi_result
 `;
 }
 
-export async function setupDesktop({ root, piPath, baseUrl, modelId, key }) {
+export async function setupDesktop({ root, piPath, baseUrl, modelId, key, defaultAgentDirectory, keychainService }) {
   await probePi(piPath);
   const provider = await discoverProvider(baseUrl, modelId, key);
   // Match the qualified manual profile's reply budget. API context is kept exact.
@@ -132,9 +133,13 @@ export async function setupDesktop({ root, piPath, baseUrl, modelId, key }) {
     const receipt = { owner: OWNER, schemaVersion: 1, piVersion: PI_VERSION, piPath,
       nodePath: process.execPath, baseUrl: validateBaseUrl(baseUrl), modelId, files };
     await writeFile(path.join(profile, 'profile.json'), `${JSON.stringify(receipt, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-    return { profile, baseUrl: receipt.baseUrl, modelId, version: PI_VERSION };
+    const saved = defaultAgentDirectory ? await installDefaultProfile({ directory: defaultAgentDirectory,
+      profile, provider, keychainService }) : {};
+    return { profile, baseUrl: receipt.baseUrl, modelId, version: PI_VERSION, ...saved };
   } catch (error) {
-    await rm(profile, { recursive: true, force: true });
+    // A failed default-profile transaction may need this public extension for
+    // recovery. Never leave a saved user configuration pointing at deleted code.
+    if (!defaultAgentDirectory) await rm(profile, { recursive: true, force: true });
     throw error;
   }
 }
@@ -206,6 +211,7 @@ async function main() {
       action: { type: 'string' }, pi: { type: 'string' }, root: { type: 'string' },
       'base-url': { type: 'string' }, model: { type: 'string' },
       profile: { type: 'string' }, workspace: { type: 'string' },
+      'default-agent-directory': { type: 'string' }, 'keychain-service': { type: 'string' },
     } });
     let result;
     if (values.action === 'inspect') {
@@ -214,7 +220,8 @@ async function main() {
       result = { version, ...(receipt ? { profile: values.profile, baseUrl: receipt.baseUrl, modelId: receipt.modelId } : {}) };
     } else if (values.action === 'setup') {
       result = await setupDesktop({ root: values.root, piPath: values.pi, baseUrl: values['base-url'],
-        modelId: values.model, key: process.env.STARK_API_KEY });
+        modelId: values.model, key: process.env.STARK_API_KEY,
+        defaultAgentDirectory: values['default-agent-directory'], keychainService: values['keychain-service'] });
     } else if (values.action === 'prepare-launch') {
       result = await prepareLaunchDetails(values.profile, values.workspace);
     } else fail('invalid_arguments');

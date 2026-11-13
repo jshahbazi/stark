@@ -86,16 +86,24 @@ final class PiConnectionController: ObservableObject {
         }
     }
 
-    func setup(baseURL: String, modelID: String, key: String) {
+    func setup(baseURL: String, modelID: String, key: String, keychainService: String? = nil) {
         guard !busy, installed, tools != nil, !baseURL.isEmpty, !modelID.isEmpty, !key.isEmpty else { return }
-        perform(["--action", "setup", "--pi", tools!.pi.path, "--root", root.path,
-                 "--base-url", baseURL, "--model", modelID], key: key) { [weak self] result in
+        var arguments = ["--action", "setup", "--pi", tools!.pi.path, "--root", root.path,
+                         "--base-url", baseURL, "--model", modelID]
+        if let keychainService {
+            arguments += ["--default-agent-directory", NSHomeDirectory() + "/.pi/agent", "--keychain-service", keychainService]
+        }
+        perform(arguments, key: key) { [weak self] result in
             guard let self else { return }
             guard result["ok"] as? Bool == true, let path = result["profile"] as? String,
                   self.ownedProfilePath(path) else { self.message = Self.failure(result); return }
+            guard keychainService == nil || result["commandLineConfigured"] as? Bool == true else {
+                self.message = "Pi's command-line setup could not be saved. Try setup again."; return
+            }
             self.acceptProfile(result)
             self.defaults.set(path, forKey: Self.profilePreference)
-            self.message = "Ready. Open Stark Pi to use the running model."
+            self.message = keychainService == nil ? "Ready. Open Stark Pi to use the running model."
+                : "Ready. Typing pi in Terminal will use Stark."
         }
     }
 
@@ -214,6 +222,12 @@ final class PiConnectionController: ObservableObject {
         case "model_unavailable_or_changed": return "The running model changed. Update Pi setup."
         case "setup_stale": return "Pi setup is out of date. Update setup."
         case "workspace_unavailable": return "The working folder is unavailable. Change the working folder and try again."
+        case "configuration_busy": return "Pi is updating its settings. Close Pi, then try setup again."
+        case "configuration_changed": return "Pi's settings changed during setup. Close Pi, then try again."
+        case "provider_conflict": return "Pi already has a different stark-local provider. Preserve or remove that entry in Pi's models.json before setting up Stark."
+        case "credential_conflict": return "Pi has a saved Stark key. In Pi, use /logout for stark-local, then retry setup to use Keychain."
+        case "invalid_default_configuration", "unsafe_default_profile": return "Pi's saved configuration could not be safely updated. Check its models.json and settings.json, then try again."
+        case "configuration_recovery_required": return "Pi's settings changed during recovery. Your backup is in Pi's .stark-backup folder; restore it before retrying setup."
         case "setup_changed", "invalid_setup": return "The saved Pi setup changed. Set it up again."
         case "helper_timeout": return "Pi setup took too long. Check Stark and Pi, then try again."
         default: return "Pi setup could not finish. Check that the model and local API are running, then try again."

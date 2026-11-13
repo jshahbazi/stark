@@ -19,6 +19,7 @@ FILES = (
     "extensions/stark-stream-guard.mjs",
     "src/desktop-setup.mjs",
     "src/desktop-launch.mjs",
+    "src/default-profile.mjs",
 )
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024

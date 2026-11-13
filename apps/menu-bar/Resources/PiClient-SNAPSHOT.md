@@ -1,6 +1,6 @@
 # Pi client distribution snapshot
 
-`PiClient/` contains the seven public source/license files pinned in
+`PiClient/` contains the eight public source/license files pinned in
 `PiClient.lock.json`. Their owning source is the separate
 [stark-agent-clients repository](https://github.com/jshahbazi/stark-agent-clients).
 This is a distribution input for clean local/hosted builds, not an independently

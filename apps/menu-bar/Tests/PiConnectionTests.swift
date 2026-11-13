@@ -49,6 +49,8 @@ struct PiConnectionTests {
                 } else if args.contains("setup") {
                     require(environment["STARK_API_KEY"] == key)
                     require(args.contains(baseURL) && args.contains("public-model"))
+                    require(args.contains("--default-agent-directory") && args.contains(NSHomeDirectory() + "/.pi/agent"))
+                    require(args.contains("--keychain-service") && args.contains("com.starkengine.menubar.local-api.fixture"))
                     deferred = completion
                 } else if args.contains("prepare-launch") {
                     launchArguments = args
@@ -60,11 +62,12 @@ struct PiConnectionTests {
         controller.refresh()
         require(controller.installed && !controller.busy && calls == 1)
         require(!controller.matches(baseURL: baseURL, modelID: "public-model"))
-        controller.setup(baseURL: baseURL, modelID: "public-model", key: key)
+        controller.setup(baseURL: baseURL, modelID: "public-model", key: key,
+                         keychainService: "com.starkengine.menubar.local-api.fixture")
         require(controller.busy && calls == 2)
         controller.setup(baseURL: baseURL, modelID: "public-model", key: key)
         require(calls == 2) // The actual caller refuses overlapping installations.
-        deferred?(["ok": true, "profile": profile, "modelId": "public-model", "baseUrl": baseURL])
+        deferred?(["ok": true, "profile": profile, "modelId": "public-model", "baseUrl": baseURL, "commandLineConfigured": true])
         require(!controller.busy && controller.matches(baseURL: baseURL, modelID: "public-model"))
         require(!controller.matches(baseURL: "http://127.0.0.1:12346/v1", modelID: "public-model"))
         require(!controller.matches(baseURL: baseURL, modelID: "another-model"))

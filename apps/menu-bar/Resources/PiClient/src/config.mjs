@@ -15,7 +15,7 @@ const positiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
 const MAX_BYTES = 256 * 1024;
 export const GUARDED_API = 'stark-guarded-chat-completions';
 
-function parseJson(bytes, code) {
+export function parseJson(bytes, code) {
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     const value = JSON.parse(text, (_key, item) => {

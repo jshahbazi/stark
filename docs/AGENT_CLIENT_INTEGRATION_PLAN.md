@@ -55,12 +55,19 @@ and open Terminal in an automatic private workspace. **Open Stark Pi** explicitl
 copies the key for Terminal's hidden prompt and starts the connected profile.
 It requires no folder selection. **Change Working Folder…** optionally selects a
 project for new sessions; **Use Stark Workspace** restores the automatic folder
-at `~/Library/Application Support/Stark/Pi/Workspace`. Starting `pi` normally uses
-the user's usual settings. Generated files and command
+at `~/Library/Application Support/Stark/Pi/Workspace`. Setup also merges Stark's
+provider/guard into the user's normal Pi configuration and saves it as the
+startup default, so later `pi` launches reconnect. The persistent provider uses
+Pi's request-time command resolver to read the current master key from macOS
+Keychain; macOS may require access approval. Pi's existing auth store takes
+precedence and is untouched. Generated files and command
 arguments contain no key; the helper and Pi receive it through their environment.
 While running, Stark schedules the unchanged clipboard item for clearing after
 two minutes and clears it on normal quit. A crash or force quit cannot run cleanup.
-The default Pi profile is unchanged. Switching to Beginner hides Connections.
+Other providers, extensions and unrelated Pi settings are preserved. Private
+backups, cooperative settings locks and a recovery journal protect updates;
+unowned provider collisions or changed files fail closed. Normal Pi retains its
+own session/retry/compaction policy. Switching to Beginner hides Connections.
 
 The Pi entry identifies the installed client/version, uses the running model,
 shows setup status, and provides an explicit setup action. It identifies manual
@@ -228,8 +235,10 @@ The separate integration repository pins Pi CLI and Pi AI 1.5.2. Its
 inspect authenticated public model/capability metadata, require finite API
 limits and tool support, and create a new provider configuration with an
 environment credential reference. Optional JSON merging preserves the original
-file and rejects an existing `stark-local` entry. It installs nothing into the
-user's default Pi profile and adds no managed authentication.
+file and rejects an existing `stark-local` entry. The standalone configure CLI
+installs nothing into the user's default Pi profile. Connections additionally
+saves the persistent manual provider described above. Neither flow adds managed
+authentication.
 
 Generated profiles now require the manual `stark-stream-guard.mjs` extension.
 Its `stark-guarded-chat-completions` API marker is local to Pi; the wire remains

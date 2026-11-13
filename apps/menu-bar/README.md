@@ -45,8 +45,9 @@ logic in its owning repository, then update the snapshot and lock together.
 In **Advanced → Connections → Apps**, start a Chat model with tool support and
 choose **Set Up Pi**. Stark detects Pi 1.5.2 and Node.js 22.19 or newer, validates
 the running model's public metadata, and writes a guarded profile under
-`~/Library/Application Support/Stark/Pi/profile-*`. Pi's default settings stay
-unchanged. Pi is excluded from Beginner Guided Setup and Adjust Setup; switching
+`~/Library/Application Support/Stark/Pi/profile-*`. It also saves Stark as the
+default provider/model in normal Pi configuration, preserving other providers,
+extensions and unrelated settings. Pi is excluded from Beginner Guided Setup and Adjust Setup; switching
 to Beginner hides an open Connections window.
 
 Detection includes Pi's managed Node, compatible installed nvm versions, and
@@ -56,22 +57,32 @@ Choose **Open Stark Pi**, then paste the copied key at Terminal's hidden prompt.
 Stark finds Pi automatically and creates or reuses the private working folder
 `~/Library/Application Support/Stark/Pi/Workspace`. **Change Working Folder…**
 optionally selects a project for new sessions in a sheet attached to Connections;
-**Use Stark Workspace** restores the automatic folder. Starting `pi` normally
-uses your usual settings; use **Open Stark Pi** for the connected profile.
+**Use Stark Workspace** restores the automatic folder. Later, typing `pi`
+normally uses the saved Stark provider in the shell's current project folder.
+Normal Pi obtains the current key from macOS Keychain through a public command
+reference, so macOS may ask you to allow access. Its auth store is untouched;
+an existing stored `stark-local` key takes precedence and must be removed through
+Pi's `/logout` to use the Keychain reference.
 This manual setup keeps the master key in process
 environments and the explicitly requested, concealed/transient clipboard item;
 it writes no key into public profiles, launch scripts or command arguments.
 While Stark runs, it schedules the unchanged clipboard item for clearing after
 two minutes and also clears it on normal quit. Crashes and force quits cannot
-run cleanup. Pi can edit
-files and run commands, sessions are not saved, automatic retries/compaction are
-disabled, and the reply ceiling is 1,024 tokens or the lower API limit.
+run cleanup. Pi can edit files and run commands. Sessions opened here are not
+saved and disable automatic retries/compaction; normal Pi keeps its existing
+session/retry/compaction policy. The reply ceiling is 1,024 tokens or the lower API limit.
 
 After a model or API-address change choose **Update Setup**. Launch checks the
 client version, model metadata and profile integrity again. After key rotation,
 open a new Pi session with the current key. Setup creates a new profile and keeps
 old public profiles for existing sessions; quit Pi before deleting an old folder.
-This flow adds no managed Connect/Disconnect or client-scoped credential grants.
+Default configuration updates use private `.stark-backup-*` recovery backups
+under `~/.pi/agent`, cooperative locks and a transaction journal. Existing
+unowned Stark providers, malformed files and concurrent edits fail closed.
+Backups may contain pre-existing credentials; keep them private. This flow
+continues to use the master key and adds no managed client-scoped grants.
+Only marked locks of exited Stark helpers are recovered automatically. Unmarked
+locks require inspection after Pi has stopped; setup never steals them.
 Updated bundled setup/guard code requires a fresh profile. Pi's executable and
 resolved symlink directories are included in its isolated PATH so installed
 companion tools such as `fd` are available.

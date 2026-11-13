@@ -65,7 +65,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "from pi_client_resources import install_pi_client; "
                 "output=Path('staged-resources'); output.mkdir(); "
                 "result=install_pi_client(output, source=None); "
-                "assert len(result['files_sha256']) == 7"
+                "assert len(result['files_sha256']) == 8"
             )
             staged = subprocess.run(
                 [sys.executable, "-B", "-s", "-E", "-c", script],

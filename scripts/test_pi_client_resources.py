@@ -33,6 +33,7 @@ class PiClientResourceTests(unittest.TestCase):
             "extensions/stark-stream-guard.mjs": b"export default function guard() {}\n",
             "src/desktop-setup.mjs": b"export const setup = true;\n",
             "src/desktop-launch.mjs": b"export const launch = true;\n",
+            "src/default-profile.mjs": b"export const defaults = true;\n",
         }
         for name, data in self.payload.items():
             path = self.source / name
