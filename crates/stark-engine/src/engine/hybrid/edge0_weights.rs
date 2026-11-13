@@ -31,6 +31,14 @@ const TABLE_WIDTH: usize = 160;
 // Exact source scale 0.00019931793212890625, without decimal truncation.
 const TABLE_SCALE: f32 = f32::from_bits(0x3951_0000);
 
+#[cfg(feature = "metal")]
+fn remaining_edge0_weight_bytes(
+    banks: usize,
+    statics: usize,
+) -> Option<usize> {
+    43_819_991_040usize.saturating_sub(banks).checked_add(MAX_STATIC_VIEW_BYTES.saturating_sub(statics))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Edge0Matrix {
     ProjectionDown {
@@ -806,24 +814,38 @@ impl Weights {
         }
     }
 
-    /// Charge future wiring against current available-memory admission. The
-    /// dynamic model/workspace allowance is accounted by the Qwen owner.
-    pub(in crate::engine::hybrid) fn edge0_additional_resident_bytes(&self) -> Option<usize> {
+    /// Charge future retained GPU weight resources in either registration
+    /// policy. Registration is an allocation allowance, not a measurement of
+    /// physical residency; the Qwen owner separately accounts dynamic state.
+    pub(in crate::engine::hybrid) fn edge0_additional_weight_bytes(&self) -> Option<usize> {
         #[cfg(feature = "metal")]
         {
-            if !self.is_edge0() {
-                return Some(0);
-            }
-            let guard = self.encoder_residency.lock().ok()?;
-            let Some(state) = guard.as_ref() else {
+            let Some(data) = self.edge0.as_ref() else {
                 return Some(0);
             };
-            if state.failed {
-                return None;
+            // Constructor admission asks for dynamic state before registering
+            // any bank policy. Do not feed weights back into that allowance.
+            if !data.metal_admitted.load(Ordering::Acquire) {
+                return Some(0);
             }
-            43_819_991_040usize
-                .saturating_sub(state.bank_bytes)
-                .checked_add(state.static_reserve.saturating_sub(state.static_bytes))
+            let registered = {
+                let guard = self.encoder_residency.lock().ok()?;
+                match guard.as_ref() {
+                    Some(state) if state.failed => return None,
+                    Some(state) => Some((state.bank_bytes, state.static_bytes)),
+                    None => None,
+                }
+            };
+            // Never acquire a cache lock while holding residency: dispatch
+            // registration uses the opposite (cache -> residency) order.
+            let (banks, statics) = if let Some(registered) = registered {
+                registered
+            } else {
+                let banks = self.encoder_bank_views.lock().ok()?.virtual_bytes;
+                let statics = self.static_views.lock().ok()?.registered_bytes;
+                (banks, statics)
+            };
+            remaining_edge0_weight_bytes(banks, statics)
         }
         #[cfg(not(feature = "metal"))]
         Some(0)
@@ -892,6 +914,15 @@ mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn edge0_retained_resource_allowance_counts_cold_partial_and_complete_banks() {
+        assert_eq!(remaining_edge0_weight_bytes(0, 0), Some(52_409_925_632));
+        assert_eq!(remaining_edge0_weight_bytes(20_000_000_000, 1_000_000_000), Some(31_409_925_632));
+        assert_eq!(remaining_edge0_weight_bytes(43_819_991_040, MAX_STATIC_VIEW_BYTES), Some(0));
+        assert_eq!(remaining_edge0_weight_bytes(44_000_000_000, MAX_STATIC_VIEW_BYTES + 1), Some(0));
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {

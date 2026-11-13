@@ -1283,7 +1283,7 @@ impl QwenModel {
         if g.edge0_metal {
             // Available memory already reflects wired owners. Admit only the
             // registry's remaining bank/static reservation once per request.
-            bytes = bytes.checked_add(self.weights.edge0_additional_resident_bytes()?)?;
+            bytes = bytes.checked_add(self.weights.edge0_additional_weight_bytes()?)?;
         }
         Some(bytes)
     }
