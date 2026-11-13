@@ -1,5 +1,7 @@
 // GGML quantization layout adaptation, MIT. See LICENSE.ggml-hybrid.
 // Lookup tables are supplied from the same source-bound Rust constants.
+// Q4_0, IQ4_NL and Q2_0 follow llama.cpp
+// 3cf03257f219afbe7334045ff7c6a06ac68c627d; see the Edge0 component record.
 
 struct HybridMatrixParams { uint rows, columns, kind, block, block_bytes, bits, group, scale_kind; };
 
@@ -27,6 +29,14 @@ inline uint2 hybrid_scale_min(device const uchar *s, uint i) {
 }
 inline float hybrid_quant(device const uchar *p, uint kind, uint i) {
     if (kind == 0 || kind == 1 || kind == 30) return hybrid_float(p, kind);
+    if (kind == 2 || kind == 20) {
+        uint q=(p[2+i%16]>>(i>=16?4:0))&15;
+        return hybrid_half(p)*(kind==2?float(int(q)-8):float(iq4values[q]));
+    }
+    if (kind == 42) {
+        uint q=(p[2+i/4]>>(2*(i%4)))&3;
+        return hybrid_half(p)*float(int(q)-1);
+    }
     if (kind == 8) return hybrid_half(p) * float(as_type<char>(p[2+i]));
     if (kind == 10 || kind == 11) {
         uint n=i/128, j=(i%128)/32, h=(i%32)/16, l=i%16;
@@ -106,10 +116,10 @@ kernel void hybrid_packed_matvec(device const uchar *codes_base [[buffer(0)]],
     float sum=0;
     // Packed matrices use the otherwise-unused group field as rows per batch.
     ulong input_offset=p.group ? ulong(row/p.group)*p.columns : 0;
-    // Every admitted block has 1, 32 or 256 values and columns is a whole
+    // Every admitted block has 1, 32, 64 or 256 values and columns is a whole
     // number of blocks. Keep the wide row address outside the inner loop;
     // runtime 64-bit division here otherwise expands for every decoded value.
-    uint block_shift=hybrid_packed_block==256?8:(hybrid_packed_block==32?5:0);
+    uint block_shift=hybrid_packed_block==256?8:(hybrid_packed_block==64?6:(hybrid_packed_block==32?5:0));
     ulong row_offset=ulong(row)*(p.columns>>block_shift)*hybrid_packed_block_bytes;
     for (uint col=lane;col<p.columns;col+=256) {
         ulong block_offset=ulong(col>>block_shift)*hybrid_packed_block_bytes;

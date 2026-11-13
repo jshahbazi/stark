@@ -41,6 +41,10 @@ mod q4_grouped_tests;
 #[path = "weight_metal_kquant_mma_tests.rs"]
 mod kquant_mma_tests;
 
+#[cfg(test)]
+#[path = "weight_metal_edge0_tests.rs"]
+mod edge0_tests;
+
 struct Executor {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -411,7 +415,7 @@ impl MappedOperation<'_> {
         let (parameters, matrix_bytes, plane_bytes) = match self.format {
             MatrixFormat::Packed(kind) => {
                 let (block, bytes) = weights::block_layout(kind)?;
-                if !matches!(kind, 0 | 1 | 30 | 8 | 10 | 11 | 12 | 13 | 14 | 16 | 17 | 18 | 23)
+                if !matches!(kind, 0 | 1 | 2 | 30 | 8 | 10 | 11 | 12 | 13 | 14 | 16 | 17 | 18 | 20 | 23 | 42)
                     || !columns.is_multiple_of(block)
                 {
                     return Err(Error::Invalid("invalid mapped packed format"));
@@ -691,6 +695,8 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("../../../unit/fixtures/hybrid_tiled_experiment.metal"));
             #[cfg(test)]
             source.push_str(include_str!("../../../unit/fixtures/hybrid_graph_reference.metal"));
+            #[cfg(test)]
+            source.push_str(include_str!("../../../unit/fixtures/edge0_block_decode.metal"));
             let options = metal::MTLCompileOptions::new();
             options.set_math_mode(metal::MTLMathMode::Safe);
             let library = device
@@ -1485,7 +1491,7 @@ impl Executor {
         name: &str,
         cache: &PipelineCache,
     ) -> Result<PipelineState> {
-        // The bounded key space describes code only: 13 GGML kinds and 18 MLX
+        // The bounded key space describes code only: 16 GGML kinds and 18 MLX
         // affine layouts. No model weights, inputs or decisions enter this
         // process-local shader cache. The tiled experiment is test-only.
         let mut pipelines = cache.lock().map_err(|_| Error::Invalid("Metal pipeline cache failed"))?;
@@ -1869,7 +1875,7 @@ fn packed_matvec(
     rows_per_batch: usize,
 ) -> Result<Vec<f32>> {
     let (block, block_bytes) = weights::block_layout(kind)?;
-    if !matches!(kind, 0 | 1 | 30 | 8 | 10 | 11 | 12 | 13 | 14 | 16 | 17 | 18 | 23)
+    if !matches!(kind, 0 | 1 | 2 | 30 | 8 | 10 | 11 | 12 | 13 | 14 | 16 | 17 | 18 | 20 | 23 | 42)
         || !columns.is_multiple_of(block)
         || rows.checked_mul(columns / block).and_then(|n| n.checked_mul(block_bytes)) != Some(bytes.len())
     {
@@ -2136,7 +2142,7 @@ mod tests {
     fn power_of_two_shader_addresses_preserve_wide_row_offsets() {
         // Exercise the address algebra independently of any allocation. Large
         // admitted row/column products exceed u32 even though each axis fits.
-        for kind in [0, 1, 30, 8, 10, 11, 12, 13, 14, 16, 17, 18, 23] {
+        for kind in [0, 1, 2, 30, 8, 10, 11, 12, 13, 14, 16, 17, 18, 20, 23, 42] {
             let (block, bytes) = weights::block_layout(kind).unwrap();
             let shift = block.trailing_zeros();
             for row in [0u64, 65_536, 7_999_999] {
@@ -2198,7 +2204,7 @@ mod tests {
 
     #[stark_test]
     fn metal_matches_all_checkpoint_quantization_formats() {
-        for kind in [0, 1, 30, 8, 10, 11, 12, 13, 14, 16, 17, 18, 23] {
+        for kind in [0, 1, 2, 30, 8, 10, 11, 12, 13, 14, 16, 17, 18, 20, 23, 42] {
             let (block, size) = weights::block_layout(kind).unwrap();
             let columns = block.max(256);
             let mut bytes = Vec::new();
@@ -2207,7 +2213,7 @@ mod tests {
                     let mut source: Vec<u8> =
                         (0..size).map(|i| ((i * 37 + number * 13 + row * 23) % 256) as u8).collect();
                     let half_offsets: &[usize] = match kind {
-                        1 | 8 | 16 | 17 | 18 | 23 => &[0],
+                        1 | 2 | 8 | 16 | 17 | 18 | 20 | 23 | 42 => &[0],
                         10 => &[80, 82],
                         11 => &[108],
                         12 | 13 => &[0, 2],
@@ -2321,7 +2327,7 @@ mod tests {
             let half_offsets: &[usize] = match kind {
                 12 | 13 => &[0, 2],
                 14 => &[208],
-                8 | 17 | 18 | 23 => &[0],
+                2 | 8 | 17 | 18 | 20 | 23 | 42 => &[0],
                 _ => unreachable!(),
             };
             for &at in half_offsets {

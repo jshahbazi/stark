@@ -4,6 +4,9 @@
 //! 8ca4060b7e30e76baaa5670ee1ec1b760b7f8552 (MIT).
 //! Copyright (c) 2023-2026 The ggml authors. See LICENSE.ggml-hybrid.
 //! Scalar decoding supplies the reference for the native Metal matvec path.
+//! The Q4_0, IQ4_NL and Q2_0 scalar additions follow ggml revision
+//! 3cf03257f219afbe7334045ff7c6a06ac68c627d. Edge0's FP8 E4M3 row policy follows
+//! edge0-strata/src/kernels/ngram.cpp at b7900cbb322926ccebdcd0c0c5a1280497ecff22.
 
 #[cfg(feature = "metal")]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2387,6 +2390,7 @@ pub(super) fn block_layout(kind: u32) -> Result<(usize, usize)> {
     Ok(match kind {
         0 => (1, 4),
         1 | 30 => (1, 2),
+        2 | 20 => (32, 18),
         8 => (32, 34),
         10 => (256, 84),
         11 => (256, 110),
@@ -2397,6 +2401,7 @@ pub(super) fn block_layout(kind: u32) -> Result<(usize, usize)> {
         17 => (256, 74),
         18 => (256, 98),
         23 => (256, 136),
+        42 => (64, 18),
         U32_KIND | I32_KIND => (1, 4),
         U8_KIND => (1, 1),
         I64_KIND => (1, 8),
@@ -2754,6 +2759,22 @@ pub(super) fn decode_block(
         0 | 1 | 30 => {
             output[0] = scalar(kind, bytes)?;
         },
+        2 | 20 => {
+            let d = half_at(bytes, 0);
+            for j in 0..16 {
+                let low = usize::from(bytes[2 + j] & 15);
+                let high = usize::from(bytes[2 + j] >> 4);
+                let value = |code: usize| {
+                    if kind == 20 {
+                        f32::from(KVALUES_IQ4NL[code])
+                    } else {
+                        (code as i32 - 8) as f32
+                    }
+                };
+                output[j] = value(low) * d;
+                output[j + 16] = value(high) * d;
+            }
+        },
         8 => {
             let d = half_at(bytes, 0);
             for i in 0..32 {
@@ -2954,7 +2975,43 @@ pub(super) fn decode_block(
                 }
             }
         },
+        42 => {
+            let d = half_at(bytes, 0);
+            for (j, value) in output.iter_mut().enumerate() {
+                let code = (bytes[2 + j / 4] >> (2 * (j % 4))) & 3;
+                *value = (i32::from(code) - 1) as f32 * d;
+            }
+        },
         _ => return Err(Error::Unsupported("unsupported floating weight block")),
+    }
+    Ok(())
+}
+
+/// Decode Edge0's 160-byte PLE FP8 row with its separate global F32 scale.
+/// This storage-specific interpretation is not a GGML tensor type. The pinned
+/// source maps E4M3FN NaN codes 0x7f/0xff to positive/negative zero before the
+/// scale product; preserve that policy rather than importing another FP8 type.
+#[allow(dead_code, reason = "Phase 2 scalar reference; the native PLE forward gather is a later gate")]
+pub(super) fn decode_edge0_fp8_e4m3_row(
+    bytes: &[u8],
+    scale: f32,
+    output: &mut [f32],
+) -> Result<()> {
+    if bytes.len() != 160 || output.len() != 160 {
+        return Err(Error::Invalid("invalid Edge0 FP8 row size"));
+    }
+    for (value, &encoded) in output.iter_mut().zip(bytes) {
+        let exponent = (encoded >> 3) & 15;
+        let mantissa = encoded & 7;
+        let magnitude = if exponent == 15 && mantissa == 7 {
+            0.0f32
+        } else if exponent == 0 {
+            f32::from(mantissa) * (1.0 / 512.0)
+        } else {
+            f32::from_bits((u32::from(exponent) + 120) << 23 | u32::from(mantissa) << 20)
+        };
+        let decoded = f32::from_bits(magnitude.to_bits() | (u32::from(encoded & 128) << 24));
+        *value = decoded * scale;
     }
     Ok(())
 }
@@ -3039,6 +3096,182 @@ mod tests {
             assert_eq!(format!("{:x}", digest.finalize()), expected, "format {kind}");
             assert!(decode_block(kind, &bytes[..size - 1], &mut vec![0.0; count]).is_err());
         }
+    }
+
+    #[stark_test]
+    fn edge0_scalar_blocks_reject_malformed_spans_before_writing() {
+        for (kind, count) in [(2, 32), (20, 32), (42, 64)] {
+            assert_eq!(block_layout(kind).unwrap(), (count, 18));
+            let mut output = vec![123.0; count];
+            for input_size in [0, 17, 19] {
+                assert!(decode_block(kind, &vec![0; input_size], &mut output).is_err());
+                assert!(output.iter().all(|&value| value == 123.0));
+            }
+            for output_size in [0, count - 1, count + 1] {
+                let mut output = vec![123.0; output_size];
+                assert!(decode_block(kind, &[0; 18], &mut output).is_err());
+                assert!(output.iter().all(|&value| value == 123.0));
+            }
+            assert!(encoded_size(kind, count - 1).is_err());
+            assert_eq!(encoded_size(kind, count * 2).unwrap(), 36);
+            assert!(decode_values(kind, &[0; 35], count * 2).is_err());
+        }
+    }
+
+    #[stark_test]
+    fn edge0_scalar_blocks_match_pinned_independent_reference_hashes_and_classes() {
+        // Registered before any Stark comparison as edge0-blocks-v1:
+        // registration SHA256 5b3ceb3419dc32a24d3c9af500df6d4679a5c2daf1f4c5fc64a7f6007a92024f.
+        // Expected values come from pinned ggml C dequantize_row_* (3cf03257),
+        // independently checked against Strata mtp_pack.py for Q2_0, and the
+        // pinned Strata ngram.cpp FP8 decoder (b7900cbb). NaN payload/sign are
+        // classified, not counted as bit parity; finite bits and signed zeros
+        // must match exactly. Raw captures stay in ignored local runtime data.
+        // Protocol tag 256 names the separate FP8 row API, not a GGML dtype.
+        let half_scales: [u16; 20] = [
+            0x0000, 0x8000, 0x0001, 0x8001, 0x03ff, 0x83ff, 0x0400, 0x8400, 0x3555, 0xb555, 0x3c00, 0xbc00, 0x7bff,
+            0xfbff, 0x7c00, 0xfc00, 0x7d00, 0xfd00, 0x7e00, 0xfe00,
+        ];
+        let fp8_scales: [u32; 14] = [
+            0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x00800000, 0x3f800000, 0xbf800000, 0x39510000,
+            0x7f7fffff, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc00000,
+        ];
+        let mut cases: Vec<(u32, u32, Vec<u8>, usize)> = Vec::new();
+        for kind in [2, 20] {
+            for scale in half_scales {
+                for rotation in 0..16 {
+                    let mut bytes = scale.to_le_bytes().to_vec();
+                    bytes.extend((0..16).map(|j| (((j + rotation) % 16) | (((7 * j + 3 * rotation) % 16) << 4)) as u8));
+                    cases.push((kind, 0, bytes, 32));
+                }
+            }
+        }
+        for scale in half_scales {
+            for rotation in 0..4 {
+                let mut bytes = scale.to_le_bytes().to_vec();
+                bytes.extend((0..16).map(|j| {
+                    (((j + rotation) % 4)
+                        | (((2 * j + rotation + 1) % 4) << 2)
+                        | (((3 * j + rotation + 2) % 4) << 4)
+                        | (((j + rotation + 3) % 4) << 6)) as u8
+                }));
+                cases.push((42, 0, bytes, 64));
+            }
+        }
+        for scale in fp8_scales {
+            for rotation in 0..256 {
+                cases.push((256, scale, (0..160).map(|j| ((j + rotation) % 256) as u8).collect(), 160));
+            }
+        }
+        assert_eq!(cases.len(), 4304);
+        let mut input_digest = Sha256::new();
+        input_digest.update(b"E0BR0001");
+        input_digest.update((cases.len() as u32).to_le_bytes());
+        for (kind, scale, bytes, count) in &cases {
+            for word in [*kind, *scale, bytes.len() as u32, *count as u32] {
+                input_digest.update(word.to_le_bytes());
+            }
+            input_digest.update(bytes);
+        }
+        assert_eq!(
+            format!("{:x}", input_digest.finalize()),
+            "3e096cfdc9860410bbd8ebe065f4ed60b958c7102fb5447f00898c0be60d9797"
+        );
+        let mut combined = Sha256::new();
+        let mut hashes: BTreeMap<u32, Sha256> = BTreeMap::new();
+        let mut classes: BTreeMap<u32, [usize; 6]> = BTreeMap::new();
+        for (kind, scale, bytes, count) in cases {
+            let mut output = vec![0.0; count];
+            if kind == 256 {
+                decode_edge0_fp8_e4m3_row(&bytes, f32::from_bits(scale), &mut output).unwrap();
+            } else {
+                decode_block(kind, &bytes, &mut output).unwrap();
+            }
+            for value in output {
+                let (category, bits) = if value.is_nan() {
+                    (5, 0x7fc00000u32)
+                } else {
+                    let bits = value.to_bits();
+                    let category = match bits {
+                        0x00000000 => 1,
+                        0x80000000 => 2,
+                        0x7f800000 => 3,
+                        0xff800000 => 4,
+                        _ => 0,
+                    };
+                    (category, bits)
+                };
+                classes.entry(kind).or_default()[category] += 1;
+                hashes.entry(kind).or_default().update(bits.to_le_bytes());
+                combined.update(bits.to_le_bytes());
+            }
+        }
+        let references = [
+            (2, "64d36767690986469301e4a39084347e11fcd9bfdb630c32f35b8452ad030001", [5760, 704, 704, 480, 480, 2112]),
+            (20, "e856290aaa7eca9b460c9c6d680f74e87b6b8515a7a51776e362a248d6af208c", [6144, 512, 512, 512, 512, 2048]),
+            (42, "fa7f74add070b05a6591de02aa84201221c7cefe23ca42c4bc5c9d58c9aa4aca", [2304, 640, 640, 192, 192, 1152]),
+            (
+                256,
+                "a042d4be577a23eac6abc63b5c562f1b106d5c9339078e459a9491a32af9b7f4",
+                [269440, 58880, 58880, 51520, 51520, 83200],
+            ),
+        ];
+        for (kind, expected, expected_classes) in references {
+            assert_eq!(format!("{:x}", hashes.remove(&kind).unwrap().finalize()), expected, "format {kind}");
+            assert_eq!(classes[&kind], expected_classes, "format {kind} classifications");
+        }
+        assert_eq!(
+            format!("{:x}", combined.finalize()),
+            "5eb63d107f4b63981af4d5dbf61665ac4d952618b61246a168d6c84cf0d474f0"
+        );
+    }
+
+    #[stark_test]
+    fn edge0_q2_0_pairs_are_adjacent_and_zero_sign_follows_the_product() {
+        let mut bytes = [0xe4; 18];
+        bytes[..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        let mut output = [0.0; 64];
+        decode_block(42, &bytes, &mut output).unwrap();
+        for group in output.chunks_exact(4) {
+            assert_eq!(group, &[-1.0, 0.0, 1.0, 2.0]);
+        }
+        bytes[..2].copy_from_slice(&0x8000u16.to_le_bytes());
+        decode_block(42, &bytes, &mut output).unwrap();
+        for group in output.chunks_exact(4) {
+            assert_eq!(group[0].to_bits(), 0.0f32.to_bits());
+            for value in &group[1..] {
+                assert_eq!(value.to_bits(), (-0.0f32).to_bits());
+            }
+        }
+    }
+
+    #[stark_test]
+    fn edge0_fp8_row_bounds_and_fn_special_code_policy_are_explicit() {
+        let mut output = [123.0; 160];
+        for input_size in [0, 159, 161] {
+            assert!(decode_edge0_fp8_e4m3_row(&vec![0; input_size], 1.0, &mut output).is_err());
+            assert!(output.iter().all(|&value| value == 123.0));
+        }
+        for output_size in [0, 159, 161] {
+            let mut output = vec![123.0; output_size];
+            assert!(decode_edge0_fp8_e4m3_row(&[0; 160], 1.0, &mut output).is_err());
+            assert!(output.iter().all(|&value| value == 123.0));
+        }
+        let mut bytes = [0; 160];
+        bytes[..9].copy_from_slice(&[0x00, 0x80, 0x01, 0x07, 0x08, 0x7e, 0xfe, 0x7f, 0xff]);
+        decode_edge0_fp8_e4m3_row(&bytes, 1.0, &mut output).unwrap();
+        let expected = [0.0f32, -0.0, 1.0 / 512.0, 7.0 / 512.0, 1.0 / 64.0, 448.0, -448.0, 0.0, -0.0];
+        for (observed, expected) in output.iter().zip(expected) {
+            assert_eq!(observed.to_bits(), expected.to_bits());
+        }
+        decode_edge0_fp8_e4m3_row(&bytes, f32::INFINITY, &mut output).unwrap();
+        for &at in &[0, 1, 7, 8] {
+            assert!(output[at].is_nan());
+        }
+        assert_eq!(output[5], f32::INFINITY);
+        assert_eq!(output[6], f32::NEG_INFINITY);
+        decode_edge0_fp8_e4m3_row(&bytes, f32::NAN, &mut output).unwrap();
+        assert!(output.iter().all(|value| value.is_nan()));
     }
 
     fn safetensors(

@@ -49,7 +49,7 @@ kernel void hybrid_packed_matvec_tiled(
     const uint kind = hybrid_packed_kind;
     const uint block = hybrid_packed_block;
     const uint block_bytes = hybrid_packed_block_bytes;
-    const uint block_shift = block == 256 ? 8 : (block == 32 ? 5 : 0);
+    const uint block_shift = block == 256 ? 8 : (block == 64 ? 6 : (block == 32 ? 5 : 0));
     const ulong row_stride = ulong(p.columns >> block_shift) * block_bytes;
     device const uchar *codes = codes_base + offsets.x;
 

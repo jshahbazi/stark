@@ -1,6 +1,6 @@
 # Edge0-145B native support plan
 
-Status: phase 1 passed for local non-commercial evaluation, 2026-11-12.
+Status: phase 2 component gate passed for local non-commercial evaluation, 2026-11-12.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
@@ -11,7 +11,9 @@ unmerged. Commercial/product availability is outside this scope. Source
 preparation is tracked separately in
 [`20261112-EDGE0-02`](model-experiments/2026-11-12-edge0-source-preparation.md).
 The full pinned source set is published locally with every payload hash bound;
-native readers/decoders are next. No Stark model execution is qualified. Follow
+native readers/decoders are tracked in
+[`20261112-EDGE0-04`](model-experiments/2026-11-12-edge0-block-readers.md).
+No Stark model execution is qualified. Follow
 [model onboarding](MODEL_ONBOARDING.md), the
 [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md) and the
 [experiment ledger](model-experiments/README.md).
@@ -255,6 +257,12 @@ native identity/import remains disabled.
   `input_scale` apply.
 
 Gate: the existing `hybrid::` operator suite passes with the new cases.
+
+Local gate passed in [attempt `20261112-EDGE0-04`](model-experiments/2026-11-12-edge0-block-readers.md):
+254 hybrid tests passed with 61 ignored, plus the full native engine and
+independent scalar/Metal checks. Readers and decoders enable no backend or
+native model admission. The record preserves the unavailable sealed scoring
+replay and remaining runtime qualification.
 
 ### Phase 3: reference forward in the F32 graph
 

@@ -91,6 +91,31 @@ This avoids inheriting the Python regex engine's different Unicode category
 tables. The accepted profile is Python preparation only; it establishes no
 Rust parser, native generation, stream or model qualification.
 
+### Edge0 native reader and block components
+
+The independent native Strata readers and the new Q4_0 (GGML 2), IQ4_NL
+(20), Q2_0 (42) and FP8 row components are tracked separately in
+[attempt `20261112-EDGE0-04`](../docs/model-experiments/2026-11-12-edge0-block-readers.md).
+Q4_0/IQ4_NL/Q2_0 scalar layouts and their Metal adaptations follow the exact
+llama.cpp revision above: `ggml/src/ggml-quants.c` SHA-256
+`07143d7068936ae46b3c528b2f3d4bbb666e74d88992165716174d243573965d`,
+`ggml/src/ggml-common.h`
+`0061131b615c5721fc88a78feeb22c1f8c450f1c2646a317d80796a653bf595c`,
+and `ggml/src/ggml-quants.h`
+`28ae5fca1f3be636b36cd6c4fa2ca74fd42d229bfbd5352eaf66f3727bb8a6da`.
+The existing full GGML MIT notice is byte-identical to that revision's license.
+
+The source-specific FP8 convention follows the pinned Edge0
+`edge0-strata/src/kernels/ngram.cpp`, SHA-256
+`f782ecbaea1ad7934eb8817fc17e6290788bc991fa03ed74fad6e6833c1cc9b0`.
+Its independent CPU qualification compiles an attributed decoder extraction;
+the complete checkpoint-driven parity utility was not run. Stored-column-scale
+placement follows `edge0-strata/src/kernels/cpu/expert_layout.cpp`
+`709d400f3f7eed77182af310cb71dbd44cb186f2144496702312a4bcb8205204`
+and active verify/prefill call paths, recorded with their own source hashes in
+the attempt. Strata's complete MIT notice remains in `LICENSE.strata-reference`.
+These component results do not qualify another artifact or enable a backend.
+
 ## Third-party algorithm adaptations
 
 The vision-only BF16 LayerNorm variance implementation adapts the logical

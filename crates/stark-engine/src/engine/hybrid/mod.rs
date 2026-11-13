@@ -4,6 +4,7 @@
 //! streams. Qwen3.8 also admits the typed Uzu converted architecture extension.
 
 pub mod activity;
+pub mod edge0_source;
 pub mod finite_guard;
 pub mod flint;
 pub mod glm;

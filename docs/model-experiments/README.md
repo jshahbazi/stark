@@ -1,5 +1,6 @@
 # Model change and experiment ledger
 
+- [20261112-EDGE0-04: native readers and block decoders](2026-11-12-edge0-block-readers.md): native readers and four scalar formats match pinned references; Safe/Fast Metal checks and the full native suite pass. No model/backend admission; sealed scoring replay inputs unavailable.
 - [20261112-EDGE0-03: source-native Edge0 tokenizer](2026-11-12-edge0-native-tokenizer.md): failed v1 and mutation-gate controls preserved; explicit source Unicode ranges and the final CPU-oracle matrix pass for Python preparation only. Rust loading, streaming and inference remain unqualified.
 - [20261112-EDGE0-02: pinned Edge0 source preparation](2026-11-12-edge0-source-preparation.md): full 69-file source set hash-verified and published locally with an opt-in source-native tokenizer; borrowed-reference failure and stored-row validator correction preserved. Native execution/import remain disabled.
 - [20261112-EDGE0-01: Edge0-145B compatibility intake](2026-11-12-edge0-compatibility.md): Phase 0 records; owner selected local non-commercial evaluation and authorized continued branch work before merge. No runtime support enabled.
