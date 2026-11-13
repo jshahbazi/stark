@@ -17,7 +17,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://starkengine.app/assets/stark-social-card.jpg?v=2">
   <link rel="canonical" href="https://starkengine.app/technical.html">
-  <link rel="icon" href="assets/stark-engine.jpg" type="image/jpeg">
+  <link rel="icon" href="assets/stark-favicon.jpg" type="image/jpeg">
   <link rel="stylesheet" href="styles.css">
   <script src="app.js" defer></script>
   <title>Technical details — Stark</title>
@@ -27,7 +27,7 @@
   <header class="site-header">
     <a class="wordmark" href="index.html#" aria-label="Stark home">STARK<span>ENGINE / APPLE SILICON</span></a>
     <nav aria-label="Main navigation">
-<a href="/">Home</a><a href="technical.html" aria-current="page">Technical details</a><a href="docs.html">Documentation</a><a href="index.html#privacy">Privacy</a><a href="index.html#start">Get started</a><a class="repo-link" href="https://github.com/jshahbazi/stark">GitHub <span aria-hidden="true">↗</span></a>
+<a href="/">Home</a><a href="technical.html" aria-current="page">Technical details</a><a href="/docs/">Documentation</a><a href="index.html#privacy">Privacy</a><a href="index.html#start">Get started</a><a class="repo-link" href="https://github.com/jshahbazi/stark">GitHub <span aria-hidden="true">↗</span></a>
 </nav>
   </header>
 
@@ -36,7 +36,7 @@
       <p class="eyebrow">TECHNICAL DETAILS / APPLE SILICON</p>
       <div class="technical-hero-grid">
         <h1 id="technical-title">Inside<br>the engine.</h1>
-        <div class="technical-intro"><p>Native inference for Apple silicon, with a model catalog, local API and developer tools.</p><a class="text-link" href="docs.html">Documentation <span aria-hidden="true">↗</span></a></div>
+        <div class="technical-intro"><p>Native inference for Apple silicon, with a model catalog, local API and developer tools.</p><a class="text-link" href="/docs/">Documentation <span aria-hidden="true">↗</span></a></div>
       </div>
     </section>
     <nav class="technical-nav" aria-label="On this page">
@@ -84,7 +84,7 @@ Content-Type: application/json
           <p class="memory-note">Fit depends on available memory and context length. Use Guided setup to check your Mac before downloading.</p>
         </div>
         <div class="model-directory">
-          <div class="tool-support-note" id="tool-workflows"><p>Tool calling depends on the model and app version. <a href="docs.html#models">Tool compatibility guide <span aria-hidden="true">↗</span></a></p></div>
+          <div class="tool-support-note" id="tool-workflows"><p>Tool calling depends on the model and app version. <a href="/docs/compatibility/">Tool compatibility guide <span aria-hidden="true">↗</span></a></p></div>
 
           <div class="model-category-heading"><h3>Featured models</h3><a href="https://github.com/jshahbazi/stark/blob/main/README.md#supported-model-families">Compatibility guide <span aria-hidden="true">↗</span></a></div>
           <div class="model-tabs" role="tablist" aria-label="Model groups">
@@ -106,7 +106,7 @@ Content-Type: application/json
           </div>
           <div class="model-group-panel" id="image-models" role="tabpanel" aria-labelledby="models-tab-images" tabindex="0">
             <div class="compact-image-model"><div><p class="eyebrow">IMAGES · DENSE BF16</p><h3>Qwen3.5</h3><p>Compatible Qwen3.5 BF16 models support PNG and JPEG input.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md">Image compatibility <span aria-hidden="true">↗</span></a></div>
-            <div class="compact-image-model"><div><p class="eyebrow">DEVELOPMENT UPDATE / UNDER REVIEW</p><h3>More Qwen and Gemma image paths.</h3><p>New source builds add quantized Qwen dense and MoE decoders, retained Lily Flash-Next, Gemma 3 and Gemma 4. Validation is recorded for specific checkpoints; larger profiles still need full-model checks. Check your build and model’s image readiness before attaching a picture.</p></div><a href="docs.html#image-support">Coverage and validation <span aria-hidden="true">↗</span></a></div>
+            <div class="compact-image-model"><div><p class="eyebrow">DEVELOPMENT UPDATE / UNDER REVIEW</p><h3>More Qwen and Gemma image paths.</h3><p>New source builds add quantized Qwen dense and MoE decoders, retained Lily Flash-Next, Gemma 3 and Gemma 4. Validation is recorded for specific checkpoints; larger profiles still need full-model checks. Check your build and model’s image readiness before attaching a picture.</p></div><a href="/docs/compatibility/#images">Coverage and validation <span aria-hidden="true">↗</span></a></div>
           </div>
           <div class="model-group-panel" id="decision-models" role="tabpanel" aria-labelledby="models-tab-decision" tabindex="0">
             <div class="compact-image-model"><div><p class="eyebrow">LOCAL DECISIONS / MODEL CONFIDENCE</p><h3>JevK5</h3><p>Compare options with JevK5 and see confidence across the choices you provide. <a href="https://huggingface.co/alibiserikbay/JevK5">Model details</a>.</p></div><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Decision and confidence guide <span aria-hidden="true">↗</span></a></div>
