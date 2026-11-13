@@ -1,0 +1,26 @@
+{
+  "source_revision": "5b069261ce551032f12943ad6d900845d2c601a6",
+  "build_number": "20261113171433476153",
+  "attempt": "43b2116d-4ba5-4277-816d-f1aa00b6c9d2",
+  "pi_revision": "e01f7735ac46c741d2e94435871d42e6d3240609",
+  "model": "qwen3-4b-4bit",
+  "manifest_sha256": "6adeed98225f2bc54722da37f11493e2e73ecd3707110f475581a30fa67d73f1",
+  "harness_sha256": "cc970b235adf79d900ce1451205ea1cf21ab4e96069f224b531d0737a7a0688c",
+  "launches": [
+    {
+      "launch": 1,
+      "default_model": true,
+      "authenticated_text": true,
+      "no_inherited_key": true,
+      "no_explicit_provider_or_model": true
+    },
+    {
+      "launch": 2,
+      "default_model": true,
+      "authenticated_text": true,
+      "no_inherited_key": true,
+      "no_explicit_provider_or_model": true
+    }
+  ],
+  "passed": true
+}
