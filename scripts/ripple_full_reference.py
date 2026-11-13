@@ -256,6 +256,8 @@ def reference(
     if serialized.get("model_type") != "ricursive":
         raise ValueError("reference architecture mismatch")
     config = module.RicursiveConfig(**serialized)
+    if positions * config.vocab_size * 4 > 256 * 1024**2:
+        raise ValueError("reference readout bound exceeded")
     tokenizer = Tokenizer.from_file(str(directory / "tokenizer.json"))
     base = tokenizer.encode(
         "A short check of local inference.", add_special_tokens=False
@@ -358,7 +360,7 @@ def main() -> int:
     parser.add_argument("--positions", type=int, default=8)
     parser.add_argument("--threads", type=int, default=8)
     args = parser.parse_args()
-    if not 1 <= args.positions <= 32 or not 1 <= args.threads <= 16:
+    if not 1 <= args.positions <= 257 or not 1 <= args.threads <= 16:
         parser.error("reference bounds exceeded")
     try:
         receipt = reference(

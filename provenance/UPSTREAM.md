@@ -84,6 +84,15 @@ test-only experiment retaining its upstream attribution and is not selected in
 production. A separate exact-index attention optimization replaces a bounded
 ring modulo with one subtraction. The [kernel report](../docs/benchmarks/RIPPLE_Q4_KERNELS_2026_11_12.md)
 preserves the new numerical and saved-binary performance evidence.
+Subsequent independent Stark attention kernels in `ripple_prepare_parallel.metal`
+and `ripple_attention_parallel.metal` use the existing Apache-2.0 native
+reference contract. Ordered RMS/softmax reductions, SIMD score reductions and
+bounded weighted-output partitions have separate numerical checks. No new
+dependency or source model revision is introduced. The
+[attention report](../docs/benchmarks/RIPPLE_Q4_ATTENTION_2026_11_12.md) records
+257-position artifact references, bounded diagnostic snapshot comparisons and
+rejected test-only residency/envelope experiments. Existing upstream-derived
+matrix paths retain their copyright and default checked behavior.
 
 Ripple's F32 Metal graph and shape-scoped Q8 dispatch were introduced in
 `410bec76c195522b6478c329225d6cbfb84b9977`, with complete-inventory admission

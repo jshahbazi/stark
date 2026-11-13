@@ -214,6 +214,8 @@ pub struct RippleModel {
     graph_admitted: bool,
     #[cfg(all(feature = "metal", test))]
     graph_enabled: bool,
+    #[cfg(all(feature = "metal", test))]
+    test_control_mode: u8,
 }
 
 impl RippleModel {
@@ -290,6 +292,8 @@ impl RippleModel {
             graph_admitted,
             #[cfg(all(feature = "metal", test))]
             graph_enabled: true,
+            #[cfg(all(feature = "metal", test))]
+            test_control_mode: 1,
         })
     }
 

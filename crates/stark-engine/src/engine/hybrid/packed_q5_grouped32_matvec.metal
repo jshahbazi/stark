@@ -12,7 +12,7 @@
 
 // Explicit-FMA experiments use separate entrypoints. The production wrapper
 // instantiates false/false and retains the original arithmetic/fallback.
-template<bool InnerFma, bool BlockFma, bool TypedHalf = false>
+template<bool InnerFma, bool BlockFma, bool TypedHalf = false, bool BoundedOnly = false>
 inline void hybrid_q5_grouped32_matvec_impl(
     device const uchar *codes_base, device const float *input,
     device float *output, constant HybridMatrixParams &p,
@@ -42,7 +42,9 @@ inline void hybrid_q5_grouped32_matvec_impl(
         #pragma clang loop unroll(full)
         for (uint j = 0; j < 8; ++j) {
             const float4 values = float4(x[j], x[j + 32], x[j + 128], x[j + 160]);
-            reference_required = reference_required || any(abs(values) > float4(1e20f));
+            if (!BoundedOnly) {
+                reference_required = reference_required || any(abs(values) > float4(1e20f));
+            }
             input_sum += values;
             const uint low0 = block[low_offset + j];
             const uint low1 = block[low_offset + j + 64];
@@ -86,7 +88,7 @@ inline void hybrid_q5_grouped32_matvec_impl(
     // Finite encoded scales bound weights below 2.7e8. At |x|<=1e20 all
     // admitted absolute product sums stay below 2.2e35. Larger inputs use the
     // old row so grouped algebra cannot conceal an overflowing product.
-    if (simd_any(reference_required)) {
+    if (!BoundedOnly && simd_any(reference_required)) {
         const float total = hybrid_packed_block_dot(codes, input, row_offset, input_offset, p.columns, lane);
         if (lane == 0) output[row] = total;
         return;

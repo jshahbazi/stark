@@ -98,14 +98,26 @@ capacity from amortized growth. Its checked 32 GiB bound includes these buffers
 and the old layer allocation while that layer's replacement is copied. The
 payload estimates above exclude this overhead.
 
+At head dimension 128, preparation distributes independent coordinates across
+SIMD lanes while retaining the original RMS summation order. Softmax similarly
+parallelizes exponentials and divisions for counts at least eight while
+preserving denominator order. Short score dots (up to 64 keys) use a qualified
+SIMD reduction. Weighted outputs at 256–4096 keys use bounded partitions for
+the admitted smaller model geometries. These last two reductions reassociate
+F32 sums; extreme operands use the original serial computation. Other
+dimensions/counts keep their existing kernels. Temporary partials remain
+subject to the independent 512 MiB graph workspace bound.
+
 Prefill currently advances one token at a time on the device and omits discarded
 vocabulary projections. Each request starts with fresh state; errors clear the sequence.
 Cross-request prefix reuse, image input and DFlash2 speculative decoding are
 not implemented for Ripple. Source chat-template preservation does not itself
 establish structured tool-call parsing or agent performance.
-Both Q8 and Q4_K_M graphs own request-local cache buffers without a qualified
-snapshot/restore interface. Exact restoration of those buffers is the concrete
-blocker for cross-request prefix reuse; reuse remains disabled.
+Both Q8 and Q4_K_M graphs own request-local cache buffers. A bounded, CPU-backed
+snapshot exists only in the diagnostic test build. Production admission and
+aggregate accounting for retaining a snapshot alongside a growing live cache,
+plus request lifecycle integration, remain blockers for cross-request prefix
+reuse; reuse stays disabled.
 
 ## Reference and validation
 
@@ -153,3 +165,6 @@ artifact-specific reference, generation and timing checks.
 The later [K-quant kernel report](benchmarks/RIPPLE_Q4_KERNELS_2026_11_12.md)
 records grouped Q4/Q6 dispatch and attention indexing validation, plus the
 saved-binary performance comparison.
+The [attention report](benchmarks/RIPPLE_Q4_ATTENTION_2026_11_12.md) separately
+records longer-prefix decode gains, 257-position Q4/Q8 oracle checks and the
+limits of the offline snapshot benchmark.

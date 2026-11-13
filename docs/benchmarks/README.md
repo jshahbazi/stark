@@ -4,6 +4,14 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Ripple attention decode (2026-11-12).** A same-loaded-model diagnostic at a
+1,024-token prefix improves median native decode from 6.639 to 7.796 tokens/s;
+the median paired round gain is 16.3%, with all four rounds favoring the new
+attention. This teacher-forced snapshot benchmark isolates decoding and is not
+worker end-to-end throughput. The [attention report](RIPPLE_Q4_ATTENTION_2026_11_12.md)
+records Q4/Q8 oracle qualification, exact fallback behavior, noisy/rejected
+experiments and source-bound evidence. Earlier workloads below stay distinct.
+
 **Ripple-65B Q4_K_M grouped kernels (2026-11-12).** A saved-binary ABBA comparison
 improves median native-worker decode from 4.559 to 7.460 tokens/s (1.64×), with
 identical quantized weights and generated token hashes. Four warm requests per

@@ -598,6 +598,10 @@ impl StaticViewCache {
 }
 
 pub struct Weights {
+    // Drop explicit test residency before cache/MMap owners. Buffer no-copy
+    // deallocators additionally retain Mapping Arcs through residency teardown.
+    #[cfg(all(feature = "metal", test))]
+    test_dense_residency: Mutex<Option<EncoderResidency>>,
     files: Vec<Arc<Mapping>>,
     tensors: HashMap<String, Tensor>,
     metadata: BTreeMap<String, Value>,
@@ -615,6 +619,8 @@ pub struct Weights {
     // for each routed projection. Memory-budget admission remains live below.
     #[cfg(feature = "metal")]
     indexed_bank_geometry_admitted: bool,
+    #[cfg(all(feature = "metal", test))]
+    test_dense_views_admitted: std::sync::atomic::AtomicBool,
 }
 
 /// A checked bank whitelist for one command or encoder. The original bounded
@@ -764,6 +770,10 @@ impl Weights {
             encoder_residency_enabled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "metal")]
             indexed_bank_geometry_admitted: false,
+            #[cfg(all(feature = "metal", test))]
+            test_dense_views_admitted: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(feature = "metal", test))]
+            test_dense_residency: Mutex::new(None),
         };
         let mut splits = BTreeMap::new();
         for path in &paths {
@@ -899,6 +909,8 @@ impl Weights {
         cap: usize,
         max_buffer_length: usize,
     ) -> Result<bool> {
+        #[cfg(test)]
+        self.test_dense_views_admitted.store(false, Ordering::Release);
         if names.is_empty() || names.len() > 4096 {
             return Err(Error::Invalid("dense Metal view inventory is empty or excessive"));
         }
@@ -943,8 +955,104 @@ impl Weights {
             return Err(Error::Invalid("dense Metal view admission requires an unused cache"));
         }
         cache.limit = MAX_STATIC_VIEW_BYTES.max(required);
+        #[cfg(test)]
+        self.test_dense_views_admitted.store(true, Ordering::Release);
         super::profile::record("native.metal.dense_cache.admitted_bytes", 0.0, required);
         Ok(true)
+    }
+
+    /// Test-only complete dense residency. Call only between synchronous
+    /// requests. The separate residency owner leaves GLM hooks/defaults alone.
+    #[cfg(all(feature = "metal", test))]
+    pub(super) fn test_set_dense_residency(
+        &self,
+        names: &[String],
+        enabled: bool,
+    ) -> Result<usize> {
+        if !enabled {
+            return self.test_set_dense_residency_with_budget(names, false, 0, 0, 0);
+        }
+        let cap = super::weight_metal::recommended_working_set()? / 4 * 3;
+        self.test_set_dense_residency_with_budget(names, enabled, cap, 32 * 1024 * 1024 * 1024, 1024 * 1024 * 1024)
+    }
+
+    #[cfg(all(feature = "metal", test))]
+    fn test_set_dense_residency_with_budget(
+        &self,
+        names: &[String],
+        enabled: bool,
+        cap: usize,
+        dynamic_reserve: usize,
+        scratch_reserve: usize,
+    ) -> Result<usize> {
+        if !enabled {
+            let previous =
+                self.test_dense_residency.lock().map_err(|_| Error::Invalid("test dense residency lock"))?.take();
+            // EncoderResidency stops and joins refreshes before EndResidency,
+            // removes allocations, and releases its retained buffer owners.
+            drop(previous);
+            return Ok(0);
+        }
+        if !self.test_dense_views_admitted.load(Ordering::Acquire) || names.is_empty() || names.len() > 4096 {
+            return Err(Error::Invalid("test dense residency requires complete admission"));
+        }
+        let mut unique_names = HashSet::new();
+        let mut keys = HashSet::new();
+        for name in names {
+            if !unique_names.insert(name.clone()) {
+                return Err(Error::Invalid("duplicate test dense residency name"));
+            }
+            let tensor = self.tensor(name)?;
+            if tensor.shape.len() != 2 {
+                return Err(Error::Invalid("test dense residency requires matrices"));
+            }
+            let mut planes = vec![tensor];
+            if let Some(affine) = &tensor.affine {
+                planes.extend([self.tensor(&affine.scales)?, self.tensor(&affine.biases)?]);
+            }
+            for plane in planes {
+                keys.insert(StaticViewKey {
+                    file: plane.file,
+                    offset: plane.offset,
+                    length: plane.size,
+                });
+            }
+        }
+        let views = {
+            let cache = self.static_views.lock().map_err(|_| Error::Invalid("test dense cache lock"))?;
+            if cache.entries.len() != keys.len() || keys.iter().any(|key| !cache.entries.contains_key(key)) {
+                return Err(Error::Invalid("test dense residency requires warmed complete cache"));
+            }
+            cache.entries.values().cloned().collect::<Vec<_>>()
+        };
+        let bytes = views
+            .iter()
+            .try_fold(0usize, |sum, view| {
+                sum.checked_add(metal::MTLResource::allocated_size(&**view.buffer()).max(view.registered_bytes()))
+            })
+            .ok_or(Error::Invalid("test dense residency size overflow"))?;
+        let static_reserve =
+            bytes.checked_add(scratch_reserve).ok_or(Error::Invalid("test dense residency reserve overflow"))?;
+        static_reserve
+            .checked_add(dynamic_reserve)
+            .filter(|&n| n <= cap)
+            .ok_or(Error::Invalid("test dense residency exceeds reserved budget"))?;
+        let mut configured =
+            self.test_dense_residency.lock().map_err(|_| Error::Invalid("test dense residency lock"))?;
+        if let Some(residency) = configured.as_mut() {
+            if residency.names != unique_names || residency.failed {
+                return Err(Error::Invalid("test dense residency configuration changed"));
+            }
+            residency.add(&views.iter().collect::<Vec<_>>(), false)?;
+            return Ok(residency.static_bytes);
+        }
+        let mut residency = EncoderResidency::new(unique_names, dynamic_reserve, cap, static_reserve)?;
+        // The local owner tears down partial/failed driver initialization. It
+        // is published only after add's post-commit accounting check succeeds.
+        residency.add(&views.iter().collect::<Vec<_>>(), false)?;
+        let admitted = residency.static_bytes;
+        *configured = Some(residency);
+        Ok(admitted)
     }
 
     fn tensor(
@@ -3075,6 +3183,60 @@ mod tests {
         // input/output allocations must not accumulate one 4 MiB resource per
         // call. Allow modest driver scratch/reuse after the warm submission.
         assert!(after <= before + 16 * 1024 * 1024);
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn test_dense_residency_requires_complete_warmed_views_and_releases() {
+        let fixture = Fixture::new();
+        let data = |value: f32| (0..64).flat_map(|_| value.to_le_bytes()).collect::<Vec<_>>();
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[("first", "F32", vec![2, 32], data(1.0)), ("second", "F32", vec![2, 32], data(2.0))],
+        );
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let names = vec!["first".to_owned(), "second".to_owned()];
+        assert!(weights.test_set_dense_residency_with_budget(&names, true, 16 * 1024 * 1024, 0, 0).is_err());
+        assert!(weights.test_dense_residency.lock().unwrap().is_none());
+        assert!(weights.configure_complete_dense_views_with_budget(&names, 16 * 1024 * 1024, usize::MAX).unwrap());
+        assert!(weights.test_set_dense_residency_with_budget(&[], true, 16 * 1024 * 1024, 0, 0).is_err());
+        assert!(weights.test_set_dense_residency_with_budget(&names, true, 16 * 1024 * 1024, 0, 0).is_err());
+        assert_eq!(weights.matvec("first", &[1.0; 32]).unwrap(), vec![32.0; 2]);
+        assert!(weights.test_set_dense_residency_with_budget(&names, true, 16 * 1024 * 1024, 0, 0).is_err());
+        assert_eq!(weights.matvec("second", &[1.0; 32]).unwrap(), vec![64.0; 2]);
+        assert!(weights.test_set_dense_residency_with_budget(&names, true, 0, 0, 0).is_err());
+        assert!(weights.test_dense_residency.lock().unwrap().is_none());
+        assert!(weights.test_set_dense_residency_with_budget(&names, true, usize::MAX, usize::MAX, 1).is_err());
+        assert!(weights.test_dense_residency.lock().unwrap().is_none());
+        let bytes = weights.test_set_dense_residency_with_budget(&names, true, 16 * 1024 * 1024, 0, 0).unwrap();
+        assert!(bytes > 0 && bytes <= 16 * 1024 * 1024);
+        assert!(weights.test_dense_residency.lock().unwrap().is_some());
+        assert_eq!(weights.matvec("first", &[1.0; 32]).unwrap(), vec![32.0; 2]);
+        assert_eq!(weights.test_set_dense_residency(&[], false).unwrap(), 0);
+        assert!(weights.test_dense_residency.lock().unwrap().is_none());
+        assert_eq!(weights.matvec("second", &[1.0; 32]).unwrap(), vec![64.0; 2]);
+        assert!(weights.test_set_dense_residency_with_budget(&names, true, 16 * 1024 * 1024, 0, 0).unwrap() > 0);
+        let residency = weights.test_dense_residency.lock().unwrap().take().unwrap();
+        let driver = Arc::clone(&residency.driver);
+        let stop = Arc::clone(&residency.stop);
+        let mapping = Arc::downgrade(&weights.files[0]);
+        // Even deliberately outliving Weights is safe: each resident Metal
+        // buffer retains the no-copy Mapping owner until EndResidency/drop.
+        drop(weights);
+        assert!(mapping.upgrade().is_some());
+        assert!(driver.lock().unwrap().set.allocation_count() > 0);
+        drop(residency);
+        assert!(stop.load(Ordering::Acquire));
+        assert_eq!(driver.lock().unwrap().set.allocation_count(), 0);
+        drop(driver);
+        for _ in 0..100 {
+            if mapping.upgrade().is_none() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(mapping.upgrade().is_none());
     }
 
     #[cfg(feature = "metal")]

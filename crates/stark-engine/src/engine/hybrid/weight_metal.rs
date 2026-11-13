@@ -42,6 +42,18 @@ mod q4_grouped_tests;
 mod ripple_k_tuning_tests;
 
 #[cfg(test)]
+#[path = "weight_metal_ripple_bounded_tests.rs"]
+mod ripple_bounded_tests;
+
+#[cfg(test)]
+#[path = "weight_metal_ripple_attention_tests.rs"]
+mod ripple_attention_tests;
+
+#[cfg(test)]
+#[path = "weight_metal_ripple_control_tests.rs"]
+mod ripple_control_tests;
+
+#[cfg(test)]
 #[path = "weight_metal_kquant_mma_tests.rs"]
 mod kquant_mma_tests;
 
@@ -722,6 +734,8 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_q6_grouped16_matvec.metal"));
             source.push_str(include_str!("packed_q5_grouped32_matvec.metal"));
             #[cfg(test)]
+            source.push_str(include_str!("packed_ripple_bounded_experiment.metal"));
+            #[cfg(test)]
             source.push_str(include_str!("packed_ripple_q4_rows_experiment.metal"));
             source.push_str(include_str!("packed_kquant_mma_matvec.metal"));
             source.push_str(include_str!("feed_forward.metal"));
@@ -732,6 +746,8 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("qwen_graph.metal"));
             source.push_str(include_str!("qwen_attention.metal"));
             source.push_str(include_str!("ripple_graph.metal"));
+            source.push_str(include_str!("ripple_attention_parallel.metal"));
+            source.push_str(include_str!("ripple_prepare_parallel.metal"));
             #[cfg(test)]
             source.push_str(include_str!("../../../unit/fixtures/hybrid_tiled_experiment.metal"));
             #[cfg(test)]
