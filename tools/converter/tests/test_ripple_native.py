@@ -86,6 +86,7 @@ def test_ripple_template_file_is_required_and_bounded(tmp_path):
 
 def test_ripple_catalog_is_pinned_text_only_and_uses_native_preparation(monkeypatch):
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+
     class NoHub:
         def __getattr__(self, name):
             pytest.fail(f"native Ripple catalog unexpectedly accessed hub.{name}")

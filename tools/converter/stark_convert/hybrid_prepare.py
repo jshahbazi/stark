@@ -796,9 +796,7 @@ def prepare(
         raise ValueError("incomplete pinned weight shard set")
     if "required_weight_files" in source and {path.name for path in weights} != set(source["required_weight_files"]):
         raise ValueError("pinned weight shard names changed")
-    if any(
-        not (stage / name).is_file() or (stage / name).is_symlink() for name in source.get("required_files", [])
-    ):
+    if any(not (stage / name).is_file() or (stage / name).is_symlink() for name in source.get("required_files", [])):
         raise ValueError("missing pinned model metadata")
     weight_bytes = sum(path.stat().st_size for path in weights)
     expected_shards_bytes = source["weight_bytes"] - (

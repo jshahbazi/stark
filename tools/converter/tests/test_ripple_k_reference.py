@@ -2,8 +2,8 @@
 
 import importlib.util
 import struct
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
