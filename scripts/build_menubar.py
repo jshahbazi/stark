@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import sign_distribution as signing
+from pi_client_resources import PiClientResourceError, install_pi_client
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_ID = "com.starkengine.menubar"
@@ -34,6 +35,8 @@ RUNTIME_MANIFEST = Path("share/stark/manifest.json")
 PYTHON = Path("libexec/python/bin/python3.13")
 CONVERTER = Path("libexec/python/lib/python3.13/site-packages/stark_convert")
 OPENWORK_CONNECTOR_LOCK = ROOT / "apps/menu-bar/Resources/OpenWorkConnector.lock.json"
+PI_CLIENT_LOCK = ROOT / "apps/menu-bar/Resources/PiClient.lock.json"
+DEFAULT_PI_CLIENT_SOURCE = ROOT.parent / "stark-agent-clients"
 OPENWORK_CONNECTOR_REPOSITORY = "https://github.com/jshahbazi/stark-openwork"
 OPENWORK_CONNECTOR_FILES = (
     "package.json",
@@ -1113,6 +1116,17 @@ def build(options: argparse.Namespace) -> Path:
             source=getattr(options, "openwork_connector", None),
             allow_development=getattr(options, "allow_development_connector", False),
         )
+        pi_client_source = getattr(options, "pi_client_source", None)
+        if pi_client_source is None and DEFAULT_PI_CLIENT_SOURCE.is_dir():
+            pi_client_source = DEFAULT_PI_CLIENT_SOURCE
+        try:
+            pi_client = install_pi_client(
+                resources,
+                source=pi_client_source,
+                lockfile=PI_CLIENT_LOCK,
+            )
+        except PiClientResourceError as error:
+            raise BuildError(str(error)) from None
         for helper in ("update_app.py", "install_app.py"):
             shutil.copy2(ROOT / "scripts" / helper, resources / helper)
         embedded = resources / "runtime"
@@ -1251,6 +1265,11 @@ def build(options: argparse.Namespace) -> Path:
                 for key, value in openwork_connector.items()
                 if key != "resources_sha256"
             },
+            "pi_client": {
+                key: value
+                for key, value in pi_client.items()
+                if key != "resources_sha256"
+            },
             "resources_sha256": {
                 **{
                     name: sha256(resources / name)
@@ -1263,6 +1282,7 @@ def build(options: argparse.Namespace) -> Path:
                     )
                 },
                 **openwork_connector["resources_sha256"],
+                **pi_client["resources_sha256"],
             },
             "executable_before_signing_sha256": sha256(executable),
             "validation": {
@@ -1279,6 +1299,8 @@ def build(options: argparse.Namespace) -> Path:
                 "openwork_connector_lock": "development_override"
                 if openwork_connector["development_override"]
                 else "passed",
+                "pi_client_resources": "passed",
+                "pi_client_lock": "passed",
                 "model_loaded": False,
             },
             "signature": "local ad-hoc; no Developer ID signature or notarization",
@@ -1361,6 +1383,11 @@ def main(argv: list[str] | None = None) -> int:
         "--openwork-connector",
         type=Path,
         help="Local first-party connector source; pinned hashes are verified",
+    )
+    parser.add_argument(
+        "--pi-client-source",
+        type=Path,
+        help="Local first-party Pi client source; the immutable public file hashes are verified",
     )
     parser.add_argument(
         "--allow-development-connector",

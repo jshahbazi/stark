@@ -6,13 +6,22 @@ The menu bar application's bridge serves a loopback-only, OpenAI-style HTTP API 
 
 Open **Connections** in Stark. **Apps** groups OpenWork and OpenCode Desktop with independent **Connect** buttons and status; **Manage** reveals each configured app's **Reconnect** and **Disconnect** actions. OpenCode's per-engine **Allow** and **Deny** prompt stays separate. The shared model header identifies the model currently running in Chat mode. API startup and credential-recovery messages remain visible when setup needs attention.
 
+The Advanced Connections **Apps** tab also includes **Pi**, with **Set Up Pi**
+and **Copy Key & Open Pi…**. This manual Pi 1.5.2 flow creates an isolated guarded
+profile and opens Terminal for a chosen folder. Its key is supplied through the
+setup/Pi process environment and an explicit concealed/transient clipboard copy,
+then pasted into a hidden prompt. Files and command arguments contain no key;
+the clipboard item expires after two minutes if unchanged. Pi is excluded from
+Beginner setup and has no managed grant or scoped Disconnect. See
+[Pi setup](../apps/menu-bar/README.md#pi-in-connections).
+
 Select **Connect your own app** to see the base URL (for example `http://127.0.0.1:8000/v1`), the API key and the Model ID. The model picker inspects saved model IDs and the settings copied as JSON; it does not run a model or change the model published to managed apps. Use **Manage Models** and **Run** in Stark to serve a different model. **Advanced settings** contains the saved listening port, API retry, explicit key regeneration, JSON and curl export, and capability details. Manually configured native clients send the copied master key on every request, including health checks:
 
 ```text
 Authorization: Bearer <key>
 ```
 
-The Swift host loads a random 256-bit key from macOS Keychain and sends it to the backend through its private control pipe. It generates a key only when Keychain reports that the item is missing, and activates it only after storage succeeds. Concurrent first launches use the winning stored value. Relaunches, worker restarts, model changes and app upgrades reuse this credential. Secrets are absent from process arguments, environment, UserDefaults, configuration files and logs.
+The Swift host loads a random 256-bit key from macOS Keychain and sends it to the backend through its private control pipe. It generates a key only when Keychain reports that the item is missing, and activates it only after storage succeeds. Concurrent first launches use the winning stored value. Relaunches, worker restarts, model changes and app upgrades reuse this credential. The host/backend bridge keeps secrets out of process arguments, environment, UserDefaults, configuration files and logs. Manual Pi setup deliberately supplies the key through its helper/client environment as described above.
 
 **Show** and **Copy** retrieve the existing key without rotating it. Key and connection-JSON copies retain the sensitive clipboard markers. **Regenerate API Key** explicitly replaces the stored credential after confirmation; clients configured with the copied master key need the replacement, while managed OpenWork and OpenCode capabilities refresh through Stark. A storage failure preserves the working key. Locked, denied, corrupt or unavailable Keychain access produces recovery instructions in Connections; authentication is never disabled. Unlock or allow access in Keychain Access and choose **Retry API**. A corrupt entry can be replaced using the explicit regeneration action. Do not save copied connection JSON in ordinary configuration files.
 

@@ -42,19 +42,30 @@ Keep Pi out of Beginner Guided Setup, Adjust Setup, task/client choices and
 beginner model recommendations. Codex and Claude connection controls also belong
 under Connections when their integrations become available.
 
-There is no Pi-specific GUI entry yet. The current manual pilot uses
-**Advanced → Connections → Connect your own app** to obtain the existing API
-settings, followed by the separate integration repository's configuration helper
-and required streaming guard. The live CLI RPC result does not qualify a GUI
-setup flow.
+The Pi card implements manual setup: verify installed Pi 1.5.2, discover the
+running model, create a separate Stark-owned profile with the required guard,
+and open Terminal for a user-selected folder. **Copy Key & Open Pi…** explicitly
+copies the key for Terminal's hidden prompt. Generated files and command
+arguments contain no key; the helper and Pi receive it through their environment.
+The clipboard item expires after two minutes unless it has been replaced.
+The default Pi profile is unchanged. Switching to Beginner hides Connections.
 
-The future Pi entry should identify the installed client/version, show the
-running model and setup status, and provide an explicit setup action. Its first
-version must clearly identify manual API-key setup. Reserve managed
+The Pi entry identifies the installed client/version, uses the running model,
+shows setup status, and provides an explicit setup action. It identifies manual
+API-key setup. Reserve managed
 Connect/Disconnect labels and automatic credential refresh for the reviewed
 grant/lifecycle implementation. Keep client configuration and extension logic in
 the integration repository; Stark owns the Connections presentation and approved
 public connection data.
+
+Each setup creates a new private profile under Stark's application-support Pi
+folder. Old profiles remain available to existing sessions; no unrelated Pi
+settings are merged or overwritten. Model/port changes require Update Setup, and
+launch rechecks metadata and version. Profiles cap replies at the lower of
+1,024 tokens and the API ceiling, disable automatic retries/compaction, and do
+not persist conversations. Building Stark requires the matching private
+integration checkout via `--pi-client-source`; the app bundles the exact locked
+source closure without runtime dependency installation.
 
 ## Current Stark contract
 

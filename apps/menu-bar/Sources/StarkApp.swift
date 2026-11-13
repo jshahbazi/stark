@@ -1523,6 +1523,7 @@ final class EngineController: ObservableObject {
     private let apiPreferences: APIConnectionPreferences
     private let apiCredentialQueue = DispatchQueue(label: "stark.api.credentials", qos: .userInitiated)
     private var apiCredentialOperation: UUID?
+    lazy var piConnection = PiConnectionController()
 
     lazy var desktopConnections = DesktopConnections(service: apiCredentials.service,
         send: { [weak self] value in self?.send(value) ?? false },
@@ -3954,6 +3955,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             console: { [weak self] in self?.showPrompt() },
             connection: { [weak self] in self?.showConnection() })
             .onChange(of: interface.mode) { [weak self] _, _ in
+                self?.interfaceDidChange()
                 DispatchQueue.main.async { self?.resizeMenuForUpdate() }
             }
             .onChange(of: updater.message) { [weak self] _, _ in
@@ -4182,6 +4184,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             beginnerChatWindow = window(title: "Stark — Chat", view: view, resizable: true)
         }
         present(beginnerChatWindow, from: origin)
+    }
+
+    private func interfaceDidChange() {
+        // The main-menu picker changes mode without opening a window. Close
+        // advanced connection controls when returning to the beginner interface.
+        if interface.mode == .beginner { connectionWindow?.orderOut(nil) }
     }
 
     private func selectInterface(_ mode: StarkInterfaceMode) {

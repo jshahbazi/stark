@@ -1,0 +1,92 @@
+import AppKit
+import Foundation
+
+@main
+struct PiConnectionTests {
+    static func require(_ condition: @autoclosure () -> Bool, line: Int = #line) {
+        if !condition() {
+            FileHandle.standardError.write(Data("pi_connection_check_failed_\(line)\n".utf8))
+            exit(1)
+        }
+    }
+
+    static func main() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("stark-pi-ui-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("resources/src"), withIntermediateDirectories: true)
+        try Data().write(to: directory.appendingPathComponent("resources/src/desktop-setup.mjs"))
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "stark.pi.tests." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = directory.appendingPathComponent("profiles")
+        let profile = root.appendingPathComponent("profile-fixture").path
+        let baseURL = "http://127.0.0.1:12345/v1"
+        let key = "synthetic-pi-test-key"
+        let tools = PiConnectionController.Tools(node: URL(fileURLWithPath: "/synthetic/node"), pi: URL(fileURLWithPath: "/synthetic/pi"))
+        var calls = 0
+        var deferred: PiConnectionController.Completion?
+        let controller = PiConnectionController(resources: directory.appendingPathComponent("resources"), root: root,
+            defaults: defaults, tools: tools, runner: { node, args, environment, completion in
+                calls += 1
+                require(node == tools.node)
+                require(!args.contains(where: { $0.contains(key) }))
+                require(Set(environment.keys).isSubset(of: ["HOME", "PATH", "STARK_API_KEY"]))
+                require(args.first?.hasSuffix("src/desktop-setup.mjs") == true)
+                if args.contains("inspect") {
+                    require(environment["STARK_API_KEY"] == nil)
+                    completion(["ok": true, "version": "1.5.2"])
+                } else if args.contains("setup") {
+                    require(environment["STARK_API_KEY"] == key)
+                    require(args.contains(baseURL) && args.contains("public-model"))
+                    deferred = completion
+                } else if args.contains("prepare-launch") {
+                    require(environment["STARK_API_KEY"] == nil)
+                    require(args.contains(profile))
+                    completion(["ok": true, "command": profile + "/Open Pi-fixture.command"])
+                } else { fatalError("unexpected_pi_helper_action") }
+            })
+        controller.refresh()
+        require(controller.installed && !controller.busy && calls == 1)
+        require(!controller.matches(baseURL: baseURL, modelID: "public-model"))
+        controller.setup(baseURL: baseURL, modelID: "public-model", key: key)
+        require(controller.busy && calls == 2)
+        controller.setup(baseURL: baseURL, modelID: "public-model", key: key)
+        require(calls == 2) // The actual caller refuses overlapping installations.
+        deferred?(["ok": true, "profile": profile, "modelId": "public-model", "baseUrl": baseURL])
+        require(!controller.busy && controller.matches(baseURL: baseURL, modelID: "public-model"))
+        require(!controller.matches(baseURL: "http://127.0.0.1:12346/v1", modelID: "public-model"))
+        require(!controller.matches(baseURL: baseURL, modelID: "another-model"))
+        var copied = false, opened = false
+        controller.prepareLaunch(workspace: directory, key: key, openTerminal: { command, completion in
+            require(copied)
+            require(command.path == profile + "/Open Pi-fixture.command")
+            opened = true; completion(true)
+        }, copyKey: { supplied in copied = supplied == key; return copied })
+        require(copied && opened && calls == 3)
+
+        // Saved setup restoration uses the same verified helper, and an unsafe
+        // helper path cannot be saved or opened even if it reports success.
+        var restored = false
+        let next = PiConnectionController(resources: directory.appendingPathComponent("resources"), root: root,
+            defaults: defaults, tools: tools, runner: { _, args, environment, completion in
+                require(environment["STARK_API_KEY"] == nil)
+                require(args.contains(profile))
+                restored = true
+                completion(["ok": true, "profile": profile, "modelId": "public-model", "baseUrl": baseURL])
+            })
+        next.refresh()
+        require(restored && next.matches(baseURL: baseURL, modelID: "public-model"))
+
+        var failed = false
+        let refused = PiConnectionController(resources: directory.appendingPathComponent("resources"), root: root,
+            defaults: UserDefaults(suiteName: suite + ".refused")!, tools: tools, runner: { _, args, _, completion in
+                if args.contains("inspect") { completion(["ok": true, "version": "1.5.2"]) }
+                else { failed = true; completion(["ok": true, "profile": directory.appendingPathComponent("unrelated").path,
+                    "modelId": "public-model", "baseUrl": baseURL]) }
+            })
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite + ".refused") }
+        refused.refresh(); refused.setup(baseURL: baseURL, modelID: "public-model", key: key)
+        require(failed && refused.profile == nil)
+        print("Pi controller checks passed")
+    }
+}

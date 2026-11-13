@@ -31,6 +31,41 @@ uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install -
 
 The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory; `--runtime`, `--worker`, `--score-worker` and `--template-worker` select a different CLI bundle, generation binary, scoring binary or native template evaluator. Native binaries default to their corresponding `target/release/` paths.
 
+Pi's public setup/guard resources come from the separate private
+`stark-agent-clients` repository. Provide its matching checkout with
+`--pi-client-source /absolute/path/to/stark-agent-clients`; the builder also
+recognizes a sibling checkout with that name. `Resources/PiClient.lock.json`
+pins the exact revision and complete file hashes. Missing or changed resources
+stop the build before installation. No npm install runs in the app.
+
+## Pi in Connections
+
+In **Advanced → Connections → Apps**, start a Chat model with tool support and
+choose **Set Up Pi**. Stark detects Pi 1.5.2 and Node.js 22.19 or newer, validates
+the running model's public metadata, and writes a guarded profile under
+`~/Library/Application Support/Stark/Pi/profile-*`. Pi's default settings stay
+unchanged. Pi is excluded from Beginner Guided Setup and Adjust Setup; switching
+to Beginner hides an open Connections window.
+
+Choose **Copy Key & Open Pi…**, select a working folder, then paste the copied key
+at Terminal's hidden prompt. This manual setup keeps the master key in process
+environments and the explicitly requested, concealed/transient clipboard item;
+it writes no key into public profiles, launch scripts or command arguments.
+The clipboard item is cleared after two minutes unless replaced. Pi can edit
+files and run commands, sessions are not saved, automatic retries/compaction are
+disabled, and the reply ceiling is 1,024 tokens or the lower API limit.
+
+After a model or API-address change choose **Update Setup**. Launch checks the
+client version, model metadata and profile integrity again. After key rotation,
+open a new Pi session with the current key. Setup creates a new profile and keeps
+old public profiles for existing sessions; quit Pi before deleting an old folder.
+This flow adds no managed Connect/Disconnect or client-scoped credential grants.
+
+Focused checks: `scripts/test_pi_connection.py`, `scripts/test_pi_client_resources.py`
+and `scripts/test_menubar_windows.py`, plus the integration repository's tests.
+
+## Runtime and signing
+
 The builder embeds `stark-template` in the app's runtime and verifies a synthetic
 render through the installed converter. Chat and Decision modes require this
 helper; template execution has no Python fallback. Models and conversation

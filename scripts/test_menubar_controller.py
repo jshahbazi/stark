@@ -2967,6 +2967,8 @@ class ControllerLifecycleTests(unittest.TestCase):
                         / "apps/menu-bar/Sources/OpenCodeConnectionController.swift"
                     ),
                     str(ROOT / "apps/menu-bar/Sources/DesktopConnections.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/PiConnectionController.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/ConnectionClipboard.swift"),
                     "-o",
                     str(cls.executable),
                 ],

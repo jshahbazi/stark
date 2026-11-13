@@ -136,7 +136,7 @@ struct ConnectionDetailsView: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Connect an app").font(.headline)
-                Text("Set up once. Stark remembers your connection.").font(.caption).foregroundStyle(.secondary)
+                Text("Use the running model with your preferred app.").font(.caption).foregroundStyle(.secondary)
             }
             VStack(spacing: 0) {
                 OpenWorkConnectionView(connection: engine.desktopConnections.openWork)
@@ -147,6 +147,9 @@ struct ConnectionDetailsView: View {
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
             Label("No API key to paste. Your key stays in Stark’s Keychain.", systemImage: "key")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            PiConnectionView(connection: engine.piConnection, baseURL: engine.apiBaseURL,
+                             modelID: connectionInfo.runningModelID, key: engine.apiKey,
+                             toolsAvailable: engine.supportsTools && !modelID.isEmpty)
             DisclosureGroup("Having trouble connecting?") {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("If you added a provider named stark manually, remove it in that app’s settings, then reconnect here.")
@@ -282,6 +285,56 @@ struct ConnectionDetailsView: View {
 
     private func copy(_ value: String, label: String, sensitive: Bool = false) {
         copied = ConnectionClipboard.write(value, sensitive: sensitive) ? label : ""
+    }
+}
+
+private struct PiConnectionView: View {
+    @ObservedObject var connection: PiConnectionController
+    let baseURL: String
+    let modelID: String
+    let key: String
+    let toolsAvailable: Bool
+
+    private var available: Bool { toolsAvailable && !baseURL.isEmpty && !key.isEmpty && !modelID.isEmpty }
+    private var current: Bool { connection.matches(baseURL: baseURL, modelID: modelID) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Image(systemName: "terminal").font(.title3).frame(width: 32, height: 32).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Pi").font(.headline)
+                    Text("Terminal · Manual API key").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if connection.busy { ProgressView().controlSize(.small).accessibilityLabel("Setting up Pi") }
+                Button(connection.profile == nil ? "Set Up Pi" : "Update Setup") {
+                    connection.setup(baseURL: baseURL, modelID: modelID, key: key)
+                }.disabled(connection.busy || !connection.installed || !available).accessibilityLabel("Set up Pi for the running model")
+            }
+            Text(connection.message).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if !available {
+                Text("Start a Chat model with tool support to set up Pi.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if connection.profile != nil && !current {
+                Text("The running model or API address changed. Update setup before opening Pi.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 12) {
+                if connection.profile != nil {
+                    Button("Copy Key & Open Pi…") { connection.open(baseURL: baseURL, modelID: modelID, key: key) }
+                        .disabled(connection.busy || !connection.installed || !available || !current)
+                        .accessibilityLabel("Copy API key and open Pi in Terminal")
+                }
+                Button("Check Installation") { connection.refresh(force: true) }.disabled(connection.busy)
+            }.font(.caption)
+            Text("Uses a separate Pi profile. Choose a folder, then paste the copied key at the hidden Terminal prompt. Pi can edit files and run commands. Sessions are not saved.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+        .onAppear { connection.refresh() }
     }
 }
 

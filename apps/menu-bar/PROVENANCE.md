@@ -15,6 +15,14 @@ The app carries the base CLI runtime's licenses, notices and source manifest. `s
 
 `Contents/Resources/menu-bar-manifest.json` records the source revision and hashes, whether the checkout was dirty, the base runtime manifest hash and every file the builder adds, including the Python package files. Its `converter_package` record identifies the wheel, build backend, source hashes and installed converter provenance. `artifacts/menu-bar/Stark.app.manifest.json` additionally records the signed executable hash.
 
+The `pi_client` record identifies the separate integration repository, immutable
+revision, lock hash and complete public file closure. `Resources/PiClient.lock.json`
+pins the setup helper, launcher, guard, their local dependencies and license.
+Each delivered `PiClient/` file is also in `resources_sha256`. The builder reads
+the matching private checkout with `--pi-client-source` and refuses hash changes;
+the app performs no package installation. The normal installed Pi executable
+supplies its own public provider API and is checked for version 1.5.2.
+
 The original app's `application_version`, `build_number` and `build_channel` are
 recorded separately from the optional `distribution_version` archive identifier.
 Local builds have application version `0.0.0` and channel `development`; their
