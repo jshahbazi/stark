@@ -11,10 +11,10 @@ use stark_engine_macros::stark_test;
 
 use super::*;
 
-struct PrivateDirectory(PathBuf);
+pub(super) struct PrivateDirectory(PathBuf);
 
 impl PrivateDirectory {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "stark-vision-contract-{}-{}-{}",
@@ -30,6 +30,10 @@ impl PrivateDirectory {
         }
         builder.create(&path).unwrap();
         Self(path)
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.0
     }
 
     fn write(
@@ -131,6 +135,28 @@ fn native_vision_prompt_expands_one_placeholder_and_reserves_output_room() {
     let (changed, start) = expand_image_placeholder(&[100, 200, 300, 400, 101], 2, 9, 300).unwrap();
     assert_eq!(start, 2);
     assert_eq!(&changed[..], &[100, 200, 300, 300, 400, 101]);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn native_vision_text_prefix_restore_failure_fences_instance_but_guard_rejection_does_not() {
+    use crate::backends::cpu::Cpu;
+
+    let mut failed = false;
+    let rejected = finish_text_prefix_restore::<Cpu>(Err(TextPrefixRestoreError::Invalid), &mut failed);
+    assert!(rejected.is_err_and(|error| error.kind() == NativeVisionErrorKind::State));
+    assert!(!failed);
+    assert!(finish_text_prefix_restore::<Cpu>(Ok(()), &mut failed).is_ok());
+    assert!(!failed);
+
+    let restore_failed = finish_text_prefix_restore::<Cpu>(Err(TextPrefixRestoreError::RestoreFailed), &mut failed);
+    assert!(restore_failed.is_err_and(|error| error.kind() == NativeVisionErrorKind::State));
+    assert!(failed);
+    // No later success or guard rejection can clear an instance fence.
+    assert!(finish_text_prefix_restore::<Cpu>(Ok(()), &mut failed).is_ok());
+    assert!(failed);
+    assert!(finish_text_prefix_restore::<Cpu>(Err(TextPrefixRestoreError::Invalid), &mut failed).is_err());
+    assert!(failed);
 }
 
 #[cfg(backend = "cpu")]
@@ -428,4 +454,18 @@ fn native_vision_official_artifact_image_request_metal() {
     assert_eq!(fresh.tokens().len(), 70);
     assert_eq!(fresh.vision_validation_state(), (70, Some(-56)));
     assert!(!model.failed);
+}
+
+#[cfg(unix)]
+#[stark_test]
+fn native_vision_selected_signature_detects_same_size_restored_mtime_edit() {
+    use std::fs::FileTimes;
+    let directory = PrivateDirectory::new();
+    let mut file = directory.write("weights", b"original");
+    let signature = ComponentSignature::read(&file).unwrap();
+    let times = FileTimes::new().set_modified(file.metadata().unwrap().modified().unwrap());
+    assert!(signature.unchanged(&file).unwrap());
+    file.write_all(b"mutation").unwrap();
+    file.set_times(times).unwrap();
+    assert!(!signature.unchanged(&file).unwrap());
 }

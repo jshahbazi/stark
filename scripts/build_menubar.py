@@ -1170,6 +1170,7 @@ def build(options: argparse.Namespace) -> Path:
             "assert callable(stark_convert.model_catalog.family_catalog); "
             "assert callable(stark_convert.model_removal.prepare_removal); "
             "assert callable(stark_convert.guided_models.recommendation_report); "
+            "assert stark_convert.guided_models.native_recipes(); "
             "from stark_convert import cli,progress; "
             "from stark_convert.provenance import toolchain_provenance; "
             "from stark_convert.template_runtime import IsolatedTemplate; "

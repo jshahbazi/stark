@@ -1,11 +1,11 @@
 # Continuous integration and security checks
 
-CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and manual dispatches; Security and CodeQL also run weekly. To check a branch before opening a pull request, choose the branch under **Actions > CI > Run workflow**. The pull-request `CI completed` gate requires the `engine-unit` job as well as the other required CI jobs. All CI inputs are synthetic: no workflow downloads a model, and private validation artifacts never enter hosted runners.
+CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and manual dispatches; Security and CodeQL also run weekly. To check a branch before opening a pull request, choose the branch under **Actions > CI > Run workflow**. The pull-request `CI completed` gate requires the `engine-unit` job as well as the other required CI jobs, except that the macOS Rust jobs are skipped for changes that cannot affect them; see [skipped Rust jobs](#skipped-rust-jobs). All CI inputs are synthetic: no workflow downloads a model, and private validation artifacts never enter hosted runners.
 
 | Workflow | Coverage |
 | --- | --- |
 | CI | Repository policy, Rust formatting, locked dependency resolution, workflow syntax, native template evaluator build and tests, converter tests and lint, installer and app script tests, process lifecycle tests on Linux and macOS, Apple silicon builds, Clippy and tests of both inference workers in the default and `optimized` configurations, the CPU/grammar engine suite and compilation of Metal kernel tests on the pinned nightly compiler, and the vendored cxx panic-safety test with the engine's `grammar` feature. |
-| Build | Builds an unsigned development bundle on pushes to `main` or `codex/**` that touch source or build inputs, verifies it, and uploads it as a seven-day artifact. |
+| Build | Builds an unsigned development bundle on pushes to `codex/**` that touch source or build inputs, and on manual dispatch, verifies it, and uploads it as a seven-day artifact. Pushes to `main` do not build; see [macOS runner budget](#macos-runner-budget). |
 | Security | cargo-deny advisories, soundness, licenses and sources across all Cargo features; OSV scans of the seven tracked lockfiles; dependency review on pull requests. |
 | CodeQL | Rust, C/C++, Python, JavaScript/TypeScript and GitHub Actions in build mode `none`. Metal kernels and Swift are not analyzed. |
 | Prebuilt release | Manual; builds an unsigned archive from an existing version tag and uploads a draft. See [releasing](RELEASING.md). |
@@ -18,6 +18,30 @@ The obsolete inherited `Tests` workflow was removed. The remaining inherited `Re
 - Rust code builds with Rust 1.98.1 on the `macos-26` Apple silicon runner, whose Xcode must support the engine's Metal 4 / macOS 26.4 target. Formatting uses `nightly-2026-10-01` rustfmt because the inherited rustfmt configuration needs nightly options, and the engine unit suite builds with the same nightly compiler because it uses `custom_test_frameworks`.
 - Python checks use uv 0.12.24. Repository policy scripts run on Python 3.12.13 with an adjacent script lockfile; the converter and the installer tests run on Python 3.13.13.
 - actionlint, cargo-deny and OSV Scanner downloads are verified against pinned hashes. External Actions are pinned to full commit SHAs, checkout does not persist credentials, build jobs hold read-only tokens, and no job uses `pull_request_target` or a self-hosted runner.
+
+## macOS runner budget
+
+Hosted macOS jobs share five concurrent runners across the whole repository, and queued jobs start in order with no priority. A Signed release dispatched after a merge therefore waits behind every macOS job already queued. Two rules keep one runner free for it when no other branch is building:
+
+- Build does not run on pushes to `main`. The branch build covers the merged tree before the merge and the Signed release rebuilds and verifies the same commit. Dispatch Build on `main` under **Actions > Build > Run workflow** when a development bundle of `main` is needed.
+- The CI `cxx` job starts after `lifecycle`, so a CI run holds at most four macOS runners at once. The dependency is scheduling only: `cxx` still runs when `lifecycle` fails.
+
+Pull-request CI and branch builds from other branches still occupy runners. Dispatch a release before updating other open branches to avoid queueing behind them. When adding a macOS job, keep the peak for one CI run at four.
+
+### Skipped Rust jobs
+
+The `scoring`, `cxx` and `engine-unit` jobs account for most macOS runner time. The `changes` job skips all three when every changed path is on a short list of paths those jobs never read (`scripts/ci/rust-jobs-needed.sh`):
+
+- `docs/`, `website/`, `apps/` and `provenance/`;
+- top-level Markdown, `LICENSE*` and `install.sh`;
+- `scripts/`, except `scripts/ci/` and `scripts/test_generation_process.py`;
+- Python sources, Markdown, `pyproject.toml` and `uv.lock` under `tools/`.
+
+Any other path runs the jobs, including a new top-level directory, workflow files, and data files under `tools/` because Rust sources include converter fixtures and memory profiles. A manual dispatch always runs them. The `lifecycle` job always runs because it tests the installer and app scripts, and the Linux `quality` job always runs its Rust formatting, dependency and template evaluator checks.
+
+A pull request is compared with the tip of `main` it would merge into. A push to `main` is compared with the last commit whose CI run on `main` succeeded, not with the previous push, so a Rust change whose run was cancelled by a later merge is still built by the run that replaced it. If no base can be found the jobs run.
+
+The `CI completed` gate accepts the three jobs as skipped only when `changes` succeeded and reported that they are not needed; otherwise each must succeed. Before a Rust job starts reading a file on the list, remove that path from the script. `scripts/ci/test_rust_jobs_needed.py` fails when a crate includes a file from outside `crates/` and `vendor/` that the list would skip.
 
 ## What CI does and does not cover
 
@@ -35,7 +59,7 @@ OSV Scanner downloads the public advisory databases and matches the seven tracke
 
 ## Rust build caches
 
-Rust jobs use `.github/actions/rust-cache`, a thin wrapper over the pinned `actions/cache`. Each job and configuration has its own cache of registry sources, Git dependencies and `target` output, keyed by runner image, compiler and Xcode identity, Cargo manifests and lockfiles, build scripts and native sources (`scripts/ci/rust-cache-key.sh`). Incremental compilation is off so no per-checkout incremental state is stored. Every build, Clippy and test step still runs after a restore; caches are saved only when the job succeeds. Pull requests can restore `main` caches, but caches saved on a merge ref do not populate `main`. Increment the `stark-rust-v1` namespace in the key script to force a fresh cache. The Build workflow does not use the cache and compiles from scratch each run.
+Rust jobs use `.github/actions/rust-cache`, a thin wrapper over the pinned `actions/cache`. Each job and configuration has its own cache of registry sources, Git dependencies and `target` output, keyed by runner image, compiler and Xcode identity, Cargo manifests and lockfiles, build scripts and native sources (`scripts/ci/rust-cache-key.sh`). Incremental compilation is off so no per-checkout incremental state is stored. Every build, Clippy and test step still runs after a restore; caches are saved only when the job succeeds. Pull requests can restore `main` caches, but caches saved on a merge ref do not populate `main`. A push to `main` that skips the Rust jobs saves no cache; none of the skippable paths is part of a cache key, so the existing `main` caches still match. Increment the `stark-rust-v1` namespace in the key script to force a fresh cache. The Build workflow does not use the cache and compiles from scratch each run.
 
 ## Download a development build
 
@@ -74,6 +98,23 @@ uv run --project tools/converter --locked --python 3.13.13 ruff check tools/conv
 uv run --project tools/converter --locked --python 3.13.13 ruff format --check tools/converter
 uv lock --check --directory tools/converter
 ```
+
+The Flash Next image qualification harness has model-free counterexamples in
+the repository job's benchmark and qualification step. They check that cache
+mismatches, missing MTP proposals, image speculation, incorrect color labels and
+resource failures stop
+qualification, preserve a sanitized partial receipt and close the owned worker.
+Run them separately when changing the harness:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 pytest -q scripts/test_qualify_flashnext_images.py
+uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/qualify_flashnext_images.py scripts/test_qualify_flashnext_images.py
+uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/qualify_flashnext_images.py scripts/test_qualify_flashnext_images.py
+```
+
+These checks use synthetic worker replies. The opt-in
+`scripts/qualify_flashnext_images.py` command still requires a private, actual
+model run for artifact-specific image, MTP and prefix lifecycle evidence.
 
 Installer, app and release scripts (shell syntax plus every unit test CI runs):
 

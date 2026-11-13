@@ -43,10 +43,25 @@ def save(path, value):
 
 
 def stop(process):
+    # Reap an exited leader before signaling its group. macOS can return
+    # EPERM for a zombie-only group, masking the worker's original failure.
+    process.poll()
     owned_group = getattr(process, "_owned_group", None)
+    def signal_group(sig):
+        try:
+            os.killpg(owned_group, sig)
+        except PermissionError:
+            # The child can exit between poll and killpg. Reap that race,
+            # then still signal any surviving descendants in its group.
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                raise PermissionError("worker_group_cleanup_denied") from None
+            os.killpg(owned_group, sig)
+
     if owned_group:
         try:
-            os.killpg(owned_group, signal.SIGTERM)
+            signal_group(signal.SIGTERM)
         except ProcessLookupError:
             pass
     if process.poll() is None:
@@ -57,7 +72,7 @@ def stop(process):
         except subprocess.TimeoutExpired:
             if owned_group:
                 try:
-                    os.killpg(owned_group, signal.SIGKILL)
+                    signal_group(signal.SIGKILL)
                 except ProcessLookupError:
                     pass
             else:
@@ -65,7 +80,7 @@ def stop(process):
             process.wait(timeout=10)
     if owned_group:
         try:
-            os.killpg(owned_group, signal.SIGKILL)
+            signal_group(signal.SIGKILL)
         except ProcessLookupError:
             pass
 

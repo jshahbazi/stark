@@ -1,4 +1,4 @@
-# Native GLM-5.3-Flash, Qwen3.8-Flash-Next and Flint
+# Native GLM-5.3-Flash, Qwen3.8-Flash-Next, Flint and Ripple
 
 Stark has a separate native Rust/Metal forward path for `glm5_next`,
 `qwen4_exp` and `flint`. It reads their prepared quantized GGUF or MLX
@@ -8,6 +8,10 @@ readout and sampled-generation controls are recorded in the Uzu-format study.
 There is no Sushi, llama.cpp, MLX, Python or Transformers inference process in
 this execution path. Python is used to prepare download metadata and by the
 optional reference validators.
+
+Ripple-65B Preview uses a separate custom `ricursive` native text path. Its
+preparation, precision policy and artifact-specific qualification are described
+in [Ripple setup and limits](RIPPLE.md).
 
 The optional [GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) links a
 pinned MLX core into the generation worker. Its separate pack, native build,
@@ -23,6 +27,8 @@ The preparation command pins these sources:
 | `qwen38-mixed` | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, revision `b2c422f3c643e36f04227a64d61796b44a4b1029` | 106,195,031,237 bytes, 98.90 GiB |
 | `qwen38-lily-q4-xl` | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83` | 106,905,155,192 bytes, 99.56 GiB |
 | `flint-int4` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | 22,568,912,600 bytes, 21.02 GiB |
+| `ripple-q8` | `AtomicChat/Ripple-65B-Preview-GGUF`, Q8_0, revision `57066fdb2348a53f2261f096e0a793b9554b4106` | 68,840,113,568 bytes, 64.11 GiB |
+| `ripple-q4-k-m` | `AtomicChat/Ripple-65B-Preview-GGUF`, standard Q4_K_M, revision `df550a7178a87bbfb6ee2bdbd37603c553d536ee` | 38,798,820,576 bytes, 36.13 GiB |
 
 See [Recursive Flint](FLINT.md) for its architecture, installation command,
 precision policy and validation. The GLM/Qwen-specific execution details below
@@ -90,10 +96,18 @@ existing F32 Qwen graph, whose [prefix-reuse disposition](GENERATION.md#prefix-r
 is `fresh-per-request` with `prefix_cache.supported: false`. That family also
 seeds the pinned Lily Q4-XL source through the typed Uzu text converter, with its
 separate artifact-specific reuse qualification.
+Source builds containing the new workers also offer **Model Catalog →
+Ripple-65B Preview** with prepared Q8_0 and standard Q4_K_M text checkpoints.
+Support is conditional on the individual artifact checks and runtime memory
+admission; see [Ripple setup and limits](RIPPLE.md). Ripple does not currently
+support prefix reuse, Decision scoring or image input.
 
 The app validates each prepared native source identity before registering the
-managed folder; loading and execution remain separate checks. Native download
-progress is indeterminate until all stored weight bytes are verified. Stop
+managed folder; loading and execution remain separate checks. Native downloads
+show a determinate bar for completed model files against the pinned weight total,
+including reusable files with matching Hub completion metadata. Network bytes
+appear separately and can advance while a shard is incomplete. Final validation
+still gates completion. Stop
 terminates preparation; private download staging is retained for retry without
 registering the model. Other native-source downloads use the preparation commands
 above. Family discovery checks metadata in successive pages; **Load more models**
@@ -104,6 +118,95 @@ Discovery does not admit additional Qwen3.8 quantization formats to the native
 loader.
 An incomplete prepared folder is rejected before registration. The native
 loader remains responsible for tensor admission.
+
+## Retained Lily image artifacts
+
+**Manage Models → Add Source → Enable images** uses a shared retained-image
+preparation path for compatible Flash Next checkpoints. Support is selected by
+the architecture and stored tensor layout. The publisher and repository name
+do not select a separate implementation. Supported layouts include Lily affine
+and external-table MLX-Serve affine storage with a complete BF16 image tower.
+Indexed affine exports with a supported `ple_manifest.json` can retain their
+separate PLE/MTP files, Q8 embeddings and shared gates, and group-128 trunk
+shared-expert matrices. Their zero-centered normalization policy remains
+distinct from folded MLX-Serve storage. The indexed adapter presents the PLE
+tensor ranges to the existing paged table and losslessly reorders a channels-last
+patch-embedding kernel at load time. Source weight files remain unchanged.
+Processor operations and image chat templates must match the implemented
+programs. When a compatible source omits processor sidecars, Stark derives the
+existing standard Flash Next processor after validating its image architecture
+and native geometry. Explicit sidecars must match that recipe. Preparation
+records the generated processor under `derived_metadata` separately from the
+upstream source hashes. Remote sources are bound to their immutable revision;
+a raw local source needs explicit repository/revision provenance for this schema-6 route.
+Prepared local image artifacts can still be imported directly.
+
+For the CLI, use a new output directory:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.cli OWNER/FLASH-NEXT-CHECKPOINT --metadata-profile hf-generic --artifact-mode vision-language --output models/flash-next-images
+```
+
+The resolver checks image processing metadata and the complete decoder, draft
+and BF16 tower headers before downloading weight payloads. Preparation preserves
+the supported source quantization and text draft head. Every artifact still
+receives its own hashes and native tensor admission, and the desktop runs local
+image checks before registering the model. Family compatibility does not
+transfer another checkpoint's numerical or performance qualification.
+
+Coverage is limited to the implemented storage contracts. The original official
+FP8 and legacy PipeNetwork/F32 exports do not use this retained image route. Other quantizers,
+quantized vision towers, changed geometry or unsupported processor/template
+programs require further implementation or admission work. Retained Lily
+pre-download checks include the declared MTP head and native control dtypes;
+the text-only Uzu converter's omission rules do not qualify those components.
+
+Source builds containing the image-family integration can explicitly enable
+still-image input for the pinned `qwen38-lily-q4-xl` and
+`qwen38-mlx-serve-mixed` retained formats. An existing complete prepared folder
+can be upgraded without copying its model payloads:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare qwen38-lily-q4-xl --output models/qwen38-lily-q4-xl --upgrade-images
+```
+
+For a new pinned preparation, add `--artifact-mode vision-language` to the matching
+preparation command. Both paths write a schema-6 `stark-image-artifact.json`
+binding the source, model shards, any external n-gram table, configuration,
+tokenizer, fixed processor recipe and standalone template. Native loading
+verifies the recorded payload hashes and retained BF16 tower before publishing
+image capability; automatic local checks must pass before image input is enabled.
+Preparation hashes every shard and seeds an owner-private
+`.stark-image-validation.json` content-digest cache. On later loads, the native
+loader reuses a recorded digest only when the exact manifest digest and the
+opened shard's device, inode, size, modification time and change time (including
+nanoseconds) match. Metadata/configuration checks and the post-load file-change
+guard still run. Missing, malformed, non-private or stale cache entries fall back
+to a full SHA-256 check; changed files must match the manifest before loading.
+Full validation uses ARM SHA-256 acceleration and at most four independent
+shards concurrently, with an 8 MiB buffer per shard. The cache is disposable
+local file-validation metadata, not an execution qualification receipt or
+persisted inference state. It assumes ordinary filesystem change-time semantics;
+privileged tampering with filesystem metadata is outside this optimization's
+unchanged-file guarantee.
+
+The path accepts one PNG/JPEG, clears generation-prefix reuse and keeps image
+MTP disabled. A retained image-loaded model also loads its declared MTP head
+for ordinary text requests. Text readiness exposes the normal supported draft
+counts and keeps the model's existing default; explicit image requests always
+use zero drafts. Text snapshots match MTP enabled/disabled, reported as
+`mtp-enabled` in the cache key. The exact Lily startup memory recipe includes
+the resident head and its state/scratch even while image execution has MTP off.
+The pinned Lily Q4-XL artifact has source-bound vision-tower and
+worker lifecycle evidence. Preparation support for the separate MLX-Serve
+mixed-4/8-bit artifact does not establish its image execution qualification.
+Full retained-decoder numerical parity and image performance remain unverified.
+Installed releases can have earlier capabilities. See the
+[retained image preparation and validation record](archive/runs/2026-11-07-qwen-image-families.md#original-format-flash-next)
+for exact checkpoints, builds, memory admission and remaining limits.
+
+The PipeNetwork `qwen38-mixed` path remains text-only. Typed Uzu text conversion,
+described below, omits the vision tower and MTP.
 
 ## Qwen3.8 Uzu text artifacts
 
@@ -214,8 +317,17 @@ Native-source selection requires `model_type=qwen4_exp` and either
 4-bit, group-64 affine quantization plus `ngram_table.bin` with 4-bit,
 group-32 storage. The latter admits
 `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` at revision
-`788c07a8725642bccf13a0a3b8a21954ab84b4f2`. Native tensor admission still
-validates the complete stored layout. The typed `Qwen38LanguageModelConfig`
+`788c07a8725642bccf13a0a3b8a21954ab84b4f2`. The model catalog and
+`stark-convert --metadata-profile hf-generic` also prepare compatible
+external-table exports for native text generation. Preparation binds the
+selected revision and source hashes, preserves indexed shards and the separate
+n-gram table, and uses the source tokenizer and template. Catalog and remote
+import checks read exact byte ranges for the pinned Safetensors headers.
+They verify shard/index membership and the native text and declared draft
+tensor shapes, packing, and dtypes before any weight download. This route covers text
+generation. Retained vision admission has its own pinned artifact checks.
+Native tensor admission still validates the complete stored layout at load.
+The typed `Qwen38LanguageModelConfig`
 route uses the same specialized runtime through its Uzu storage adapter. Other
 Qwen exports retain the F32 graph below.
 Converted group-major affine parameters are restored once at load time with
@@ -266,6 +378,20 @@ Hybrid generation and scoring hold a macOS user-initiated, latency-critical
 process activity through request execution and GPU cleanup, then release it
 between requests. This expresses the request's activity lifetime; it does not
 reserve GPU resources or establish a fixed clock or throughput.
+Between complete requests, the native Qwen mixed-precision generation and
+scoring workers wait for input with a 500 ms poll timeout and send an empty
+Metal queue signal on timeout. Both Lily and official mixed-affine numerical
+policies use this maintenance.
+This avoids the measured idle queue wake penalty while keeping model state and
+the ten-minute prefix expiry unchanged. It creates no background thread or
+inference activity assertion; it ends at worker shutdown. Queue/input failures
+clear retained state and exit for reload. The scoring loop preserves its
+consecutive-logit cache and cumulative counters across successful idle ticks;
+EOF discards the entry. Converted text generation also maintains its Metal4
+queue through a private shared event. Vision wrappers, dense scoring and other
+native hybrid backends keep their existing idle behavior. Latency and idle
+resource evidence are in the original [Lily generation study](benchmarks/2026-11-07-flashnext-idle-wake-fix.md)
+and the [cross-backend follow-up](benchmarks/2026-11-08-cross-backend-idle-wake.md).
 For Qwen3.8, the generation worker can also load the checkpoint's existing MTP
 head and enable one to three draft tokens per request through `mtp_drafts`.
 It remains off by default. The generic `mtp: true` request option chooses the
@@ -277,7 +403,7 @@ quantization is unchanged. Lily batched verification retains ordinary decode ari
 captures GDN and convolution state, and rejection restores the committed
 prefix and n-gram history. The
 head and its speculative state add memory. See the
-[generation protocol](GENERATION.md#qwen38-multi-token-prediction) for settings,
+[generation protocol](GENERATION.md#multi-token-prediction) for settings,
 aggregate counters and sampling semantics. Scoring keeps MTP disabled.
 The official mixed-affine checkpoint's existing one-layer head is also
 supported, using `batched-affine-decode-exact-v1` verification to preserve its
@@ -285,8 +411,9 @@ ValueKey GDN, stock HC, affine-64 cache and BF16-valued head policy.
 Lily weights retain `batched-decode-exact-v1`. The official verifier uses
 its own short-row kernels and physical ValueKey rollback captures; both
 policies retain their ordinary target arithmetic.
-This path requires macOS 26 and Metal 4, uses the checkpoint's declared context
-maximum, and does not execute vision. Initial K/V and decode scratch
+The text path requires macOS 26 and Metal 4 and uses the checkpoint's declared
+context maximum. Images require the separate retained-image artifact described
+above. Initial K/V and decode scratch
 reserve at most 16,384 tokens and grow as needed; that reserve is not a token
 limit. Prefill scratch follows the current state capacity. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
@@ -472,12 +599,23 @@ numerical policy. See the [Flash-Next pilot](benchmarks/2026-11-07-flashnext-opt
 for the measured source identities, artifact guards, reproduction commands and
 limitations. The runner never promotes a setting automatically.
 The separate [MoE projection experiment](benchmarks/2026-11-07-flashnext-moe-projections.md)
-records the guarded fixed-geometry gate/up and shared-first candidate. Its
-numerical controls pass; whole-model performance qualification is blocked.
+records the guarded fixed-geometry gate/up and shared-first candidate. The
+candidate is now withdrawn and its source controls remain archived. The
+[sustained diagnosis](benchmarks/2026-11-07-flashnext-sustained-diagnosis.md)
+records GPU-span growth during repeated requests, the separate idle wake cost,
+and a single-loaded-model crossover without an accepted projection benefit.
 `scripts/benchmark_qwen38_cadence.py` holds one loaded worker and request
 configuration fixed while comparing positions after a fixed pause. It emits
 hashes, counts, timings and descriptive host screens; it never claims quiet
 admission or promotes a candidate.
+Optional `--clock-sampler` uses a separately supplied source-bracketed sampler;
+`--process-metrics` records worker CPU/memory aggregates and host attribution.
+`--native-profile-output` enables native aggregate profiling without GPU stage
+timestamp writes. Profile-gated GPU-busy deltas cover Qwen prefill and MTP
+draft/verify/finish using existing completed command spans, including any device
+stalls or preemption. Disabled profiling adds no counter reads. Idle keepalive
+and the separate `benchmark_qwen38_moe_crossover.py` require archived private
+worker patches; the production worker exposes neither diagnostic operation.
 
 The context benchmark supports greedy and stochastic generation; `--top-k 0`
 omits top-k filtering. It emits counts, hashes and timing aggregates. The
@@ -510,7 +648,9 @@ and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-r
 record the remaining graph, kernel and prefill opportunities with source and
 license boundaries.
 
-These paths are text-only. They do not execute vision, video, audio or DFlash.
+The default prepared paths are text-only. Still images require the explicit
+retained Lily image preparation described above. Video, audio and DFlash are
+unsupported.
 MTP is available through the native Lily and official mixed-affine generation
 paths described above when the checkpoint contains its trained head. The
 ordinary GLM GGUF path does not execute its MTP layer; the explicitly selected

@@ -11,7 +11,9 @@ import json
 import math
 from pathlib import Path
 
+from .checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from .compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from .config_normalization import normalize_config
 from .streaming import (
     ConversionError,
     ConversionPlan,
@@ -20,7 +22,6 @@ from .streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
     validate_planning_layers,
 )
 
@@ -126,10 +127,16 @@ def _unscaled_rope_theta(config: dict) -> float:
 
 
 def build_qwen3_plan(
-    source: Path, *, dtype: str = "bfloat16", tensors: dict[str, TensorInfo] | None = None
+    source: Path,
+    *,
+    dtype: str = "bfloat16",
+    tensors: dict[str, TensorInfo] | None = None,
+    checkpoint_metadata: CheckpointMetadata | None = None,
 ) -> ConversionPlan:
     """Plan all output tensors from strict checkpoint headers before writing."""
-    config = read_json(source / "config.json")
+    config = normalize_config(
+        "qwen3", read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     if config.get("model_type") != "qwen3":
         raise UnsupportedConversion("Streaming converter supports Qwen3")
     if dtype not in _DTYPES:
@@ -176,7 +183,8 @@ def build_qwen3_plan(
     if type(max_window_layers) is not int or not 0 <= max_window_layers <= layers:
         raise ConversionError("Qwen3 sliding window layer boundary is invalid")
     sliding = _positive_int(config, "sliding_window") if use_sliding else None
-    tensors = load_checkpoint(source) if tensors is None else tensors
+    if tensors is None:
+        tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     validate_planning_layers(layers, tensors)
     windows = [sliding if use_sliding and layer >= max_window_layers else None for layer in range(layers)]
     if config.get("layer_types") is not None:
@@ -338,14 +346,14 @@ def build_qwen3_plan(
                 embedding = read_mlx_matrix(tensors, "model.embed_tokens.weight", (vocab, model_dim), quantization)
                 expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
                 if any(
-                    left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                    not tensor_aliases_equal(left, right, header_only=checkpoint_metadata is not None)
                     for left, right in zip(head.planes, embedding.planes, strict=True)
                 ):
                     raise ConversionError("Tied MLX lm_head differs from the input embedding")
             else:
                 head = tensor("lm_head.weight", (vocab, model_dim))
                 embedding = tensors["model.embed_tokens.weight"]
-                if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
+                if not tensor_aliases_equal(head, embedding, header_only=checkpoint_metadata is not None):
                     raise ConversionError("Tied lm_head differs from the input embedding")
     else:
         matrix(

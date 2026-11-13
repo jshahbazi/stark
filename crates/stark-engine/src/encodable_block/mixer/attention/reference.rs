@@ -1,4 +1,4 @@
-//! BF16 eager boundaries used only by the exact Qwen3.5 vision artifact.
+//! BF16 eager boundaries for source-bound owned or committed-query paths.
 
 use crate::{
     backends::common::{
@@ -37,6 +37,31 @@ impl<B: Backend> ReferenceBF16Attention<B> {
         {
             return Err(InvalidInput("reference BF16 attention requires owned full causal cache").into());
         }
+        Self::kernels(context, config)
+    }
+
+    /// A single query over already committed, temporally ordered rows. The
+    /// caller validates the window and row count before entering this path.
+    /// This grants no mutable shared-cache or partial-ring acceptance support.
+    pub(crate) fn for_committed_target(
+        context: &B::Context,
+        config: &AttentionConfig,
+    ) -> Result<Self, B::Error> {
+        if !config.is_causal
+            || !config.is_kv_sharing
+            || config.has_sinks
+            || config.logit_soft_cap.is_some()
+            || config.sliding_window_size.is_some_and(|window| window != 513)
+        {
+            return Err(InvalidInput("invalid committed BF16 assistant attention profile").into());
+        }
+        Self::kernels(context, config)
+    }
+
+    fn kernels(
+        context: &B::Context,
+        config: &AttentionConfig,
+    ) -> Result<Self, B::Error> {
         crate::config::validation::validate_heads(config.num_heads, config.num_groups, config.head_dim)?;
         Ok(Self {
             dot: <B::Kernels as Kernels>::VisionMatmulBF16Kernel::new(context)?,
@@ -49,6 +74,15 @@ impl<B: Backend> ReferenceBF16Attention<B> {
             head_dim: config.head_dim,
             scale: config.scale.unwrap_or(1.0 / (config.head_dim as f32).sqrt()),
         })
+    }
+
+    pub(crate) fn matches_geometry(
+        &self,
+        heads: u32,
+        groups: u32,
+        head_dim: u32,
+    ) -> bool {
+        self.heads == heads && self.groups == groups && self.head_dim == head_dim
     }
 
     pub(crate) fn encode(
@@ -121,5 +155,60 @@ impl<B: Backend> ReferenceBF16Attention<B> {
             );
         }
         Ok(output)
+    }
+
+    /// Ephemeral first-divergence instrumentation; ordinary encoding is unchanged.
+    #[cfg(test)]
+    pub(crate) fn trace_single_query(
+        &self,
+        queries: impl BufferRef<Backend = B>,
+        keys: impl BufferRef<Backend = B>,
+        values: impl BufferRef<Backend = B>,
+        key_count: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Vec<(String, B::ScratchBuffer)>, B::Error> {
+        let mut stages = Vec::new();
+        let stride = self.groups * self.head_dim;
+        for index in 0..self.heads {
+            let start = index as usize * self.head_dim as usize * 2;
+            let group_start = (index / (self.heads / self.groups) * self.head_dim) as usize * 2;
+            let mut dot = commands.allocate_scratch_for_shape(&[1, key_count], DataType::F32)?;
+            let mut probabilities = commands.allocate_scratch_for_shape(&[1, key_count], DataType::BF16)?;
+            let mut scores = commands.allocate_scratch_for_shape(&[1, key_count], DataType::BF16)?;
+            let mut weighted = commands.allocate_scratch_for_shape(&[1, self.head_dim], DataType::F32)?;
+            let mut output = commands.allocate_scratch_for_shape(&[1, self.head_dim], DataType::BF16)?;
+            self.dot.encode(
+                queries.subrange(start..start + self.head_dim as usize * 2),
+                keys.subrange(group_start..),
+                &mut dot,
+                1,
+                key_count,
+                self.head_dim,
+                stride,
+                1,
+                32,
+                commands,
+            );
+            self.score.encode(&dot, &mut probabilities, key_count, 1, key_count - 1, self.scale, commands);
+            commands.encode_copy(&probabilities, &mut scores);
+            self.softmax.encode(&mut probabilities, key_count, 1, commands);
+            self.dot.encode(
+                &probabilities,
+                values.subrange(group_start..),
+                &mut weighted,
+                1,
+                self.head_dim,
+                key_count,
+                stride,
+                0,
+                4,
+                commands,
+            );
+            self.cast.encode(&weighted, &mut output, self.head_dim, commands);
+            stages.push((format!("head{index}.scores"), scores));
+            stages.push((format!("head{index}.probabilities"), probabilities));
+            stages.push((format!("head{index}.weighted_values"), output));
+        }
+        Ok(stages)
     }
 }

@@ -3,9 +3,13 @@ use std::os::unix::fs::FileExt;
 #[cfg(target_family = "wasm")]
 use std::os::wasi::fs::FileExt;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     fs::File,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use super::{
@@ -26,6 +30,18 @@ struct ParameterMetadata {
     size: usize,
 }
 
+/// Parameter storage only, excluding request state, scratch and allocator slack.
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub struct ParameterStorageStatistics {
+    pub resident_bytes: usize,
+    pub peak_loading_bytes: usize,
+    pub shared_matrix_bytes: usize,
+    /// Subset of shared_matrix_bytes, not an additional allocation.
+    pub shared_expert_matrix_bytes: usize,
+    pub representation_copy_bytes: usize,
+    pub unshared_parameter_bytes: usize,
+}
+
 /// An internal arithmetic policy selected by an admitting loader, never by
 /// checkpoint metadata. Ordinary text loading retains the established policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -33,6 +49,19 @@ pub(crate) enum NumericalProfile {
     #[default]
     Legacy,
     Qwen35ReferenceBF16,
+    /// BF16 activation boundaries with canonical packed affine matrices.
+    Qwen35AffineBF16,
+    /// Qualified full-BF16 dense predictor only; target/norm policy stays unchanged.
+    QwenMtpSourceBF16,
+    /// Test-only causal experiment: full BF16 linears with all other operators unchanged.
+    #[cfg(test)]
+    QwenMtpReferenceLinears,
+}
+
+impl NumericalProfile {
+    pub(crate) fn qwen35_bf16_activations(self) -> bool {
+        matches!(self, Self::Qwen35ReferenceBF16 | Self::Qwen35AffineBF16)
+    }
 }
 
 pub struct ParameterLoader<'a, B: Backend> {
@@ -42,6 +71,9 @@ pub struct ParameterLoader<'a, B: Backend> {
     validated_tensors: RefCell<HashSet<String>>,
     file: &'a File,
     numerical_profile: NumericalProfile,
+    shared_weights: Option<RefCell<HashMap<String, Arc<B::GlobalBuffer>>>>,
+    representation_copy_bytes: Arc<AtomicUsize>,
+    allocated_buffer_bytes: Cell<usize>,
 }
 
 impl<'a, B: Backend> ParameterLoader<'a, B> {
@@ -89,6 +121,9 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
             validated_tensors: RefCell::new(HashSet::new()),
             file,
             numerical_profile: NumericalProfile::Legacy,
+            shared_weights: None,
+            representation_copy_bytes: Arc::new(AtomicUsize::new(0)),
+            allocated_buffer_bytes: Cell::new(0),
         })
     }
 
@@ -100,11 +135,106 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
         self
     }
 
+    pub(crate) fn enable_weight_sharing(&mut self) {
+        self.shared_weights = Some(RefCell::new(HashMap::new()));
+    }
+
+    pub(crate) fn set_numerical_profile(
+        &mut self,
+        profile: NumericalProfile,
+    ) {
+        self.numerical_profile = profile;
+    }
+
+    /// Upper bound for a second Qwen graph: immutable matrices share storage;
+    /// signed A8 codes may require a different representation, and small F32
+    /// controls are independently constructed. Keep kernel/allocator margin.
+    pub(crate) fn qwen_text_graph_extra_bytes(&self) -> Option<usize> {
+        let mut codes = 0usize;
+        let mut controls = 0usize;
+        for (name, tensor) in &self.index {
+            if !name.starts_with("decoder.") && !name.starts_with("mtp.") {
+                continue;
+            }
+            if tensor.data_type == DataType::U8 && name.ends_with(".weights") {
+                codes = codes.checked_add(tensor.size)?;
+            } else if tensor.data_type == DataType::F32 {
+                controls = controls.checked_add(tensor.size)?;
+            }
+        }
+        codes.checked_add(controls.checked_mul(4)?)?.checked_add(256 * 1024 * 1024)
+    }
+
+    pub(crate) fn storage_statistics(&self) -> ParameterStorageStatistics {
+        let mut cache_only = 0usize;
+        let mut shared = 0usize;
+        let mut shared_experts = 0usize;
+        if let Some(cache) = &self.shared_weights {
+            for (name, buffer) in cache.borrow().iter() {
+                use crate::backends::common::Buffer;
+                let bytes = buffer.size();
+                match Arc::strong_count(buffer) {
+                    1 => cache_only += bytes,
+                    2 => {},
+                    _ => {
+                        shared += bytes;
+                        if name.contains(".mlp.experts.") {
+                            shared_experts += bytes;
+                        }
+                    },
+                }
+            }
+        }
+        let copies = self.representation_copy_bytes.load(Ordering::Relaxed);
+        let allocated = self.allocated_buffer_bytes.get();
+        ParameterStorageStatistics {
+            resident_bytes: allocated + copies - cache_only,
+            peak_loading_bytes: allocated + copies,
+            shared_matrix_bytes: shared,
+            shared_expert_matrix_bytes: shared_experts,
+            representation_copy_bytes: copies,
+            unshared_parameter_bytes: allocated - cache_only - shared,
+        }
+    }
+
     pub fn tree(&self) -> ParameterTree<'_, B> {
         ParameterTree {
             loader: self,
             prefix: None,
+            profile_override: None,
         }
+    }
+
+    /// Inspect both target and predictor storage, without allocating weights.
+    /// A BF16 predictor attached to a packed/mixed target is not eligible.
+    /// The qualified head retains Legacy norms; other incoming policies stay intact.
+    pub(crate) fn qwen_target_and_head_full_bf16(&self) -> bool {
+        use crate::config::weight_matrix::AnyWeightMatrixSpec;
+        if self.numerical_profile != NumericalProfile::Legacy {
+            return false;
+        }
+        let mut target = false;
+        let mut head = false;
+        for (name, value) in &self.metadata {
+            if !(name.starts_with("decoder.") || name.starts_with("mtp.")) || !name.ends_with(".spec") {
+                continue;
+            }
+            if !matches!(
+                serde_json::from_str::<AnyWeightMatrixSpec>(value),
+                Ok(AnyWeightMatrixSpec::FullPrecisionSpec(_))
+            ) {
+                return false;
+            }
+            let Some(tensor) = self.index.get(&format!("{}.weights", name.trim_end_matches(".spec"))) else {
+                return false;
+            };
+            if tensor.data_type != DataType::BF16 {
+                return false;
+            }
+            target |= name.starts_with("decoder.");
+            head |= name.starts_with("mtp.");
+        }
+        target && head
     }
 }
 
@@ -161,18 +291,52 @@ impl<'a, 'leaf, B: Backend> ParameterLeaf<'a, 'leaf, B, true> {
         let mut buffer =
             self.loader.context.create_buffer(self.metadata.size).map_err(ParameterLoaderError::BackendError)?;
         self.loader.file.read_exact_at(buffer.as_slice_mut::<u8>(), self.metadata.offset as u64)?;
+        self.loader.allocated_buffer_bytes.set(self.loader.allocated_buffer_bytes.get() + self.metadata.size);
         Ok(buffer)
+    }
+
+    /// Only raw validated parameter bytes enter this cache. Callers receive
+    /// immutable ownership; representation changes must allocate private bytes.
+    pub(crate) fn read_shared_weight(&self) -> Result<Arc<B::GlobalBuffer>, ParameterLoaderError<B>> {
+        if let Some(cache) = &self.loader.shared_weights {
+            if let Some(buffer) = cache.borrow().get(self.key) {
+                return Ok(buffer.clone());
+            }
+            let buffer = Arc::new(self.read_buffer()?);
+            cache.borrow_mut().insert(self.key.into(), buffer.clone());
+            Ok(buffer)
+        } else {
+            Ok(Arc::new(self.read_buffer()?))
+        }
     }
 }
 
 pub struct ParameterTree<'loader, B: Backend> {
     loader: &'loader ParameterLoader<'loader, B>,
     prefix: Option<String>,
+    profile_override: Option<NumericalProfile>,
 }
 
 impl<'loader, B: Backend> ParameterTree<'loader, B> {
+    pub(crate) fn representation_copy_counter(&self) -> Arc<AtomicUsize> {
+        self.loader.representation_copy_bytes.clone()
+    }
     pub(crate) fn numerical_profile(&self) -> NumericalProfile {
+        if let Some(profile) = self.profile_override {
+            return profile;
+        }
         self.loader.numerical_profile
+    }
+
+    pub(crate) fn with_numerical_profile(
+        &self,
+        profile: NumericalProfile,
+    ) -> Self {
+        Self {
+            loader: self.loader,
+            prefix: self.prefix.clone(),
+            profile_override: Some(profile),
+        }
     }
 
     fn join_prefix(
@@ -189,6 +353,7 @@ impl<'loader, B: Backend> ParameterTree<'loader, B> {
         Self {
             loader: self.loader,
             prefix: Some(self.join_prefix(name)),
+            profile_override: self.profile_override,
         }
     }
 
@@ -239,6 +404,39 @@ impl<'loader, B: Backend> ParameterTree<'loader, B> {
             })
         }
     }
+
+    /// A caller that independently admits an exact artifact may intentionally
+    /// omit one complete subtree. This does not mark its tensors validated.
+    /// Return its logical storage, rejecting every other unvalidated tensor.
+    pub(crate) fn assert_only_unloaded_subtree(
+        &self,
+        name: &str,
+    ) -> Result<usize, ParameterLoaderError<B>> {
+        let allowed = format!("{}.", self.join_prefix(name));
+        let validated = self.loader.validated_tensors.borrow();
+        let mut unexpected = self
+            .loader
+            .index
+            .keys()
+            .filter(|key| !validated.contains(*key) && !key.starts_with(&allowed))
+            .cloned()
+            .collect::<Vec<_>>();
+        unexpected.sort();
+        if !unexpected.is_empty() {
+            return Err(ParameterLoaderError::UnvalidatedTensors {
+                prefix: self.prefix.clone(),
+                keys: unexpected.into_boxed_slice(),
+            });
+        }
+        self.loader.index.iter().filter(|(key, _)| key.starts_with(&allowed)).try_fold(0usize, |sum, (_, meta)| {
+            sum.checked_add(meta.size).ok_or_else(|| {
+                ParameterLoaderError::ArrayLoadingError(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "parameter inventory overflow",
+                ))
+            })
+        })
+    }
 }
 
 #[cfg(all(test, backend = "cpu"))]
@@ -265,6 +463,14 @@ mod payload_tests {
         end: usize,
         payload: &[u8],
     ) -> std::fs::File {
+        named_tensor_file("weight", end, payload)
+    }
+
+    fn named_tensor_file(
+        name: &str,
+        end: usize,
+        payload: &[u8],
+    ) -> std::fs::File {
         let path = std::env::temp_dir().join(format!(
             "stark-payload-test-{}-{}",
             std::process::id(),
@@ -273,7 +479,7 @@ mod payload_tests {
         let mut file = OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
         std::fs::remove_file(path).unwrap();
         let shape = end.min(u32::MAX as usize);
-        let header = format!(r#"{{"weight":{{"dtype":"U8","shape":[{shape}],"data_offsets":[0,{end}]}}}}"#);
+        let header = format!(r#"{{"{name}":{{"dtype":"U8","shape":[{shape}],"data_offsets":[0,{end}]}}}}"#);
         file.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
         file.write_all(header.as_bytes()).unwrap();
         file.write_all(payload).unwrap();
@@ -314,5 +520,93 @@ mod payload_tests {
             loader.tree().subtree("decoder").subtree("mixer").numerical_profile(),
             NumericalProfile::Qwen35ReferenceBF16
         );
+    }
+
+    #[stark_test]
+    fn head_profile_override_is_scoped_and_does_not_select_reference_activations() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(1, &[0]);
+        let loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+        let root = loader.tree();
+        let head = root.subtree("mtp").with_numerical_profile(NumericalProfile::QwenMtpSourceBF16);
+        assert_eq!(
+            head.subtree("transformer").subtree("mixer").numerical_profile(),
+            NumericalProfile::QwenMtpSourceBF16
+        );
+        assert!(!head.numerical_profile().qwen35_bf16_activations());
+        assert_eq!(root.numerical_profile(), NumericalProfile::Legacy);
+        assert_eq!(root.subtree("decoder").numerical_profile(), NumericalProfile::Legacy);
+        assert_eq!(loader.tree().subtree("mtp").numerical_profile(), NumericalProfile::Legacy);
+    }
+
+    #[stark_test]
+    fn head_source_policy_requires_full_bf16_target_and_head_storage() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(1, &[0]);
+        let mut loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+        assert!(!loader.qwen_target_and_head_full_bf16());
+        for prefix in ["decoder.projection", "mtp.fusion"] {
+            loader
+                .metadata
+                .insert(format!("{prefix}.spec"), r#"{"type":"FullPrecisionSpec","layout":"output_input"}"#.into());
+            loader.index.insert(
+                format!("{prefix}.weights"),
+                super::ParameterMetadata {
+                    shape: vec![1, 1].into_boxed_slice(),
+                    data_type: DataType::BF16,
+                    offset: 0,
+                    size: 2,
+                },
+            );
+        }
+        assert!(loader.qwen_target_and_head_full_bf16());
+        loader.set_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+        assert!(!loader.qwen_target_and_head_full_bf16());
+        loader.set_numerical_profile(NumericalProfile::Legacy);
+        loader.index.get_mut("decoder.projection.weights").unwrap().data_type = DataType::F32;
+        assert!(!loader.qwen_target_and_head_full_bf16());
+        loader.index.get_mut("decoder.projection.weights").unwrap().data_type = DataType::BF16;
+        // A packed target plus unchanged BF16 head must stay on its old policy.
+        loader.metadata.insert(
+            "decoder.projection.spec".into(),
+            r#"{"type":"MLXSpec","bits":4,"group_size":64,"layout":"output_input"}"#.into(),
+        );
+        assert!(!loader.qwen_target_and_head_full_bf16());
+        assert_eq!(loader.allocated_buffer_bytes.get(), 0);
+    }
+
+    #[stark_test]
+    fn shared_raw_parameter_survives_profile_change_without_duplicate_allocation() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(3, &[4, 5, 6]);
+        let mut loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+        loader.enable_weight_sharing();
+        let first =
+            loader.tree().leaf("weight").unwrap().validate(&[3], DataType::U8).unwrap().read_shared_weight().unwrap();
+        loader.set_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+        let second =
+            loader.tree().leaf("weight").unwrap().validate(&[3], DataType::U8).unwrap().read_shared_weight().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(first.as_ref().copyout::<u8>(), [4, 5, 6]);
+        let stats = loader.storage_statistics();
+        assert_eq!(stats.resident_bytes, 3);
+        assert_eq!(stats.shared_matrix_bytes, 3);
+        assert_eq!(stats.representation_copy_bytes, 0);
+    }
+
+    #[stark_test]
+    fn unloaded_subtree_inventory_never_marks_or_excuses_other_tensors() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        for (name, allowed) in [("vision.weight", true), ("visionary.weight", false), ("decoder.weight", false)] {
+            let file = named_tensor_file(name, 3, &[1, 2, 3]);
+            let loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+            let result = loader.tree().assert_only_unloaded_subtree("vision");
+            assert_eq!(result.is_ok(), allowed);
+            assert!(loader.tree().assert_all_tensors_validated().is_err());
+            if allowed {
+                assert_eq!(result.unwrap(), 3);
+                assert_eq!(loader.storage_statistics().resident_bytes, 0);
+            }
+        }
     }
 }

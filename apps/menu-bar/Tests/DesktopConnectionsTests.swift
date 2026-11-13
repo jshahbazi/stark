@@ -95,6 +95,7 @@ struct DesktopConnectionsTests {
             case "broker-write": try brokerWrite()
             case "broker-cleanup": try brokerCleanup()
             case "opencode-approval": try openCodeApproval()
+            case "opencode-model-discovery": try openCodeModelDiscovery()
             case "opencode-pending": try openCodePending()
             case "opencode-deny": try openCodeDeny()
             case "opencode-disabled": try openCodeDisabled()
@@ -309,7 +310,7 @@ struct DesktopConnectionsTests {
     }
 
     private static func controllerModelDiscovery() throws {
-        let model: [String: Any] = ["id": "fixture/model", "context_length": 4096, "tool_calling": true]
+        let model: [String: Any] = ["id": "fixture/model", "context_length": 4096, "context_capacity_known": true, "max_output_tokens": 4095, "tool_calling": true]
         try withController(models: [model]) { controller, packets, clock, advance in
             let current = try peer()
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
@@ -337,9 +338,16 @@ struct DesktopConnectionsTests {
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
             try check(controller.discoveryScope != previousScope)
         }
-        try withController(models: [["id": "fixture/model", "context_length": 4096, "tool_calling": false]]) { controller, _, _, _ in
+        try withController(models: [["id": "fixture/model", "context_length": 4096, "context_capacity_known": true, "max_output_tokens": 4095, "tool_calling": false]]) { controller, _, _, _ in
             controller.handle("status", peer: try peer()) { _ in }
             try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+        }
+        for output in [0, 4097] {
+            try withController(models: [["id": "fixture/model", "context_length": 4096,
+                "context_capacity_known": true, "max_output_tokens": output, "tool_calling": true]]) { controller, _, _, _ in
+                controller.handle("status", peer: try peer()) { _ in }
+                try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            }
         }
     }
 
@@ -689,14 +697,16 @@ struct DesktopConnectionsTests {
     }
 
     private static func withOpenCode(_ mock: MockApprovalStorage,
+                                     models: [[String: Any]] = [],
+                                     clock: @escaping () -> TimeInterval = { 1000 },
                                      _ body: (OpenCodeConnectionController, ResultBox<[[String: Any]]>) throws -> Void) throws {
         let service = namespace()
         let packets = ResultBox<[[String: Any]]>()
         packets.set([])
         let value = OpenCodeConnectionController(service: service,
-            storage: OpenCodeEngineApprovalStore(service: service, storage: mock), clock: { 1000 },
+            storage: OpenCodeEngineApprovalStore(service: service, storage: mock), clock: clock,
             send: { packet in packets.set((packets.value ?? []) + [packet]); return true },
-            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": []] },
+            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": models] },
             brokerPath: { "/private/tmp/stark-synthetic-broker/openwork.sock" })
         defer { value.shutdown(); pump() }
         value.receiveConnection(["api_session": firstSession, "base_url": "http://127.0.0.1:8000/v1"])
@@ -713,6 +723,44 @@ struct DesktopConnectionsTests {
     private static func notConnected(_ result: Result<[String: Any], DesktopConnectionError>?) -> Bool {
         guard case .success(let value) = result else { return false }
         return value.count == 2 && value["status"] as? String == "not_connected" && value["api_key"] == nil
+    }
+
+    private static func openCodeModelDiscovery() throws {
+        let current = try peer()
+        let mock = openCodeStorage(enabled: true, engines: [current.instanceID])
+        var now: TimeInterval = 1000
+        let models: [[String: Any]] = [
+            ["id": "fixture/model", "context_length": 4096, "context_capacity_known": true, "max_output_tokens": 4095, "tool_calling": true],
+            ["id": "fixture/chat", "context_length": 4096, "context_capacity_known": true, "max_output_tokens": 4095, "tool_calling": false],
+            ["id": "fixture/oversized-output", "context_length": 4096,
+             "context_capacity_known": true, "max_output_tokens": 262143, "tool_calling": true],
+        ]
+        try withOpenCode(mock, models: models, clock: { now }) { controller, packets in
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            controller.handle("status", peer: current) { _ in }
+            try check(packets.value?.isEmpty == true && !controller.clientActive)
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 8192))
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/chat", contextTokens: 4096))
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/oversized-output", contextTokens: 4096))
+            now += 30
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            controller.handle("status", peer: current) { _ in }
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            let oldScope = controller.discoveryScope
+            controller.receiveConnection(["api_session": nextSession, "base_url": "http://127.0.0.1:8000/v1"])
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            try check(controller.discoveryScope != oldScope)
+            controller.handle("status", peer: current) { _ in }
+            try check(controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            controller.disconnect()
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+        }
+        try withOpenCode(openCodeStorage(enabled: true), models: models) { controller, _ in
+            controller.handle("status", peer: current) { _ in }
+            try check(!controller.hasDiscoveredModel(apiID: "fixture/model", contextTokens: 4096))
+            try check(controller.pendingEngine == current)
+        }
     }
 
     private static func openCodeApproval() throws {

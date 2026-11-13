@@ -133,6 +133,7 @@ fn get_output<
         AccumT::data_type(),
         input.in_place,
         input.has_scales,
+        false,
     )
     .expect("Failed to create QKVNormKernel");
 

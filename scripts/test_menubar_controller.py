@@ -206,7 +206,7 @@ extension EngineController {
                     "host": host, "items": [item]]
         }
         func prepareBeginnerReport(_ installed: [String] = []) -> String {
-            engine.requestBeginnerModels(task: "unsure")
+            engine.requestBeginnerModels(task: "general")
             let id = command()["request_id"] as! String
             engine.apply(["event": "guided_models", "request_id": id, "report": beginnerReport(installed)])
             return id
@@ -215,13 +215,13 @@ extension EngineController {
         switch scenario {
         case "worker-pipe-small-guided-reply":
             let replies = Pipe()
-            engine.observeWorkerOutput(replies.fileHandleForReading)
+            engine.observeBackendOutput(replies.fileHandleForReading)
             defer {
                 replies.fileHandleForReading.readabilityHandler = nil
                 try? replies.fileHandleForWriting.close()
                 try? replies.fileHandleForReading.close()
             }
-            engine.requestBeginnerModels(task: "code", preference: "answers")
+            engine.requestBeginnerModels(task: "coding", preference: "quality")
             let requestID = command()["request_id"] as! String
             guard engine.beginnerChoicesLoading else { return false }
             var bytes = try! JSONSerialization.data(withJSONObject: [
@@ -237,7 +237,7 @@ extension EngineController {
                 replies.fileHandleForReading.readabilityHandler != nil
         case "worker-pipe-fragmented-and-coalesced-events":
             let replies = Pipe()
-            engine.observeWorkerOutput(replies.fileHandleForReading)
+            engine.observeBackendOutput(replies.fileHandleForReading)
             defer {
                 replies.fileHandleForReading.readabilityHandler = nil
                 try? replies.fileHandleForWriting.close()
@@ -263,7 +263,7 @@ extension EngineController {
             return pump({ engine.gpuMemoryBytes == 333 }) && engine.reader.sync { engine.pending.isEmpty }
         case "worker-pipe-eof-clears-handler":
             let replies = Pipe()
-            engine.observeWorkerOutput(replies.fileHandleForReading)
+            engine.observeBackendOutput(replies.fileHandleForReading)
             defer {
                 replies.fileHandleForReading.readabilityHandler = nil
                 try? replies.fileHandleForReading.close()
@@ -271,11 +271,52 @@ extension EngineController {
             guard replies.fileHandleForReading.readabilityHandler != nil else { return false }
             try? replies.fileHandleForWriting.close()
             return pump({ replies.fileHandleForReading.readabilityHandler == nil })
+        case "resource-budget-memory-derived":
+            for mib in [16, 64, 65, 256, 1024] {
+                let input = mib * 1024 * 1024
+                let wire = 6 * input + 2 * 1024 * 1024
+                guard engine.applyResourceBudget(["resource_budget": [
+                    "request_budget_mib": mib, "input_bytes": input, "max_request_bytes": wire
+                ]]), engine.workerWireLimit() == wire else { return false }
+            }
+            let prior = engine.workerWireLimit()
+            for invalid: [String: Any] in [
+                ["request_budget_mib": Int.max, "input_bytes": Int.max, "max_request_bytes": Int.max],
+                ["request_budget_mib": 0, "input_bytes": 0, "max_request_bytes": 2 * 1024 * 1024],
+                ["request_budget_mib": 256, "input_bytes": 1, "max_request_bytes": 1]
+            ] {
+                guard !engine.applyResourceBudget(["resource_budget": invalid]),
+                      engine.workerWireLimit() == prior else { return false }
+            }
+            return true
+        case "backend-short-replies":
+            let backend = Pipe()
+            engine.observeBackendOutput(backend.fileHandleForReading)
+            defer {
+                backend.fileHandleForReading.readabilityHandler = nil
+                try? backend.fileHandleForWriting.close()
+                try? backend.fileHandleForReading.close()
+            }
+            engine.state = "starting"
+            for message in ["Fixture backend ready", "Fixture next reply"] {
+                let event = ["event": "status", "state": "idle", "message": message]
+                var bytes = try! JSONSerialization.data(withJSONObject: event)
+                bytes.append(10)
+                backend.fileHandleForWriting.write(bytes)
+                // The writer deliberately remains open, as in the real app.
+                guard pump({ engine.state == "idle" && engine.message == message }) else { return false }
+            }
+            return true
+        case "beginner-general-task-transport":
+            engine.requestBeginnerModels(task: "general")
+            let request = command()
+            return engine.beginnerChoicesLoading && request["command"] as? String == "guided_models"
+                && request["task"] as? String == "general"
         case "beginner-recommendation-fences":
-            engine.requestBeginnerModels(task: "unsure")
+            engine.requestBeginnerModels(task: "general")
             let request = command()
             let id = request["request_id"] as! String
-            guard request["preference"] as? String == "balanced",
+            guard request["preference"] as? String == "quality",
                   let hardware = request["hardware"] as? [String: Any],
                   hardware["gpu_available"] is Bool, hardware["gpu_name"] is String,
                   hardware["gpu_memory_budget_bytes"] != nil, hardware["cpu_cores"] != nil else { return false }
@@ -291,7 +332,7 @@ extension EngineController {
             _ = prepareBeginnerReport()
             guard engine.beginnerReport?.deviceSummary.contains("Fixture GPU") == true,
                   engine.beginnerReport?.items.first?.recommendationReason == "Fits the fixture GPU budget" else { return false }
-            engine.requestBeginnerModels(task: "code", excludingModelID: "fixture-model", preference: "speed")
+            engine.requestBeginnerModels(task: "coding", excludingModelID: "fixture-model", preference: "speed")
             let retry = command()
             engine.apply(["event": "guided_models", "request_id": id, "report": beginnerReport()])
             let excluded = retry["excluded_model_ids"] as? [String]
@@ -398,10 +439,17 @@ extension EngineController {
                   !BeginnerContextPolicy.requiresRestart(expected: 32768, local: 32768, api: 32768) else { return false }
             engine.mode = .chat; engine.loadedMode = .chat
             engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
-                          "max_context_tokens": 40960, "context_tokens": 32768,
-                          "api_context_tokens": 32768, "max_output_tokens": 4096, "tools": true])
-            guard engine.contextLimit == 40960, engine.contextCapacityKnown,
+                          "max_context_tokens": 262144, "context_tokens": 32768,
+                          "api_context_tokens": 32768, "max_output_tokens": 262143,
+                          "api_max_output_tokens": 32767, "tools": true])
+            guard engine.contextLimit == 262144, engine.contextCapacityKnown,
+                  engine.outputLimit == 262143, engine.apiMaxNewTokens == 32767,
                   engine.apiContextTokens == 32768, engine.options.contextTokens == 32768 else { return false }
+            // A backend without the additive API field still needs a safe cap.
+            engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
+                          "max_context_tokens": 262144, "context_tokens": 32768,
+                          "api_context_tokens": 32768, "max_output_tokens": 262143, "tools": true])
+            guard engine.outputLimit == 262143, engine.apiMaxNewTokens == 32767 else { return false }
             engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
                           "max_context_tokens": Int(UInt32.max), "context_capacity_known": false,
                           "context_tokens": 32768, "api_context_tokens": 32768, "max_output_tokens": 4096])
@@ -678,7 +726,37 @@ extension EngineController {
                 "max_context_tokens": 8192, "context_tokens": 8192, "max_output_tokens": 4096,
                 "max_new_tokens": 512, "mtp": capability, "mtp_enabled": true]
             engine.apply(ready)
-            guard engine.supportsMTP, engine.mtpEnabled else { return false }
+            guard engine.supportsMTP, engine.mtpEnabled, engine.defaultMTPEnabled else { return false }
+            var gemmaReady = ready
+            var gemmaCapability = capability
+            gemmaCapability["verification"] = "gemma4-e2b-target-verify-v1"
+            gemmaReady["mtp"] = gemmaCapability; gemmaReady["mtp_enabled"] = false
+            engine.apply(gemmaReady)
+            guard engine.supportsMTP, !engine.mtpEnabled, !engine.defaultMTPEnabled else { return false }
+            engine.apply(ready)
+            guard engine.defaultMTPEnabled else { return false }
+            let originalModels = engine.models
+            for (group, family, precision, enabled) in [
+                ("repo:google/gemma-4-E2B-it", "gemma4_text", "BF16", false),
+                ("repo:Qwen/Qwen3.5-0.8B", "qwen3_5", "BF16", false),
+                ("repo:Qwen/Qwen3.5-0.8B", "qwen3_5", "4-bit", true),
+                ("repo:Qwen/Qwen3.5-4B", "qwen3_5", "BF16", true),
+            ] {
+                guard let display = InstalledModelDisplay(["schema_version": 1, "group_id": group,
+                    "group_name": "Fixture", "family_id": family, "quantization": precision]) else { return false }
+                engine.models = [InstalledModel(id: "fixture-model", name: "Fixture", path: "/fixture",
+                    apiID: "fixture", display: display)]
+                guard engine.defaultMTPEnabled == enabled else { return false }
+            }
+            guard let unverifiedBF16 = InstalledModelDisplay(["schema_version": 1,
+                "group_id": "installed:fixture-model", "group_name": "Fixture", "quantization": "BF16"]) else { return false }
+            engine.models = [InstalledModel(id: "fixture-model", name: "Fixture", path: "/fixture",
+                apiID: "Qwen/Qwen3.5-0.8B", display: unverifiedBF16, source: "huggingface:Qwen/Qwen3.5-0.8B")]
+            guard !engine.defaultMTPEnabled else { return false }
+            engine.models = [InstalledModel(id: "fixture-model", name: "Qwen/Qwen3.5-0.8B", path: "/fixture",
+                apiID: "Qwen/Qwen3.5-0.8B", display: unverifiedBF16, source: "local:/fixture")]
+            guard engine.defaultMTPEnabled else { return false }
+            engine.models = originalModels
             let options = engine.options
             guard !engine.configure(options, mtpEnabled: false, modelID: "stale"), noCommandSent(),
                   engine.configure(options, mtpEnabled: false, modelID: "fixture-model") else { return false }
@@ -925,7 +1003,8 @@ extension EngineController {
             guard let payload = try? JSONSerialization.jsonObject(with: Data(backendError.utf8)) as? [String: Any],
                   let registry = payload["registry"] as? [String: Any], let report = payload["report"] as? [String: Any] else { return false }
             engine.apply(["event": "model_families", "report": registry])
-            guard let families = engine.modelFamilies?.families, families.count == 15,
+            guard let families = engine.modelFamilies?.families,
+                  let declared = registry["families"] as? [[String: Any]], families.count == declared.count,
                   let classifier = families.first(where: { $0.modelKind == "classifier" }),
                   classifier.modes.values.allSatisfy({ $0.status == .unsupported }),
                   let qwen3 = families.first(where: { $0.id == "qwen3" }),
@@ -934,6 +1013,9 @@ extension EngineController {
                   let glm = families.first(where: { $0.id == "glm5_next" }),
                   glm.containers == [".gguf"], glm.sourceFormats == ["UD-Q2_K_XL"],
                   glm.hasAppMode(.text), !glm.hasAppMode(.visionLanguage), !glm.hasAppMode(.decision),
+                  let ripple = families.first(where: { $0.id == "ricursive" }),
+                  ripple.displayName == "Ripple-65B Preview", ripple.sourceFormats == ["Q8_0", "Q4_K_M"],
+                  ripple.hasAppMode(.text), !ripple.hasAppMode(.visionLanguage), !ripple.hasAppMode(.decision),
                   families.first(where: { $0.id == "qwen3_5" })?.modes[.visionLanguage]?.status == .conditional else { return false }
             engine.install(source: "fixture/source", kind: "huggingface", artifactMode: "vision-language")
             let requested = command()
@@ -984,8 +1066,8 @@ extension EngineController {
             raw["families"] = Array(families.reversed())
             guard let registry = ModelFamilyRegistry(raw),
                   let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
-            return rows.map(\.name) == ["Gemma 2", "Gemma 3", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
-                "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.8 Flash Next", "SmolLM3"] &&
+            return rows.map(\.name) == ["Flint", "Gemma 2", "Gemma 3", "Gemma 3 images", "Gemma 4", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
+                "Mistral", "OLMo 3", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.5 MoE", "Qwen3.8 Flash Next", "Ripple-65B Preview", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
             engine.apply(["event": "models", "models": [
@@ -1004,6 +1086,46 @@ extension EngineController {
             for key in ["family_id", "quantization", "weight_bytes", "source_revision"] { unknown[key] = NSNull() }
             guard let descriptor = InstalledModelDisplay(unknown) else { return false }
             return descriptor.familyID == nil && descriptor.quantization == nil && descriptor.weightBytes == nil && descriptor.sourceRevision == nil
+        case "models-ripple-display-event":
+            var display = modelDisplay("repo:AtomicChat/Ripple-65B-Preview-GGUF")
+            display["group_name"] = "Ripple-65B-Preview-GGUF"
+            display["family_id"] = "ricursive"
+            display["quantization"] = "Q8_0"
+            display["weight_bytes"] = Int64(68_840_113_568)
+            engine.apply(["event": "models", "models": [
+                ["id": "ripple", "name": "Ripple-65B Preview", "path": "/private/ripple", "display": display]
+            ]])
+            guard let model = engine.models.first, model.display?.familyID == "ricursive",
+                  model.display?.quantization == "Q8_0", model.display?.weightBytes == 68_840_113_568 else { return false }
+            let inventory = ModelsInventory(models: engine.models, loadedID: "", registry: nil)
+            return inventory.groups.first?.family == "Ripple-65B Preview" &&
+                inventory.models.first?.detailLabels.first == "Q8_0" &&
+                inventory.models.first?.detailLabels.count == 4 && !engine.supportsImages
+        case "models-display-native-families":
+            for (familyID, familyName, repository) in [
+                ("olmo3", "OLMo 3", "allenai/Olmo-3-7B-Instruct"),
+                ("gemma3", "Gemma 3 images", "google/gemma-3-4b-it"),
+                ("qwen3_5_moe", "Qwen3.5 MoE", "mlx-community/Qwen3.5-35B-A3B-4bit"),
+                ("gemma4_text", "Gemma 4", "google/gemma-4-E2B-it")
+            ] {
+                var raw = modelDisplay("repo:" + repository, name: repository.split(separator: "/").last.map(String.init) ?? repository)
+                raw["family_id"] = familyID
+                guard ModelFamily.displayName(for: familyID) == familyName,
+                      let display = InstalledModelDisplay(raw),
+                      display.repositoryURL?.absoluteString == "https://huggingface.co/" + repository,
+                      display.familyID == familyID, display.quantization == "BF16",
+                      display.weightBytes == 1_190_000_000,
+                      display.sourceRevision == String(repeating: "a", count: 40) else { return false }
+                let inventory = ModelsInventory(
+                    models: [InstalledModel(id: familyID, name: repository, path: "/private/" + familyID,
+                                            apiID: familyID, display: display)],
+                    loadedID: "", registry: nil
+                )
+                guard inventory.groups.count == 1,
+                      inventory.groups[0].family == familyName,
+                      inventory.groups[0].name == repository.split(separator: "/").last.map(String.init) else { return false }
+            }
+            return true
         case "models-display-malformed":
             let mutations: [(String, Any)] = [
                 ("schema_version", 2), ("schema_version", true), ("group_id", ""),
@@ -1307,6 +1429,45 @@ extension EngineController {
             return !inventory.groups[0].models[0].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models[1].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models.filter(\.isRunning).map(\.id) == ["text"]
+        case "models-readable-names":
+            var lily = modelDisplay("repo:owner/Qwen3.8-Flash-Next-lily-q4-xl", name: "Qwen3.8-Flash-Next-lily-q4-xl")
+            lily["quantization"] = "Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)"
+            var mlxServe = modelDisplay("repo:owner/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit", name: "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit")
+            mlxServe["quantization"] = "MLX-Serve mixed 4/8-bit"
+            var mlx = modelDisplay("repo:owner/Qwen3.8-Flash-Next-MLX-mixed-4_8bit", name: "Qwen3.8-Flash-Next-MLX-mixed-4_8bit")
+            mlx["quantization"] = "MLX mixed 4/8-bit"
+            var compact = modelDisplay("repo:owner/Qwen3-4B-4bit", name: "Qwen3-4B-4bit")
+            compact["quantization"] = "4-bit"
+            let saved = "qwen38-flash-next-lily-q4-xl-0f94842e"
+            let dense = modelDisplay("repo:owner/Qwen3-0.6B", name: "Qwen3-0.6B")
+            let fixtures = [variant("lily", name: saved, display: lily),
+                            variant("mlx-serve", name: "qwen38-flash-next-mixed-4-8bit-788c07a8", display: mlxServe),
+                            variant("mlx", name: "qwen38-flash-next-mixed-4-8bit-b2c422f3", display: mlx),
+                            variant("mixed", name: "qwen38-flash-next-mixed-4-8bit-788c07a8", display: nil),
+                            variant("small", name: "qwen3-4b-4bit", display: compact),
+                            variant("dense", name: "qwen3-dense", display: dense),
+                            variant("custom", name: "JevK5", display: nil)]
+            let inventory = ModelsInventory(models: fixtures, loadedID: "lily", registry: nil)
+            let rows = Dictionary(uniqueKeysWithValues: inventory.models.map { ($0.id, $0) })
+            guard rows["lily"]?.displayName == "Qwen3.8 Flash Next", rows["lily"]?.name == saved,
+                  rows["lily"]?.quantization == lily["quantization"] as? String,
+                  rows["lily"]?.variantLabel == "Lily q4",
+                  rows["mlx-serve"]?.displayName == "Qwen3.8 Flash Next", rows["mlx-serve"]?.variantLabel == "MLX-Serve",
+                  rows["mlx"]?.displayName == "Qwen3.8 Flash Next", rows["mlx"]?.variantLabel == "MLX",
+                  rows["mixed"]?.displayName == "Qwen3.8 Flash Next (Mixed 4/8-bit)",
+                  rows["small"]?.displayName == "Qwen3 4B", rows["custom"]?.displayName == "JevK5",
+                  rows["dense"]?.displayName == "Qwen3 Dense",
+                  ["mixed", "small", "custom", "dense"].allSatisfy({ rows[$0]?.variantLabel == nil }),
+                  inventory.runningGroup?.models.first?.variantLabel == "Lily q4" else { return false }
+            for query in [saved, "0f94842e", "Qwen3.8 Flash Next", "Lily q4"] {
+                guard ModelsInventory(models: fixtures, loadedID: "", registry: nil, query: query).models.contains(where: { $0.id == "lily" }) else { return false }
+            }
+            let serveResults = ModelsInventory(models: fixtures, loadedID: "", registry: nil, query: "MLX-Serve")
+            guard serveResults.models.map(\.id) == ["mlx-serve"] else { return false }
+            return ModelsInventory.readableName("My preferred model", display: InstalledModelDisplay(lily)) == "My preferred model"
+                && ModelsInventory.readableName("my-favorite-model", display: InstalledModelDisplay(lily)) == "My Favorite Model"
+                && ModelsInventory.readableName("experiment-deadbeef", display: nil) == "Experiment Deadbeef"
+                && ModelsInventory.readableName("---", display: nil) == "---"
         case "models-visible-row-name-sort":
             let aliases = [
                 variant("zeta", name: "Zeta", display: modelDisplay("owner/first", name: "Alpha")),
@@ -1481,6 +1642,50 @@ extension EngineController {
             guard engine.catalog == nil, engine.catalogLoading else { return false }
             engine.apply(catalogReply(newFamily))
             return engine.catalog?.familyID == "qwen3_5" && engine.catalog?.items.map(\.id) == ["entry"]
+        case "catalog-partial-rows-stream-into-pending-page":
+            func partial(_ request: [String: Any], _ ids: [String]) -> [String: Any] {
+                var event = catalogReply(request, items: ids.map { catalogItem($0) })
+                event["partial"] = true
+                return event
+            }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let first = command()
+            engine.apply(partial(first, ["early"]))
+            guard engine.catalog?.items.map(\.id) == ["early"], engine.catalog?.status == .ready,
+                  engine.catalog?.nextOffset == nil, engine.catalogLoading, noCommandSent() else { return false }
+            engine.apply(partial(first, ["second"]))
+            guard engine.catalog?.items.map(\.id) == ["early", "second"], engine.catalogLoading else { return false }
+            // The page's report replaces its partial rows and does not count them as already shown.
+            engine.apply(catalogReply(first, items: [catalogItem("second"), catalogItem("early")], nextOffset: 30))
+            guard engine.catalog?.items.map(\.id) == ["second", "early"], engine.catalog?.nextOffset == 30,
+                  !engine.catalogLoading, noCommandSent() else { return false }
+            engine.apply(partial(first, ["after-report"]))
+            guard engine.catalog?.items.count == 2 else { return false }
+            engine.requestMoreModelCatalog(loadRemaining: false)
+            let second = command()
+            engine.apply(partial(first, ["stale-offset"]))
+            guard engine.catalog?.items.count == 2 else { return false }
+            engine.apply(partial(second, ["later"]))
+            guard engine.catalog?.items.map(\.id) == ["second", "early", "later"], engine.catalog?.nextOffset == 30,
+                  engine.catalogLoading else { return false }
+            // A failed page keeps the rows already checked and its retry position.
+            engine.apply(catalogReply(second, status: "error"))
+            guard engine.catalog?.items.map(\.id) == ["second", "early", "later"], engine.catalog?.nextOffset == 30,
+                  engine.catalogError != nil, !engine.catalogLoading else { return false }
+            engine.requestMoreModelCatalog(loadRemaining: false)
+            let retry = command()
+            guard (retry["offset"] as? NSNumber)?.int64Value == 30 else { return false }
+            engine.apply(partial(retry, ["later"]))
+            // The retried page only repeats a row shown before it was requested, so the next page follows.
+            engine.apply(catalogReply(retry, items: [catalogItem("later")], nextOffset: 60))
+            let third = command()
+            guard engine.catalog?.items.map(\.id) == ["second", "early", "later"], engine.catalog?.nextOffset == 60,
+                  (third["offset"] as? NSNumber)?.int64Value == 60, engine.catalogLoading else { return false }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let refresh = commands().last!
+            engine.apply(partial(refresh, ["fresh"]))
+            engine.apply(catalogReply(refresh, status: "error"))
+            return engine.catalog?.status == .error && engine.catalog?.items.isEmpty == true && !engine.catalogLoading
         case "catalog-pagination-auto-drains-positive-empty-and-duplicate-pages":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()
@@ -1536,6 +1741,19 @@ extension EngineController {
             var raw = future["report"] as! [String: Any]; raw["schema_version"] = 2; future["report"] = raw
             engine.apply(future)
             return engine.catalog == nil && engine.catalogLoading && !engine.supportsImages && engine.modelReady
+        case "catalog-unavailable-row":
+            var item = catalogItem("unsupported")
+            item["downloadable"] = false
+            guard FamilyModelCatalog(catalogReport("qwen3", items: [item])) == nil else { return false }
+            let reason = "Expert weights use 3-bit packing with groups of 128."
+            item["unavailable_reason"] = reason
+            engine.requestModelCatalog(familyID: "qwen3")
+            let request = command()
+            engine.apply(catalogReply(request, items: [item]))
+            guard let row = engine.catalog?.items.first, row.unavailableReason == reason,
+                  !row.downloadable else { return false }
+            engine.installCatalogItem(id: row.id)
+            return noCommandSent()
         case "catalog-provider-order":
             var small4 = catalogItem("small4"); small4["parameter_count"] = NSNull(); small4["quantization"] = "4-bit"
             var small8 = catalogItem("small8"); small8["parameter_count"] = NSNull(); small8["quantization"] = "8-bit"
@@ -1669,6 +1887,139 @@ extension EngineController {
                   small.map({ $0.items[0].id }) == ["small", "large", "unknown"],
                   large.map({ $0.items[0].id }) == ["large", "small", "unknown"] else { return false }
             return ModelBrowserSort.nameDescending.precedes("Same", id: "a", size: nil, "Same", id: "b", size: nil)
+        case "catalog-browser-top-rated-sort":
+            let gigabyte: Int64 = 1_000_000_000
+            func rated(_ id: String, group: String, bytes: Int64?, general: Double? = nil, coding: Double? = nil,
+                       downloadable: Bool = true, relationship: String = "benchmarked_model") -> [String: Any] {
+                var item = groupedCatalogItem(id, repo: "owner/" + id, name: id, group: group, groupName: "Group " + group,
+                                              publisher: "owner")
+                item["weight_bytes"] = bytes as Any? ?? NSNull()
+                if general != nil || coding != nil {
+                    item["reference_score"] = [
+                        "model_id": "parent/" + id, "relationship": relationship,
+                        "general": general as Any? ?? NSNull(), "coding": coding as Any? ?? NSNull(),
+                        "source_url": "https://whatmodel.sh/model/" + id, "captured": "2026-11-11"]
+                }
+                if !downloadable { item["downloadable"] = false; item["unavailable_reason"] = "Fixture reason" }
+                return item
+            }
+            let raw = [
+                rated("unscored", group: "1", bytes: 1 * gigabyte),
+                rated("mid", group: "2", bytes: 4 * gigabyte, general: 50, coding: 60),
+                rated("best-full", group: "3", bytes: 30 * gigabyte, general: 70, coding: 40),
+                rated("best-small", group: "3", bytes: 8 * gigabyte, general: 70, coding: 40, relationship: "named_quantization"),
+                rated("huge", group: "4", bytes: 200 * gigabyte, general: 90),
+                rated("blocked", group: "5", bytes: 2 * gigabyte, general: 95, downloadable: false),
+                rated("coder", group: "6", bytes: 3 * gigabyte, coding: 80)
+            ]
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
+            let memory = UInt64(64) * 1024 * 1024 * 1024
+            func rows(_ sort: ModelBrowserSort, _ memory: UInt64?) -> [String] {
+                CatalogBrowserInventory(items: catalog.items, sort: sort, physicalMemory: memory).groups.flatMap { $0.items.map(\.id) }
+            }
+            // Fits and downloadable first by score, the smaller download breaking a tie; unscored rows follow,
+            // then models too large for this Mac, then rows that cannot be downloaded.
+            // A coding-only score does not rank on the general scale.
+            guard rows(.ratingGeneral, memory) == ["best-small", "best-full", "mid", "unscored", "coder", "huge", "blocked"],
+                  rows(.ratingCoding, memory) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
+                  rows(.ratingGeneral, nil) == ["huge", "best-small", "best-full", "mid", "unscored", "coder", "blocked"],
+                  rows(.ratingGeneral, UInt64(8) * 1024 * 1024 * 1024) ==
+                      ["mid", "unscored", "coder", "huge", "best-small", "best-full", "blocked"],
+                  rows(.sizeAscending, memory).count == 7 else { return false }
+            guard let export = catalog.items.first(where: { $0.id == "best-small" })?.referenceScore,
+                  let coder = catalog.items.first(where: { $0.id == "coder" })?.referenceScore,
+                  export.relationship == .namedQuantization, export.modelID == "parent/best-small",
+                  export.score(for: .ratingGeneral)?.value == 70, export.score(for: .ratingCoding)?.value == 40,
+                  coder.score(for: .ratingGeneral) == nil, coder.score(for: .sizeAscending)?.value == 80,
+                  coder.score(for: .sizeAscending)?.task == "coding",
+                  catalog.items.first(where: { $0.id == "unscored" })?.referenceScore == nil,
+                  catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: memory) == false,
+                  catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: nil) == true else { return false }
+            // Hiding unsupported rows removes exactly those that cannot be downloaded, whatever their score.
+            let supported = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: true)
+            guard supported.map(\.id) == ["unscored", "mid", "best-full", "best-small", "huge", "coder"],
+                  CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: false).count == 7,
+                  CatalogBrowserInventory(items: supported, sort: .ratingCoding, physicalMemory: memory).groups
+                      .flatMap({ $0.items.map(\.id) }) == ["coder", "mid", "best-small", "best-full", "unscored", "huge"],
+                  CatalogQuantizationFilter.tabs(for: supported).count == 2 else { return false }
+            // A malformed score rejects its row instead of ranking by a guess.
+            var malformed = raw[1]
+            for change in [["general": "50"], ["general": NSNull(), "coding": NSNull()], ["relationship": "guessed"],
+                           ["source_url": "https://example.com/model/mid"], ["extra": 1], ["general": true]] as [[String: Any]] {
+                var reference = raw[1]["reference_score"] as! [String: Any]
+                change.forEach { reference[$0.key] = $0.value }
+                malformed["reference_score"] = reference
+                guard FamilyModelCatalog.Item(malformed) == nil else { return false }
+            }
+            return true
+        case "catalog-foreign-exports-fold-under-original":
+            func export(_ id: String, repo: String, group: String, quantization: String, original: String?) -> [String: Any] {
+                var item = groupedCatalogItem(id, repo: repo, name: repo.components(separatedBy: "/")[1], group: group,
+                                              groupName: "Group " + group, publisher: repo.components(separatedBy: "/")[0],
+                                              quantization: quantization)
+                item["downloadable"] = false; item["unavailable_reason"] = "Fixture reason"
+                if let original { item["original_repo"] = original }
+                return item
+            }
+            let raw = [
+                groupedCatalogItem("original", repo: "Owner/Model-7B", name: "Model-7B", group: "1", groupName: "Model 7B",
+                                   publisher: "Owner"),
+                // The declared original matches whatever its letter case.
+                export("gptq", repo: "other/Model-7B-GPTQ", group: "2", quantization: "GPTQ", original: "Owner/Model-7B"),
+                export("awq", repo: "owner/Model-7B-AWQ", group: "3", quantization: "AWQ", original: "owner/model-7b"),
+                export("orphan", repo: "other/Lost-AWQ", group: "4", quantization: "AWQ", original: "missing/Lost"),
+                export("blocked", repo: "owner/Blocked", group: "5", quantization: "BF16", original: nil),
+                export("blocked-export", repo: "other/Blocked-AWQ", group: "6", quantization: "AWQ", original: "owner/Blocked"),
+                export("dead", repo: "owner/Dead", group: "7", quantization: "BF16", original: nil)
+            ]
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
+            // Only an export whose original can be downloaded here is folded.
+            let exports = CatalogBrowserInventory.foldedExports(catalog.items)
+            guard Array(exports.keys) == ["owner/model-7b"],
+                  exports["owner/model-7b"]?.map(\.id).sorted() == ["awq", "gptq"] else { return false }
+            let supported = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: true)
+            let everything = CatalogBrowserInventory.listed(catalog.items, hidingUnsupported: false)
+            guard supported.map(\.id) == ["original"],
+                  everything.map(\.id) == ["original", "orphan", "blocked", "blocked-export", "dead"],
+                  catalog.items.count - supported.count - exports.values.reduce(0, { $0 + $1.count }) == 4,
+                  !CatalogQuantizationFilter.tabs(for: supported).contains(.quantization("GPTQ")) else { return false }
+            func groups(_ items: [FamilyModelCatalog.Item], _ query: String = "") -> [CatalogBrowserInventory.Group] {
+                CatalogBrowserInventory(items: items, query: query, exports: exports).groups
+            }
+            // The original carries its exports, ordered by format.
+            guard groups(supported).count == 1, groups(supported)[0].exports.map(\.id) == ["awq", "gptq"],
+                  !groups(supported)[0].foundByExport,
+                  groups(everything).first(where: { $0.items[0].id == "orphan" })?.exports.isEmpty == true else { return false }
+            // Searching for an export lands on its original and says why; the original's own match does not.
+            guard groups(supported, "gptq").map({ $0.items.map(\.id) }) == [["original"]],
+                  groups(supported, "gptq")[0].foundByExport,
+                  groups(supported, "model-7b-awq")[0].foundByExport,
+                  groups(supported, "model-7b")[0].foundByExport == false,
+                  groups(supported, "lost").isEmpty,
+                  groups(supported, "   ")[0].foundByExport == false,
+                  CatalogBrowserInventory(items: supported, query: "gptq").groups.isEmpty else { return false }
+            let summary = CatalogBrowserInventory.exportSummary(groups(supported)[0].exports)
+            guard String(summary.characters) == "Also published as AWQ by owner and GPTQ by other. "
+                      + "Stark cannot import those formats, so this original is listed instead.",
+                  summary.runs.compactMap(\.link).map(\.absoluteString) == [
+                      "https://huggingface.co/owner/Model-7B-AWQ", "https://huggingface.co/other/Model-7B-GPTQ"],
+                  String(CatalogBrowserInventory.exportSummary([exports["owner/model-7b"]![0]]).characters)
+                      .hasSuffix("Stark cannot import that format, so this original is listed instead.") else { return false }
+            let many = (0..<8).compactMap { index in
+                FamilyModelCatalog.Item(export("many\(index)", repo: "pub\(index)/Model-7B-AWQ", group: "8", quantization: "AWQ",
+                                               original: "Owner/Model-7B"))
+            }
+            guard many.count == 8,
+                  String(CatalogBrowserInventory.exportSummary(many).characters).contains("AWQ by pub5 and 2 more."),
+                  CatalogBrowserInventory.exportSummary(many).runs.compactMap(\.link).count == 6 else { return false }
+            // A pointer is rejected on a downloadable row, at itself, or when it is not a repository.
+            var pointed = raw[0]; pointed["original_repo"] = "other/Model-7B"
+            guard FamilyModelCatalog.Item(pointed) == nil else { return false }
+            for value in ["other/model-7b-gptq", "not a repo", "owner", "a/b/c", "https://example.com/a/b", 7] as [Any] {
+                var malformed = raw[1]; malformed["original_repo"] = value
+                guard FamilyModelCatalog.Item(malformed) == nil else { return false }
+            }
+            return catalog.items.first(where: { $0.id == "orphan" })?.originalRepo == "missing/Lost"
         case "catalog-browser-row-size-and-numeric-fallback":
             let raw = [
                 groupedCatalogItem("unknown", repo: "owner/Unknown", name: "Unknown", group: "1", groupName: "Model", publisher: "owner", size: nil),
@@ -1739,7 +2090,21 @@ extension EngineController {
             defer { preferences.removePersistentDomain(forName: suite) }
             guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
                   ModelBrowserPreferences.load(.families, defaults: preferences) == .nameAscending,
-                  ModelBrowserPreferences.load(.catalog, defaults: preferences) == .sizeAscending else { return false }
+                  ModelBrowserPreferences.load(.catalog, defaults: preferences) == .ratingCoding else { return false }
+            // Unsupported rows stay hidden until the user chooses to see them; a damaged value restores that.
+            guard ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            ModelBrowserPreferences.saveHidesUnsupported(false, defaults: preferences)
+            guard !ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            preferences.set("no", forKey: ModelBrowserPreferences.hideUnsupportedKey)
+            guard ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            preferences.set(0, forKey: ModelBrowserPreferences.hideUnsupportedKey)
+            guard ModelBrowserPreferences.hidesUnsupported(defaults: preferences) else { return false }
+            // Rating orders exist only where rows carry reference scores.
+            ModelBrowserPreferences.save(.ratingGeneral, for: .saved, defaults: preferences)
+            guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
+                  !ModelBrowserScope.saved.sorts.contains(where: \.isRating),
+                  !ModelBrowserScope.families.sorts.contains(where: \.isRating),
+                  ModelBrowserScope.catalog.sorts.prefix(2) == [.ratingGeneral, .ratingCoding] else { return false }
             ModelBrowserPreferences.save(.sizeDescending, for: .saved, defaults: preferences)
             ModelBrowserPreferences.save(.nameDescending, for: .families, defaults: preferences)
             ModelBrowserPreferences.save(.nameAscending, for: .catalog, defaults: preferences)
@@ -1754,7 +2119,7 @@ extension EngineController {
             reopened.set(42, forKey: ModelBrowserScope.catalog.preferenceKey)
             return ModelBrowserPreferences.load(.saved, defaults: reopened) == .nameAscending &&
                 ModelBrowserPreferences.load(.families, defaults: reopened) == .nameAscending &&
-                ModelBrowserPreferences.load(.catalog, defaults: reopened) == .sizeAscending
+                ModelBrowserPreferences.load(.catalog, defaults: reopened) == .ratingCoding
         case "catalog-installed-mode":
             var item = catalogItem(); item["installed_ids"] = ["fixture-model", "not-in-library"]
             guard let parsed = FamilyModelCatalog.Item(item) else { return false }
@@ -1771,6 +2136,31 @@ extension EngineController {
             let install = command()
             guard install["command"] as? String == "install_catalog", install["catalog_request_id"] as? String == browse["request_id"] as? String,
                   install["artifact_mode"] as? String == "text", engine.busy, engine.downloadProgress.state == "waiting" else { return false }
+            engine.apply(["event": "status", "state": "installing", "message": "Downloading model files…"])
+            engine.apply(["event": "progress", "request_id": install["support_request_id"]!,
+                          "phase": "download", "state": "running", "completed_bytes": Int64(2_000_000)])
+            guard engine.message == "Downloading model files…", engine.downloadProgress.completedBytes == 2_000_000,
+                  engine.downloadProgress.detail(for: "download") == "2 MB",
+                  InstallProgress(state: "running").detail(for: "download") == "Downloading…",
+                  InstallProgress(state: "running").detail(for: "conversion") == "Preparing…" else { return false }
+            let received: [String: Any] = ["event": "progress", "request_id": install["support_request_id"]!,
+                "phase": "download", "state": "running", "completed_bytes": Int64(78_000),
+                "transferred_bytes": Int64(2_000_000_000)]
+            engine.apply(received)
+            guard engine.downloadProgress.completedBytes == 78_000,
+                  engine.downloadProgress.detail(for: "download") == "2 GB received",
+                  !engine.downloadProgress.showsProgressBar,
+                  InstallProgress(state: "running", completedBytes: 25, totalBytes: 100).showsProgressBar,
+                  InstallProgress(state: "running", completedBytes: 25, totalBytes: 100).fraction == 0.25 else { return false }
+            engine.apply(received.merging(["transferred_bytes": Int64(3_000_000_000)]) { _, new in new })
+            guard engine.downloadProgress.detail(for: "download") == "3 GB received" else { return false }
+            let known = InstallProgress(state: "running", completedBytes: 25, totalBytes: 100, transferredBytes: 200)
+            guard known.showsProgressBar, known.fraction == 0.25, known.detail(for: "download") == "25%",
+                  known.transferredBytes == 200 else { return false }
+            for bad: Any in [true, -1, 1.5, "100"] {
+                engine.apply(received.merging(["transferred_bytes": bad]) { _, new in new })
+                guard engine.downloadProgress.transferredBytes == 3_000_000_000 else { return false }
+            }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             guard engine.busy, engine.catalogInstallation != nil else { return false }
             engine.apply(["event": "models", "models": [
@@ -1870,15 +2260,29 @@ extension EngineController {
             let browse = command(); engine.apply(catalogReply(browse))
             engine.installCatalogItem(id: "entry")
             let install = command()
-            engine.stop(); _ = command()
+            engine.stop()
+            let stoppedCommands = commands()
+            guard stoppedCommands.map({ $0["command"] as! String }) == ["stop", "catalog"],
+                  let refresh = stoppedCommands.last,
+                  refresh["request_id"] as? String != browse["request_id"] as? String,
+                  engine.catalogFamilyID == "qwen3", engine.catalogLoading,
+                  engine.catalogInstallation == nil, engine.activeInstallRequestID == nil else { return false }
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
             engine.selectedID = "replacement"
             engine.apply(["event": "ready", "mode": "decision", "model_id": "replacement"])
             engine.apply(["event": "installed", "support_request_id": install["support_request_id"]!, "model": ["id": "stale-model"]])
             engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Stale failure"])
             engine.apply(catalogReply(browse))
-            return engine.selectedID == "replacement" && engine.loadedID == "replacement" && engine.modelReady &&
-                engine.catalog == nil && engine.errorMessage == nil
+            guard engine.catalog == nil, engine.catalogLoading, engine.errorMessage == nil,
+                  engine.catalogInstallMessage == nil, !engine.catalogInstallFailed else { return false }
+            engine.apply(catalogReply(refresh))
+            guard engine.selectedID == "replacement", engine.loadedID == "replacement", engine.modelReady,
+                  engine.catalog?.status == .ready, engine.catalog?.items.map(\.id) == ["entry"],
+                  !engine.catalogLoading, engine.catalogError == nil else { return false }
+            engine.installCatalogItem(id: "entry")
+            let retry = command()
+            return retry["command"] as? String == "install_catalog" &&
+                retry["catalog_request_id"] as? String == refresh["request_id"] as? String
         case "model-removal-confirmation":
             let imported = InstalledModel(id: "imported", name: "Exact imported name", path: "/private/imported", apiID: "id",
                                           removal: InstalledModelRemoval(removal("unregister")))
@@ -2117,13 +2521,31 @@ extension EngineController {
             engine.apply(imageReady)
             engine.selectedID = "different-fixture"
             return engine.supportsImages && !engine.canAttachImage
+        case "image-limits-follow-model":
+            var retained = imageReady
+            retained["image_limits"] = ["max_source_pixels": 32_000_000,
+                "max_processed_pixels": 16_777_216, "max_image_tokens": 16_384]
+            engine.apply(retained)
+            guard engine.imageLimits?.processedPixels == 16_777_216,
+                  engine.imageLimits?.imageTokens == 16_384 else { return false }
+            var gemma = imageReady
+            gemma["image_limits"] = ["max_source_pixels": 32_000_000,
+                "max_processed_pixels": 645_120, "max_image_tokens": 280]
+            engine.apply(gemma)
+            guard engine.imageLimits?.processedPixels == 645_120,
+                  engine.imageLimits?.imageTokens == 280 else { return false }
+            engine.apply(imageReady)
+            guard engine.imageLimits == nil else { return false }
+            engine.apply(retained)
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            return !engine.supportsImages && engine.imageLimits == nil &&
+                ModelImageLimits(["max_source_pixels": true,
+                    "max_processed_pixels": 16_777_216, "max_image_tokens": 16_384]) == nil
         case "image-local-evidence":
             var verified = imageReady
             verified["image_verification"] = "locally_tested"
             engine.apply(verified)
-            guard engine.supportsImages, engine.imageVerification == "locally_tested",
-                  engine.imageVerificationNote.contains("Reference parity is unverified"),
-                  !engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            guard engine.supportsImages, engine.imageVerification == "locally_tested" else { return false }
             engine.pendingOptions = engine.options
             engine.pendingOptionsModelID = engine.loadedID
             engine.state = "configuring"
@@ -2134,18 +2556,15 @@ extension EngineController {
             var verified = imageReady
             verified["image_verification"] = "reference_verified"
             engine.apply(verified)
-            guard engine.supportsImages, engine.imageVerification == "reference_verified",
-                  engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            guard engine.supportsImages, engine.imageVerification == "reference_verified" else { return false }
             verified["images"] = false
             engine.apply(verified)
-            return !engine.supportsImages && engine.imageVerification == "unverified" &&
-                !engine.imageVerificationNote.contains("has reference-parity verification")
+            return !engine.supportsImages && engine.imageVerification == "unverified"
         case "image-unknown-evidence":
             var unsupported = imageReady
             unsupported["image_verification"] = "self-declared-reference-pass"
             engine.apply(unsupported)
-            guard engine.imageVerification == "unverified",
-                  !engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            guard engine.imageVerification == "unverified" else { return false }
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
             return !engine.supportsImages && engine.imageVerification == "unverified"
         case "image-install-check-clears":
@@ -2163,7 +2582,7 @@ extension EngineController {
                 engine.gpuMemoryBytes == nil && engine.gpuMemoryText == "GPU memory —" &&
                 !engine.supportsImages && engine.imageVerification == "unverified" &&
                 engine.messages.isEmpty && engine.draftImage == nil && engine.conversationImage == nil &&
-                staged().isEmpty && engine.message == "Checking image support on this Mac…"
+                staged().isEmpty && engine.message == "Loading model…"
         case "image-install-check-state-guard":
             try! engine.attachImage(bytes: imageBytes)
             engine.apply(["event": "image_check", "state": "checking"])
@@ -2415,6 +2834,8 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_worker_pipe_eof_removes_readability_handler(self):
         self.exercise("worker-pipe-eof-clears-handler")
+    def test_small_backend_replies_do_not_wait_for_pipe_close(self):
+        self.exercise("backend-short-replies")
 
     def test_connected_application_activity_does_not_show_playground_timing(self):
         self.exercise("generation-progress-external-activity")
@@ -2483,6 +2904,8 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_beginner_install_rejection_does_not_start_an_operation(self):
         self.exercise("beginner-rejected-install-does-not-start")
+    def test_beginner_general_task_reaches_guided_model_backend(self):
+        self.exercise("beginner-general-task-transport")
 
     def test_beginner_cancellation_preserves_the_current_worker_and_history(self):
         self.exercise("beginner-cancel-preserves-current")
@@ -2606,6 +3029,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_image_capability_requires_complete_negotiation(self):
         self.exercise("image-capability")
 
+    def test_image_limits_follow_loaded_model_and_clear_on_stop(self):
+        self.exercise("image-limits-follow-model")
+
     def test_vision_install_is_explicit_opt_in(self):
         self.exercise("vision-install-opt-in")
 
@@ -2651,7 +3077,15 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_model_display_metadata_cannot_change_runtime_capabilities(self):
         self.exercise("models-display-event")
 
-    def test_tool_labels_distinguish_protocol_support_and_never_grant_live_capabilities(self):
+    def test_ripple_inventory_preserves_family_quantization_and_weight_size(self):
+        self.exercise("models-ripple-display-event")
+
+    def test_installed_model_display_accepts_olmo3_and_gemma4_families(self):
+        self.exercise("models-display-native-families")
+
+    def test_tool_labels_distinguish_protocol_support_and_never_grant_live_capabilities(
+        self,
+    ):
         self.exercise("models-tool-support-labels")
 
     def test_malformed_display_keeps_exact_model_name_without_guessed_badges(self):
@@ -2724,7 +3158,9 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_restart_controls_stop_exact_model_and_restart_in_stopped_mode(self):
         self.exercise("restart-controls-stop-and-start")
 
-    def test_explicit_failed_start_retries_selected_model_without_clearing_on_busy_run(self):
+    def test_explicit_failed_start_retries_selected_model_without_clearing_on_busy_run(
+        self,
+    ):
         self.exercise("restart-controls-explicit-target-after-failed-start")
 
     def test_restart_controls_reject_running_busy_and_deleted_targets(self):
@@ -2735,6 +3171,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_grouped_text_and_image_variants_have_distinct_stored_mode_label(self):
         self.exercise("models-artifact-mode-label")
+
+    def test_readable_model_names_preserve_saved_identity_precision_and_search(self):
+        self.exercise("models-readable-names")
 
     def test_catalog_family_changes_and_close_fence_late_results(self):
         self.exercise("image-catalog-stale-family")
@@ -2748,11 +3187,21 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_catalog_pagination_failure_retry_preserves_loaded_rows(self):
         self.exercise("catalog-pagination-failure-retry-preserves-rows")
 
-    def test_catalog_pagination_single_click_drains_pages_and_ignores_duplicate_clicks(self):
-        self.exercise("catalog-pagination-auto-drains-positive-empty-and-duplicate-pages")
+    def test_catalog_partial_rows_stream_into_the_pending_page(self):
+        self.exercise("catalog-partial-rows-stream-into-pending-page")
+
+    def test_catalog_pagination_single_click_drains_pages_and_ignores_duplicate_clicks(
+        self,
+    ):
+        self.exercise(
+            "catalog-pagination-auto-drains-positive-empty-and-duplicate-pages"
+        )
 
     def test_catalog_schema_and_item_bounds_are_enforced(self):
         self.exercise("catalog-schema-bounds")
+
+    def test_catalog_unavailable_row_retains_reason_and_cannot_install(self):
+        self.exercise("catalog-unavailable-row")
 
     def test_catalog_preserves_provider_order_for_size_and_quantized_variants(self):
         self.exercise("catalog-provider-order")
@@ -2782,6 +3231,12 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_catalog_sort_uses_natural_names_and_keeps_unknown_sizes_last(self):
         self.exercise("catalog-browser-name-and-size-sort")
+
+    def test_catalog_top_rated_sort_prefers_fitting_scored_rows(self):
+        self.exercise("catalog-browser-top-rated-sort")
+
+    def test_foreign_exports_fold_under_their_downloadable_original(self):
+        self.exercise("catalog-foreign-exports-fold-under-original")
 
     def test_grouped_rows_sort_numeric_sizes_with_parameter_fallback_and_bounds(self):
         self.exercise("catalog-browser-row-size-and-numeric-fallback")
@@ -2861,6 +3316,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_source_or_install_reset_clears_only_previous_install_error(self):
         self.exercise("install-error-reset")
+
+    def test_resource_budget_follows_runtime_memory_and_rejects_overflow(self):
+        self.exercise("resource-budget-memory-derived")
 
     def test_install_reset_preserves_later_runtime_or_attachment_errors(self):
         self.exercise("install-error-runtime-retained")

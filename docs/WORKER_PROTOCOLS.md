@@ -34,28 +34,29 @@ Image-capable generation workers keep the same framing budget. They pass image d
 
 Normal app use requires no budget configuration. At process startup, the host
 reads available RAM and selects `floor(available_bytes / (128 × 1 MiB))` MiB,
-clamped to 16 through 64 MiB. If memory telemetry is unavailable, it uses the
-16 MiB floor. The host pins that snapshot for its child workers and template
+with a 16 MiB floor and no fixed content ceiling. If memory telemetry is unavailable,
+it uses the 16 MiB floor. The host pins that snapshot for its child workers and template
 helpers so a request uses one consistent policy. Native standalone workers
 apply the same automatic policy at startup.
 
 For development or controlled runtime testing, `STARK_REQUEST_BUDGET_MIB`
-overrides the budget with an integer from 1 through 64. Invalid values fail
+overrides the budget with a positive decimal integer in MiB. Derived byte allowances
+must fit the platform's allocation address space; invalid or overflowing values fail
 startup. The override is read at process startup; restart the owning app and
 workers to apply a change, and give standalone host tools and native helpers
 the same override. There is no budget setting in the app interface.
 
 For a selected logical budget `B` bytes, the policy is:
 
-| Resource | Budget | Automatic range |
+| Resource | Budget | Automatic minimum |
 | --- | --- | --- |
-| Logical input and output content, including rendered templates | `B` | 16–64 MiB |
-| Encoded worker and template request, including framing | `6B + 2 MiB` | 98–386 MiB |
-| Text HTTP body | `6B + 2 MiB` | 98–386 MiB |
-| Image HTTP body | Text body budget plus 6 MiB | 104–392 MiB |
-| Aggregate pending HTTP bodies | Two image body budgets | 208–784 MiB |
-| Template live Rust allocation requests and sampled RSS | `128 MiB + 8B` | 256–640 MiB |
-| Template cumulative Rust allocation requests | `32 MiB + 32B` | 544–2,080 MiB |
+| Logical input and output content, including rendered templates | `B` | 16 MiB |
+| Encoded worker and template request, including framing | `6B + 2 MiB` | 98 MiB |
+| Text HTTP body | `6B + 2 MiB` | 98 MiB |
+| Image HTTP body | Text body budget plus 6 MiB | 104 MiB |
+| Aggregate pending HTTP bodies | Two image body budgets | 208 MiB |
+| Template live Rust allocation requests and sampled RSS | `128 MiB + 8B` | 256 MiB |
+| Template cumulative Rust allocation requests | `32 MiB + 32B` | 544 MiB |
 
 Transport headroom accommodates JSON escaping and protocol fields. Token vectors
 are also resource bounded using their four-byte-per-ID storage. Native readiness
@@ -78,7 +79,18 @@ not impose a 65,536-token ceiling on native worker requests.
 Template source size, sandbox restrictions, execution fuel and deadlines remain
 separate controls; see [chat template evaluation](GENERATION.md#chat-template-evaluation).
 
+The HTTP API and private app command pipe also check current parsing headroom
+for frames above 1 MiB, using twelve times the raw size as a conservative
+Unicode/JSON allowance. HTTP reserves that allowance across concurrent readers.
+The serialized app pipe checks while receiving a frame and immediately before
+decoding; a rejected frame drains through its newline so smaller commands and
+Stop remain available. This estimate does not reserve RAM or impose a hard RSS
+ceiling.
+
 ## Automatic execution for undeclared contexts
+
+The memory planner also admits Auto output for finite-context text models. Their
+declared model capacity is the upper bound; it remains unchanged in discovery.
 
 Workers advertising `generation_budget: "memory-context-v1"` accept
 `plan_generation` after tokenization:
@@ -91,17 +103,68 @@ Workers advertising `generation_budget: "memory-context-v1"` accept
 budget; the protocol ceiling permits automatic selection. The reply contains
 a finite `context_tokens`, `max_new_tokens` equal to that allowance minus the
 input, `context_capacity_known` and `budget_kind: "memory"`. Generation then uses
-those explicit finite values. The HTTP model capacity remains undeclared.
+those explicit finite values. A model without a declared capacity continues to
+report an undeclared HTTP model capacity.
+
+Workers additionally advertising `generation_budget_inputs: "token-ids-v1"`
+accept optional `input_token_ids`, `cache_scope`, `mtp`/`mtp_drafts` and
+`sampling` on `plan_generation`. Token IDs must match `input_tokens` exactly;
+scope and MTP validation follows generation. The host sends the same prefix
+identity, selected draft depth and sampling policy that it will use for the
+actual request. This permits an inventory of compatible retained state and the
+selected MTP path. Older workers receive the original count-only request.
+Count-only clients remain supported, but cannot establish prefix identity and
+therefore receive no unproven retained-prefix credit.
+
+Planning can release incompatible retained state and reclaim fully retired
+allocator cache pages when more headroom is needed. Reclamation waits for the
+owning queue's retirements; live or aliased buffers are excluded. Available
+memory is sampled again after release before admitting a fresh allocation.
 
 The native planner performs checked, allocation-free estimates using the loaded
 attention cache dimensions and precision, ring bounds, recurrent state and
-conservative scratch-pool requirements. It admits a context against one quarter
-of currently available RAM after a 256 MiB reserve, also bounded by token-storage
-and caller limits. Planning leaves another quarter of that allowance unused for
-serialization and ordinary memory-pressure fluctuations before allocation is
-rechecked. This is conservative admission evidence; it is not a memory
+conservative scratch-pool requirements. Planning and generation admit the
+estimated state and workspace requirements against currently available RAM after a 256 MiB
+reserve for transient serialization and host bookkeeping, also bounded by
+token-storage and caller limits. Resident model and state allocations already
+reduce available RAM. Compatible generic retained states receive credit for
+actual owned buffers, capped to the corresponding persistent-state cost class.
+Shared views, virtual sparse capacity, fresh scratch and new snapshots do not
+become persistent-state credit. Dense MTP is inventoried only when selected.
+Lily and the other hybrid families inspect persistent owners and count new
+allocations or replacement peaks. Workspace bounds can remain conservative.
+Greedy hybrid requests with MTP disabled omit full-vocabulary stochastic
+sampling arrays; legacy count-only plans and stochastic/MTP requests keep their
+conservative sampler inventory.
+The worker rechecks admission immediately before execution.
+This is allocation evidence; it is not a memory
 reservation or a hard process RSS ceiling. Cancellation, output byte limits and
 deadlines remain active. Insufficient memory rejects the request cleanly.
+
+Each Auto request uses the allowance admitted by the current estimate. A smaller
+allowance from a previous request does not restrict a later request when memory
+headroom or the caller's context budget increases.
+
+Native text generation also checks allocation admission for explicit output
+requests. A finite context using sparse Metal buffers is charged for the actual
+input plus requested output span; unused reserved address capacity is not mapped
+cache memory. Dense buffers and undeclared contexts are charged for their full
+selected context. Finite retained states are checked before additional generation
+and may be rejected under memory pressure. Exact reuse of an
+undeclared-context state keeps its previously admitted whole-context allocation.
+
+The separate GLM, Qwen and Flint execution paths inventory their loaded cache
+geometry, growth rounding, transient replacement buffers and host workspaces.
+Retained Lily uses its selected K/V format and loaded draft head when counting
+state, snapshots and decode/prefill scratch. The EXL3 bridge already bills device
+phases at its installed full context before loading; its host planner additionally
+admits token/readout workspaces. These checks do not change inference precision
+or replay tokens. Image requests also admit their decoder cache using expanded
+prepared-token counts, and check the selected virtual cache reservation against
+device buffer and shader-index limits. The prepared context remains bound:
+image Auto can reject a window that does not fit instead of shrinking that
+context. Encoder bounds and qualification remain separate; this decoder check
+does not estimate the encoder's complete peak.
 
 Planning never replays a prompt or generated token. A successful query preserves
 the retained prefix; the worker keeps an existing planned capacity while it still
@@ -120,6 +183,7 @@ The first line a worker writes is its readiness reply. On success it starts with
 | `stark-generate` | `mode` | `text-generation-v1` |
 | `stark-generate` | `streaming` | `text-delta-v1` |
 | `stark-generate` | `cancellation` | `pipe-v1` |
+| `stark-generate` | `generation_budget` | `memory-context-v1` when the loaded text backend exposes an allocation profile |
 | `stark-generate` | `image_input.version` | `mediaref-v1` (when the loaded model supports the implemented vision layout) |
 | `stark-generate` | `image_input.transport` | `owner-private-file-v1` |
 | `stark-generate` | `timing_method` (in generate replies) | `first-token-wall-clock-v1` |

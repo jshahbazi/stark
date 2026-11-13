@@ -1,5 +1,40 @@
 # Native image support implementation
 
+The native worker, terminal client, macOS app and Local API share a bounded
+single-image workflow for compatible Qwen and Gemma artifacts. Each artifact
+binds its processing program, tokenizer, model source and native implementation
+profile. Loading verifies that contract before publishing image capability.
+
+| Implementation | Stored contract | Checkpoint boundaries |
+| --- | --- | --- |
+| Dense Qwen BF16 | Schema 2 exact reference or schema 3 family v1/v2 | Original reference qualification below; changed checkpoints require separate checks |
+| Dense affine Qwen 3.5/3.8 | Schema 3, `qwen35-dense-affine-merged-v3` | Supported packed decoder matrices with a complete BF16 tower |
+| Qwen 3.5 MoE | Schema 3, `qwen35-moe-affine-merged-v4` for affine-quantized source weights; `qwen35-moe-bf16-merged-v5` for BF16 source weights | Bounded selected experts, shared expert and complete BF16 tower; v4 retains packed decoder matrices with BF16 activations, while v5 uses BF16 decoder weights; qualification is separate |
+| Retained Qwen Flash Next | Schema 6, `stark-image-artifact.json` | Exact supported original-format source pins and immutable shard inventory |
+| Gemma 3 | Schema 5, `gemma3-siglip-bf16-v1` | Original 4B/12B/27B BF16 wrappers; fixed SigLIP processing |
+| Gemma 4 | Schema 4, exact per-size family profile | E2B/E4B, 12B encoder-free, 26B-A4B MoE and 31B dense BF16 layouts |
+
+Retained Lily image artifacts use their separate exact-source native contract;
+the typed `qwen4_exp` converter produces text-only artifacts and omits vision
+and MTP tensors.
+
+Conversion and native admission establish implemented operations. Automatic
+local checks establish functional evidence labeled `locally_tested`. Numerical
+qualification remains bound to the exact artifact, reference, executable and
+runtime. The affine Qwen decoder and larger Gemma paths retain open numerical
+qualification work; a family entry does not establish answer quality or speed.
+
+See [Qwen retained and affine paths](archive/runs/2026-11-07-qwen-image-families.md),
+[Gemma 3 processing and qualification](GEMMA3_IMAGES.md), and
+[Gemma 4 profiles](OLMO3_GEMMA4.md) for their source identities and current limits.
+Gemma 3 global layers permit same-image attention; local layers retain the
+sliding lower bound. Larger Gemma 4 profiles use causal masks for global layers
+and `windowed_same_image` masks for local layers, allowing same-image attention
+within the sliding-window lower bound. These choices are explicit per-attention
+policies and do not change ordinary text dispatch.
+
+## Original Qwen reference qualification
+
 The first target is one static image with the official BF16 `Qwen/Qwen3.5-0.8B`
 checkpoint at `2fc06364715b967f1860aea9cf38778875588b17`. The implementation
 follows the native Rust/Metal tower and decoder route. The converter has an
@@ -26,7 +61,7 @@ The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift
 records production-controller checks, delivered-GUI image execution, recovery,
 cleanup, source/notice audits, and the remaining public-release boundary.
 
-## Implemented conversion boundary
+## Qwen BF16 conversion boundary
 
 `stark-convert --artifact-mode vision-language` is opt-in and accepts the exact
 reference checkpoint or a merged BF16 dense Qwen3.5 model that passes the
@@ -189,13 +224,14 @@ A tower failure fences the loaded instance before language-state mutation;
 decoder execution failures fence the loaded instance and request state.
 
 The shared decoder accepts one static 8-bit PNG or baseline/progressive JPEG.
-PNG decoding uses exact-locked `image 0.25.10`; JPEG uses exact-locked
+PNG decoding uses exact-locked `png 0.18.1`; JPEG uses exact-locked
 `jpeg-decoder 0.3.2` with default features disabled. Both are native Rust, with no
-Python or system codec dependency. JPEG support on `image` is enabled only for
+Python or system codec dependency. The `image` crate is used only for
 test-fixture encoding. Header validation precedes codec construction and checks
 dimensions, frame/scan structure, arithmetic, and encoded length. Animated,
-multiple, 16-bit, CMYK, and unsupported JPEG encodings fail. Compressed PNG
-profile/text metadata is rejected before decompression.
+16-bit, CMYK, and unsupported JPEG encodings fail. PNG ICC and text chunks are
+skipped without decompression; chunk CRCs remain checked. MPO JPEGs decode only
+the primary image. Unlabelled concatenated JPEGs remain rejected.
 
 EXIF orientation is applied. Grayscale expands to RGB and transparency composites
 over white; ICC color conversion is not performed. Smart-resize dimensions follow
@@ -203,8 +239,14 @@ the pinned processor, with ties-to-even rounding. Antialiased bicubic uint8
 resizing, fused rescale/normalization, static-frame temporal repetition, and
 merge-group patch ordering feed owned BF16 patch rows to the tower. The official
 processor's 65,536–16,777,216 pixel recipe remains unchanged. Internal admission
-rejects a recipe result beyond 1,048,576 pixels or 4,096 encoder patches instead
-of changing that resize result. Other internal bounds are 20 MiB compressed,
+for the converted Qwen backend rejects a recipe result beyond 1,048,576 pixels
+or 4,096 encoder patches instead of changing that resize result. The retained
+Lily streaming backend admits up to the original 16,777,216-pixel processor
+ceiling (65,536 patches / 16,384 image tokens), with separate checked vision
+storage, device-buffer and decoder memory admission. See the [family-specific
+limits](GENERATION.md#prepared-image-operations) and [bounded validation
+evidence](model-experiments/2026-11-10-lily-image-size.md); full-ceiling model
+execution remains unqualified. Other internal bounds are 20 MiB compressed,
 32 million source pixels, dimension 16,384, aspect ratio 200, and 64 JPEG scans.
 These are implementation admission guards; they are not measured hardware or
 public service capabilities, and do not claim a strict global allocator ceiling.
@@ -309,7 +351,8 @@ opaque files in that pinned directory. Hard-killing both processes before claim
 can leave a staging file; there is no shared-temporary-directory scan.
 
 The model installer offers **Enable image input when converting** for supported
-merged BF16 Qwen3.5 checkpoints. Existing converted folders are detected
+Qwen3.5 checkpoints with a complete BF16 vision tower and an admitted decoder
+profile, including supported packed affine decoder matrices. Existing converted folders are detected
 automatically. Schema-3 installations stop the running model and pass local
 checks before entering the library. Run validates the admitted identity and
 reuses a matching private receipt or runs the checks again. The default
@@ -318,12 +361,14 @@ report the running worker's image capability and evidence level.
 
 ## Remaining dependencies and acceptance
 
-1. **Coverage:** config-derived dense geometry remains bounded by the implemented
-   attention/DeltaNet/tower operations, indexing and storage limits, merged BF16
-   weights and recognized metadata. A size name does not establish runtime
-   qualification. MoE, quantized vision models, alternate operations and new
-   architectures require implementation and validation. A local execution pass
-   does not inherit official quality or parity.
+1. **Coverage:** config-derived geometry remains bounded by implemented
+   attention/DeltaNet/tower operations, indexing and storage limits, recognized
+   metadata, and a complete BF16 vision tower. Supported Qwen profiles may use
+   packed affine decoder matrices. Qwen3.5 MoE has bounded affine-v4 and
+   BF16-source-v5 image profiles. Quantized vision towers, other MoE variants,
+   alternate operations and new architectures require implementation and
+   validation. A size name does not establish runtime qualification. A local
+   execution pass does not inherit official quality or parity.
 2. **Distribution:** each delivered worker signature is a different executable
    identity. A changed worker requires matching reference evidence or fresh
    local checks. Public distribution also
@@ -363,3 +408,27 @@ version `v2.11.0`, under its
 [BSD-style license](https://github.com/pytorch/pytorch/blob/v2.11.0/LICENSE).
 The dated native vision record pins the additional processor, vision-helper and
 Torchvision reference revisions, licenses, and validation harness identities.
+
+### Tower request memory and loading identity
+
+Converted Qwen, Gemma 3 and Gemma 4 image requests admit decoder state together
+with conservative tower workspace before allocating that state. The inventory
+includes patch uploads, BF16/F32 intermediates, eager score matrices where used,
+projection/readback copies and allocation margin. Scratch counts every rounded
+allocation in one block plus the initial/final stage owners. Identically shaped
+later blocks reuse pool size classes; Metal's access barriers preserve their
+dispatch order. Command constants use a separate lifetime and include all
+append-only uploads. Gemma 3 waits after each block and sums its initial,
+single-block and final submission inventories. Gemma 4's larger source tower
+counts its fixed tiled-attention buffers, without a quadratic score plane.
+This is conservative payload accounting, not an observed RSS bound. The
+[workspace inventory record](archive/runs/2026-11-10-vision-workspace-inventory.md)
+describes the accounting and synthetic production-path allocation controls.
+
+Each selected image-artifact component is hashed once per load. The loader
+retains the opened descriptor and compares inode, size and nanosecond mtime/ctime
+through admission and materialization. Same-size in-place changes with restored
+mtime are rejected by ctime; selected paths cannot swap the admitted descriptor.
+There is no persistent warm-start digest cache on these converted routes yet.
+The [20261110-IMAGE-01 record](model-experiments/2026-11-10-family-image-correctness.md)
+tracks tests and the remaining full-artifact qualification.

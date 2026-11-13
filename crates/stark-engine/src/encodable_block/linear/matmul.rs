@@ -15,7 +15,10 @@ use crate::{
     config::weight_matrix::{AnyWeightMatrixSpec, Layout},
     data_type::DataType,
     encodable_block::{
-        linear::{Gather, Linear, LinearInput, ReferenceBF16Matmul},
+        linear::{
+            Gather, Linear, LinearInput, ReferenceAffineBF16Matmul, ReferenceBF16Matmul, has_source_affine_policy,
+            is_affine_dot_witness_active,
+        },
         weight_matrix::{WeightMatrix, WeightMatrixError},
     },
     parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
@@ -44,6 +47,7 @@ pub struct LinearMatmul<B: Backend> {
     output_dim: u32,
     output_data_type: DataType,
     reference_matmul: Option<ReferenceBF16Matmul<B>>,
+    reference_affine: Option<ReferenceAffineBF16Matmul<B>>,
 }
 
 fn load_biases<B: Backend>(
@@ -63,6 +67,10 @@ fn load_biases<B: Backend>(
 }
 
 impl<B: Backend> LinearMatmul<B> {
+    #[cfg(test)]
+    pub(super) fn uses_reference_affine(&self) -> bool {
+        self.reference_affine.is_some()
+    }
     /// A row partition inherits its original fused matrix's eight-bit lane
     /// arithmetic and prefill K partitions, while retaining packed storage.
     pub(super) fn preserve_w8_row_arithmetic(
@@ -80,6 +88,14 @@ impl<B: Backend> LinearMatmul<B> {
             ));
         }
         self.kernel.lock().set_row_arithmetic_reference(reference_output_dim);
+        Ok(())
+    }
+
+    pub(super) fn set_source_output_widths(
+        &mut self,
+        widths: &[u32],
+    ) -> Result<(), LinearMatmulError<B>> {
+        self.matrix.set_source_output_widths(widths)?;
         Ok(())
     }
 
@@ -113,10 +129,17 @@ impl<B: Backend> LinearMatmul<B> {
 
         let biases = load_biases(weights_data_type, output_data_type, output_dim, bias_tree)?;
 
-        let reference_matmul = if weights_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16 {
+        let reference_linear = matches!(
+            weights_tree.numerical_profile(),
+            NumericalProfile::Qwen35ReferenceBF16 | NumericalProfile::QwenMtpSourceBF16
+        );
+        #[cfg(test)]
+        let reference_linear =
+            reference_linear || weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears;
+        let reference_matmul = if reference_linear {
             if weights_data_type != DataType::BF16
                 || input_data_type != DataType::BF16
-                || output_data_type != DataType::BF16
+                || !matches!(output_data_type, DataType::BF16 | DataType::F32)
                 || matrix.quantization().is_some()
                 || biases.is_some()
             {
@@ -124,13 +147,53 @@ impl<B: Backend> LinearMatmul<B> {
                     "reference BF16 linear requires full BF16 weights/activations without biases".into(),
                 ));
             }
-            Some(ReferenceBF16Matmul::new(context).map_err(LinearMatmulError::BackendError)?)
+            let reference = ReferenceBF16Matmul::new(context).map_err(LinearMatmulError::BackendError)?;
+            let source_wide = weights_tree.numerical_profile() == NumericalProfile::QwenMtpSourceBF16;
+            #[cfg(test)]
+            let source_wide = source_wide
+                || (weights_tree.numerical_profile() == NumericalProfile::QwenMtpReferenceLinears
+                    && std::env::var_os("STARK_TEST_HEAD_MLX_OPERATORS").is_some());
+            let reference = if source_wide {
+                reference.with_mlx_wide(context).map_err(LinearMatmulError::BackendError)?
+            } else {
+                reference
+            };
+            Some(reference)
         } else {
             None
         };
-        let kernel =
+        let use_reference_affine = weights_tree.numerical_profile() == NumericalProfile::Qwen35AffineBF16
+            && !has_source_affine_policy::<B>(&matrix.matmul_b());
+        let reference_affine = if use_reference_affine {
+            if weights_data_type != DataType::BF16
+                || input_data_type != DataType::BF16
+                || !matches!(output_data_type, DataType::BF16 | DataType::F32)
+                || biases.is_some()
+                || output_hadamard_factors.is_some()
+            {
+                return Err(LinearMatmulError::UnsupportedConfiguration(
+                    "affine reference requires BF16 inputs/weights and no output transforms".into(),
+                ));
+            }
+            if matrix.quantization().is_some_and(|info| {
+                info.method != crate::backends::common::gpu_types::QuantizationMethod::ScaleBias
+                    || info.group_size != 64
+                    || !matches!(info.mode.bits(), 4 | 5 | 6 | 8)
+            }) {
+                return Err(LinearMatmulError::UnsupportedConfiguration(
+                    "affine reference requires unsigned group64 affine storage or full BF16 controls".into(),
+                ));
+            }
+            Some(ReferenceAffineBF16Matmul::new(context, output_data_type).map_err(LinearMatmulError::BackendError)?)
+        } else {
+            None
+        };
+        let mut kernel =
             <B::Kernels as Kernels>::MatmulKernel::new(context, weights_data_type, input_data_type, output_data_type)
                 .map_err(LinearMatmulError::BackendError)?;
+        if use_reference_affine {
+            kernel.set_reference_accumulation();
+        }
 
         Ok(Self {
             kernel: Mutex::new(kernel),
@@ -141,17 +204,23 @@ impl<B: Backend> LinearMatmul<B> {
             output_dim,
             output_data_type,
             reference_matmul,
+            reference_affine,
         })
     }
 
     pub(super) fn prepare_a8(
         &mut self,
         context: &B::Context,
-    ) -> Option<ActivationQuantization> {
+    ) -> Result<Option<ActivationQuantization>, LinearMatmulError<B>> {
         let mut candidate = self.matmul_shape(1, false);
-        candidate.signed_codes = self.matrix.a8_signed_codes()?;
-        let quantization = self.kernel.lock().select_activation_quantization(&candidate, context)?;
-        self.matrix.try_prepare_a8_storage().then_some(quantization)
+        let Some(signed_codes) = self.matrix.a8_signed_codes() else {
+            return Ok(None);
+        };
+        candidate.signed_codes = signed_codes;
+        let Some(quantization) = self.kernel.lock().select_activation_quantization(&candidate, context) else {
+            return Ok(None);
+        };
+        Ok(self.matrix.try_prepare_a8_storage(context)?.then_some(quantization))
     }
 
     pub(crate) fn encode_with_a(
@@ -164,9 +233,6 @@ impl<B: Backend> LinearMatmul<B> {
         let (output_dim, gather_indices) =
             gather.map_or((self.output_dim, None), |gather| (gather.output_dim, Some(gather.indices)));
         if let Some(reference) = &self.reference_matmul {
-            if gather_indices.is_some() {
-                return Err(InvalidInput("reference BF16 linear does not support gathered columns").into());
-            }
             let MatmulA::FullPrecision {
                 values,
                 offset,
@@ -180,7 +246,55 @@ impl<B: Backend> LinearMatmul<B> {
             else {
                 return Err(InvalidInput("reference BF16 linear requires full precision weights").into());
             };
-            return reference.encode(values, offset, b, batch_dim, output_dim, self.input_dim, command_buffer);
+            return if let Some(indices) = gather_indices {
+                reference.encode_gathered(
+                    values,
+                    offset,
+                    b,
+                    indices,
+                    batch_dim,
+                    output_dim,
+                    self.output_dim,
+                    self.input_dim,
+                    self.output_data_type,
+                    command_buffer,
+                )
+            } else if self.output_data_type == DataType::BF16 {
+                reference.encode(values, offset, b, batch_dim, output_dim, self.input_dim, command_buffer)
+            } else {
+                reference.encode_output(
+                    values,
+                    offset,
+                    b,
+                    batch_dim,
+                    output_dim,
+                    self.input_dim,
+                    self.output_data_type,
+                    command_buffer,
+                )
+            };
+        }
+        if let Some(reference) = &self.reference_affine
+            && !is_affine_dot_witness_active::<B>()
+            && !has_source_affine_policy::<B>(&self.matmul_b())
+        {
+            let MatmulA::FullPrecision {
+                values,
+                offset,
+            } = a
+            else {
+                return Err(InvalidInput("affine reference requires BF16 activations").into());
+            };
+            return reference.encode(
+                values,
+                offset,
+                self.matmul_b(),
+                gather_indices,
+                batch_dim,
+                output_dim,
+                self.input_dim,
+                command_buffer,
+            );
         }
         let mut output = command_buffer.allocate_scratch_for_shape(&[batch_dim, output_dim], self.output_data_type)?;
         self.kernel.lock().encode(

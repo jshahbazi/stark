@@ -1,6 +1,9 @@
 //! Decoder integration fixtures are generated locally and removed when each test ends.
 //! The feature oracle is an independent embedding-table lookup of control tokens.
 
+#[path = "text_prefix_tests.rs"]
+mod text_prefix_tests;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -38,6 +41,128 @@ const SPECIAL_IDS: ImageTokenIds = ImageTokenIds {
     video: 4,
 };
 
+fn retained_generation_admission_uses_actual_owners<B: Backend>() {
+    let fixture = TinyModel::new(384);
+    let path = fixture.directory.join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["decoder_config"]["transformer_config"]["layer_configs"][0]["rope_config"] = json!({
+        "type": "UnscaledRoPEConfig", "base": 100.0, "head_dim": 4, "max_sequence_length": CAPACITY,
+    });
+    fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let engine = Engine::<B>::new().unwrap();
+    let model = engine.load_language_model(&fixture.directory).unwrap();
+    let foreign = engine.load_language_model(&fixture.directory).unwrap();
+    let mut state = model.create_empty_state(Some(CAPACITY), 0).unwrap();
+    // Allocation-only committed prefix: prepare actual cache backing and
+    // accept an identity range without printing or evaluating token contents.
+    state.transformer_state.prepare(0, 1024).unwrap();
+    let mut command = engine.context.create_command_buffer(None, None).unwrap();
+    state.transformer_state.encode_accept(&(0..1024).collect::<Vec<_>>(), &mut command).unwrap();
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    state.tokens = vec![5; 1024];
+    let input = 1025;
+    let maximum = 16;
+    let warm = model.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1024).unwrap();
+    let cold = model.generation_memory_bytes_for_request(input, CAPACITY, maximum, false).unwrap();
+    assert!(warm < cold);
+    let allocated = model.generation_allocation_context_length(input, CAPACITY, maximum).unwrap();
+    let estimate = model.generation_memory_estimate_for_prefill(input, CAPACITY, maximum, false, 1, false).unwrap();
+    let persistent = model.decoder.persistent_state_bytes(allocated, 1, input, false).unwrap();
+    let credit = state.resident_payload_bytes().unwrap().min(persistent);
+    let cold_history =
+        crate::encodable_block::memory::token_vector_growth_bytes::<u64>(0, 0, input as usize, maximum as usize, 1024)
+            .unwrap();
+    let warm_history = crate::encodable_block::memory::token_vector_growth_bytes::<u64>(
+        state.tokens.capacity(),
+        1024,
+        1,
+        maximum as usize,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(warm, estimate.state_bytes - cold_history + warm_history - credit + estimate.scratch_bytes);
+    // Large resident buffers cannot erase fresh host/scratch allocations.
+    assert!(warm >= estimate.scratch_bytes + 12);
+    assert!(foreign.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1024).is_none());
+    assert!(model.generation_memory_bytes_reusing_state(&state, input, CAPACITY / 2, maximum, 1024).is_none());
+    assert!(model.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1).is_none());
+    state.tokens.reserve(1024);
+    let no_growth = model.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1024).unwrap();
+    assert_eq!(warm - no_growth, warm_history);
+    // A previous request can retain backing beyond its reusable logical
+    // prefix. A 1025-row suffix prepares 3072 rows after that 1024-row prefix.
+    state.transformer_state.prepare(2048, 1024).unwrap();
+    let full_input = 2049;
+    let allocated = model.generation_allocation_context_length(full_input, CAPACITY, 1).unwrap();
+    let persistent = model.decoder.persistent_state_bytes(allocated, 1025, full_input, false).unwrap();
+    let suffix_only = model.decoder.persistent_state_bytes(allocated, 1025, 1025, false).unwrap();
+    if engine.context.sparse_page_size().is_some() {
+        assert!(persistent > suffix_only);
+    }
+    let base = model.generation_memory_estimate_for_prefill(full_input, CAPACITY, 1, false, 1025, false).unwrap();
+    let cold_history = crate::encodable_block::memory::token_vector_growth_bytes::<u64>(0, 0, 2049, 1, 1024).unwrap();
+    let retained_history =
+        crate::encodable_block::memory::token_vector_growth_bytes::<u64>(state.tokens.capacity(), 1024, 1025, 1, 1024)
+            .unwrap();
+    let credit = state.resident_payload_bytes().unwrap().min(persistent);
+    assert_eq!(
+        model.generation_memory_bytes_reusing_state(&state, full_input, CAPACITY, 1, 1024).unwrap(),
+        base.state_bytes - cold_history + retained_history - credit + base.scratch_bytes,
+    );
+    state.multimodal_failed = true;
+    assert!(model.generation_memory_bytes_reusing_state(&state, input, CAPACITY, maximum, 1024).is_none());
+
+    let short = model.decoder.scoring_memory_estimate(128, 16).unwrap();
+    let longer = model.decoder.scoring_memory_estimate(256, 16).unwrap();
+    let short_state = model.decoder.persistent_state_bytes(128, 16, 16, false).unwrap();
+    let long_state = model.decoder.persistent_state_bytes(256, 16, 16, false).unwrap();
+    assert_eq!(longer.state_bytes - short.state_bytes, long_state - short_state);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn retained_generation_admission_uses_actual_owners_cpu() {
+    retained_generation_admission_uses_actual_owners::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn retained_generation_admission_uses_actual_owners_metal() {
+    retained_generation_admission_uses_actual_owners::<crate::backends::metal::Metal>();
+}
+
+#[stark_test]
+fn separate_prefill_last_token_aligns_stream_and_scoring_cpu() {
+    use crate::backends::cpu::Cpu;
+    for split in [false, true] {
+        let fixture = TinyModel::new(128);
+        let path = fixture.directory.join("config.json");
+        if split {
+            let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            config["decoder_config"]["separate_prefill_last_token"] = json!(true);
+            fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        }
+        let engine = Engine::<Cpu>::new().unwrap();
+        let model = engine.load_language_model(&fixture.directory).unwrap();
+        assert_eq!(model.decoder.prefill_requires_separate_logits_row(), split);
+        let prompt = [5u32, 6, 7, 8];
+        let scores = model.score_next_token(&prompt, 64).unwrap();
+        let expected = greedy(&scores.logits);
+        let mut state = model.create_empty_state(Some(64), 0).unwrap();
+        let options = LanguageModelStreamOptions {
+            sampling_method: SamplingMethod::Greedy,
+            ..model.default_stream_options()
+        };
+        let tokens: Vec<u64> = prompt.into_iter().map(u64::from).collect();
+        let mut stream = model.stream(&tokens, &mut state, options).unwrap();
+        let actual = stream.next().unwrap().unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stream.metrics().num_tokens_prefilled, 4);
+        // Both decoder parts belong to one logical prefill batch.
+        assert_eq!(stream.metrics().num_prefill_forward_passes, 1);
+    }
+}
+
 struct TinyModel {
     directory: PathBuf,
     model_dim: u32,
@@ -53,6 +178,41 @@ impl Drop for TinyModel {
 impl TinyModel {
     fn new(model_dim: u32) -> Self {
         Self::with_rope_mix(model_dim, false)
+    }
+
+    fn gemma4_images(model_dim: u32) -> Self {
+        let fixture = Self::new(model_dim);
+        let path = fixture.directory.join("config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["decoder_config"]["gemma4_image_embeddings"] = json!(true);
+        for layer in config["decoder_config"]["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+            layer["rope_config"] = json!({
+                "type":"UnscaledRoPEConfig", "base":100.0, "head_dim":4, "max_sequence_length":CAPACITY
+            });
+        }
+        fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        fixture
+    }
+
+    fn scalar_bidirectional_images(
+        model_dim: u32,
+        reference: bool,
+    ) -> Self {
+        let fixture = Self::gemma4_images(model_dim);
+        let path = fixture.directory.join("config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["decoder_config"]["gemma4_image_embeddings"] = json!(false);
+        config["decoder_config"]["scalar_image_embeddings"] = json!(true);
+        config["decoder_config"]["bidirectional_image_attention"] = json!(true);
+        for layer in config["decoder_config"]["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+            layer["rope_config"] = json!({
+                "type":"LinearScalingRoPEConfig", "base":100.0, "head_dim":4,
+                "max_sequence_length":CAPACITY, "scaling_factor":8.0,
+            });
+            layer["mixer_config"]["reference_bf16"] = json!(reference);
+        }
+        fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        fixture
     }
 
     fn with_rope_mix(
@@ -562,6 +722,120 @@ fn stream_crosses_image_boundary<B: Backend>(model_dim: u32) {
     assert_eq!(state.transformer_state.rotary_position_delta(), Some(-2));
 }
 
+fn gemma4_scalar_image_fusion_and_stream<B: Backend>() {
+    let fixture = TinyModel::gemma4_images(128);
+    let engine = Engine::<B>::new().unwrap();
+    let model = engine.load_language_model(&fixture.directory).unwrap();
+    let old = fixture.prefill(&model, 0);
+    let input = MultimodalPrefill::try_new_gemma4(
+        old.tokens,
+        old.image,
+        SPECIAL_IDS,
+        15,
+        &model.model_identity,
+        128,
+        DataType::BF16,
+        VOCAB,
+        64,
+    )
+    .unwrap();
+    let controls = control_tokens(&input);
+    let empty = || model.decoder.create_empty_state(Some(64), &model.engine.context).unwrap();
+    let mut fused = empty();
+    let actual = encode(&model, &mut fused, &input.tokens, None, image_replacement(&input, 0..8));
+    let mut control = empty();
+    let expected = encode(&model, &mut control, &controls, None, None);
+    assert_identical(&actual, &expected);
+    assert_eq!(fused.context_length(), 8);
+    assert_eq!(fused.rotary_position_delta(), None);
+    let next = greedy(&expected);
+    let expected_continuation = encode(&model, &mut control, &[next], None, None);
+
+    let mut state = model.create_empty_state(Some(64), 0).unwrap();
+    {
+        let mut stream = model.stream_multimodal(&input, &mut state, greedy_options(&model)).unwrap();
+        assert_eq!(stream.next().unwrap().unwrap(), next);
+        assert_eq!(stream.next().unwrap().unwrap(), greedy(&expected_continuation));
+    }
+    assert!(state.multimodal_prefilled);
+    assert!(state.has_multimodal_context());
+    assert_eq!(state.transformer_state.rotary_position_delta(), None);
+
+    // Gemma has no rotary delta to act as a request marker. Its explicit image
+    // marker must still enforce the one-token output headroom and stop limit.
+    let mut bounded = model.create_empty_state(Some(9), 0).unwrap();
+    let generated = model
+        .stream_multimodal(&input, &mut bounded, greedy_options(&model))
+        .unwrap()
+        .take(4)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(generated.len(), 1);
+    assert_eq!(bounded.tokens().len(), 9);
+    assert_eq!(bounded.last_output_token, None);
+    assert!(bounded.has_multimodal_context());
+    assert_eq!(bounded.transformer_state.rotary_position_delta(), None);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn gemma4_image_fusion_uses_scalar_rope_and_explicit_context_marker_cpu() {
+    gemma4_scalar_image_fusion_and_stream::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn gemma4_image_fusion_uses_scalar_rope_and_explicit_context_marker_metal() {
+    gemma4_scalar_image_fusion_and_stream::<crate::backends::metal::Metal>();
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn gemma4_image_mode_rejects_spatial_decoder_and_forged_position_delta() {
+    use crate::backends::cpu::Cpu;
+    let fixture = TinyModel::new(128);
+    let engine = Engine::<Cpu>::new().unwrap();
+    let qwen = engine.load_language_model(&fixture.directory).unwrap();
+    let old = fixture.prefill(&qwen, 0);
+    let input = MultimodalPrefill::try_new_gemma4(
+        old.tokens,
+        old.image,
+        SPECIAL_IDS,
+        15,
+        &qwen.model_identity,
+        128,
+        DataType::BF16,
+        VOCAB,
+        64,
+    )
+    .unwrap();
+    let mut state = qwen.create_empty_state(Some(64), 0).unwrap();
+    assert!(qwen.stream_multimodal(&input, &mut state, greedy_options(&qwen)).is_err());
+    assert!(!state.multimodal_prefilled);
+    assert_eq!(state.tokens().len(), 0);
+
+    let fixture = TinyModel::gemma4_images(128);
+    let gemma = engine.load_language_model(&fixture.directory).unwrap();
+    let old = fixture.prefill(&gemma, 0);
+    let mut input = MultimodalPrefill::try_new_gemma4(
+        old.tokens,
+        old.image,
+        SPECIAL_IDS,
+        15,
+        &gemma.model_identity,
+        128,
+        DataType::BF16,
+        VOCAB,
+        64,
+    )
+    .unwrap();
+    input.position_delta = 1;
+    let mut state = gemma.create_empty_state(Some(64), 0).unwrap();
+    assert!(gemma.stream_multimodal(&input, &mut state, greedy_options(&gemma)).is_err());
+    assert!(!state.multimodal_prefilled);
+    assert_eq!(state.tokens().len(), 0);
+}
+
 #[cfg(backend = "cpu")]
 #[stark_test]
 fn native_image_stream_crosses_1024_token_feature_boundary_cpu() {
@@ -724,4 +998,84 @@ fn native_image_fusion_matches_lookup_and_chunked_decoder_metal() {
     // Metal attention instantiates head widths 64 and larger. Rotate the same
     // four-channel prefix while exercising its actual GPU feature copy path.
     fusion_and_cache_parity::<crate::backends::metal::Metal>(128);
+}
+
+fn scalar_bidirectional_linear_rope_stream<B: Backend>() {
+    for reference in [false, true] {
+        let fixture = TinyModel::scalar_bidirectional_images(128, reference);
+        let engine = Engine::<B>::new().unwrap();
+        let model = engine.load_language_model(&fixture.directory).unwrap();
+        assert!(model.decoder.scalar_multimodal_supported());
+        let old = fixture.prefill(&model, 0);
+        let input = MultimodalPrefill::try_new_gemma3(
+            old.tokens,
+            old.image,
+            SPECIAL_IDS.image,
+            SPECIAL_IDS.vision_start,
+            SPECIAL_IDS.vision_end,
+            &model.model_identity,
+            128,
+            DataType::BF16,
+            VOCAB,
+            64,
+        )
+        .unwrap();
+        let mut state = model.create_empty_state(Some(64), 0).unwrap();
+        let result = model.stream_multimodal(&input, &mut state, greedy_options(&model));
+        if reference {
+            assert!(result.is_err(), "causal-only eager score path must reject image masks");
+        } else {
+            let generated = result.unwrap().take(2).collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(generated.len(), 2);
+            assert!(state.has_multimodal_context());
+            assert_eq!(state.transformer_state.rotary_position_delta(), None);
+        }
+    }
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn scalar_bidirectional_linear_rope_image_stream_cpu() {
+    scalar_bidirectional_linear_rope_stream::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn scalar_bidirectional_linear_rope_image_stream_metal() {
+    scalar_bidirectional_linear_rope_stream::<crate::backends::metal::Metal>();
+}
+
+fn ordinary_sampling_failure_fences_lookahead_state<B: Backend>() {
+    let fixture = TinyModel::new(128);
+    let engine = Engine::<B>::new().unwrap();
+    let model = engine.load_language_model(&fixture.directory).unwrap();
+    for poll_failed_sample in [false, true] {
+        let mut state = model.create_empty_state(Some(64), 0).unwrap();
+        assert!(!state.is_fenced());
+        let mut stream = model.stream(&[5, 6], &mut state, greedy_options(&model)).unwrap();
+        assert!(stream.next().unwrap().is_ok());
+        // The finite first draw leaves a genuine native lookahead submission.
+        // Replace only its completed sampling slot to exercise both consumers.
+        stream.validation_replace_pending_sample(u32::MAX).unwrap();
+        if poll_failed_sample {
+            assert!(matches!(stream.next(), Some(Err(super::stream::LanguageModelStreamError::InvalidSamplingResult))));
+        }
+        drop(stream);
+        assert!(state.is_fenced(), "text cleanup failure must remain visible to the worker");
+        assert!(state.last_output_token.is_none());
+        assert!(state.text_prefix_position().is_none());
+        assert!(model.stream(&[7], &mut state, greedy_options(&model)).is_err());
+    }
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn ordinary_sampling_failure_fences_lookahead_state_cpu() {
+    ordinary_sampling_failure_fences_lookahead_state::<crate::backends::cpu::Cpu>();
+}
+
+#[cfg(backend = "metal")]
+#[stark_test]
+fn ordinary_sampling_failure_fences_lookahead_state_metal() {
+    ordinary_sampling_failure_fences_lookahead_state::<crate::backends::metal::Metal>();
 }

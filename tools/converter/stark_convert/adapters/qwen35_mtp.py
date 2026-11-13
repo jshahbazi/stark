@@ -28,29 +28,26 @@ def plan_qwen35_mtp(
     row_range,
     include_vision,
     quantization,
+    moe=False,
+    experts=None,
+    expert_hidden=None,
+    dedicated_embeddings=False,
 ):
     candidates = [
         stem for stem in ("mtp", "language_model.mtp", "model.language_model.mtp") if stem + ".fc.weight" in tensors
     ]
     if not candidates:
-        # Legacy uniform text exports may declare bare auxiliary MTP tensors
-        # which were always omitted. Per-module exports and language-model
-        # predictor namespaces require a complete identifiable graph.
-        if any(
-            name.startswith(("language_model.mtp.", "model.language_model.mtp."))
-            or (quantization is not None and quantization.overrides and name.startswith("mtp."))
-            for name in tensors
-        ):
+        # Once any predictor payload is present it must be complete; neither
+        # a raw-HF namespace nor an older stripping policy authorizes omission.
+        if any(name.startswith(("mtp.", "language_model.mtp.", "model.language_model.mtp.")) for name in tensors):
             raise ConversionError("Qwen3.5 MTP predictor is missing its fusion matrix")
         return None
     if len(candidates) != 1 or declaration != 1:
         raise ConversionError("Qwen3.5 MTP requires one explicitly declared predictor")
-    if quantization is None:
-        # Preserve the existing raw text-only conversion contract. Its declared
-        # auxiliary weights remain omitted and cannot grant MTP capability.
-        return None
-    if include_vision:
-        raise UnsupportedConversion("Qwen3.5 MTP currently qualifies text execution only")
+    if dedicated_embeddings:
+        raise UnsupportedConversion("Qwen3.5 MTP dedicated embeddings require a separate predictor contract")
+    if moe and quantization is not None:
+        raise UnsupportedConversion("Qwen3.5 MoE MTP requires an expert predictor implementation")
     source = candidates[0]
     attention = next((layer for layer in layer_configs if layer["mixer_config"]["type"] == "AttentionConfig"), None)
     if attention is None or attention["mixer_config"]["has_qkvg_biases"]:
@@ -76,14 +73,45 @@ def plan_qwen35_mtp(
     )
     norm(out + ".mixer.query_norm", attn + ".q_norm.weight", head_dim)
     norm(out + ".mixer.key_norm", attn + ".k_norm.weight", head_dim)
+    if moe:
+        # The pinned official BF16 index has separate per-expert predictor
+        # matrices, unlike the trunk's fused [expert, gate+up, input] bank.
+        # Canonical banks retain every source tensor and source byte identity.
+        if type(experts) is not int or not 1 <= experts <= 1024 or type(expert_hidden) is not int:
+            raise ConversionError("Qwen3.5 expert predictor geometry is invalid")
+        matrix(
+            out + ".mlp.experts.up_projection.weights",
+            tuple(
+                matrix_source(src + f".mlp.experts.{expert}.{branch}_proj.weight", (expert_hidden, dim))
+                for expert in range(experts)
+                for branch in ("up", "gate")
+            ),
+            (experts * 2 * expert_hidden, dim),
+        )
+        matrix(
+            out + ".mlp.experts.down_projection.weights",
+            tuple(
+                matrix_source(src + f".mlp.experts.{expert}.down_proj.weight", (dim, expert_hidden))
+                for expert in range(experts)
+            ),
+            (experts * dim, expert_hidden),
+        )
+        matrix(out + ".mlp.router.weights", (matrix_source(src + ".mlp.gate.weight", (experts, dim)),), (experts, dim))
+        matrix(
+            out + ".mlp.shared_gate.weights",
+            (matrix_source(src + ".mlp.shared_expert_gate.weight", (1, dim)),),
+            (1, dim),
+        )
+    dense_source = src + (".mlp.shared_expert" if moe else ".mlp")
+    dense_output = out + (".mlp.shared_expert" if moe else ".mlp")
     matrix(
-        out + ".mlp.up_projection.weights",
-        tuple(matrix_source(src + f".mlp.{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
+        dense_output + ".up_projection.weights",
+        tuple(matrix_source(dense_source + f".{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
         (2 * hidden, dim),
     )
     matrix(
-        out + ".mlp.down_projection.weights",
-        (matrix_source(src + ".mlp.down_proj.weight", (dim, hidden)),),
+        dense_output + ".down_projection.weights",
+        (matrix_source(dense_source + ".down_proj.weight", (dim, hidden)),),
         (dim, hidden),
     )
     norm("mtp.transformer.output_norm", source + ".norm.weight", dim)

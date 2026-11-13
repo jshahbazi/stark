@@ -1,5 +1,6 @@
 """Inventory denominator and conservative dispatch remain explicit."""
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -18,14 +19,20 @@ from stark_convert.registry import (
 )
 from stark_convert.streaming import UnsupportedConversion
 
+EXPORTER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "export_conversion_catalog.py"
+EXPORTER_SPEC = importlib.util.spec_from_file_location("conversion_catalog_exporter", EXPORTER_PATH)
+assert EXPORTER_SPEC is not None and EXPORTER_SPEC.loader is not None
+EXPORTER = importlib.util.module_from_spec(EXPORTER_SPEC)
+EXPORTER_SPEC.loader.exec_module(EXPORTER)
+
 
 def test_complete_pinned_builtin_inventory():
     catalog = load_catalog()
     assert catalog["entry_count"] == 110 == len(catalog["models"])
-    assert catalog["extension_count"] == 6 == len(catalog["extensions"])
+    assert catalog["extension_count"] == 10 == len(catalog["extensions"])
     assert catalog["reference"]["plugins"] is False
     assert catalog["reference"]["revision"] == "831accb8252a6b6606c378048caeb44178f1a050"
-    assert len({entry["repo"] for entry in models()}) == 116
+    assert len({entry["repo"] for entry in models()}) == 120
     assert sum(entry["model_kind"] == "LanguageModelSpec" for entry in catalog["models"]) == 107
     assert sum(entry["model_kind"] == "ClassifierModelSpec" for entry in models()) == 2
     assert sum(entry["model_kind"] == "TTSModelSpec" for entry in models()) == 1
@@ -34,7 +41,7 @@ def test_complete_pinned_builtin_inventory():
 
 def test_catalog_is_independent_of_reference_and_framework_imports():
     code = (
-        "import sys; from stark_convert.registry import models; assert len(models()) == 116; "
+        "import sys; from stark_convert.registry import models; assert len(models()) == 120; "
         "assert not any(name.split('.')[0] in {'lalamo','jax','torch'} for name in sys.modules)"
     )
     env = os.environ.copy()
@@ -49,7 +56,7 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 91
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 95
     assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 85
 
 
@@ -71,6 +78,70 @@ def test_extensions_are_separate_from_builtin_inventory():
     assert all(entry["catalog_origin"] == "stark_extension" for entry in load_catalog()["extensions"])
     assert adapter_for_model("unsloth/Llama-3.2-1B-Instruct", "llama") == "llama"
     assert adapter_for_model("mistralai/Mistral-7B-Instruct-v0.3", "mistral") == "mistral"
+
+
+def test_olmo3_and_gemma4_text_extensions_bind_pinned_source_without_reasoning_defaults():
+    expected = {
+        "allenai/Olmo-3-7B-Instruct": ("olmo3", "HFOlmo3Config", "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc"),
+        "google/gemma-4-E2B-it": ("gemma4_text", "HFGemma4TextConfig", "3e22461f65e89153144f8adb70e3b8c2cc9845a7"),
+        "google/gemma-4-E4B-it": ("gemma4_text", "HFGemma4TextConfig", "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"),
+        "google/gemma-4-31B-it": ("gemma4_text", "HFGemma4TextConfig", "842da3794eaa0b77d5f08bae87a17459d91ff475"),
+    }
+    for repo, (adapter, config_class, revision) in expected.items():
+        entry = get_model(repo)
+        assert entry is not None
+        assert entry["catalog_origin"] == (
+            "stark_extension" if repo.startswith("allenai/") or repo == "google/gemma-4-31B-it" else "pinned_builtin"
+        )
+        assert entry["adapter"] == entry["metadata_profile"] == adapter
+        assert entry["config_class"] == config_class
+        assert entry["profile_source"]["revision"] == revision
+        expected_files = {
+            "config.json",
+            "generation_config.json",
+            "tokenizer_config.json",
+            "tokenizer.json",
+            "chat_template.jinja",
+        }
+        if adapter == "gemma4_text":
+            expected_files.add("processor_config.json")
+        assert set(entry["profile_source"]["files_sha256"]) == expected_files
+        assert entry["metadata"]["parser_id"] is None
+        assert entry["metadata"]["reasoning_id"] is None
+        assert entry["metadata"]["end_of_thinking_id"] is None
+        assert entry["metadata"]["generation_config"] is None
+        assert entry["metadata"]["generation_params_overrides"] is None
+        assert entry["vendor"] == ("AllenAI" if repo.startswith("allenai/") else "Google")
+        assert entry["files"]["chat_template"] == {
+            "repo": repo,
+            "filename": "chat_template.jinja",
+        }
+        assert entry["status"]["qualification"] == "pending"
+    assert adapter_for_model("allenai/Olmo-3-7B-Instruct", "olmo3") == "olmo3"
+    assert adapter_for_model("google/gemma-4-E2B-it", "gemma4_text") == "gemma4_text"
+
+
+def test_profile_extension_reproduces_catalog_metadata_without_inherited_overrides():
+    catalog = load_catalog()
+    for repo in ("allenai/Olmo-3-7B-Instruct", "google/gemma-4-E2B-it"):
+        expected = get_model(repo)
+        assert expected is not None
+        profile = EXPORTER.profile_extension(
+            catalog["models"],
+            repo=repo,
+            revision=expected["profile_source"]["revision"],
+            reference_repo=expected["profile_reference"],
+            config_class=expected["config_class"],
+            adapter=expected["adapter"],
+            family=expected["family"],
+            size=expected["size"],
+            vendor=expected["vendor"],
+            file_hashes=expected["profile_source"]["files_sha256"],
+        )
+        assert profile["vendor"] == expected["vendor"]
+        assert profile["files"] == expected["files"]
+        assert profile["metadata"] == expected["metadata"]
+        assert profile["profile_source"] == expected["profile_source"]
 
 
 def test_mlx_profiles_bind_bit_width_without_promoting_other_packed_families():
@@ -122,11 +193,20 @@ def test_dispatch_requires_an_implemented_specific_tuple():
     assert adapter_for_model("Qwen/Qwen3-0.6B-MLX-8bit", "qwen3") == "qwen3"
     assert adapter_for_model("mlx-community/Qwen3.5-0.8B-MLX-4bit") == "qwen3_5"
     assert adapter_for_model("mlx-community/LFM2-350M-8bit") == "lfm2"
-    with pytest.raises(UnsupportedConversion):
-        adapter_for_model("google/gemma-4-E2B-it")
+    assert adapter_for_model("google/gemma-4-E2B-it") == "gemma4_text"
     with pytest.raises(UnsupportedConversion):
         adapter_for_model("Qwen/Qwen3-0.6B", "llama")
     assert get_model("unregistered/model") is None
+
+
+@pytest.mark.parametrize("architecture", ["qwen4", "qwen4_text", "qwen4_moe"])
+def test_unimplemented_qwen4_names_do_not_alias_existing_qwen_adapters(architecture):
+    with pytest.raises(UnsupportedConversion):
+        architecture_for_config({"model_type": architecture})
+
+
+def test_qwen38_preview_marker_remains_explicitly_distinct_from_qwen4_names():
+    assert architecture_for_config({"model_type": "qwen4_exp"}) == "qwen4_exp"
 
 
 def test_hybrid_mlx_promotions_use_exact_pinned_checkpoint_names():

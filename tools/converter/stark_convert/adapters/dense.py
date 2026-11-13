@@ -12,7 +12,9 @@ import json
 import math
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from ..config_normalization import normalize_config
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -20,7 +22,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
     validate_planning_layers,
 )
 
@@ -73,10 +74,20 @@ _COMMON_KEYS = {
     "pretraining_tp",
 }
 _FAMILY_KEYS = {
-    "qwen2": {"use_sliding_window", "sliding_window", "max_window_layers"},
+    "qwen2": {"use_sliding_window", "sliding_window", "max_window_layers", "use_mrope"},
     # Unsloth's mirror records a packaging annotation ignored by HFLlamaConfig;
     # it changes neither the decoder nor tensor interpretation.
-    "llama": {"unsloth_fixed", "transformers.js_config", "fp8", "use_grouped_mm"},
+    "llama": {
+        "unsloth_fixed",
+        "transformers.js_config",
+        "fp8",
+        "use_grouped_mm",
+        "embd_pdrop",
+        "resid_pdrop",
+        "classifier_dropout",
+        "id2label",
+        "label2id",
+    },
     "mistral": {"sliding_window"},
 }
 
@@ -175,7 +186,9 @@ def _rope(config: dict, family: str, head_dim: int, sequence_length: int, unsupp
     return rope
 
 
-def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> ConversionPlan:
+def build_dense_plan(
+    source: Path, *, family: str, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
     """Check every tensor and return only bounded-memory transformation operations.
 
     Compatibility selection is performed separately by the reviewed source catalog.
@@ -183,7 +196,9 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     """
     if family not in _ARCHITECTURES:
         raise UnsupportedConversion("Architecture has no dense adapter")
-    config = read_json(source / "config.json")
+    config = normalize_config(
+        family, read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     if config.get("model_type") != family:
         raise UnsupportedConversion("Checkpoint model_type does not match selected adapter")
     if dtype not in _DTYPES:
@@ -234,6 +249,24 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         if _bool(config, "fp8", False):
             unsupported.append("FP8 checkpoint is outside qualified dense coverage")
         _bool(config, "use_grouped_mm", False)
+        # Nanbeige and Reka retain training/classifier annotations in their
+        # LlamaForCausalLM configs. Admit only the reviewed inactive dropout
+        # values; the causal-LM architecture and complete tensor inventory are
+        # still checked independently.
+        for key in ("embd_pdrop", "resid_pdrop", "classifier_dropout"):
+            value = config.get(key, 0.0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ConversionError("Dense config has malformed dropout metadata")
+            if value != 0.0:
+                unsupported.append("Nonzero training/classifier dropout is outside qualified dense coverage")
+        for key, key_type, value_type in (("id2label", str, str), ("label2id", str, int)):
+            labels = config.get(key, {})
+            if not isinstance(labels, dict) or any(
+                type(label) is not key_type or type(value) is not value_type for label, value in labels.items()
+            ):
+                raise ConversionError("Dense config has malformed classifier labels")
+    if family == "qwen2" and _bool(config, "use_mrope", False):
+        unsupported.append("Qwen2 multimodal RoPE is outside qualified dense coverage")
     if (family == "qwen2" and not attention_bias) or (family != "qwen2" and attention_bias) or mlp_bias:
         unsupported.append("Projection bias variant is outside qualified dense coverage")
     if dropout != 0.0:
@@ -253,7 +286,7 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     if pruned:
         unsupported.append("Pruned attention heads are outside qualified dense coverage")
     rope = _rope(config, family, head_dim, sequence_length, unsupported)
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     validate_planning_layers(layers, tensors)
     windows: list[int | None] = [None] * layers
     if family == "qwen2":
@@ -361,14 +394,14 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
                 embedding = read_mlx_matrix(tensors, "model.embed_tokens.weight", (vocab, model_dim), quantization)
                 expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
                 if any(
-                    left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                    not tensor_aliases_equal(left, right, header_only=checkpoint_metadata is not None)
                     for left, right in zip(head.planes, embedding.planes, strict=True)
                 ):
                     raise ConversionError("Tied MLX lm_head differs from the input embedding")
             else:
                 head = tensor("lm_head.weight", (vocab, model_dim))
                 embedding = tensors["model.embed_tokens.weight"]
-                if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
+                if not tensor_aliases_equal(head, embedding, header_only=checkpoint_metadata is not None):
                     raise ConversionError("Tied lm_head differs from the input embedding")
     else:
         matrix(

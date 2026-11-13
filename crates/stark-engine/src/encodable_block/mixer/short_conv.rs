@@ -34,6 +34,10 @@ pub struct ShortConvState<B: Backend> {
 }
 
 impl<B: Backend> MixerState<B> for ShortConvState<B> {
+    fn resident_payload_bytes(&self) -> Option<usize> {
+        Some(self.conv_state.size())
+    }
+
     fn prepare(
         &mut self,
         _context_length: u32,

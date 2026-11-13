@@ -47,6 +47,7 @@ ADAPTATION_NOTICES = (
     "arm-optimized-routines-ATTRIBUTION.txt",
     "transformers-LICENSE",
     "transformers-ATTRIBUTION.txt",
+    "LICENSE.mlx-reference",
 )
 
 
