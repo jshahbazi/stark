@@ -4,11 +4,14 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
-**Ripple-65B Q4_K_M (2026-11-12).** The standard 38.8 GB artifact passes native
-Metal parity against the independent full 80-layer reference and bounded
-generation/recovery checks. Two short warm runs measured 5.416 tokens/s median.
-The [Q4 report](RIPPLE_Q4_K_M_2026_11_12.md) records its separate precision and
-validation scope; Q8's earlier source-bound results remain preserved.
+**Ripple-65B Q4_K_M grouped kernels (2026-11-12).** A saved-binary ABBA comparison
+improves median native-worker decode from 4.559 to 7.460 tokens/s (1.64×), with
+identical quantized weights and generated token hashes. Four warm requests per
+arm are short and unscreened, with observed host drift. The
+[kernel report](RIPPLE_Q4_KERNELS_2026_11_12.md) records reference checks,
+component selection and scope. It supersedes the timing observations in the
+[initial Q4 report](RIPPLE_Q4_K_M_2026_11_12.md); earlier numerical evidence stays
+source-bound. Q8's earlier results remain preserved.
 
 **Ripple-65B native GPU graph (2026-11-05 UTC).** A fresh saved-binary comparison
 on the 128 GiB M5 Max improves median decode from 2.760 to 6.040 tok/s (2.19×)

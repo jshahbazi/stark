@@ -360,6 +360,7 @@ impl DecodeGraph {
     /// Admit the separately validated Ripple Q8 projection schedule for this
     /// graph only. Exact shape and storage guards leave all other work on its
     /// established route; this changes F32 reduction grouping, not precision.
+    /// Enable measured Q4_K and Q6_K projections in Ripple's mixed Q4_K_M artifact.
     pub fn enable_ripple_dense_q4(&mut self) {
         self.ripple_dense_q4 = true;
     }
@@ -1051,8 +1052,12 @@ impl DecodeGraph {
             self.ripple_dense_q8 && ripple_dense_q8_shape(operation.format, operation.rows, operation.columns);
         let ripple_q4 =
             self.ripple_dense_q4 && ripple_dense_q4_shape(operation.format, operation.rows, operation.columns);
-        let pipeline = if ripple_q4 {
-            executor.cached_pipeline(operation.format, "hybrid_packed_block_matvec", &executor.ripple_q4_pipelines)?
+        let ripple_q6 =
+            self.ripple_dense_q4 && ripple_dense_q6_shape(operation.format, operation.rows, operation.columns);
+        let pipeline = if ripple_q6 {
+            executor.cached_pipeline(operation.format, "hybrid_q6_grouped16_matvec", &executor.ripple_q6_pipelines)?
+        } else if ripple_q4 {
+            executor.cached_pipeline(operation.format, "hybrid_q4_grouped32_matvec", &executor.ripple_q4_pipelines)?
         } else if ripple_q8 {
             executor.cached_pipeline(
                 operation.format,
@@ -1114,7 +1119,9 @@ impl DecodeGraph {
             &pipeline,
             (&input.buffer, input.offset),
             (&output.buffer, output.offset),
-            if ripple_q4 {
+            if ripple_q6 {
+                (operation.rows.div_ceil(4), 64)
+            } else if ripple_q4 {
                 (operation.rows.div_ceil(2), 64)
             } else if ripple_q8 {
                 (operation.rows.div_ceil(2), 128)
@@ -1125,6 +1132,17 @@ impl DecodeGraph {
                 )
             },
         );
+        if ripple_q4 || ripple_q6 {
+            profile::record(
+                if ripple_q4 {
+                    "native.metal.graph.ripple_q4_grouped"
+                } else {
+                    "native.metal.graph.ripple_q6_grouped"
+                },
+                0.0,
+                operation.matrices.iter().map(|matrix| matrix.codes.length).sum(),
+            );
+        }
         if ripple_q8 {
             profile::record(
                 "native.metal.graph.ripple_q8_grouped",

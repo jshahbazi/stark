@@ -77,6 +77,13 @@ packed kernels; each quantized artifact requires its own validation record.
 The Q4_K_M production graph selects the existing packed block kernel only for
 Ripple's validated dense geometries, with an isolated cache. Artifact-specific
 checks are recorded in the [Q4_K_M report](../docs/benchmarks/RIPPLE_Q4_K_M_2026_11_12.md).
+Later Ripple K-quant tuning reuses the existing MIT-attributed GGML-derived
+grouped32 Q4_K and grouped16 Q6_K kernels, with separately qualified shape
+policies and caches. No packed weights change. The new row-reuse shader is a
+test-only experiment retaining its upstream attribution and is not selected in
+production. A separate exact-index attention optimization replaces a bounded
+ring modulo with one subtraction. The [kernel report](../docs/benchmarks/RIPPLE_Q4_KERNELS_2026_11_12.md)
+preserves the new numerical and saved-binary performance evidence.
 
 Ripple's F32 Metal graph and shape-scoped Q8 dispatch were introduced in
 `410bec76c195522b6478c329225d6cbfb84b9977`, with complete-inventory admission

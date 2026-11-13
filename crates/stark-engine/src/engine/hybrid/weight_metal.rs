@@ -38,6 +38,10 @@ mod q8_grouped_tests;
 mod q4_grouped_tests;
 
 #[cfg(test)]
+#[path = "weight_metal_ripple_k_tuning_tests.rs"]
+mod ripple_k_tuning_tests;
+
+#[cfg(test)]
 #[path = "weight_metal_kquant_mma_tests.rs"]
 mod kquant_mma_tests;
 
@@ -52,6 +56,7 @@ struct Executor {
     q8_segmented8_pipelines: PipelineCache,
     ripple_q8_pipelines: PipelineCache,
     ripple_q4_pipelines: PipelineCache,
+    ripple_q6_pipelines: PipelineCache,
     q6_grouped16_pipelines: PipelineCache,
     q5_grouped32_pipelines: PipelineCache,
     q4_grouped32_pipelines: PipelineCache,
@@ -248,6 +253,15 @@ fn ripple_dense_q4_shape(
             (rows, columns),
             (40960, 5120) | (5120, 40960) | (10240, 5120) | (1024, 5120) | (5120, 10240) | (100352, 5120)
         )
+}
+
+// Q6 projections present in the qualified mixed Ripple Q4_K_M artifact.
+fn ripple_dense_q6_shape(
+    format: MatrixFormat,
+    rows: usize,
+    columns: usize,
+) -> bool {
+    format == MatrixFormat::Packed(14) && matches!((rows, columns), (5120, 40960) | (1024, 5120) | (100352, 5120))
 }
 
 fn q4k_block_enabled() -> bool {
@@ -707,6 +721,8 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_factored_matvec.metal"));
             source.push_str(include_str!("packed_q6_grouped16_matvec.metal"));
             source.push_str(include_str!("packed_q5_grouped32_matvec.metal"));
+            #[cfg(test)]
+            source.push_str(include_str!("packed_ripple_q4_rows_experiment.metal"));
             source.push_str(include_str!("packed_kquant_mma_matvec.metal"));
             source.push_str(include_str!("feed_forward.metal"));
             source.push_str(include_str!("qwen_gdn.metal"));
@@ -751,6 +767,7 @@ fn executor() -> Result<&'static Executor> {
                 q8_segmented8_pipelines: Mutex::new(HashMap::new()),
                 ripple_q8_pipelines: Mutex::new(HashMap::new()),
                 ripple_q4_pipelines: Mutex::new(HashMap::new()),
+                ripple_q6_pipelines: Mutex::new(HashMap::new()),
                 q6_grouped16_pipelines: Mutex::new(HashMap::new()),
                 q5_grouped32_pipelines: Mutex::new(HashMap::new()),
                 q4_grouped32_pipelines: Mutex::new(HashMap::new()),
@@ -2551,62 +2568,115 @@ mod tests {
             assert!(!ripple_dense_q4_shape(MatrixFormat::Packed(12), rows, columns));
         }
 
-        // Exercise one compact admitted Ripple geometry through three graph
-        // instances. The graph-local block pipeline must not replace the
-        // shared scalar format pipeline for either default graph.
-        let (rows, columns) = (1024usize, 5120usize);
-        let encoded = finite_packed_codes(12, rows, columns, 53);
-        let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
-        let parameters = [rows as u32, columns as u32, 12, 256, 144, 0, 0, 0];
-        let matrix = || MappedMatrix {
-            codes: MappedSlice {
-                buffer: buffer(executor().unwrap(), &encoded).unwrap(),
-                offset: 0,
-                length: encoded.len(),
-                registered_length: encoded.len(),
-            },
-            planes: None,
-        };
-        let operation = || MappedOperation {
-            matrices: vec![matrix()],
-            inputs: &[],
-            rows,
-            columns,
-            rows_per_batch: 0,
-            format: MatrixFormat::Packed(12),
-        };
-        let graph_projection = |ripple_q4: bool| -> Result<Vec<f32>> {
-            let mut graph = DecodeGraph::new()?;
-            if ripple_q4 {
-                graph.enable_ripple_dense_q4();
+        let q6_admitted = [(5120, 40960), (1024, 5120), (100352, 5120)];
+        for (rows, columns) in q6_admitted {
+            assert!(ripple_dense_q6_shape(MatrixFormat::Packed(14), rows, columns));
+            for excluded in
+                [MatrixFormat::Packed(8), MatrixFormat::Packed(12), MatrixFormat::Packed(13), MatrixFormat::Packed(30)]
+            {
+                assert!(!ripple_dense_q6_shape(excluded, rows, columns));
             }
-            let input_vector = DecodeGraph::upload(&input)?;
-            let output = graph.mapped(&operation(), &input_vector)?;
-            graph.finish(&[output]).map(|mut values| values.remove(0))
+            assert!(!ripple_dense_q6_shape(MatrixFormat::Packed(14), rows, 0), "indexed geometry entered Q6 policy");
+        }
+        for (rows, columns) in [(13, 256), (1024, 4096), (5120, 5120)] {
+            assert!(!ripple_dense_q6_shape(MatrixFormat::Packed(14), rows, columns));
+        }
+
+        // Exercise compact admitted Q4_K and Q6_K projections through three
+        // graph instances. The Ripple-only grouped kernels must agree with a
+        // decoded-product F64 oracle without replacing either default route.
+        let check_graph_policy = |kind: u32, rows: usize, columns: usize, seed: usize| {
+            let (block, bytes) = weights::block_layout(kind).unwrap();
+            let encoded = finite_packed_codes(kind, rows, columns, seed);
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let parameters = [rows as u32, columns as u32, kind, block as u32, bytes as u32, 0, 0, 0];
+            let matrix = || MappedMatrix {
+                codes: MappedSlice {
+                    buffer: buffer(executor().unwrap(), &encoded).unwrap(),
+                    offset: 0,
+                    length: encoded.len(),
+                    registered_length: encoded.len(),
+                },
+                planes: None,
+            };
+            let operation = || MappedOperation {
+                matrices: vec![matrix()],
+                inputs: &[],
+                rows,
+                columns,
+                rows_per_batch: 0,
+                format: MatrixFormat::Packed(kind),
+            };
+            let graph_projection = |ripple: bool| -> Result<Vec<f32>> {
+                let mut graph = DecodeGraph::new()?;
+                if ripple {
+                    graph.enable_ripple_dense_q4();
+                }
+                let input_vector = DecodeGraph::upload(&input)?;
+                let output = graph.mapped(&operation(), &input_vector)?;
+                graph.finish(&[output]).map(|mut values| values.remove(0))
+            };
+
+            let mut oracle = Vec::with_capacity(rows);
+            let row_bytes = columns / block * bytes;
+            for row in 0..rows {
+                let mut expected = 0.0f64;
+                let mut absolute = 0.0f64;
+                for (encoded_block, input_block) in
+                    encoded[row * row_bytes..(row + 1) * row_bytes].chunks_exact(bytes).zip(input.chunks_exact(block))
+                {
+                    let mut decoded = vec![0.0f32; block];
+                    weights::decode_block(kind, encoded_block, &mut decoded).unwrap();
+                    for (&weight, &value) in decoded.iter().zip(input_block) {
+                        let product = f64::from(weight) * f64::from(value);
+                        expected += product;
+                        absolute += product.abs();
+                    }
+                }
+                oracle.push((expected, 2e-6 * absolute.max(1.0)));
+            }
+
+            let default_before = graph_projection(false).unwrap();
+            let default_schedule = if kind == 14 {
+                TestMatrixSchedule::Block
+            } else {
+                TestMatrixSchedule::Scalar
+            };
+            let default_reference =
+                executor().unwrap().run_inner(&encoded, &input, parameters, None, default_schedule).unwrap();
+            assert!(
+                default_before
+                    .iter()
+                    .zip(&default_reference)
+                    .all(|(actual, expected)| actual.to_bits() == expected.to_bits()),
+                "default graph changed its packed route kind={kind}"
+            );
+
+            let optimized = graph_projection(true).unwrap();
+            for (row, (&actual, &(expected, bound))) in optimized.iter().zip(&oracle).enumerate() {
+                assert!(
+                    (f64::from(actual) - expected).abs() <= bound,
+                    "Ripple grouped F64 mismatch kind={kind} row={row}"
+                );
+            }
+
+            let default_after = graph_projection(false).unwrap();
+            assert!(
+                default_after
+                    .iter()
+                    .zip(&default_reference)
+                    .all(|(actual, expected)| actual.to_bits() == expected.to_bits()),
+                "Ripple grouped pipeline leaked into default graph cache kind={kind}"
+            );
         };
 
-        let default_before = graph_projection(false).unwrap();
-        let scalar =
-            executor().unwrap().run_inner(&encoded, &input, parameters, None, TestMatrixSchedule::Scalar).unwrap();
-        assert!(
-            default_before.iter().zip(&scalar).all(|(actual, expected)| actual.to_bits() == expected.to_bits()),
-            "default graph changed its scalar Q4_K route"
-        );
-        let optimized = graph_projection(true).unwrap();
-        let block =
-            executor().unwrap().run_inner(&encoded, &input, parameters, None, TestMatrixSchedule::Block).unwrap();
-        assert!(
-            optimized.iter().zip(&block).all(|(actual, expected)| actual.to_bits() == expected.to_bits()),
-            "Ripple graph block schedule/grid mismatch"
-        );
-        let default_after = graph_projection(false).unwrap();
-        assert!(
-            default_after.iter().zip(&scalar).all(|(actual, expected)| actual.to_bits() == expected.to_bits()),
-            "Ripple Q4_K pipeline leaked into the default graph cache"
-        );
+        check_graph_policy(12, 1024, 5120, 53);
+        check_graph_policy(14, 1024, 5120, 59);
         let executor = executor().unwrap();
         assert!(executor.ripple_q4_pipelines.lock().unwrap().contains_key(&MatrixFormat::Packed(12)));
+        assert!(executor.ripple_q6_pipelines.lock().unwrap().contains_key(&MatrixFormat::Packed(14)));
         assert!(executor.pipelines.lock().unwrap().contains_key(&MatrixFormat::Packed(12)));
+        assert!(executor.pipelines.lock().unwrap().contains_key(&MatrixFormat::Packed(14)));
     }
 
     fn run_kquant_matrix_test(

@@ -48,9 +48,13 @@ Native execution uses the existing packed Q4_K/Q6_K kernels and the Ripple
 device graph, with F32 controls, accumulation and KV state. The independent
 full reference helper also decodes these block types. Q8 validation does not
 qualify this artifact; record Q4_K_M numerical and generation checks separately.
-The released Q4_K projection shapes use the existing two-row, 64-thread block
-kernel through a Ripple-local policy and pipeline cache. Q6_K retains its
-established kernel. No diagnostic environment flag is needed.
+The released Q4_K projection shapes use the grouped32 two-row, 64-thread
+kernel. The Q6_K down, KV and output-head projections use grouped16 with four
+rows per 64-thread group. Both schedules have Ripple-local shape policies and
+separate pipeline caches. They preserve packed codes, F32 accumulation and
+Safe Metal math, while changing reduction grouping. Extreme finite inputs use
+the original block arithmetic to preserve overflow behavior. No diagnostic
+environment flag is needed.
 
 ## Precision and limits
 
@@ -146,3 +150,6 @@ records graph/Q8 validation, the matched worker comparison and the installed
 development build.
 The separate [Q4_K_M report](benchmarks/RIPPLE_Q4_K_M_2026_11_12.md) records
 artifact-specific reference, generation and timing checks.
+The later [K-quant kernel report](benchmarks/RIPPLE_Q4_KERNELS_2026_11_12.md)
+records grouped Q4/Q6 dispatch and attention indexing validation, plus the
+saved-binary performance comparison.

@@ -105,7 +105,10 @@ kernel void ripple_graph_attention_output(device const float *probabilities [[bu
     uint kv_base = head / (heads / kv_heads) * dim + d;
     float value = 0.0f;
     for (uint token = 0; token < count; ++token) {
-        uint slot = (start + token) % capacity;
+        // Host bounds guarantee start < capacity and count <= capacity.
+        // The sum wraps at most once; avoid integer division in this hot loop.
+        uint slot = start + token;
+        if (slot >= capacity) slot -= capacity;
         value += probabilities[head * capacity + token] * values[slot * kv_heads * dim + kv_base];
     }
     if (p[6]) value *= ripple_graph_sigmoid(gates[task]);
