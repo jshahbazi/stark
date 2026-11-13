@@ -1,10 +1,12 @@
-"""Bounded Phi-4-mini planner for the pinned Hugging Face Phi3 layout.
+"""Bounded Phi3 planner for the pinned Hugging Face Phi3 layout.
 
 Config and tensor conventions are adapted from Lalamo revision
 831accb8252a6b6606c378048caeb44178f1a050, MIT License.
 Copyright (c) 2025 Mirai Tech Inc. See LICENSE.lalamo and source provenance.
-The pinned reference implements tied Phi-4-mini with LongRoPE; other Phi3
-variants require separate qualification. No upstream runtime is imported.
+The pinned reference implements tied Phi-4-mini with LongRoPE. Untied
+checkpoints reuse the dense planner's separate output embedding; each
+checkpoint still requires its own qualification. No upstream runtime is
+imported.
 """
 
 from __future__ import annotations
@@ -118,7 +120,7 @@ def _row_slice(tensor: TensorInfo, start: int, stop: int) -> TensorInfo:
 def build_phi_plan(
     source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
 ) -> ConversionPlan:
-    """Validate the complete tied Phi3 checkpoint and plan Phi-4-mini output.
+    """Validate the complete Phi3 checkpoint and plan its decoder output.
 
     HF stores MLP rows as gate then up. The target stores up then gate; two
     contiguous row views implement that reorder with the shared bounded writer.
@@ -141,7 +143,10 @@ def build_phi_plan(
     if model_dim % heads or heads % groups:
         raise ConversionError("Phi attention dimensions are inconsistent")
     head_dim = model_dim // heads
-    partial_factor = _positive_float(config, "partial_rotary_factor")
+    # Phi-3/Phi-3.5 configs omit the factor; Transformers 5.20.1 Phi3Config and
+    # MLX-LM 72be8c955d9a0d3099bd01865af288e0e947c3fa phi3.ModelArgs default it
+    # to 1.0 (full rotary head). An explicit value is used unchanged.
+    partial_factor = _positive_float(config, "partial_rotary_factor", 1.0)
     if partial_factor > 1:
         raise ConversionError("Phi partial_rotary_factor exceeds the head dimension")
     # The pinned reference uses int(head_dim * partial_rotary_factor).
@@ -156,8 +161,6 @@ def build_phi_plan(
     epsilon = _positive_float(config, "rms_norm_eps")
     base = _positive_float(config, "rope_theta")
     tied = _bool(config, "tie_word_embeddings", False)
-    if not tied:
-        unsupported.append("Untied Phi3 embeddings are outside pinned Phi-4-mini coverage")
     if config.get("architectures", ["Phi3ForCausalLM"]) != ["Phi3ForCausalLM"]:
         unsupported.append("Checkpoint architecture is outside qualified Phi coverage")
     if config.get("hidden_act", "silu") != "silu":
@@ -190,7 +193,10 @@ def build_phi_plan(
     if _positive_float(config, "interpolate_factor", 1.0) != 1:
         unsupported.append("Interpolated attention is outside qualified Phi coverage")
     if config.get("sliding_window") is not None:
-        _positive_int(config, "sliding_window")
+        # The plan emits full attention. A window covering every admitted
+        # position is equivalent; a shorter one (Transformers applies it) is not.
+        if _positive_int(config, "sliding_window") < sequence_length:
+            unsupported.append("Sliding-window attention is outside qualified Phi coverage")
     pruned = config.get("pruned_heads", {})
     if not isinstance(pruned, dict):
         raise ConversionError("Phi config has malformed pruned_heads")
@@ -264,13 +270,18 @@ def build_phi_plan(
         operations.append(TensorOperation(out + ".scales", (info,), "F32", (model_dim,), "cast_f32"))
 
     embedding = tensor("model.embed_tokens.weight", (vocab, model_dim))
-    matrix("decoder.embedding.embedding", (embedding,), (vocab, model_dim), "input_output")
-    if "lm_head.weight" in tensors:
+    # Same tensor names, layouts and operation order as the dense planner's
+    # untied path; a tied plan keeps its single shared embedding unchanged.
+    embedding_out = "decoder.embedding.embedding" if tied else "decoder.embedding.input_embedding"
+    matrix(embedding_out, (embedding,), (vocab, model_dim), "input_output")
+    if tied:
+        if "lm_head.weight" in tensors:
+            head = tensor("lm_head.weight", (vocab, model_dim))
+            if not tensor_aliases_equal(head, embedding, header_only=checkpoint_metadata is not None):
+                raise ConversionError("Tied lm_head differs from the input embedding")
+    else:
         head = tensor("lm_head.weight", (vocab, model_dim))
-        if tied and (not tensor_aliases_equal(head, embedding, header_only=checkpoint_metadata is not None)):
-            raise ConversionError("Tied lm_head differs from the input embedding")
-    elif not tied:
-        tensor("lm_head.weight", (vocab, model_dim))
+        matrix("decoder.embedding.output_embedding", (head,), (vocab, model_dim), "output_input")
     qkv_width = model_dim + 2 * groups * head_dim
     for layer in range(layers):
         src, out = f"model.layers.{layer}", f"decoder.transformer.layers.{layer}"
@@ -348,7 +359,7 @@ def build_phi_plan(
     }
     decoder_config = {
         "embedding_config": {
-            "type": "TiedEmbeddingConfig",
+            "type": "TiedEmbeddingConfig" if tied else "UntiedEmbeddingConfig",
             "input_scale": None,
             "logit_soft_cap": None,
             "logit_scale": None,

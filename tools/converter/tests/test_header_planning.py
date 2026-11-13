@@ -43,6 +43,7 @@ CASES = [
     ("gemma4_text", gemma4_fixture, "text"),
     ("olmo3", olmo_fixture, "text"),
     ("phi3", partial(phi_fixture, duplicate_head=True), "text"),
+    ("phi3", partial(phi_fixture, untied=True), "text"),
     ("granite", granite_fixture, "text"),
     ("smollm3", partial(granite_fixture, case="smollm3"), "text"),
     ("qwen3_5", partial(qwen35_fixture, tied=True), "text"),

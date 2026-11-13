@@ -202,6 +202,19 @@ engine build. See the
 [original E2B validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md)
 and [31B vision component record](archive/runs/2026-11-07-gemma4-larger-vision-qualified-component.md).
 
+Phi-3 dense (`phi3`) plans tied and untied embeddings. An untied checkpoint
+uses the dense planner's separate output embedding (`UntiedEmbeddingConfig`);
+tied plans are unchanged. An absent `partial_rotary_factor` means the full head,
+as in Transformers. The planner requires LongRoPE and refuses a `sliding_window`
+shorter than the context, because it plans full attention. Preflight refuses
+head dimensions without a Metal attention kernel (other than 64, 128, 256 or
+512), which excludes Phi-3 and Phi-3.5 mini (96). LongRoPE uses the long factors
+whenever the declared context exceeds the original one, as MLX-LM does;
+Transformers uses the short factors up to the original context. No real untied
+checkpoint is qualified yet; see
+[attempt 20261112-PHI-01](model-experiments/2026-11-12-phi3-untied-embeddings.md).
+Gemma 2 and Gemma 3 text still require tied embeddings.
+
 ## Browsing and removing models
 
 The app's **Manage Models** window has **Installed**, **Model Catalog** and

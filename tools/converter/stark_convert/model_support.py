@@ -160,7 +160,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
             caveats.extend(["qwen35_vision_geometry", "reviewed_processing_programs", "local_image_checks"])
         if supported and mode == "vision-language" and architecture == "gemma4_text":
             caveats.extend(["gemma4_pinned_bf16_image_geometry", "pinned_processing_metadata", "local_image_checks"])
-        if supported and architecture in {"phi3", "gemma2", "gemma3_text", "gemma4_text"}:
+        if supported and architecture in {"gemma2", "gemma3_text", "gemma4_text"}:
             caveats.append("tied_embeddings_required")
         if supported and architecture == "gemma4_text" and mode != "vision-language":
             caveats.extend(["native_dense_text_geometry", "image_and_audio_towers_excluded"])
@@ -372,7 +372,7 @@ def preflight_model(
             "Native app modes require BF16 output, except F16 text and Decision output for full-attention "
             "Llama, Qwen2 and Mistral; floating-point sources can be converted to BF16.",
         )
-    if architecture in {"phi3", "gemma2", "gemma3_text"} and config.get("tie_word_embeddings") is False:
+    if architecture in {"gemma2", "gemma3_text"} and config.get("tie_word_embeddings") is False:
         return _report(
             family,
             mode,
@@ -380,6 +380,19 @@ def preflight_model(
             "unsupported_embedding_layout",
             "This family currently implements tied embeddings only.",
         )
+    if architecture == "phi3":
+        # Metal attention kernels are compiled for these head widths only;
+        # Phi-3/Phi-3.5 mini (3072 / 32 = 96) would download and then fail.
+        width, heads = config.get("hidden_size"), config.get("num_attention_heads")
+        if type(width) is int and type(heads) is int and heads > 0 and width % heads == 0:
+            if width // heads not in {64, 128, 256, 512}:
+                return _report(
+                    family,
+                    mode,
+                    "unsupported",
+                    "unsupported_native_geometry",
+                    "This attention head dimension has no native Metal attention kernel.",
+                )
     if architecture == "qwen4_exp":
         from .adapters.qwen38 import architecture_config
         from .qwen38_external import is_external_affine

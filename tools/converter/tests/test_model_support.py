@@ -274,6 +274,26 @@ def test_known_phi_annotation_is_validated_without_executing_custom_code():
     assert preflight_model(config, mode="text")["status"] == "unsupported"
 
 
+@pytest.mark.parametrize("tied", [True, False])
+def test_phi3_embedding_layout_is_left_to_the_tensor_planner(tied):
+    report = preflight_model({"model_type": "phi3", "tie_word_embeddings": tied}, mode="text")
+    assert report["status"] == "conditional" and report["reasons"] == ["structural_path_implemented"]
+    phi = next(family for family in support_matrix()["families"] if family["family_id"] == "phi3")
+    assert all("tied_embeddings_required" not in mode["caveats"] for mode in phi["modes"].values())
+
+
+@pytest.mark.parametrize(
+    "width,heads,supported", [(3072, 24, True), (5120, 40, True), (3072, 32, False), (2560, 32, False)]
+)
+def test_phi3_head_dimension_without_a_metal_kernel_is_unsupported(width, heads, supported):
+    config = {"model_type": "phi3", "tie_word_embeddings": False, "hidden_size": width, "num_attention_heads": heads}
+    report = preflight_model(config, mode="text")
+    if supported:
+        assert report["status"] == "conditional"
+    else:
+        assert report["status"] == "unsupported" and report["reasons"] == ["unsupported_native_geometry"]
+
+
 def test_unknown_metadata_is_inconclusive_in_every_mode():
     for config in (None, {}):
         report = preflight_model(config, mode="vision-language")
@@ -413,7 +433,7 @@ def test_resolver_rechecks_small_vision_processing_before_any_weights(tmp_path):
     assert all(not event[2].endswith(".safetensors") for event in hub.events if event[0] == "download")
 
 
-@pytest.mark.parametrize("architecture", ["phi3", "gemma2", "gemma3_text"])
+@pytest.mark.parametrize("architecture", ["gemma2", "gemma3_text"])
 def test_known_untied_layout_exclusion_precedes_weights(tmp_path, architecture):
     root = files(tmp_path / "source", model_type=architecture)
     (root / "config.json").write_text(json.dumps({"model_type": architecture, "tie_word_embeddings": False}))
@@ -471,7 +491,7 @@ def test_actual_conversion_mode_mismatch_stops_before_resolution(tmp_path, monke
     [
         ({"model_type": "qwen3", "num_experts": 8}, {}),
         ({"model_type": "qwen3", "auto_map": {"AutoModel": "private.Custom"}}, {}),
-        ({"model_type": "phi3", "tie_word_embeddings": False}, {}),
+        ({"model_type": "gemma2", "tie_word_embeddings": False}, {}),
         ({"model_type": "qwen3", "quantization": {"quant_method": "gptq", "bits": 4}}, {}),
         ({"model_type": "qwen3"}, {"dtype": "float16"}),
         ({"model_type": "qwen3"}, {"container": ".gguf"}),
@@ -524,7 +544,7 @@ def test_malformed_shared_tokenizer_metadata_leaves_no_conditional_alternatives(
     [
         ({"model_type": "qwen3", "num_experts": 8}, {}),
         ({"model_type": "qwen3", "auto_map": {"AutoModel": "private.Custom"}}, {}),
-        ({"model_type": "phi3", "tie_word_embeddings": False}, {}),
+        ({"model_type": "gemma2", "tie_word_embeddings": False}, {}),
         ({"model_type": "qwen3", "quantization": {"quant_method": "gptq", "bits": 4}}, {}),
         ({"model_type": "qwen3", "quantization_config": []}, {}),
         ({"model_type": "qwen3"}, {"dtype": "float16"}),
