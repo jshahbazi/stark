@@ -3,10 +3,10 @@
 Status: phases 3 and 4 and bounded Phase 5 worker correctness/lifecycle gates
 passed for local non-commercial evaluation, 2026-11-13. Sixty matched worker
 requests completed, with no eligible timing group; MTP remains off by default.
-Two subsequent reruns each deferred all six groups at strict quiet admission,
-after 12 matching warmups and before any measured arm. Worker self-task memory
-diagnostics now identify execution-charged warmup decompressions; global activity
-and CPU/GPU gate failures still prevent performance qualification.
+Subsequent strict reruns still defer every group before measured arms. Selected
+expert-record Metal bindings now reduce reproduced worker decompression churn
+in a fixed-idle ABBA control and pass bounded lifecycle gates. Residual global
+decompressions and CPU/GPU gate failures still prevent performance qualification.
 Phase 5 performance qualification and phases 6–8 remain unfinished.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
@@ -384,6 +384,18 @@ also fail. These are execution-accounting observations with fixed warmup order,
 not complete page ownership, route rankings or performance results. Every prior
 screen is retained; [new receipts](benchmarks/2026-11-13-edge0-worker-memory.md)
 bind the new worker and observer separately.
+The [expert-window successor](model-experiments/2026-11-13-edge0-expert-windows.md)
+narrows target bindings from full layers to original expert records under
+`STARK_EDGE0_EXPERT_WINDOWS=1`. In four fresh-worker ABBA sessions, post-idle off
+task decompressions are 458,036/0/0/446,679 for layer/record/record/layer policies,
+with matching useful work. The 26-case lifecycle passes. Its separate screened
+rerun again defers six groups after 12 matching warmups and zero measured arms;
+task decompressions remain zero in the observed span, while global admission
+decompressions total 19,986 and CPU/GPU gates also fail. Complete admission still
+covers every record window, including overlapping pages. This bounded churn
+result establishes no throughput or MTP route ranking. Record bindings remain
+opt-in and [separate receipts](benchmarks/2026-11-13-edge0-expert-windows.md)
+preserve all earlier evidence and every screen.
 Default remains off and timing qualification remains pending. The 512-token cap,
 disabled prefix reuse and local non-commercial scope remain in force.
 

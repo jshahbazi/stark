@@ -72,14 +72,18 @@ adds explicitly enabled self-task diagnostics: warmups show task-charged
 decompressions, while global paging and CPU/GPU activity prevent timing admission.
 These accounting observations preserve every screen and establish no speed claim.
 
-The separately staged `STARK_EDGE0_EXPERT_WINDOWS=1` experiment narrows each
+The separately evaluated `STARK_EDGE0_EXPERT_WINDOWS=1` policy narrows each
 target expert binding to its original gate/up/down record while retaining
 projection layer bindings. Admission includes every possible page-rounded
-record window; it does not reduce the full prospective allowance. Default layer
-bindings remain available and residency plus record windows is rejected. See
-[attempt 14](model-experiments/2026-11-13-edge0-expert-windows.md) for the fixed-idle
-control and separately screened MTP evaluation. No arithmetic, precision or
-prefix-state format changes with the binding extent.
+record window; it does not reduce the full prospective allowance. Unset/zero
+keeps layer bindings, and residency plus record windows is rejected. The
+[fixed-idle ABBA control](benchmarks/2026-11-13-edge0-expert-windows.md) reproduces
+post-idle baseline task decompressions in both layer sessions and zero in both
+record sessions. The new policy passes 26 actual lifecycle cases. Its six-group
+performance rerun remains admission-deferred with all screens intact, so no
+speed claim follows. No arithmetic, precision or prefix-state format changes
+with the binding extent; qualification is bounded to this pinned artifact and
+the recorded context/workloads.
 
 Inspect only its pinned small metadata and bounded skeleton header with:
 

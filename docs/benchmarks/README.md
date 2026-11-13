@@ -22,6 +22,12 @@ decompression/gauge snapshots and host rejection counts. Twelve warmups match,
 but all six groups again defer before measured arms. Worker-charged warmup churn
 and idle global activity are documented separately, with no route ranking or
 performance promotion.
+The [expert-record binding control](2026-11-13-edge0-expert-windows.md) reproduces
+post-idle task decompressions in both baseline sessions and zero in both candidate
+sessions, with less retained resource registration and unchanged useful work.
+Twenty-six lifecycle cases pass. The separate unchanged-screen MTP attempt still
+defers every group before measured arms; this is a bounded churn improvement,
+with no qualified throughput or route ranking.
 
 ## Current result
 

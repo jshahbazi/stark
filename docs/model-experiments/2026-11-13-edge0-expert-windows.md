@@ -9,7 +9,7 @@
 | Baseline | `543ea9bf`; preceding diagnostics from `590b185d` |
 | Predecessor | [Attempt 13](2026-11-13-edge0-worker-memory.md) |
 | Governing plan | [Phase 5](../EDGE0_PLAN.md#phase-5-mtp) |
-| State / promotion | Implementation/control preparation; new binding policy opt-in, MTP default off |
+| State / promotion | Bounded churn reduction and lifecycle validated; six timing groups deferred; record policy opt-in, MTP default off |
 
 ## Source findings and hypothesis
 
@@ -94,8 +94,9 @@ extent changes no causal state format or restoration; Phase 6's blocker remains.
 
 ## Results and disposition
 
-Preflight checks passed: the native engine suite, 52 final focused Edge0 tests
-(11 artifact-dependent cases ignored), 163 worker tests (seven ignored),
+Preflight checks passed: the native engine suite, final focused Edge0 checks
+(52 passed, 11 artifact-dependent cases ignored), worker checks (163 passed,
+seven ignored),
 55 private observer/control tests, six startup-process cases, formatting,
 repository policy and production-target Clippy with warnings denied. The new
 tiny-file GPU test verifies byte-identical products, mapped page prefixes/tails
@@ -103,5 +104,84 @@ and mapping ownership through both graph completions after file unlink.
 Independent source reviews checked the complete inventory, lifetime and budget
 accounting, unchanged screen predicates and the fixed-idle control schedule.
 
-Pending sealed controls and matched rerun. Preserve every predecessor receipt.
-No decompression reduction or performance benefit is established by source alone.
+The [separate result record](../benchmarks/2026-11-13-edge0-expert-windows.md)
+binds implementation `7c900c69` and release worker SHA-256
+`0f6db70121c424f86457023de5330635b37ad677d8ebe3179d12e37cb9240055`.
+
+The four-session ABBA control passed with all 16 requests matching the same
+input/output hashes, six emitted/seven sampled tokens and EOS. Post-idle off
+requests recorded **458,036 / 0 / 0 / 446,679 task decompressions** for policies
+0/1/1/0; following on requests recorded zero in every session. Every fixed idle
+wait exceeded 120 seconds. All four workers exited normally and were reaped.
+Both record-policy sessions retained 11,956,895,744 bank-registration bytes
+versus 43,819,991,040 for the baseline, a 72.714% reduction for this workload.
+Sampled Metal allocated resource bytes after on were 18,214,731,776 versus
+50,077,827,072. These are registration/allocation gauges, not physical residency.
+
+This intervention identifies binding extent as an actionable source of excess
+worker-execution churn in the bounded control. It does not identify individual
+pages or the complete driver/OS mechanism. Source bytes, kernels and useful work
+are unchanged. Fixed off-before-on route order, four sessions and uncontrolled
+host differences prevent a route-efficiency ranking or speed claim. Neither
+task/global subtraction nor diagnostic baseline subtraction is permitted.
+
+The new policy also passed 26 actual worker lifecycle cases: nine greedy hash
+comparisons, sampled paths, stopping/tails/streaming, two asynchronous prompt/
+decode cancellations with two same-worker recoveries, cancellation-channel EOF,
+three rejected invalid requests and two memory plans at context 512. These
+cases have no worker-memory trace and are separate from memory measurements.
+
+The preregistered performance attempt completed 12 golden-matching warmups but
+deferred all six groups before any of 48 intended measured arms. All 657
+diagnostic snapshots were valid, with task decompressions staying zero throughout
+the observed span, including all warmups and admission waits. Six admission
+windows totaled 19,986 global decompressions and zero compression, pageout or
+swapout increases over 720.392 seconds. The sampled counter-only quiet maximum
+was 9.759404 seconds, and the combined maximum was 8.600685, below ten. Every
+window also had CPU/GPU gate violations; thermal remained nominal. The source
+of residual global activity and complete GPU/driver accounting remain unresolved.
+
+With the 128-token prefix, retained registration grew to 19,286,458,368 bytes
+across 9,488 windows, while sampled Metal allocation reached 25,544,294,400 bytes.
+The full admitted allowance stayed 44,210,061,312 bytes; arbitrary future prompts
+can populate more of that inventory. The short control is not a model-wide
+memory bound. No cache limit or admission reserve was reduced.
+
+Independent review regenerated all 2,185 source entries and verified binary,
+SDK, private helper/test, corpus, artifact receipt, input and output identities.
+All 472 control and 657 performance snapshots and their derived deltas/brackets
+were rechecked without discrepancies. Final performance monitor joined with
+1,365 samples and zero failures. Lifecycle and performance workers each exited
+on stdin EOF with code zero and were reaped within the registered limits.
+Every predecessor receipt is preserved. Keep the resource policy opt-in;
+performance qualification remains open and MTP stays off by default.
+
+## Evidence bindings
+
+Only aggregates and hashes are published. The locked Python 3.13.13 environment,
+psutil 7.2.2, six SDK headers, interpreter, native fixture and private source/test
+identities are bound inside the immutable registrations. No fresh large-payload
+rehash is claimed.
+
+| Binding | SHA-256 |
+| --- | --- |
+| Source manifest, 2,185 entries | `72cd9009cc1e5d1fbaae55465b1c6367b4343633e48630f9c4ce912ce32b5b47` |
+| ABBA registration | `930c3a51a0a2a4c87a3b6dafba54f26e6b863216816a2c68e7fe69c22e5ab16c` |
+| ABBA aggregate report | `dbc8f16c33c9836db0146ea786cc77343ddbd3d504b49579d8ced9e284b81ad9` |
+| Lifecycle registration | `f5a0f29f69e4c81ee5ff5b0ea6c719aa209b5e3d94d62fdb6bd7f42ac440e799` |
+| Lifecycle aggregate report | `976a1656e938d818fffe1b60b4d068e53d9261103198624214a41a1318d8afcd` |
+| Performance registration | `a891aaaaef2c7bf8b45e335ddd66a1cb802ddcca97291a0f2b277f1712da33b0` |
+| Performance aggregate report | `d0a4c8d15ea07490eb66afd23aca79fc1595b67e868fec64f733189cdeaa3b4d` |
+| Control harness | `37e253e72b0ce0697bcd3d3459a5d445d0e95e2f37efb42c6446a210739d4478` |
+| Performance/lifecycle harness | `c29a55e8cf1ecaa95e75619fec29edf604f510a580c8d44ee76aa74bfbd51c6b` |
+| Worker/backend observer | `eb2bcf6b46d713b1ff46ca326640c7c458c833acf2b83e69fb7444052a4c25e5` |
+| Final focused native test log | `ef0a00e0db29ac9c9af66cc0d3d228d3a98037e0d56a8345d3bfb0be6107e051` |
+
+## Remaining qualification work
+
+A qualified MTP decision still requires complete eligible matched groups on a
+host that reaches every unchanged admission condition. Smaller bindings address
+the measured worker churn, while the residual global counter and CPU/GPU gates
+remain. No foreign application was closed and no OS memory/power policy was
+changed. Wider prompts, arbitrary long-running cache histories, explicit residency,
+prefix reuse, other artifacts and product admission require separate evidence.
