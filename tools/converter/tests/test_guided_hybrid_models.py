@@ -39,9 +39,14 @@ def host_resources(**changes):
     }
 
 
-def test_every_fixed_native_source_has_a_separate_bound_plan():
+def test_fixed_native_sources_have_a_bound_plan_or_explicit_ripple_exclusion():
     recipes = guided.native_recipes()
-    assert {recipe.native_choice for recipe in recipes} == set(hybrid.SOURCES)
+    # Ripple's manual text imports do not establish the source-bound memory
+    # and tool-workflow profiles required by Guided setup. BF16 is preparation
+    # only; the two quantized catalog choices are also deliberately excluded.
+    unprofiled = {"ripple-q8", "ripple-q4-k-m", "ripple-bf16"}
+    assert unprofiled <= set(hybrid.SOURCES)
+    assert {recipe.native_choice for recipe in recipes} == set(hybrid.SOURCES) - unprofiled
     assert len({recipe.id for recipe in recipes}) == len(recipes)
     for recipe in recipes:
         source = hybrid.SOURCES[recipe.native_choice]
@@ -261,7 +266,7 @@ def test_native_sources_are_considered_offline_without_catalog_candidates(tmp_pa
         report = [json.loads(line) for line in host.output.getvalue().splitlines()][-1]["report"]
         assert report["items"][0]["repo"] == hybrid.SOURCES["flint-int4"]["weights_repo"]
         assert "Native hybrid" in report["message"]
-        assert report["catalog_search"]["candidates_considered"] == len(guided.RECIPES) + len(hybrid.SOURCES)
+        assert report["catalog_search"]["candidates_considered"] == len(guided.RECIPES) + len(guided.native_recipes())
     finally:
         host.stop(quiet=True)
 

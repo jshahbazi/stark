@@ -13,6 +13,11 @@ clipping require Ripple-specific execution.
 
 ## Prepare and run
 
+The app's Advanced **Model Catalog → Ripple-65B Preview** also offers the two
+pinned quantized recipes below. Ripple is excluded from Guided setup
+recommendations: the source-bound guided memory profile and tool-workflow
+qualification required by that path have not been established.
+
 Run from a source checkout containing Ripple support:
 
 ```sh
