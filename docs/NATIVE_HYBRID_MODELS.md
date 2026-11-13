@@ -43,9 +43,14 @@ execution policies.
 The private native MTP head has passed independent component and bounded
 actual-artifact replay checks in
 [attempt `20261113-EDGE0-08`](model-experiments/2026-11-13-edge0-mtp-head.md).
-It retains original four-plane Q2 expert bytes and F32 arithmetic. This does
-not enable worker MTP: complete target/head restoration and rebinding, request
-lifecycle, exact sampling and MTP on/off measurement remain unfinished.
+It retains original four-plane Q2 expert bytes and F32 arithmetic. Combined
+target/head/pending-wide restoration, exclusive resource leases and exact
+one-to-three-draft serial sampling subsequently passed bounded local gates in
+[attempt `20261113-EDGE0-09`](model-experiments/2026-11-13-edge0-mtp-integration.md).
+The private evaluator qualifies one combined checkpoint per round, clean callback
+stops and same-model recovery. Worker request integration, asynchronous
+cancellation and matched MTP on/off measurement/default selection remain
+unfinished; worker MTP and prefix reuse stay unavailable.
 
 Inspect only its pinned small metadata and bounded skeleton header with:
 

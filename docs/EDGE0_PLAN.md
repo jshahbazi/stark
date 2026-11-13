@@ -348,10 +348,14 @@ The foundation component and bounded actual-target checkpoint gates passed in
 The private original-weight head component passed its independent numerical
 and bounded actual-artifact replay gates in
 [attempt `20261113-EDGE0-08`](model-experiments/2026-11-13-edge0-mtp-head.md).
-Combined target-plus-head restoration/rebinding, exact sampling integration,
-request lifecycle and MTP on/off qualification remain unfinished; worker
-capabilities stay unavailable. Current diagnostic head admission is one-shot;
-fresh target binding requires model reload until leasing/rebinding is implemented.
+Combined target/head/pending-wide restoration, exclusive head leasing/rebinding
+and exact serial sampling passed bounded local gates in
+[attempt `20261113-EDGE0-09`](model-experiments/2026-11-13-edge0-mtp-integration.md).
+The private evaluator supports one to three drafts and one live combined
+checkpoint per round; head recreation and reset recovery require no model reload.
+Worker request integration, asynchronous cancellation and matched MTP on/off
+qualification/default selection remain unfinished. Worker capabilities stay
+unavailable; the 512-token cap and disabled prefix reuse remain in force.
 
 - Load the draft layer from `mtp/` and adapt the existing Flash-Next head
   contract to the native Qwen graph. Implement the source's four-plane Q2 expert
@@ -377,8 +381,9 @@ fresh target binding requires model reload until leasing/rebinding is implemente
 - Complete the state inventory below against the implemented path.
 - Implement consistent export/import for the native graph using the existing
   mixed-precision backend's 4,096-token snapshot contract as a reference.
-  Phase 5 supplies private positive-boundary target primitives; worker prefix
-  scope/lifetime integration and draft-head restoration remain unfinished.
+  Phase 5 supplies private positive-boundary target/head primitives; worker prefix
+  scope/lifetime integration and combined restoration at chunk boundaries remain
+  unfinished.
   The current 512-token cap cannot exercise that boundary. Address the recorded
   wider-context indexer finite-check concern and qualify the larger context
   before a 4,096-token reuse run.
@@ -435,10 +440,9 @@ These are expectations from the Flash-Next inventory, not findings.
 2. The model is described as trained at 4 bits with quantized activations in
    the upstream arithmetic. Floating activations may differ from the trained
    forward.
-3. Main-path scale conventions are traced and component-qualified. The retained
-   draft's four-plane Q2 bank is source-traced but still needs executable
-   head/storage qualification and independent normalization checks before MTP
-   admission.
+3. Main-path scale conventions and the retained four-plane Q2 head have passed
+   bounded F32 numerical and exact serial sampling gates. Reduced-precision
+   activations, wider contexts and worker MTP admission need separate evidence.
 4. The borrowed Flash-Next tokenizer comparison failed. The separately qualified
    source-native tokenizer is artifact/profile bound; other exports do not
    inherit that proof.

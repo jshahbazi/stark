@@ -260,3 +260,9 @@ incomplete: combined target/head/pending-wide state, resource leasing, request
 recovery/cancellation, real one-to-three-draft exact sampling and matched on/off
 measurement are still required. Worker MTP and prefix reuse remain unavailable;
 app/catalogue and distribution admission are unchanged.
+
+Follow-up: [attempt `20261113-EDGE0-09`](2026-11-13-edge0-mtp-integration.md)
+subsequently qualified combined restoration, exclusive resource leases, reset
+rebinding and exact serial sampling for bounded private evaluation. It supersedes
+the one-shot diagnostic lifetime limitation for that evaluator. The numerical
+results above retain their original source and scope; worker MTP remains unavailable.
