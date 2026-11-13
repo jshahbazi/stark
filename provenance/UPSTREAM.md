@@ -91,6 +91,38 @@ This avoids inheriting the Python regex engine's different Unicode category
 tables. The accepted profile is Python preparation only; it establishes no
 Rust parser, native generation, stream or model qualification.
 
+### Edge0 reference forward
+
+The diagnostic source adapter, tiled-head/negative-A recurrence and latent MoE
+reference follow the same pinned authorities. GGUF transformation facts come
+from `conversion/qwen.py`, `conversion/qwen4exp.py` and `src/models/qwen4exp.cpp`
+at llama.cpp `3cf03257f219afbe7334045ff7c6a06ac68c627d`. The exact 38 family
+metadata fields are recorded in native `edge0_geometry.json` and preparation's
+`EXPECTED_GEOMETRY`; runtime equality is required. They do not establish
+checkpoint payload integrity independently of the prepared source receipt.
+
+| Conversion/layout authority at the llama.cpp pin | SHA-256 |
+| --- | --- |
+| `conversion/qwen.py` | `b783f53598e1a65cb0ef7fbe0d0f52da472e2784f63acf13a5aea00f623cfaa6` |
+| `conversion/qwen4exp.py` | `12a0a5aea7877fbb8fe35af041a9c34f8b57b05278871b22c24c650b9760dfc3` |
+| `src/llama-graph.cpp` | `90f5c6f082790599124630680ba1293d702b369e9ce9088680d210b69905c8d3` |
+| `ggml/src/ggml-cpu/ops.cpp` | `3ad6c159f0e9c2e8cef589be2f41f8ca7221a4e465488ad13ae5bff55669158c` |
+| `src/llama-memory-hybrid-idx.cpp` | `84a57c465729006c28edbca6bc04d121a2afda1495afb206f956dfc3d17096a1` |
+
+Additional arithmetic authorities at Edge0 revision
+`b7900cbb322926ccebdcd0c0c5a1280497ecff22`:
+
+| File | SHA-256 |
+| --- | --- |
+| `edge0-strata/src/kernels/cuda/router_top10.cu` | `4fa8260d101ba1d5c82e9ee1ee6260ca3f8a7d8020493254682dd0e597c5e94a` |
+| `edge0-strata/src/latent/latent_moe.cpp` | `43f929de67fdd421e6d78ec6dacf3d86f4d8b0b3325a5a1bc680bf2a2f4f8239` |
+| `edge0-strata/src/kernels/cpu/native_expert.cpp` | `ca4c07774c9f3ea0341bc91bf152f03b885a0a1fbf0f9d7d6d827641515e6b97` |
+
+The independent F64 fixture uses the pinned GGML C quantizers/decoders through
+a Stark-authored CPU bridge. New code does not copy the source runtime.
+Component, activation-control and actual checkpoint scopes are recorded
+separately in [attempt `20261112-EDGE0-05`](../docs/model-experiments/2026-11-12-edge0-reference-forward.md).
+
 ### Edge0 native reader and block components
 
 The independent native Strata readers and the new Q4_0 (GGML 2), IQ4_NL

@@ -1,6 +1,7 @@
 # Edge0-145B native support plan
 
-Status: phase 2 component gate passed for local non-commercial evaluation, 2026-11-12.
+Status: phase 3 reference gate passed for local non-commercial evaluation;
+phase 4 pending, 2026-11-12.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
@@ -13,24 +14,31 @@ preparation is tracked separately in
 The full pinned source set is published locally with every payload hash bound;
 native readers/decoders are tracked in
 [`20261112-EDGE0-04`](model-experiments/2026-11-12-edge0-block-readers.md).
-No Stark model execution is qualified. Follow
+The diagnostic reference path passed the bounded component and ordinary-chat
+gates in
+[`20261112-EDGE0-05`](model-experiments/2026-11-12-edge0-reference-forward.md).
+It requires an explicit local selector and retains a 512-token runtime limit;
+app/catalogue admission, MTP, prefix reuse and broad numerical/performance
+qualification remain unfinished. Follow
 [model onboarding](MODEL_ONBOARDING.md), the
 [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md) and the
 [experiment ledger](model-experiments/README.md).
 
 ## Summary
 
-Adding Edge0-145B is feasible. The release is Qwen3.8-Flash-Next (`qwen4exp`)
+The release is Qwen3.8-Flash-Next (`qwen4exp`)
 with its routed experts replaced by latent experts, and Stark already runs that
-trunk natively. It is a backend project, not a catalogue entry:
+trunk natively. The original intake identified these backend requirements;
+the phase status above and dated records track their implementation:
 
-- the weights use a storage layout Stark does not read (a Strata pack plus a
+- the weights use a storage layout beyond the normal model-loading route (a Strata pack plus a
   GGUF skeleton, with no `config.json` and no Safetensors);
 - the routed feed-forward path has new arithmetic (project down, run the
   expert at latent width, project up, by expert group);
-- three block formats and one table format are new to Stark;
-- the upstream runtime for this model is NVIDIA-only in the public tree, so
-  there is no Mac reference to compare against.
+- three block formats and one table format require artifact-specific validation;
+- the relevant upstream full-latent verification targets require CUDA, and
+  related CPU parity tools require x86; no registered full latent-forward
+  verifier is available CPU-only on macOS arm64 at this pin.
 
 Recommended first artifact: `Edge0/Edge0-145B-q3k`. The eight binary files listed
 below total 103,374,417,600 bytes (96.27 GiB), of which 51.2 GB is the n-gram
@@ -282,6 +290,13 @@ replay and remaining runtime qualification.
 Gate: fixture parity within thresholds fixed in the attempt record; bounded
 ordinary-chat smoke passes on the real artifact. `prefix_cache.supported` stays
 false and MTP stays unavailable on this path.
+
+Local gate passed in [attempt `20261112-EDGE0-05`](model-experiments/2026-11-12-edge0-reference-forward.md):
+the independent F64 latent/shared/readout fixture passed on CPU and Safe Metal,
+activation controls ran on synthetic and actual layer weights, the locked Rust
+tokenizer gate passed, and bounded real-artifact ordinary chat/reset/restart
+passed. This is a diagnostic reference qualification; it establishes no
+whole-model external numerical equivalence or broad quality/speed result.
 
 ### Phase 4: mixed-precision Metal path
 

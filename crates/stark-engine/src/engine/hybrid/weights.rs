@@ -40,6 +40,10 @@ use serde_json::Value;
 
 use super::{Error, Result};
 
+#[path = "edge0_weights.rs"]
+mod edge0;
+pub use edge0::Edge0Matrix;
+
 const MAX_HEADER: usize = 128 * 1024 * 1024;
 const MAX_COUNT: usize = 2_000_000;
 const MAX_VECTOR: usize = 8_000_000;
@@ -604,6 +608,7 @@ pub struct Weights {
     files: Vec<Arc<Mapping>>,
     tensors: HashMap<String, Tensor>,
     metadata: BTreeMap<String, Value>,
+    edge0: Option<edge0::Edge0Data>,
     #[cfg(feature = "metal")]
     static_views: Mutex<StaticViewCache>,
     #[cfg(feature = "metal")]
@@ -833,6 +838,7 @@ impl Weights {
             files: Vec::new(),
             tensors: HashMap::new(),
             metadata: BTreeMap::new(),
+            edge0: None,
             #[cfg(feature = "metal")]
             static_views: Mutex::new(StaticViewCache::new(MAX_STATIC_VIEW_BYTES)),
             #[cfg(feature = "metal")]
@@ -949,10 +955,13 @@ impl Weights {
         &self,
         name: &str,
     ) -> bool {
-        self.tensors.contains_key(name)
+        self.tensors.contains_key(name) || self.edge0.as_ref().is_some_and(|data| data.virtual_shape(name).is_some())
     }
     pub fn names(&self) -> Vec<String> {
         let mut names: Vec<_> = self.tensors.keys().cloned().collect();
+        if let Some(data) = &self.edge0 {
+            names.extend(data.virtual_names());
+        }
         names.sort();
         names
     }
@@ -968,6 +977,9 @@ impl Weights {
         &self,
         name: &str,
     ) -> Result<&[usize]> {
+        if let Some(shape) = self.edge0.as_ref().and_then(|data| data.virtual_shape(name)) {
+            return Ok(shape);
+        }
         Ok(&self.tensor(name)?.shape)
     }
 
@@ -1069,6 +1081,9 @@ impl Weights {
         &self,
         name: &str,
     ) -> Result<Vec<i64>> {
+        if let Some(values) = self.edge0.as_ref().and_then(|data| data.integers(name)) {
+            return Ok(values.to_vec());
+        }
         let tensor = self.tensor(name)?;
         let count = product(&tensor.shape)?;
         if count > MAX_VECTOR {
@@ -1088,6 +1103,11 @@ impl Weights {
         name: &str,
         row: usize,
     ) -> Result<Vec<f32>> {
+        if let Some(data) = &self.edge0
+            && data.is_table(name)
+        {
+            return data.row(self, row);
+        }
         let tensor = self.tensor(name)?;
         if tensor.shape.len() < 2 {
             return Err(Error::Invalid("matrix row access requires rank two or higher"));

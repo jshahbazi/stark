@@ -21,7 +21,13 @@ the app catalogue, Beginner recommendations and normal prepared-model identity.
 Its default metadata-only preflight rejects the released tokenizer's mismatch
 with the pinned Qwen reference before downloading payloads. A separately
 qualified source-native tokenizer is available through an explicit evaluation
-policy; no Edge0 backend is enabled.
+policy. Default worker loading rejects this source. An explicit source-checkout
+diagnostic path, selected with `STARK_EDGE0_REFERENCE=1`, has passed the
+[bounded F32 reference gate](model-experiments/2026-11-12-edge0-reference-forward.md)
+on the exact prepared artifact, with a 512-token runtime limit. MTP and prefix
+reuse remain unavailable; image input is N/A for this text-only source. This
+does not enable catalogue admission, full-model external numerical parity or
+broad quality/performance qualification.
 Inspect only its pinned small metadata and bounded skeleton header with:
 
 ```sh

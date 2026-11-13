@@ -10,6 +10,9 @@
 
 use serde_json::Value;
 
+#[path = "edge0.rs"]
+mod edge0;
+
 #[cfg(feature = "metal")]
 #[path = "qwen_graph.rs"]
 mod decode_graph;
@@ -24,6 +27,7 @@ use super::{
 #[derive(Clone)]
 #[cfg_attr(test, derive(Default))]
 struct Geometry {
+    edge0: bool,
     dim: usize,
     vocab: usize,
     streams: usize,
@@ -324,9 +328,7 @@ struct DeltaNet {
     norm: Vec<f32>,
     #[cfg(feature = "metal")]
     metal: Option<super::weight_metal::QwenGdnState>,
-    #[cfg(not(feature = "metal"))]
     conv_state: ConvState,
-    #[cfg(not(feature = "metal"))]
     state: Vec<f32>,
 }
 
@@ -338,6 +340,15 @@ impl DeltaNet {
         let width =
             g.key_heads.checked_mul(g.key_dim)?.checked_mul(2)?.checked_add(g.value_heads.checked_mul(g.value_dim)?)?;
         let recurrent = g.value_heads.checked_mul(g.value_dim)?.checked_mul(g.key_dim)?;
+        if g.edge0 {
+            return super::memory::sum(&[
+                super::memory::vector_resize_bytes::<f32>(self.state.capacity(), recurrent)?,
+                super::memory::vector_resize_bytes::<f32>(
+                    self.conv_state.history.capacity(),
+                    width.checked_mul(g.conv_kernel - 1)?,
+                )?,
+            ]);
+        }
         #[cfg(feature = "metal")]
         {
             if self.metal.is_some() {
@@ -386,17 +397,20 @@ impl DeltaNet {
         }
         matrix(weights, &format!("{prefix}.out_proj"), g.dim, value_width)?;
         shape(weights, &format!("{prefix}.conv1d.weight"), &[width, g.conv_kernel, 1])?;
+        let a_log = vector(weights, &format!("{prefix}.A_log"), g.value_heads)?;
+        if g.edge0 && a_log.iter().any(|value| *value > 0.0) {
+            return Err(Error::Invalid("Edge0 recurrent stored negative A"));
+        }
         Ok(Self {
             convolution: vector(weights, &format!("{prefix}.conv1d.weight"), width * g.conv_kernel)?,
-            a_log: vector(weights, &format!("{prefix}.A_log"), g.value_heads)?,
+            // GGUF already stores -exp(A_log); retain it directly for Edge0.
+            a_log,
             dt_bias: vector(weights, &format!("{prefix}.dt_bias"), g.value_heads)?,
             norm: vector(weights, &format!("{prefix}.norm.weight"), g.value_dim)?,
             prefix,
             #[cfg(feature = "metal")]
             metal: None,
-            #[cfg(not(feature = "metal"))]
             conv_state: ConvState::default(),
-            #[cfg(not(feature = "metal"))]
             state: Vec::new(),
         })
     }
@@ -406,11 +420,8 @@ impl DeltaNet {
         if let Some(state) = &mut self.metal {
             state.reset();
         }
-        #[cfg(not(feature = "metal"))]
-        {
-            self.conv_state.clear();
-            self.state.clear();
-        }
+        self.conv_state.clear();
+        self.state.clear();
     }
 
     fn step(
@@ -421,7 +432,7 @@ impl DeltaNet {
     ) -> Result<Vec<f32>> {
         let _profile = Scope::new("qwen.gdn");
         #[cfg(feature = "metal")]
-        {
+        if !g.edge0 {
             if self.metal.is_none() {
                 self.metal = Some(super::weight_metal::QwenGdnState::new(
                     super::weight_metal::QwenGdnGeometry {
@@ -439,13 +450,12 @@ impl DeltaNet {
                     &self.norm,
                 )?);
             }
-            weights.qwen_gdn(
+            return weights.qwen_gdn(
                 &self.prefix,
                 input,
                 self.metal.as_mut().ok_or(Error::Invalid("Qwen GDN state unavailable"))?,
-            )
+            );
         }
-        #[cfg(not(feature = "metal"))]
         {
             let [mixed, z, a, b] = projects(
                 weights,
@@ -453,50 +463,82 @@ impl DeltaNet {
                 [("in_proj_qkv", input), ("in_proj_z", input), ("in_proj_a", input), ("in_proj_b", input)],
             )?;
             let convolved = self.conv_state.step(&mixed, &self.convolution, g.conv_kernel, 1)?;
-            let key_width = g.key_heads * g.key_dim;
-            let (q, remainder) = convolved.split_at(key_width);
-            let (k, v) = remainder.split_at(key_width);
-            let recurrent_profile = Scope::new("qwen.gdn.recurrent");
-            let mut q = q.to_vec();
-            let mut k = k.to_vec();
-            normalize_l2(&mut q, g.key_dim, (g.key_dim as f32).sqrt().recip());
-            normalize_l2(&mut k, g.key_dim, 1.0);
-            let count = g.value_heads * g.value_dim * g.key_dim;
-            if self.state.is_empty() {
-                self.state.resize(count, 0.0);
-            }
-            let mut result = vec![0.0; g.value_heads * g.value_dim];
-            for head in 0..g.value_heads {
-                let key_head = head / (g.value_heads / g.key_heads);
-                let q = &q[key_head * g.key_dim..(key_head + 1) * g.key_dim];
-                let k = &k[key_head * g.key_dim..(key_head + 1) * g.key_dim];
-                let softplus_arg = a[head] + self.dt_bias[head];
-                let softplus = softplus_arg.max(0.0) + (-softplus_arg.abs()).exp().ln_1p();
-                let decay = (-self.a_log[head].exp() * softplus).exp();
-                let beta = sigmoid(b[head]);
-                for channel in 0..g.value_dim {
-                    let index = head * g.value_dim + channel;
-                    let state = &mut self.state[index * g.key_dim..(index + 1) * g.key_dim];
-                    result[index] = delta_row(state, q, k, v[index], decay, beta);
-                }
-                let normalized = rms_norm(&result[head * g.value_dim..(head + 1) * g.value_dim], &self.norm, g.eps)?;
-                for (channel, value) in normalized.into_iter().enumerate() {
-                    let index = head * g.value_dim + channel;
-                    result[index] = value
-                        * if g.sigmoid_output {
-                            sigmoid(z[index])
-                        } else {
-                            silu(z[index])
-                        };
-                }
-            }
-            drop(recurrent_profile);
+            let result = self.recurrent_step(&convolved, &z, &a, &b, g)?;
             project(weights, &format!("{}.out_proj", self.prefix), &result)
         }
     }
+
+    fn recurrent_step(
+        &mut self,
+        convolved: &[f32],
+        z: &[f32],
+        a: &[f32],
+        b: &[f32],
+        g: &Geometry,
+    ) -> Result<Vec<f32>> {
+        let _profile = Scope::new("qwen.gdn.recurrent");
+        let key_width = g.key_heads * g.key_dim;
+        let value_width = g.value_heads * g.value_dim;
+        if convolved.len() != 2 * key_width + value_width
+            || z.len() != value_width
+            || a.len() != g.value_heads
+            || b.len() != g.value_heads
+        {
+            return Err(Error::Invalid("Qwen recurrent projection geometry"));
+        }
+        let (q, remainder) = convolved.split_at(key_width);
+        let (k, v) = remainder.split_at(key_width);
+        let mut q = q.to_vec();
+        let mut k = k.to_vec();
+        normalize_l2(&mut q, g.key_dim, (g.key_dim as f32).sqrt().recip());
+        normalize_l2(&mut k, g.key_dim, 1.0);
+        let count = g.value_heads * g.value_dim * g.key_dim;
+        if self.state.is_empty() {
+            self.state.resize(count, 0.0);
+        }
+        if self.state.len() != count {
+            return Err(Error::Invalid("Qwen recurrent state geometry"));
+        }
+        let mut result = vec![0.0; value_width];
+        for head in 0..g.value_heads {
+            // GGUF conversion tiles V heads to match ggml broadcast; the
+            // MLX source keeps V heads grouped by their K head instead.
+            let key_head = if g.edge0 {
+                head % g.key_heads
+            } else {
+                head / (g.value_heads / g.key_heads)
+            };
+            let q = &q[key_head * g.key_dim..(key_head + 1) * g.key_dim];
+            let k = &k[key_head * g.key_dim..(key_head + 1) * g.key_dim];
+            let softplus_arg = a[head] + self.dt_bias[head];
+            let softplus = softplus_arg.max(0.0) + (-softplus_arg.abs()).exp().ln_1p();
+            let negative_a = if g.edge0 {
+                self.a_log[head]
+            } else {
+                -self.a_log[head].exp()
+            };
+            let decay = (negative_a * softplus).exp();
+            let beta = sigmoid(b[head]);
+            for channel in 0..g.value_dim {
+                let index = head * g.value_dim + channel;
+                let state = &mut self.state[index * g.key_dim..(index + 1) * g.key_dim];
+                result[index] = delta_row(state, q, k, v[index], decay, beta);
+            }
+            let normalized = rms_norm(&result[head * g.value_dim..(head + 1) * g.value_dim], &self.norm, g.eps)?;
+            for (channel, value) in normalized.into_iter().enumerate() {
+                let index = head * g.value_dim + channel;
+                result[index] = value
+                    * if g.sigmoid_output {
+                        sigmoid(z[index])
+                    } else {
+                        silu(z[index])
+                    };
+            }
+        }
+        Ok(result)
+    }
 }
 
-#[cfg(any(not(feature = "metal"), test))]
 fn normalize_l2(
     input: &mut [f32],
     dim: usize,
@@ -508,7 +550,6 @@ fn normalize_l2(
     }
 }
 
-#[cfg(any(not(feature = "metal"), test))]
 fn delta_row(
     state: &mut [f32],
     q: &[f32],
@@ -762,10 +803,9 @@ impl Ple {
         for n in 2..=g.ngram_size {
             hash ^= (shifted[n - 1] as i64).wrapping_mul(self.multipliers[n - 1]);
             for head in (n - 2) * heads_per_size..(n - 1) * heads_per_size {
-                let global = hash
-                    .rem_euclid(self.sizes[head])
-                    .checked_add(self.offsets[head])
-                    .ok_or(Error::Invalid("Qwen3.8 n-gram index"))? as usize;
+                let bucket = ple_bucket(hash, self.sizes[head], g.edge0);
+                let global =
+                    bucket.checked_add(self.offsets[head]).ok_or(Error::Invalid("Qwen3.8 n-gram index"))? as usize;
                 let shard = global / self.rows_per_shard;
                 let row = global % self.rows_per_shard;
                 if shard >= g.shards {
@@ -814,6 +854,18 @@ impl Ple {
             *value += convolution;
         }
         Ok(gated)
+    }
+}
+
+fn ple_bucket(
+    hash: i64,
+    size: i64,
+    edge0: bool,
+) -> i64 {
+    if edge0 {
+        ((hash as u64) % size as u64) as i64
+    } else {
+        hash.rem_euclid(size)
     }
 }
 
@@ -923,6 +975,7 @@ enum Mixer {
 }
 
 struct Layer {
+    edge0_layer: Option<usize>,
     prefix: String,
     attn_hyper: HyperConnection,
     mlp_hyper: HyperConnection,
@@ -1173,6 +1226,7 @@ impl QwenModel {
         weights: Weights,
         config: &Value,
     ) -> Result<Self> {
+        let edge0 = weights.is_edge0();
         if config.get("model_type").and_then(Value::as_str) != Some("qwen4_exp") {
             return Err(Error::Unsupported("Qwen3.8 architecture"));
         }
@@ -1182,7 +1236,7 @@ impl QwenModel {
         }
         if text.get("hidden_act").and_then(Value::as_str).unwrap_or("silu") != "silu"
             || text.get("attention_bias").and_then(Value::as_bool).unwrap_or(false)
-            || config.get("quantization").and_then(Value::as_object).is_none()
+            || (!edge0 && config.get("quantization").and_then(Value::as_object).is_none())
         {
             return Err(Error::Unsupported("Qwen3.8 activation, biases or unconverted normalization weights"));
         }
@@ -1213,6 +1267,7 @@ impl QwenModel {
             return Err(Error::Unsupported("Qwen3.8 recurrent output activation"));
         }
         let g = Geometry {
+            edge0,
             dim: integer(text, "hidden_size", 16_384)?,
             vocab: integer(text, "vocab_size", 1_000_000)?,
             streams: integer(text, "hc_count", 16)?,
@@ -1319,13 +1374,18 @@ impl QwenModel {
                 },
                 _ => return Err(Error::Unsupported("Qwen3.8 token mixer")),
             };
-            validate_moe(&weights, &format!("{prefix}.mlp"), &g)?;
+            if edge0 {
+                edge0::validate(&weights, index, &g, &format!("{prefix}.mlp"))?;
+            } else {
+                validate_moe(&weights, &format!("{prefix}.mlp"), &g)?;
+            }
             let ple = if ple_ids.contains(&(index + 1)) {
                 Some(Ple::load(&weights, format!("{prefix}.ple"), &g)?)
             } else {
                 None
             };
             layers.push(Layer {
+                edge0_layer: edge0.then_some(index),
                 attn_hyper: HyperConnection::load(&weights, format!("{prefix}.attn_hyper_connection"), &g, true)?,
                 mlp_hyper: HyperConnection::load(&weights, format!("{prefix}.mlp_hyper_connection"), &g, true)?,
                 prefix,
@@ -1334,7 +1394,8 @@ impl QwenModel {
             });
         }
         #[cfg(feature = "metal")]
-        let graph_enabled = g.active_experts <= 64
+        let graph_enabled = !g.edge0
+            && g.active_experts <= 64
             && weights.indexed_banks_admitted()
             && std::env::var_os("STARK_QWEN38_DECODE_GRAPH").is_none_or(|value| value != "0");
         Ok(Self {
@@ -1446,7 +1507,11 @@ impl QwenModel {
             };
             inject(&mut hidden, &output, &gates, g)?;
             let (input, gates) = layer.mlp_hyper.mix(&self.weights, &hidden, g)?;
-            let output = moe(&self.weights, &format!("{}.mlp", layer.prefix), &input, g)?;
+            let output = if let Some(index) = layer.edge0_layer {
+                edge0::moe(&self.weights, index, &format!("{}.mlp", layer.prefix), &input, g)?
+            } else {
+                moe(&self.weights, &format!("{}.mlp", layer.prefix), &input, g)?
+            };
             inject(&mut hidden, &output, &gates, g)?;
         }
         // The next projection normally rejects nonfinite residuals. Prefix
@@ -1580,9 +1645,7 @@ mod tests {
             norm: vec![1.0; g.value_dim],
             #[cfg(feature = "metal")]
             metal: None,
-            #[cfg(not(feature = "metal"))]
             conv_state: ConvState::default(),
-            #[cfg(not(feature = "metal"))]
             state: Vec::new(),
         };
         let cold = state.additional_memory_bytes(&g).unwrap();
@@ -1637,6 +1700,109 @@ mod tests {
         // Hashing must never round the checkpoint's signed 64-bit multipliers.
         let multiplier = 9_007_199_254_740_993_i64;
         assert_ne!(multiplier.wrapping_mul(17), (multiplier as f32 as i64).wrapping_mul(17));
+    }
+
+    #[stark_test]
+    fn edge0_ple_unsigned_modulo_keeps_source_semantics_outside_the_pinned_reachable_range() {
+        // A synthetic overflow counterexample, not a token/artifact witness.
+        assert_eq!(ple_bucket(i64::MIN, 11, true), 8);
+        assert_eq!(ple_bucket(i64::MIN, 11, false), 3);
+        for multiplier in [23_703_573_157_769_u64, 20_109_073_645_365, 8_052_911_324_071] {
+            assert!(248_319_u64 * multiplier < (1_u64 << 63));
+        }
+        // Each valid pinned product has its sign bit clear, so their XOR does
+        // too. The two policies coincide on this artifact's reachable hashes.
+    }
+
+    #[stark_test]
+    fn edge0_gdn_tiled_negative_a_matches_independent_grouped_f64_recurrence() {
+        // A post-convolution semantic unit, independent of the external latent
+        // fixture. The reference stays in original grouped HF head order and
+        // does not call the production normalization or delta-row helpers.
+        let g = Geometry {
+            edge0: true,
+            key_heads: 2,
+            key_dim: 2,
+            value_heads: 4,
+            value_dim: 2,
+            eps: 1e-5,
+            sigmoid_output: true,
+            ..Geometry::default()
+        };
+        let order = [0, 2, 1, 3];
+        let negative_a = [-0.5_f32, -1.0, -1.5, -2.0];
+        let dt = [0.1_f32, -0.2, 0.3, -0.4];
+        let norm = [0.9_f32, 1.1];
+        let initial: Vec<f32> = (0..16).map(|i| (i as f32 - 7.0) * 0.025).collect();
+        let mut reference_state: Vec<f64> = initial.iter().copied().map(f64::from).collect();
+        let mut native = DeltaNet {
+            prefix: String::new(),
+            convolution: Vec::new(),
+            a_log: order.iter().map(|&h| negative_a[h]).collect(),
+            dt_bias: order.iter().map(|&h| dt[h]).collect(),
+            norm: norm.to_vec(),
+            #[cfg(feature = "metal")]
+            metal: None,
+            conv_state: ConvState::default(),
+            state: order.iter().flat_map(|&h| initial[h * 4..h * 4 + 4].iter().copied()).collect(),
+        };
+        for step in 0..2 {
+            let q = [0.4_f32 + step as f32 * 0.03, -0.8, 0.7, 0.2];
+            let k = [0.6_f32, 0.1, -0.3, 0.9 - step as f32 * 0.02];
+            let v: Vec<f32> = (0..8).map(|i| (i as f32 - 3.0) * 0.15 + step as f32 * 0.1).collect();
+            let z: Vec<f32> = (0..8).map(|i| (i as f32 - 4.0) * 0.1).collect();
+            let a = [-0.6_f32, 0.2, 0.8, -0.3];
+            let b = [0.1_f32, -0.4, 0.7, -0.2];
+            let mut convolved = q.to_vec();
+            convolved.extend(k);
+            convolved.extend(order.iter().flat_map(|&h| v[h * 2..h * 2 + 2].iter().copied()));
+            let tiled_z: Vec<f32> = order.iter().flat_map(|&h| z[h * 2..h * 2 + 2].iter().copied()).collect();
+            let tiled_a: Vec<f32> = order.iter().map(|&h| a[h]).collect();
+            let tiled_b: Vec<f32> = order.iter().map(|&h| b[h]).collect();
+            let actual = native.recurrent_step(&convolved, &tiled_z, &tiled_a, &tiled_b, &g).unwrap();
+            let mut reference = [0.0_f64; 8];
+            for head in 0..4 {
+                let key = head / 2;
+                let mut qn = [f64::from(q[key * 2]), f64::from(q[key * 2 + 1])];
+                let mut kn = [f64::from(k[key * 2]), f64::from(k[key * 2 + 1])];
+                let qs = 1.0 / ((qn[0] * qn[0] + qn[1] * qn[1] + 1e-6) * 2.0).sqrt();
+                let ks = 1.0 / (kn[0] * kn[0] + kn[1] * kn[1] + 1e-6).sqrt();
+                for c in 0..2 {
+                    qn[c] *= qs;
+                    kn[c] *= ks;
+                }
+                let arg = f64::from(a[head]) + f64::from(dt[head]);
+                let sp = arg.max(0.0) + (-arg.abs()).exp().ln_1p();
+                let decay = (f64::from(negative_a[head]) * sp).exp();
+                let beta = 1.0 / (1.0 + (-f64::from(b[head])).exp());
+                for channel in 0..2 {
+                    let row = &mut reference_state[head * 4 + channel * 2..head * 4 + channel * 2 + 2];
+                    row[0] *= decay;
+                    row[1] *= decay;
+                    let update = (f64::from(v[head * 2 + channel]) - row[0] * kn[0] - row[1] * kn[1]) * beta;
+                    row[0] += kn[0] * update;
+                    row[1] += kn[1] * update;
+                    reference[head * 2 + channel] = row[0] * qn[0] + row[1] * qn[1];
+                }
+                let r = &reference[head * 2..head * 2 + 2];
+                let inv = 1.0 / ((r[0] * r[0] + r[1] * r[1]) * 0.5 + f64::from(g.eps)).sqrt();
+                for channel in 0..2 {
+                    reference[head * 2 + channel] *=
+                        inv * f64::from(norm[channel]) / (1.0 + (-f64::from(z[head * 2 + channel])).exp());
+                }
+            }
+            for (tiled, &grouped) in order.iter().enumerate() {
+                for channel in 0..2 {
+                    assert!((f64::from(actual[tiled * 2 + channel]) - reference[grouped * 2 + channel]).abs() < 2e-5);
+                }
+                for state in 0..4 {
+                    assert!(
+                        (f64::from(native.state[tiled * 4 + state]) - reference_state[grouped * 4 + state]).abs()
+                            < 2e-5
+                    );
+                }
+            }
+        }
     }
 
     #[stark_test]

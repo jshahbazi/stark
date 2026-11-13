@@ -4,6 +4,7 @@
 //! streams. Qwen3.8 also admits the typed Uzu converted architecture extension.
 
 pub mod activity;
+mod edge0_config;
 pub mod edge0_source;
 pub mod finite_guard;
 pub mod flint;
@@ -320,7 +321,17 @@ impl Model {
         let _ = native_decode_stage;
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
         let _ = (with_mtp, with_images);
-        let outer = config(path)?;
+        let mut outer = config(path)?;
+        let edge0_weights = if edge0_config::selected(&outer) {
+            if std::env::var_os("STARK_EDGE0_REFERENCE").as_deref() != Some(std::ffi::OsStr::new("1")) {
+                return Err(Error::Unsupported("Edge0 requires the explicit local reference selector"));
+            }
+            let weights = weights::Weights::open_edge0(path)?;
+            outer = edge0_config::runtime_config(&outer, weights.metadata())?;
+            Some(weights)
+        } else {
+            None
+        };
         if with_images && !mixed_precision_checkpoint(&outer) {
             return Err(Error::Unsupported("retained original-format Qwen image tower required"));
         }
@@ -424,7 +435,11 @@ impl Model {
         } else {
             #[cfg(feature = "metal")]
             weight_metal::initialize()?;
-            let weights = weights::Weights::open(path)?;
+            let weights = if let Some(weights) = edge0_weights {
+                weights
+            } else {
+                weights::Weights::open(path)?
+            };
             let forward = match outer.get("model_type").and_then(Value::as_str) {
                 Some("flint") => Forward::Flint(flint::FlintModel::new(weights, &outer)?),
                 Some("glm5_next") => Forward::Glm(glm::GlmModel::new(weights, &outer)?),

@@ -429,6 +429,9 @@ pub(super) struct State {
 
 impl State {
     fn new(model: &QwenModel) -> Result<Self> {
+        if model.geometry.edge0 {
+            return Err(Error::Unsupported("Edge0 reference requires scalar control"));
+        }
         let mut layers = Vec::with_capacity(model.layers.len());
         for layer in &model.layers {
             layers.push(LayerControls {
