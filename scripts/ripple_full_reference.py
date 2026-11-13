@@ -1,4 +1,4 @@
-"""Evaluate the actual Ripple Q8 checkpoint with streamed publisher layers.
+"""Evaluate a packed Ripple checkpoint with streamed publisher layers.
 
 Run in the locked ``tools`` uv environment. The independent PyTorch oracle
 dequantizes one layer at a time on CPU and executes the exact hash-pinned
@@ -83,8 +83,58 @@ def _ordered_shards(sources: list):
     return ordered
 
 
+def dequantize_k_blocks(data: bytes, kind: str):
+    """Independent NumPy GGML K-block decoder, without native engine calls.
+
+    Layout/equations: llama.cpp 1b70350c92563449576bcbbf552994b1d1ed847d,
+    ggml/src/ggml-quants.c dequantize_row_q4_K/dequantize_row_q6_K.
+    Returns F32 in GGML element order; packed source bytes remain untouched.
+    """
+    import numpy as np
+
+    size = {"Q4_K": 144, "Q6_K": 210}.get(kind)
+    if size is None or not data or len(data) % size:
+        raise ValueError("invalid K-block payload")
+    raw = np.frombuffer(data, dtype=np.uint8).reshape(-1, size)
+    result = np.empty((len(raw), 256), dtype=np.float32)
+
+    def half(offset):
+        return raw[:, offset : offset + 2].copy().view("<f2").reshape(-1).astype(np.float32)
+
+    if kind == "Q4_K":
+        d, dmin = half(0), half(2)
+        packed_scales = raw[:, 4:16]
+        codes = raw[:, 16:]
+        for group in range(8):
+            if group < 4:
+                scale = packed_scales[:, group] & 63
+                minimum = packed_scales[:, group + 4] & 63
+            else:
+                scale = (packed_scales[:, group + 4] & 15) | ((packed_scales[:, group - 4] >> 6) << 4)
+                minimum = (packed_scales[:, group + 4] >> 4) | ((packed_scales[:, group] >> 6) << 4)
+            nibble = (codes[:, (group // 2) * 32 : (group // 2 + 1) * 32] >> (4 * (group % 2))) & 15
+            result[:, group * 32 : (group + 1) * 32] = (
+                (d * scale)[:, None] * nibble - (dmin * minimum)[:, None]
+            )
+    else:
+        d = half(208)
+        low, high = raw[:, :128], raw[:, 128:192]
+        scales = raw[:, 192:208].copy().view(np.int8)
+        lanes = np.arange(32) // 16
+        for half_index in range(2):
+            for group in range(4):
+                packed_low = low[:, half_index * 64 + (group % 2) * 32 : half_index * 64 + (group % 2 + 1) * 32]
+                packed_high = high[:, half_index * 32 : (half_index + 1) * 32]
+                codes = (((packed_low >> (4 * (group // 2))) & 15)
+                         | (((packed_high >> (2 * group)) & 3) << 4)).astype(np.int16) - 32
+                scale = scales[:, half_index * 8 + group * 2 + lanes].astype(np.float32)
+                begin = half_index * 128 + group * 32
+                result[:, begin : begin + 32] = (d[:, None] * scale) * codes
+    return result
+
+
 class Q8Weights:
-    """Read Q8_0/F32 tensors independently of the native Rust decoder."""
+    """Read packed GGUF tensors independently of the native Rust decoder."""
 
     def __init__(self, directory: Path):
         # Reuse only the bounded GGUF container parser. Numeric decoding below
@@ -99,7 +149,7 @@ class Q8Weights:
         for path in self.files:
             if path.is_symlink():
                 raise ValueError("GGUF source must be a regular file")
-            sources.append(read_gguf(path))
+            sources.append(read_gguf(path, reference_k_quants=True))
         sources = _ordered_shards(sources)
         self.files = [source.path for source in sources]
         self.tensors = {}
@@ -117,7 +167,7 @@ class Q8Weights:
 
         path, info = self.tensors[name]
         shape = info.shape
-        if len(shape) > 2 or info.kind not in {"F32", "F16", "Q8_0"}:
+        if len(shape) > 2 or info.kind not in {"F32", "F16", "Q8_0", "Q4_K", "Q6_K"}:
             raise ValueError("unsupported full-reference tensor")
         offset, size = info.offset, info.nbytes
         if first_row is not None:
@@ -146,6 +196,8 @@ class Q8Weights:
             values = blocks["codes"].astype(np.float32)
             values *= blocks["scale"].astype(np.float32)[:, None]
             values = values.reshape(shape)
+        elif info.kind in {"Q4_K", "Q6_K"}:
+            values = dequantize_k_blocks(data, info.kind).reshape(shape)
         else:
             values = (
                 np.frombuffer(data, dtype="<f4" if info.kind == "F32" else "<f2")
@@ -269,7 +321,8 @@ def reference(
             "torch": torch.__version__,
             "transformers": transformers.__version__,
         },
-        "weight_format": "GGUF Q8_0, independently dequantized to F32",
+        "weight_format": "GGUF packed weights, independently dequantized to F32",
+        "tensor_storage_kinds": sorted({info.kind for _, info in weights.tensors.values()}),
         "execution_device": "CPU",
         "execution_dtype": "float32",
         "positions": positions,

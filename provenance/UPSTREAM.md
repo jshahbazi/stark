@@ -67,6 +67,14 @@ row order and the split-half rotary convention. Existing ggml storage notices
 continue to cover the shared GGUF reader. See [Ripple support](../docs/RIPPLE.md)
 for the precision policy, preparation and validation scope.
 
+Ripple's Q4_K_M recipe pins the standard AtomicChat artifact at
+`df550a7178a87bbfb6ee2bdbd37603c553d536ee`, preserving its packed bytes and
+the existing official metadata revision above. The independent NumPy reference
+decoder implements the Q4_K/Q6_K layouts documented by MIT-licensed
+[GGML quantization source](https://github.com/ggml-org/llama.cpp/blob/1b70350c92563449576bcbbf552994b1d1ed847d/ggml/src/ggml-quants.c).
+It uses no external inference engine. Native execution reuses Stark's existing
+packed kernels; each quantized artifact requires its own validation record.
+
 Ripple's F32 Metal graph and shape-scoped Q8 dispatch were introduced in
 `410bec76c195522b6478c329225d6cbfb84b9977`, with complete-inventory admission
 enforced in `1978a3b17df1ea83b4d7e1139ec2e91619f2acfc`. The control kernels

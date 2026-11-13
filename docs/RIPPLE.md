@@ -34,6 +34,21 @@ Original floating Safetensors checkpoints use the same native architecture;
 about 120.7 GiB, making Q8_0 the practical starting point on a 128 GB Mac.
 Successful preparation does not qualify loading, generation quality or speed.
 
+The smaller `ripple-q4-k-m` recipe selects the standard (not AD) Q4_K_M file
+from AtomicChat revision `df550a7178a87bbfb6ee2bdbd37603c553d536ee`.
+It occupies 38,798,820,576 bytes (36.13 GiB) and preserves the mixed Q4_K/Q6_K
+blocks. It uses the same pinned official metadata as Q8:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare ripple-q4-k-m --output models/ripple-q4-k-m
+./scripts/stark chat --model-path models/ripple-q4-k-m
+```
+
+Native execution uses the existing packed Q4_K/Q6_K kernels and the Ripple
+device graph, with F32 controls, accumulation and KV state. The independent
+full reference helper also decodes these block types. Q8 validation does not
+qualify this artifact; record Q4_K_M numerical and generation checks separately.
+
 ## Precision and limits
 
 Q8_0 weights retain their original block scales and integer codes. Matrix

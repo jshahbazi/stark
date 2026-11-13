@@ -21,6 +21,20 @@ from .cli import _publish
 from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
 
 SOURCES = {
+    "ripple-q4-k-m": {
+        "architecture": "ricursive",
+        "weights_repo": "AtomicChat/Ripple-65B-Preview-GGUF",
+        "weights_revision": "df550a7178a87bbfb6ee2bdbd37603c553d536ee",
+        "weights_patterns": ["Ripple-65B-Preview-Q4_K_M.gguf", "README.md"],
+        "metadata_repo": "ricursiveAI/Ripple-65B-Preview",
+        "metadata_revision": "e27e171792f303d74c048184e8259ba663cfa0d5",
+        "weight_bytes": 38_798_820_576,
+        "weight_shards": 1,
+        "weight_extension": ".gguf",
+        "required_weight_files": ["Ripple-65B-Preview-Q4_K_M.gguf"],
+        "required_files": ["LICENSE", "chat_template.jinja"],
+        "quantization": "Q4_K_M",
+    },
     "ripple-q8": {
         "architecture": "ricursive",
         "weights_repo": "AtomicChat/Ripple-65B-Preview-GGUF",

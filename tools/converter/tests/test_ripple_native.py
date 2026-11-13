@@ -22,7 +22,7 @@ def ripple_metadata(root):
     (root / "LICENSE").write_text("Apache License 2.0")
 
 
-@pytest.mark.parametrize("choice", ["ripple-q8", "ripple-bf16"])
+@pytest.mark.parametrize("choice", ["ripple-q8", "ripple-bf16", "ripple-q4-k-m"])
 def test_ripple_preparation_preserves_exact_selected_shards_and_official_metadata(tmp_path, monkeypatch, choice):
     original = hybrid.SOURCES[choice]
     source = {**original, "weight_bytes": original["weight_shards"]}
@@ -92,7 +92,7 @@ def test_ripple_catalog_is_pinned_text_only_and_uses_native_preparation(monkeypa
 
     family = next(item for item in support_matrix()["families"] if item["family_id"] == "ricursive")
     assert family["name"] == "Ripple-65B Preview"
-    assert family["conversion"]["source_formats"] == ["Q8_0"]
+    assert family["conversion"]["source_formats"] == ["Q8_0", "Q4_K_M"]
     assert family["modes"]["text"]["status"] == "conditional"
     assert family["modes"]["decision"]["status"] == "unsupported"
     assert family["modes"]["vision-language"]["status"] == "unsupported"
@@ -107,6 +107,11 @@ def test_ripple_catalog_is_pinned_text_only_and_uses_native_preparation(monkeypa
     assert item["size_label"] == "65B"
     assert item["parameter_count"] == 64_782_689_360
     assert item["artifact_modes"] == ["text"]
+    q4 = report["items"][1]
+    assert q4 == native_catalog.catalog_item("ripple-q4-k-m")
+    assert q4["id"] != item["id"]
+    assert q4["weight_bytes"] == 38_798_820_576
+    assert native_catalog.source_choice("ricursive", q4) == "ripple-q4-k-m"
     # Generic conversion must not treat custom HF code as an implementation.
     assert preflight_model({"model_type": "ricursive"}, mode="text")["reasons"] == ["unsupported_architecture"]
     assert model_catalog.family_catalog("ricursive", offline=True, hub=NoHub())["status"] == "offline"

@@ -6,10 +6,10 @@ import hashlib
 
 FAMILY_ID = "glm5_next"
 CHOICE = "glm53-q2"
-FAMILY_CHOICES = {FAMILY_ID: (CHOICE,), "ricursive": ("ripple-q8",)}
+FAMILY_CHOICES = {FAMILY_ID: (CHOICE,), "ricursive": ("ripple-q8", "ripple-q4-k-m")}
 FAMILY_IDS = tuple(FAMILY_CHOICES)
 _NAMES = {FAMILY_ID: "GLM-5.3 Flash", "ricursive": "Ripple-65B Preview"}
-_ITEM_NAMES = {CHOICE: "GLM-5.3-Flash-GGUF", "ripple-q8": "Ripple-65B-Preview-GGUF"}
+_ITEM_NAMES = {CHOICE: "GLM-5.3-Flash-GGUF", "ripple-q8": "Ripple-65B-Preview-GGUF", "ripple-q4-k-m": "Ripple-65B-Preview-GGUF"}
 
 
 def _source(choice):
@@ -64,8 +64,8 @@ def catalog_item(choice: str = CHOICE) -> dict:
         "repo": repo,
         "revision": revision,
         "name": _ITEM_NAMES[choice],
-        "size_label": "65B" if choice == "ripple-q8" else None,
-        "parameter_count": 64_782_689_360 if choice == "ripple-q8" else None,
+        "size_label": "65B" if source["architecture"] == "ricursive" else None,
+        "parameter_count": 64_782_689_360 if source["architecture"] == "ricursive" else None,
         "weight_bytes": source["weight_bytes"],
         "quantization": source["quantization"],
         "artifact_modes": ["text"],
