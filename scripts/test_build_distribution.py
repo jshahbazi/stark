@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import importlib.util
 import io
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -26,6 +28,70 @@ SPEC.loader.exec_module(distribution)
 
 
 class BundleConstructionTests(unittest.TestCase):
+    def test_menu_builder_recipe_imports_and_stages_pi_without_a_private_checkout(self):
+        with tempfile.TemporaryDirectory(prefix="stark-clean-recipe-") as temporary:
+            root = Path(temporary) / "stark"
+            for name in distribution.RECIPE_INPUTS:
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(distribution.ROOT / name, target)
+            resources = root / "apps/menu-bar/Resources"
+            resources.mkdir(parents=True)
+            actual = distribution.ROOT / "apps/menu-bar/Resources"
+            shutil.copy2(
+                actual / "PiClient.lock.json", resources / "PiClient.lock.json"
+            )
+            shutil.copytree(actual / "PiClient", resources / "PiClient")
+            self.assertFalse((root.parent / "stark-agent-clients").exists())
+            command = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    "-s",
+                    "-E",
+                    str(root / "scripts/build_menubar.py"),
+                    "--help",
+                ],
+                cwd=root,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(command.returncode, 0, "clean_menu_builder_import_failed")
+            script = (
+                "import sys; from pathlib import Path; "
+                "sys.path.insert(0, str(Path('scripts').resolve())); "
+                "from pi_client_resources import install_pi_client; "
+                "output=Path('staged-resources'); output.mkdir(); "
+                "result=install_pi_client(output, source=None); "
+                "assert len(result['files_sha256']) == 8"
+            )
+            staged = subprocess.run(
+                [sys.executable, "-B", "-s", "-E", "-c", script],
+                cwd=root,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(
+                staged.returncode, 0, "clean_menu_builder_pi_staging_failed"
+            )
+
+    def test_pi_resource_stager_is_imported_and_recorded_in_distribution_recipe(self):
+        self.assertIn("scripts/pi_client_resources.py", distribution.RECIPE_INPUTS)
+        self.assertIn("apps/menu-bar", distribution.SOURCE_PATHS)
+        builder_path = Path(__file__).with_name("build_menubar.py")
+        tree = ast.parse(builder_path.read_text(encoding="utf-8"))
+        imports = {
+            (node.module, alias.name)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        self.assertIn(("pi_client_resources", "install_pi_client"), imports)
+
     def test_local_archives_require_a_development_suffix_without_tag_lookup(self):
         source = {"revision": "a" * 40, "dirty": True}
         with patch.object(distribution, "run") as command:
@@ -854,6 +920,12 @@ class BundleConstructionTests(unittest.TestCase):
                         environment, allow_dirty=True
                     )
                     self.assertTrue(receipt["dirty"])
+                    self.assertIn(
+                        "scripts/pi_client_resources.py", receipt["recipe_sha256"]
+                    )
+                    self.assertIn(
+                        "scripts/pi_client_resources.py", receipt["files_sha256"]
+                    )
                     self.assertIn("crates/engine/new.rs", receipt["files_sha256"])
                     for source in lily_sources:
                         self.assertEqual(

@@ -1,10 +1,20 @@
 # Codex, Claude and Pi integration plan
 
-Status: proposed implementation and qualification plan, reviewed against Stark
-`main` revision `a171326271f6c5eaf31f4ea49bc21905f7e7a813` on 2026-11-12.
-This document adds no runtime support. No Codex, Claude or Pi session was run
-against Stark for this work. Configuration examples below are proposed starting
-points; examples involving an adapter require that adapter to be implemented.
+Status: guarded Pi 1.5.2 CLI RPC pilot has artifact-bound live evidence as of
+2026-11-13, using installed Stark 0.20.5 at
+`9e33ab729581994269f56c64685e27a0bdd94c27`. The foundation started against
+`0bdcf4b3b4cc316fd7fd4f4ec2f6bc3a18268420`; the original plan was reviewed
+against `a171326271f6c5eaf31f4ea49bc21905f7e7a813`. Client implementation lives in
+the separate [stark-agent-clients repository](https://github.com/jshahbazi/stark-agent-clients).
+Codex/Claude Responses/Messages adapters remain planned. Separate manual
+Connections setup evidence is recorded for installed development build
+`20261113134611603911` at `f9a247e6c87f1f52901a5a869cdcdbf2ce93aff7`.
+The Pi evidence does not transfer to other clients or artifacts. See the
+[Connections run record](archive/runs/2026-11-13-pi-connections.md) for its exact
+GUI, Terminal and installed-backend boundaries.
+The [pre-PR review](archive/runs/2026-11-13-pi-pr-review.md) records a later signed
+candidate with clean-checkout packaging, runtime/clipboard recovery and default
+HTTP-port corrections, with fresh evidence separate from the installed build.
 
 ## Objective and delivery order
 
@@ -31,6 +41,53 @@ Here, “Claude” covers Claude Code and the desktop Code surface. Replacing th
 model used by ordinary Claude chat, Cowork, web or mobile is outside this plan.
 An MCP server exposing Stark as a tool is a separate integration: it does not
 make Stark the coding client's inference provider.
+
+### GUI placement
+
+Pi setup belongs exclusively under **Advanced → Connect to... → Apps → Pi**
+in the Connections window.
+Keep Pi out of Beginner Guided Setup, Adjust Setup, task/client choices and
+beginner model recommendations. Codex and Claude connection controls also belong
+under Connections when their integrations become available.
+
+The Pi card implements manual setup: verify installed Pi 1.5.2, discover the
+running model, create a separate Stark-owned profile with the required guard,
+and open Terminal in an automatic private workspace. **Open Stark Pi** explicitly
+copies the key for Terminal's hidden prompt and starts the connected profile.
+It requires no folder selection. **Change Working Folder…** optionally selects a
+project for new sessions; **Use Stark Workspace** restores the automatic folder
+at `~/Library/Application Support/Stark/Pi/Workspace`. Setup also merges Stark's
+provider/guard into the user's normal Pi configuration and saves it as the
+startup default, so later `pi` launches reconnect. The persistent provider uses
+Pi's request-time command resolver to read the current master key from macOS
+Keychain; macOS may require access approval. Pi's existing auth store takes
+precedence and is untouched. Generated files and command
+arguments contain no key; the helper and Pi receive it through their environment.
+While running, Stark schedules the unchanged clipboard item for clearing after
+two minutes and clears it on normal quit. A crash or force quit cannot run cleanup.
+Other providers, extensions and unrelated Pi settings are preserved. Private
+backups, cooperative settings locks and a recovery journal protect updates;
+unowned provider collisions or changed files fail closed. Normal Pi retains its
+own session/retry/compaction policy. Switching to Beginner hides Connections.
+
+The Pi entry identifies the installed client/version, uses the running model,
+shows setup status, and provides an explicit setup action. It identifies manual
+API-key setup. Reserve managed
+Connect/Disconnect labels and automatic credential refresh for the reviewed
+grant/lifecycle implementation. Keep client configuration and extension logic in
+the integration repository; Stark owns the Connections presentation and approved
+public connection data.
+
+Each setup creates a new private profile under Stark's application-support Pi
+folder. Old profiles remain available to existing sessions; no unrelated Pi
+settings are merged or overwritten. Model/port changes require Update Setup, and
+launch rechecks metadata and version. Profiles cap replies at the lower of
+1,024 tokens and the API ceiling, disable automatic retries/compaction, and do
+not persist conversations. Clean builds consume a checked-in immutable public
+snapshot of the separate integration repository, verified against its revision
+and all file hashes. An optional `--pi-client-source` checkout must match the same
+lock. Client logic remains maintained in the owning repository; snapshot updates
+must be mechanical. The app performs no runtime dependency installation.
 
 ## Current Stark contract
 
@@ -172,10 +229,52 @@ a direct manual pilot using Stark's current API. Official references:
 [configuration location](https://pi.dev/docs/latest/configuration) and
 [provider extensions](https://pi.dev/docs/latest/custom-provider).
 
+### Initial implementation status
+
+The separate integration repository pins Pi CLI and Pi AI 1.5.2. Its
+[manual setup helper and guide](https://github.com/jshahbazi/stark-agent-clients/blob/codex/pi-manual-pilot/README.md)
+inspect authenticated public model/capability metadata, require finite API
+limits and tool support, and create a new provider configuration with an
+environment credential reference. Optional JSON merging preserves the original
+file and rejects an existing `stark-local` entry. The standalone configure CLI
+installs nothing into the user's default Pi profile. Connections additionally
+saves the persistent manual provider described above. Neither flow adds managed
+authentication.
+
+Generated profiles now require the manual `stark-stream-guard.mjs` extension.
+Its `stark-guarded-chat-completions` API marker is local to Pi; the wire remains
+Stark Chat Completions. It delegates conversion/parsing to Pi's public API and
+requires valid usage, a terminal reason and `[DONE]` before success or executable
+tool handoff. Missing extension fails before inference. It adds no managed
+authentication or external adapter. Earlier unguarded profiles must be regenerated.
+
+Fifty-one model-free checks now pass, including desktop profile and Terminal-script
+checks. The earlier 21-check real-model record remains source-bound to its named
+build. Installed Pi 1.5.2
+used its official CLI RPC mode with the real `mlx-community/Qwen3-4B-4bit`
+artifact, context 40,960 and a 1,024-token output profile. Checks include actual
+read/edit/test/diff, failed tools, native-phase cancellation and recovery,
+context rejection/manual compaction, truncation, model/port changes, backend
+restart, interleaved sessions, disconnect and exact reused-versus-fresh output.
+Raw/guarded matched short timing controls are recorded separately from quality.
+
+The guard closes the missing-usage and terminal-sentinel gaps in this profile.
+The isolated backend used an ephemeral manual key through the private host pipe;
+the Swift UI credential-entry flow was not run in that earlier matrix. The new
+Connections record separately covers installed GUI profile creation, folder
+selection and Terminal launch, user-confirmed TUI generation, and eight fresh
+real-model checks through the final bundled desktop setup/launch entry points.
+Broad coding reliability,
+another artifact/version, managed grants and full UI-consumer backpressure have
+no qualification from these checks. See the
+[guard/live record](archive/runs/2026-11-13-pi-guard-live.md) and model attempts
+`20261113-PI-01` through `20261113-PI-08` for prior failed/superseded receipts.
+
 ### Manual setup
 
-1. Start the intended model in Stark's Chat mode and enable the local API through
-   Connections. Obtain the displayed Base URL and key through Stark's user flow.
+1. Select Advanced in Stark, start the intended model in Chat mode, and open
+   Connections → Connect your own app. Obtain the displayed Base URL and key
+   through Stark's user flow. Pi is not part of Beginner Guided Setup.
 2. Inspect authenticated `/v1/models` and `/v1/capabilities` without writing
    credentials or response payloads to logs. Record the public model ID, finite
    context capacity, API `max_output_tokens` ceiling and tool capability for
@@ -192,7 +291,7 @@ a direct manual pilot using Stark's current API. Official references:
     "stark-local": {
       "name": "Stark local",
       "baseUrl": "http://127.0.0.1:PORT/v1",
-      "api": "openai-completions",
+      "api": "stark-guarded-chat-completions",
       "apiKey": "${STARK_API_KEY}",
       "authHeader": true,
       "compat": {
@@ -201,6 +300,9 @@ a direct manual pilot using Stark's current API. Official references:
         "supportsReasoningEffort": false,
         "supportsStrictMode": false,
         "supportsUsageInStreaming": true,
+        "supportsFinishReason": true,
+        "supportsLongCacheRetention": false,
+        "promptCacheKeyMode": "disabled",
         "maxTokensField": "max_tokens"
       },
       "models": [
@@ -227,11 +329,15 @@ a direct manual pilot using Stark's current API. Official references:
    CLI selection is:
 
 ```sh
-pi --provider stark-local --model 'MODEL_ID_FROM_STARK'
+pi --extension '/absolute/path/to/stark-agent-clients/extensions/stark-stream-guard.mjs' --provider stark-local --model 'MODEL_ID_FROM_STARK'
 ```
 
 6. Run the acceptance sequence below in a disposable workspace before granting
    access to a real project. A provider appearing in the picker is insufficient.
+
+Use the isolated profile and no-retry settings from the integration guide for
+the first run. The custom API marker is handled only by the required extension;
+it does not change Stark's HTTP protocol.
 
 The explicit compatibility settings avoid relying on localhost URL heuristics.
 Stark normalizes incoming developer messages to system. With the initial
@@ -244,7 +350,7 @@ Field semantics are defined in Pi's
 
 ### Managed Pi extension
 
-After the manual pilot passes, build a provider extension in the integration
+After the manual pilot passes, build a managed provider extension in the integration
 repository. Register a distinct Stark provider through Pi's public provider API
 and delegate generation to its existing Chat Completions implementation.
 
@@ -656,6 +762,14 @@ or numerical equivalence. Report task success separately.
 
 ## Implementation milestones
 
+Current progress: milestone 0 has a pinned, inventoried Pi manual profile;
+other client contracts remain to be frozen. Milestone 1 has a passing bounded
+Pi 1.5.2 CLI RPC matrix with the named Qwen3-4B 4-bit artifact and installed
+Stark backend. Manual Connections setup has separate native UI/controller,
+Terminal-script and installed-backend evidence; user-confirmed Terminal startup
+and generation are recorded separately from automated RPC. Other versions/artifacts need their
+own evidence. Milestones 2–7 have no implementation from this work.
+
 | Milestone | Deliverable | Exit condition |
 | --- | --- | --- |
 | 0. Freeze contracts | Pin Stark/client versions; synthetic schemas and capability inventory | All unsupported fields and security boundaries have an explicit policy |
@@ -685,5 +799,5 @@ tool behavior, auth mode, cancellation, prefix-reuse policy and recovery cases
 have matching evidence. Unsupported client versions remain explicitly blocked.
 Update this plan and [Local API](LOCAL_API.md) as implementation lands; retain
 dated validation separately under [archive/runs](archive/runs/) or in the owning
-implementation PR. This documentation PR establishes the work required and
-does not mark any runtime milestone complete.
+implementation PR. Pi's bounded manual qualification does not complete other
+client surfaces, artifacts or managed connections.

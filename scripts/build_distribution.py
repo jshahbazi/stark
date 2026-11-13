@@ -34,6 +34,7 @@ RUST_VERSION = "1.98.1"
 RECIPE_INPUTS = (
     "scripts/build_distribution.py",
     "scripts/build_menubar.py",
+    "scripts/pi_client_resources.py",
     "scripts/sign_distribution.py",
     "scripts/install_app.py",
     "scripts/update_app.py",

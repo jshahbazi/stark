@@ -1523,6 +1523,7 @@ final class EngineController: ObservableObject {
     private let apiPreferences: APIConnectionPreferences
     private let apiCredentialQueue = DispatchQueue(label: "stark.api.credentials", qos: .userInitiated)
     private var apiCredentialOperation: UUID?
+    lazy var piConnection = PiConnectionController()
 
     lazy var desktopConnections = DesktopConnections(service: apiCredentials.service,
         send: { [weak self] value in self?.send(value) ?? false },
@@ -2867,7 +2868,7 @@ struct MenuView: View {
             }.controlSize(.small)
             if interface.mode == .advanced && engine.mode == .chat { SpeedView(engine: engine) }
             Divider()
-            Button(interface.mode == .beginner ? "Adjust Setup" : "Connections", action: connection)
+            Button(interface.mode == .beginner ? "Adjust Setup" : "Connect to...", action: connection)
                 .frame(maxWidth: .infinity, alignment: .leading)
             AppUpdateView(updater: updater)
             HStack {
@@ -3665,7 +3666,7 @@ struct PlaygroundView: View {
             HStack {
                 Text("Stark").font(.title3.weight(.semibold))
                 Spacer()
-                Button("Connections", action: connection)
+                Button("Connect to...", action: connection)
                 Picker("Mode", selection: Binding(get: { engine.mode }, set: engine.changeMode)) {
                     ForEach(PlaygroundMode.allCases) { Text($0.title).tag($0) }
                 }.pickerStyle(.segmented).frame(width: 180).disabled(engine.busy)
@@ -3954,6 +3955,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             console: { [weak self] in self?.showPrompt() },
             connection: { [weak self] in self?.showConnection() })
             .onChange(of: interface.mode) { [weak self] _, _ in
+                self?.interfaceDidChange()
                 DispatchQueue.main.async { self?.resizeMenuForUpdate() }
             }
             .onChange(of: updater.message) { [weak self] _, _ in
@@ -4184,6 +4186,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         present(beginnerChatWindow, from: origin)
     }
 
+    private func interfaceDidChange() {
+        // The main-menu picker changes mode without opening a window. Close
+        // advanced connection controls when returning to the beginner interface.
+        if interface.mode == .beginner { connectionWindow?.orderOut(nil) }
+    }
+
     private func selectInterface(_ mode: StarkInterfaceMode) {
         interface.select(mode)
         if mode == .beginner {
@@ -4246,6 +4254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return .terminateNow
     }
     func applicationWillTerminate(_ notification: Notification) {
+        PiConnectionController.clearCopiedKey()
         updater.prepareForTermination()
         engine.shutdown()
     }

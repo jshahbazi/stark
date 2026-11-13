@@ -25,6 +25,11 @@ final class ForbiddenWindowCredentialStorage: APICredentialStorage {
     func replace(_ data: Data) -> OSStatus { fatalError("unexpected_credential_access") }
 }
 
+final class ConnectionModeWindowProbe: NSWindow {
+    var hiddenForBeginner = false
+    override func orderOut(_ sender: Any?) { hiddenForBeginner = true; super.orderOut(sender) }
+}
+
 struct CatalogPickerBoundsProbe: NSViewRepresentable {
     let view: NSView
     func makeNSView(context: Context) -> NSView { view }
@@ -401,7 +406,7 @@ extension AppDelegate {
         let credentials = APICredentialStore(service: suite, storage: storage)
         let engine = EngineController(apiCredentials: credentials, apiDefaults: defaults,
                                       gpuMemoryBudgetBytes: 8_589_934_592)
-        let delegate = AppDelegate(engine: engine)
+        let delegate = AppDelegate(engine: engine, interface: StarkInterfacePreferences(defaults: defaults))
         // Reopen may arrive before the status item exists. It must stay quiet.
         guard !delegate.applicationShouldHandleReopen(application, hasVisibleWindows: false),
               delegate.promptWindow == nil, delegate.connectionWindow == nil,
@@ -421,6 +426,17 @@ extension AppDelegate {
         }
         prompt.close()
         connection.close()
+        let modeConnection = ConnectionModeWindowProbe(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        delegate.connectionWindow = modeConnection
+        delegate.interface.select(.beginner)
+        delegate.interfaceDidChange()
+        guard modeConnection.hiddenForBeginner, !modeConnection.isVisible,
+              delegate.beginnerWindow == nil, delegate.beginnerChatWindow == nil,
+              !delegate.menuPanel.isVisible else { return false }
+        delegate.interface.select(.advanced)
+        delegate.interfaceDidChange()
+        guard !modeConnection.isVisible, delegate.modelsWindow == nil else { return false }
+        modeConnection.close()
         for _ in 0..<20 { engine.exerciseBackgroundWindowUpdates() }
         RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         return !prompt.isVisible && !connection.isVisible && !delegate.menuPanel.isVisible

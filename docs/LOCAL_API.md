@@ -6,13 +6,24 @@ The menu bar application's bridge serves a loopback-only, OpenAI-style HTTP API 
 
 Open **Connections** in Stark. **Apps** groups OpenWork and OpenCode Desktop with independent **Connect** buttons and status; **Manage** reveals each configured app's **Reconnect** and **Disconnect** actions. OpenCode's per-engine **Allow** and **Deny** prompt stays separate. The shared model header identifies the model currently running in Chat mode. API startup and credential-recovery messages remain visible when setup needs attention.
 
+The Advanced Connections **Apps** tab also includes **Pi**, with **Set Up Pi**
+and **Copy Key & Open Pi…**. This manual Pi 1.5.2 flow creates an isolated guarded
+profile and opens Terminal for a chosen folder. Its key is supplied through the
+setup/Pi process environment and an explicit concealed/transient clipboard copy,
+then pasted into a hidden prompt. Files and command arguments contain no key;
+while running Stark schedules the unchanged clipboard item for clearing after
+two minutes and also clears it on normal quit. Crashes/force quits cannot run
+cleanup. Pi is excluded from
+Beginner setup and has no managed grant or scoped Disconnect. See
+[Pi setup](../apps/menu-bar/README.md#pi-in-connections).
+
 Select **Connect your own app** to see the base URL (for example `http://127.0.0.1:8000/v1`), the API key and the Model ID. The model picker inspects saved model IDs and the settings copied as JSON; it does not run a model or change the model published to managed apps. Use **Manage Models** and **Run** in Stark to serve a different model. **Advanced settings** contains the saved listening port, API retry, explicit key regeneration, JSON and curl export, and capability details. Manually configured native clients send the copied master key on every request, including health checks:
 
 ```text
 Authorization: Bearer <key>
 ```
 
-The Swift host loads a random 256-bit key from macOS Keychain and sends it to the backend through its private control pipe. It generates a key only when Keychain reports that the item is missing, and activates it only after storage succeeds. Concurrent first launches use the winning stored value. Relaunches, worker restarts, model changes and app upgrades reuse this credential. Secrets are absent from process arguments, environment, UserDefaults, configuration files and logs.
+The Swift host loads a random 256-bit key from macOS Keychain and sends it to the backend through its private control pipe. It generates a key only when Keychain reports that the item is missing, and activates it only after storage succeeds. Concurrent first launches use the winning stored value. Relaunches, worker restarts, model changes and app upgrades reuse this credential. The host/backend bridge keeps secrets out of process arguments, environment, UserDefaults, configuration files and logs. Manual Pi setup deliberately supplies the key through its helper/client environment as described above.
 
 **Show** and **Copy** retrieve the existing key without rotating it. Key and connection-JSON copies retain the sensitive clipboard markers. **Regenerate API Key** explicitly replaces the stored credential after confirmation; clients configured with the copied master key need the replacement, while managed OpenWork and OpenCode capabilities refresh through Stark. A storage failure preserves the working key. Locked, denied, corrupt or unavailable Keychain access produces recovery instructions in Connections; authentication is never disabled. Unlock or allow access in Keychain Access and choose **Retry API**. A corrupt entry can be replaced using the explicit regeneration action. Do not save copied connection JSON in ordinary configuration files.
 
@@ -378,6 +389,17 @@ OpenCode Desktop's background engine listens on a fixed default port. Two OpenCo
 A desktop run with a signed test build and official OpenCode Desktop 2.2.5 qualified Connect, live configuration reload, chat, per-engine **Allow** and **Disconnect**. It did not cover tool calls, **Deny**, the production bundle identifier or a notarized build. See the [OpenCode desktop run](archive/runs/2026-11-02-opencode-desktop-live.md) and the [implementation record](archive/runs/2026-11-01-opencode-managed-client.md).
 
 ## Client compatibility
+
+Pi's manual setup foundation lives in the separate
+[stark-agent-clients repository](https://github.com/jshahbazi/stark-agent-clients).
+Installed Pi CLI/AI 1.5.2 passed a bounded CLI RPC matrix with the real Qwen3-4B
+4-bit artifact and packaged Stark 0.20.5 backend. Its required manual extension
+guards missing usage and terminal `[DONE]`; the custom client API marker still
+sends ordinary Chat Completions to Stark. Manual credentials share the master
+key's upstream prefix scope; no managed Pi connection is available. See the
+[integration plan](AGENT_CLIENT_INTEGRATION_PLAN.md#initial-implementation-status)
+and [guard/live record](archive/runs/2026-11-13-pi-guard-live.md) for exact
+artifact/build hashes, 43 model-free and 21 live results, and setup/quality limits.
 
 Clients must send authenticated requests from native or backend code on the same Mac and stay within the capabilities shown by `/v1/capabilities`. The client checks below validated the text subset against the published 0.3.0 bridge and worker on 2026-10-23 ([record](archive/runs/LOCAL_API_CLIENT_VALIDATION_2026_10_23.md)); they do not qualify image input:
 
