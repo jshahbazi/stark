@@ -147,6 +147,10 @@ _NAME = re.compile(r"[A-Za-z0-9_.]+\Z")
 _CHUNK = 1024 * 1024
 SKELETON_HEADER_BYTES = 11_012_448
 SKELETON_HEADER_SHA256 = "1cd961c7675aae8dcb9efc219ff58813f37441c33a567073bd521c72673b6685"
+# Physical rows from the pinned ple-fp8.gguf tensor header. The logical head
+# vocabularies occupy fewer rows; no general padding or rounding rule is assumed.
+EDGE0_TABLE_ROWS = 320_001_536
+EDGE0_TABLE_WIDTH = 160
 
 
 @dataclass(frozen=True)
@@ -636,6 +640,48 @@ def validate_skeleton(source: GGUFSource) -> None:
             raise ConversionError("Edge0 vocabulary projection geometry mismatch")
 
 
+def validate_ngram_table(table: GGUFSource, geometry: dict) -> dict:
+    """Keep stored table geometry separate from addressable logical head rows."""
+    tensor = table.tensors.get("per_layer_token_embd.weight")
+    payload_bytes = EDGE0_TABLE_WIDTH * EDGE0_TABLE_ROWS
+    if (
+        len(table.tensors) != 1
+        or tensor is None
+        or tensor.shape != (EDGE0_TABLE_WIDTH, EDGE0_TABLE_ROWS)
+        or tensor.kind != "i8"
+    ):
+        raise ConversionError("Edge0 n-gram table physical shape or encoding mismatch")
+    if tensor.nbytes != payload_bytes:
+        raise ConversionError("Edge0 n-gram table physical payload size mismatch")
+    if (
+        table.metadata.get("strata.ple.format") != "f8_e4m3"
+        or table.metadata.get("strata.ple.scale") != 0.00019931793212890625
+    ):
+        raise ConversionError("Edge0 n-gram table format or scale mismatch")
+    offsets = geometry.get("qwen4exp.ple.head_offsets")
+    sizes = geometry.get("qwen4exp.ple.head_vocab_sizes")
+    if (
+        not isinstance(offsets, list)
+        or not isinstance(sizes, list)
+        or len(offsets) != 16
+        or len(sizes) != 16
+        or any(type(value) is not int or value < 0 for value in offsets)
+        or any(type(value) is not int or value <= 0 for value in sizes)
+    ):
+        raise ConversionError("Invalid Edge0 n-gram logical head ranges")
+    logical_rows = 0
+    for offset, size in zip(offsets, sizes, strict=True):
+        if offset != logical_rows or offset + size > EDGE0_TABLE_ROWS:
+            raise ConversionError("Edge0 n-gram logical head ranges exceed or disagree with physical storage")
+        logical_rows += size
+    return {
+        "table_rows": EDGE0_TABLE_ROWS,
+        "logical_table_rows": logical_rows,
+        "table_padding_rows": EDGE0_TABLE_ROWS - logical_rows,
+        "table_payload_bytes": payload_bytes,
+    }
+
+
 def validate_source(directory: Path) -> dict:
     """Validate the complete pinned source after per-file hash verification."""
     paths = {name: source_path(directory, name) for name in EDGE0_FILES}
@@ -663,20 +709,7 @@ def validate_source(directory: Path) -> dict:
     if paths["latent_dense_q8.bin"].stat().st_size != 48 * projection_per_layer:
         raise ConversionError("Edge0 Q8 projection formula mismatch")
     table = read_gguf(paths["ple-fp8.gguf"])
-    rows = sum(EXPECTED_GEOMETRY["qwen4exp.ple.head_vocab_sizes"])
-    table_tensor = table.tensors.get("per_layer_token_embd.weight")
-    if (
-        len(table.tensors) != 1
-        or table_tensor is None
-        or table_tensor.shape != (160, rows)
-        or table_tensor.kind != "i8"
-    ):
-        raise ConversionError("Edge0 n-gram table shape or encoding mismatch")
-    if (
-        table.metadata.get("strata.ple.format") != "f8_e4m3"
-        or table.metadata.get("strata.ple.scale") != 0.00019931793212890625
-    ):
-        raise ConversionError("Edge0 n-gram table format or scale mismatch")
+    table_layout = validate_ngram_table(table, skeleton.metadata)
     mtp = read_mtp_index(paths["mtp/dense.txt"], paths["mtp/dense.bin"].stat().st_size)
     # Strata Q2_0: 64 values in 18 bytes; fused gate/up then down.
     mtp_record = (1280 * (2560 // 64) + 2560 * (640 // 64)) * 18
@@ -694,7 +727,7 @@ def validate_source(directory: Path) -> dict:
             "mtp_dense_tensors": len(mtp),
             "mtp_expert_record_bytes": mtp_record,
             "projection_layer_bytes": projection_per_layer,
-            "table_rows": rows,
+            **table_layout,
             "duplicate_payload_validation": duplicates,
             "native_loading": "unverified",
         },

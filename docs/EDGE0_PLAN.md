@@ -1,6 +1,6 @@
 # Edge0-145B native support plan
 
-Status: phase 1 in progress for local non-commercial evaluation, 2026-11-12.
+Status: phase 1 passed for local non-commercial evaluation, 2026-11-12.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
@@ -10,7 +10,8 @@ authorized continuing local branch work while the attempt record remains
 unmerged. Commercial/product availability is outside this scope. Source
 preparation is tracked separately in
 [`20261112-EDGE0-02`](model-experiments/2026-11-12-edge0-source-preparation.md).
-No Stark model execution is qualified. Follow
+The full pinned source set is published locally with every payload hash bound;
+native readers/decoders are next. No Stark model execution is qualified. Follow
 [model onboarding](MODEL_ONBOARDING.md), the
 [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md) and the
 [experiment ledger](model-experiments/README.md).
@@ -197,7 +198,7 @@ on this branch while the record remains unmerged. This authorizes the local
 evaluation sequence; merge, product admission and any commercial permissions
 remain separate. The
 [license intake](archive/runs/2026-11-12-edge0-license-intake.md#owner-decision-2026-11-12)
-records this scope. Phase 1 is in progress under that instruction.
+records this scope. Phase 1 completed under that instruction.
 
 ### Phase 1: source preparation and admission
 
@@ -232,6 +233,13 @@ records this scope. Phase 1 is in progress under that instruction.
 Gate: a prepared folder on the intake host whose receipt binds every payload
 hash. Binary payloads total 103.4 GB, plus the small metadata files; the host had
 317 GiB free at the original intake. Recheck space before download.
+
+Local gate passed: the 69 pinned source files were fully verified and published
+with receipt SHA-256
+`8dc700fe5cd5f6644ed9f062eb391ce32cb0a09b76a2e19ec44539bf89200a5e`.
+See the [preparation record](model-experiments/2026-11-12-edge0-source-preparation.md#published-local-source-phase-1-passed)
+for the tokenizer successor, rejected runs and stored-row correction. Normal
+native identity/import remains disabled.
 
 ### Phase 2: readers and block decoders, without a model
 

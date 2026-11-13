@@ -65,6 +65,57 @@ def test_gguf_oversized_metadata_does_not_allocate(tmp_path):
         edge.read_gguf(path)
 
 
+def ngram_table():
+    tensor = edge.Tensor("per_layer_token_embd.weight", (160, 320001536), "i8", 352, 51200245760)
+    return edge.GGUFSource(
+        {"strata.ple.format": "f8_e4m3", "strata.ple.scale": 0.00019931793212890625}, {tensor.name: tensor}, 352
+    )
+
+
+def test_ngram_table_accepts_physical_padding_beyond_logical_heads():
+    # The released tensor has 90 stored rows beyond all logical head ranges.
+    # Equating its physical row count with sum(head_vocab_sizes) rejects it.
+    layout = edge.validate_ngram_table(ngram_table(), edge.EXPECTED_GEOMETRY)
+    assert layout == {
+        "table_rows": 320001536,
+        "logical_table_rows": 320001446,
+        "table_padding_rows": 90,
+        "table_payload_bytes": 51200245760,
+    }
+
+
+@pytest.mark.parametrize("physical_rows", [320001446, 320001535, 320001537])
+def test_ngram_table_rejects_logical_count_or_other_physical_rows(physical_rows):
+    source = ngram_table()
+    tensor = source.tensors["per_layer_token_embd.weight"]
+    changed = replace(tensor, shape=(160, physical_rows), nbytes=160 * physical_rows)
+    with pytest.raises(ConversionError, match="physical shape"):
+        edge.validate_ngram_table(replace(source, tensors={tensor.name: changed}), edge.EXPECTED_GEOMETRY)
+
+
+def test_ngram_table_rejects_truncated_physical_payload(tmp_path):
+    source = ngram_table()
+    tensor = source.tensors["per_layer_token_embd.weight"]
+    changed = replace(tensor, nbytes=tensor.nbytes - 160)
+    with pytest.raises(ConversionError, match="physical payload size"):
+        edge.validate_ngram_table(replace(source, tensors={tensor.name: changed}), edge.EXPECTED_GEOMETRY)
+    # A complete header capture can check full-file spans without materializing
+    # the 51.2GB payload. A file ending one physical row early must fail.
+    path = gguf(tmp_path, kind=24, shape=(160, 320001536), payload=b"")
+    complete_size = path.stat().st_size + 51200245760
+    assert edge.read_gguf(path, expected_size=complete_size).tensors["test.weight"].nbytes == 51200245760
+    with pytest.raises(ConversionError, match="spans"):
+        edge.read_gguf(path, expected_size=complete_size - 160)
+
+
+def test_ngram_table_rejects_logical_head_outside_physical_storage():
+    geometry = dict(edge.EXPECTED_GEOMETRY)
+    geometry["qwen4exp.ple.head_vocab_sizes"] = [*geometry["qwen4exp.ple.head_vocab_sizes"]]
+    geometry["qwen4exp.ple.head_vocab_sizes"][-1] += 91
+    with pytest.raises(ConversionError, match="logical head ranges"):
+        edge.validate_ngram_table(ngram_table(), geometry)
+
+
 def index(tmp_path, rows=None, *, pool=64):
     rows = rows or [
         "test.weight 0 4 0 8 0 8 4 0 0 0 1 0 0 0 0 0 0 0",

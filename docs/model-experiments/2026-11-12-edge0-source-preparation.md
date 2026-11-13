@@ -6,7 +6,7 @@
 | --- | --- |
 | Registered date / owner | 2026-11-12 / Codex implementation; repository owner authorizes local non-commercial evaluation only |
 | Kind / scope | Compatibility, source preparation and admission; no inference or performance experiment |
-| Attempt state | In progress; actual tokenizer metadata mismatch identified, final checks pending |
+| Attempt state | Completed for opt-in local source preparation; rejected borrowed-reference route preserved |
 | Acceptance | All exact structural and tokenizer checks below must pass before atomic publication. Any mismatch rejects preparation. |
 | Promotion decision | Evaluation-only preparation tooling; no product catalogue entry or native load capability |
 | Baseline | Stark `2c966a73`, source record based on `a171326271f6c5eaf31f4ea49bc21905f7e7a813` |
@@ -228,3 +228,63 @@ These are implementation and packaging results. The ongoing full payload run
 must still establish every expected SHA-256, source layout, duplicate-tensor
 byte equality and atomic publication before Phase 1 can pass. No worker or
 model execution is represented by the test counts.
+
+### Full-payload validation failure and stored-row correction
+
+The first full run finished transport for all eight payload files and exited 1
+without publishing a folder. The source validator incorrectly equated the sum
+of logical n-gram head vocabularies (320,001,446) with the stored table row
+count (320,001,536). The original intake correctly recorded the larger stored
+shape; the implementation failed to preserve that distinction. This is a
+preparation validator defect, not evidence of a defective released artifact.
+
+The corrected check pins the physical shape and byte count, verifies contiguous
+logical head ranges fit inside it, and records the 90 extra rows / 14,400 bytes.
+No generic alignment formula or zero-filled tail is inferred. Pinned source
+authorities at `Edge0-AI/Edge0@b7900cbb322926ccebdcd0c0c5a1280497ecff22`:
+
+| Path | Finding | SHA-256 |
+| --- | --- | --- |
+| `edge0-strata/tools/ple_fp8_pack.py` | Sums all 128 source shard shapes and copies their bytes unchanged | `6f7a2327ffafa435ff88611167362273399fd77a057efc8e669240e3c06a9419` |
+| `edge0-strata/include/strata/kernels/ngram.hpp` | Explicit physical row count 320,001,536 | `be4a2c08a8c7ce3aad2b9f85a92385188b52d392237255440efdf6da3c317a86` |
+| `edge0-strata/src/kernels/ngram.cpp` | Head-modulus/offset hashing addresses only the logical range; reader checks stored shape and byte fill | `f782ecbaea1ad7934eb8817fc17e6290788bc991fa03ed74fad6e6833c1cc9b0` |
+
+The pinned llama.cpp `src/models/qwen4exp.cpp` separately treats head ranges as
+the minimum, then adopts the stored row count; SHA-256
+`863b5df1a53dd132ff994f1b44dcd1c88a2eecd4ad4e031817104c67c03139ac`.
+The corrected source suite passed 51 tests; the focused preparation, source,
+tokenizer, catalogue and guide suites passed 187 tests. This row-only change
+does not alter the sealed tokenizer candidate or its accepted proof.
+
+An actual bounded layout recheck passed, including 777 duplicate tensors /
+1,538,035,200 bytes compared exactly, before the full offline retry. Recheck
+receipt SHA-256:
+`a73d071d51204d9f82be257c92c1587e436c3a506f020165b8a8d267c4ac4493`.
+Five first-run files were copied to private history; manifest SHA-256
+`6913bc6b769aa6d2b8368ca024bbc997e7ccbddcc9689629fe9b51963a0cd340`.
+The retry adds `--offline`, uses the unchanged policy ownership marker and
+rehashes all source payloads before publication. No payload redownload is
+required; publication remains pending until that retry completes.
+
+### Published local source: Phase 1 passed
+
+The offline retry exited 0 and atomically published the local evaluation folder
+at `runtime/edge0-native-v2-evaluation/`. All 69 immutable source file sizes and
+SHA-256 values passed. The source total is 103,384,750,077 bytes, including
+103,374,417,600 bytes in the eight binary payloads. The receipt binds 72 files:
+the 69 sources, the explicit preparation config and two derived tokenizer files.
+Receipt SHA-256:
+`8dc700fe5cd5f6644ed9f062eb391ce32cb0a09b76a2e19ec44539bf89200a5e`.
+
+The final layout records 1,079 skeleton tensors, 1,367 pack entries, 29 MTP
+dense entries and exact duplicate-payload agreement for 777 tensors /
+1,538,035,200 bytes. Stored and logical PLE row counts remain distinct, with
+all original bytes retained. The accepted tokenizer proof and derived hashes
+match the source-native profile above. A bounded receipt check confirmed every
+source pin and that normal native identity returns `None`.
+
+This closes Phase 1 for the owner's local non-commercial evaluation sequence.
+Native loading and execution remain `unverified`; no app admission, generation,
+tool behavior, MTP, prefix reuse, speed or runtime memory claim follows. Code
+checkpoint `61cb78f2` plus the subsequently recorded stored-row correction
+produced this preparation; no worker build or inference run was involved.
