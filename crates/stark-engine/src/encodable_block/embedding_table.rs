@@ -97,7 +97,7 @@ impl<B: Backend> EmbeddingTable<B> {
         data_type: DataType,
         materialize_dequant: bool,
     ) -> Result<Self, EmbeddingTableError<B>> {
-        if !matches!(data_type, DataType::F32 | DataType::BF16) {
+        if !matches!(data_type, DataType::F32 | DataType::F16 | DataType::BF16) {
             return Err(EmbeddingTableError::UnsupportedConfiguration(format!(
                 "input embedding lookup does not support {data_type:?}"
             )));

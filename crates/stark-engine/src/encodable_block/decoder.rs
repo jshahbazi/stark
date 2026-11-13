@@ -75,6 +75,11 @@ pub struct DecoderEncodeOutput<B: Backend> {
 }
 
 impl<B: Backend> Decoder<B> {
+    /// Activation, KV-cache and readout dtype selected at load.
+    pub fn data_type(&self) -> DataType {
+        self.data_type
+    }
+
     pub(crate) fn embedding(&self) -> &Embedding<B> {
         &self.embedding
     }

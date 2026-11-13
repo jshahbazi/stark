@@ -13,7 +13,7 @@ using namespace stark::quantization_method;
 using stark::read_packed;
 
 template <typename T>
-VARIANTS(T, float, bfloat)
+VARIANTS(T, float, half, bfloat)
 PUBLIC KERNEL(InputEmbeddingLookup)(
     const device uint* token_ids,
     const device uchar* values,

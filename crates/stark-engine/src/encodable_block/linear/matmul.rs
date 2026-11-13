@@ -114,7 +114,7 @@ impl<B: Backend> LinearMatmul<B> {
         output_hadamard_factors: Option<B::GlobalBuffer>,
     ) -> Result<Self, LinearMatmulError<B>> {
         for data_type in [weights_data_type, input_data_type, output_data_type] {
-            if !matches!(data_type, DataType::BF16 | DataType::F32) {
+            if !matches!(data_type, DataType::BF16 | DataType::F16 | DataType::F32) {
                 return Err(LinearMatmulError::UnsupportedDataType(data_type));
             }
         }
