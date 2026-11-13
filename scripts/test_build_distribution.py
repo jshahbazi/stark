@@ -575,6 +575,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "LICENSE.qwen38-reference",
                 "LICENSE.omlx-reference",
                 "LICENSE.flint-reference",
+                "LICENSE.ripple-reference",
                 "LICENSE.mlx-reference",
                 "provenance/UPSTREAM.md",
                 "tools/converter/LICENSE.lalamo",
@@ -762,6 +763,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "LICENSE.qwen38-reference",
                 "LICENSE.omlx-reference",
                 "LICENSE.flint-reference",
+                "LICENSE.ripple-reference",
                 "LICENSE.mlx-reference",
             ):
                 self.assertEqual(

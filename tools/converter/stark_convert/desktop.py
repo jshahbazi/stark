@@ -76,6 +76,7 @@ from .model_removal import RemovalError, prepare_removal, removal_info, remove_m
 from .model_support import support_matrix
 from .mtp import mtp_capabilities, resolve_mtp
 from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
+from .native_catalog import RIPPLE_FAMILY_ID
 from .native_catalog import allowed_choice as native_choice_allowed
 from .native_catalog import catalog_item as native_catalog_item
 from .native_catalog import catalog_items as native_catalog_items
@@ -957,7 +958,7 @@ class Desktop:
             native_choice = native_source_choice(self.catalog_family_id, item)
             fixed_native_ids = {native_item["id"] for native_item in native_catalog_items(self.catalog_family_id)}
             if (
-                self.catalog_family_id == NATIVE_FAMILY_ID or item["id"] in fixed_native_ids
+                self.catalog_family_id in {NATIVE_FAMILY_ID, RIPPLE_FAMILY_ID} or item["id"] in fixed_native_ids
             ) and native_choice is None:
                 raise DesktopError("Refresh this family before downloading a model.")
             installed = self.catalog_installed_ids(item, mode)

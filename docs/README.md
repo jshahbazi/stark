@@ -24,6 +24,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Edge0-145B plan](EDGE0_PLAN.md) | Pinned metadata intake, storage and arithmetic gaps against the native Flash-Next path, and staged work; nothing implemented or run |
 | [Gemma 3 images](GEMMA3_IMAGES.md) | Source-bound SigLIP image artifacts, 4B/12B/27B admission, exact processor semantics and qualification boundaries |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
+| [Ripple-65B Preview](RIPPLE.md) | Native Rust/Metal architecture, pinned Q4_K_M and Q8_0 preparation, precision and validation limits |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
 | [Local API](LOCAL_API.md) | The loopback OpenAI-style chat API: authentication, endpoints, parameters, limits, error codes, tested clients |
 
