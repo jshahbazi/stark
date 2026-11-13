@@ -22,6 +22,9 @@ mod batch;
 #[path = "decode_graph_edge0.rs"]
 mod edge0;
 
+#[path = "decode_graph_edge0_mtp.rs"]
+mod edge0_mtp;
+
 /// Persistent backing for automatic, non-aliasable Shared scratch buffers.
 /// Apple documents that each subresource strongly retains its heap until the
 /// resource is destroyed. No buffer here is ever made aliasable or placed.

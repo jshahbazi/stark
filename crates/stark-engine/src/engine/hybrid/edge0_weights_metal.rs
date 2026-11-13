@@ -8,6 +8,13 @@ use crate::engine::hybrid::weight_metal::{DecodeGraph, DeviceVector, MappedMatri
 
 const BANK_CAP: usize = 56 * 1024 * 1024 * 1024;
 
+#[path = "edge0_mtp_weights_metal.rs"]
+mod mtp;
+
+fn edge0_memory_cap(recommended_working_set: usize) -> usize {
+    BANK_CAP.min(recommended_working_set / 4 * 3)
+}
+
 #[derive(Clone)]
 struct Bank {
     name: String,
@@ -68,7 +75,7 @@ impl Weights {
             return Err(Error::Invalid("Edge0 Metal already admitted"));
         }
         let banks = data.banks()?;
-        let cap = BANK_CAP.min(super::super::super::weight_metal::recommended_working_set()? / 4 * 3);
+        let cap = edge0_memory_cap(super::super::super::weight_metal::recommended_working_set()?);
         let mut bank_bytes = 0usize;
         for bank in &banks {
             let bytes = self.files[bank.file].metal_span(bank.offset, bank.bytes)?.1;
@@ -118,6 +125,8 @@ impl Weights {
         // GPU wrapper. Actual registration remains lazy, one layer at a time.
         super::super::super::profile::record("native.edge0.bank.admitted_bytes", 0.0, bank_bytes);
         super::super::super::profile::record("native.edge0.bank.cap_bytes", 0.0, cap);
+        data.metal_dynamic_allowance.store(dynamic_allowance, Ordering::Release);
+        data.metal_resident.store(resident, Ordering::Release);
         data.metal_admitted.store(true, Ordering::Release);
         Ok(())
     }

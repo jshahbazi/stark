@@ -712,7 +712,7 @@ impl State {
         readout: bool,
     ) -> Result<Vec<f32>> {
         if model.geometry.edge0 {
-            return self.encode_edge0_batch(model, &[token], readout);
+            return self.encode_edge0_batch(model, &[token], readout, None);
         }
         let g = &model.geometry;
         let embedding = model.weights.row(&model.embedding, token as usize)?;
@@ -827,6 +827,7 @@ impl State {
         model: &mut QwenModel,
         tokens: &[u32],
         readout: bool,
+        wide_output: Option<&mut Option<DeviceVector>>,
     ) -> Result<Vec<f32>> {
         let g = &model.geometry;
         let count = tokens.len();
@@ -837,6 +838,7 @@ impl State {
             || tokens.iter().any(|&token| token as usize >= g.vocab)
             || start.checked_add(count).is_none_or(|end| end > g.context)
             || (readout && count != 1)
+            || (wide_output.is_some() && (!readout || count != 1))
         {
             return Err(Error::Invalid("Edge0 graph token batch boundary"));
         }
@@ -1001,6 +1003,15 @@ impl State {
         for values in &hidden {
             graph.check_finite(values)?;
         }
+        // Only the private diagnostic path requests this compact owner. The
+        // ordinary target path encodes no extra allocation or copy command.
+        let saved_wide = if wide_output.is_some() {
+            let saved = DecodeGraph::zeros(g.streams * g.dim)?;
+            graph.copy_into(&hidden[0], &saved)?;
+            Some(saved)
+        } else {
+            None
+        };
         let outputs = if readout {
             let (input, _) = mix(&mut graph, &model.weights, &model.final_mix, &self.final_norm, &hidden[0], g)?;
             let logits = model.weights.encode_edge0_named_batch(&mut graph, &model.readout, &input, 1)?;
@@ -1020,6 +1031,9 @@ impl State {
         }
         model.position += count;
         model.history = history;
+        if let Some(output) = wide_output {
+            *output = saved_wide;
+        }
         Ok(logits)
     }
 }
@@ -1148,6 +1162,22 @@ pub(super) fn step(
     result
 }
 
+/// Diagnostic-only target advance retaining a compact final wide residual.
+pub(super) fn step_with_wide(
+    model: &mut QwenModel,
+    token: u32,
+) -> Result<(Vec<f32>, DeviceVector)> {
+    let mut state = match model.graph.take() {
+        Some(state) => state,
+        None => State::new(model)?,
+    };
+    let mut wide = None;
+    let result = state.encode_edge0_batch(model, &[token], true, Some(&mut wide));
+    model.graph = Some(state);
+    let logits = result?;
+    Ok((logits, wide.ok_or(Error::Invalid("private MTP target wide residual missing"))?))
+}
+
 pub(super) fn prefill(
     model: &mut QwenModel,
     tokens: &[u32],
@@ -1168,7 +1198,7 @@ pub(super) fn prefill(
             for _ in batch {
                 before_token()?;
             }
-            state.encode_edge0_batch(model, batch, false)?;
+            state.encode_edge0_batch(model, batch, false, None)?;
         }
         Ok(())
     })();

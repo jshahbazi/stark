@@ -80,11 +80,21 @@ pub(super) struct Edge0Data {
     experts: edge0_source::NativeExperts,
     projections: edge0_source::Q8Projections,
     mtp: mtp_storage::MtpStorage,
+    #[cfg(feature = "metal")]
+    mtp_dense_file: usize,
+    #[cfg(feature = "metal")]
+    mtp_expert_file: usize,
     integers: HashMap<String, Vec<i64>>,
     integer_shapes: HashMap<String, Vec<usize>>,
     metal_counters: [std::sync::atomic::AtomicU64; 4],
     #[cfg(feature = "metal")]
     metal_admitted: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "metal")]
+    metal_dynamic_allowance: std::sync::atomic::AtomicUsize,
+    #[cfg(feature = "metal")]
+    metal_resident: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "metal")]
+    mtp_admitted: std::sync::atomic::AtomicBool,
 }
 
 impl Edge0Data {
@@ -773,11 +783,21 @@ impl Weights {
             experts,
             projections,
             mtp,
+            #[cfg(feature = "metal")]
+            mtp_dense_file: mtp_dense,
+            #[cfg(feature = "metal")]
+            mtp_expert_file: mtp_experts,
             integers,
             integer_shapes,
             metal_counters: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature = "metal")]
             metal_admitted: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "metal")]
+            metal_dynamic_allowance: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(feature = "metal")]
+            metal_resident: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "metal")]
+            mtp_admitted: std::sync::atomic::AtomicBool::new(false),
         });
         #[cfg(feature = "metal")]
         {

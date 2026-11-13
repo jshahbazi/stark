@@ -640,6 +640,27 @@ pub(super) fn allocated_bytes() -> Result<usize> {
     executor().map(|executor| executor.device.current_allocated_size())
 }
 
+/// Test-only retained transport for unchanged synthetic packed fixture bytes.
+#[cfg(test)]
+pub(super) fn fixture_mapped_bytes(bytes: &[u8]) -> Result<MappedMatrix> {
+    if bytes.is_empty() || bytes.len() > 128 * 1024 * 1024 {
+        return Err(Error::Invalid("synthetic mapped fixture size"));
+    }
+    let buffer = executor()?
+        .device
+        .new_buffer_with_data(bytes, MTLResourceOptions::STORAGE_MODE_SHARED)
+        .ok_or(Error::Invalid("synthetic mapped fixture allocation"))?;
+    Ok(MappedMatrix {
+        codes: MappedSlice {
+            offset: 0,
+            length: bytes.len(),
+            registered_length: buffer.length(),
+            buffer,
+        },
+        planes: None,
+    })
+}
+
 fn executor() -> Result<&'static Executor> {
     EXECUTOR
         .get_or_init(|| {
@@ -686,6 +707,7 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_mla_prefill.metal"));
             source.push_str(include_str!("feed_forward.metal"));
             source.push_str(include_str!("edge0_graph.metal"));
+            source.push_str(include_str!("edge0_mtp_graph.metal"));
             source.push_str(include_str!("qwen_gdn.metal"));
             source.push_str(include_str!("decode_graph.metal"));
             source.push_str(include_str!("affine_uint_matvec.metal"));

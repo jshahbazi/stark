@@ -102,6 +102,39 @@ impl PolicyKey {
 pub(super) struct Stamp {
     identity: Arc<()>,
     epoch: u64,
+    wide_branch: u64,
+}
+
+/// Opaque model/epoch/branch/policy binding for private residuals and heads.
+#[derive(Clone)]
+pub(super) struct StateTag {
+    identity: Arc<()>,
+    epoch: u64,
+    wide_branch: u64,
+    policy: PolicyKey,
+}
+
+impl StateTag {
+    pub(super) fn same(
+        &self,
+        other: &Self,
+    ) -> bool {
+        Arc::ptr_eq(&self.identity, &other.identity)
+            && self.epoch == other.epoch
+            && self.wide_branch == other.wide_branch
+            && self.policy == other.policy
+    }
+}
+
+pub(super) fn state_selector_bits() -> u64 {
+    SELECTORS.iter().enumerate().fold(0, |bits, (index, &(name, default_on))| {
+        let on = if default_on {
+            std::env::var_os(name).is_none_or(|value| value != "0")
+        } else {
+            std::env::var_os(name).is_some_and(|value| value == "1")
+        };
+        bits | (u64::from(on) << index)
+    })
 }
 
 impl Stamp {
@@ -109,6 +142,7 @@ impl Stamp {
         Self {
             identity: Arc::new(()),
             epoch: 0,
+            wide_branch: 0,
         }
     }
 
@@ -119,6 +153,37 @@ impl Stamp {
             self.identity = Arc::new(());
             self.epoch = 0;
         }
+        self.wide_branch = 0;
+    }
+
+    // Successful target restores preserve reusable checkpoints, but every
+    // residual from the abandoned branch must become stale, even at the same
+    // absolute row. Overflow invalidates the checkpoint epoch safely too.
+    fn advance_wide_branch(&mut self) {
+        if let Some(next) = self.wide_branch.checked_add(1) {
+            self.wide_branch = next;
+        } else {
+            self.invalidate();
+        }
+    }
+
+    fn state_tag(
+        &self,
+        policy: PolicyKey,
+    ) -> StateTag {
+        StateTag {
+            identity: self.identity.clone(),
+            epoch: self.epoch,
+            wide_branch: self.wide_branch,
+            policy,
+        }
+    }
+
+    fn matches_state_tag(
+        &self,
+        tag: &StateTag,
+    ) -> bool {
+        self.matches(&tag.identity, tag.epoch) && self.wide_branch == tag.wide_branch
     }
 
     fn matches(
@@ -169,6 +234,24 @@ fn valid_boundary(
 }
 
 impl QwenModel {
+    pub(super) fn checkpoint_state_tag(
+        &mut self,
+        staging: StagingPolicy,
+    ) -> Result<StateTag> {
+        let policy = PolicyKey::read(&self.geometry, staging)?;
+        let stamp = self.checkpoint_stamp.get_or_insert_with(Stamp::new);
+        Ok(stamp.state_tag(policy))
+    }
+
+    pub(super) fn checkpoint_state_tag_matches(
+        &self,
+        tag: &StateTag,
+        staging: StagingPolicy,
+    ) -> Result<bool> {
+        Ok(tag.policy == PolicyKey::read(&self.geometry, staging)?
+            && self.checkpoint_stamp.as_ref().is_some_and(|stamp| stamp.matches_state_tag(tag)))
+    }
+
     /// Capture a completed positive-position target boundary under the staging policy.
     pub(super) fn capture_checkpoint(
         &mut self,
@@ -274,6 +357,9 @@ impl QwenModel {
             fence()?;
             // Everything fallible completed on independent replacement owners.
             // No callback or GPU submission can observe a partially swapped set.
+            if let Some(stamp) = &mut self.checkpoint_stamp {
+                stamp.advance_wide_branch();
+            }
             for (layer, replacement) in self.layers.iter_mut().zip(replacements) {
                 if let Mixer::Delta(state) = &mut layer.mixer {
                     state.metal = replacement;
@@ -410,6 +496,46 @@ mod tests {
         changed = policy.clone();
         changed.context = 256;
         assert!(policy != changed);
+    }
+
+    #[stark_test]
+    fn private_wide_tags_reject_abandoned_same_row_branch_without_expiring_checkpoint() {
+        let policy = PolicyKey {
+            staging: StagingPolicy::Edge0MetalSingleStepV1,
+            context: 512,
+            sigmoid_output: true,
+            selectors: 0,
+        };
+        let mut stamp = Stamp::new();
+        // cp32 survives a successful restore. wide A at row32 must not be
+        // accepted after restoring cp32 and taking branch B at that same row.
+        let checkpoint_identity = stamp.identity.clone();
+        let checkpoint_epoch = stamp.epoch;
+        let wide_a = stamp.state_tag(policy.clone());
+        assert!(stamp.matches_state_tag(&wide_a));
+        stamp.advance_wide_branch();
+        let wide_b = stamp.state_tag(policy.clone());
+        assert!(stamp.matches(&checkpoint_identity, checkpoint_epoch));
+        assert!(!stamp.matches_state_tag(&wide_a));
+        assert!(!wide_a.same(&wide_b));
+        assert!(stamp.matches_state_tag(&wide_b));
+        // The same reusable checkpoint may be restored a second time, while
+        // branch-B handles are invalidated independently of checkpoint age.
+        stamp.advance_wide_branch();
+        assert!(stamp.matches(&checkpoint_identity, checkpoint_epoch));
+        assert!(!stamp.matches_state_tag(&wide_b));
+        // A counter wrap must never revive either wide or checkpoint handles.
+        stamp.wide_branch = u64::MAX;
+        let wrapped_branch = stamp.state_tag(policy.clone());
+        stamp.advance_wide_branch();
+        assert!(!stamp.matches_state_tag(&wrapped_branch));
+        assert!(!stamp.matches(&checkpoint_identity, checkpoint_epoch));
+        stamp.epoch = u64::MAX;
+        stamp.wide_branch = u64::MAX;
+        let wrapped_epoch = stamp.state_tag(policy);
+        stamp.advance_wide_branch();
+        assert!(!stamp.matches_state_tag(&wrapped_epoch));
+        assert!(!Arc::ptr_eq(&stamp.identity, &wrapped_epoch.identity));
     }
 
     #[stark_test]

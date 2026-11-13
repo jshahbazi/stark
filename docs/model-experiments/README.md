@@ -1,5 +1,6 @@
 # Model change and experiment ledger
 
+- [20261113-EDGE0-08: native MTP head component](2026-11-13-edge0-mtp-head.md): private original-plane F32 head and independent F64 oracle in progress; no MTP capability or sampling admission.
 - [20261113-EDGE0-07: native MTP foundation](2026-11-13-edge0-mtp.md): checked four-plane draft storage, controller and checkpoint component gates passed; actual short target-state replay/reset/stale-handle gate passed. Head integration and MTP sampling/performance remain unfinished; capabilities stay unavailable.
 - [20261112-EDGE0-06: Metal graph and grouped prefill](2026-11-12-edge0-metal.md): bounded Phase 4 gate passed for virtual/resident native graph variants, with complete-readout comparison, matched fixed-work timing, corrected cold memory admission and worker lifecycle checks; cap 512, MTP/reuse unavailable, app/catalogue excluded.
 - [20261112-EDGE0-05: F32 reference forward](2026-11-12-edge0-reference-forward.md): diagnostic native adapter, independent F64 component and bounded checkpoint chat/reset/restart gates passed; broad model parity, mixed execution, MTP and prefix reuse remain unqualified.

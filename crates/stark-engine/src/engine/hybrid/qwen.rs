@@ -24,6 +24,10 @@ mod decode_graph;
 mod checkpoint;
 
 #[cfg(feature = "metal")]
+#[path = "qwen_mtp.rs"]
+pub(super) mod mtp;
+
+#[cfg(feature = "metal")]
 // Reserved for the private native-target adapter; no production caller is enabled.
 #[allow(unused_imports)]
 pub(super) use checkpoint::{Checkpoint, StagingPolicy};
@@ -1540,6 +1544,36 @@ impl QwenModel {
         token: u32,
     ) -> Result<Vec<f32>> {
         self.advance(token, true)
+    }
+
+    /// Private diagnostic boundary. No worker capability or default target
+    /// commands change; callers retain only a dedicated final-wide owner.
+    #[cfg(feature = "metal")]
+    #[allow(dead_code, reason = "private head diagnostic awaiting qualification")]
+    pub(super) fn step_with_wide(
+        &mut self,
+        token: u32,
+    ) -> Result<(Vec<f32>, mtp::WideResidual)> {
+        let result = objc2::rc::autoreleasepool(|_| {
+            if !self.geometry.edge0_metal || !self.graph_enabled {
+                return Err(Error::Unsupported("private MTP target graph"));
+            }
+            let tag = self.checkpoint_state_tag(checkpoint::StagingPolicy::Edge0MetalSingleStepV1)?;
+            let row = self.position;
+            let (logits, values) = decode_graph::step_with_wide(self, token)?;
+            Ok((
+                logits,
+                mtp::WideResidual {
+                    values,
+                    tag,
+                    row,
+                },
+            ))
+        });
+        if result.is_err() {
+            self.reset();
+        }
+        result
     }
 
     /// Advance recurrent, attention and n-gram state for a prefix token without

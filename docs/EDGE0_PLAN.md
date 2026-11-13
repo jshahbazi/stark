@@ -347,6 +347,8 @@ The foundation component and bounded actual-target checkpoint gates passed in
 [attempt `20261113-EDGE0-07`](model-experiments/2026-11-13-edge0-mtp.md).
 The executable head, complete target-plus-head lifecycle and MTP on/off
 qualification remain unfinished; capabilities stay unavailable.
+The head component is tracked separately in
+[attempt `20261113-EDGE0-08`](model-experiments/2026-11-13-edge0-mtp-head.md).
 
 - Load the draft layer from `mtp/` and adapt the existing Flash-Next head
   contract to the native Qwen graph. Implement the source's four-plane Q2 expert

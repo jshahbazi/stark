@@ -152,6 +152,17 @@ Independent foundation work and remaining executable-head gates are recorded in
 Existing Strata MIT/GGML notices remain preserved; no model license or runtime
 capability is changed by these checked views.
 
+The private executable F32 head and independent binary64 oracle follow the same
+pin and preserve the original draft code/scale planes. Their HC equations are
+traced to `edge0-strata/src/kernels/cuda/fused_gr.cu`; dense attention, RoPE,
+router and shared-expert authorities are bound individually by Git blob and
+SHA-256 in the oracle registration. The candidate uses floating activations
+where Strata uses Q8_1 activation blocks. It does not import the CUDA runtime or
+inherit its numerical/acceptance results. Source-bound synthetic and actual
+component evidence belongs to
+[attempt `20261113-EDGE0-08`](../docs/model-experiments/2026-11-13-edge0-mtp-head.md).
+The Strata MIT and GGML notices remain separate from the model-weight licenses.
+
 ### Edge0 native reader and block components
 
 The independent native Strata readers and the new Q4_0 (GGML 2), IQ4_NL
