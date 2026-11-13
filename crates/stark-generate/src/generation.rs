@@ -430,25 +430,8 @@ fn collect_tokens_with_clock_and_callback(
     mut on_progress: Option<&mut ProgressCallback<'_>>,
     cancelled: &mut dyn FnMut() -> Result<bool, &'static str>,
 ) -> Result<GeneratedTokens, &'static str> {
-    let capacity = options.context_tokens as usize - input_tokens;
-    let budget = capacity.min(options.max_new_tokens as usize);
-    let mut result = GeneratedTokens {
-        generated_token_ids: Vec::with_capacity(budget),
-        sampled_tokens: 0,
-        finish_reason: if capacity < options.max_new_tokens as usize {
-            FinishReason::Context
-        } else {
-            FinishReason::Length
-        },
-        stop_token_id: None,
-        prefill_seconds: None,
-        decode_seconds: None,
-        text: None,
-        reused_input_tokens: 0,
-    };
-    let mut first_sample = None;
-    let mut last_sample = None;
-    for _ in 0..budget {
+    let mut collector = TokenCollector::new(input_tokens, options);
+    for _ in 0..collector.budget {
         if cancelled()? {
             return Err("generation_cancelled");
         }
@@ -456,44 +439,112 @@ fn collect_tokens_with_clock_and_callback(
         if cancelled()? {
             return Err("generation_cancelled");
         }
-        let sample_time = elapsed();
+        if !collector.push(token, vocab_size, elapsed(), on_token, on_progress.as_deref_mut())? {
+            break;
+        }
+    }
+    drop(stream);
+    Ok(collector.finish())
+}
+
+/// The same output boundary for iterator and callback-driven native decoders.
+/// Returning false stops native production before another output is delivered.
+pub(crate) struct TokenCollector<'a> {
+    options: &'a GenerationOptions,
+    budget: usize,
+    result: GeneratedTokens,
+    first_sample: Option<Duration>,
+    last_sample: Option<Duration>,
+    stopped: bool,
+}
+
+impl<'a> TokenCollector<'a> {
+    pub(crate) fn new(
+        input_tokens: usize,
+        options: &'a GenerationOptions,
+    ) -> Self {
+        let capacity = (options.context_tokens as usize).saturating_sub(input_tokens);
+        let budget = capacity.min(options.max_new_tokens as usize);
+        let result = GeneratedTokens {
+            generated_token_ids: Vec::with_capacity(budget),
+            sampled_tokens: 0,
+            finish_reason: if capacity < options.max_new_tokens as usize {
+                FinishReason::Context
+            } else {
+                FinishReason::Length
+            },
+            stop_token_id: None,
+            prefill_seconds: None,
+            decode_seconds: None,
+            text: None,
+            reused_input_tokens: 0,
+        };
+        Self {
+            options,
+            budget,
+            result,
+            first_sample: None,
+            last_sample: None,
+            stopped: budget == 0,
+        }
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        token: u64,
+        vocab_size: usize,
+        sample_time: Duration,
+        on_token: &mut dyn FnMut(u32) -> Result<bool, &'static str>,
+        on_progress: Option<&mut ProgressCallback<'_>>,
+    ) -> Result<bool, &'static str> {
+        if self.stopped {
+            return Err("invalid_generation_output");
+        }
         if token >= vocab_size as u64 {
             return Err("invalid_generation_output");
         }
         let token = token as u32;
-        first_sample.get_or_insert(sample_time);
-        last_sample = Some(sample_time);
-        result.sampled_tokens += 1;
-        if let Some(callback) = on_progress.as_deref_mut() {
+        self.first_sample.get_or_insert(sample_time);
+        self.last_sample = Some(sample_time);
+        self.result.sampled_tokens += 1;
+        if let Some(callback) = on_progress {
             callback(GenerationProgress {
-                sampled_tokens: result.sampled_tokens,
+                sampled_tokens: self.result.sampled_tokens,
                 elapsed_seconds: sample_time.as_secs_f64(),
-                prefill_seconds: first_sample.map(|time| time.as_secs_f64()),
+                prefill_seconds: self.first_sample.map(|time| time.as_secs_f64()),
             })?;
         }
-        if options.eos_token_ids.contains(&token) {
-            result.finish_reason = FinishReason::Eos;
-            result.stop_token_id = Some(token);
-            break;
+        if self.options.eos_token_ids.contains(&token) {
+            self.result.finish_reason = FinishReason::Eos;
+            self.result.stop_token_id = Some(token);
+            self.stopped = true;
+        } else if self.options.extra_stop_token_ids.contains(&token) {
+            self.result.finish_reason = FinishReason::StopToken;
+            self.result.stop_token_id = Some(token);
+            self.stopped = true;
+        } else {
+            self.result.generated_token_ids.push(token);
+            if !on_token(token)? {
+                self.result.finish_reason = FinishReason::StopSequence;
+                self.stopped = true;
+            }
         }
-        if options.extra_stop_token_ids.contains(&token) {
-            result.finish_reason = FinishReason::StopToken;
-            result.stop_token_id = Some(token);
-            break;
-        }
-        result.generated_token_ids.push(token);
-        if !on_token(token)? {
-            result.finish_reason = FinishReason::StopSequence;
-            break;
-        }
+        self.stopped |= self.result.sampled_tokens >= self.budget;
+        Ok(!self.stopped)
     }
-    result.prefill_seconds = first_sample.map(|time| time.as_secs_f64());
-    if result.sampled_tokens > 1 {
-        result.decode_seconds =
-            last_sample.zip(first_sample).map(|(last, first)| last.saturating_sub(first).as_secs_f64());
+
+    pub(crate) fn finish(mut self) -> GeneratedTokens {
+        self.result.prefill_seconds = self.first_sample.map(|time| time.as_secs_f64());
+        if self.result.sampled_tokens > 1 {
+            self.result.decode_seconds =
+                self.last_sample.zip(self.first_sample).map(|(last, first)| last.saturating_sub(first).as_secs_f64());
+        }
+        self.result
     }
-    drop(stream);
-    Ok(result)
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.stopped
+    }
 }
 
 pub(crate) trait GenerationBackend {
@@ -2104,7 +2155,7 @@ mod tests {
 
     #[test]
     fn mtp_toggle_uses_each_models_recommendation_and_does_not_persist() {
-        for (maximum, recommended) in [(1, 1), (3, 2), (5, 4)] {
+        for (maximum, recommended) in [(1, 1), (3, 1), (3, 2), (5, 4)] {
             let mut worker = mtp_worker(maximum, recommended);
             let mut output = Vec::new();
             run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();

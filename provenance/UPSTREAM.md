@@ -170,6 +170,13 @@ source and precision policy above and reuse Stark's existing `MtpSampler` and
 [attempt `20261113-EDGE0-09`](../docs/model-experiments/2026-11-13-edge0-mtp-integration.md);
 they do not enable worker MTP or change model-weight licensing.
 
+The controlled JSONL worker connection and shared output collector follow the
+same original Stark sampling contract. Request-ID cancellation polls, scoped
+failure fencing, acknowledgement and conservative request accounting are local
+adapter changes, tracked in
+[attempt `20261113-EDGE0-10`](../docs/model-experiments/2026-11-13-edge0-mtp-worker.md).
+The model remains limited to explicit local non-commercial evaluation.
+
 ### Edge0 native reader and block components
 
 The independent native Strata readers and the new Q4_0 (GGML 2), IQ4_NL

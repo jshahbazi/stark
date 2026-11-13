@@ -1017,12 +1017,35 @@ pub struct QwenModel {
     readout: String,
     position: usize,
     history: Vec<u32>,
+    edge0_mtp_enabled: bool,
+    edge0_mtp_stats: super::MtpStats,
     #[cfg(feature = "metal")]
     graph: Option<decode_graph::State>,
     #[cfg(feature = "metal")]
     graph_enabled: bool,
     #[cfg(feature = "metal")]
     checkpoint_stamp: Option<checkpoint::Stamp>,
+}
+
+// Conservative worker inventory: the runtime lease shares its 512 MiB cap
+// with snapshots, while worker admission additionally reserves the full sealed
+// 256 MiB target snapshot bound before allocating the head.
+fn edge0_mtp_request_allowance(enabled: bool) -> usize {
+    if enabled {
+        768 * 1024 * 1024
+    } else {
+        0
+    }
+}
+
+fn edge0_mtp_policy(
+    edge0: bool,
+    graph: bool,
+    reference: bool,
+    metal: bool,
+    resident: bool,
+) -> bool {
+    edge0 && graph && reference && metal && !resident
 }
 
 pub(super) fn forced_scalar_attention() -> bool {
@@ -1189,6 +1212,53 @@ impl QwenModel {
         }))
     }
 
+    pub(super) fn supports_edge0_mtp_decode(&self) -> bool {
+        #[cfg(feature = "metal")]
+        return edge0_mtp_policy(
+            self.geometry.edge0,
+            self.geometry.edge0_metal && self.graph_enabled,
+            std::env::var_os("STARK_EDGE0_REFERENCE").is_some_and(|v| v == "1"),
+            std::env::var_os("STARK_EDGE0_METAL").is_some_and(|v| v == "1"),
+            std::env::var_os("STARK_EDGE0_RESIDENT").is_some_and(|v| v == "1"),
+        );
+        #[cfg(not(feature = "metal"))]
+        edge0_mtp_policy(self.geometry.edge0, false, false, false, false)
+    }
+
+    pub(super) fn edge0_mtp_capabilities(&self) -> Option<super::MtpCapabilities> {
+        self.supports_edge0_mtp_decode().then_some(super::MtpCapabilities {
+            max_drafts: 3,
+            recommended_drafts: 1,
+            sampling: "exact-rejection-v1",
+            verification: "serial-target-exact-v1",
+        })
+    }
+
+    /// Allocation-free policy change; worker admission must run afterward.
+    pub(super) fn set_edge0_mtp_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<()> {
+        if enabled && !self.supports_edge0_mtp_decode() {
+            return Err(Error::Unsupported("Edge0 MTP unavailable for loaded execution path"));
+        }
+        if enabled != self.edge0_mtp_enabled {
+            self.reset();
+        }
+        self.edge0_mtp_enabled = enabled;
+        self.edge0_mtp_stats = super::MtpStats::default();
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    pub(super) fn edge0_mtp_enabled(&self) -> bool {
+        self.edge0_mtp_enabled
+    }
+
+    pub(super) fn edge0_mtp_stats(&self) -> super::MtpStats {
+        self.edge0_mtp_stats
+    }
+
     pub(super) fn additional_scoring_device_readout(&self) -> bool {
         #[cfg(feature = "metal")]
         return !self.graph_enabled;
@@ -1306,6 +1376,7 @@ impl QwenModel {
             // registry's remaining bank/static reservation once per request.
             bytes = bytes.checked_add(self.weights.edge0_additional_weight_bytes()?)?;
         }
+        bytes = bytes.checked_add(edge0_mtp_request_allowance(self.edge0_mtp_enabled))?;
         Some(bytes)
     }
 
@@ -1511,6 +1582,8 @@ impl QwenModel {
             graph_enabled,
             #[cfg(feature = "metal")]
             checkpoint_stamp: None,
+            edge0_mtp_enabled: false,
+            edge0_mtp_stats: super::MtpStats::default(),
         };
         #[cfg(feature = "metal")]
         if model.geometry.edge0_metal {
@@ -1523,6 +1596,7 @@ impl QwenModel {
     }
 
     pub fn reset(&mut self) {
+        self.edge0_mtp_stats = super::MtpStats::default();
         #[cfg(feature = "metal")]
         {
             if let Some(stamp) = &mut self.checkpoint_stamp {
@@ -1715,6 +1789,20 @@ mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn edge0_mtp_capability_requires_loaded_opt_in_virtual_metal_path() {
+        for bits in 0..32 {
+            assert_eq!(
+                edge0_mtp_policy(bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0, bits & 16 != 0),
+                bits == 15
+            );
+        }
+        assert_eq!(edge0_mtp_request_allowance(false), 0);
+        assert_eq!(edge0_mtp_request_allowance(true), 768 * 1024 * 1024);
+        #[cfg(feature = "metal")]
+        assert_eq!(edge0_mtp_request_allowance(true), mtp::HEAD_DYNAMIC_BYTES + checkpoint::MAX_CHECKPOINT_BYTES);
+    }
 
     #[stark_test]
     fn qwen_request_inventory_covers_executing_graph_cache_growth_and_scores() {

@@ -22,6 +22,7 @@ use crate::{
     text_stop::StopFilter,
 };
 
+mod edge0;
 pub(crate) mod mtp;
 #[path = "hybrid_nucleus.rs"]
 mod nucleus;
@@ -433,6 +434,9 @@ impl HybridBackend {
         mut on_text: Option<&mut TextCallback<'_>>,
         mut on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
+        if image.is_none() && options.mtp_drafts > 0 && self.model.supports_edge0_mtp_decode() {
+            return self.generate_edge0_inner(input, options, on_text, on_progress);
+        }
         let started = Instant::now();
         let is_image = image.is_some();
         if reused > 0 {
@@ -795,6 +799,11 @@ impl GenerationBackend for HybridBackend {
         if self.model.is_fenced() {
             return Err("native_generation_failed");
         }
+        // Edge0's enabled flag is allocation-free and determines the head's
+        // additional admission charge before any native request allocation.
+        if self.model.supports_edge0_mtp_decode() {
+            self.model.set_mtp_enabled(request.options.mtp_drafts > 0).map_err(|_| "mtp_not_supported")?;
+        }
         let released = self.model.prepare_request_memory().map_err(|_| "native_generation_failed")?;
         let memory_budget_bytes = if released {
             stark_resource_budget::inference_memory_budget(stark_resource_budget::available_memory_bytes().unwrap_or(0))
@@ -867,6 +876,9 @@ impl GenerationBackend for HybridBackend {
         let end = input_tokens.checked_add(options.max_new_tokens).ok_or("context_overflow")?;
         if end > options.context_tokens {
             return Err("context_overflow");
+        }
+        if self.model.supports_edge0_mtp_decode() {
+            self.model.set_mtp_enabled(options.mtp_drafts > 0).map_err(|_| "mtp_not_supported")?;
         }
         self.model.prepare_request_memory().map_err(|_| "native_generation_failed")?;
         let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
@@ -975,7 +987,12 @@ impl GenerationBackend for HybridBackend {
         self.last_mtp.clone()
     }
     fn default_mtp_drafts(&self) -> u32 {
-        self.model.default_mtp_drafts()
+        if self.model.supports_edge0_mtp_decode() {
+            // Default selection awaits matched on/off measurements.
+            0
+        } else {
+            self.model.default_mtp_drafts()
+        }
     }
     fn effective_mtp_drafts(
         &self,

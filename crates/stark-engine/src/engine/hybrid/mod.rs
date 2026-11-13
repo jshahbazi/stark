@@ -955,7 +955,14 @@ impl Model {
         false
     }
 
+    pub fn supports_edge0_mtp_decode(&self) -> bool {
+        matches!(&self.forward, Forward::Qwen(model) if model.supports_edge0_mtp_decode())
+    }
+
     pub fn supports_mtp(&self) -> bool {
+        if self.supports_edge0_mtp_decode() {
+            return true;
+        }
         #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
         if let Forward::GlmExl3(model) = &self.forward {
             return model.mtp_capabilities().is_some();
@@ -968,6 +975,9 @@ impl Model {
     }
 
     pub fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
+        if let Forward::Qwen(model) = &self.forward {
+            return model.edge0_mtp_capabilities();
+        }
         #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
         if let Forward::GlmExl3(model) = &self.forward {
             return model.mtp_capabilities();
@@ -980,6 +990,9 @@ impl Model {
     }
 
     pub fn mtp_verification(&self) -> &'static str {
+        if self.supports_edge0_mtp_decode() {
+            return "serial-target-exact-v1";
+        }
         #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
         if let Forward::GlmExl3(model) = &self.forward {
             return model.mtp_verification();
@@ -1000,12 +1013,16 @@ impl Model {
             Forward::GlmExl3(model) => model.set_mtp_enabled(enabled),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Forward::Lily(model) => model.set_mtp_enabled(enabled),
+            Forward::Qwen(model) => model.set_edge0_mtp_enabled(enabled),
             _ if !enabled => Ok(()),
             _ => Err(Error::Unsupported("MTP unavailable")),
         }
     }
 
     pub fn mtp_stats(&self) -> MtpStats {
+        if let Forward::Qwen(model) = &self.forward {
+            return model.edge0_mtp_stats();
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return model.mtp_stats();
@@ -1013,8 +1030,34 @@ impl Model {
         MtpStats::default()
     }
 
-    /// Explicit local Edge0 evaluation hook. This does not enable worker MTP
-    /// or change advertised model capabilities. The callback owns the private
+    /// Complete an opt-in local Edge0 request while holding the loaded model
+    /// exclusively. Control is polled before every prompt, target, draft and
+    /// replay step and before delivering queued output. Errors invalidate all
+    /// request state; false output callbacks finish cleanly. Prefix reuse stays
+    /// disabled: the 512-token cap cannot qualify the 4,096-token boundary and
+    /// wider-context indexer finite checks remain unresolved.
+    pub fn generate_edge0_mtp_controlled(
+        &mut self,
+        tokens: &[u32],
+        max_outputs: usize,
+        drafts: usize,
+        sampler: &mut dyn MtpSampler,
+        on_output: &mut dyn FnMut(u32) -> Result<bool>,
+        control: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<MtpStats> {
+        match &mut self.forward {
+            #[cfg(feature = "metal")]
+            Forward::Qwen(model) if model.edge0_mtp_enabled() => {
+                model.run_edge0_mtp(tokens, max_outputs, drafts, sampler, on_output, control)
+            },
+            _ => {
+                let _ = (tokens, max_outputs, drafts, sampler, on_output, control);
+                Err(Error::Unsupported("Edge0 MTP request is not enabled"))
+            },
+        }
+    }
+
+    /// Explicit local Edge0 evaluation hook. The callback owns the private
     /// output and can stop cleanly with `false` or cancel by returning an error.
     #[doc(hidden)]
     pub fn evaluate_edge0_mtp(

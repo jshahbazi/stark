@@ -20,6 +20,7 @@ mod state;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub(in crate::engine::hybrid) use state::CombinedCheckpoint;
+pub(super) const HEAD_DYNAMIC_BYTES: usize = state::HEAD_DYNAMIC_BYTES;
 
 use super::{Geometry, QwenModel, checkpoint, edge0};
 use crate::engine::hybrid::{
@@ -271,7 +272,7 @@ impl HeadCheckpoint {
     }
 }
 
-fn new_graph() -> Result<DecodeGraph> {
+pub(super) fn new_graph() -> Result<DecodeGraph> {
     let mut graph = DecodeGraph::new()?;
     graph.set_scratch_limit(SCRATCH_BYTES)?;
     Ok(graph)

@@ -1,12 +1,10 @@
 //! Backend-neutral, synchronous MTP control. The private Edge0 evaluation
 //! adapter supplies complete model/policy-bound target AND draft checkpoints.
-//! No worker capability is enabled by this module.
+//! Worker requests collect synchronously while retaining exclusive backend ownership.
 //!
 //! The initial target verifier uses ordinary single-token steps. The sampler
 //! owns exact stochastic rejection and its independent draft randomness; this
 //! controller makes no same-seed MTP-on/off identity claim.
-
-#![allow(dead_code, reason = "private evaluation integration does not enable production MTP")]
 
 use std::{collections::VecDeque, time::Instant};
 
@@ -16,6 +14,11 @@ use super::{Error, MtpSampler, MtpStats, Result};
 /// synchronous: errors must drain submitted work before returning or fencing.
 pub(super) trait MtpBackend {
     type Checkpoint;
+
+    /// Cancellation/control is checked before publishing queued outputs too.
+    fn check_control(&mut self) -> Result<()> {
+        Ok(())
+    }
 
     fn vocab_size(&self) -> usize;
     fn is_fenced(&self) -> bool;
@@ -220,6 +223,10 @@ impl<'a, B: MtpBackend + ?Sized> MtpDecode<'a, B> {
             self.invalidate();
             return Err(Error::Invalid("MTP controller fenced"));
         }
+        if let Err(error) = self.backend.check_control() {
+            self.invalidate();
+            return Err(error);
+        }
         if !self.queue.is_empty() {
             let inputs = self.committed_inputs[..self.delivered].to_vec();
             if let Err(error) = self.rewind(&inputs) {
@@ -236,6 +243,7 @@ impl<'a, B: MtpBackend + ?Sized> MtpDecode<'a, B> {
 
     /// Restore the delivered boundary, then invalidate the cancelled request.
     /// Neither this method nor finish/Drop invokes any sampler callback.
+    #[cfg(test)]
     pub(super) fn cancel(&mut self) -> Result<()> {
         let result = self.finish();
         self.invalidate();
@@ -249,6 +257,10 @@ impl<B: MtpBackend + ?Sized> Iterator for MtpDecode<'_, B> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.stopped {
             return None;
+        }
+        if let Err(error) = self.backend.check_control() {
+            self.invalidate();
+            return Some(Err(error));
         }
         if self.backend.is_fenced() {
             self.invalidate();
@@ -265,6 +277,10 @@ impl<B: MtpBackend + ?Sized> Iterator for MtpDecode<'_, B> {
                 return Some(Err(error));
             }
         }
+        if let Err(error) = self.backend.check_control() {
+            self.invalidate();
+            return Some(Err(error));
+        }
         let token = self.queue.pop_front()?;
         self.delivered += 1;
         Some(Ok(token))
@@ -273,8 +289,47 @@ impl<B: MtpBackend + ?Sized> Iterator for MtpDecode<'_, B> {
 
 impl<B: MtpBackend + ?Sized> Drop for MtpDecode<'_, B> {
     fn drop(&mut self) {
-        let _ = self.finish();
+        if std::thread::panicking() {
+            // No caller callback or replay is safe while unwinding.
+            self.invalidate();
+        } else {
+            let _ = self.finish();
+        }
     }
+}
+
+/// Synchronous worker output delivery, including the already sampled first
+/// output. Every error fences the request; a false callback acknowledges a
+/// clean stop at the last delivered boundary.
+pub(super) fn collect<B: MtpBackend + ?Sized>(
+    backend: &mut B,
+    sampler: &mut dyn MtpSampler,
+    stats: &mut MtpStats,
+    first: u32,
+    remaining: usize,
+    drafts: usize,
+    on_output: &mut dyn FnMut(u32) -> Result<bool>,
+) -> Result<()> {
+    let mut stream = MtpDecode::new(backend, sampler, stats, first, remaining, drafts)?;
+    let result = (|| {
+        stream.backend.check_control()?;
+        if !on_output(first)? {
+            return Ok(());
+        }
+        for output in stream.by_ref() {
+            if !on_output(output?)? {
+                break;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        // Cancellation cannot perform more replay submissions. Invalidate
+        // directly; the owning request resets and drains both model owners.
+        stream.invalidate();
+        return Err(error);
+    }
+    stream.finish()
 }
 
 #[cfg(test)]
@@ -309,6 +364,8 @@ mod tests {
         target_calls: usize,
         draft_calls: usize,
         first_fenced_state: Option<(Vec<u32>, Vec<u32>)>,
+        cancel_after_target: bool,
+        cancel_after_rewind: Option<usize>,
     }
 
     impl Backend {
@@ -322,12 +379,23 @@ mod tests {
                 target_calls: 0,
                 draft_calls: 0,
                 first_fenced_state: None,
+                cancel_after_target: false,
+                cancel_after_rewind: None,
             }
         }
     }
 
     impl MtpBackend for Backend {
         type Checkpoint = (Vec<u32>, Vec<u32>);
+
+        fn check_control(&mut self) -> Result<()> {
+            if (self.cancel_after_target && self.target_calls > 0)
+                || self.cancel_after_rewind.is_some_and(|at| self.rewinds >= at)
+            {
+                return Err(Error::Invalid("fake asynchronous cancellation"));
+            }
+            Ok(())
+        }
 
         fn vocab_size(&self) -> usize {
             8
@@ -843,6 +911,96 @@ mod tests {
                 }
             }
             assert_eq!(*calls.borrow(), before);
+            assert!(backend.fenced);
+            assert!(backend.target.is_empty() && backend.draft.is_empty());
+        }
+    }
+    #[stark_test]
+    fn mtp_controlled_collector_callback_boundaries_and_failures() {
+        for drafts in 1..=3 {
+            for delivered in 1..=5 {
+                for fail in [false, true] {
+                    let mut backend = Backend::new(Fault::None);
+                    // Rejection every round avoids assuming a proposal count.
+                    let mut sampler = Sampler::new(&[7; 12], &[1, 2, 3, 4]);
+                    let mut stats = MtpStats::default();
+                    let mut seen = Vec::new();
+                    let result = collect(&mut backend, &mut sampler, &mut stats, 0, 4, drafts, &mut |token| {
+                        seen.push(token);
+                        if seen.len() == delivered {
+                            if fail {
+                                Err(Error::Invalid("fake output callback failure"))
+                            } else {
+                                Ok(false)
+                            }
+                        } else {
+                            Ok(true)
+                        }
+                    });
+                    assert_eq!(seen, (0..delivered as u32).collect::<Vec<_>>());
+                    assert_eq!(result.is_err(), fail);
+                    assert_eq!(backend.fenced, fail);
+                    if fail {
+                        assert!(backend.target.is_empty() && backend.draft.is_empty());
+                    } else {
+                        let expected = (0..delivered.saturating_sub(1) as u32).collect::<Vec<_>>();
+                        assert_eq!(backend.target, expected);
+                        assert_eq!(backend.draft, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    fn mtp_controlled_collector_cancellation_during_target_or_replay_never_publishes() {
+        for drafts in 1..=3 {
+            for during_target in [false, true] {
+                let mut backend = Backend::new(Fault::None);
+                backend.cancel_after_target = during_target;
+                backend.cancel_after_rewind = if during_target {
+                    None
+                } else {
+                    Some(2)
+                };
+                let mut sampler = Sampler::new(&[1, 2, 3], &[1, 2, 3, 4]);
+                let mut stats = MtpStats::default();
+                let mut seen = Vec::new();
+                assert!(
+                    collect(&mut backend, &mut sampler, &mut stats, 0, 4, drafts, &mut |token| {
+                        seen.push(token);
+                        Ok(true)
+                    })
+                    .is_err()
+                );
+                assert_eq!(seen, vec![0]);
+                assert!(backend.fenced);
+                assert!(backend.target.is_empty() && backend.draft.is_empty());
+            }
+        }
+    }
+    #[stark_test]
+    fn mtp_controlled_collector_callback_panic_fences_without_cleanup_sampling() {
+        for delivered in 1..=5 {
+            let mut backend = Backend::new(Fault::None);
+            let mut sampler = Sampler::new(&[1, 2, 3], &[1, 2, 3, 4]);
+            let calls = Rc::clone(&sampler.calls);
+            let mut stats = MtpStats::default();
+            let mut seen = 0;
+            let mut before = Calls::default();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = collect(&mut backend, &mut sampler, &mut stats, 0, 4, 3, &mut |_| {
+                    seen += 1;
+                    if seen == delivered {
+                        before = *calls.borrow();
+                        panic!("injected output callback panic");
+                    }
+                    Ok(true)
+                });
+            }));
+            assert!(result.is_err());
+            assert_eq!(*calls.borrow(), before);
+            assert_eq!(seen, delivered);
             assert!(backend.fenced);
             assert!(backend.target.is_empty() && backend.draft.is_empty());
         }
