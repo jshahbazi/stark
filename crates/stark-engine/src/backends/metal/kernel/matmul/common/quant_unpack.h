@@ -51,6 +51,16 @@ METAL_FUNC bfloat4 uint4_to_fp4<bfloat, 8>(uint4 n) {
   return bfloat4(_uint4_to_fp4_float<8>(n));
 }
 
+template <>
+METAL_FUNC half4 uint4_to_fp4<half, 4>(uint4 n) {
+  return half4(_uint4_to_fp4_float<4>(n));
+}
+
+template <>
+METAL_FUNC half4 uint4_to_fp4<half, 8>(uint4 n) {
+  return half4(_uint4_to_fp4_float<8>(n));
+}
+
 template <ushort BITS>
 METAL_FUNC constexpr uint symmetric_zero_point() {
   return 1u << (BITS - 1);

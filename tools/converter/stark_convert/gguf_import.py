@@ -636,7 +636,13 @@ def import_qwen3(
     try:
         stats = write_import(source, operations, metadata, staging / "model.safetensors", chunk_bytes=chunk_bytes)
         stats["code_preservation"] = validate_codes(source, operations, staging / "model.safetensors", chunk_bytes)
-        normalized = write_metadata(hf_source, staging, {**config, "_stark_model_repo": repo})
+        template_provenance = {}
+        normalized = write_metadata(
+            hf_source, staging, {**config, "_stark_model_repo": repo}, provenance=template_provenance
+        )
+        if template_provenance:
+            # This pinned import records no template selection; keep refusing named lists.
+            raise ConversionError("GGUF import requires a plain chat template")
         (staging / "config.json").write_text(
             json.dumps({"type": "LanguageModelConfig", "decoder_config": plan.decoder_config, **normalized}, indent=4)
         )

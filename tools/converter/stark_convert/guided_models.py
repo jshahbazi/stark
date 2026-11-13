@@ -136,8 +136,9 @@ class Recipe:
                 total += policy.paged_working_set_bytes + policy.host_reserve_bytes
                 return ((total + GIB - 1) // GIB) * GIB
             return ((self.installed_bytes + state + 3 * GIB + GIB - 1) // GIB) * GIB
-        # Guided installs use the converter's BF16 default (cli.py), matching
-        # the dense generation route's activation/KV state policy.
+        # Guided installs convert with `--dtype auto` (cli.py): BF16, or F16
+        # for an all-F16 MLX Qwen2/Mistral source. Both store 2-byte
+        # activations and KV state, matching the dense generation route.
         # Budget both full-context KV buffers, the 1024-row attention suffix,
         # converted weights/header overhead and a 3 GiB workspace/tokenizer allowance.
         # Rounded-up planning values still do not grant native admission.
@@ -475,13 +476,25 @@ def _small_file(root, name):
 
 
 def _artifact_precision_matches(root, recipe, receipt):
-    """Check native BF16 storage and its size allowance using only headers.
+    """Check native BF16 or automatically selected F16 storage using only headers.
 
     Source identity alone also matches F16/F32 reference conversions. Those
     outputs cannot inherit the guide's BF16 load/memory policy. Normalization
     scales remain F32 in the supported dense route; quantization parameters
-    and floating matrices must be BF16.
+    and floating matrices must be BF16. The one exception is an install whose
+    receipt records `--dtype auto` selecting F16 for a family in
+    AUTO_F16_FAMILIES: its floating planes must then all be F16 (same width,
+    so the memory plan is unchanged).
     """
+    from .model_support import AUTO_F16_FAMILIES
+
+    selection = receipt.get("dtype_selection")
+    automatic_f16 = (
+        isinstance(selection, dict) and selection.get("requested") == "auto" and selection.get("selected") == "float16"
+    )
+    if automatic_f16 and recipe.architecture not in AUTO_F16_FAMILIES:
+        return False
+    floating = "F16" if automatic_f16 else "BF16"
     capability = receipt.get("capability")
     if (
         receipt.get("status") != "ok"
@@ -544,7 +557,7 @@ def _artifact_precision_matches(root, recipe, receipt):
         if normalization:
             if tensor.dtype != "F32" or len(tensor.shape) != 1:
                 return False
-        elif tensor.dtype == "BF16":
+        elif tensor.dtype == floating:
             continue
         elif tensor.dtype in {"U8", "I8", "U32", "I32"} and base in quantized and plane in {"weights", "zero_points"}:
             continue

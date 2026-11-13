@@ -24,6 +24,26 @@ from pathlib import Path
 from test_hybrid_workers import CheckFailed, digest, require, worker_process
 
 MLX_LM_REVISION = "1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7"
+# A full-attention model has no window edge to cross; its long case crosses the
+# 1,024-token prefill chunk used by the reference and the native workers.
+FULL_ATTENTION_LONG_CASE_TOKENS = 1029
+
+
+def long_case_tokens(text: dict) -> int:
+    """Return the long reference case length for a decoder text config.
+
+    A windowed model crosses its sliding-window edge, exactly as before. A
+    config with no window, or one that declares a window and disables it
+    (Qwen2's ``use_sliding_window: false``), uses full attention.
+    """
+    window = text.get("sliding_window")
+    if window is None or text.get("use_sliding_window") is False:
+        return FULL_ATTENTION_LONG_CASE_TOKENS
+    require(
+        type(window) is int and 1 <= window <= 4096,
+        "reference_window_outside_test_bounds",
+    )
+    return window + 5
 
 
 def save_json(path: Path, value) -> None:
@@ -70,13 +90,14 @@ def reference(args) -> dict:
     source = args.source.resolve(strict=True)
     model, config = load_model(source, lazy=True, strict=True, trust_remote_code=False)
     tokenizer = load_tokenizer(source)
+    if args.reference_dtype == "bfloat16":
+        # Diagnostic profile: round every floating parameter (including affine
+        # scales and biases) to BF16, as a BF16 Stark conversion does, so MLX
+        # computes with BF16 activations. It is not the stock source profile.
+        model.set_dtype(mx.bfloat16)
     mx.eval(model.parameters())
     text = config.get("text_config", config)
-    window = text["sliding_window"]
-    require(
-        type(window) is int and 1 <= window <= 4096,
-        "reference_window_outside_test_bounds",
-    )
+    long_tokens = long_case_tokens(text)
     rendered = [
         tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
@@ -116,7 +137,7 @@ def reference(args) -> dict:
 
     cases = []
     base = prompts[0]
-    repeated = (base * ((window + 5) // len(base) + 1))[: window + 5]
+    repeated = (base * (long_tokens // len(base) + 1))[:long_tokens]
     sequences = [base[:1], base, prompts[1], repeated[:129], repeated]
     for index, tokens in enumerate(sequences):
         logits, _cache, elapsed = prefill(tokens)
@@ -176,6 +197,8 @@ def reference(args) -> dict:
         "mlx_lm_revision": MLX_LM_REVISION,
         "mlx": importlib.metadata.version("mlx"),
         "forward_profile": "prefix-cache-1024-then-last-token-v2",
+        "long_case_tokens": long_tokens,
+        "reference_dtype": args.reference_dtype,
         "cases_sha256": digest(output / "cases.json"),
         "generations_sha256": digest(output / "generations.json"),
     }
@@ -379,6 +402,12 @@ def main() -> int:
     ref = modes.add_parser("reference")
     ref.add_argument("--source", type=Path, required=True)
     ref.add_argument("--output", type=Path, required=True)
+    ref.add_argument(
+        "--reference-dtype",
+        choices=("source", "bfloat16"),
+        default="source",
+        help="source keeps stock MLX-LM parameter dtypes; bfloat16 is a diagnostic profile",
+    )
     check = modes.add_parser("workers")
     check.add_argument("--fixture", type=Path, required=True)
     check.add_argument("--model", type=Path, required=True)

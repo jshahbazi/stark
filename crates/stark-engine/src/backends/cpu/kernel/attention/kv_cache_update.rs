@@ -1,11 +1,11 @@
-use half::bf16;
+use half::{bf16, f16};
 use num_traits::Float;
 use stark_engine_macros::kernel;
 
 use crate::array::ArrayElement;
 
 #[kernel(KVCacheUpdate)]
-#[variants(T, f32, bf16)]
+#[variants(T, f32, f16, bf16)]
 pub fn kv_cache_update<T: ArrayElement + Float>(
     in_place_keys: *mut T,
     in_place_values: *mut T,
