@@ -147,6 +147,10 @@ def _listing_rejects(repo, listing):
 
     Only outcomes that the per-repository checks reach from the same fields
     are settled here: another task, no model configuration, or no weights.
+    A source whose only weights are GGUF files is also dropped. Inspection
+    could only show it as unavailable for want of Safetensors weights, and
+    some publishers give every GGUF repository the same placeholder
+    configuration, which would list it under an unrelated family.
     """
     if isinstance(_field(listing, "tags"), list) and not _application_source(listing, repo):
         return True
@@ -158,9 +162,12 @@ def _listing_rejects(repo, listing):
         return False
     if "config.json" not in names and get_model(repo) is None:
         return True
-    return not any(
-        name.endswith(_WEIGHT_SUFFIXES) and not PurePosixPath(name).name.startswith("adapter_model") for name in names
-    )
+    weights = [
+        name
+        for name in names
+        if name.endswith(_WEIGHT_SUFFIXES) and not PurePosixPath(name).name.startswith("adapter_model")
+    ]
+    return all(name.endswith(".gguf") for name in weights)
 
 
 def _unsupported_quantization(config):
