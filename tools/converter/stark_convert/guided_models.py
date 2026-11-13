@@ -32,7 +32,7 @@ from .guided_memory import config_identity, native_request_bytes
 from .guided_memory_profiles import ResidentProfile, qualified_profile, source_profile
 from .model_inventory import MAX_HEADER_BYTES, _weights
 from .recommendation_benchmarks import load_registry
-from .recommendation_leaderboard import load_snapshot, speed_policy
+from .recommendation_leaderboard import QUALITY_MAX_SCORE_GAP, load_snapshot, speed_policy
 from .registry import get_model
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, read_safetensors_header
 
@@ -934,6 +934,34 @@ def recommendation_report(
         # Historical benchmark evidence stays visible as reference information;
         # it cannot claim to have determined a different final ordering.
         benchmark_used = set()
+    # Explain a stronger known option blocked only by current free memory.
+    # Keep it outside actionable offers: startup and installation gates stay intact.
+    memory_limited = []
+    best_score = None
+    if guide_preference == "quality" and guide_task in {"general", "coding"}:
+        best_score = max(
+            (
+                records[benchmarks.model_id(recipe)]["score"]
+                for recipe in eligible
+                if benchmarks.model_id(recipe) in records
+            ),
+            default=None,
+        )
+        for recipe in candidates:
+            parent = benchmarks.model_id(recipe)
+            if (
+                recipe.id not in excluded_recipe_ids
+                and parent in records
+                and (best_score is None or records[parent]["score"] > best_score)
+                and installation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
+                and not execution_allowed(recipe, host)
+            ):
+                memory_limited.append(recipe)
+    memory_option = min(
+        memory_limited,
+        key=lambda recipe: (-records[benchmarks.model_id(recipe)]["score"], recipe.startup_memory, recipe.id),
+        default=None,
+    )
     items = []
     for recipe in eligible[:3]:
         evidence, benchmark_details = benchmarks.evidence(recipe, task, cohort, benchmark_used)
@@ -1072,6 +1100,18 @@ def recommendation_report(
         "message": message,
         "host": dict(host),
         "items": items,
+        "memory_limited_model": {
+            "name": memory_option.display_name or memory_option.name,
+            "reference_score": str(records[benchmarks.model_id(memory_option)]["score"]),
+            "compared_with_score": str(best_score) if best_score is not None else None,
+            "required_available_memory_bytes": memory_option.startup_memory,
+        }
+        if memory_option is not None
+        else None,
+        "quality_policy": {
+            "maximum_alternative_score_gap": QUALITY_MAX_SCORE_GAP,
+            "distinct_parent_models": True,
+        },
         "speed_policy": speed_limits,
         "leaderboard_ranking": {
             "captured": leaderboard.captured,

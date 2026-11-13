@@ -76,7 +76,7 @@ def report(candidates, leaderboard, *, task="general", preference="quality", mac
     )
 
 
-@pytest.mark.parametrize("task, expected", [("general", ["large", "small"]), ("coding", ["small", "large"])])
+@pytest.mark.parametrize("task, expected", [("general", ["large"]), ("coding", ["small"])])
 def test_quality_uses_the_selected_tasks_scores_after_admission(task, expected):
     candidates = [recipe("large", 10), recipe("small", 1)]
     cached = snapshot({"large": 95, "small": 15}, {"large": 10, "small": 99})
@@ -237,14 +237,12 @@ def test_high_source_score_and_tiny_source_plan_cannot_override_stark_memory_exc
     assert result["leaderboard_ranking"]["applied"]
 
 
-def test_missing_score_stays_unknown_after_scored_options_and_all_unknown_falls_back():
+def test_missing_score_is_not_a_quality_alternative_and_all_unknown_offers_one_fallback():
     unknown, scored = recipe("unknown", 100), recipe("scored", 1)
     result = report([unknown, scored], snapshot({"unknown": None, "scored": 0}))
-    assert [item["id"] for item in result["items"]] == ["scored", "unknown"]
-    assert result["items"][1]["benchmarks"] == []
-    assert "quality is unknown" in result["items"][1]["recommendation_reason"]
+    assert [item["id"] for item in result["items"]] == ["scored"]
     fallback = report([scored, unknown], snapshot({"unknown": None, "scored": None}), task="coding")
-    assert [item["id"] for item in fallback["items"]] == ["unknown", "scored"]
+    assert [item["id"] for item in fallback["items"]] == ["unknown"]
     assert not fallback["leaderboard_ranking"]["applied"]
     assert all(item["benchmarks"] == [] for item in fallback["items"])
     assert "resource-based fallback; coding quality is unknown" in fallback["items"][0]["recommendation_reason"]
@@ -268,15 +266,13 @@ def test_quantized_parent_score_requires_exact_reviewed_revision():
     cached = snapshot({"parent": 99, "other": 10})
     bound = registry(bindings=[binding])
     result = report([other, quantized], cached, benchmarks=bound)
-    assert [item["id"] for item in result["items"]] == ["quantized", "other"]
+    assert [item["id"] for item in result["items"]] == ["quantized"]
     evidence = result["items"][0]["benchmarks"][0]
     assert evidence["model_id"] == "example/parent"
     assert evidence["candidate_revision"] == binding["revision"]
     changed = replace(quantized, revision="c" * 40)
     result = report([changed, other], cached, benchmarks=bound)
-    assert [item["id"] for item in result["items"]] == ["other", "quantized"]
-    assert result["items"][1]["benchmarks"] == []
-    assert "quality is unknown" in result["items"][1]["recommendation_reason"]
+    assert [item["id"] for item in result["items"]] == ["other"]
 
 
 @pytest.mark.parametrize("task", ["general", "coding"])
@@ -294,9 +290,81 @@ def test_negative_scores_are_recorded_and_null_scores_remain_unknown():
     assert records["example/negative"]["score"] == -3.25
     assert "example/unknown" not in records
     result = report([recipe("unknown", 100), recipe("negative", 1)], cached)
-    assert [item["id"] for item in result["items"]] == ["negative", "unknown"]
+    assert [item["id"] for item in result["items"]] == ["negative"]
     assert result["items"][0]["benchmarks"][0]["score"] == "-3.25"
-    assert result["items"][1]["benchmarks"] == []
+
+
+@pytest.mark.parametrize("task", ["general", "coding"])
+def test_quality_alternatives_have_an_inclusive_ten_point_gap(task):
+    candidates = [recipe(name, 1) for name in ("main", "near", "edge", "distant", "unknown")]
+    cached = snapshot({"main": 73.7, "near": 73.6, "edge": 63.7, "distant": 63.69, "unknown": None})
+    for order in (candidates, list(reversed(candidates))):
+        result = report(order, cached, task=task)
+        assert [item["id"] for item in result["items"]] == ["main", "near", "edge"]
+
+
+def test_screenshot_coding_gap_does_not_fill_alternative_slots():
+    candidates = [recipe(name, 1) for name in ("qwen38", "coder14", "qwen14")]
+    result = report(candidates, snapshot({"qwen38": 73.7, "coder14": 51, "qwen14": 48.4}), task="coding")
+    assert [item["id"] for item in result["items"]] == ["qwen38"]
+
+
+def test_quality_does_not_offer_multiple_exports_of_the_same_parent():
+    primary = recipe("primary", 1)
+    duplicate = replace(primary, id="duplicate")
+    alternative = recipe("alternative", 1)
+    result = report([primary, duplicate, alternative], snapshot({"primary": 70, "alternative": 69}))
+    assert [item["id"] for item in result["items"]] == ["duplicate", "alternative"]
+
+
+def test_stronger_memory_blocked_model_is_explained_and_reappears_after_memory_recovers():
+    strong = replace(recipe("strong", 100), estimated_runtime_bytes=87 * guided.GIB)
+    small = recipe("small", 1)
+    cached = snapshot({"strong": 76.1, "small": 73.7})
+    pressured = host(available_memory_bytes=72 * guided.GIB)
+    result = report([strong, small], cached, task="coding", machine=pressured)
+    assert [item["id"] for item in result["items"]] == ["small"]
+    assert result["memory_limited_model"] == {
+        "name": "strong",
+        "reference_score": "76.1",
+        "compared_with_score": "73.7",
+        "required_available_memory_bytes": 87 * guided.GIB,
+    }
+    recovered = report([strong, small], cached, task="coding")
+    assert [item["id"] for item in recovered["items"]] == ["strong", "small"]
+    assert recovered["memory_limited_model"] is None
+
+
+@pytest.mark.parametrize("blocker", ["gpu", "disk", "excluded", "unknown-score"])
+def test_memory_advice_does_not_suggest_options_with_other_blockers(blocker):
+    strong = replace(recipe("strong", 100, weights=20 * guided.GIB), estimated_runtime_bytes=87 * guided.GIB)
+    small = recipe("small", 1)
+    machine = host(available_memory_bytes=72 * guided.GIB)
+    if blocker == "gpu":
+        machine.update(gpu_available=True, unified_memory=True, gpu_memory_budget_bytes=60 * guided.GIB)
+    if blocker == "disk":
+        machine["free_disk_bytes"] = 10 * guided.GIB
+    cached = snapshot({"strong": None if blocker == "unknown-score" else 76.1, "small": 73.7})
+    result = guided.recommendation_report(
+        machine,
+        {},
+        [strong.id] if blocker == "excluded" else (),
+        candidates=[strong, small],
+        task="coding",
+        preference="quality",
+        benchmarks=registry(),
+        leaderboard=cached,
+    )
+    assert result["memory_limited_model"] is None
+    assert [item["id"] for item in result["items"]] == ["small"]
+
+
+def test_memory_advice_remains_available_when_no_model_can_run():
+    strong = replace(recipe("strong", 100), estimated_runtime_bytes=87 * guided.GIB)
+    result = report([strong], snapshot({"strong": 76.1}), machine=host(available_memory_bytes=72 * guided.GIB))
+    assert result["status"] == "unavailable" and result["items"] == []
+    assert result["memory_limited_model"]["name"] == "strong"
+    assert result["memory_limited_model"]["compared_with_score"] is None
 
 
 def test_packaged_snapshot_loads_both_tasks_all_ram_buckets_and_known_reference_scores():

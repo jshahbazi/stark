@@ -209,11 +209,11 @@ def test_fixed_recipes_bind_complete_real_source_manifests():
 
 def test_resources_select_starting_choices_and_installed_reuse():
     normal = guided.recommendation_report(resources(), {})
-    assert [item["id"] for item in normal["items"]] == [recipe.id for recipe in guided.RECIPES]
+    assert [item["id"] for item in normal["items"]] == [guided.RECIPES[0].id]
     small = guided.recommendation_report(resources(physical_memory_bytes=8 * guided.GIB), {})
     assert small["items"] == [] and "16 GB" in small["message"]
-    assert [item["context_tokens"] for item in normal["items"]] == [32768, 32768]
-    assert [item["runtime_memory_bytes_estimate"] for item in normal["items"]] == [11 * guided.GIB, 9 * guided.GIB]
+    assert [item["context_tokens"] for item in normal["items"]] == [32768]
+    assert [item["runtime_memory_bytes_estimate"] for item in normal["items"]] == [11 * guided.GIB]
     pressure = resources(available_memory_bytes=0, free_disk_bytes=0, download_free_disk_bytes=0)
     assert guided.recommendation_report(pressure, {})["items"] == []
     reused = guided.recommendation_report(pressure, {guided.RECIPES[0].id: ["same-copy"]})
@@ -692,7 +692,7 @@ def test_dynamic_recipe_snapshots_source_and_checks_config_receipt(tmp_path):
 
 def test_catalog_results_are_bounded_and_unknown_parameter_count_is_honest():
     candidates = [guided.recipe_from_catalog(catalog_candidate(number)) for number in range(1, 6)]
-    report = guided.recommendation_report(gpu_resources(), {}, candidates=candidates)
+    report = guided.recommendation_report(gpu_resources(), {}, candidates=candidates, preference="balanced")
     assert len(report["items"]) == 3
     item = catalog_candidate()
     item["parameter_count"] = None

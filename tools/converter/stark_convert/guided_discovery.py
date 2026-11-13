@@ -13,7 +13,7 @@ FAMILY_SECONDS = 10
 MAX_FAMILY_PAGES = 10
 
 
-def _discover_family(catalog, family):
+def _discover_family(catalog, family, task="general"):
     """Pass unavailable pages while sharing one family's metadata budget."""
     deadline = time.monotonic() + FAMILY_SECONDS
     items = {}
@@ -23,7 +23,7 @@ def _discover_family(catalog, family):
         seconds = FAMILY_SECONDS if page == 0 else deadline - time.monotonic()
         if seconds <= 0:
             break
-        options = {"planning": True, "deadline_seconds": seconds, "limit": 30}
+        options = {"planning": True, "deadline_seconds": seconds, "limit": 30, "ranking_task": task}
         if offset:
             options["offset"] = offset
         try:
@@ -48,7 +48,9 @@ def _discover_family(catalog, family):
     return {**report, "items": list(items.values())}
 
 
-def discover(*, catalog=family_catalog):
+def discover(*, catalog=family_catalog, task="general"):
+    if task not in {"general", "coding"}:
+        raise ValueError("Unsupported guided discovery task")
     # At most three families share the active lookup slots. Each family passes
     # unavailable pages within its own total deadline and metadata page budget.
     families = [
@@ -58,7 +60,7 @@ def discover(*, catalog=family_catalog):
     ]
     items, checked, incomplete, failed = {}, 0, False, 0
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(_discover_family, catalog, family): family for family in families}
+        futures = {pool.submit(_discover_family, catalog, family, task): family for family in families}
         for future in as_completed(futures):
             try:
                 report = future.result()
@@ -89,7 +91,12 @@ def discover(*, catalog=family_catalog):
 
 
 def main():
-    print(json.dumps(discover(), allow_nan=False))
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", choices=("general", "coding"), default="general")
+    arguments = parser.parse_args()
+    print(json.dumps(discover(task=arguments.task), allow_nan=False))
 
 
 if __name__ == "__main__":

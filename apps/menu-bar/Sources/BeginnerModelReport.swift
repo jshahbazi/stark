@@ -48,8 +48,8 @@ struct BeginnerModelReport {
 
         var recommendation: String {
             switch name {
-            case "whatmodel.sh · General Work": return "Recommended using the cached General Work leaderboard."
-            case "whatmodel.sh · Coding": return "Recommended using the cached Coding leaderboard."
+            case "whatmodel.sh · General Work": return "Cached General Work score: \(score). Parent-model reference; this quantization was not evaluated."
+            case "whatmodel.sh · Coding": return "Cached Coding score: \(score). Parent-model reference; this quantization was not evaluated."
             case "LiveCodeBench": return "Recommended for coding using published benchmark results."
             case "BFCL": return "Recommended using published tool-use results."
             default: return "Recommended using published instruction-following results."
@@ -176,6 +176,7 @@ struct BeginnerModelReport {
     let gpuName: String?
     let gpuMemoryBudgetBytes: Int64?
     let items: [Item]
+    let memoryAdvice: String?
 
     init?(_ raw: [String: Any]) {
         guard BeginnerMetadata.integer(raw["schema_version"]) == 1,
@@ -192,6 +193,19 @@ struct BeginnerModelReport {
         freeDiskBytes = BeginnerMetadata.integer(host["free_disk_bytes"])
         gpuName = BeginnerMetadata.string(host["gpu_name"], limit: 200)
         gpuMemoryBudgetBytes = BeginnerMetadata.integer(host["gpu_memory_budget_bytes"])
+        if let blocked = raw["memory_limited_model"] as? [String: Any],
+           let name = BeginnerMetadata.string(blocked["name"], limit: 256),
+           let score = BeginnerMetadata.string(blocked["reference_score"], limit: 32),
+           let value = Double(score), value.isFinite,
+           let required = BeginnerMetadata.integer(blocked["required_available_memory_bytes"]),
+           let available = availableMemoryBytes, required > available {
+            let needed = ByteCountFormatter.string(fromByteCount: required, countStyle: .memory)
+            let free = ByteCountFormatter.string(fromByteCount: available, countStyle: .memory)
+            let compared = (blocked["compared_with_score"] as? String).flatMap(Double.init)
+            let scoreDescription = compared.map { $0.isFinite && value > $0 } == true
+                ? "a higher cached parent-model score" : "a cached parent-model score"
+            memoryAdvice = "\(name) has \(scoreDescription) (\(score)), and needs \(needed) of available memory; \(free) is available now. Free up memory and check models again."
+        } else { memoryAdvice = nil }
     }
 
     var deviceSummary: String {

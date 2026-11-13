@@ -100,6 +100,7 @@ struct BeginnerSetupSnapshot: Equatable {
     var choices: [BeginnerModelChoice] = []
     var choicesLoading = false
     var choicesError: String? = nil
+    var memoryAdvice: String? = nil
     var deviceSummary = ""
     var installChoiceID: String? = nil
     var installedResultID: String? = nil

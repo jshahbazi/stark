@@ -463,7 +463,7 @@ class Desktop:
         self.guided_discovery_generation = 0
         self.guided_discovery_process = None
         self.guided_discovery_job = None
-        self.guided_catalog_cache = None
+        self.guided_catalog_cache = {}
         self.active_model = None
         self.active_mode = None
         self.vocab_size = None
@@ -1067,14 +1067,14 @@ class Desktop:
             process = getattr(self, "guided_discovery_process", None)
         terminate(process)
 
-    def run_guided_discovery(self, generation):
+    def run_guided_discovery(self, generation, task="general"):
         process = None
         try:
             with self.lock:
                 if generation != self.guided_discovery_generation:
                     return None
                 process = subprocess.Popen(
-                    [sys.executable, "-I", "-B", "-m", "stark_convert.guided_discovery"],
+                    [sys.executable, "-I", "-B", "-m", "stark_convert.guided_discovery", "--task", task],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
@@ -1120,19 +1120,20 @@ class Desktop:
 
     def load_guided_models(self, task, preference, hardware, excluded, request_id, generation):
         try:
+            discovery_task = "coding" if task in {"coding", "code"} else "general"
             with self.lock:
-                cached = self.guided_catalog_cache
+                cached = self.guided_catalog_cache.get(discovery_task)
             if cached is not None and time.monotonic() - cached[0] < 600:
                 discovery = cached[1]
             else:
-                discovery = self.run_guided_discovery(generation)
+                discovery = self.run_guided_discovery(generation, discovery_task)
                 if discovery is None:
                     return
                 with self.lock:
                     if generation != self.guided_discovery_generation:
                         return
                     if discovery["items"] and not discovery.get("failed_families", 0):
-                        self.guided_catalog_cache = (time.monotonic(), discovery)
+                        self.guided_catalog_cache[discovery_task] = (time.monotonic(), discovery)
             self.publish_guided_models(task, preference, hardware, excluded, request_id, discovery, generation)
         except Exception:
             # Network/discovery failure keeps the exact qualified starters and

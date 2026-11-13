@@ -534,6 +534,30 @@ struct BeginnerChecks {
             ]
             guard let legacy = BeginnerModelReport.Item(raw), legacy.gpuRuntimeBytes == 100,
                   legacy.memoryDetails.count == 1, legacy.benchmarkDetails.isEmpty else { return false }
+            var report: [String: Any] = ["schema_version": 1, "status": "ready", "message": "Fixture",
+                                        "host": ["available_memory_bytes": 72 * 1_073_741_824], "items": [raw]]
+            guard BeginnerModelReport(report)?.memoryAdvice == nil else { return false }
+            var stronger: [String: Any] = ["name": "Stronger fixture", "reference_score": "76.1",
+                                           "compared_with_score": "73.7",
+                                           "required_available_memory_bytes": 87 * 1_073_741_824]
+            report["memory_limited_model"] = stronger
+            guard let advice = BeginnerModelReport(report)?.memoryAdvice,
+                  advice.contains("Stronger fixture"), advice.contains("76.1"),
+                  advice.contains("87"), advice.contains("72"), advice.contains("check models again") else { return false }
+            stronger.removeValue(forKey: "compared_with_score")
+            report["memory_limited_model"] = stronger
+            guard let unknownAdvice = BeginnerModelReport(report)?.memoryAdvice,
+                  unknownAdvice.contains("has a cached parent-model score"),
+                  !unknownAdvice.contains("higher") else { return false }
+            for invalid in ["NaN", "Infinity", "garbage"] {
+                stronger["reference_score"] = invalid
+                report["memory_limited_model"] = stronger
+                guard BeginnerModelReport(report)?.memoryAdvice == nil else { return false }
+            }
+            stronger["reference_score"] = "76.1"
+            stronger["required_available_memory_bytes"] = 60 * 1_073_741_824
+            report["memory_limited_model"] = stronger
+            guard BeginnerModelReport(report)?.memoryAdvice == nil else { return false }
             raw["benchmark_details"] = ["Published upstream reference: 42/100"]
             guard BeginnerModelReport.Item(raw)?.benchmarkDetails.count == 1 else { return false }
             for invalid in [true, [1], Array(repeating: "reference", count: 17),
@@ -612,10 +636,13 @@ struct BeginnerChecks {
             guard let reference = BeginnerModelReport.BenchmarkReference(cached),
                   reference.score == "-2.5", reference.capturedDate == "2026-11-11",
                   reference.sourceURL?.absoluteString == "https://whatmodel.sh/model/fixture-model",
-                  reference.recommendation.contains("cached Coding leaderboard") else { return false }
+                  reference.recommendation.contains("Cached Coding score: -2.5"),
+                  reference.recommendation.contains("Parent-model reference"),
+                  reference.recommendation.contains("this quantization was not evaluated") else { return false }
             var cachedRaw = raw
             cachedRaw["benchmarks"] = [cached]
             guard let cachedItem = BeginnerModelReport.Item(cachedRaw),
+                  cachedItem.beginnerSummary(availableMemoryBytes: nil).contains("Cached Coding score: -2.5"),
                   cachedItem.beginnerDetails.contains("Cached 2026-11-11"),
                   !cachedItem.beginnerDetails.contains("/100") else { return false }
             cachedRaw["selection_preference"] = "speed"

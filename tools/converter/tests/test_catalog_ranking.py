@@ -135,6 +135,12 @@ def test_priority_prefers_scored_models_from_a_list_this_machine_can_use():
     assert ranking.priority("exporter/Small-4B-MLX-4bit", [], 16 * GIB) == (True, 50.5)
     assert ranking.priority("exporter/X", ["base_model:quantized:maker/Big-70B"], 128 * GIB) == (True, 70)
     assert ranking.priority("maker/Coder-7B", [], 128 * GIB) == (False, 60)
+    assert ranking.priority("maker/Big-70B", [], 128 * GIB, task="coding") is None
+    assert ranking.priority("maker/Coder-7B", [], 128 * GIB, task="coding") == (True, 60)
+    assert ranking.priority(
+        "exporter/X", ["base_model:quantized:maker/Big-70B"], 128 * GIB, task="general", exact_first=True
+    ) == (False, True, 70)
+    assert ranking.priority("maker/Big-70B", [], 128 * GIB, task="general", exact_first=True) == (True, True, 70)
     assert ranking.priority("someone/Unknown", ["base_model:finetune:maker/Big-70B"], 128 * GIB) is None
 
 
@@ -215,6 +221,53 @@ def test_guided_planning_scan_is_not_reordered_or_scored(tmp_path):
     assert sorted(item["repo"] for item in planned["items"]) == ["maker/Small-4B", "someone/Popular"]
     assert all("reference_score" not in item for item in planned["items"])
     assert all(event[2]["limit"] == 100 for event in requests(hub, "list"))
+
+
+def test_guided_planning_prioritizes_task_scores_inside_bounded_window(tmp_path):
+    hub = ListingHub()
+    files = ["config.json", "model.safetensors"]
+    order = [f"someone/Popular-{index:02d}" for index in range(35)] + ["maker/Big-70B", "maker/Coder-7B"]
+    for repo in order:
+        hub.add(tmp_path / "hub", repo, CONFIG)
+        hub.listing[repo] = listed(files)
+    hub.discovered["qwen3"] = order
+
+    general = catalog.family_catalog(
+        "qwen3", hub=hub, limit=30, planning=True, physical_memory=128 * GIB, ranking_task="general"
+    )
+    coding = catalog.family_catalog(
+        "qwen3", hub=hub, limit=30, planning=True, physical_memory=128 * GIB, ranking_task="coding"
+    )
+
+    general_repos = {item["repo"] for item in general["items"]}
+    coding_repos = {item["repo"] for item in coding["items"]}
+    assert "maker/Big-70B" in general_repos and "maker/Coder-7B" not in general_repos
+    assert "maker/Coder-7B" in coding_repos and "maker/Big-70B" not in coding_repos
+    assert len(general_repos) == len(coding_repos) == 30
+    assert all("reference_score" not in item for item in general["items"] + coding["items"])
+    assert all(item["downloadable"] for item in general["items"] + coding["items"])
+
+
+def test_guided_exact_parent_precedes_inferred_exports_within_candidate_limit(tmp_path):
+    hub = ListingHub()
+    files = ["config.json", "model.safetensors"]
+    exports = [f"exporter/Big-70B-variant-{index:02d}" for index in range(35)]
+    order = exports + ["maker/Big-70B"]
+    for repo in exports:
+        hub.add(tmp_path / "hub", repo, PACKED, parameters={"U32": 10}, tags=["base_model:quantized:maker/Big-70B"])
+        hub.listing[repo] = listed(files, tags=["base_model:quantized:maker/Big-70B"])
+    hub.add(tmp_path / "hub", "maker/Big-70B", CONFIG)
+    hub.listing["maker/Big-70B"] = listed(files)
+    hub.discovered["qwen3"] = order
+
+    report = catalog.family_catalog(
+        "qwen3", hub=hub, limit=30, planning=True, physical_memory=128 * GIB, ranking_task="general"
+    )
+
+    repos = {item["repo"] for item in report["items"]}
+    assert "maker/Big-70B" in repos
+    assert len(repos) == 30
+    assert all("reference_score" not in item for item in report["items"])
 
 
 def reference(**changes):

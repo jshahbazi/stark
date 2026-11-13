@@ -187,6 +187,7 @@ struct BeginnerSetupHost: View {
         }
         result.choicesLoading = engine.beginnerChoicesLoading
         result.choicesError = engine.beginnerChoicesError
+        result.memoryAdvice = engine.beginnerReport?.memoryAdvice
         result.deviceSummary = engine.beginnerReport?.deviceSummary ?? ""
         result.installChoiceID = engine.beginnerInstallChoice?.id
         result.installedResultID = engine.beginnerInstalledResultID
