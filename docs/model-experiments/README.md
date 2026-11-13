@@ -1,5 +1,6 @@
 # Model change and experiment ledger
 
+- [20261112-PHI-01: untied Phi3 output head](2026-11-12-phi3-untied-embeddings.md): untied `phi3` plans a separate output embedding and passes synthetic MLX-LM, lifecycle and prefix-reuse controls; actual Phi-3.5-mini execution failed (head dimension 96 has no Metal attention kernel) and that geometry is now refused in preflight. No real untied checkpoint qualified.
 - [20261112-CATALOG-01: shared config normalization](2026-11-12-catalog-config-normalization.md): one reviewed rewrite pass before every in-scope family planner, shared by catalogue admission and conversion; unknown keys and real RoPE variants still fail closed. Header admission only; converted artifacts unqualified.
 - [20261110-CATALOG-01: catalogue family admission](2026-11-10-catalog-family-admission.md): shared header planners, interleaved discovery and unsupported reasons. Pre-PR review repaired image-to-text fallback after vision header failure. Full checkpoint qualification remains separate.
 

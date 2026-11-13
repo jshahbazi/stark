@@ -4,9 +4,9 @@ Config and tensor conventions are adapted from Lalamo revision
 831accb8252a6b6606c378048caeb44178f1a050, MIT License.
 Copyright (c) 2025 Mirai Tech Inc. See LICENSE.lalamo and source provenance.
 The pinned reference implements tied Phi-4-mini with LongRoPE. Untied
-checkpoints (Phi-3/Phi-3.5) reuse the dense planner's separate output
-embedding; each checkpoint still requires its own qualification. No upstream
-runtime is imported.
+checkpoints reuse the dense planner's separate output embedding; each
+checkpoint still requires its own qualification. No upstream runtime is
+imported.
 """
 
 from __future__ import annotations
