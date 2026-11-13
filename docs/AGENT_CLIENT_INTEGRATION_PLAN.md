@@ -12,6 +12,9 @@ Connections setup evidence is recorded for installed development build
 The Pi evidence does not transfer to other clients or artifacts. See the
 [Connections run record](archive/runs/2026-11-13-pi-connections.md) for its exact
 GUI, Terminal and installed-backend boundaries.
+The [pre-PR review](archive/runs/2026-11-13-pi-pr-review.md) records a later signed
+candidate with clean-checkout packaging, runtime/clipboard recovery and default
+HTTP-port corrections, with fresh evidence separate from the installed build.
 
 ## Objective and delivery order
 

@@ -1,4 +1,4 @@
-# 20261113-PIGUI-01–03: Pi Connections delivery
+# 20261113-PIGUI-01–04: Pi Connections delivery
 
 Registered retrospectively on 2026-11-13, owner Codex. Governing sources: user's
 Advanced Connections placement and build/install request,
@@ -11,6 +11,7 @@ qualification rules. Full source and delivered identities are in the
 | 20261113-PIGUI-01 | Stark source `43ea570ed80d289b05d01de67790a0e96f687593`, build `20261113132858753344`; bundled integration `4455cbfe60f8a7b88e78d82cc0238c3dfec70ddd`; eight Qwen3-4B backend/client checks passed. Installed GUI failed to detect the user's nvm Node path. | GUI candidate superseded; model result retained as a bounded smoke, no complete GUI claim. |
 | 20261113-PIGUI-02 | Stark source `d5557bce3c637480f3c8cd2a34ce43f6b88348d7`, build `20261113133359056674`; same integration; all eight fresh installed-bundle checks passed, actual GUI detected Pi through nvm, created profile and opened Terminal for a selected folder. User confirmed Pi selected Stark and supplied successful-generation evidence, with an `fd` lookup warning. | Signed build installed and manually accepted; launcher warning retained for correction in PIGUI-03. |
 | 20261113-PIGUI-03 | Stark `f9a247e6c87f1f52901a5a869cdcdbf2ce93aff7`, build `20261113134611603911`, integration `349f9ceb0b2a65f883d35f4a8bb83a63356e5cce`: include Pi's lexical/resolved bin directories in isolated PATH; real PTY sibling-fd and self-consistent-old-profile refusal; 51 integration checks and eight fresh installed-model checks passed. | Final signed development build installed; fresh GUI profile saved; actual bundled environment resolves fd 10.4.2; Qwen3-4B Ready for user testing. |
+| 20261113-PIGUI-04 | Stark `e00401f24f367094dd4c1f01fbd8f996ede14708`, candidate build `20261113143108361356`, integration `11e91d0a23c8a21dee5e6e0ba9b9833bacd17458`; default snapshot build, runtime rediscovery/availability, normal-quit clipboard cleanup and port-80 recovery; 54 client tests and 8/8 fresh native/client stages passed. | Signed candidate validated; prior user installation preserved. [Pre-PR review](../archive/runs/2026-11-13-pi-pr-review.md) records all four detected issues/corrections, receipt and scopes. |
 
 Exact artifact: `mlx-community/Qwen3-4B-4bit` revision
 `4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25`; MLX affine Q4/group 64, weights

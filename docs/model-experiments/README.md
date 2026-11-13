@@ -1,6 +1,6 @@
 # Model change and experiment ledger
 
-- [20261113-PIGUI-01–03: Pi Connections delivery](2026-11-13-pi-connections.md): signed development app, retained nvm/fd detection gaps, manual GUI setup and fresh bundled-profile Qwen3-4B checks.
+- [20261113-PIGUI-01–04: Pi Connections delivery](2026-11-13-pi-connections.md): signed app/candidate, retained nvm/fd and pre-PR recovery/build findings, manual GUI setup and fresh bundled-profile Qwen3-4B checks.
 - [20261113-PI-01–08: guarded Pi manual qualification](2026-11-13-pi-manual-qualification.md): missing-usage/DONE guard, retained failed/superseded harness recipes, and final 21-check installed-Pi/Qwen3-4B backend qualification; manual RPC scope only.
 
 - [20261112-CATALOG-01: shared config normalization](2026-11-12-catalog-config-normalization.md): one reviewed rewrite pass before every in-scope family planner, shared by catalogue admission and conversion; unknown keys and real RoPE variants still fail closed. Header admission only; converted artifacts unqualified.
