@@ -381,13 +381,14 @@ A desktop run with a signed test build and official OpenCode Desktop 2.2.5 quali
 
 Pi's manual setup foundation lives in the separate
 [stark-agent-clients repository](https://github.com/jshahbazi/stark-agent-clients).
-The pinned Pi CLI/AI 1.5.2 has synthetic protocol and actual CLI fixture checks,
-including tools and cancellation at the Pi AI HTTP boundary. No live Stark
-model/artifact has been qualified with Pi. Manual credentials share the master
+Installed Pi CLI/AI 1.5.2 passed a bounded CLI RPC matrix with the real Qwen3-4B
+4-bit artifact and packaged Stark 0.20.5 backend. Its required manual extension
+guards missing usage and terminal `[DONE]`; the custom client API marker still
+sends ordinary Chat Completions to Stark. Manual credentials share the master
 key's upstream prefix scope; no managed Pi connection is available. See the
 [integration plan](AGENT_CLIENT_INTEGRATION_PLAN.md#initial-implementation-status)
-and [independent recheck](archive/runs/2026-11-12-pi-manual-recheck.md) for the
-open live matrix, missing-usage accounting and missing-terminal-sentinel gaps.
+and [guard/live record](archive/runs/2026-11-13-pi-guard-live.md) for exact
+artifact/build hashes, 43 model-free and 21 live results, and setup/quality limits.
 
 Clients must send authenticated requests from native or backend code on the same Mac and stay within the capabilities shown by `/v1/capabilities`. The client checks below validated the text subset against the published 0.3.0 bridge and worker on 2026-10-23 ([record](archive/runs/LOCAL_API_CLIENT_VALIDATION_2026_10_23.md)); they do not qualify image input:
 

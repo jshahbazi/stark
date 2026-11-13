@@ -45,7 +45,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Adding model support](MODEL_ONBOARDING.md) | Required tool-calling assessment, prefix reuse, artifact qualification and lifecycle checks for each new inference path |
 | [Model changes and experiments](model-experiments/README.md) | Attempt ledger, image-support retrospective, failed approaches, promotion decisions and a template for future correctness/performance work |
 | [Technical guide](TECHNICAL_OVERVIEW.md) | Components, engine module layout, feature flags, Python package layout, the app control protocol |
-| [Codex, Claude and Pi integration plan](AGENT_CLIENT_INTEGRATION_PLAN.md) | Client setup, external protocol adapters, authentication and qualification gates; Pi manual foundation has model-free evidence, with live model qualification pending |
+| [Codex, Claude and Pi integration plan](AGENT_CLIENT_INTEGRATION_PLAN.md) | Client setup, external protocol adapters, authentication and qualification gates; guarded Pi manual CLI has bounded real Qwen3-4B evidence |
 | [CI and security checks](CI.md) | Workflows, what they cover and do not cover, dependency gates, caches, local equivalents |
 | [Releasing](RELEASING.md) | Signed and prebuilt release workflows, verification on a receiving Mac, DMG handling |
 | [Cargo troubleshooting](CARGO_TROUBLESHOOTING.md) | Repairing a corrupted registry cache |

@@ -1,12 +1,13 @@
 # Codex, Claude and Pi integration plan
 
-Status: Pi manual foundation started on 2026-11-12 against Stark revision
-`0bdcf4b3b4cc316fd7fd4f4ec2f6bc3a18268420`. The original plan was reviewed
+Status: guarded Pi 1.5.2 CLI RPC pilot has artifact-bound live evidence as of
+2026-11-13, using installed Stark 0.20.5 at
+`9e33ab729581994269f56c64685e27a0bdd94c27`. The foundation started against
+`0bdcf4b3b4cc316fd7fd4f4ec2f6bc3a18268420`; the original plan was reviewed
 against `a171326271f6c5eaf31f4ea49bc21905f7e7a813`. Client implementation lives in
 the separate [stark-agent-clients repository](https://github.com/jshahbazi/stark-agent-clients).
-No Codex, Claude or Pi session has been qualified against a live Stark model.
-Pi's pinned CLI has model-free fixture evidence only. Examples involving a
-Responses/Messages adapter still require that adapter to be implemented.
+Codex/Claude Responses/Messages adapters remain planned. The Pi evidence below
+does not transfer to those clients, another artifact or the Swift GUI setup flow.
 
 ## Objective and delivery order
 
@@ -184,26 +185,28 @@ environment credential reference. Optional JSON merging preserves the original
 file and rejects an existing `stark-local` entry. It installs nothing into the
 user's default Pi profile and adds no managed authentication.
 
-Twenty-nine model-free checks pass, including the actual bundled Pi CLI loading
-generated configuration and completing read/edit/test/failed-tool rounds in a
-disposable workspace. Pi AI cancellation closes the fixture HTTP connection
-and permits a recovery request; native Stark and interactive CLI cancellation
-remain untested. The isolated pilot settings disable both provider and agent
-retries, plus automatic compaction. Context recovery needs separate qualification.
-The independent recheck fixed inferred vendor cache fields under inherited
-`PI_CACHE_RETENTION=long`, rejected duplicate JSON keys in discovery/config,
-and bounded merge reads to regular files. Explicit cache compatibility flags
-keep long-retention preferences from adding unsupported fields to Stark requests.
+Generated profiles now require the manual `stark-stream-guard.mjs` extension.
+Its `stark-guarded-chat-completions` API marker is local to Pi; the wire remains
+Stark Chat Completions. It delegates conversion/parsing to Pi's public API and
+requires valid usage, a terminal reason and `[DONE]` before success or executable
+tool handoff. Missing extension fails before inference. It adds no managed
+authentication or external adapter. Earlier unguarded profiles must be regenerated.
 
-Pi 1.5.2 reports a successful result with zero counters if upstream usage is
-missing. This is a characterized accounting gap, not a passing acceptance case.
-Keep the missing-accounting gate open until a client change or qualified guard
-fails closed. Pi also accepts EOF after a finish reason and usage without
-`[DONE]`; terminal-sentinel enforcement remains open. No artifact, backend,
-coding quality, native prefix reuse or live lifecycle result follows from these
-fixture checks. See the original
-[foundation validation record](archive/runs/2026-11-12-pi-manual-foundation.md)
-and the [independent recheck](archive/runs/2026-11-12-pi-manual-recheck.md).
+Forty-three model-free checks and 21 real-model checks passed. Installed Pi 1.5.2
+used its official CLI RPC mode with the real `mlx-community/Qwen3-4B-4bit`
+artifact, context 40,960 and a 1,024-token output profile. Checks include actual
+read/edit/test/diff, failed tools, native-phase cancellation and recovery,
+context rejection/manual compaction, truncation, model/port changes, backend
+restart, interleaved sessions, disconnect and exact reused-versus-fresh output.
+Raw/guarded matched short timing controls are recorded separately from quality.
+
+The guard closes the missing-usage and terminal-sentinel gaps in this profile.
+The isolated backend used an ephemeral manual key through the private host pipe;
+the Swift UI credential-entry flow was not run. Broad coding reliability,
+another artifact/version, managed grants and full UI-consumer backpressure have
+no qualification from these checks. See the
+[guard/live record](archive/runs/2026-11-13-pi-guard-live.md) and model attempts
+`20261113-PI-01` through `20261113-PI-08` for prior failed/superseded receipts.
 
 ### Manual setup
 
@@ -225,7 +228,7 @@ and the [independent recheck](archive/runs/2026-11-12-pi-manual-recheck.md).
     "stark-local": {
       "name": "Stark local",
       "baseUrl": "http://127.0.0.1:PORT/v1",
-      "api": "openai-completions",
+      "api": "stark-guarded-chat-completions",
       "apiKey": "${STARK_API_KEY}",
       "authHeader": true,
       "compat": {
@@ -263,11 +266,15 @@ and the [independent recheck](archive/runs/2026-11-12-pi-manual-recheck.md).
    CLI selection is:
 
 ```sh
-pi --provider stark-local --model 'MODEL_ID_FROM_STARK'
+pi --extension '/absolute/path/to/stark-agent-clients/extensions/stark-stream-guard.mjs' --provider stark-local --model 'MODEL_ID_FROM_STARK'
 ```
 
 6. Run the acceptance sequence below in a disposable workspace before granting
    access to a real project. A provider appearing in the picker is insufficient.
+
+Use the isolated profile and no-retry settings from the integration guide for
+the first run. The custom API marker is handled only by the required extension;
+it does not change Stark's HTTP protocol.
 
 The explicit compatibility settings avoid relying on localhost URL heuristics.
 Stark normalizes incoming developer messages to system. With the initial
@@ -280,7 +287,7 @@ Field semantics are defined in Pi's
 
 ### Managed Pi extension
 
-After the manual pilot passes, build a provider extension in the integration
+After the manual pilot passes, build a managed provider extension in the integration
 repository. Register a distinct Stark provider through Pi's public provider API
 and delegate generation to its existing Chat Completions implementation.
 
@@ -693,10 +700,10 @@ or numerical equivalence. Report task success separately.
 ## Implementation milestones
 
 Current progress: milestone 0 has a pinned, inventoried Pi manual profile;
-other client contracts remain to be frozen. Milestone 1 has setup tooling and
-model-free evidence, with the full live artifact matrix, missing-accounting and
-terminal-sentinel gates still open. Milestones 2–7 have no implementation from
-this work.
+other client contracts remain to be frozen. Milestone 1 has a passing bounded
+Pi 1.5.2 CLI RPC matrix with the named Qwen3-4B 4-bit artifact and installed
+Stark backend. The Swift setup flow and other versions/artifacts need their own
+evidence. Milestones 2–7 have no implementation from this work.
 
 | Milestone | Deliverable | Exit condition |
 | --- | --- | --- |
@@ -727,5 +734,5 @@ tool behavior, auth mode, cancellation, prefix-reuse policy and recovery cases
 have matching evidence. Unsupported client versions remain explicitly blocked.
 Update this plan and [Local API](LOCAL_API.md) as implementation lands; retain
 dated validation separately under [archive/runs](archive/runs/) or in the owning
-implementation PR. The Pi foundation does not mark any runtime milestone
-complete.
+implementation PR. Pi's bounded manual qualification does not complete other
+client surfaces, artifacts or managed connections.
