@@ -449,6 +449,41 @@ def test_glm_download_retries_reuse_owned_partial_shards(host, native_download, 
     assert attempts[0] == attempts[1] and len(host.models) == 1
 
 
+def test_glm_transient_download_failure_retries_owned_stage_and_partial_data(host, native_download, monkeypatch):
+    snapshot = hybrid_prepare.snapshot_download
+    prepare = host.run_converter
+    attempts = []
+
+    def interrupted(repo, **options):
+        if repo == native_download["weights_repo"]:
+            root = Path(options["local_dir"])
+            attempts.append(root)
+            partial = root / "UD-Q2_K_XL" / "model-0.gguf"
+            if len(attempts) == 1:
+                partial.parent.mkdir(parents=True)
+                partial.write_bytes(b"partial")
+                raise TimeoutError("synthetic network interruption")
+            assert partial.read_bytes() == b"partial"
+        return snapshot(repo, **options)
+
+    monkeypatch.setattr(hybrid_prepare, "snapshot_download", interrupted)
+
+    def transient_run(command, environment, epoch):
+        try:
+            return prepare(command, environment, epoch)
+        except TimeoutError:
+            return 1, "network_unavailable"
+
+    monkeypatch.setattr(host, "run_converter", transient_run)
+    monkeypatch.setattr(module, "DOWNLOAD_RETRY_INITIAL_SECONDS", 0.001)
+    args = (host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"])
+    host.install(*args)
+
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert len(host.models) == 1
+    assert module.model_valid(Path(host.models[0]["path"]))
+
+
 def test_glm_registry_failure_keeps_completed_download_for_retry(host, native_download, monkeypatch):
     persist = host.persist
     monkeypatch.setattr(host, "persist", lambda: (_ for _ in ()).throw(OSError("synthetic registry failure")))

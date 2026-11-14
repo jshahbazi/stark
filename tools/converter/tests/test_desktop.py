@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -2987,6 +2988,205 @@ def test_failed_conversion_does_not_complete_progress_or_publish_model(desktop, 
     assert progress_events(desktop, "conversion")[-1]["state"] == "failed"
     assert not any(e["state"] == "complete" for e in progress_events(desktop, "conversion"))
     assert not list(desktop.model_dir.iterdir())
+
+
+def test_remote_download_resumes_same_command_and_staging_after_network_failure(desktop, model, converter_support):
+    commands = []
+    interrupted = progress_spawn(
+        model,
+        [
+            progress_line("download", "running", 40, 100),
+            json.dumps({"phase": "failure", "category": "network_unavailable"}).encode(),
+        ],
+        exit_code=1,
+    )
+    resumed = progress_spawn(model, [progress_line("download", "complete", 100, 100)])
+
+    def spawn(command, **kwargs):
+        commands.append(command)
+        return (interrupted if len(commands) == 1 else resumed)(command, **kwargs)
+
+    with (
+        patch("stark_convert.desktop.subprocess.Popen", side_effect=spawn),
+        patch("stark_convert.desktop.DOWNLOAD_RETRY_INITIAL_SECONDS", 0.01),
+    ):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+    assert len(commands) == 2
+    assert commands[0][:-2] == commands[1][:-2]  # Only the private pipe descriptor may change.
+    assert len(converter_support) == 1
+    assert len(desktop.models) == 1
+    assert not any(e["event"] == "error" for e in events(desktop))
+    assert any(e.get("message") == "Download paused. Waiting for a connection…" for e in events(desktop))
+    assert [e["completed_bytes"] for e in progress_events(desktop, "download")] == [0, 40, 100]
+
+
+def test_download_retries_accumulate_network_bytes_without_regressing_completed_bytes(
+    desktop, model, converter_support
+):
+    def transfer(completed, transferred, state="running"):
+        return json.dumps(
+            {
+                "phase": "download",
+                "state": state,
+                "completed_bytes": completed,
+                "total_bytes": 100,
+                "transferred_bytes": transferred,
+            }
+        ).encode()
+
+    failure = json.dumps({"phase": "failure", "category": "network_unavailable"}).encode()
+    attempts = iter(
+        [
+            progress_spawn(model, [transfer(40, 100), failure], exit_code=1),
+            progress_spawn(model, [transfer(20, 30), transfer(60, 60), failure], exit_code=1),
+            progress_spawn(model, [transfer(100, 25, "complete")]),
+        ]
+    )
+    with (
+        patch(
+            "stark_convert.desktop.subprocess.Popen",
+            side_effect=lambda command, **kwargs: next(attempts)(command, **kwargs),
+        ),
+        patch("stark_convert.desktop.DOWNLOAD_RETRY_INITIAL_SECONDS", 0.001),
+    ):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+    download = progress_events(desktop, "download")
+    assert [e["completed_bytes"] for e in download] == [0, 40, 40, 60, 100]
+    assert [e.get("transferred_bytes") for e in download] == [None, 100, 130, 160, 185]
+    assert len(desktop.models) == 1
+    assert desktop.download_transferred_offset == 0
+
+
+@pytest.mark.parametrize("stop", [True, False])
+def test_download_retry_wait_can_be_cancelled_without_a_second_child(desktop, model, converter_support, stop):
+    lines = [json.dumps({"phase": "failure", "category": "network_unavailable"}).encode()]
+    with patch(
+        "stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, exit_code=1)
+    ) as spawn:
+        desktop.start(
+            desktop.install,
+            "installing",
+            "Installing model…",
+            "huggingface",
+            "example/model",
+            request_id="retry",
+            guided_install=True,
+        )
+        deadline = time.monotonic() + 3
+        while not any(e.get("message") == "Download paused. Waiting for a connection…" for e in events(desktop)):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        job = desktop.job
+        if stop:
+            desktop.stop()
+        else:
+            desktop.dispatch({"command": "cancel_install", "request_id": "retry"})
+        job.join(timeout=1)
+        assert not job.is_alive()
+        assert spawn.call_count == 1
+    assert not desktop.models
+    assert not list(desktop.model_dir.iterdir())
+    assert not any(e["event"] == "error" for e in events(desktop))
+
+
+def test_sleep_pauses_download_and_wake_resumes_without_waiting_for_backoff(desktop, model, converter_support):
+    commands = []
+    interrupted = progress_spawn(model, [progress_line("download", "running", 40, 100)], pause=True)
+    resumed = progress_spawn(model, [progress_line("download", "complete", 100, 100)])
+
+    def spawn(command, **kwargs):
+        commands.append(command)
+        return (interrupted if len(commands) == 1 else resumed)(command, **kwargs)
+
+    with patch("stark_convert.desktop.subprocess.Popen", side_effect=spawn):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        deadline = time.monotonic() + 3
+        while not any(e["completed_bytes"] == 40 for e in progress_events(desktop, "download")):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        desktop.dispatch({"command": "system_sleep"})
+        while not any(e.get("message") == "Download paused. Waiting for a connection…" for e in events(desktop)):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert len(commands) == 1 and desktop.system_asleep
+        desktop.dispatch({"command": "system_wake"})
+        desktop.job.join(timeout=2)  # Initial backoff is 5 s; wake bypasses it.
+        assert not desktop.job or not desktop.job.is_alive()
+    assert len(commands) == 2
+    assert commands[0][:-2] == commands[1][:-2]
+    assert len(desktop.models) == 1
+    assert not any(e["event"] == "error" for e in events(desktop))
+
+
+def test_sleep_does_not_interrupt_conversion_or_start_an_idle_download(desktop):
+    with patch.object(desktop, "terminate_converter") as terminate:
+        desktop.dispatch({"command": "system_sleep"})
+        desktop.dispatch({"command": "system_wake"})
+        terminate.assert_not_called()
+        assert desktop.job is None
+        desktop.download_retry_epoch = desktop.install_epoch = desktop.epoch
+        desktop.install_progress = {"conversion": {"state": "running"}}
+        desktop.converter = object()
+        desktop.dispatch({"command": "system_sleep"})
+        desktop.dispatch({"command": "system_wake"})
+        terminate.assert_not_called()
+        assert desktop.download_interrupted_epoch is None
+        desktop.converter = None
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_sleep_at_conversion_boundary_recovers_buffered_progress_or_completed_output(
+    desktop, model, tmp_path, published
+):
+    output = tmp_path / "output"
+    desktop.begin_install_progress(desktop.epoch, "huggingface")
+    calls = []
+
+    def convert(*_args):
+        calls.append(1)
+        if len(calls) == 1:
+            desktop.system_power(True)  # Sleep selected a still-downloading child.
+            desktop.progress(desktop.epoch, "conversion", "running", 1, 100)
+            if published:
+                shutil.copytree(model, output)
+            desktop.system_power(False)
+            return -15, None
+        shutil.copytree(model, output)
+        return 0, None
+
+    with patch.object(desktop, "run_converter", side_effect=convert):
+        assert desktop.run_download_converter(["converter", "--output", str(output)], {}, desktop.epoch) == (0, None)
+    assert len(calls) == (1 if published else 2)
+
+
+def test_download_retry_backoff_caps_at_one_minute(desktop, tmp_path):
+    desktop.begin_install_progress(desktop.epoch, "huggingface")
+    with (
+        patch.object(desktop, "run_converter", side_effect=[(1, "network_unavailable")] * 6 + [(0, None)]),
+        patch.object(desktop, "wait_for_download_retry", return_value=True) as wait,
+    ):
+        assert desktop.run_download_converter(["converter", "--output", str(tmp_path / "out")], {}, desktop.epoch) == (
+            0,
+            None,
+        )
+    assert [call.args[1] for call in wait.call_args_list] == [5, 10, 20, 40, 60, 60]
+
+
+def test_network_failure_after_conversion_starts_does_not_repeat_conversion(desktop, model, converter_support):
+    lines = [
+        progress_line("conversion", "running", 1, 100),
+        json.dumps({"phase": "failure", "category": "network_unavailable"}).encode(),
+    ]
+    with patch(
+        "stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, exit_code=1)
+    ) as spawn:
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+        assert spawn.call_count == 1
+    assert not desktop.models
+    assert any(e["event"] == "error" for e in events(desktop))
 
 
 @pytest.mark.parametrize(
