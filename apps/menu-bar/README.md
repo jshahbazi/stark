@@ -94,7 +94,7 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 ## Models and requests
 
-**Manage Models** contains three tabs: **Installed**, **Model Catalog** and
+**Manage Models** contains four tabs: **Installed**, **Top Models**, **Model Catalog** and
 **Add from Source**. Installed lists saved versions; Model Catalog browses model
 families; Add from Source accepts a local folder or a Hugging Face repository name or URL
 such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model
@@ -106,7 +106,7 @@ means the selected conversion path is unsupported; unavailable or inconclusive
 metadata has a separate explanation. Supported models are governed by the
 [converter](../../tools/converter/README.md). Conversion support alone does not
 guarantee that Stark can render a model's chat template or parse its function
-tool calls. The third tab shows
+tool calls. Add from Source shows
 Download and Conversion progress; **Cancel Installation** cancels. Command-I
 opens that tab in the same window.
 
@@ -117,7 +117,7 @@ The source tabs start with **Hugging Face**, selected by default, followed by
 These views show the running model's name and use management to choose
 and run a model. Its quantization and stored weight-file size appear beside the
 name when recorded, so saved versions can be distinguished. Installation uses
-the third tab. Entered source and image options remain in memory when switching
+Add from Source. Entered source and image options remain in memory when switching
 tabs or reopening the window. Switching tabs preserves an active installation;
 its progress and cancellation remain accessible. Completion stays in management.
 Search and sort settings are separate for
@@ -126,6 +126,15 @@ the visible rows immediately; family search uses the current catalogue and does
 not fetch from Hugging Face again while you type. Search text stays within the
 current browsing session. Sort choices are remembered between app launches.
 The family overview uses compact, full-width rows in a single column.
+
+**Top Models** shows the ten ranked families from the November 14, 2026
+llmbench shared-benchmark calculation, in descending coding-index order. Each
+row shows its original rank, relative index and number of scored models. Search
+preserves that order; selecting a row opens the existing family catalog, with
+Back returning to the ranking. The snapshot remains visible before the backend
+is ready; browsing is enabled when that family is available. It does not fetch
+leaderboard data at runtime. See the [calculation and provenance](../../docs/benchmarks/2026-11-14-catalog-coding-ranking.md)
+for model coverage, attribution and the relative index's limitations.
 
 **Installed** shows compact rows with the saved name, quantization, file size,
 repo link, **Run** or **Stop**, and removal button on one line. **Run** selects

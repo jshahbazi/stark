@@ -4,6 +4,15 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Catalog coding ranking snapshot (2026-11-14).** The Top Models tab uses a
+shared-benchmark relative index across 28 catalog-matched models and 167
+pairwise comparisons, averaged into ten family entries. This is external
+reference-model evidence, independent of Stark's native performance and
+artifact qualification records. See the [calculation and provenance](2026-11-14-catalog-coding-ranking.md)
+and [aggregate results](data/catalog-coding-ranking-2026-11-14.json).
+This replaces the earlier exploratory percentile calculation for this UI;
+it does not supersede any native validation result.
+
 **Qwen3.8-Flash-Next MoE projection experiment (2026-11-07).** Fixed-geometry
 expert gate/up and shared-first dispatch pass bounded numerical, scoring and
 prefix-restoration controls. The final synthetic combined projection improves

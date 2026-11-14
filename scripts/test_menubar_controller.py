@@ -968,8 +968,9 @@ extension EngineController {
             let inventory = ModelsInventory(models: [], loadedID: "missing", registry: nil)
             guard inventory.models.isEmpty, inventory.families == nil,
                   ModelsSheetTab.initial == .installed,
-                  ModelsSheetTab.allCases == [.installed, .download, .installModel],
+                  ModelsSheetTab.allCases == [.installed, .topModels, .download, .installModel],
                   ModelsSheetTab.installed.title(modelCount: 0) == "Installed (0)",
+                  ModelsSheetTab.topModels.title(modelCount: 0) == "Top Models",
                   ModelsSheetTab.download.title(modelCount: 0) == "Model Catalog",
                   ModelsSheetTab.installModel.title(modelCount: 0) == "Add from Source",
                   ModelsSheetTab.installed.emptyTitle == "No models yet",
@@ -984,6 +985,11 @@ extension EngineController {
             raw["families"] = Array(families.reversed())
             guard let registry = ModelFamilyRegistry(raw),
                   let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
+            guard TopModelRanking.entries.count == 10,
+                  TopModelRanking.entries.allSatisfy({ entry in rows.contains(where: { $0.id == entry.id }) }),
+                  TopModelRanking.matching("qwen").map(\.rank) == [1, 3, 4, 5],
+                  TopModelRanking.matching("no-such-family").isEmpty,
+                  TopModelRanking.matching("").map(\.rank) == Array(1...10) else { return false }
             return rows.map(\.name) == ["Gemma 2", "Gemma 3", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
                 "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.8 Flash Next", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
