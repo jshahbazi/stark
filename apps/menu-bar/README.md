@@ -174,7 +174,7 @@ include image support when available for that artifact. Sort
 the family overview by name A–Z or Z–A; family detail sorts by name in either
 direction or model size ascending or descending. Unknown numeric values stay last
 in either direction. Download and preparation progress
-stay in the browser. A completed download appears in **Installed** without
+stay in the browser. The download byte count is an estimate that advances with network activity when file reconstruction lags, includes cached files, and stays below completion until the files are ready. A completed download appears in **Installed** without
 selecting it; choose it and **Run** when ready. Some image installations stop
 the running model for their required local checks.
 

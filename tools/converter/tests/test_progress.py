@@ -143,7 +143,7 @@ def test_selected_file_totals_include_cache_resume_and_exclude_unselected_files(
     assert capsys.readouterr() == ("", "")
 
 
-def test_xet_counts_reconstruction_once_with_progress_globally_disabled(monkeypatch, capsys):
+def test_xet_estimates_progress_from_transfers_when_reconstruction_lags(monkeypatch, capsys):
     monkeypatch.setenv("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     events = []
     download = DownloadProgress(ProgressReporter(events.append, interval=0))
@@ -164,12 +164,35 @@ def test_xet_counts_reconstruction_once_with_progress_globally_disabled(monkeypa
                     total_bytes=100,
                 )
             )
-    assert [event["completed_bytes"] for event in events] == [0, 0, 20, 40, 100]
+    assert [event["completed_bytes"] for event in events] == [0, 0, 20, 60, 60, 99, 100, 100]
     assert events[-1]["state"] == "running"
     download.complete()
     assert events[-1]["state"] == "complete"
     assert_private(events)
     assert capsys.readouterr() == ("", "")
+
+
+def test_transfer_estimate_handles_resume_retries_and_reconstruction_without_double_counting():
+    events = []
+    download = DownloadProgress(ProgressReporter(events.append, interval=0))
+    key = ("private-repository", PIN, "private-file")
+    download.sizes[key] = 1000
+    download.selected = {key}
+    bar = download.bar_class(key)(total=1000, initial=200)
+    bar.update_transfer(300)
+    assert events[-1]["completed_bytes"] == 500
+    bar.update(300)
+    assert events[-1]["completed_bytes"] == 500
+    bar.update_transfer(-500)
+    bar.update_transfer(100)
+    assert events[-1]["completed_bytes"] == 500
+    bar.update_transfer(5000)
+    assert events[-1]["completed_bytes"] == 990
+    assert events[-1]["state"] == "running"
+    bar.update(500)
+    assert events[-1]["completed_bytes"] == 1000
+    assert all(event["state"] == "running" for event in events)
+    assert_private(events)
 
 
 def test_sharded_download_total_is_known_before_weight_payloads(tmp_path):
