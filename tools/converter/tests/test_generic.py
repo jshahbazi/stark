@@ -16,6 +16,7 @@ from tokenizers import Tokenizer, models
 
 from stark_convert import cli
 from stark_convert.contracts import ConversionRequest
+from stark_convert.model_support import NATIVE_F16_FAMILIES, native_f16_sliding_window
 from stark_convert.sources import resolve_source
 from stark_convert.streaming import ConversionError, UnsupportedConversion
 
@@ -70,6 +71,36 @@ def test_generic_probe_needs_explicit_architecture_and_never_qualifies_source():
     assert cli.capability(ConversionRequest(REPOS["qwen3"], architecture="llama")).conversion == "unsupported"
 
 
+@pytest.mark.parametrize("architecture", sorted(REPOS))
+def test_f16_output_is_native_loadable_only_for_full_attention_dense_families(tmp_path, architecture):
+    source = future_source(tmp_path / "source", architecture)
+    config = json.loads((source / "config.json").read_text())
+    native_f16 = architecture in NATIVE_F16_FAMILIES and not native_f16_sliding_window(architecture, config)
+    receipt = cli.convert(snapshot(source), tmp_path / "output", repo=FUTURE, dtype="float16", chunk_bytes=4096)
+    assert receipt["native_qualification"] is None
+    assert receipt["capability"]["native_loading"] == ("unverified" if native_f16 else "runtime_blocked")
+    request = ConversionRequest(FUTURE, dtype="float16", metadata_profile="hf-generic", architecture=architecture)
+    probe = cli.capability(request).native_loading
+    assert probe == ("unverified" if architecture in NATIVE_F16_FAMILIES else "runtime_blocked")
+    assert cli.capability(replace(request, dtype="float32")).native_loading == "runtime_blocked"
+    catalogued = cli.capability(ConversionRequest(REPOS[architecture], dtype="float16")).native_loading
+    if cli.capability(ConversionRequest(REPOS[architecture])).conversion == "implemented":
+        assert catalogued == ("unverified" if architecture in NATIVE_F16_FAMILIES else "runtime_blocked")
+
+
+def test_f16_sliding_window_plan_is_runtime_blocked(tmp_path):
+    source = future_source(tmp_path / "source", "mistral")
+    config = json.loads((source / "config.json").read_text())
+    config["sliding_window"] = 4
+    (source / "config.json").write_text(json.dumps(config))
+    receipt = cli.convert(snapshot(source), tmp_path / "f16", repo=FUTURE, dtype="float16", chunk_bytes=4096)
+    assert receipt["capability"]["native_loading"] == "runtime_blocked"
+    assert receipt["capability"]["reason"] == "native_f16_sliding_window"
+    receipt = cli.convert(snapshot(source), tmp_path / "bf16", repo=FUTURE, chunk_bytes=4096)
+    assert receipt["capability"]["native_loading"] == "unverified"
+    assert receipt["capability"]["reason"] is None
+
+
 @pytest.mark.parametrize("bits", [4, 8])
 def test_future_mlx_checkpoint_uses_its_declared_packing(tmp_path, bits):
     source = tmp_path / "source"
@@ -88,7 +119,7 @@ def test_future_mlx_checkpoint_uses_its_declared_packing(tmp_path, bits):
 def test_future_hybrid_mlx_checkpoint_converts_and_replays_offline(tmp_path, architecture, bits):
     source = tmp_path / "source"
     if architecture == "qwen3_5":
-        mlx_qwen35_fixture(source, bits=bits, wrapper=True, vl_wrapper=True, layout="grouped", sharded=True, mtp=True)
+        mlx_qwen35_fixture(source, bits=bits, wrapper=True, vl_wrapper=True, layout="grouped", sharded=True)
     else:
         mlx_lfm2_fixture(source, bits=bits, variant="flat", sharded=True)
     tokenizer = Tokenizer(models.WordLevel({f"[SYNTHETIC_{i}]": i for i in range(17)}, unk_token="[SYNTHETIC_0]"))
@@ -236,7 +267,7 @@ def test_generic_modern_llama_preserves_nested_rope_xml_template_and_multiple_st
 
 def test_local_text_only_qwen35_export_converts_and_replays_with_own_metadata(tmp_path):
     source = tmp_path / "source"
-    config, _ = qwen35_fixture(source, mtp=True, sharded=True)
+    config, _ = qwen35_fixture(source, sharded=True)
     config.update(
         model_type="qwen3_5_text",
         architectures=["Qwen3_5ForCausalLM"],

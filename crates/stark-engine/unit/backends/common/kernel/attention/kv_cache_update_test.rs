@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Display};
 
-use half::bf16;
+use half::{bf16, f16};
 #[cfg(backend = "metal")]
 use ndarray::{Array, Array3};
 use num_traits::Float;
@@ -257,6 +257,27 @@ fn test_large_f32() {
 #[stark_test]
 fn test_large_bf16() {
     test_large_internal::<bf16>();
+}
+
+// F16 KV cache (admitted F16 dense activation profile)
+#[stark_test]
+fn test_single_copy_f16() {
+    test_single_copy_internal::<f16>();
+}
+
+#[stark_test]
+fn test_multi_copy_f16() {
+    test_multi_copy_internal::<f16>();
+}
+
+#[stark_test]
+fn test_no_copy_f16() {
+    test_no_copy_internal::<f16>();
+}
+
+#[stark_test]
+fn test_large_f16() {
+    test_large_internal::<f16>();
 }
 
 #[cfg(backend = "metal")]

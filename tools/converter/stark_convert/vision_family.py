@@ -23,6 +23,12 @@ LEGACY_FAMILY_PROFILE = "qwen35-dense-bf16-merged-v1"
 LEGACY_FAMILY_VERSION = 1
 FAMILY_PROFILE = "qwen35-dense-bf16-merged-v2"
 FAMILY_VERSION = 2
+AFFINE_FAMILY_PROFILE = "qwen35-dense-affine-merged-v3"
+AFFINE_FAMILY_VERSION = 3
+MOE_FAMILY_PROFILE = "qwen35-moe-affine-merged-v4"
+MOE_FAMILY_VERSION = 4
+BF16_MOE_FAMILY_PROFILE = "qwen35-moe-bf16-merged-v5"
+BF16_MOE_FAMILY_VERSION = 5
 _SOURCE_TOKENIZER_SHA256 = "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
 OUTPUT_TOKENIZER_SHA256 = "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"
 ALTERNATE_OUTPUT_TOKENIZER_SHA256 = "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
@@ -33,10 +39,14 @@ _TOKENIZER_PROGRAM_FINGERPRINTS = {
     "d3232a3729eeaafa5f64e11e13f9adfd4566c2d9ae4bc1b21ebf7b27dcda4147",
     "1adf1f3e7347b63fc197a7e6c30e965d92ba5c3a249980db32c59a76503b65ea",
     "537fdfe1168e1c78d55cc922b74633986d27aa8aac96cdbe3529523a0963368e",
+    # Qwen3.8 uses legacy string merges; Tokenizers normalizes this exact
+    # program to OUTPUT_TOKENIZER_SHA256 with identical vocabulary and controls.
+    "8541ccaa962ac3d4c0e7bdb68a0a09651b140218e1408ea6cc4f25cc655762fa",
 }
 _TEMPLATE_SHA256 = "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
 _MAPPING_TEMPLATE_SHA256 = "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67"
 _THINKING_TEMPLATE_SHA256 = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+_PRESERVED_THINKING_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
 COMPONENT_FILES = ("model.safetensors", "tokenizer.json", "preprocessor_config.json", "chat_template.jinja")
 _METADATA_FILES = (
     "config.json",
@@ -139,7 +149,10 @@ def family_processor_filename(names: Any) -> str:
 
 def family_reasoning_profile(contract: dict) -> str:
     """Expose the reviewed template's existing boolean thinking control."""
-    thinking = contract["source"]["hashes"]["chat_template.jinja"] == _THINKING_TEMPLATE_SHA256
+    thinking = contract["source"]["hashes"]["chat_template.jinja"] in {
+        _THINKING_TEMPLATE_SHA256,
+        _PRESERVED_THINKING_TEMPLATE_SHA256,
+    }
     return "boolean_default_on" if thinking else "boolean_default_off"
 
 
@@ -315,8 +328,42 @@ def _source_label(value: Any) -> bool:
 def validate_family_geometry(config: dict) -> tuple[dict, dict]:
     """Derive a bounded dense decoder and tower from their operation metadata."""
     from .adapters.qwen35 import normalize_qwen35_config
+    from .compressed import parse_mlx_quantization
 
     text = normalize_qwen35_config(config)
+    moe = config.get("model_type") == "qwen3_5_moe"
+    if moe:
+        if (
+            any(
+                type(text.get(key)) is not int or not 0 < text[key] <= maximum
+                for key, maximum in {
+                    "num_experts": 1024,
+                    "num_experts_per_tok": 32,
+                    "moe_intermediate_size": 131072,
+                    "shared_expert_intermediate_size": 131072,
+                }.items()
+            )
+            or text["num_experts_per_tok"] > text["num_experts"]
+            or text.get("norm_topk_prob", True) is not True
+        ):
+            raise UnsupportedConversion("Vision MoE routing geometry is outside the implemented profile")
+        alignment = 64 if text.get("quantization") is not None else _TEXT_ALIGNMENT
+        if text["moe_intermediate_size"] % alignment or text["shared_expert_intermediate_size"] % alignment:
+            raise UnsupportedConversion("Vision MoE expert widths require storage alignment")
+        text = {**text, "intermediate_size": text["shared_expert_intermediate_size"]}
+    rope = text.get("rope_parameters")
+    if isinstance(rope, dict) and "type" in rope and rope["type"] == rope.get("rope_type", rope["type"]):
+        text = {
+            **text,
+            "rope_parameters": {**{k: v for k, v in rope.items() if k != "type"}, "rope_type": rope["type"]},
+        }
+    quantization = parse_mlx_quantization(text, allow_mixed=True)
+    if text.get("quantization_config") is not None and quantization is None:
+        raise UnsupportedConversion("Vision family affine exports require explicit quantization metadata")
+    if quantization is not None and any(
+        item is not None and item.group_size != 64 for item in (quantization, *(q for _, q in quantization.overrides))
+    ):
+        raise UnsupportedConversion("Vision family affine exports require group size 64")
     if any(type(text.get(key)) is not int or not 0 < text[key] <= maximum for key, maximum in _TEXT_BOUNDS.items()):
         raise UnsupportedConversion("Vision family decoder geometry is outside the implemented profile")
     epsilon = text.get("rms_norm_eps")
@@ -344,7 +391,7 @@ def validate_family_geometry(config: dict) -> tuple[dict, dict]:
         or not _equal(text.get("rope_parameters"), _ROPE)
         or text.get("dtype", "bfloat16") != "bfloat16"
         or text.get("torch_dtype", "bfloat16") != "bfloat16"
-        or any(text.get(key) is not None for key in ("quantization", "quantization_config", "auto_map"))
+        or text.get("auto_map") is not None
     ):
         raise UnsupportedConversion("Vision family decoder operations are outside the implemented profile")
     interval = text.get("full_attention_interval")
@@ -389,7 +436,7 @@ def validate_family_geometry(config: dict) -> tuple[dict, dict]:
             for key, maximum in _VISION_BOUNDS.items()
         )
         or any(not _equal(vision.get(key), expected) for key, expected in fixed.items())
-        or vision.get("model_type") not in ("qwen3_5", "qwen3_5_vision")
+        or vision.get("model_type") not in ("qwen3_5", "qwen3_5_vision", "qwen3_5_moe", "qwen3_5_moe_vision")
         or vision["hidden_size"] % vision["num_heads"]
         or (vision["hidden_size"] // vision["num_heads"]) % _VISION_HEAD_ALIGNMENT
         or math.isqrt(vision["num_position_embeddings"]) ** 2 != vision["num_position_embeddings"]
@@ -438,16 +485,22 @@ def validate_family_source(snapshot: Any, dtype: str) -> dict:
         _TEMPLATE_SHA256,
         _MAPPING_TEMPLATE_SHA256,
         _THINKING_TEMPLATE_SHA256,
+        _PRESERVED_THINKING_TEMPLATE_SHA256,
     }:
         raise UnsupportedConversion("Vision family tokenizer or template is outside the implemented profile")
     tokenizer = recognized_family_tokenizer(payloads["tokenizer.json"])
     config, token_config = (_json(payloads[name]) for name in ("config.json", "tokenizer_config.json"))
     if (
-        config.get("model_type") != "qwen3_5"
-        or config.get("architectures") != ["Qwen3_5ForConditionalGeneration"]
+        config.get("model_type") not in {"qwen3_5", "qwen3_5_moe"}
+        or config.get("architectures")
+        != [
+            "Qwen3_5MoeForConditionalGeneration"
+            if config.get("model_type") == "qwen3_5_moe"
+            else "Qwen3_5ForConditionalGeneration"
+        ]
         or not isinstance(config.get("text_config"), dict)
         or not isinstance(config.get("vision_config"), dict)
-        or any(config.get(key) is not None for key in ("quantization", "quantization_config", "auto_map"))
+        or config.get("auto_map") is not None
         or token_config.get("auto_map") is not None
     ):
         raise UnsupportedConversion("Vision family requires a merged dense Qwen3.5 checkpoint")
@@ -563,10 +616,27 @@ def validate_family_source(snapshot: Any, dtype: str) -> dict:
     }
     if not any(record["role"] == "weights" for record in weights.values()):
         raise ConversionError("Vision family requires complete merged weights")
+    profile = (
+        (MOE_FAMILY_PROFILE if text.get("quantization") is not None else BF16_MOE_FAMILY_PROFILE)
+        if config["model_type"] == "qwen3_5_moe"
+        else AFFINE_FAMILY_PROFILE
+        if text.get("quantization") is not None
+        else FAMILY_PROFILE
+    )
+    version = (
+        (MOE_FAMILY_VERSION if text.get("quantization") is not None else BF16_MOE_FAMILY_VERSION)
+        if config["model_type"] == "qwen3_5_moe"
+        else AFFINE_FAMILY_VERSION
+        if text.get("quantization") is not None
+        else FAMILY_VERSION
+    )
     return {
         "type": "Qwen35VisionLanguageArtifact",
         "schema_version": 3,
-        "family": {"profile": FAMILY_PROFILE, "version": FAMILY_VERSION},
+        "family": {
+            "profile": profile,
+            "version": version,
+        },
         "input_modalities": ["text", "image"],
         "dtype": dtype,
         "source": {

@@ -9,7 +9,8 @@ dependencies = [
 
 [tool.uv]
 environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
-constraint-dependencies = ["certifi>=2026.10.19"]
+# GHSA-mf5v-w3w3-f6cg: bound traceparent parsing in the OpenTelemetry API.
+constraint-dependencies = ["certifi>=2026.10.19", "opentelemetry-api>=1.45.2"]
 # vLLM 0.32.0 pins setuptools 78.1.1, below the GHSA-h35f-9h28-mq5c fix.
 # The benchmark uses prebuilt wheels; see ../README.md for the scoped override.
 override-dependencies = ["setuptools==84.1.0"]

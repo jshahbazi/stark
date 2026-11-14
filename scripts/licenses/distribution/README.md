@@ -10,6 +10,12 @@ are collected explicitly because the Cargo registry inventory excludes path
 dependencies. The distribution source manifest hashes the vendored core and
 these notices alongside the other owned source files.
 
+`mlx-LICENSE` preserves the Apple MIT terms for the source-bound BF16 sigmoid
+experiment. `mlx-bf16-head-sigmoid-experiment` in the manifest pins the MLX
+unary, BF16 math and wide GEMV sources. The experiment selects source rounding and
+head-projection reduction boundaries
+only in a test head; it does not change the default inference precision policy.
+
 `pytorch-LICENSE` is the exact PyTorch license file from tag `v2.14.1`, resolved
 to commit `5c4886908584029761b579af026dcfb627c84070`. It is included because the
 vision-only BF16 LayerNorm variance implementation adapts the logical Welford
@@ -26,6 +32,16 @@ also adapt `SumKernel.cpp`'s FP32 row-sum cascade and the pinned NEON
 square-root then reciprocal sequence. `pytorch-qwen35-reference-rms` records
 their source hashes. The private numerical profile selects these operations;
 the existing text profile retains its normalization implementation.
+
+The larger Gemma 4 vision tower adapts the same sum cascade for logical72 and
+hidden1152 RMS rows, including the 72-channel whole-vector tail order.
+`pytorch-gemma4-larger-vision-rms` records this scope and pinned source hashes.
+E2B/E4B, unified12B and text normalization retain their previous schedules.
+
+The larger Gemma vision Flash path also adapts the pinned CPU FlashAttention
+tile boundaries, BF16 exponential stores and NEON `fexp_u20` approximation.
+`pytorch-gemma4-larger-vision-flash` records the source files and hashes; existing
+PyTorch BSD distribution notices cover this adaptation.
 
 The same private profile preserves Qwen3.5 DeltaNet's BF16 convolution, SiLU,
 sigmoid, gated normalization, and F32 state boundaries. Its 64-token chunk

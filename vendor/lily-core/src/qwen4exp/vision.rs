@@ -18,13 +18,16 @@
 //!    block) read as one `[N / 4, 4 H]` row, `fc1`, the exact erf GELU, `fc2`
 //!    into the text model's hidden size.
 //!
-//! Attention is a fused online-softmax kernel (design (b) of the plan) rather
+//! Attention uses bounded-memory three-pass streaming softmax rather
 //! than a score matrix through the GEMM: the engine already had a tensor-op
 //! flash kernel for the text path to derive it from, and materialising
 //! `[N, N]` scores per head costs about 0.5 GB of traffic per head and layer
 //! at 8 192 patches, 230 GB for the tower, which alone would take the
-//! latency budget. The kernel is a copy with the causal limit and the KV
-//! cache removed, so the text path's numerics are untouched.
+//! latency budget. It rounds QK and scaled scores to BF16, computes softmax
+//! statistics in F32, and rounds normalized probabilities to BF16 before PV,
+//! matching the pinned eager source. Four query rows use one SIMD32 group
+//! each; source-order QK, normalization and PV retain fixed register state,
+//! avoiding an N x N allocation. The text path uses separate kernels.
 //!
 //! Everything runs in one serial pass per image; intermediates live in a
 //! [`VisionScratch`] that grows to the largest patch count seen.
@@ -32,17 +35,33 @@
 use anyhow::{Result, ensure};
 use half::bf16;
 
-use crate::kernels::elementwise::{Gelu, add_bf16, gelu_bf16};
+#[cfg(test)]
+use crate::kernels::elementwise::gelu_bf16;
+use crate::kernels::elementwise::{Gelu, add_bf16};
+#[cfg(test)]
 use crate::kernels::gemm::gemm_bf16_nt_bias;
+#[cfg(test)]
 use crate::kernels::norm::layernorm_bf16;
 use crate::kernels::vision::{
-    attention_full_bf16, patch_pos_embed_bf16, qkv_rope_2d_bf16,
+    attention_full_bf16, gelu_vision_bf16, layernorm_vision_bf16, linear_bf16_bias,
+    patch_pos_embed_bf16, qkv_rope_2d_bf16,
 };
 use crate::metal::MetalContext;
 use crate::tensor::{DType, Tensor};
 
 use super::config::VisionConfig;
 use super::vision_weights::VisionWeights;
+
+#[cfg(test)]
+#[path = "vision_reference_tests.rs"]
+mod reference_tests;
+
+#[cfg(test)]
+#[path = "vision_math_reference.rs"]
+mod source_math;
+
+#[path = "vision_math.rs"]
+mod rotary_math;
 
 /// The rotary base of `Qwen4ExpVisionRotaryEmbedding`, a constructor default
 /// the checkpoint's config does not carry (VISION.md "Rotary").
@@ -51,7 +70,7 @@ const ROPE_THETA: f32 = 10000.0;
 const LAYERNORM_EPS: f32 = 1e-6;
 
 /// Intermediates for up to `capacity` patches; every forward uses exact
-/// row-prefix views. Under 0.3 GB at the 8 192-patch cap.
+/// row-prefix views. Allocation admission checks the full processor ceiling before execution.
 pub struct VisionScratch {
     capacity: usize,
     /// `[n, patch_dim]` bf16: the pixel rows cast on upload.
@@ -72,6 +91,8 @@ pub struct VisionScratch {
     mlp: Tensor,
     /// `[n / 4, out_hidden]` bf16.
     merged: Tensor,
+    /// Grid-derived F32 cos/sin, kept alive through the full GPU pass.
+    rotary: Option<(Tensor, Tensor)>,
 }
 
 impl VisionScratch {
@@ -91,8 +112,69 @@ impl VisionScratch {
             tmp: z(&[capacity, h])?,
             mlp: z(&[capacity, i])?,
             merged: z(&[capacity / 4, v.out_hidden_size])?,
+            rotary: if v.hidden_size == 1152 && v.num_heads == 16 && v.head_dim() == 72
+            {
+                Some((
+                    Tensor::zeros(ctx, &[capacity, 36], DType::F32)?,
+                    Tensor::zeros(ctx, &[capacity, 36], DType::F32)?,
+                ))
+            } else {
+                None
+            },
         })
     }
+}
+
+fn rotary_coefficients(gh: usize, gw: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+    let n = gh
+        .checked_mul(gw)
+        .ok_or_else(|| anyhow::anyhow!("vision rotary grid overflow"))?;
+    ensure!(
+        gh >= 2 && gw >= 2 && gh.is_multiple_of(2) && gw.is_multiple_of(2) && n <= 65_536,
+        "vision rotary grid bounds"
+    );
+    let inverse = (0..18)
+        .map(|index| 1.0_f32 / 10000_f32.powf((2 * index) as f32 / 36.0))
+        .collect::<Vec<_>>();
+    let mut angles = Vec::with_capacity(n * 36);
+    for row in 0..n {
+        let ih = (row / 2) % 2;
+        let iw = row % 2;
+        let bh = row / (4 * (gw / 2));
+        let bw = (row / 4) % (gw / 2);
+        for index in 0..36 {
+            let position = if index < 18 { 2 * bh + ih } else { 2 * bw + iw };
+            angles.push(position as f32 * inverse[index % 18]);
+        }
+    }
+    ensure!(
+        angles.iter().all(|angle| angle.is_finite() && angle.abs() < 4096.0),
+        "vision rotary angle bounds"
+    );
+    let (cos, sin) = rotary_math::vision_sin_cos(&angles);
+    ensure!(
+        cos.iter().chain(&sin).all(|value| value.is_finite()),
+        "vision rotary coefficient finite gate"
+    );
+    Ok((cos, sin))
+}
+
+fn prepare_rotary(
+    s: &VisionScratch,
+    gh: usize,
+    gw: usize,
+) -> Result<Option<(Tensor, Tensor)>> {
+    let Some((cos, sin)) = &s.rotary else { return Ok(None) };
+    let n = gh
+        .checked_mul(gw)
+        .ok_or_else(|| anyhow::anyhow!("vision rotary extent overflow"))?;
+    ensure!(n <= s.capacity, "vision rotary capacity");
+    let (cosines, sines) = rotary_coefficients(gh, gw)?;
+    let cos = cos.view(0, &[n, 36])?;
+    let sin = sin.view(0, &[n, 36])?;
+    cos.write_bytes(bytemuck::cast_slice(&cosines))?;
+    sin.write_bytes(bytemuck::cast_slice(&sines))?;
+    Ok(Some((cos, sin)))
 }
 
 /// One image's tower outputs, as views into the tower's scratch: valid until
@@ -146,7 +228,10 @@ pub(super) fn forward_with(
         let v = config;
         let (hid, patch_dim, heads) = (v.hidden_size, v.patch_dim(), v.num_heads);
         let merge = v.spatial_merge_size * v.spatial_merge_size;
-        let n = gh * gw;
+        let n = gh
+            .checked_mul(gw)
+            .ok_or_else(|| anyhow::anyhow!("vision grid size overflow"))?;
+        ensure!(n > 0 && n <= 65_536, "vision grid exceeds native patch budget");
         ensure!(
             gh >= 2 && gw >= 2 && gh.is_multiple_of(2) && gw.is_multiple_of(2),
             "grid ({gh}, {gw}) is not made of 2 x 2 merge blocks"
@@ -179,27 +264,50 @@ pub(super) fn forward_with(
         // The cast is the reference's `hidden_states.to(target_dtype)`.
         let cast: Vec<bf16> = pixels.iter().map(|&p| bf16::from_f32(p)).collect();
         px.write_bytes(bytemuck::cast_slice(&cast))?;
+        let rotary = prepare_rotary(s, gh, gw)?;
 
         let pass = ctx.begin()?;
         pass.set_label("vision");
-        gemm_bf16_nt_bias(ctx, &pass, &px, &w.patch_proj_w, &w.patch_proj_b, &x)?;
+        linear_bf16_bias(ctx, &pass, &px, &w.patch_proj_w, &w.patch_proj_b, &x, 4)?;
         patch_pos_embed_bf16(ctx, &pass, &x, &w.pos_embed, gh, gw)?;
         for b in &w.blocks[..depth] {
-            layernorm_bf16(ctx, &pass, &x, &b.norm1_w, &b.norm1_b, &h, LAYERNORM_EPS)?;
-            gemm_bf16_nt_bias(ctx, &pass, &h, &b.qkv_w, &b.qkv_b, &qkv)?;
-            qkv_rope_2d_bf16(ctx, &pass, &qkv, heads, gh, gw, ROPE_THETA)?;
+            layernorm_vision_bf16(
+                ctx,
+                &pass,
+                &x,
+                &b.norm1_w,
+                &b.norm1_b,
+                &h,
+                LAYERNORM_EPS,
+            )?;
+            linear_bf16_bias(ctx, &pass, &h, &b.qkv_w, &b.qkv_b, &qkv, 32)?;
+            if let Some((cos, sin)) = &rotary {
+                crate::kernels::vision::qkv_rope_coefficients_bf16(
+                    ctx, &pass, &qkv, cos, sin, gh, gw,
+                )?;
+            } else {
+                qkv_rope_2d_bf16(ctx, &pass, &qkv, heads, gh, gw, ROPE_THETA)?;
+            }
             attention_full_bf16(ctx, &pass, &qkv, &attn, heads, scale)?;
-            gemm_bf16_nt_bias(ctx, &pass, &attn, &b.proj_w, &b.proj_b, &tmp)?;
+            linear_bf16_bias(ctx, &pass, &attn, &b.proj_w, &b.proj_b, &tmp, 32)?;
             add_bf16(ctx, &pass, &x, &tmp, &x)?;
-            layernorm_bf16(ctx, &pass, &x, &b.norm2_w, &b.norm2_b, &h, LAYERNORM_EPS)?;
-            gemm_bf16_nt_bias(ctx, &pass, &h, &b.fc1_w, &b.fc1_b, &mlp)?;
-            gelu_bf16(ctx, &pass, &mlp, Gelu::Tanh)?;
-            gemm_bf16_nt_bias(ctx, &pass, &mlp, &b.fc2_w, &b.fc2_b, &tmp)?;
+            layernorm_vision_bf16(
+                ctx,
+                &pass,
+                &x,
+                &b.norm2_w,
+                &b.norm2_b,
+                &h,
+                LAYERNORM_EPS,
+            )?;
+            linear_bf16_bias(ctx, &pass, &h, &b.fc1_w, &b.fc1_b, &mlp, 32)?;
+            gelu_vision_bf16(ctx, &pass, &mlp, Gelu::Tanh)?;
+            linear_bf16_bias(ctx, &pass, &mlp, &b.fc2_w, &b.fc2_b, &tmp, 32)?;
             add_bf16(ctx, &pass, &x, &tmp, &x)?;
         }
         // Merger: the per-patch norm lands in `h`, whose four consecutive
         // rows per merge block are one `[4 H]` row of `h4` by layout.
-        layernorm_bf16(
+        layernorm_vision_bf16(
             ctx,
             &pass,
             &x,
@@ -208,15 +316,16 @@ pub(super) fn forward_with(
             &h,
             LAYERNORM_EPS,
         )?;
-        gemm_bf16_nt_bias(ctx, &pass, &h4, &w.merger_fc1_w, &w.merger_fc1_b, &mlp4)?;
-        gelu_bf16(ctx, &pass, &mlp4, Gelu::Erf)?;
-        gemm_bf16_nt_bias(
+        linear_bf16_bias(ctx, &pass, &h4, &w.merger_fc1_w, &w.merger_fc1_b, &mlp4, 32)?;
+        gelu_vision_bf16(ctx, &pass, &mlp4, Gelu::Erf)?;
+        linear_bf16_bias(
             ctx,
             &pass,
             &mlp4,
             &w.merger_fc2_w,
             &w.merger_fc2_b,
             &merged,
+            32,
         )?;
         pass.commit_wait()?;
         Ok(VisionOutput { merged })

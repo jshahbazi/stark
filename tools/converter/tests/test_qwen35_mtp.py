@@ -8,7 +8,7 @@ from test_mlx import save_mlx_fixture
 from test_mlx_qwen35 import mlx_qwen35_fixture
 
 from stark_convert.adapters.qwen35 import build_qwen35_plan
-from stark_convert.streaming import ConversionError, read_safetensors_header, write_plan
+from stark_convert.streaming import ConversionError, UnsupportedConversion, read_safetensors_header, write_plan
 
 
 def complete_mtp_fixture(source):
@@ -43,7 +43,9 @@ def test_complete_mtp_head_is_preserved_with_explicit_graph(tmp_path):
     assert "mtp.transformer.layers.0.mixer.query_norm.scales" in written
 
 
-@pytest.mark.parametrize("mutation", ["missing_fusion", "bad_fusion", "undeclared", "multiple_layers", "extra"])
+@pytest.mark.parametrize(
+    "mutation", ["missing_fusion", "bad_fusion", "undeclared", "multiple_layers", "extra", "dedicated"]
+)
 def test_partial_or_unsupported_predictor_fails_closed(tmp_path, mutation):
     source = tmp_path / "source"
     config, tensors = complete_mtp_fixture(source)
@@ -55,15 +57,17 @@ def test_partial_or_unsupported_predictor_fails_closed(tmp_path, mutation):
         config["text_config"].pop("mtp_num_hidden_layers")
     elif mutation == "multiple_layers":
         config["text_config"]["mtp_num_hidden_layers"] = 2
+    elif mutation == "dedicated":
+        config["text_config"]["mtp_use_dedicated_embeddings"] = True
     else:
         tensors["language_model.mtp.unexpected.weight"] = "BF16", np.zeros((2,), dtype="<u2")
     (source / "config.json").write_text(json.dumps(config))
     save_mlx_fixture(source, tensors)
-    with pytest.raises(ConversionError):
+    with pytest.raises((ConversionError, UnsupportedConversion)):
         build_qwen35_plan(source)
 
 
-def test_unqualified_unquantized_predictor_is_not_enabled(tmp_path):
+def test_complete_unquantized_predictor_is_preserved(tmp_path):
     source = tmp_path / "source"
     config, tensors = complete_mtp_fixture(source)
     config.pop("quantization")
@@ -77,8 +81,10 @@ def test_unqualified_unquantized_predictor_is_not_enabled(tmp_path):
     (source / "config.json").write_text(json.dumps(config))
     save_mlx_fixture(source, tensors)
     plan = build_qwen35_plan(source)
-    assert plan.mtp_config is None
-    assert not any(op.name.startswith("mtp.") for op in plan.operations)
+    assert plan.mtp_config is not None
+    head = [op for op in plan.operations if op.name.startswith("mtp.")]
+    assert head and all(op.dtype in {"BF16", "F32"} for op in head)
+    assert plan.mtp_config["input_norm_config"]["scale_offset"] == 1.0
 
 
 def test_quantized_root_namespace_partial_head_is_rejected(tmp_path):

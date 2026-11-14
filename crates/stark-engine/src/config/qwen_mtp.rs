@@ -27,6 +27,29 @@ fn owned_full_attention(layer: &TransformerLayerConfig) -> bool {
 }
 
 impl QwenMtpConfig {
+    /// Geometry covered by the pinned official 0.8B full-BF16 head replay.
+    /// Storage eligibility is checked separately against target AND head metadata.
+    pub(crate) fn source_bf16_geometry(
+        &self,
+        target: &TransformerConfig,
+    ) -> bool {
+        use crate::config::{activation::AnyActivation, mlp::AnyMLPConfig};
+        self.model_dim == 1024
+            && self.target_layer == 23
+            && target.model_dim == 1024
+            && target.hidden_dim == 3584
+            && target.layer_configs.len() == 24
+            && target.layer_configs.iter().all(|layer| matches!(layer.mlp_config, AnyMLPConfig::DenseMLPConfig(_)))
+            && self.transformer_config.hidden_dim == 3584
+            && self.transformer_config.layer_configs.len() == 1
+            && matches!(&self.transformer_config.layer_configs[0].mixer_config,
+                AnyTokenMixerConfig::AttentionConfig(a) if a.num_heads == 8 && a.num_groups == 2 && a.head_dim == 256
+                    && a.has_gate && !a.has_qkvg_biases && !a.has_out_biases && !a.reference_bf16)
+            && matches!(&self.transformer_config.layer_configs[0].mlp_config,
+                AnyMLPConfig::DenseMLPConfig(m) if !m.has_up_biases && !m.has_down_biases
+                    && matches!(&m.activation, AnyActivation::SiLU(s) if s.alpha == 1.0))
+    }
+
     /// This route retains only DeltaNet histories and append-only attention.
     /// Other state layouts require their own admission and restoration proof.
     pub(crate) fn validate_for_target(
@@ -105,6 +128,32 @@ mod tests {
             draft_readout_bits: None,
         };
         (transformer, head)
+    }
+
+    #[stark_test]
+    fn source_bf16_geometry_is_limited_to_qualified_dense_shape() {
+        let (mut target, mut head) = fixture();
+        target.model_dim = 1024;
+        target.hidden_dim = 3584;
+        target.layer_configs = vec![target.layer_configs[0].clone(); 24].into_boxed_slice();
+        head.model_dim = 1024;
+        head.target_layer = 23;
+        head.transformer_config.model_dim = 1024;
+        head.transformer_config.hidden_dim = 3584;
+        let AnyTokenMixerConfig::AttentionConfig(attention) =
+            &mut head.transformer_config.layer_configs[0].mixer_config
+        else {
+            panic!()
+        };
+        attention.num_heads = 8;
+        attention.num_groups = 2;
+        attention.head_dim = 256;
+        assert!(head.source_bf16_geometry(&target));
+        target.model_dim = 2048;
+        assert!(!head.source_bf16_geometry(&target));
+        target.model_dim = 1024;
+        head.transformer_config.hidden_dim += 32;
+        assert!(!head.source_bf16_geometry(&target));
     }
 
     #[stark_test]

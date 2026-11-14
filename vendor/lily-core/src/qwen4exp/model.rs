@@ -78,6 +78,9 @@ use super::ExpertCacheStats;
 use super::vision::{self, VisionScratch};
 
 use super::config::{GateAct, Qwen4ExpConfig};
+
+#[path = "request_memory.rs"]
+mod request_memory;
 use super::ngram::{NgramHasher, NgramStorage, NgramTable, StagedRows};
 use super::positions::{ImageSpan, Positions};
 use super::weights::{
@@ -979,6 +982,19 @@ pub struct Scratch {
 }
 
 impl Scratch {
+    /// Context capacity represented by decode scratch's QSA score buffer.
+    pub fn resident_context_capacity(&self, compress_ratio: usize) -> usize {
+        self.qsa.scores.shape()[1].saturating_mul(compress_ratio)
+    }
+
+    /// Actual persistent prefill allocation geometry, independent of whether
+    /// its most recent construction or use completed successfully.
+    pub fn resident_prefill_geometry(&self, compress_ratio: usize) -> (usize, usize) {
+        self.prefill.as_ref().map_or((0, 0), |prefill| {
+            (prefill.m, prefill.qsa.scores.shape()[1].saturating_mul(compress_ratio))
+        })
+    }
+
     /// The arrival probe event (`LILY_PROBE_ARRIVAL`), for benchmarks.
     pub fn arrival_probe(&self) -> Option<&SharedEvent> {
         self.sync.arrival.as_ref()
@@ -2028,6 +2044,22 @@ impl Qwen4ExpModel {
         vision: Option<&VisionInput<'_>>,
     ) -> Result<()> {
         self.prefill_chunks(ctx, state, s, tokens, draw, vision, None).map(drop)
+    }
+
+    /// Stark's bounded image worker: retain the ordinary final target readout
+    /// while allowing cancellation between completed prefill command buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill_with_vision_until(
+        &self,
+        ctx: &MetalContext,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        tokens: &[u32],
+        draw: Option<Draw<'_>>,
+        vision: Option<&VisionInput<'_>>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<usize> {
+        self.prefill_chunks(ctx, state, s, tokens, draw, vision, Some(stop))
     }
 
     /// [`Self::prefill_with_vision`] without a draw that stops before the
@@ -4531,6 +4563,35 @@ impl Qwen4ExpModel {
                     .view(capture.row * cfg.vocab_size, &[cfg.vocab_size])?,
             )?;
             pass.level_barrier(&[capture.hyper, &capture.spec.logits])?;
+        }
+        if capture.is_none()
+            && self.mtp_enabled
+            && let (Some(mtp), Some(mst)) = (&self.weights.mtp, &state.mtp)
+        {
+            // Ordinary decode also consumes a trunk row. In particular the
+            // official N-1 prefill holds its last prompt token for this graph;
+            // leaving the head behind here would draft from the penultimate
+            // hidden and leave a cache row from an earlier request visible.
+            // Reuse the prefill catch-up on views of the exact decode hidden
+            // and input ID, preserving the target graph's arithmetic.
+            let mut ps = s
+                .prefill
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("MTP decode without prefill scratch"))?
+                .rows(1)?;
+            ps.hyper = s.hyper.view(0, &[1, cfg.hc_width()])?;
+            ps.ids = ids;
+            self.mtp_catch_up(
+                ctx,
+                pass,
+                mtp,
+                mst,
+                state.pos,
+                s,
+                &ps,
+                Rope::Delta(state.rope_delta),
+                &[],
+            )?;
         }
         pass.profile_stage(crate::metal::stage_profile::Phase::Draw)?;
         let out = s.next_token.view(slot_out, &[1])?;

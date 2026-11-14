@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from stark_convert.desktop import Desktop, DesktopError
+from stark_convert.desktop import Desktop, DesktopError, InstallCancelled
 
 REVISION = "a" * 40
 
@@ -198,6 +198,112 @@ def test_real_support_child_reply_and_epoch_cancellation_reap_process(host):
     thread.join(timeout=3)
     assert not thread.is_alive() and results == [None]
     assert process.poll() is not None and process.stdout.closed and host.converter is None
+
+
+def test_remote_install_support_child_resumes_after_sleep_and_wake(host, tmp_path):
+    marker = tmp_path / "preflight-started"
+    command = [
+        sys.executable,
+        "-c",
+        "import json,time; from pathlib import Path; "
+        f"marker=Path({str(marker)!r}); "
+        "first=not marker.exists(); marker.write_text('started'); "
+        "time.sleep(30) if first else None; "
+        f"print(json.dumps({support_report()!r}))",
+    ]
+    host.begin_install_progress(host.epoch, "huggingface")
+    results = []
+    thread = threading.Thread(
+        target=lambda: results.append(host.run_install_support_check(command, dict(os.environ), host.epoch))
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 3
+        while not marker.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        process = host.converter
+        host.dispatch({"command": "system_sleep"})
+        while not any(e.get("message") == "Download paused. Waiting for a connection…" for e in emitted(host)):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert process.poll() is not None and process.stdout.closed
+        assert thread.is_alive() and not results
+        host.dispatch({"command": "system_wake"})
+        thread.join(timeout=2)
+        assert not thread.is_alive() and results == [support_report()]
+        assert host.download_retry_epoch is None and host.download_interrupted_epoch is None
+    finally:
+        host.stop(quiet=True)
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("status", ["conditional", "unsupported", "inconclusive"])
+def test_finished_remote_install_support_report_is_not_retried_after_sleep(host, monkeypatch, status):
+    host.begin_install_progress(host.epoch, "huggingface")
+    calls = []
+
+    def preflight(*_args):
+        calls.append(1)
+        host.system_power(True)
+        host.system_power(False)
+        return support_report(status=status)
+
+    monkeypatch.setattr(host, "run_support_check", preflight)
+    assert host.run_install_support_check([], {}, host.epoch) == support_report(status=status)
+    assert calls == [1] and host.download_interrupted_epoch is None
+
+
+def test_remote_install_support_failure_without_sleep_is_terminal(host, monkeypatch):
+    calls = []
+
+    def preflight(*_args):
+        calls.append(1)
+        raise DesktopError("Synthetic support failure")
+
+    monkeypatch.setattr(host, "run_support_check", preflight)
+    with pytest.raises(DesktopError, match="Synthetic support failure"):
+        host.run_install_support_check([], {}, host.epoch)
+    assert calls == [1] and host.download_retry_epoch is None
+
+
+def test_local_install_support_does_not_enter_sleep_retry_wrapper(host, monkeypatch):
+    monkeypatch.setattr(host, "run_install_support_check", lambda *_args: pytest.fail("local preflight was retried"))
+    monkeypatch.setattr(host, "run_support_check", lambda *_args: support_report())
+    assert host.check_install_support(host.epoch, "local", "fixture", "text", "text", "request") == REVISION
+
+
+def test_remote_install_support_sleep_wait_is_cancellable(host, monkeypatch):
+    host.begin_install_progress(host.epoch, "huggingface")
+    host.install_cancelled = threading.Event()
+    calls, failures = [], []
+
+    def preflight(*_args):
+        calls.append(1)
+        host.system_power(True)
+        raise DesktopError("Synthetic interrupted check")
+
+    def run():
+        try:
+            host.run_install_support_check([], {}, host.epoch)
+        except InstallCancelled:
+            failures.append("cancelled")
+
+    monkeypatch.setattr(host, "run_support_check", preflight)
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 2
+        while not any(e.get("message") == "Download paused. Waiting for a connection…" for e in emitted(host)):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        host.install_cancelled.set()
+        host.download_retry_wake.set()
+        thread.join(timeout=1)
+        assert not thread.is_alive() and failures == ["cancelled"] and calls == [1]
+    finally:
+        host.stop(quiet=True)
+        thread.join(timeout=2)
 
 
 def test_family_matrix_is_discoverable_without_loading_a_model(host):

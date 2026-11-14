@@ -15,6 +15,8 @@ pub(super) struct RowPartitionedLinear<B: Backend> {
     parts: Vec<(u32, LinearMatmul<B>)>,
     output_dim: u32,
     output_data_type: DataType,
+    input_dim: u32,
+    reference_affine: bool,
     copy: <B::Kernels as Kernels>::CopyRowsKernel,
 }
 
@@ -65,6 +67,8 @@ impl<B: Backend> RowPartitionedLinear<B> {
             parts,
             output_dim,
             output_data_type,
+            input_dim,
+            reference_affine: tree.numerical_profile() == crate::parameters::NumericalProfile::Qwen35AffineBF16,
             copy,
         })
     }
@@ -86,6 +90,20 @@ impl<B: Backend> Linear<B> for RowPartitionedLinear<B> {
         batch_dim: u32,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
+        if self.reference_affine {
+            use super::reference_affine::{MAX_REFERENCE_DISPATCHES, ReferenceAffinePlan};
+            ReferenceAffinePlan::new(batch_dim, self.output_dim, self.input_dim)?;
+            let mut dispatches = 0_u32;
+            for (rows, _) in &self.parts {
+                dispatches = dispatches
+                    .checked_add(ReferenceAffinePlan::new(batch_dim, *rows, self.input_dim)?.dispatches)
+                    .and_then(|count| count.checked_add(1)) // Existing row-copy dispatch.
+                    .ok_or(InvalidInput("affine row-partition dispatch count overflow"))?;
+            }
+            if dispatches > MAX_REFERENCE_DISPATCHES {
+                return Err(InvalidInput("affine row-partition dispatch count exceeds bound").into());
+            }
+        }
         let element_bytes = self.output_data_type.size_in_bits() as u32 / 8;
         let output_row_bytes = self
             .output_dim

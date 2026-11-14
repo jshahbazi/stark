@@ -1,5 +1,8 @@
 mod dense;
 mod gate_act_mul;
+mod gemma4_moe;
+mod qwen_moe;
+pub(crate) mod routed;
 
 pub use dense::DenseMlp;
 use derive_more::Debug;
@@ -11,10 +14,44 @@ use crate::{
     config::mlp::AnyMLPConfig,
     data_type::DataType,
     encodable_block::linear::{Linear, LinearBlockError},
-    parameters::{NumericalProfile, ParameterTree},
+    parameters::ParameterTree,
 };
 
 pub trait Mlp<B: Backend>: Send + Sync {
+    #[cfg(test)]
+    fn trace_dense(
+        &self,
+        _input: B::ScratchBuffer,
+        _batch_dim: u32,
+        _command: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<Vec<(String, B::ScratchBuffer)>>, B::Error> {
+        Ok(None)
+    }
+
+    #[cfg(test)]
+    fn validation_trace_dense(
+        &self,
+        _input: B::ScratchBuffer,
+        _rows: u32,
+        _commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Option<Vec<(&'static str, B::ScratchBuffer)>>, B::Error> {
+        Ok(None)
+    }
+
+    fn requires_residual_input(&self) -> bool {
+        false
+    }
+
+    fn encode_with_residual(
+        &self,
+        input: B::ScratchBuffer,
+        _residual: Option<B::ScratchBuffer>,
+        batch_dim: u32,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        self.encode(input, batch_dim, command_buffer)
+    }
+
     fn encode(
         &self,
         input: B::ScratchBuffer,
@@ -29,6 +66,8 @@ pub enum MlpBlockError<B: Backend> {
     BackendError(#[source] B::Error),
     #[error("Linear block error: {0}")]
     LinearBlockError(#[from] LinearBlockError<B>),
+    #[error("Normalization error: {0}")]
+    Normalization(#[from] crate::encodable_block::normalization::NormalizationNewError<B>),
     #[error("Mixture of experts is not supported")]
     UnsupportedMixtureOfExperts,
 }
@@ -43,10 +82,21 @@ impl<B: Backend> dyn Mlp<B> {
         data_type: DataType,
     ) -> Result<(Box<dyn Mlp<B>>, Option<B::GlobalBuffer>), MlpBlockError<B>> {
         match config {
+            AnyMLPConfig::Gemma4MoeConfig(config) => Ok((
+                Box::new(gemma4_moe::Gemma4Moe::new(
+                    config,
+                    model_dimension,
+                    hidden_dimension,
+                    context,
+                    parameter_tree,
+                    data_type,
+                )?),
+                None,
+            )),
             AnyMLPConfig::DenseMLPConfig(dense_config) => {
                 let (up_projection, up_input_hadamard_factors) = <dyn Linear<B>>::new_with_input_rht(
                     model_dimension,
-                    [2 * hidden_dimension],
+                    [hidden_dimension, hidden_dimension],
                     dense_config.has_up_biases,
                     context,
                     data_type,
@@ -70,13 +120,23 @@ impl<B: Backend> dyn Mlp<B> {
                     dense_config.up_clipping,
                     hidden_dimension,
                     down_input_preparation,
-                    parameter_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16,
+                    parameter_tree.numerical_profile().qwen35_bf16_activations(),
                 )
                 .map_err(MlpBlockError::BackendError)?;
 
                 Ok((Box::new(DenseMlp::new(up_projection, gate, down_projection)), up_input_hadamard_factors))
             },
-            AnyMLPConfig::MixtureOfExpertsConfig(_) => Err(MlpBlockError::UnsupportedMixtureOfExperts),
+            AnyMLPConfig::MixtureOfExpertsConfig(config) => Ok((
+                Box::new(qwen_moe::QwenMoe::new(
+                    config,
+                    model_dimension,
+                    hidden_dimension,
+                    context,
+                    parameter_tree,
+                    data_type,
+                )?),
+                None,
+            )),
         }
     }
 }

@@ -95,6 +95,7 @@ def make_worker(handler=None):
 
     def default(payload, _on_delta=None, cancelled=None):
         operation = payload["operation"]
+        assert "cache_scope" not in payload
         if operation in {"prepare_image", "generate_image"} and cancelled is not None and cancelled.is_set():
             raise ChatCancelled("Request cancelled.")
         worker.sent.append(operation)
@@ -136,6 +137,7 @@ def perform(worker, cancelled=None):
 
 def test_image_request_orders_prepare_generate_discard_and_removes_staged_file():
     worker = make_worker()
+    worker.prefix_cache = True
     root = worker.media.root
     try:
         reply = perform(worker)
@@ -414,6 +416,77 @@ def test_aligned_image_failure_discards_and_allows_valid_request_b(first_failure
         worker.media.close()
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_generation_memory_rejection_discards_real_pipe_transaction_and_allows_retry(tmp_path, stream):
+    from stark_convert.chat import ChatRequestTooLarge
+
+    executable = tmp_path / "synthetic image worker"
+    operations = tmp_path / "operations.jsonl"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json,sys\n"
+        f"operations={str(operations)!r}\n"
+        "prepared=None;generated=0\n"
+        "print(json.dumps({'ready':True}),flush=True)\n"
+        "for line in sys.stdin:\n"
+        " request=json.loads(line);op=request['operation']\n"
+        " with open(operations,'a') as out:out.write(json.dumps(op)+'\\n')\n"
+        " if op=='prepare_image':\n"
+        "  assert prepared is None\n"
+        "  prepared='a'*32\n"
+        "  reply={'prepared_id':prepared,'input_tokens':12,'image_tokens':4}\n"
+        " elif op=='generate_image':\n"
+        "  assert request['prepared_id']==prepared\n"
+        "  generated+=1\n"
+        "  if generated==1:\n"
+        "   if request.get('stream'): print(json.dumps({'event':'delta','text':'synthetic'}),flush=True)\n"
+        "   reply={'error':'resource_budget_exceeded'}\n"
+        "  else: reply={'text':'synthetic','input_tokens':12,'output_tokens':1,'finish_reason':'eos'}\n"
+        " elif op=='discard_image':\n"
+        "  reply={'discarded':prepared is not None};prepared=None\n"
+        " else:\n"
+        "  assert op=='tokenize' and prepared is None\n"
+        "  reply={'token_count':1,'token_ids':[1]}\n"
+        " print(json.dumps(reply),flush=True)\n"
+    )
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 5)
+    try:
+        worker.read()
+        worker.media = PrivateMediaStore()
+        worker.image_input = {"max_image_tokens": 16}
+        root = worker.media.root
+        process = worker.process
+        deltas = []
+        with pytest.raises(ChatRequestTooLarge):
+            worker.request_image(
+                "synthetic rendered prompt",
+                ImageData(PNG, "image/png"),
+                {**OPTIONS, "stream": stream},
+                on_delta=deltas.append if stream else None,
+            )
+        assert deltas == (["synthetic"] if stream else [])
+        assert worker.process is process and process.poll() is None
+        assert worker._image_deadline is None
+        assert not list(root.iterdir())
+        assert [json.loads(line) for line in operations.read_text().splitlines()] == [
+            "prepare_image",
+            "generate_image",
+            "discard_image",
+        ]
+        assert perform(worker)["finish_reason"] == "eos"
+        assert worker.request({"operation": "tokenize", "text": "synthetic retry"})["token_count"] == 1
+        assert worker.process is process and process.poll() is None
+        assert not list(root.iterdir())
+        assert [json.loads(line) for line in operations.read_text().splitlines()] == [
+            "prepare_image",
+            "generate_image",
+            "discard_image",
+        ] * 2 + ["tokenize"]
+    finally:
+        worker.close()
+
+
 @pytest.mark.parametrize(
     "scenario", ["silent_prepare", "invalid_protocol", "stream", "blocked_write", "silent_discard"]
 )
@@ -440,8 +513,7 @@ def test_image_transaction_real_pipes_have_one_deadline_and_fatal_errors_skip_di
         "   time.sleep(.03)\n"
         "   print(json.dumps({'text':'','input_tokens':12,'output_tokens':0,'finish_reason':'eos'}),flush=True)\n"
         "   continue\n"
-        "  for _ in range(60):\n"
-        "   print(json.dumps({'event':'delta','text':'x'}),flush=True);time.sleep(.02)\n"
+        "  print(json.dumps({'event':'delta','text':'x'}),flush=True);time.sleep(30)\n"
         "  print(json.dumps({'text':'x'*60,'input_tokens':12,'output_tokens':4,'finish_reason':'eos'}),flush=True)\n"
         " else:\n"
         "  if scenario=='silent_discard':time.sleep(30)\n"
@@ -482,6 +554,112 @@ def test_image_transaction_real_pipes_have_one_deadline_and_fatal_errors_skip_di
         )
     finally:
         worker.close()
+
+
+@pytest.mark.parametrize(("event", "verification_cap"), [("progress", False), ("delta", False), ("progress", True)])
+def test_image_generation_activity_renews_shared_inactivity_deadline(tmp_path, event, verification_cap):
+    executable = tmp_path / "active image worker"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json,sys,time\n"
+        f"event={event!r}\n"
+        "print(json.dumps({'ready':True}),flush=True)\n"
+        "for line in sys.stdin:\n"
+        " request=json.loads(line);op=request['operation']\n"
+        " if op=='prepare_image':\n"
+        "  reply={'prepared_id':'a'*32,'input_tokens':12,'image_tokens':4}\n"
+        " elif op=='generate_image':\n"
+        "  for i in range(8):\n"
+        "   frame=({'event':'delta','text':'x'} if event=='delta' else {\n"
+        "    'event':'progress','input_tokens':12,'sampled_tokens':0,'output_token_budget':4,\n"
+        "    'elapsed_seconds':i*.075,'prefill_seconds':None})\n"
+        "   print(json.dumps(frame),flush=True);time.sleep(.075)\n"
+        "  reply={'text':'x'*8 if event=='delta' else '',\n"
+        "   'input_tokens':12,'output_tokens':4 if event=='delta' else 0,'finish_reason':'eos'}\n"
+        " else:reply={'discarded':True}\n"
+        " print(json.dumps(reply),flush=True)\n"
+    )
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 5)
+    try:
+        worker.read()
+        worker.media = PrivateMediaStore()
+        worker.image_input = {"max_image_tokens": 16}
+        worker.timeout = 0.3
+        delivered, progress = [], []
+        started = time.monotonic()
+        if verification_cap:
+            worker._verification_deadline = started + 0.45
+            with pytest.raises(ChatError, match="timed out"):
+                worker.request_image(
+                    "synthetic rendered prompt",
+                    ImageData(PNG, "image/png"),
+                    {**OPTIONS, "stream": True},
+                    on_delta=delivered.append,
+                    on_progress=progress.append,
+                )
+            assert worker.timeout < time.monotonic() - started < 2
+            assert len(progress) > 4
+            assert worker.process.poll() is not None
+            assert worker._image_deadline is None
+            return
+        reply = worker.request_image(
+            "synthetic rendered prompt",
+            ImageData(PNG, "image/png"),
+            {**OPTIONS, "stream": True},
+            on_delta=delivered.append,
+            on_progress=progress.append,
+        )
+        assert time.monotonic() - started > worker.timeout
+        assert reply["text"] == ("x" * 8 if event == "delta" else "")
+        assert len(delivered if event == "delta" else progress) == 8
+        assert worker.process.poll() is None
+        assert worker._image_deadline is None
+        assert not list(worker.media.root.iterdir())
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("event", ["progress", "delta"])
+def test_cancelled_image_activity_does_not_renew_cleanup_deadline(monkeypatch, event):
+    worker = object.__new__(Worker)
+    worker.process = type("Process", (), {"stdin": io.BytesIO()})()
+    worker._write_image_frame = worker.process.stdin.write
+    worker.cancellation = False
+    worker.cancel = lambda _request_id: None
+    worker.timeout = 30
+    worker._image_deadline = 101
+    cancelled = threading.Event()
+    frames = iter(
+        [
+            {"event": "delta", "text": "x"}
+            if event == "delta"
+            else {
+                "event": "progress",
+                "input_tokens": 12,
+                "sampled_tokens": 0,
+                "output_token_budget": 4,
+                "elapsed_seconds": 0.0,
+                "prefill_seconds": None,
+            },
+            {"error": "generation_cancelled"},
+        ]
+    )
+
+    def read(_cancelled=None, _request_id=None):
+        cancelled.set()
+        return next(frames)
+
+    worker.read = read
+    monkeypatch.setattr(chat.time, "monotonic", lambda: 100)
+    with pytest.raises(ChatCancelled):
+        worker.request(
+            {"operation": "generate_image", "stream": True},
+            on_delta=lambda _value: pytest.fail("cancelled delta delivered"),
+            on_progress=lambda _value: pytest.fail("cancelled progress delivered"),
+            cancelled=cancelled,
+        )
+    assert worker._image_deadline == 101
 
 
 def test_fatal_image_error_survives_staging_and_process_cleanup_failures():

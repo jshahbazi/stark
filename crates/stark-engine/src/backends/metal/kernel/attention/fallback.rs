@@ -5,7 +5,7 @@ use crate::{
         common::{
             Backend, BufferRef, CommandBufferEncoding, Kernels,
             kernel::{
-                AttentionArguments, AttentionKernelConfig, SoftmaxKernel,
+                AttentionArguments, AttentionKernelConfig, SoftmaxKernel, VisionCastBF16Kernel,
                 matmul::{MatmulA, MatmulArguments, MatmulB, MatmulDOps, MatmulKernel},
             },
         },
@@ -16,6 +16,7 @@ use crate::{
             error::MetalError,
             kernel::{
                 AttentionFallbackScatterScoresMetalKernel, AttentionFallbackScatterValuesMetalKernel, MetalKernels,
+                SourceCachedQKMetalKernel,
             },
         },
     },
@@ -23,6 +24,13 @@ use crate::{
 };
 
 const HEAD_DIM: u32 = 512;
+
+struct SourceQK {
+    config: AttentionKernelConfig,
+    matmul: Mutex<<MetalKernels as Kernels>::MatmulKernel>,
+    cast: <MetalKernels as Kernels>::VisionCastBF16Kernel,
+    cached_wide: [SourceCachedQKMetalKernel; 2],
+}
 
 pub struct AttentionFallback {
     head_dim: u32,
@@ -34,12 +42,15 @@ pub struct AttentionFallback {
     scatter_scores: AttentionFallbackScatterScoresMetalKernel,
     scatter_values: AttentionFallbackScatterValuesMetalKernel,
     softmax: <MetalKernels as Kernels>::SoftmaxKernel,
+    source_softmax: Option<super::source_softmax::SourceBF16Softmax>,
+    source_qk: Option<SourceQK>,
     matmul: Mutex<<MetalKernels as Kernels>::MatmulKernel>,
 }
 
 impl AttentionFallback {
     pub fn is_supported(config: &AttentionKernelConfig) -> bool {
-        config.head_dim == HEAD_DIM && matches!(config.data_type, DataType::BF16 | DataType::F32)
+        (config.head_dim == HEAD_DIM || (config.materialize_prefill_scores && config.head_dim == 256))
+            && matches!(config.data_type, DataType::BF16 | DataType::F32)
     }
 
     pub fn new(
@@ -66,6 +77,34 @@ impl AttentionFallback {
             config.data_type,
             config.data_type,
         )?);
+        let source_softmax = config
+            .materialize_prefill_scores
+            .then(|| super::source_softmax::SourceBF16Softmax::new(context))
+            .transpose()?;
+        let source_qk = if config.materialize_prefill_scores
+            && config.data_type == DataType::BF16
+            && config.head_dim == 512
+            && config.num_q_heads == 8
+            && config.num_groups == 1
+            && context.supports_mxu
+        {
+            Some(SourceQK {
+                config: *config,
+                matmul: Mutex::new(<<MetalKernels as Kernels>::MatmulKernel as MatmulKernel>::new(
+                    context,
+                    DataType::BF16,
+                    DataType::BF16,
+                    DataType::F32,
+                )?),
+                cast: <<MetalKernels as Kernels>::VisionCastBF16Kernel as VisionCastBF16Kernel>::new(context)?,
+                cached_wide: [
+                    SourceCachedQKMetalKernel::new(context, 16)?,
+                    SourceCachedQKMetalKernel::new(context, 32)?,
+                ],
+            })
+        } else {
+            None
+        };
         Ok(Self {
             head_dim: config.head_dim,
             num_groups: config.num_groups,
@@ -76,6 +115,8 @@ impl AttentionFallback {
             scatter_scores,
             scatter_values,
             softmax,
+            source_softmax,
+            source_qk,
             matmul,
         })
     }
@@ -91,6 +132,49 @@ impl AttentionFallback {
             impl BufferRef<Backend = Metal>,
         >,
         command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
+        self.encode_inner(
+            arguments,
+            command_buffer,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encode_trace(
+        &self,
+        arguments: AttentionArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<(<Metal as Backend>::ScratchBuffer, Vec<(&'static str, <Metal as Backend>::ScratchBuffer)>), MetalError>
+    {
+        if self.num_groups != 1 {
+            return Err(crate::backends::common::InvalidInput("trace requires one KV group").into());
+        }
+        let mut trace = Vec::new();
+        let output = self.encode_inner(arguments, command_buffer, Some(&mut trace))?;
+        Ok((output, trace))
+    }
+
+    fn encode_inner(
+        &self,
+        arguments: AttentionArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+        #[cfg(test)] mut trace: Option<&mut Vec<(&'static str, <Metal as Backend>::ScratchBuffer)>>,
     ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
         assert!(arguments.trie.is_none(), "fallback does not support trie");
         let suffix_length = arguments.suffix_length;
@@ -108,29 +192,74 @@ impl AttentionFallback {
             .allocate_scratch_for_shape(&[gqa_factor * suffix_length, sequence_length], self.data_type)?;
 
         for group_index in 0..self.num_groups {
-            self.matmul.lock().encode(
-                MatmulArguments {
-                    a: MatmulA::FullPrecision {
-                        values: arguments.queries,
-                        offset: group_index as usize * group_rows * head_dim_bytes,
+            if let Some(source) = &self.source_qk
+                && let Some(lanes) = source.config.source_cached_qk_wide_lanes(suffix_length, sequence_length, true)
+            {
+                source.cached_wide[usize::from(lanes == 32)].encode(
+                    arguments.queries,
+                    arguments.keys,
+                    &mut group_scores,
+                    sequence_length,
+                    command_buffer,
+                );
+            } else if let Some(source) = &self.source_qk
+                && source.config.source_nax_qk_split_parts(suffix_length, sequence_length, true).is_some()
+            {
+                // MLX NAX split-K keeps dense BF16 operands, F32 partials and
+                // reduction, then materializes each score once as BF16.
+                let mut partials = command_buffer
+                    .allocate_scratch_for_shape(&[gqa_factor * suffix_length, sequence_length], DataType::F32)?;
+                source.matmul.lock().encode_source_qk_split(
+                    MatmulArguments {
+                        a: MatmulA::FullPrecision {
+                            values: arguments.queries,
+                            offset: 0,
+                        },
+                        b: MatmulB::FullPrecision {
+                            b: arguments.keys,
+                        },
+                        b_leading_dimension: Some(self.head_dim),
+                        b_transpose: true,
+                        d: &mut partials,
+                        d_transform: MatmulDOps::none(),
+                        gather_indices: None::<&<Metal as Backend>::ScratchBuffer>,
+                        m: gqa_factor * suffix_length,
+                        n: sequence_length,
+                        k: self.head_dim,
                     },
-                    b: MatmulB::FullPrecision {
-                        b: arguments.keys.subrange(group_index as usize * head_dim_bytes..),
+                    command_buffer,
+                )?;
+                source.cast.encode(
+                    &partials,
+                    &mut group_scores,
+                    gqa_factor * suffix_length * sequence_length,
+                    command_buffer,
+                );
+            } else {
+                self.matmul.lock().encode(
+                    MatmulArguments {
+                        a: MatmulA::FullPrecision {
+                            values: arguments.queries,
+                            offset: group_index as usize * group_rows * head_dim_bytes,
+                        },
+                        b: MatmulB::FullPrecision {
+                            b: arguments.keys.subrange(group_index as usize * head_dim_bytes..),
+                        },
+                        b_leading_dimension: Some(self.num_groups * self.head_dim),
+                        b_transpose: true,
+                        d: &mut group_scores,
+                        d_transform: MatmulDOps {
+                            ab_scale: scale,
+                            ..MatmulDOps::none()
+                        },
+                        gather_indices: None::<&<Metal as Backend>::ScratchBuffer>,
+                        m: gqa_factor * suffix_length,
+                        n: sequence_length,
+                        k: self.head_dim,
                     },
-                    b_leading_dimension: Some(self.num_groups * self.head_dim),
-                    b_transpose: true,
-                    d: &mut group_scores,
-                    d_transform: MatmulDOps {
-                        ab_scale: scale,
-                        ..MatmulDOps::none()
-                    },
-                    gather_indices: None::<&<Metal as Backend>::ScratchBuffer>,
-                    m: gqa_factor * suffix_length,
-                    n: sequence_length,
-                    k: self.head_dim,
-                },
-                command_buffer,
-            )?;
+                    command_buffer,
+                )?;
+            }
             self.scatter_scores.encode(
                 &group_scores,
                 &mut scores,
@@ -146,14 +275,32 @@ impl AttentionFallback {
             );
         }
 
-        self.softmax.encode(
-            &mut scores,
-            arguments.sinks,
-            sequence_length,
-            self.num_q_heads,
-            suffix_length,
-            command_buffer,
-        );
+        #[cfg(test)]
+        if let Some(trace) = trace.as_deref_mut() {
+            let mut snapshot = command_buffer
+                .allocate_scratch_for_shape(&[self.num_q_heads, suffix_length, sequence_length], self.data_type)?;
+            command_buffer.encode_copy(&scores, &mut snapshot);
+            trace.push(("scores", snapshot));
+        }
+        if let Some(source_softmax) = &self.source_softmax {
+            source_softmax.encode(&mut scores, sequence_length, self.num_q_heads * suffix_length, command_buffer)?;
+        } else {
+            self.softmax.encode(
+                &mut scores,
+                arguments.sinks,
+                sequence_length,
+                self.num_q_heads,
+                suffix_length,
+                command_buffer,
+            );
+        }
+        #[cfg(test)]
+        if let Some(trace) = trace.as_deref_mut() {
+            let mut snapshot = command_buffer
+                .allocate_scratch_for_shape(&[self.num_q_heads, suffix_length, sequence_length], self.data_type)?;
+            command_buffer.encode_copy(&scores, &mut snapshot);
+            trace.push(("probabilities", snapshot));
+        }
         let mut group_output =
             command_buffer.allocate_scratch_for_shape(&[gqa_factor * suffix_length, self.head_dim], self.data_type)?;
         for group_index in 0..self.num_groups {
@@ -177,6 +324,13 @@ impl AttentionFallback {
                 },
                 command_buffer,
             )?;
+            #[cfg(test)]
+            if let Some(trace) = trace.as_deref_mut() {
+                let mut snapshot = command_buffer
+                    .allocate_scratch_for_shape(&[gqa_factor * suffix_length, self.head_dim], self.data_type)?;
+                command_buffer.encode_copy(&group_output, &mut snapshot);
+                trace.push(("pv", snapshot));
+            }
             self.scatter_values.encode(
                 &group_output,
                 &mut output,

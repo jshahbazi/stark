@@ -22,7 +22,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .json_budget import check_json_structure
-from .resource_budget import PENDING_BYTES, WIRE_BYTES, available_memory_bytes
+from .resource_budget import PENDING_BYTES, WIRE_BYTES, available_memory_bytes, json_parse_headroom_bytes
 
 MAX_TEXT_BODY_BYTES = WIRE_BYTES
 MAX_IMAGE_BODY_BYTES = WIRE_BYTES + 6 * 1024 * 1024
@@ -113,7 +113,8 @@ class LocalAPI:
     with ``cancellable=True`` (the menu bar app) it is always called as
     ``complete(payload, on_delta, cancelled)`` where ``on_delta`` is ``None`` for
     buffered requests and ``cancelled`` is a ``threading.Event`` that the handler
-    sets when the client disconnects or ``request_timeout`` seconds pass; in the
+    sets when the client disconnects or no execution activity is reported for
+    ``request_timeout`` seconds; in the
     deadline case the handler also sets ``cancelled.reason = "deadline"`` so the
     callee can distinguish the two. ``complete`` reports failures by raising
     ``APIError``. The HTTP contract is documented in docs/LOCAL_API.md.
@@ -148,6 +149,7 @@ class LocalAPI:
         self._closing = threading.Event()
         self._body_lock = threading.Lock()
         self._pending_body_bytes = 0
+        self._pending_parse_bytes = 0
         self._api_session = ""
         self._clients: dict[str, _ClientGrant] = {}
         # Kept separately from current admission grants: refreshing a token or
@@ -460,6 +462,7 @@ class LocalAPI:
                 client_id = None
                 monitor = None
                 reserved_body = 0
+                reserved_parse = 0
                 try:
                     client_id = self._guard(cancelled)
                     if self.path != "/v1/chat/completions":
@@ -477,13 +480,16 @@ class LocalAPI:
                     length = int(raw_length.lstrip("0") or "0")
                     if length > api._body_limit():
                         raise APIError(413, "Request body is too large", "body_too_large")
-                    if length > 1024 * 1024 and 3 * length > available_memory_bytes():
-                        raise APIError(429, "Available memory is too low for this request", "memory_pressure")
                     with api._body_lock:
                         if api._pending_body_bytes + length > MAX_PENDING_BODY_BYTES:
                             raise APIError(429, "Pending request bytes exceed the server budget", "body_budget_full")
+                        parse_bytes = json_parse_headroom_bytes(length)
+                        if parse_bytes and api._pending_parse_bytes + parse_bytes > available_memory_bytes():
+                            raise APIError(429, "Available memory is too low for this request", "memory_pressure")
                         api._pending_body_bytes += length
                         reserved_body = length
+                        api._pending_parse_bytes += parse_bytes
+                        reserved_parse = parse_bytes
                     content_type = self.headers.get("Content-Type")
                     if content_type and content_type.split(";", 1)[0].strip().lower() != "application/json":
                         raise APIError(415, "Content-Type must be application/json", "unsupported_media_type")
@@ -500,6 +506,11 @@ class LocalAPI:
                         )
                     except (ValueError, UnicodeDecodeError, RecursionError):
                         raise APIError(400, "Malformed JSON", "invalid_json") from None
+                    finally:
+                        if reserved_parse:
+                            with api._body_lock:
+                                api._pending_parse_bytes -= reserved_parse
+                            reserved_parse = 0
                     if not isinstance(payload, dict):
                         raise APIError(400, "Request body must be an object", "invalid_request")
                     if length > MAX_TEXT_BODY_BYTES and not self._contains_image(payload):
@@ -510,6 +521,7 @@ class LocalAPI:
                     self._check_client_cancelled(client_id, cancelled)
                     self.request.settimeout(api._write_timeout)
                     if api._cancellable:
+                        cancelled.last_activity = time.monotonic()
                         monitor = threading.Thread(target=self._monitor_peer, args=(cancelled,), daemon=True)
                         monitor.start()
                     if not streaming:
@@ -532,13 +544,21 @@ class LocalAPI:
                                 # Worker catches OSError, requests native
                                 # cancellation and drains the terminal frame.
                                 raise OSError("Request cancelled.")
-                            if not isinstance(text, str):
+                            if isinstance(text, str):
+                                delta = {"content": text}
+                            elif (
+                                isinstance(text, dict)
+                                and set(text) == {"reasoning_content"}
+                                and isinstance(text["reasoning_content"], str)
+                            ):
+                                delta = text
+                            else:
                                 raise APIError(500, "Internal server error", "internal_error")
                             if not started:
                                 started = True
                                 self._start_sse(ident, model, created)
-                            if text:
-                                self._sse_write(self._sse_item(ident, model, created, {"content": text}))
+                            if any(delta.values()):
+                                self._sse_write(self._sse_item(ident, model, created, delta))
 
                         try:
                             result = (
@@ -605,9 +625,10 @@ class LocalAPI:
                     else:
                         self._error(error)
                 finally:
-                    if reserved_body:
+                    if reserved_body or reserved_parse:
                         with api._body_lock:
                             api._pending_body_bytes -= reserved_body
+                            api._pending_parse_bytes -= reserved_parse
                     cancelled.set()
                     if monitor is not None:
                         monitor.join(timeout=0.2)
@@ -644,12 +665,12 @@ class LocalAPI:
                 return number
 
             def _monitor_peer(self, cancelled):
-                deadline = time.monotonic() + api._request_timeout
+                started = time.monotonic()
                 while not cancelled.wait(0.05):
                     if session_closed.is_set():
                         cancelled.set()
                         return
-                    if time.monotonic() >= deadline:
+                    if time.monotonic() - getattr(cancelled, "last_activity", started) >= api._request_timeout:
                         cancelled.reason = "deadline"
                         cancelled.set()
                         return

@@ -7,13 +7,25 @@
 namespace stark {
 namespace gemm {
 
-template <typename Tile, typename AT, typename BT, typename DT, GemmBPrologueKind B_PROLOGUE, uint BITS>
+// MLX 0.32.3 quantized.h qdot returns each scaled dot plus affine bias
+// correction before qmv adds that contribution to its F32 prior. Keep the
+// addition grouped even when the surrounding legacy GEMV uses Fast math.
+inline float materialized_affine_fold(float prior, float scale, float partial, float bias, float input_sum) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(on)
+  return prior + (scale * partial + bias * input_sum);
+}
+#pragma METAL fp math_mode(fast)
+#pragma METAL fp contract(on)
+
+template <typename Tile, typename AT, typename BT, typename DT, GemmBPrologueKind B_PROLOGUE, uint BITS, bool MATERIALIZED_SOURCE>
 struct QuantMetadata {
 private:
   float scale[Tile::ROWS_PER_LANE];
   float origin[Tile::ROWS_PER_LANE];
   float bias[Tile::ROWS_PER_LANE];
   bool signed_codes;
+  bool reference_bf16_weights;
 
 public:
   static METAL_FUNC uint group_count(const thread GemvParams& params, uint group_size) {
@@ -27,6 +39,7 @@ public:
       const thread GemvParams& params
   ) thread {
     signed_codes = params.signed_codes;
+    reference_bf16_weights = params.reference_bf16_weights;
     Tile::for_each_output_row([&](auto output_index) STARK_ALWAYS_INLINE {
       constexpr uint R = decltype(output_index)::value;
       const uint row = weight_rows[R];
@@ -60,6 +73,16 @@ public:
       thread float (&values)[QuantChunk<BITS>::VALUES]
   ) const thread {
     QuantChunk<BITS>::decode(words, chunk, values, origin[row], signed_codes);
+    if constexpr (B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant) {
+      if (reference_bf16_weights) {
+        // The explicit affine reference materializes each effective
+        // coefficient in BF16 before multiplying by its activation.
+        METAL_PRAGMA_UNROLL
+        for (uint i = 0; i < QuantChunk<BITS>::VALUES; i++) {
+          values[i] = float(bfloat(fma(scale[row], values[i], bias[row])));
+        }
+      }
+    }
   }
 
   METAL_FUNC void fold(
@@ -78,6 +101,12 @@ public:
 
 private:
   METAL_FUNC float finish(float prior, float partial, float input_sum, uint row) const thread {
+    if (reference_bf16_weights) {
+      return prior + partial;
+    }
+    if constexpr (MATERIALIZED_SOURCE) {
+      return materialized_affine_fold(prior, scale[row], partial, bias[row], input_sum);
+    }
     float result = fma(scale[row], partial, prior);
     if constexpr (B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant) {
       result = fma(bias[row], input_sum, result);

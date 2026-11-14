@@ -28,6 +28,9 @@ fn run<B: Backend>() -> Output {
         true,
         false,
         false,
+        false,
+        false,
+        false,
     )
     .expect("Failed to create AttentionPrepareKernel");
     let qkvg = [
@@ -47,6 +50,10 @@ fn run<B: Backend>() -> Output {
         Some(&mut keys),
         Some(&mut values),
         None::<&B::GlobalBuffer>,
+        None::<&B::GlobalBuffer>,
+        None::<&B::GlobalBuffer>,
+        None,
+        None,
         None::<&B::GlobalBuffer>,
         2,
         Some(1),
@@ -88,6 +95,9 @@ fn run_query_only<B: Backend>() -> Vec<bf16> {
         false,
         false,
         false,
+        false,
+        false,
+        false,
     )
     .expect("Failed to create AttentionPrepareKernel");
     let qg = [1.0, 2.0, 3.0, 4.0, 101.0, 102.0, 103.0, 104.0, 11.0, 12.0, 13.0, 14.0, 111.0, 112.0, 113.0, 114.0]
@@ -102,6 +112,10 @@ fn run_query_only<B: Backend>() -> Vec<bf16> {
         None::<&mut B::GlobalBuffer>,
         None::<&mut B::GlobalBuffer>,
         None::<&B::GlobalBuffer>,
+        None::<&B::GlobalBuffer>,
+        None::<&B::GlobalBuffer>,
+        None,
+        None,
         None::<&B::GlobalBuffer>,
         2,
         None,
@@ -143,6 +157,9 @@ fn run_reference_bf16_rope<B: Backend>() {
         false,
         true,
         true,
+        false,
+        false,
+        false,
     )
     .unwrap();
     // Independent pinned Torch BF16 arithmetic on public [1.1, 2.3] and
@@ -160,6 +177,10 @@ fn run_reference_bf16_rope<B: Backend>() {
         None::<&mut B::GlobalBuffer>,
         Some(&cosines),
         Some(&sines),
+        None::<&B::GlobalBuffer>,
+        None,
+        None,
+        None::<&B::GlobalBuffer>,
         1,
         None,
         4,
@@ -195,6 +216,9 @@ fn run_kv_only_exact<B: Backend>() {
                 true,
                 rope_dim.is_some(),
                 false,
+                false,
+                false,
+                false,
             )
             .expect("failed to create ordinary prepare");
             let kv_only = <<B as Backend>::Kernels as Kernels>::AttentionPrepareKVOnlyKernel::new(
@@ -202,6 +226,9 @@ fn run_kv_only_exact<B: Backend>() {
                 DataType::BF16,
                 DataType::F32,
                 rope_dim.is_some(),
+                false,
+                false,
+                false,
                 false,
             )
             .expect("failed to create KV-only prepare");
@@ -237,6 +264,10 @@ fn run_kv_only_exact<B: Backend>() {
                 Some(&mut values),
                 cos.as_ref(),
                 sin.as_ref(),
+                None::<&B::GlobalBuffer>,
+                None,
+                None,
+                None::<&B::GlobalBuffer>,
                 q_heads,
                 Some(kv_heads),
                 head_dim,
@@ -252,6 +283,10 @@ fn run_kv_only_exact<B: Backend>() {
                 &mut actual_values,
                 cos.as_ref(),
                 sin.as_ref(),
+                None::<&B::GlobalBuffer>,
+                None,
+                None,
+                None::<&B::GlobalBuffer>,
                 q_heads,
                 kv_heads,
                 head_dim,
@@ -278,4 +313,121 @@ fn run_kv_only_exact<B: Backend>() {
 fn test_kv_only_prepare_preserves_packed_rope_bits_and_prefix() {
     run_kv_only_exact::<Cpu>();
     for_each_non_cpu_backend!(|B| run_kv_only_exact::<B>());
+}
+
+// Public, non-model input exercises non-contiguous absolute positions and proves
+// that this explicit profile computes coefficients instead of reading the table.
+fn run_source_rope_positions<B: Backend>() {
+    let context = B::Context::new().unwrap();
+    let positions = [0u32, 7, 19];
+    let input: Vec<bf16> =
+        (0..3).flat_map(|_| [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]).map(bf16::from_f32).collect();
+    for proportional in [false, true] {
+        let kernel = <<B as Backend>::Kernels as Kernels>::AttentionPrepareKernel::new(
+            &context,
+            DataType::BF16,
+            DataType::F32,
+            true,
+            true,
+            false,
+            true,
+            proportional,
+            false,
+        )
+        .unwrap();
+        let kv_only = <<B as Backend>::Kernels as Kernels>::AttentionPrepareKVOnlyKernel::new(
+            &context,
+            DataType::BF16,
+            DataType::F32,
+            true,
+            false,
+            true,
+            proportional,
+            false,
+        )
+        .unwrap();
+        let packed = create_buffer_with_data::<B, bf16>(&context, &input);
+        let positions_buffer = create_buffer_with_data::<B, u32>(&context, &positions);
+        let poison = create_buffer_with_data::<B, f32>(&context, &[f32::NAN; 12]);
+        let mut queries = create_buffer::<B, bf16>(&context, 12);
+        let mut keys = create_buffer::<B, bf16>(&context, 20);
+        let mut values = create_buffer::<B, bf16>(&context, 20);
+        let mut keys_only = create_buffer::<B, bf16>(&context, 20);
+        let mut values_only = create_buffer::<B, bf16>(&context, 20);
+        let mut commands = context.create_command_buffer(None, None).unwrap();
+        let base = if proportional {
+            4.0
+        } else {
+            2.0
+        }; // raw base vs log2(base)
+        kernel.encode(
+            &packed,
+            &mut queries,
+            Some(&mut keys),
+            Some(&mut values),
+            Some(&poison),
+            Some(&poison),
+            Some(&positions_buffer),
+            Some(base),
+            Some(2),
+            None::<&B::GlobalBuffer>,
+            1,
+            Some(1),
+            4,
+            Some(4),
+            Some(2),
+            12,
+            3,
+            &mut commands,
+        );
+        kv_only.encode(
+            &packed,
+            &mut keys_only,
+            &mut values_only,
+            Some(&poison),
+            Some(&poison),
+            Some(&positions_buffer),
+            Some(base),
+            Some(2),
+            None::<&B::GlobalBuffer>,
+            1,
+            1,
+            4,
+            Some(4),
+            2,
+            12,
+            3,
+            &mut commands,
+        );
+        commands.end_encoding().submit().wait_until_completed().unwrap();
+        let expected: Vec<bf16> = positions
+            .into_iter()
+            .flat_map(|position| {
+                let a = f64::from(position);
+                let b = if proportional {
+                    0.0
+                } else {
+                    a * 0.5
+                };
+                [
+                    (a.cos() - 3.0 * a.sin()) as f32,
+                    (2.0 * b.cos() - 4.0 * b.sin()) as f32,
+                    (a.sin() + 3.0 * a.cos()) as f32,
+                    (2.0 * b.sin() + 4.0 * b.cos()) as f32,
+                ]
+            })
+            .map(bf16::from_f32)
+            .collect();
+        assert_eq!(buffer_to_vec::<B, bf16>(&queries), expected, "source coefficient profile");
+        let keys = buffer_to_vec::<B, bf16>(&keys);
+        assert_eq!(&keys[8..], expected.as_slice(), "cache offset");
+        assert_eq!(&keys[8..], &buffer_to_vec::<B, bf16>(&keys_only)[8..], "KV-only source rotation");
+        assert_eq!(&buffer_to_vec::<B, bf16>(&values)[8..], &buffer_to_vec::<B, bf16>(&values_only)[8..]);
+    }
+}
+
+#[stark_test]
+fn source_rope_uses_absolute_positions_and_preserves_proportional_pairs() {
+    run_source_rope_positions::<Cpu>();
+    for_each_non_cpu_backend!(|B| run_source_rope_positions::<B>());
 }

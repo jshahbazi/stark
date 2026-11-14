@@ -27,6 +27,59 @@ use crate::{
     trie::TrieNode,
 };
 
+/// Retain the ordinary chunk grid for text and spatial images. A scalar image
+/// with bidirectional attention must be evaluated as one complete block.
+fn prefill_batch_ranges(
+    length: usize,
+    maximum: usize,
+    image: Option<std::ops::Range<usize>>,
+) -> Result<Vec<std::ops::Range<usize>>, crate::backends::common::InvalidInput> {
+    use crate::backends::common::InvalidInput;
+    if maximum == 0 || image.as_ref().is_some_and(|r| r.start >= r.end || r.end > length || r.end - r.start > maximum) {
+        return Err(InvalidInput("invalid bidirectional image prefill geometry"));
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < length {
+        let mut end = start.saturating_add(maximum).min(length);
+        if let Some(image) = &image
+            && end > image.start
+            && end < image.end
+        {
+            end = image.start;
+        }
+        if end <= start {
+            return Err(InvalidInput("image prefill made no progress"));
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    Ok(ranges)
+}
+
+/// Bound physical command encodings while retaining absolute logical snapshot
+/// boundaries, including a continuation whose initial position is not aligned.
+fn bounded_text_prefill_ranges(
+    length: usize,
+    prefix_length: usize,
+    maximum: usize,
+) -> Result<Vec<std::ops::Range<usize>>, crate::backends::common::InvalidInput> {
+    use crate::backends::common::InvalidInput;
+    let grid = super::PREFILL_CHUNK_TOKENS;
+    if maximum == 0 || maximum > grid || prefix_length.checked_add(length).is_none() {
+        return Err(InvalidInput("invalid bounded text prefill geometry"));
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < length {
+        let remaining_to_grid = grid - (prefix_length + start) % grid;
+        let end = start + maximum.min(remaining_to_grid).min(length - start);
+        ranges.push(start..end);
+        start = end;
+    }
+    Ok(ranges)
+}
+
 enum ForwardPassChaining<B: Backend> {
     Constant {
         token: u64,
@@ -55,7 +108,7 @@ impl<B: Backend> ForwardPassChaining<B> {
                 })?;
                 let output_tokens = in_flight.output_tokens.as_slice::<u32>();
                 assert_eq!(output_tokens.len(), 1);
-                let token_id = output_tokens[0] as u64;
+                let token_id = checked_sampled_token(output_tokens[0])?;
                 let output_norm = in_flight.output_norm.take();
                 *self = Self::Constant {
                     token: token_id,
@@ -122,10 +175,9 @@ impl<P, S> SubmittedScratchPool<P, S> {
 
     fn with_drop_wait(
         mut self,
-        enabled: bool,
         wait: fn(P),
     ) -> Self {
-        self.wait_on_drop = enabled.then_some(wait);
+        self.wait_on_drop = Some(wait);
         self
     }
 
@@ -263,6 +315,14 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         if model_state.multimodal_failed {
             return Err(LanguageModelStreamError::InvalidMultimodal);
         }
+        if let Some(position) = model_state.text_prefix_capture_position
+            && (multimodal.is_some()
+                || model_state.has_multimodal_context()
+                || position <= model_state.tokens.len()
+                || position >= model_state.tokens.len().saturating_add(input.len()))
+        {
+            return Err(LanguageModelStreamError::InvalidMultimodal);
+        }
         if let Some(multimodal) = multimodal {
             model.preflight_multimodal_stream(input, model_state, &options)?;
             if !model.decoder.multimodal_supported()
@@ -270,11 +330,21 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 || !model_state.tokens.is_empty()
                 || model_state.transformer_state.context_length() != 0
                 || model_state.last_output_token.is_some()
-                || model_state.transformer_state.rotary_position_delta().is_some()
+                || model_state.has_multimodal_context()
                 || !Arc::ptr_eq(&multimodal.image.model_identity, &model.model_identity)
                 || multimodal.image.model_dim != model.decoder.embedding().model_dim()
                 || multimodal.image.data_type != DataType::BF16
                 || multimodal.positions.len() != input.len()
+                || (multimodal.uses_spatial_positions() && !model.decoder.qwen35_multimodal_supported())
+                || (multimodal.bidirectional_image_range().is_some() && !model.decoder.scalar_multimodal_supported())
+                || (!multimodal.uses_spatial_positions()
+                    && multimodal.bidirectional_image_range().is_none()
+                    && !model.decoder.gemma4_multimodal_supported())
+                || (!multimodal.uses_spatial_positions()
+                    && (multimodal.position_delta != 0
+                        || multimodal.positions.iter().enumerate().any(|(index, position)| {
+                            u32::try_from(index).map_or(true, |index| *position != [index; 3])
+                        })))
             {
                 return Err(LanguageModelStreamError::InvalidMultimodal);
             }
@@ -302,17 +372,30 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
 
         // After this point failures fence this per-request state. A fresh state
         // is required rather than reusing partially encoded image/cache rows.
-        let multimodal_request =
-            multimodal.is_some() || model_state.transformer_state.rotary_position_delta().is_some();
+        let multimodal_request = multimodal.is_some() || model_state.has_multimodal_context();
+        model_state.text_prefix_restored_position = None;
         if multimodal_request {
             model_state.multimodal_failed = true;
         }
         if let Some(multimodal) = multimodal {
-            model_state.transformer_state.set_rotary_position_delta(Some(multimodal.position_delta));
+            model_state.text_prefix = None;
+            model_state.text_prefix_capture_position = None;
+            model_state.multimodal_prefilled = true;
+            model_state
+                .transformer_state
+                .set_rotary_position_delta(multimodal.uses_spatial_positions().then_some(multimodal.position_delta));
         }
 
+        // Scope the new schedule to ordinary routed-Qwen text. Image geometry,
+        // image continuations and generic speculation retain their old path.
+        let prefill_execution_cap = if !multimodal_request && model.speculator.is_none() {
+            model.decoder.ordinary_prefill_execution_cap()
+        } else {
+            None
+        };
+
         let setup = (|| -> Result<_, LanguageModelStreamError<B>> {
-            let capture_span = if model_state.transformer_state.rotary_position_delta().is_none()
+            let capture_span = if !model_state.has_multimodal_context()
                 && let Some(capture_manager) = &model.engine.capture_manager
                 && let Some(capture_request) = capture_manager.maybe_capture_prefill_step()
             {
@@ -355,18 +438,23 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             let decoding_state = if !input.is_empty() {
                 model_state.last_output_token.take();
 
-                // NOTE: this is required for attention correctness (hardcoded suffix 1024). This is really bad design, attention should be rewritten to allow on-demand suffix length
-                // Prefix reuse depends on this fixed grid starting at position zero.
-                let max_batch_size = super::PREFILL_CHUNK_TOKENS;
-                let number_of_batches = input.len().div_ceil(max_batch_size);
+                let batch_ranges = if let Some(cap) = prefill_execution_cap {
+                    bounded_text_prefill_ranges(input.len(), model_state.tokens.len(), cap)
+                } else {
+                    prefill_batch_ranges(
+                        input.len(),
+                        super::PREFILL_CHUNK_TOKENS,
+                        multimodal.and_then(MultimodalPrefill::bidirectional_image_range),
+                    )
+                }
+                .map_err(|_| LanguageModelStreamError::InvalidMultimodal)?;
+                let number_of_batches = batch_ranges.len();
+                let last_start = batch_ranges.last().expect("nonempty input").start;
+                let largest_batch = batch_ranges.iter().map(|r| r.len()).max().expect("nonempty input");
 
                 model_state
                     .transformer_state
-                    .prepare(
-                        model_state.transformer_state.context_length()
-                            + ((number_of_batches - 1) * max_batch_size) as u32,
-                        usize::min(max_batch_size, input.len()) as u32,
-                    )
+                    .prepare(model_state.transformer_state.context_length() + last_start as u32, largest_batch as u32)
                     .map_err(LanguageModelStreamError::Backend)?;
 
                 let mut command_buffer = model
@@ -377,7 +465,9 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
 
                 let mut output_tokens = None;
                 let mut output_norm = None;
-                let split_logits_row = model.decoder.prefill_cache_skips_trailing_layers();
+                let mut text_prefix = None;
+                let mut prefill_submissions = 0;
+                let split_logits_row = model.decoder.prefill_requires_separate_logits_row();
                 let hidden_feature_layer_indices =
                     model.speculator.as_ref().map(|speculator| speculator.hidden_feature_layer_indices());
                 #[cfg(test)]
@@ -388,11 +478,11 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 #[cfg(test)]
                 let hidden_feature_layer_indices = vision_layer_indices.as_deref().or(hidden_feature_layer_indices);
 
-                for (input_chunk, sample_last) in input
-                    .chunks(max_batch_size)
+                for (input_chunk, sample_last) in batch_ranges
+                    .iter()
                     .enumerate()
-                    .flat_map(|(batch_idx, input_chunk)| {
-                        prefill_chunk_parts(input_chunk, batch_idx == number_of_batches - 1, split_logits_row)
+                    .flat_map(|(batch_idx, range)| {
+                        prefill_chunk_parts(&input[range.clone()], batch_idx == number_of_batches - 1, split_logits_row)
                     })
                     .flatten()
                 {
@@ -408,13 +498,23 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                     let input_flat_trie_nodes = input_flat_trie.token_subtrie_ranges().collect::<Box<[GpuTrieNode]>>();
                     let chunk_start = model_state.tokens.len();
                     let batch_dim = match multimodal {
-                        Some(input) => BatchTopology::with_rotary_positions(
+                        Some(input) if input.uses_spatial_positions() => BatchTopology::with_rotary_positions(
                             &input_flat_trie_nodes,
                             true,
                             &input.positions[chunk_start..chunk_start + input_chunk.len()],
                         )
                         .map_err(|_| LanguageModelStreamError::InvalidMultimodal)?,
-                        None => BatchTopology::new(&input_flat_trie_nodes, true),
+                        _ => BatchTopology::new(&input_flat_trie_nodes, true),
+                    };
+                    let image_span = multimodal
+                        .map(|input| input.chunk_image_span(chunk_start, input_chunk.len()))
+                        .transpose()
+                        .map_err(|_| LanguageModelStreamError::InvalidMultimodal)?
+                        .flatten();
+                    let batch_dim = if let Some(span) = image_span {
+                        batch_dim.with_image_span(span).map_err(|_| LanguageModelStreamError::InvalidMultimodal)?
+                    } else {
+                        batch_dim
                     };
                     let replacement = multimodal
                         .map(|input| {
@@ -555,11 +655,55 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                     }
 
                     model_state.tokens.extend(input_chunk);
+                    if model_state.text_prefix_capture_position == Some(model_state.tokens.len()) {
+                        let snapshot = model_state
+                            .transformer_state
+                            .capture_prefix(&*model.engine.context, &mut command_buffer)
+                            .map_err(LanguageModelStreamError::Backend)?
+                            .ok_or(LanguageModelStreamError::InvalidMultimodal)?;
+                        text_prefix = Some((model_state.tokens.len(), snapshot));
+                    }
+                    // No constant handle may survive end_encoding. Snapshot
+                    // copies remain private until the complete prefill succeeds.
+                    drop(token_ids);
+                    if prefill_execution_cap.is_some() && !sample_last {
+                        command_buffer
+                            .end_encoding()
+                            .submit()
+                            .wait_until_completed()
+                            .map_err(LanguageModelStreamError::Backend)?;
+                        prefill_submissions += 1;
+                        #[cfg(test)]
+                        if model_state.validation_fail_after_completed_prefill == Some(model_state.tokens.len()) {
+                            return Err(LanguageModelStreamError::InvalidMultimodal);
+                        }
+                        command_buffer = model
+                            .engine
+                            .context
+                            .create_command_buffer(Some("prefill chunk"), Some(allocation_pool.clone()))
+                            .map_err(LanguageModelStreamError::Backend)?;
+                    }
                 }
 
-                let pending = Box::new([command_buffer.end_encoding().submit()]);
+                if model_state.text_prefix_capture_position.is_some() && text_prefix.is_none() {
+                    return Err(LanguageModelStreamError::InvalidMultimodal);
+                }
+                let submission = command_buffer.end_encoding().submit();
+                prefill_submissions += 1;
+                let pending: Box<[_]> = if text_prefix.is_some() || prefill_execution_cap.is_some() {
+                    // The bounded path drains its final command too. Publish
+                    // snapshots only after all chunks and sampling complete.
+                    submission.wait_until_completed().map_err(LanguageModelStreamError::Backend)?;
+                    if let Some(prefix) = text_prefix {
+                        model_state.text_prefix = Some(prefix);
+                        model_state.text_prefix_capture_position = None;
+                    }
+                    Box::new([])
+                } else {
+                    Box::new([submission])
+                };
 
-                metrics.num_prefill_forward_passes += 1;
+                metrics.num_prefill_forward_passes += prefill_submissions;
                 metrics.num_tokens_prefilled += input.len();
                 metrics.num_tokens_proposed += 1;
                 metrics.num_tokens_accepted += 1;
@@ -569,12 +713,9 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                     full_accept: true,
                     // Large prefill workspaces are released rather than retained
                     // for the stream's single-token decode pool rotation.
-                    pending: Some(SubmittedScratchPool::new(pending, None).with_drop_wait(
-                        multimodal_request,
-                        |pending| {
-                            let _ = pending.wait_until_completed();
-                        },
-                    )),
+                    pending: Some(SubmittedScratchPool::new(pending, None).with_drop_wait(|pending| {
+                        let _ = pending.wait_until_completed();
+                    })),
                     capture_span,
                     hidden_features: None,
                     output_norm,
@@ -600,6 +741,18 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         let (allocation_pool, context_ring, metrics, decoding_state, reuse_decode_pool) = match setup {
             Ok(setup) => setup,
             Err(error) => {
+                if prefill_execution_cap.is_some() {
+                    // Earlier chunks may already be committed. Never allow a
+                    // partially advanced target or snapshot to seed a retry.
+                    model_state.text_prefix = None;
+                    model_state.text_prefix_capture_position = None;
+                    model_state.text_prefix_restored_position = None;
+                    fence_multimodal_state(model_state);
+                }
+                if model_state.text_prefix_capture_position.is_some() {
+                    model_state.text_prefix = None;
+                    model_state.multimodal_failed = true;
+                }
                 if multimodal_request {
                     fence_multimodal_state(model_state);
                 }
@@ -666,8 +819,8 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                         .output_tokens
                         .as_slice::<u32>()
                         .iter()
-                        .map(|x| *x as u64)
-                        .collect::<Box<[u64]>>();
+                        .map(|x| checked_sampled_token(*x))
+                        .collect::<Result<Box<[u64]>, _>>()?;
                     let flat_trie = forward_pass_pending.input_trie.linearize();
                     let full = flat_trie.accept(
                         &sampled_tokens,
@@ -808,7 +961,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             ));
         }
 
-        let capture_span = if self.model_state.transformer_state.rotary_position_delta().is_none()
+        let capture_span = if !self.model_state.has_multimodal_context()
             && let Some(capture_manager) = &self.model.engine.capture_manager
             && let Some(capture_request) = capture_manager.maybe_capture_decode_step()
         {
@@ -823,7 +976,6 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         };
 
         let mut pending = SubmittedScratchPool::new(Box::new([]), None::<Arc<B::AllocationPool>>).with_drop_wait(
-            self.model_state.transformer_state.rotary_position_delta().is_some(),
             |pending: <B::CommandBuffer as CommandBuffer>::Pending| {
                 let _ = pending.wait_until_completed();
             },
@@ -1067,6 +1219,34 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
     pub fn metrics(&self) -> &TokenStreamMetrics {
         &self.metrics
     }
+
+    #[cfg(test)]
+    pub(crate) fn validation_replace_pending_sample(
+        &mut self,
+        token: u32,
+    ) -> Result<(), LanguageModelStreamError<B>> {
+        let mut output = self
+            .model
+            .engine
+            .context
+            .create_buffer(std::mem::size_of::<u32>())
+            .map_err(LanguageModelStreamError::Backend)?;
+        output.copyin(&[token]);
+        let DecodingState::ForwardPassPending(in_flight) = &mut self.decoding_state else {
+            return Err(LanguageModelStreamError::InvalidSamplingResult);
+        };
+        let pool =
+            in_flight.pending.take().unwrap().wait(|pending| {
+                pending.wait_until_completed().map(|_| ()).map_err(LanguageModelStreamError::Backend)
+            })?;
+        in_flight.pending = Some(SubmittedScratchPool::new(Box::new([]), pool).with_drop_wait(
+            |pending: <B::CommandBuffer as CommandBuffer>::Pending| {
+                let _ = pending.wait_until_completed();
+            },
+        ));
+        in_flight.output_tokens = Arc::new(output);
+        Ok(())
+    }
 }
 
 fn fence_multimodal_state<B: Backend>(model_state: &mut LanguageModelState<B>) {
@@ -1080,6 +1260,14 @@ fn valid_stream_tokens<'a>(
     tokens: impl IntoIterator<Item = &'a u64>,
 ) -> bool {
     vocab_size != 0 && tokens.into_iter().all(|&token| token < u64::from(vocab_size))
+}
+
+fn checked_sampled_token<B: Backend>(token: u32) -> Result<u64, LanguageModelStreamError<B>> {
+    if token == u32::MAX {
+        Err(LanguageModelStreamError::InvalidSamplingResult)
+    } else {
+        Ok(u64::from(token))
+    }
 }
 
 impl<'a, B: Backend> Iterator for LanguageModelStream<'a, B> {
@@ -1097,7 +1285,7 @@ impl<'a, B: Backend> Iterator for LanguageModelStream<'a, B> {
         // The ordinary stream's lookahead may already hold a sampled next
         // token. Image requests must not return it after their context budget
         // is consumed; Drop still drains the owned submission safely.
-        if self.model_state.transformer_state.rotary_position_delta().is_some()
+        if self.model_state.has_multimodal_context()
             && self
                 .model_state
                 .max_context_length
@@ -1111,7 +1299,10 @@ impl<'a, B: Backend> Iterator for LanguageModelStream<'a, B> {
         {
             **fence = true;
         }
-        if result.is_err() && self.model_state.transformer_state.rotary_position_delta().is_some() {
+        if result.is_err()
+            && (self.model_state.has_multimodal_context()
+                || matches!(result, Err(LanguageModelStreamError::InvalidSamplingResult)))
+        {
             fence_multimodal_state(self.model_state);
         }
         result.transpose()
@@ -1126,18 +1317,13 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
             } => Some(seed_token),
             DecodingState::ForwardPassPending(in_flight) => {
                 let completion = in_flight.pending.unwrap().wait(|pending| pending.wait_until_completed().map(|_| ()));
-                if completion.is_err()
-                    && (self.model_state.multimodal_failed
-                        || self.model_state.transformer_state.rotary_position_delta().is_some()
-                        || self.failure_fence.is_some())
-                {
+                if completion.is_err() {
                     fence_multimodal_state(self.model_state);
                     if let Some(fence) = &mut self.failure_fence {
                         **fence = true;
                     }
                     return;
                 }
-                completion.unwrap();
                 if self.model_state.multimodal_failed {
                     if let Some(fence) = &mut self.failure_fence {
                         **fence = true;
@@ -1167,7 +1353,16 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
                     command_buffer.end_encoding().submit().wait_until_completed().unwrap();
                 }
 
-                Some(in_flight.output_tokens.as_slice::<u32>()[0] as u64)
+                match checked_sampled_token::<B>(in_flight.output_tokens.as_slice::<u32>()[0]) {
+                    Ok(token) => Some(token),
+                    Err(_) => {
+                        fence_multimodal_state(self.model_state);
+                        if let Some(fence) = &mut self.failure_fence {
+                            **fence = true;
+                        }
+                        None
+                    },
+                }
             },
             DecodingState::Accepting {
                 full,
@@ -1217,7 +1412,7 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
                 **fence = true;
             }
             None
-        } else if self.model_state.transformer_state.rotary_position_delta().is_some()
+        } else if self.model_state.has_multimodal_context()
             && self
                 .model_state
                 .max_context_length
@@ -1237,6 +1432,42 @@ mod decode_pool_tests {
     use stark_engine_macros::stark_test;
 
     use super::{SubmittedScratchPool, valid_stream_tokens};
+
+    #[stark_test]
+    fn failed_device_sampling_never_commits_a_token_to_history() {
+        use crate::{
+            backends::common::{Backend, BufferMut, Context},
+            tests::helpers::for_each_backend,
+        };
+        fn check<B: Backend>() {
+            let context = B::Context::new().unwrap();
+            let mut output = context.create_buffer(std::mem::size_of::<u32>()).unwrap();
+            output.copyin(&[u32::MAX]);
+            let mut chain = super::ForwardPassChaining::InFlight(super::DecodingStatePending::<B> {
+                input_trie: crate::trie::TrieNode::new(1, 42, 0.0),
+                full_accept: true,
+                pending: Some(SubmittedScratchPool::new(Box::new([]), None)),
+                capture_span: None,
+                hidden_features: None,
+                output_norm: None,
+                output_tokens: std::sync::Arc::new(output),
+                _input_token_source: None,
+            });
+            let mut tokens = vec![1, 2];
+            assert!(matches!(
+                chain.resolve(
+                    &mut tokens,
+                    #[cfg(grammar)]
+                    None
+                ),
+                Err(super::LanguageModelStreamError::InvalidSamplingResult)
+            ));
+            assert_eq!(tokens, vec![1, 2]);
+        }
+        for_each_backend!(|B| {
+            check::<B>();
+        });
+    }
 
     #[stark_test]
     fn stream_tokens_reject_vocabulary_edges_and_narrowing() {
@@ -1324,7 +1555,7 @@ mod decode_pool_tests {
         let pool = Rc::new(Pool {
             outstanding: Cell::new(0),
         });
-        let submitted = Pool::submit(&pool, 3).with_drop_wait(true, |pending| {
+        let submitted = Pool::submit(&pool, 3).with_drop_wait(|pending| {
             let _ = Pool::complete(pending);
         });
         // A local pass can be abandoned by an allocation/encoding error before
@@ -1334,11 +1565,103 @@ mod decode_pool_tests {
         assert_eq!(Rc::strong_count(&pool), 1);
 
         // Explicit completion must disarm cleanup rather than complete twice.
-        let submitted = Pool::submit(&pool, 2).with_drop_wait(true, |pending| {
+        let submitted = Pool::submit(&pool, 2).with_drop_wait(|pending| {
             let _ = Pool::complete(pending);
         });
         let returned_pool = submitted.wait(Pool::complete).unwrap().unwrap();
         assert_eq!(returned_pool.outstanding.get(), 0);
         assert_eq!(Rc::strong_count(&pool), 2);
     }
+
+    #[stark_test]
+    fn failed_sample_resolution_drains_abandoned_text_lookahead() {
+        fn early_failure<B: crate::backends::common::Backend>(
+            pool: &Rc<Pool>
+        ) -> Result<(), super::LanguageModelStreamError<B>> {
+            // Grammar-backed decode submits lookahead before resolving its
+            // prior sample. An error must drain this still-local owner.
+            let _submitted = Pool::submit(pool, 3).with_drop_wait(|pending| {
+                let _ = Pool::complete(pending);
+            });
+            super::checked_sampled_token::<B>(u32::MAX)?;
+            Ok(())
+        }
+        crate::tests::helpers::for_each_backend!(|B| {
+            let pool = Rc::new(Pool {
+                outstanding: Cell::new(0),
+            });
+            assert!(matches!(early_failure::<B>(&pool), Err(super::LanguageModelStreamError::InvalidSamplingResult)));
+            assert_eq!(pool.outstanding.get(), 0);
+            assert_eq!(Rc::strong_count(&pool), 1);
+        });
+    }
 }
+
+#[cfg(test)]
+mod image_chunk_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::prefill_batch_ranges;
+
+    #[stark_test]
+    fn bidirectional_image_is_kept_whole_across_original_chunk_boundaries() {
+        assert_eq!(prefill_batch_ranges(2300, 1024, Some(1000..1256)).unwrap(), vec![0..1000, 1000..2024, 2024..2300]);
+        assert_eq!(prefill_batch_ranges(2300, 1024, Some(768..1024)).unwrap(), vec![0..1024, 1024..2048, 2048..2300]);
+        assert_eq!(prefill_batch_ranges(2300, 1024, Some(1024..1280)).unwrap(), vec![0..1024, 1024..2048, 2048..2300]);
+        assert_eq!(prefill_batch_ranges(2300, 1024, None).unwrap(), vec![0..1024, 1024..2048, 2048..2300]);
+        assert!(prefill_batch_ranges(2300, 1024, Some(0..1025)).is_err());
+        assert!(prefill_batch_ranges(2300, 1024, Some(2000..2301)).is_err());
+        assert!(prefill_batch_ranges(2300, 1024, Some(10..10)).is_err());
+        assert!(prefill_batch_ranges(2300, 0, None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_prefill_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::{bounded_text_prefill_ranges, prefill_chunk_parts};
+
+    #[stark_test]
+    fn physical_chunks_preserve_absolute_snapshot_grid_and_context_continuations() {
+        let ranges = bounded_text_prefill_ranges(1792, 0, 256).unwrap();
+        assert_eq!(ranges, (0..7).map(|index| index * 256..(index + 1) * 256).collect::<Vec<_>>());
+        assert_eq!(bounded_text_prefill_ranges(512, 1808, 256).unwrap(), vec![0..240, 240..496, 496..512]);
+        for prefix in [0usize, 1, 1023, 1024, 1808] {
+            for length in [0usize, 1, 255, 256, 257, 1024, 1025, 1792] {
+                for maximum in [1, 256, 1024] {
+                    let ranges = bounded_text_prefill_ranges(length, prefix, maximum).unwrap();
+                    let mut next = 0;
+                    for range in &ranges {
+                        assert_eq!(range.start, next);
+                        assert!(!range.is_empty() && range.len() <= maximum);
+                        assert_eq!((prefix + range.start) / 1024, (prefix + range.end - 1) / 1024);
+                        next = range.end;
+                    }
+                    assert_eq!(next, length);
+                    for position in prefix + 1..prefix + length {
+                        if position.is_multiple_of(1024) {
+                            assert!(ranges.iter().any(|range| prefix + range.end == position));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(bounded_text_prefill_ranges(1, 0, 0).is_err());
+        assert!(bounded_text_prefill_ranges(1, 0, 1025).is_err());
+        assert!(bounded_text_prefill_ranges(1, usize::MAX, 256).is_err());
+    }
+
+    #[stark_test]
+    fn separate_logits_row_keeps_the_existing_255_plus_one_tail() {
+        let rows = [0u64; 256];
+        let parts = prefill_chunk_parts(&rows, true, true);
+        assert!(matches!(parts, [Some((prompt, false)), Some((sample, true))] if prompt.len()==255 && sample.len()==1));
+        let parts = prefill_chunk_parts(&rows, false, true);
+        assert!(matches!(parts, [Some((prompt, false)), None] if prompt.len()==256));
+    }
+}
+
+#[cfg(all(test, backend = "metal"))]
+#[path = "bounded_prefill_native_tests.rs"]
+mod bounded_prefill_native_tests;

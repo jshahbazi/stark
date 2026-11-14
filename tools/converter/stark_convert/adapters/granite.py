@@ -11,7 +11,9 @@ import json
 import math
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from ..config_normalization import normalize_config
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -19,7 +21,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
     validate_planning_layers,
 )
 from .dense import _COMMON_KEYS, _DTYPES, _bool, _positive_float, _positive_int
@@ -34,8 +35,12 @@ _SMOLLM3_KEYS = {
 }
 
 
-def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
-    config = read_json(source / "config.json")
+def _build_plan(
+    source: Path, *, family: str, dtype: str, checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
+    config = normalize_config(
+        family, read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     if config.get("model_type") != family:
         raise UnsupportedConversion("Checkpoint model_type does not match selected adapter")
     if dtype not in _DTYPES:
@@ -102,7 +107,7 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
     if family == "granite" and config.get("layer_types") is not None:
         unsupported.append("Explicit layer types are outside qualified dense coverage")
     embedding_scale, residual_scale, attention_scale, logit_divisor = None, None, None, None
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     validate_planning_layers(layers, tensors)
     uses_rope = [True] * layers
     if family == "granite":
@@ -235,14 +240,14 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
                 )
                 expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
                 if any(
-                    left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                    not tensor_aliases_equal(left, right, header_only=checkpoint_metadata is not None)
                     for left, right in zip(head.planes, input_embedding.planes, strict=True)
                 ):
                     raise ConversionError("Tied MLX lm_head differs from the input embedding")
             else:
                 head = tensor("lm_head.weight", (vocab, model_dim))
                 input_embedding = tensors["model.embed_tokens.weight"]
-                if head.dtype != input_embedding.dtype or tensor_sha256(head) != tensor_sha256(input_embedding):
+                if not tensor_aliases_equal(head, input_embedding, header_only=checkpoint_metadata is not None):
                     raise ConversionError("Tied lm_head differs from the input embedding")
     else:
         matrix("decoder.embedding.output_embedding", ("lm_head.weight",), ((vocab, model_dim),), (vocab, model_dim))
@@ -393,6 +398,8 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
     )
 
 
-def build_granite_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_granite_plan(
+    source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
     """Validate Granite's tied embedding, source-precision scaling, and layout."""
-    return _build_plan(source, family="granite", dtype=dtype)
+    return _build_plan(source, family="granite", dtype=dtype, checkpoint_metadata=checkpoint_metadata)

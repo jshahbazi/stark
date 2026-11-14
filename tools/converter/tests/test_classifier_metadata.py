@@ -210,6 +210,16 @@ def test_generic_self_contained_inline_template_and_unregistered_identity(source
     assert codec["token_codec_config"]["prompt_template"] == TEMPLATE
 
 
+def test_classifier_keeps_refusing_named_template_lists(source, tmp_path):
+    root, config = source
+    update(root, chat_template=[{"name": "default", "template": TEMPLATE}])
+    model_entry = entry(repo="future/classifier", profile=GENERIC_PROFILE)
+    del model_entry["files"]["chat_template"]
+    with pytest.raises(UnsupportedMetadata, match="chat-template representation"):
+        convert(source, tmp_path, config={**config, "_stark_model_repo": "future/classifier"}, model_entry=model_entry)
+    assert not (tmp_path / "output").exists()
+
+
 def test_generic_anonymous_local_identity_and_sources(source, tmp_path):
     _, config = source
     model_entry = entry(repo=None, profile=GENERIC_PROFILE)

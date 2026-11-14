@@ -16,6 +16,77 @@ base model's capabilities after training. The official checkpoint's existing
 [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json)
 remain separate.
 
+The separate `qwen35-moe-bf16-merged-v5` version `5` profile admits complete
+BF16 Qwen3.5 MoE image wrappers under schema `3`. The source uses the official
+HF fused expert layout: `experts.gate_up_proj` has shape
+`[experts, 2 * expert_hidden, model]`, and `experts.down_proj` has shape
+`[experts, model, expert_hidden]`. Conversion binds every source file and swaps
+gate/up row ranges within each expert into native up/gate order. Normalized
+top-k routing, one sigmoid-gated shared expert, BF16 matrices and the supported
+vision geometry are required. Expert counts are bounded to 1,024, selected
+experts to 32, and expert/shared widths to 131,072 with 32-element alignment.
+The affine version-3 and version-4 profiles retain their separate storage and
+folded-normalization contracts.
+
+Version 5 independently reconstructs the MoE operation graph and requires a
+complete full-precision tensor header before native allocation. The admitted
+loader selects `Qwen35ReferenceBF16`: zero-centered RMS gain in F32 before the
+BF16 activation boundary, reference BF16 projection boundaries, selected expert
+IDs sorted into source order, and BF16 products and partial sums. Router logits
+occupy F32 storage after their BF16 output rounding. Indexed expert dots read
+bank rows directly with the existing reference reduction schedule; they never
+materialize gathered weight matrices. Their extra scratch is one F32
+accumulator plus one BF16 output per selected projection value. BF16 MoE text
+conversion remains unsupported outside this image artifact policy.
+
+Version-5 structural and bounded component fixtures do not establish full-model
+reference parity or a working 35B installation. The official full BF16 artifact
+was not downloaded or converted in this implementation. See the
+[source-bound record](archive/runs/2026-11-07-qwen35-bf16-moe-images.md).
+
+Ordinary text on a Qwen vision artifact can reuse its preceding text request's
+decoder state when every owned mixer supports exact boundary restoration.
+The worker retains a snapshot of DeltaNet F32 recurrence and convolution history
+at a complete non-final 1,024-token prefill boundary, alongside the retained
+attention KV rows and positions. Only the entire saved boundary can be reused;
+scope, context and loaded model identity must match. Sampling is reseeded for
+each request. The [generation contract](GENERATION.md#prefix-reuse) defines
+publication, invalidation and artifact-specific qualification requirements.
+
+Image requests still use fresh state and clear retained text prefixes. Their
+image-dependent M-RoPE positions and multimodal state are excluded from text
+snapshot capture and restoration. The Gemma 4 image worker separately restores
+owned sliding-ring K/V payload and its offset, length and traversal origin at
+the same 1,024-token text boundary. Shared-KV layers reuse their owning layer's
+snapshot. Gemma 3 now uses the same model-bound worker capture/restore contract,
+including suffix-only prefill and an actual-prefill-count invariant. Its exact
+4B artifact is awaiting execution in the
+[continuation attempt](model-experiments/2026-11-09-gemma-next-image-parity.md);
+the shared ring primitive alone does not qualify its complete image worker. See the
+[Gemma 4 attempt](model-experiments/2026-11-09-gemma4-image-text-parity.md)
+for exact-artifact checks and remaining scope.
+No artifact inherits numerical qualification from another checkpoint, precision
+or conversion layout. Prefix reuse does not by itself enable MTP. Dense affine
+version-3 conversion retains a complete declared compatible predictor and binds
+its configuration and tensors to the admitted target. Text requests can execute
+that predictor while the tower is resident; image requests retain zero drafts.
+Admitted dense BF16, dense affine and affine MoE artifacts retain a separate ordinary
+text execution graph using the existing Legacy numerical policy, unscaled text
+RoPE and, when an admitted compatible head exists, batched MTP verification.
+It shares immutable validated matrix buffers
+with the reference image graph; graph-specific controls remain independent and
+any signed-code representation change uses private storage. Normal text worker
+requests select this graph, including MTP-off requests. Image requests use the
+reference graph and zero drafts. Their states have distinct model identities;
+retained dense text prefixes additionally key the execution graph, precision and
+draft depth. Cross-graph preflight rejection does not fence a usable model.
+The [27B follow-up](archive/runs/2026-11-09-qwen27-shared-weight-fast-text.md)
+records exact configuration/payload equality and bounded performance and cache
+checks. The [remaining-family comparison](benchmarks/2026-11-09-qwen-remaining-image-text-parity.md)
+records bounded headless dense BF16, affine and affine MoE speed evidence, including
+shared expert banks. These results do not qualify BF16 heads, other artifacts or
+BF16 MoE, which retains its reference text graph pending separate work.
+
 ## Config-derived family profile
 
 Admission requires the complete supported decoder and vision tower, including
@@ -48,8 +119,15 @@ covered by geometry fixtures; that evidence alone does not establish runtime
 execution for each size.
 
 Required matrices and convolution weights must be BF16. Explicit norm-scale,
-`a_log` and `dt_bias` control-weight exceptions may originate in FP32. Declared
-auxiliary MTP tensors are omitted as in the existing text adapter.
+`a_log` and `dt_bias` control-weight exceptions may originate in FP32. Complete
+declared raw BF16 dense predictors and the official separate-expert BF16 MoE
+predictor now have conversion and strict tensor-contract implementations. A
+present incomplete head fails conversion; it is never silently stripped. Raw
+norm scales retain the explicit gain offset of one. The pinned 0.8B output uses
+schema 3 when a head is retained; existing headless schema-2 artifacts keep their
+frozen contract. Native BF16-head execution and performance remain unqualified
+in this increment, and the full official BF16 MoE payload is absent locally.
+Quantized MoE heads and dedicated predictor embeddings require separate support.
 
 Weights may differ from the official checkpoint. Metadata must use recognized
 forms:
@@ -89,7 +167,7 @@ forms:
 - Self-contained source configuration, tokenizer metadata and template. No
   custom `auto_map` code, unresolved adapter weights or quantization metadata.
 
-MoE, LoRA-only repositories, quantized vision weights, tokenizer programs outside
+Unsupported MoE layouts, LoRA-only repositories, quantized vision weights, tokenizer programs outside
 the reviewed forms, unrecognized templates/processors and other architectures
 require additional implementation. Matching a repository name, model size or
 architecture label alone cannot admit a model.

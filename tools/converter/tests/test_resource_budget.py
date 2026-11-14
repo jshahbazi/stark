@@ -8,7 +8,9 @@ import pytest
 from stark_convert import resource_budget
 
 
-@pytest.mark.parametrize(("available", "expected"), [(0, 16), (2 << 30, 16), (4 << 30, 32), (8 << 30, 64)])
+@pytest.mark.parametrize(
+    ("available", "expected"), [(0, 16), (2 << 30, 16), (4 << 30, 32), (8 << 30, 64), (16 << 30, 128)]
+)
 def test_automatic_budget_tracks_available_memory(available, expected):
     assert resource_budget.automatic_budget_mib(available) == expected
 
@@ -22,7 +24,22 @@ def test_resource_budget_formulas():
     assert resource_budget.TEMPLATE_CUMULATIVE_BYTES == 32 * 1024 * 1024 + 32 * size
 
 
-@pytest.mark.parametrize(("setting", "expected"), [("1", 1), ("64", 64), ("01", 1)])
+def test_budget_representation_bound_matches_the_largest_native_allowance():
+    mib = 1024 * 1024
+    assert 32 * mib + 32 * resource_budget.MAX_BUDGET_MIB * mib <= sys.maxsize
+    assert 32 * mib + 32 * (resource_budget.MAX_BUDGET_MIB + 1) * mib > sys.maxsize
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [
+        ("1", 1),
+        ("64", 64),
+        ("128", 128),
+        ("01", 1),
+        (str(resource_budget.MAX_BUDGET_MIB), resource_budget.MAX_BUDGET_MIB),
+    ],
+)
 def test_resource_budget_setting_is_read_at_process_start(setting, expected):
     project = Path(__file__).resolve().parents[1]
     environment = dict(os.environ, STARK_REQUEST_BUDGET_MIB=setting)
@@ -41,7 +58,10 @@ def test_resource_budget_setting_is_read_at_process_start(setting, expected):
     assert result.stdout.strip() == str(expected)
 
 
-@pytest.mark.parametrize("setting", ["", "0", "65", "1.0", "+1", " 1", "001", "１２"])
+@pytest.mark.parametrize(
+    "setting",
+    ["", "0", "1.0", "+1", " 1", "１２", str(resource_budget.MAX_BUDGET_MIB + 1), str(sys.maxsize)],
+)
 def test_resource_budget_rejects_invalid_settings_without_echoing_them(setting):
     project = Path(__file__).resolve().parents[1]
     environment = dict(os.environ, STARK_REQUEST_BUDGET_MIB=setting)
@@ -53,4 +73,6 @@ def test_resource_budget_rejects_invalid_settings_without_echoing_them(setting):
         text=True,
     )
     assert result.returncode != 0
-    assert result.stderr.strip() == "Invalid STARK_REQUEST_BUDGET_MIB; expected a decimal integer from 1 through 64."
+    assert result.stderr.strip() == (
+        "Invalid STARK_REQUEST_BUDGET_MIB; expected a positive decimal integer with representable byte allowances."
+    )

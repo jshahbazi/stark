@@ -39,6 +39,8 @@ _FIELDS = {
     "tool_choice",
     "parallel_tool_calls",
     "store",
+    "thinking",
+    "reasoning_effort",
 }
 
 
@@ -165,6 +167,12 @@ def parse_chat_request(
         raise _bad("stream must be a boolean.")
     if "mtp" in payload and type(payload["mtp"]) is not bool:
         raise _bad("mtp must be a boolean.")
+    if "thinking" in payload and type(payload["thinking"]) is not bool:
+        raise _bad("thinking must be a boolean.")
+    if "reasoning_effort" in payload and (
+        not isinstance(payload["reasoning_effort"], str) or payload["reasoning_effort"] not in {"low", "high", "max"}
+    ):
+        raise _bad("reasoning_effort must be low, high or max.")
     options = payload.get("stream_options")
     if options is not None and (
         not stream
@@ -281,6 +289,8 @@ def parse_chat_request(
         "stop": stop,
         "image": images[0] if images else None,
         "mtp": payload.get("mtp"),
+        "thinking": payload.get("thinking", False),
+        "reasoning_effort": payload.get("reasoning_effort"),
         "has_tool_history": has_tool_history,
         **tool_options,
     }

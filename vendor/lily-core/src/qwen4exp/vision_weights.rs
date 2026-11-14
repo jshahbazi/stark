@@ -8,6 +8,7 @@
 
 use anyhow::{Result, ensure};
 
+use crate::safetensors::SafetensorsDType;
 use crate::tensor::{DType, Tensor};
 use crate::weights::{Loader, expect_shape};
 
@@ -40,8 +41,9 @@ pub struct VisionWeights {
     /// The patch embedding's `Conv3d` weight `[hidden, C, T, P, P]` viewed as
     /// the `[hidden, C * T * P * P]` linear map it is when the kernel takes one
     /// step per patch. Row-major flattening of the trailing dims is the
-    /// (C, T, H, W) order of a preprocessed pixel row, so this is a reshape of
-    /// the checkpoint bytes, not a permutation.
+    /// (C, T, H, W) order of a preprocessed pixel row. Indexed MLX exports
+    /// store the axes as `[hidden, T, P, P, C]`; those BF16 encodings are
+    /// transposed once at load without modifying the source checkpoint.
     pub patch_proj_w: Tensor,
     /// `[hidden]`.
     pub patch_proj_b: Tensor,
@@ -68,8 +70,51 @@ impl VisionWeights {
     }
 }
 
+/// Reorder BF16 encodings from `[out, T, H, W, C]` to `[out, C, T, H, W]`.
+/// The fixed native image bounds cap each input/output temporary at 12 MiB.
+fn patch_channels_first(input: &[u8], shape: [usize; 5]) -> Result<Vec<u8>> {
+    let [out, frames, height, width, channels] = shape;
+    ensure!(
+        shape.iter().all(|dimension| *dimension > 0)
+            && out <= 4096
+            && frames <= 2
+            && height <= 16
+            && width <= 16
+            && channels <= 3,
+        "patch embedding transpose exceeds native image bounds"
+    );
+    let elements = out * frames * height * width * channels;
+    ensure!(input.len() == elements * 2, "invalid BF16 patch embedding payload length");
+    let mut output = vec![0u8; input.len()];
+    for o in 0..out {
+        for c in 0..channels {
+            for t in 0..frames {
+                for y in 0..height {
+                    for x in 0..width {
+                        let source = ((((o * frames + t) * height + y) * width + x)
+                            * channels
+                            + c)
+                            * 2;
+                        let target = ((((o * channels + c) * frames + t) * height + y)
+                            * width
+                            + x)
+                            * 2;
+                        output[target..target + 2]
+                            .copy_from_slice(&input[source..source + 2]);
+                    }
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
 /// Reads every tower tensor into GPU memory, checking dtype and shape.
-pub(crate) fn load(loader: &Loader<'_>, v: &VisionConfig) -> Result<VisionWeights> {
+pub(crate) fn load(
+    loader: &Loader<'_>,
+    v: &VisionConfig,
+    indexed_mlx: bool,
+) -> Result<VisionWeights> {
     let h = v.hidden_size;
     let bytes = std::cell::Cell::new(0usize);
     let tensor = |name: &str, shape: &[usize]| -> Result<Tensor> {
@@ -85,10 +130,36 @@ pub(crate) fn load(loader: &Loader<'_>, v: &VisionConfig) -> Result<VisionWeight
         Ok(t)
     };
 
-    let conv = tensor(
-        "patch_embed.proj.weight",
-        &[h, v.in_channels, v.temporal_patch_size, v.patch_size, v.patch_size],
-    )?;
+    let patch_name = format!("{VISION_PREFIX}patch_embed.proj.weight");
+    let channels_last =
+        [h, v.temporal_patch_size, v.patch_size, v.patch_size, v.in_channels];
+    let canonical =
+        [h, v.in_channels, v.temporal_patch_size, v.patch_size, v.patch_size];
+    let conv = if indexed_mlx
+        && loader
+            .checkpoint()
+            .meta(&patch_name)
+            .is_some_and(|meta| meta.shape == channels_last)
+    {
+        ensure!(
+            loader
+                .checkpoint()
+                .meta(&patch_name)
+                .is_some_and(|meta| meta.dtype == SafetensorsDType::BF16),
+            "indexed MLX patch embedding requires BF16 storage"
+        );
+        // Read the small patch projection before allocating its final GPU
+        // buffer. No redundant source GPU allocation survives model loading.
+        let source = loader.checkpoint().read(&patch_name)?;
+        let reordered = patch_channels_first(&source, channels_last)?;
+        let result =
+            Tensor::from_bytes(loader.context(), &reordered, &canonical, DType::BF16)?;
+        loader.mark_consumed(&patch_name);
+        bytes.set(bytes.get() + result.byte_len());
+        result
+    } else {
+        tensor("patch_embed.proj.weight", &canonical)?
+    };
     let patch_proj_w = conv.view(0, &[h, v.patch_dim()])?;
     let patch_proj_b = tensor("patch_embed.proj.bias", &[h])?;
     let pos_embed = tensor("pos_embed.weight", &[v.num_position_embeddings, h])?;
@@ -139,4 +210,60 @@ pub(crate) fn load(loader: &Loader<'_>, v: &VisionConfig) -> Result<VisionWeight
         merger_fc2_b,
         bytes: bytes.get(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::patch_channels_first;
+
+    #[test]
+    fn indexed_patch_transpose_preserves_bf16_encodings_and_pixel_axis_order() {
+        let [out, frames, height, width, channels] = [2, 2, 2, 2, 3];
+        let expected: Vec<u16> = (0..out * frames * height * width * channels)
+            .map(|index| match index {
+                0 => 0,
+                1 => 0x8000,
+                2 => 0x7f80,
+                3 => 0xff80,
+                4 => 0x7fc1,
+                _ => 0xa000 + index as u16,
+            })
+            .collect();
+        // Construct source bytes from semantic (out, channel, frame, y, x)
+        // coordinates, using the export's innermost channel axis.
+        let mut source = Vec::new();
+        for o in 0..out {
+            for t in 0..frames {
+                for y in 0..height {
+                    for x in 0..width {
+                        for c in 0..channels {
+                            source.extend_from_slice(
+                                &expected[((((o * channels + c) * frames + t)
+                                    * height
+                                    + y)
+                                    * width)
+                                    + x]
+                                    .to_le_bytes(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let original = source.clone();
+        let actual =
+            patch_channels_first(&source, [out, frames, height, width, channels])
+                .unwrap();
+        let expected: Vec<u8> =
+            expected.iter().flat_map(|encoding| encoding.to_le_bytes()).collect();
+        assert_eq!(actual, expected);
+        assert_eq!(source, original, "source checkpoint bytes changed");
+    }
+
+    #[test]
+    fn patch_transpose_rejects_invalid_payloads_and_unbounded_dimensions() {
+        assert!(patch_channels_first(&[0; 4], [1, 1, 1, 1, 3]).is_err());
+        assert!(patch_channels_first(&[], [usize::MAX, 2, 16, 16, 3]).is_err());
+        assert!(patch_channels_first(&[], [1, 0, 16, 16, 3]).is_err());
+    }
 }

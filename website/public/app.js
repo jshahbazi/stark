@@ -9,65 +9,6 @@ followMovedIntegration();
 window.addEventListener('hashchange', followMovedIntegration);
 document.body.classList.add('is-enhanced');
 
-const commands = {
-  "http": "POST /v1/chat/completions\nAuthorization: Bearer <API_KEY>\nContent-Type: application/json\n\n{\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Reply with OK.\"}\n  ],\n  \"stream\": true,\n  \"max_tokens\": 128,\n  \"temperature\": 0\n}",
-  "generate": "{\"operation\":\"generate\",\"rendered_prompt\":\"<complete rendered chat template>\",\"context_tokens\":8192,\"max_new_tokens\":128,\"sampling\":{\"mode\":\"greedy\"},\"stream\":true,\"request_id\":1}",
-  "score": "{\"operation\":\"score\",\"input_token_ids\":[1,2,3],\"candidate_token_ids\":[10,11],\"context_tokens\":8192,\"temperature\":1.0}",
-  "convert": "stark convert Qwen/Qwen3-0.6B \\\n  --output models/qwen3"
-};
-const commandMetadata = {
-  "http": {
-    "heading": "HTTP / STREAMING CHAT",
-    "detail": "Request shape · Successful SSE ends with [DONE]",
-    "note": "Use the Base URL under Connections → Other apps. Omitting model targets the running model. Copy curl Example under Advanced settings generates an authenticated request that keeps the key out of command arguments and environment variables."
-  },
-  "generate": {
-    "heading": "STDIN / GENERATE REQUEST",
-    "detail": "One JSON line · text-generation-v1",
-    "note": "Spawn stark generate --model-path /path/to/model and read readiness first. Supply a complete rendered chat template or input_token_ids. Consume progress/delta events and the terminal reply before the next request."
-  },
-  "score": {
-    "heading": "STDIN / SCORE REQUEST",
-    "detail": "One JSON line · candidate IDs are illustrative",
-    "note": "Spawn stark score --score-model-path /path/to/model and read readiness first. Use token IDs from the loaded tokenizer. Returns logits, full-vocabulary log probabilities and temperature-scaled candidate probabilities."
-  },
-  "convert": {
-    "heading": "SHELL / MODEL CONVERSION",
-    "detail": "Installed CLI · selected checkpoint formats",
-    "note": "Conversion prepares the artifact for Stark. Consult the converter catalog for family and precision support; runtime admission and numerical validation are separate from conversion."
-  }
-};
-const tabs = [...document.querySelectorAll('[data-command]')];
-const code = document.querySelector('#command-code');
-const panel = document.querySelector('#command-panel');
-const copyStatus = document.querySelector('#copy-status');
-const selectCommand = (tab) => {
-  for (const item of tabs) {
-    const selected = item === tab;
-    item.setAttribute('aria-selected', String(selected));
-    item.tabIndex = selected ? 0 : -1;
-  }
-  code.textContent = commands[tab.dataset.command];
-  const metadata = commandMetadata[tab.dataset.command];
-  document.querySelector('#command-heading').textContent = metadata.heading;
-  document.querySelector('#command-detail').textContent = metadata.detail;
-  document.querySelector('#command-note').textContent = metadata.note;
-  panel.setAttribute('aria-labelledby', tab.id);
-  copyStatus.textContent = '';
-};
-for (const tab of tabs) {
-  tab.addEventListener('click', () => selectCommand(tab));
-  tab.addEventListener('keydown', (event) => {
-    const index = tabs.indexOf(tab);
-    const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length
-      : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length
-        : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : null;
-    if (next === null) return;
-    event.preventDefault();
-    selectCommand(tabs[next]);
-    tabs[next].focus();
-  });
-}
 for (const button of document.querySelectorAll('[data-copy]')) {
   button.addEventListener('click', async () => {
     const target = document.getElementById(button.dataset.copy);

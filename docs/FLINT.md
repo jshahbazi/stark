@@ -50,10 +50,11 @@ attention retains the request prefix. KV state is F32, allocated as tokens
 arrive, with a checked 32 GiB payload maximum over the configured architecture. This
 differs from Recursive's optional quantized KV cache policy.
 
-The workers use the loaded model's configured context maximum and cap generation
-at 4,096 output tokens. Flint's upstream 262,144-token configuration is accepted
-as the context boundary; full-length execution still requires sufficient memory
-and separate qualification. Prefill advances one token at a time and omits discarded
+The worker uses the loaded model's configured context maximum. Flint's upstream
+262,144-token configuration is accepted as the context boundary; full-length
+execution still requires sufficient memory and separate qualification. The
+request's output budget is constrained by remaining context. Prefill advances
+one token at a time and omits discarded
 vocabulary projections. This implementation does not include Recursive's fused
 decode megakernel; its published throughput does not describe Stark.
 

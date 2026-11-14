@@ -1,0 +1,418 @@
+# Retained Lily vision source numerics
+
+Session date: 2026-11-07. Final component replay: 2026-11-08 00:53 UTC.
+
+The retained original-format Lily vision component passes its frozen source
+gate. Both synthetic inputs have zero numerical error at 0, 1 and all 27
+blocks: all six merged-output comparisons have RMS 0 and cosine 1. The final
+arithmetic candidate is `94ce9e1a`, integrated and sealed at
+`9b1c1e44b901528e5579163597606a4b3bb13493`.
+
+## Qualified component result
+
+| Case index | Patches | Blocks | Merged values | Relative RMS | Cosine |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 256 | 0 | 163,840 | 0 | 1 |
+| 0 | 256 | 1 | 163,840 | 0 | 1 |
+| 0 | 256 | 27 | 163,840 | 0 | 1 |
+| 1 | 4 | 0 | 2,560 | 0 | 1 |
+| 1 | 4 | 1 | 2,560 | 0 | 1 |
+| 1 | 4 | 27 | 2,560 | 0 | 1 |
+
+The fixed gate remains RMS at most 0.02 and cosine at least 0.999. Across
+499,200 merged BF16 values, the observed numerical error is zero. The first
+block's 17-stage sequence is also exact for both inputs. All 14 production
+contractions, 10 nonlinear controls, position and rotary controls, three
+production attention stages per input, seven independent attention-order
+controls per input, and all observer comparisons report zero mismatches.
+Both 65,280-input finite-BF16 GELU domain controls report zero mismatches and
+zero nonfinite outputs. The 54-stage `full_norm` diagnostic remains the
+legacy two-pass baseline, separate from the selected production Welford path.
+
+The Rust 1.98.1 test seal SHA256 is
+`4d6631c7a66b71a9d606671dbeccc1ceb502715eabbe9e5f090a045b5bf7556c`;
+the vendored Lily source tree is
+`25dfbb16004058500ea9b2cf8cb889408e17ddab`.
+The private receipt is `9b1c1e44-lily/component-result.json` in the integration
+checkout's ignored qualification folder. It exited 0, peaked at
+1,015,463,936 bytes RSS, observed at least 63,066,144,768 bytes available
+RAM, and did not trip the 4-GiB-RSS / 8-GiB-available guard. The wrapper took
+4.740 seconds; this includes test/reference work and is not a throughput
+benchmark. The qualification build used opt-level 3 with debug info disabled;
+older debug seals and failures remain preserved.
+
+This is a tower-component qualification on these source-bound controls.
+Fresh full-worker lifecycle, full-model answer quality, larger-grid controls
+and throughput are separate qualifications. At this seal, a fresh retained
+full-worker replay had not run because an unrelated model occupied the
+required memory. Existing worker evidence remains in the separate
+[image-family record](2026-11-07-qwen-image-families.md).
+
+## Artifact and independent source
+
+The artifact is `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` at revision
+`0f94842e3682b49acace4daeb4cf2e65a6f94f83`, with artifact identity
+`18c7bcc1e97d1fefdd361472c2daa59d81d89fcd6f3a61983d995a032b44bfb4`.
+All 333 visual tensors are original BF16 storage: 897,862,112 bytes from the
+existing local shard. No weights were fetched, converted or modified.
+
+The CPU producer executes selected unchanged arithmetic bodies from
+Transformers `2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397`:
+`modeling_qwen4_exp.py` SHA256
+`e57b3617e71e81ecb7e5ae3b420c45b5aee80d76a07aa8c88b797c2642f1f5df`.
+It follows Lily upstream `e22d58fa7cc488493fb1b5d810a198bd29730aeb`'s
+`tools/reference/hf_vision_reference.py`, SHA256
+`79d37b1a81308db9da677d99506613383b6f3bf5190bf025c34f9ca25822ee92`.
+Torch 2.14.1 runs on CPU with four threads; Transformers 5.15.1 supplies only
+the pinned scaffold described and hashed in the manifest. Strict parameter
+assignment supplies every visual parameter; the rotary inverse-frequency
+buffer remains F32.
+
+Two synthetic cases use identical frozen source pixels at 0, 1 and all 27
+blocks. The tower gate stays relative RMS at most 0.02 and cosine at least
+0.999. No acceptance threshold was relaxed.
+
+## Failure localization
+
+The existing v3 CPU manifest SHA256 is
+`02b0e2d74141f5b6a6d64449f9e6cd2e5b046af80ea3e216ef4c4abe5863b0c3`.
+On source `c2d7d6cd`, the root-owned sealed native test
+SHA256 `473c342216037e20e9cfc8746a70da7e6414ac67af4be101b809f501fdfa0572`
+failed the numerical gate. Its six aggregate controls were:
+
+| Case index | Blocks | Relative RMS | Cosine |
+| --- | ---: | ---: | ---: |
+| 0 | 0 | 0.0006575898 | 0.9999997838 |
+| 0 | 1 | 0.0032868664 | 0.9999945984 |
+| 0 | 27 | 0.0252454230 | 0.9996813587 |
+| 1 | 0 | 0.0001088986 | 0.9999999941 |
+| 1 | 1 | 0.0029782713 | 0.9999955650 |
+| 1 | 27 | 0.0188444247 | 0.9998283354 |
+
+Only case 0 at full depth exceeded the fixed RMS gate. The aggregate replay
+took 36.68 seconds, peaked at 951,255,040 bytes RSS, observed at least
+106,239,426,560 bytes available RAM, and did not trip its guard. The original
+failure and the aggregate replay receipts are preserved separately.
+
+The optional `--operators` CPU mode records source operator inputs and outputs
+at one block, using forward hooks and an observation wrapper around unchanged
+eager attention. The v5 manifest SHA256 is
+`c4cd9d332849de9d7946fb0e66309a0bb9ee4cf4578aa854561123079a363b66`.
+It contains 20,847,793 bytes and peaked at 1,307,852,800 bytes CPU RSS. All
+six merged-output digests match v3 exactly. The native ignored unit replays
+each operator on its exact source input, so preceding operators cannot
+contribute accumulated error to an individual control.
+
+The native operator baseline at integrated source `7cb13f39` reproduced all
+six v3 tower metrics. Its sealed test SHA256 is
+`757a1de86e4e4890c3af767158bc0129ce0e78f9d743dfe9f859b40cfd2ece19`.
+Attention operator index 3 measured relative RMS 0.00423718156 and
+0.00408923204 for cases 0 and 1. Every other same-input operator was at or
+below 0.000087729 relative RMS, with most near 0.00001 or exact. This isolates
+attention arithmetic as the component discrepancy, independently of the
+full-depth accumulated result.
+
+A separate CPU policy oracle uses the same source attention Q/K/V input,
+F32 dot accumulation, and explicit BF16 boundaries. These are policy
+simulations, with native compiler/reduction behavior qualified separately:
+
+| Policy | Case 0 relative RMS | Case 1 relative RMS |
+| --- | ---: | ---: |
+| Retained online, unnormalized BF16 exponentials | 0.0042373480 | 0.0040892320 |
+| BF16 QK/scaled scores, unnormalized BF16 exponentials | 0.0021092730 | 0.0022688445 |
+| BF16 QK/scaled scores, globally normalized BF16 probabilities | 0.0001280236 | 0 |
+
+The private oracle receipt SHA256 is
+`dadc101afed27fbe7bca8fd9856ac79bb95d58656800053eeb23599cb42ab15a`;
+its script SHA256 is
+`9c42551f8679b10cc95460280cbd7a24780426fe9ebfe36390be9a1957218e13`.
+
+## Arithmetic change and acceptance
+
+The initial attention candidate rounded the QK result to BF16 and rounded the
+scalar-scaled score to BF16. Its first tiled pass computes global F32
+softmax statistics. A second tiled QK pass casts globally normalized
+probabilities to BF16 before PV. Both passes retain 32-query/64-key tiles,
+with no image-sized square attention allocation. The additional QK pass is
+a performance cost that has not been benchmarked here.
+
+The ignored test adds an independent same-input attention gate: relative
+RMS at most 0.001 and cosine at least 0.999999. It prints aggregate metrics
+before checking either operator or full-tower gates. The original full-tower
+gate stays unchanged. No production API, checkpoint format, text arithmetic
+or global diagnostic selector is added.
+
+An independent read-only source review checked the two rounding boundaries,
+global probability normalization, per-row shuffle grouping, and the barriers
+between QK, softmax statistics, probability staging and PV. It found no
+blocking arithmetic or synchronization issue. Its observation about masked
+key-slot scratch reads led to `9aeea9b1`, which moves those reads inside the
+valid-key branch in both passes and removes an unused first-pass V slice.
+The inherited single-pass tile-speed claim was also corrected. Valid-key
+arithmetic is unchanged; the final source still requires its own replay.
+
+The first native candidate at integrated source `621326da` failed the tight
+attention gate. Its seal SHA256 is
+`8c2572d0f49a5ced367b51c80ae191be047cbffdf4ea610cbc70ee94e8f1788b`.
+Same-input attention relative RMS was 0.00334684894 and 0.00330652702; full
+tower relative RMS at 27 blocks was 0.02805142 and 0.02207323. Other operator
+controls remained unchanged. Peak RSS was 972,324,864 bytes and the guard
+did not trip. This failure is retained and is not qualified evidence.
+
+A follow-up CPU policy diagnostic matches that native attention discrepancy
+when QK rounds to BF16 but scaled scores remain F32: 0.00334702816 and
+0.003306527016 relative RMS. Explicit native stage observations were then
+added in `afb3525c` to compare QK, scaled scores and stored probabilities
+with source stages, including an ordinary-versus-observed output comparison.
+The v6 source fixture manifest SHA256 is
+`4cb0f69a1989f8d3b65c08cc389e8ae8aff0f4d2c036ae684e5872518ea893ad`;
+its 27,142,533 bytes were produced at 1,324,548,096 bytes peak CPU RSS.
+No acceptance threshold changed following the failed native candidate.
+
+The first trace replay at integrated source `43fc445c`, seal SHA256
+`13061d1972d997c1b6421f1b2eba68330978ed6168090048514736811427dd54`,
+showed that observing the floating casts changed compiled arithmetic. The
+captured four-patch control had exact QK/scaled-score stage agreement but
+0.0130567764 probability relative RMS, while observed output differed from
+ordinary output at 2,461 BF16 elements (0.0128432321 relative RMS). Ordinary
+output retained the earlier failed candidate metrics. The initial wrapper
+retained only the last of the two trace records. This is evidence of observer
+perturbation, and does not qualify the production stage graph.
+
+Candidate `771ddfb3` replaces intermediate BF16 constructors with explicit
+integer round-to-nearest-even barriers after QK, scaled scores and normalized
+probabilities. It follows the existing Stark integer BF16 policy used in GDN;
+compiler promotion cannot remove an integer bit boundary. A separate CPU
+source control checked 326,400 finite F32 bit patterns: all 65,280 finite
+BF16 upper patterns with five lower-bit controls each, including every exact
+halfway tie. It found zero differences from Torch's BF16 conversion.
+Input SHA256:
+`69a3440c2c3206af78c73a611946bb817a393cdcff287158d515c1130f5d8728`;
+rounded-output SHA256:
+`340d7b0bc514884ab6409df032ace615527a43230c246fb2f6cf695af6c377a2`.
+The native unit now requires exact observed-versus-ordinary output agreement
+in addition to the unchanged same-input attention and full-tower gates.
+The independent review also checked the final integer helper's sign/tie
+behavior and all score/probability call sites, finding no blocking source or
+synchronization issue. Native replay remains the arithmetic qualification.
+
+The integer-barrier replay at integrated source `202269cd`, seal SHA256
+`b0e0f0de9444fa56d669eb3760999844826c867ed796aafd51a92793e095536e`,
+passed both same-input attention gates. Both cases had exact observed versus
+ordinary output agreement. Case 0 QK/scaled-score/probability relative RMS
+was 0.000024407 / 0.000025886 / 0.000145343; case 1 was exact at all three
+stages. The largest operator relative RMS was 0.000179531 / 0.000087729.
+This qualifies the attention correction on these controls, while the full
+tower remained unqualified: case 0 at 0/1/27 blocks measured 0.00065759 /
+0.00245160 / 0.02625438 relative RMS, and case 1 measured 0.000108899 /
+0.00153173 / 0.01731256. Only case 0 at full depth exceeds the frozen gate.
+The receipt is retained separately from the earlier failed casts.
+
+Test-only diagnostic `890555dc` adds 17 first-block sequence observations,
+including both residual adds and all merger stages, against existing v6
+source hooks. Each stage runs the existing production kernel and scratch
+layout. A hard bit-equality assertion compares its final merged output with
+the ordinary one-pass depth-one graph, checking that readback segmentation
+does not change execution. No additional arithmetic policy changed for this
+diagnostic.
+
+The first-block sequence replay at integrated source `ec8db81c`, seal SHA256
+`d4a8fe4cea44b59dbd0413b65e69e4558d27e6a36dda98cae5422f84159680dc`,
+had zero observed-versus-ordinary mismatches for both cases. Case 0 relative
+RMS grew from 0.000015031 at patch output to 0.000065840 at norm1,
+0.000847711 at attention output, 0.001058058 at norm2, 0.001858651 at
+MLP GELU output, 0.002164119 at block output, and 0.002451595 at merged
+output. Case 1 first exceeded 0.001 at merger FC1 (0.001250871), ending at
+0.001531733. The source-gate failure and all 17 stage aggregates remain
+preserved; the observations show accumulated arithmetic differences.
+
+The bounded v7 source capture adds full-depth norm/residual inputs and
+outputs without changing source arithmetic. Its manifest SHA256 is
+`3824730fa423d8232c48d8c163263ef607fe07fef690c9c5fc6b49a76b3fe436`;
+it is 124,272,525 bytes and peaked at 1,312,063,488 bytes CPU RSS. All new
+v4-v7 fixture files together remain below 256 MiB. Test-only `a20b5618`
+compares 54 full-depth norms per case on exact source inputs.
+
+Test-only `78ff5804` adds the main engine's four-stream patch and 32-stream
+dense F32 contraction schedules, followed by the same single bias/BF16
+epilogue, as a witness on the actual source input of each linear operator.
+The body is source-matched to Torch commit
+`5c4886908584029761b579af026dcfb627c84070`, which exactly matches the
+producer's `torch_git`. Source lineage is PyTorch `BlasKernel.cpp`,
+`ReducedPrecisionFloatGemvFastPathKernel.cpp`, and `functional_base.h`; BSD/MIT
+notices remain in `scripts/licenses/distribution`. The witness is compiled
+only in tests, with existing M <= 256 and N/K <= 4608 bounds. It records
+source bit mismatches for this schedule and the production NAX baseline.
+No contraction schedule was promoted on the basis of source lineage alone.
+
+The contraction witness at integrated source `36414711`, seal SHA256
+`d62ee1dc8d6bb21acc7740e73211a9a21235b048021055a2db740d2b20a80280`,
+was bit exact for all 14 source-input controls. NAX source mismatch counts
+for case 0 were 52 / 187 / 24 / 138 / 122 / 79 / 22 across patch, QKV,
+projection, FC1, FC2, merger FC1 and merger FC2. Case 1 counts were
+0 / 2 / 2 / 1 / 2 / 2 / 0. The 54 same-input full-depth norms per case had
+maximum relative RMS 0.000055999 / 0.000100806. These per-operator controls
+do not themselves qualify a whole tower.
+
+Production candidate `874901fa`, bounded before allocation by `5b928751`,
+selects the proven four-stream patch / 32-stream dense schedules for only the
+seven measured dimension pairs. The adapter checks BF16 types, rank, spans,
+products and the existing 8,192-patch budget before scratch allocation.
+Dispatches use at most 32 rows and 147,456 output work items, borrowing existing
+input and output views. Other admitted geometries retain NAX; text arithmetic
+is unchanged. An independent test-only contraction body remains available,
+and all 14 production outputs must match source bits exactly. First-block
+sequence observations now use this production policy and still require exact
+agreement with the ordinary graph.
+
+Test-only `bdb7158e` also compares the existing main engine's canonical
+Torch Welford/affine and GELU bodies on source operator inputs. These
+observations had no production norm or activation selector at that checkpoint.
+LayerNorm and GELU selection awaited the contraction-only tower result.
+
+The contraction-only production replay at integrated source `42efacbf`, seal
+SHA256 `4c80351d09903d83702606b075adb591f5f1b99aabef41e11e7bfddd4bcfb016`,
+passed exact source-bit checks for all 14 production linears, tight attention,
+and both observer checks. Case 1 at zero blocks became bit exact. Full tower
+relative RMS remained 0.02534985 / 0.01829176, so case 0 still failed the
+frozen 2% gate. All 10 independent canonical norm/GELU controls were bit
+exact against source, providing the separate evidence for the next policy.
+
+Vision-only norm candidate `fc79b28e` adopts the measured Welford/affine body
+at width 1,152, with at most 8,192 rows and checked shapes/types/spans. Other
+widths retain the original norm. Separate activation candidate `6b197e41`
+adopts the measured GELU bodies, bounding rows at 8,192 and elements at
+`8192 * 4608`, with 262,144-element dispatch tiles and existing in-place
+storage. Wider rows retain the original activation. Text kernels are
+unchanged. Production norm and GELU outputs must match source bits in the
+same-input controls; independent test-only bodies remain available.
+
+Optional test checkpoint `21dbb8af` seals an all-finite BF16 GELU oracle from
+the exact Torch revision. It covers every one of 65,280 finite BF16 input
+patterns for erf and tanh forms, including signed zero and subnormals. The
+392,422-byte private fixture manifest SHA256 is
+`78f542f4bb6f10a760927ef5501ba5d9884d0f1c78bc430ecd5646f77c037644`.
+Only the ignored unit reads `STARK_LILY_GELU_REFERENCE_PATH`; release code has
+no diagnostic selector. The domain control requires zero source-bit
+mismatches and zero nonfinite outputs for both forms. This source fixture
+does not itself qualify native execution.
+
+The combined norm/GELU replay at integrated source `42f328a2`, seal SHA256
+`ffb569c501c1d5b444db708c599801e7ec9b3b551ddfae268cf78539258f73e3`,
+passed all 14 production contraction and 10 production nonlinear source-bit
+checks. Both GELU domain controls had zero mismatches and zero nonfinite
+outputs across 65,280 values each. All trace/sequence observers matched
+ordinary execution exactly. Case 1 became bit exact at all three depths.
+Case 0 at 0/1/27 blocks remained 0.000602537 / 0.002470966 / 0.024297598
+relative RMS, so its full-depth gate still failed.
+
+Its first source-sequence discrepancy was position addition: patch output
+was exact, while position output relative RMS was 0.000056127348. A CPU
+source-input comparison ruled out complete elision of the intermediate BF16
+position blend: that policy produced 25,196 mismatches and 0.000950757 RMS.
+Sequential uncontracted F32 summation followed by the two BF16 boundaries
+matched both source cases exactly. A pairwise sum produced two mismatches
+in case 0, confirming that mathematically equivalent reduction order alone
+is not the source contract.
+
+Test-only safe/uncontracted position witness `08181b80` at integrated source
+`5067716c`, seal SHA256
+`eb5ef51859941a0a77982ad281636b508cd71ce8f29169108d7549375023161b`,
+was bit exact for both cases. The default path differed at 128 of 294,912
+case-0 elements, while case 1 was already exact. Its full-tower failure was
+retained because the witness was not selected by the production graph.
+
+Position candidate `fe905fc6` selects only that measured safe/uncontracted
+body for the 48-by-48, 1,152-wide table, with a unique pipeline-cache key.
+It preserves coordinates, tap ordering, BF16 blend/add boundaries and
+geometry. Other table geometries retain the previous policy. Grid products,
+the existing 8,192-patch budget and dtype/spans are checked. Independent
+source-input controls now require zero production position mismatches before
+the unchanged whole-tower gate is evaluated.
+
+The position-production replay at integrated source `2529098a`, seal SHA256
+`b6f367cff45a0845a275cf982b36d0dfe4aaf85f109c0672e380632f1fa3ab72`,
+passed both exact position checks and all previous component/domain/observer
+controls. The first four case-0 sequence outputs (patch, position, norm1 and
+QKV) became bit exact. The first discrepancy moved to rotary output:
+0.000016602011753 relative RMS. Attention output then measured 0.000188197,
+merged depth-one output 0.00107075, and full-depth output 0.02349485. Case 0
+still failed the frozen whole-tower gate; case 1 remained exact throughout.
+
+Test-only `9da0853a` isolates rotary contraction policy with a separate safe,
+uncontracted copy of the retained body on existing v7 pre/post-QKV controls.
+Source frequency construction is F32 throughout: for head dimension 72,
+18 inverse frequencies are `1 / (10000 ** (arange(0,36,2,F32) / 36))`;
+F32 positions multiply those frequencies, followed by F32 cosine/sine and
+`[H18,W18,H18,W18]` recomposition. Q/K are promoted from BF16 to F32; two
+separately rounded products are added before the single BF16 output cast.
+No attention policy or coordinate geometry changed for this diagnostic.
+
+The safe/uncontracted rotary witness at integrated source `a1649a6a`, seal
+SHA256 `2bd7edacd22aff7f18e3cad9834b8b5696c4cda2b0935ceca681d11283d5ed5a`,
+reduced case-0 mismatches from 38 to 17 (0.00001410644 RMS), without closing
+the source gate. It was not promoted. Source F32 stages were then captured in
+the 189,255-byte rotary fixture, manifest SHA256
+`62d158ff6f64365ed54fa3465417b71f1bc538044c3486fb921c8401c9c32f3e`.
+
+Frequency/trig controls at integrated source `1d0fe455`, seal SHA256
+`93b6408c3d348c15be8e923e8d9da284400a29421452bdcee2cdaf52d64de3a1`,
+found seven of 18 native inverse frequencies differed by at most two F32 ULPs.
+Native angles differed at 3,104 of 9,216 values; native trig differed even at
+exact source angles (4,064 cosine and 4,064 sine values, at most two ULPs).
+Applying exact source coefficients was exact, and the staged native
+application matched the safe witness exactly. The follow-up `c31fc114` seal
+SHA256 `56e20caba19df6bb12ffc16a72be13d2bfb79296bd386d2d4af644a3ea99fe32`
+isolated eight remaining BF16 mismatches when only native trig was used at
+exact source angles. Both frequency construction and trig needed correction.
+
+The source-compatible host control at integrated source `96b6da7d`, seal
+SHA256 `7a828dd1c802447c45202bd1a884b3af59a2e6a61ea98ca7e6024de02b2970a5`,
+proved Rust F32 powf frequencies, block-major angles and the pinned SLEEF
+four-lane cos/sin schedule exactly matched source F32 bits for both cases.
+Its BF16 application also had zero mismatches. Production candidate
+`4172094d` uses this live arithmetic, with no fixture vectors, and two
+scratch-owned coefficient buffers bounded at 2,359,296 bytes total. Angles
+are finite and below 4,096; buffers are refreshed before the GPU pass and
+remain alive through completion. The standalone Boost license/attribution,
+vendor NOTICE and distribution source manifest identify the copied bodies.
+
+That production replay at integrated source `e7717364`, seal SHA256
+`5f5b4e3df3d86bd7b1fc86d758175d1a650753d34884f3bda02d49d699a2d037`,
+passed exact production F32 coefficient and BF16 rotary application checks.
+The first five sequence outputs became exact, moving the first discrepancy
+to attention (0.00017953088 RMS). The full case-0 RMS was 0.02741351 and
+still failed; case 1 remained exact. The failed receipt was preserved.
+
+Independent attention-order controls at integrated source `7e537d9d`, seal
+SHA256 `fed1c3cd71debab962f12c1674c7ea1a35f217e7d817cfd5ffcc44a48e17ca31`,
+were exact in all seven controls per input: source-order QK, scaled scores,
+scaling source QK, softmax on source scaled scores, PV on source P/V,
+combined probabilities and combined output. The ordinary path still
+differed at 131 BF16 case-0 outputs. Segmented and ordinary reference
+execution matched at every observed intermediate and final output.
+
+Production candidate `94ce9e1a` maps the witnessed aligned64/32-stream plus
+eight-term-tail QK fold onto one SIMD32 group per query, retains four complete
+key-range softmax sums with the crosswise fold, pinned SLEEF exp and reciprocal
+multiply, and four-stream PV. Three streaming passes use fixed register state
+without an N-by-N tensor or weight copies. The H1152/head72/16-head profile
+checks N <= 8,192, N divisible by four and SIMD width 32; other geometries
+retain NAX. Independent source controls, actual-production stage captures,
+hard source-bit checks and hard observer equality remain enabled in the
+ignored test. This candidate produced the qualified result at the top of
+this record. No reference output or acceptance gate was changed.
+
+Repository policy checks and `git diff --check` pass. Rust sources were
+formatted with nightly-2026-10-01. Native builds and model-bound GPU work
+were centralized in the integration checkout; no native target or weight
+download was created in the agent checkout.
+
+Image requests already clear and bypass generation prefix reuse; this
+component change retains that state policy. Image requests have no MTP path.
+No full-model answer-quality or throughput claim follows from tower parity.
+
+Private v1-v7 references and all prior failed receipts remain preserved.
+An initial operator-producer invocation used the wrong existing pixel
+manifest and failed its argument identity check before creating output;
+the content-free category was `AssertionError`, phase `arguments`.

@@ -7,7 +7,7 @@ use std::{
 
 use QuantParamsLayout::{GroupOutput, OutputGroup};
 use QuantizationMethod::{ScaleBias, ScaleZeroPoint};
-use half::bf16;
+use half::{bf16, f16};
 use num_traits::Float;
 use rstest::rstest;
 use stark_engine_macros::stark_test;
@@ -185,6 +185,42 @@ fn parity_gemv_bf16(
     #[case] method: QuantizationMethod,
 ) {
     run_parity::<bf16>(m, k, n, gs, bits, method, None, "gemv", 0.05, 0.4);
+}
+
+// F16 activations with F16 MLX affine scales and biases (admitted F16 dense
+// profile): automatic routing, GEMV and Simdgroup GEMM against the CPU reference.
+#[rstest]
+#[test_attr(stark_test)]
+#[case::m1_gs64_4bit_mlx(1, 896, 128, 64, 4, QuantizationMethod::ScaleBias)]
+#[case::m4_gs64_4bit_mlx(4, 256, 64, 64, 4, QuantizationMethod::ScaleBias)]
+#[case::m1_gs64_8bit_mlx(1, 256, 64, 64, 8, QuantizationMethod::ScaleBias)]
+#[case::m8_gs32_4bit_mlx(8, 256, 64, 32, 4, QuantizationMethod::ScaleBias)]
+fn parity_gemv_f16(
+    #[case] m: u32,
+    #[case] k: u32,
+    #[case] n: u32,
+    #[case] gs: u32,
+    #[case] bits: u32,
+    #[case] method: QuantizationMethod,
+) {
+    run_parity::<f16>(m, k, n, gs, bits, method, None, "gemv", 0.02, 0.1);
+}
+
+#[rstest]
+#[test_attr(stark_test)]
+#[case::gs64_4bit_mlx_prefill(64, 256, 64, 64, 4, QuantizationMethod::ScaleBias)]
+#[case::gs64_8bit_mlx_prefill(64, 256, 64, 64, 8, QuantizationMethod::ScaleBias)]
+#[case::gs64_4bit_mlx_unaligned_n(64, 256, 72, 64, 4, QuantizationMethod::ScaleBias)]
+fn parity_f16(
+    #[case] m: u32,
+    #[case] k: u32,
+    #[case] n: u32,
+    #[case] gs: u32,
+    #[case] bits: u32,
+    #[case] method: QuantizationMethod,
+) {
+    run_parity::<f16>(m, k, n, gs, bits, method, Some(GemmEngine::Simdgroup), "gemm", 0.02, 0.25);
+    run_parity::<f16>(m, k, n, gs, bits, method, None, "auto", 0.02, 0.25);
 }
 
 #[stark_test]

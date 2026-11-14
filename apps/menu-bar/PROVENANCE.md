@@ -15,6 +15,17 @@ The app carries the base CLI runtime's licenses, notices and source manifest. `s
 
 `Contents/Resources/menu-bar-manifest.json` records the source revision and hashes, whether the checkout was dirty, the base runtime manifest hash and every file the builder adds, including the Python package files. Its `converter_package` record identifies the wheel, build backend, source hashes and installed converter provenance. `artifacts/menu-bar/Stark.app.manifest.json` additionally records the signed executable hash.
 
+The `pi_client` record identifies the separate integration repository, immutable
+revision, lock hash and complete public file closure. `Resources/PiClient.lock.json`
+pins the setup helper, launcher, guard, their local dependencies and license.
+Each delivered `PiClient/` file is also in `resources_sha256`. The builder reads
+the immutable `Resources/PiClient` snapshot by default and refuses hash changes.
+An explicit `--pi-client-source` checkout must match the same lock; a sibling
+checkout is never implicitly consumed. Client logic remains owned in the separate
+repository; update the snapshot mechanically, without local edits. The app
+performs no package installation. The normal installed Pi executable
+supplies its own public provider API and is checked for version 1.5.2.
+
 The original app's `application_version`, `build_number` and `build_channel` are
 recorded separately from the optional `distribution_version` archive identifier.
 Local builds have application version `0.0.0` and channel `development`; their
@@ -43,7 +54,9 @@ contract checks; they do not load a model or establish image execution.
 Worker overlays also refresh the native license inventory using Rust 1.98.1 and
 the current locked Cargo dependency metadata through the existing distribution
 notice collector. This includes the native image decoder dependencies and the
-verified PyTorch, SLEEF, Arm, GGML and Transformers adaptation notices. The old
+verified PyTorch, SLEEF, Arm, GGML, Transformers and MLX adaptation notices.
+The MLX notice is retained as `share/stark/licenses/LICENSE.mlx-reference` and
+is required by the packaged image qualification checks. The old
 CLI runtime's notice files are retained, while current notices and their Cargo
 lock identity are recorded in the app manifest. Building the app therefore needs
 the pinned Rust toolchain even when the worker executables already exist.

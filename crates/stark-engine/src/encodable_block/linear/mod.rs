@@ -4,6 +4,7 @@ use thiserror::Error;
 mod input_rht;
 mod matmul;
 mod qlora_wrapper;
+mod reference_affine;
 mod reference_bf16;
 mod rht_wrapper;
 mod row_partitioned;
@@ -11,6 +12,7 @@ mod untied_readout;
 
 pub use matmul::{LinearMatmul, LinearMatmulError};
 pub use qlora_wrapper::{QLoRALinearWrapper, QLoRALinearWrapperError};
+pub(crate) use reference_affine::{ReferenceAffineBF16Matmul, has_source_affine_policy, is_affine_dot_witness_active};
 pub(crate) use reference_bf16::ReferenceBF16Matmul;
 pub use rht_wrapper::{RHTLinearWrapper, RHTLinearWrapperError};
 pub use untied_readout::UntiedReadout;
@@ -155,7 +157,7 @@ impl<B: Backend> dyn Linear<B> {
             spec @ (AnyWeightMatrixSpec::FullPrecisionSpec(_)
             | AnyWeightMatrixSpec::MLXSpec(_)
             | AnyWeightMatrixSpec::IntSpec(_)) => {
-                let block = LinearMatmul::load(
+                let mut block = LinearMatmul::load(
                     context,
                     spec,
                     input_dimension,
@@ -167,6 +169,7 @@ impl<B: Backend> dyn Linear<B> {
                     has_biases.then_some(parameter_tree),
                     None,
                 )?;
+                block.set_source_output_widths(output_dimensions.as_ref())?;
                 Ok(Box::new(block))
             },
             AnyWeightMatrixSpec::HybridSpec(HybridSpec {

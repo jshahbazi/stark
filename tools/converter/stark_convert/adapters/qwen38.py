@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..checkpoint_metadata import CheckpointMetadata
 from ..compressed import MLXQuantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
@@ -106,8 +107,8 @@ def normalize_qwen38_config(config: dict) -> dict:
     }
 
 
-def architecture_config(config: dict) -> tuple[dict, tuple[re.Pattern, ...]]:
-    """Select only implemented text fields for the typed executable schema."""
+def text_architecture(config: dict) -> dict:
+    """Validate the shared Qwen3.8 text graph metadata."""
     text = normalize_qwen38_config(config)
     architecture = {field: _positive_int(text.get(field), field) for field in _TEXT_INTEGER_FIELDS}
     validate_planning_layers(architecture["num_hidden_layers"])
@@ -179,6 +180,13 @@ def architecture_config(config: dict) -> tuple[dict, tuple[re.Pattern, ...]]:
         and architecture["indexer_budget"] % architecture["indexer_compress_ratio"] == 0,
         "Unsupported Qwen3.8 geometry",
     )
+    return architecture
+
+
+def architecture_config(config: dict) -> tuple[dict, tuple[re.Pattern, ...]]:
+    """Bind typed conversion to the Lily storage contract."""
+    architecture = text_architecture(config)
+    ple_ids = architecture["ple_layer_ids"]
     lily = config.get("lily")
     _require(
         isinstance(lily, dict) and lily.get("format") == "qwen4_exp-affine-v1",
@@ -252,21 +260,133 @@ def _flatten(info: TensorInfo) -> TensorInfo:
     return replace(info, shape=(math.prod(info.shape[:-1]), info.shape[-1]))
 
 
-def build_qwen38_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def describe_text_weights(architecture, tensors, matrix, control, *, include_mtp=False):
+    """Walk the required logical tensor names and shapes for the text graph."""
+    base = "model.language_model"
+    h = architecture["hidden_size"]
+    wide = h * architecture["hc_count"]
+
+    def hyper(stem: str, combine: bool):
+        matrix(stem + ".input_mix_weight_down", (architecture["hc_lowrank"], wide), fixed_q8=True)
+        matrix(stem + ".input_mix_weight_up", (wide, architecture["hc_lowrank"]), fixed_q8=True)
+        if combine:
+            matrix(stem + ".block_inject_weight", (architecture["hc_count"], wide), fixed_q8=True)
+        control(stem + ".hc_norm.weight", (wide,))
+
+    def layer(stem: str, kind: str):
+        hyper(stem + ".attn_hyper_connection", True)
+        hyper(stem + ".mlp_hyper_connection", True)
+        if kind == "linear_attention":
+            p = stem + ".linear_attn"
+            kw = architecture["linear_num_key_heads"] * architecture["linear_key_head_dim"]
+            vw = architecture["linear_num_value_heads"] * architecture["linear_value_head_dim"]
+            for name, rows in (
+                ("in_proj_qkv", 2 * kw + vw),
+                ("in_proj_z", vw),
+                ("in_proj_a", architecture["linear_num_value_heads"]),
+                ("in_proj_b", architecture["linear_num_value_heads"]),
+            ):
+                matrix(p + "." + name, (rows, h), group="gdn")
+            matrix(p + ".out_proj", (h, vw), group="gdn")
+            control(p + ".conv1d.weight", (2 * kw + vw, 1, architecture["linear_conv_kernel_dim"]))
+            control(p + ".A_log", (architecture["linear_num_value_heads"],))
+            control(p + ".dt_bias", (architecture["linear_num_value_heads"],))
+            control(p + ".norm.weight", (architecture["linear_value_head_dim"],))
+        else:
+            p = stem + ".self_attn"
+            for name, rows in (
+                ("q_proj", 2 * architecture["num_attention_heads"] * architecture["head_dim"]),
+                ("k_proj", architecture["num_key_value_heads"] * architecture["head_dim"]),
+                ("v_proj", architecture["num_key_value_heads"] * architecture["head_dim"]),
+            ):
+                matrix(p + "." + name, (rows, h), group="attn")
+            matrix(p + ".o_proj", (h, architecture["num_attention_heads"] * architecture["head_dim"]), group="attn")
+            matrix(
+                p + ".indexer.index_qk_proj",
+                ((architecture["indexer_n_heads"] + 1) * architecture["indexer_head_dim"], h),
+                fixed_q8=True,
+            )
+            for name, width in (
+                ("q_norm", architecture["head_dim"]),
+                ("k_norm", architecture["head_dim"]),
+                ("indexer.q_layernorm", architecture["indexer_head_dim"]),
+                ("indexer.k_layernorm", architecture["indexer_head_dim"]),
+            ):
+                control(p + "." + name + ".weight", (width,))
+        p = stem + ".mlp"
+        matrix(p + ".gate", (architecture["num_experts"], h), fixed_q8=True)
+        matrix(p + ".shared_expert_gate", (1, h), fixed_q8=True)
+        e, m, s = (
+            architecture["num_experts"],
+            architecture["moe_intermediate_size"],
+            architecture["shared_expert_intermediate_size"],
+        )
+        for name in ("gate_proj", "up_proj"):
+            matrix(p + ".experts." + name, (e, m, h))
+            matrix(p + ".shared_expert." + name, (s, h), group="shared")
+        matrix(p + ".experts.down_proj", (e, h, m))
+        matrix(p + ".shared_expert.down_proj", (h, s), group="shared")
+
+    matrix(base + ".embed_tokens", (architecture["vocab_size"], h), group="embed", embedding=True)
+    matrix("lm_head", (architecture["vocab_size"], h), group="head")
+    hyper(base + ".hyper_connection_mixer", False)
+    for index, kind in enumerate(architecture["layer_types"]):
+        stem = f"{base}.layers.{index}"
+        layer(stem, kind)
+        if index + 1 in architecture["ple_layer_ids"]:
+            p = stem + ".ple"
+            pe = architecture["ple_embed_dim"]
+            heads = (architecture["ngram_size"] - 1) * architecture["heads_per_ngram"]
+            _require(pe % heads == 0, "Invalid Qwen3.8 PLE head width")
+            shard_rows, remainder = divmod(architecture["ple"]["padded_vocab_size"], architecture["split_ngram_parts"])
+            _require(shard_rows > 0 and remainder == 0, "Invalid Qwen3.8 PLE shard geometry")
+            for shard in range(architecture["split_ngram_parts"]):
+                matrix(
+                    f"{p}.ple_embedding.ngram_embedding.shard_{shard}",
+                    (shard_rows, pe // heads),
+                    embedding=True,
+                    ngram=True,
+                )
+            matrix(p + ".key_proj", (wide, pe), fixed_q8=True)
+            matrix(p + ".value_proj", (h, pe), fixed_q8=True)
+            for name in ("norm_key", "norm_query", "norm_conv"):
+                control(p + "." + name + ".weight", (wide,))
+            control(p + ".conv1d.weight", (wide, 1, architecture["ple_conv_kernel_size"]))
+            for name, width in (
+                ("layer_multipliers", architecture["ngram_size"]),
+                ("ngram_heads_vocab_sizes", heads),
+                ("ngram_heads_offsets", heads),
+            ):
+                key = p + ".ple_embedding." + name
+                # Lily stores these in typed config; retain exact tensor copies
+                # when the source also carries them (older exports do).
+                if key in tensors:
+                    control(key, (width,), integers=True)
+
+    if include_mtp:
+        control("mtp.pre_fc_norm_embedding.weight", (h,))
+        control("mtp.pre_fc_norm_hidden.weight", (wide,))
+        matrix("mtp.fc_embedding", (h, h), fixed_q8=True)
+        matrix("mtp.fc_hidden", (h, h), fixed_q8=True)
+        hyper("mtp.hyper_connection_mixer", False)
+        layer("mtp.layers.0", "full_attention")
+
+
+def build_qwen38_plan(
+    source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
     """Plan text-only standard storage while preserving every consumed source bit."""
     if dtype != "bfloat16":
         raise UnsupportedConversion("Qwen3.8 currently preserves BF16 parameters and requires bfloat16 output")
-    config = read_json(source / "config.json")
+    config = read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
     architecture, regexes = architecture_config(config)
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     validate_planning_layers(architecture["num_hidden_layers"], tensors)
     expected: set[str] = set()
     operations: list[TensorOperation] = []
     bindings: dict[str, dict] = {}
     metadata: dict[str, str] = {}
     groups = set(architecture["quantization"]["q8_groups"])
-    base = "model.language_model"
-    h, wide = architecture["hidden_size"], architecture["hidden_size"] * architecture["hc_count"]
 
     def control(name: str, shape: tuple[int, ...], integers: bool = False):
         _require(name in tensors, "Missing Qwen3.8 control tensor")
@@ -333,99 +453,7 @@ def build_qwen38_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
             }
         expected.update(names)
 
-    def hyper(stem: str, combine: bool):
-        matrix(stem + ".input_mix_weight_down", (architecture["hc_lowrank"], wide), fixed_q8=True)
-        matrix(stem + ".input_mix_weight_up", (wide, architecture["hc_lowrank"]), fixed_q8=True)
-        if combine:
-            matrix(stem + ".block_inject_weight", (architecture["hc_count"], wide), fixed_q8=True)
-        control(stem + ".hc_norm.weight", (wide,))
-
-    matrix(base + ".embed_tokens", (architecture["vocab_size"], h), group="embed", embedding=True)
-    matrix("lm_head", (architecture["vocab_size"], h), group="head")
-    hyper(base + ".hyper_connection_mixer", False)
-    for index, kind in enumerate(architecture["layer_types"]):
-        stem = f"{base}.layers.{index}"
-        hyper(stem + ".attn_hyper_connection", True)
-        hyper(stem + ".mlp_hyper_connection", True)
-        if kind == "linear_attention":
-            p = stem + ".linear_attn"
-            kw = architecture["linear_num_key_heads"] * architecture["linear_key_head_dim"]
-            vw = architecture["linear_num_value_heads"] * architecture["linear_value_head_dim"]
-            for name, rows in (
-                ("in_proj_qkv", 2 * kw + vw),
-                ("in_proj_z", vw),
-                ("in_proj_a", architecture["linear_num_value_heads"]),
-                ("in_proj_b", architecture["linear_num_value_heads"]),
-            ):
-                matrix(p + "." + name, (rows, h), group="gdn")
-            matrix(p + ".out_proj", (h, vw), group="gdn")
-            control(p + ".conv1d.weight", (2 * kw + vw, 1, architecture["linear_conv_kernel_dim"]))
-            control(p + ".A_log", (architecture["linear_num_value_heads"],))
-            control(p + ".dt_bias", (architecture["linear_num_value_heads"],))
-            control(p + ".norm.weight", (architecture["linear_value_head_dim"],))
-        else:
-            p = stem + ".self_attn"
-            for name, rows in (
-                ("q_proj", 2 * architecture["num_attention_heads"] * architecture["head_dim"]),
-                ("k_proj", architecture["num_key_value_heads"] * architecture["head_dim"]),
-                ("v_proj", architecture["num_key_value_heads"] * architecture["head_dim"]),
-            ):
-                matrix(p + "." + name, (rows, h), group="attn")
-            matrix(p + ".o_proj", (h, architecture["num_attention_heads"] * architecture["head_dim"]), group="attn")
-            matrix(
-                p + ".indexer.index_qk_proj",
-                ((architecture["indexer_n_heads"] + 1) * architecture["indexer_head_dim"], h),
-                fixed_q8=True,
-            )
-            for name, width in (
-                ("q_norm", architecture["head_dim"]),
-                ("k_norm", architecture["head_dim"]),
-                ("indexer.q_layernorm", architecture["indexer_head_dim"]),
-                ("indexer.k_layernorm", architecture["indexer_head_dim"]),
-            ):
-                control(p + "." + name + ".weight", (width,))
-        p = stem + ".mlp"
-        matrix(p + ".gate", (architecture["num_experts"], h), fixed_q8=True)
-        matrix(p + ".shared_expert_gate", (1, h), fixed_q8=True)
-        e, m, s = (
-            architecture["num_experts"],
-            architecture["moe_intermediate_size"],
-            architecture["shared_expert_intermediate_size"],
-        )
-        for name in ("gate_proj", "up_proj"):
-            matrix(p + ".experts." + name, (e, m, h))
-            matrix(p + ".shared_expert." + name, (s, h), group="shared")
-        matrix(p + ".experts.down_proj", (e, h, m))
-        matrix(p + ".shared_expert.down_proj", (h, s), group="shared")
-        if index + 1 in architecture["ple_layer_ids"]:
-            p = stem + ".ple"
-            pe = architecture["ple_embed_dim"]
-            heads = (architecture["ngram_size"] - 1) * architecture["heads_per_ngram"]
-            _require(pe % heads == 0, "Invalid Qwen3.8 PLE head width")
-            shard_rows, remainder = divmod(architecture["ple"]["padded_vocab_size"], architecture["split_ngram_parts"])
-            _require(shard_rows > 0 and remainder == 0, "Invalid Qwen3.8 PLE shard geometry")
-            for shard in range(architecture["split_ngram_parts"]):
-                matrix(
-                    f"{p}.ple_embedding.ngram_embedding.shard_{shard}",
-                    (shard_rows, pe // heads),
-                    embedding=True,
-                    ngram=True,
-                )
-            matrix(p + ".key_proj", (wide, pe), fixed_q8=True)
-            matrix(p + ".value_proj", (h, pe), fixed_q8=True)
-            for name in ("norm_key", "norm_query", "norm_conv"):
-                control(p + "." + name + ".weight", (wide,))
-            control(p + ".conv1d.weight", (wide, 1, architecture["ple_conv_kernel_size"]))
-            for name, width in (
-                ("layer_multipliers", architecture["ngram_size"]),
-                ("ngram_heads_vocab_sizes", heads),
-                ("ngram_heads_offsets", heads),
-            ):
-                key = p + ".ple_embedding." + name
-                # Lily stores these in typed config; retain exact tensor copies
-                # when the source also carries them (older exports do).
-                if key in tensors:
-                    control(key, (width,), integers=True)
+    describe_text_weights(architecture, tensors, matrix, control)
     omitted = {"vision": {"tensors": 0, "bytes": 0}, "mtp": {"tensors": 0, "bytes": 0}}
     for name, info in tensors.items():
         if name in expected:

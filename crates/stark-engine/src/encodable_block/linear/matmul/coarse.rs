@@ -10,6 +10,7 @@ impl<B: Backend> LinearMatmul<B> {
             || self.biases.is_some()
             || self.output_hadamard_factors.is_some()
             || self.reference_matmul.is_some()
+            || self.reference_affine.is_some()
         {
             return Ok(None);
         }
@@ -29,6 +30,7 @@ impl<B: Backend> LinearMatmul<B> {
             output_dim: self.output_dim,
             output_data_type: DataType::F32,
             reference_matmul: None,
+            reference_affine: None,
         }))
     }
 }

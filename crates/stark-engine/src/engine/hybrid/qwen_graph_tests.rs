@@ -602,7 +602,7 @@ fn qwen_graph_parallel_ple_matches_scalar_across_wide_tails_and_history() {
 fn qwen_graph_parallel_attention_preserves_grouped_heads_mask_and_prefix_stride() {
     use crate::engine::hybrid::math::{sigmoid, softmax};
 
-    for (heads, kv_heads, dim, count, capacity) in [(4, 2, 3, 5, 8), (2, 1, 33, 7, 16)] {
+    for (heads, kv_heads, dim, count, capacity, score_capacity) in [(4, 2, 3, 5, 8, 16), (2, 1, 33, 7, 16, 32)] {
         let values = |len: usize, seed: usize| {
             (0..len).map(|index| (((index * 13 + seed * 7) % 47) as f32 - 23.0) / 29.0).collect::<Vec<_>>()
         };
@@ -621,10 +621,10 @@ fn qwen_graph_parallel_attention_preserves_grouped_heads_mask_and_prefix_stride(
         let input_visible =
             DecodeGraph::upload(&visible.iter().map(|&keep| f32::from_bits(u32::from(keep))).collect::<Vec<_>>())
                 .unwrap();
-        let scores = graph.scratch(heads * capacity).unwrap();
-        let probabilities = graph.scratch(heads * capacity).unwrap();
+        let scores = graph.scratch(heads * score_capacity).unwrap();
+        let probabilities = graph.scratch(heads * score_capacity).unwrap();
         let output = graph.scratch(heads * dim).unwrap();
-        let parameters = [count as u32, heads as u32, dim as u32, kv_heads as u32, capacity as u32];
+        let parameters = [count as u32, heads as u32, dim as u32, kv_heads as u32, score_capacity as u32];
         graph
             .kernel(
                 "qwen_graph_qsa_scores",
@@ -638,7 +638,7 @@ fn qwen_graph_parallel_attention_preserves_grouped_heads_mask_and_prefix_stride(
             .kernel(
                 "qwen_graph_qsa_softmax",
                 &[&scores, &input_visible, &probabilities],
-                &[count as u32, heads as u32, capacity as u32],
+                &[count as u32, heads as u32, score_capacity as u32],
                 heads,
                 1,
             )
@@ -679,4 +679,45 @@ fn qwen_graph_parallel_attention_preserves_grouped_heads_mask_and_prefix_stride(
         }
         assert!(actual.iter().zip(expected).all(|(&a, b)| (a - b).abs() < 2e-6));
     }
+}
+
+#[stark_test]
+fn qwen_graph_scalar_workspace_does_not_follow_split_attention_cache_growth() {
+    let g = Geometry {
+        context: 4096,
+        heads: 4,
+        kv_heads: 1,
+        head_dim: 2,
+        index_heads: 1,
+        index_dim: 2,
+        ratio: 4,
+        budget: 8,
+        ..Geometry::default()
+    };
+    let norm = DecodeGraph::upload(&[1.0, 1.0]).unwrap();
+    let mut controls = AttentionControls {
+        q_norm: norm.clone(),
+        k_norm: norm.clone(),
+        index_q_norm: norm.clone(),
+        index_k_norm: norm,
+        cache: None,
+        scalar: None,
+    };
+    assert!(controls.scalar.is_none());
+    controls.ensure_scalar_workspace(&g, 255).unwrap();
+    for position in [0, 16, 32, 64, 128, 256, 512, 1024, 2048] {
+        let mut graph = DecodeGraph::new().unwrap();
+        controls.ensure_cache(&mut graph, &g, position).unwrap();
+        graph.finish(&[]).unwrap();
+    }
+    assert_eq!(controls.cache.as_ref().unwrap().capacity, 4096);
+    let scalar = controls.scalar.as_ref().unwrap();
+    assert_eq!(scalar.capacity, 256);
+    assert_eq!(scalar.scores.len, 256 * g.heads);
+    assert_eq!(scalar.probabilities.len, 256 * g.heads);
+    // Explicit scalar mode and oversized split fallback still grow on demand.
+    controls.ensure_scalar_workspace(&g, 4096).unwrap();
+    let scalar = controls.scalar.as_ref().unwrap();
+    assert_eq!(scalar.capacity, 4096);
+    assert_eq!(scalar.scores.len, 4096 * g.heads);
 }

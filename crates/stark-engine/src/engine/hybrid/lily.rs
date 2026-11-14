@@ -9,7 +9,7 @@
 //! persisted. Optional MTP uses complete host-sampled F32 readouts and
 //! request-local rollback captures.
 
-use std::{collections::VecDeque, path::Path, time::Instant};
+use std::{collections::VecDeque, path::Path, sync::Arc, time::Instant};
 
 use stark_lily_core::{
     engine::{DecodeStateApi, Draw, ScratchApi, SnapshotApi, VisionMode},
@@ -17,9 +17,10 @@ use stark_lily_core::{
         attention::{KvFormat, MAX_SEQ},
         sample::SamplingParams,
     },
-    metal::{EncodedPass, MetalContext, PendingPass, stage_profile},
+    metal::{EncodedPass, MetalContext, PendingPass, gpu_busy_ns, stage_profile},
     qwen4exp::{
-        DecodeState, HostVerification, NgramStorage, Qwen4ExpModel, Scratch, config::Qwen4ExpConfig, model::Snapshot,
+        DecodeState, HostVerification, ImageEmbeds, ImageSpan, NgramStorage, Qwen4ExpModel, Scratch, VisionInput,
+        config::Qwen4ExpConfig, model::Snapshot, positions_for_prompt,
     },
 };
 
@@ -149,6 +150,24 @@ fn record_gpu_profile_for(mtp_verify: bool) {
     }
 }
 
+/// Capture Lily's process-local union of completed GPU command spans only for
+/// an opted-in profile. The caller records the delta after its phase completes.
+fn gpu_busy_snapshot() -> Option<u64> {
+    profile::enabled().then(gpu_busy_ns)
+}
+
+fn record_gpu_busy_delta(
+    name: &'static str,
+    before: Option<u64>,
+) {
+    if let Some(before) = before {
+        let after = gpu_busy_ns();
+        if after >= before {
+            profile::record(name, (after - before) as f64 * 1e-9, 0);
+        }
+    }
+}
+
 fn admitted_position(
     committed: usize,
     pending: usize,
@@ -243,6 +262,8 @@ pub struct LilyModel {
     mtp_stats: MtpStats,
     capture_at: Option<usize>,
     captured: Option<PrefixSnapshot>,
+    image_owner: Arc<()>,
+    image_active: bool,
     // Context ownership outlives every model/state/scratch allocation on drop.
     context: MetalContext,
 }
@@ -253,9 +274,18 @@ impl LilyModel {
         Self::load_with_mtp(path, false)
     }
 
+    #[cfg(test)]
     pub fn load_with_mtp(
         path: &Path,
         requested: bool,
+    ) -> Result<Self> {
+        Self::load_with_options(path, requested, false)
+    }
+
+    pub fn load_with_options(
+        path: &Path,
+        requested: bool,
+        images: bool,
     ) -> Result<Self> {
         let with_mtp = requested
             && Qwen4ExpConfig::from_model_dir(path)
@@ -269,7 +299,11 @@ impl LilyModel {
             path,
             NgramStorage::Paged,
             with_mtp,
-            VisionMode::Off,
+            if images {
+                VisionMode::Auto
+            } else {
+                VisionMode::Off
+            },
             None,
             None,
             None,
@@ -278,6 +312,9 @@ impl LilyModel {
             None,
         )
         .map_err(|_| Error::Unsupported("mixed precision checkpoint admission failed"))?;
+        if images && !model.has_vision() {
+            return Err(Error::Unsupported("checkpoint does not retain an admitted vision tower"));
+        }
         Self::from_model(context, model)
     }
 
@@ -333,6 +370,8 @@ impl LilyModel {
             mtp_stats: MtpStats::default(),
             capture_at: None,
             captured: None,
+            image_owner: Arc::new(()),
+            image_active: false,
             context,
         })
     }
@@ -341,8 +380,205 @@ impl LilyModel {
         self.vocab_size
     }
 
+    pub fn supports_images(&self) -> bool {
+        self.model.has_vision()
+    }
+
+    fn image_tokens(&self) -> Result<super::image::Tokens> {
+        let vision = self
+            .model
+            .config
+            .vision
+            .as_ref()
+            .filter(|_| self.model.has_vision())
+            .ok_or(Error::Unsupported("native image tower unavailable"))?;
+        Ok(super::image::Tokens {
+            start: vision.vision_start_token_id,
+            end: vision.vision_end_token_id,
+            pad: vision.image_token_id,
+            video: vision.video_token_id,
+        })
+    }
+
+    pub fn validate_image_tokenizer(
+        &self,
+        tokenizer: &tokenizers::Tokenizer,
+    ) -> Result<()> {
+        let tokens = self.image_tokens()?;
+        for (text, expected) in [
+            ("<|vision_start|>", tokens.start),
+            ("<|vision_end|>", tokens.end),
+            ("<|image_pad|>", tokens.pad),
+            ("<|video_pad|>", tokens.video),
+        ] {
+            if tokenizer.token_to_id(text) != Some(expected) {
+                return Err(Error::Invalid("image tokenizer controls"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn prepare_image(
+        &self,
+        encoded: &[u8],
+    ) -> Result<super::PreparedHybridImage> {
+        self.image_tokens()?;
+        if self.is_fenced() {
+            return Err(Error::Invalid("mixed precision context requires reload"));
+        }
+        super::image::prepare(self.image_owner.clone(), encoded)
+    }
+
+    pub fn prepare_image_prompt(
+        &self,
+        tokens: &[u32],
+        image: &super::PreparedHybridImage,
+        context_capacity: usize,
+    ) -> Result<Box<[u32]>> {
+        if !Arc::ptr_eq(&self.image_owner, &image.owner)
+            || context_capacity == 0
+            || self.is_fenced()
+            || tokens.iter().any(|token| *token as usize >= self.vocab_size)
+        {
+            return Err(Error::Invalid("model-bound image prompt"));
+        }
+        self.image_tokens()?.expand(tokens, image.image_token_count() as usize, context_capacity.min(self.max_context))
+    }
+
+    pub fn prefill_image(
+        &mut self,
+        tokens: &[u32],
+        image: super::PreparedHybridImage,
+    ) -> Result<Vec<f32>> {
+        self.prefill_image_controlled(tokens, image, || false)
+    }
+
+    pub fn prefill_image_controlled<F: FnMut() -> bool>(
+        &mut self,
+        tokens: &[u32],
+        image: super::PreparedHybridImage,
+        should_cancel: F,
+    ) -> Result<Vec<f32>> {
+        let should_cancel = std::cell::RefCell::new(should_cancel);
+        let stop = || (should_cancel.borrow_mut())();
+        let result = (|| {
+            if stop() {
+                return Err(Error::Cancelled);
+            }
+            if !Arc::ptr_eq(&self.image_owner, &image.owner)
+                || self.is_fenced()
+                || tokens.is_empty()
+                || tokens.len() > self.max_context
+                || tokens.iter().any(|token| *token as usize >= self.vocab_size)
+            {
+                return Err(Error::Invalid("model-bound image prefill"));
+            }
+            let start = self.image_tokens()?.span(tokens, image.image_token_count() as usize)?;
+            let grid = image.grid();
+            let span = ImageSpan {
+                start,
+                len: image.image_token_count() as usize,
+                grid_h: grid[1] as usize,
+                grid_w: grid[2] as usize,
+            };
+            let positions =
+                positions_for_prompt(tokens, &[span]).map_err(|_| Error::Invalid("image rotary positions"))?;
+            self.reset();
+            self.set_mtp_enabled(false)?;
+            self.ensure_context_capacity(tokens.len())?;
+            let pixels: Vec<f32> = image.prepared.patches.iter().map(|value| value.to_f32()).collect();
+            // Fence the instance until every tower/prefill completion and the
+            // target readout have succeeded. Reset drains submitted work.
+            self.usable = false;
+            let rows = self
+                .model
+                .encode_image(&self.context, &mut self.scratch, &pixels, span.grid_h, span.grid_w)
+                .map_err(|_| Error::Invalid("image tower execution failed"))?;
+            // A tower pass owns one bounded image (at most 65,536 patches).
+            // Submitted Metal commands cannot be interrupted safely; observe
+            // cancellation immediately after completion, before text prefill.
+            if stop() {
+                self.usable = true;
+                return Err(Error::Cancelled);
+            }
+            let images = [ImageEmbeds {
+                span,
+                rows: &rows,
+            }];
+            let input = VisionInput {
+                positions: &positions,
+                images: &images,
+            };
+            let greedy = SamplingParams::greedy();
+            let draw = Draw {
+                params: &greedy,
+                step: 0,
+            };
+            let fed = self
+                .model
+                .prefill_with_vision_until(
+                    &self.context,
+                    &mut self.state,
+                    &mut self.scratch,
+                    tokens,
+                    Some(draw),
+                    Some(&input),
+                    &stop,
+                )
+                .map_err(|_| Error::Invalid("image prefill execution failed"))?;
+            if fed != tokens.len() || stop() {
+                self.usable = true;
+                return Err(Error::Cancelled);
+            }
+            let logits = self.scratch.logits().to_f32().map_err(|_| Error::Invalid("image target readout failed"))?;
+            if self.state.pos != tokens.len()
+                || logits.len() != self.vocab_size
+                || !super::finite_guard::all_finite(&logits)
+            {
+                return Err(Error::Invalid("image target readout values"));
+            }
+            self.usable = true;
+            self.image_active = true;
+            self.last_full_readout = Some(self.state.pos);
+            Ok(logits)
+        })();
+        if result.is_err() {
+            self.reset();
+        }
+        result
+    }
+
     pub fn max_context(&self) -> usize {
         self.max_context
+    }
+
+    pub(crate) fn request_memory_bytes(
+        &self,
+        context_tokens: u32,
+        input_tokens: u32,
+    ) -> Option<usize> {
+        let capacity =
+            planned_context_capacity(self.scratch_capacity, context_tokens as usize, self.max_context).ok()?;
+        self.model.additional_request_memory_bytes(&self.context, capacity, input_tokens as usize, &self.scratch)
+    }
+
+    pub(crate) fn image_request_memory_bytes(
+        &self,
+        patches: usize,
+    ) -> Option<usize> {
+        self.model.image_request_memory_bytes(&self.context, patches)
+    }
+
+    /// Reserve the span used by admission before prompt execution can trigger
+    /// a smaller geometric growth followed by a second, larger decode growth.
+    pub fn reserve_generation_context(
+        &mut self,
+        tokens: usize,
+    ) -> Result<()> {
+        if self.is_fenced() {
+            return Err(Error::Invalid("mixed precision context requires reload"));
+        }
+        self.ensure_context_capacity(tokens)
     }
 
     pub fn supports_mtp(&self) -> bool {
@@ -429,6 +665,21 @@ impl LilyModel {
         Ok(())
     }
 
+    /// Keep the Lily queue resident between requests without touching model
+    /// state. Called on its owner thread, only after synchronous work drains.
+    pub fn maintain_idle_queue(&self) -> Result<()> {
+        if self.is_fenced() {
+            return Err(Error::Invalid("mixed precision context requires reload"));
+        }
+        self.context.wake().map_err(|_| Error::Invalid("mixed precision idle queue wake failed"))
+    }
+
+    /// Both admitted Lily and official affine policies share this same queue.
+    /// Queue maintenance changes no precision, sampling or model state.
+    pub fn needs_idle_queue_maintenance(&self) -> bool {
+        true
+    }
+
     /// Explicit diagnostic mode for future passes; no payload is captured.
     pub fn set_stage_profiling(
         &mut self,
@@ -472,7 +723,8 @@ impl LilyModel {
         position: usize,
     ) -> Result<()> {
         let chunk = self.prefill_chunk_tokens();
-        if self.is_fenced()
+        if self.image_active
+            || self.is_fenced()
             || !self.pending.is_empty()
             || position <= self.state.pos
             || position >= self.max_context
@@ -502,7 +754,8 @@ impl LilyModel {
     ) -> Result<()> {
         let position = snapshot.position();
         let chunk = self.prefill_chunk_tokens();
-        if self.is_fenced()
+        if self.image_active
+            || self.is_fenced()
             || self.state.pos != 0
             || !self.pending.is_empty()
             || snapshot.mtp_enabled != self.mtp_enabled
@@ -532,6 +785,7 @@ impl LilyModel {
         self.last_full_readout = None;
         self.capture_at = None;
         self.captured = None;
+        self.image_active = false;
         self.mtp_stats = MtpStats::default();
         // Core waits drain submitted GPU work even on execution failure.
         // A faulted context stays unusable until the worker reloads the model.
@@ -558,9 +812,17 @@ impl LilyModel {
         &mut self,
         token: u32,
     ) -> Result<Vec<f32>> {
+        self.step_controlled(token, &mut || Ok(()))
+    }
+
+    pub fn step_controlled(
+        &mut self,
+        token: u32,
+        before_pass: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<f32>> {
         self.last_greedy = None;
         self.last_full_readout = None;
-        let result = self.forward(token).and_then(|_| {
+        let result = self.forward_controlled(token, before_pass).and_then(|_| {
             let logits = {
                 let _scope = profile::Scope::bytes("qwen.mixed.logit_readback", self.vocab_size * 4);
                 self.scratch.logits().to_f32().map_err(|_| Error::Invalid("mixed precision readout failed"))?
@@ -584,9 +846,17 @@ impl LilyModel {
         &mut self,
         token: u32,
     ) -> Result<u32> {
+        self.step_greedy_controlled(token, &mut || Ok(()))
+    }
+
+    pub fn step_greedy_controlled(
+        &mut self,
+        token: u32,
+        before_pass: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<u32> {
         self.last_greedy = None;
         self.last_full_readout = None;
-        let result = self.forward(token).and_then(|slot| {
+        let result = self.forward_controlled(token, before_pass).and_then(|slot| {
             let values = self
                 .scratch
                 .next_token
@@ -762,10 +1032,12 @@ impl LilyModel {
     }
 
     /// Returns the GPU sampler slot written by this synchronous forward pass.
-    fn forward(
+    fn forward_controlled(
         &mut self,
         token: u32,
+        before_pass: &mut dyn FnMut() -> Result<()>,
     ) -> Result<usize> {
+        before_pass()?;
         let expected_position = self.check_token(token)?;
         self.ensure_context_capacity(expected_position)?;
         let greedy = SamplingParams::greedy();
@@ -782,7 +1054,7 @@ impl LilyModel {
             {
                 // Match the official server's N-1 prompt forward followed by
                 // one initialized S1 logits forward. The prefix cannot draw.
-                self.prefill_pending(prefix_len, None)?;
+                self.prefill_pending(prefix_len, None, before_pass)?;
                 if self.state.pos.checked_add(1) != Some(expected_position) {
                     return Err(Error::Invalid("mixed precision prefill position"));
                 }
@@ -790,6 +1062,10 @@ impl LilyModel {
                     params: &greedy,
                     step: self.state.pos,
                 };
+                if let Err(error) = before_pass() {
+                    self.usable = true;
+                    return Err(error);
+                }
                 self.forward_decode_admitted(token, expected_position, held_draw)?;
                 if self.state.pos != expected_position {
                     return Err(Error::Invalid("mixed precision prefill position"));
@@ -802,7 +1078,7 @@ impl LilyModel {
                 Ok(1)
             } else {
                 // Preserve legacy/reference execution and cold N1 prefill.
-                self.prefill_pending(self.pending.len(), Some(draw))?;
+                self.prefill_pending(self.pending.len(), Some(draw), before_pass)?;
                 self.usable = true;
                 self.pending.clear();
                 if self.state.pos != expected_position {
@@ -831,7 +1107,9 @@ impl LilyModel {
         &mut self,
         end: usize,
         draw: Option<Draw<'_>>,
+        before_pass: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
+        let gpu_busy_before = gpu_busy_snapshot();
         let chunk = self.prefill_chunk_tokens();
         let split = self.capture_at.and_then(|position| position.checked_sub(self.state.pos)).filter(|&split| {
             (split < end || (split == end && draw.is_none()))
@@ -839,23 +1117,59 @@ impl LilyModel {
                 && split.is_multiple_of(chunk)
                 && self.state.pos.is_multiple_of(chunk)
         });
-        let failed = |_| Error::Invalid("mixed precision prefill failed");
         let Some(split) = split else {
-            return self
-                .model
-                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..end], draw)
-                .map_err(failed);
+            let result = self.prefill_span_controlled(0, end, draw, before_pass);
+            record_gpu_busy_delta("qwen.mixed.prefill.gpu_busy", gpu_busy_before);
+            return result;
         };
-        if split > 0 {
-            self.model
-                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..split], None)
-                .map_err(failed)?;
+        let result = (|| -> Result<()> {
+            if split > 0 {
+                self.prefill_span_controlled(0, split, None, before_pass)?;
+            }
+            self.capture_prefix()?;
+            if split < end {
+                self.prefill_span_controlled(split, end, draw, before_pass)?;
+            }
+            Ok(())
+        })();
+        record_gpu_busy_delta("qwen.mixed.prefill.gpu_busy", gpu_busy_before);
+        result
+    }
+
+    fn prefill_span_controlled(
+        &mut self,
+        start: usize,
+        end: usize,
+        draw: Option<Draw<'_>>,
+        before_pass: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let control = std::cell::RefCell::new(before_pass);
+        let control_error = std::cell::RefCell::new(None);
+        let stop = || match (control.borrow_mut())() {
+            Ok(()) => false,
+            Err(error) => {
+                *control_error.borrow_mut() = Some(error);
+                true
+            },
+        };
+        let tokens = &self.pending[start..end];
+        let fed = self
+            .model
+            .prefill_with_vision_until(&self.context, &mut self.state, &mut self.scratch, tokens, draw, None, &stop)
+            .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
+        // A cancelled pass has completed and the context remains healthy.
+        // Let the public step reset request state without fencing the model.
+        if let Some(error) = control_error.into_inner() {
+            self.usable = true;
+            return Err(error);
         }
-        self.capture_prefix()?;
-        if split < end {
-            self.model
-                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[split..end], draw)
-                .map_err(failed)?;
+        if fed != tokens.len() {
+            self.usable = true;
+            return Err(Error::Cancelled);
+        }
+        if let Err(error) = (control.borrow_mut())() {
+            self.usable = true;
+            return Err(error);
         }
         Ok(())
     }
@@ -952,43 +1266,45 @@ impl MtpDecode<'_> {
         let count = self.drafts.min(self.remaining.saturating_sub(1));
         *self.usable = false;
         let started = Instant::now();
-        let proposals = if count > 0 {
+        let gpu_busy_before = gpu_busy_snapshot();
+        let proposals_result = if count > 0 {
             let sampler = &mut *self.sampler;
             self.model
                 .draft_host(self.context, self.state, self.scratch, self.pending, count, &mut |logits| {
                     sampler.draft(logits).map_err(|_| std::io::Error::other("MTP draft selection failed").into())
                 })
-                .map_err(|_| Error::Invalid("MTP draft failed"))?
+                .map_err(|_| Error::Invalid("MTP draft failed"))
         } else {
-            Vec::new()
+            Ok(Vec::new())
         };
+        record_gpu_busy_delta("qwen.mtp.draft.gpu_busy", gpu_busy_before);
+        let proposals = proposals_result?;
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.draft_seconds += elapsed;
         profile::record("qwen.mtp.draft", elapsed, 0);
         let started = Instant::now();
-        let verified = self
-            .model
-            .verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals)
-            .map_err(|error| {
-                if profile::enabled() {
-                    // Classify only fixed diagnostic guards. Never emit the
-                    // framework error, request data, or an exception dump.
-                    let category = match error.to_string().as_str() {
-                        "stage profile capacity exceeded" => "qwen.mtp.verify.profile_failure.capacity",
-                        "stage profile changed command buffer count" => {
-                            "qwen.mtp.verify.profile_failure.command_buffers"
-                        },
-                        "stage timestamp duration" => "qwen.mtp.verify.profile_failure.duration",
-                        "stage timestamp order" => "qwen.mtp.verify.profile_failure.order",
-                        "stage timestamp shape" => "qwen.mtp.verify.profile_failure.shape",
-                        "stage profile missing terminal timestamp" => "qwen.mtp.verify.profile_failure.terminal",
-                        "stage trace missing" => "qwen.mtp.verify.profile_failure.missing",
-                        _ => "qwen.mtp.verify.profile_failure.other",
-                    };
-                    profile::record(category, 0.0, 0);
-                }
-                Error::Invalid("MTP verify failed")
-            })?;
+        let gpu_busy_before = gpu_busy_snapshot();
+        let verified_result =
+            self.model.verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals);
+        record_gpu_busy_delta("qwen.mtp.verify.gpu_busy", gpu_busy_before);
+        let verified = verified_result.map_err(|error| {
+            if profile::enabled() {
+                // Classify only fixed diagnostic guards. Never emit the
+                // framework error, request data, or an exception dump.
+                let category = match error.to_string().as_str() {
+                    "stage profile capacity exceeded" => "qwen.mtp.verify.profile_failure.capacity",
+                    "stage profile changed command buffer count" => "qwen.mtp.verify.profile_failure.command_buffers",
+                    "stage timestamp duration" => "qwen.mtp.verify.profile_failure.duration",
+                    "stage timestamp order" => "qwen.mtp.verify.profile_failure.order",
+                    "stage timestamp shape" => "qwen.mtp.verify.profile_failure.shape",
+                    "stage profile missing terminal timestamp" => "qwen.mtp.verify.profile_failure.terminal",
+                    "stage trace missing" => "qwen.mtp.verify.profile_failure.missing",
+                    _ => "qwen.mtp.verify.profile_failure.other",
+                };
+                profile::record(category, 0.0, 0);
+            }
+            Error::Invalid("MTP verify failed")
+        })?;
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.verify_seconds += elapsed;
         profile::record("qwen.mtp.verify", elapsed, 0);
@@ -1010,9 +1326,10 @@ impl MtpDecode<'_> {
             }
         }
         let started = Instant::now();
-        self.model
-            .finish_host_verify(self.context, self.state, self.scratch, &verified, accepted)
-            .map_err(|_| Error::Invalid("MTP rollback failed"))?;
+        let gpu_busy_before = gpu_busy_snapshot();
+        let finish_result = self.model.finish_host_verify(self.context, self.state, self.scratch, &verified, accepted);
+        record_gpu_busy_delta("qwen.mtp.finish.gpu_busy", gpu_busy_before);
+        finish_result.map_err(|_| Error::Invalid("MTP rollback failed"))?;
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.rollback_seconds += elapsed;
         profile::record("qwen.mtp.finish", elapsed, 0);
@@ -1468,6 +1785,15 @@ mod tests {
 
     use super::*;
 
+    fn digest_logits(logits: &[f32]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        for value in logits {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        digest.finalize().into()
+    }
+
     #[stark_test]
     #[ignore]
     #[cfg(debug_assertions)]
@@ -1881,6 +2207,86 @@ mod tests {
         assert!(planned_context_capacity(0, 0, 0).is_err());
         assert_eq!(admitted_position(262_144, 0, 7, 8, published).unwrap(), 262_145);
         assert_eq!(admitted_decode_end(262_144, published - 262_144, published).unwrap(), published);
+    }
+
+    #[stark_test]
+    fn reserving_request_end_preserves_the_capacity_charged_by_admission() {
+        let maximum = 1_048_576;
+        let prompt = 33_000;
+        let end = 34_000;
+        let admitted = planned_context_capacity(INITIAL_CONTEXT_CAPACITY, end, maximum).unwrap();
+        // Growing first for the prompt and then decode would charge a second
+        // geometric expansion absent from the original request estimate.
+        let prompt_first = planned_context_capacity(INITIAL_CONTEXT_CAPACITY, prompt, maximum).unwrap();
+        assert!(planned_context_capacity(prompt_first, end, maximum).unwrap() > admitted);
+        assert_eq!(planned_context_capacity(admitted, prompt, maximum).unwrap(), admitted);
+        assert_eq!(planned_context_capacity(admitted, end, maximum).unwrap(), admitted);
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn private_checkpoint_cancelled_prefill_resets_and_replays() {
+        let path = std::env::var_os("STARK_TEST_MODEL_PATH").expect("private checkpoint path");
+        let path = Path::new(&path);
+        let mut model = LilyModel::load(path).unwrap();
+        model.model.set_prefill_chunk(256).unwrap();
+        let input: Vec<u32> = (0..513).map(|i| 1 + (i % 31) as u32).collect();
+        for &token in &input[..input.len() - 1] {
+            model.ingest(token).unwrap();
+        }
+        let mut checks = 0;
+        let result = model.step_controlled(*input.last().unwrap(), &mut || {
+            checks += 1;
+            if checks == 3 {
+                Err(Error::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(checks == 3 && model.position() == 0 && model.pending.is_empty());
+        assert!(!model.is_fenced() && model.take_prefix_snapshot().is_none());
+        let prefill = |model: &mut LilyModel| {
+            model.reset();
+            for &token in &input[..input.len() - 1] {
+                model.ingest(token).unwrap();
+            }
+            digest_logits(&model.step(*input.last().unwrap()).unwrap())
+        };
+        let replay = prefill(&mut model);
+        assert!(prefill(&mut model) == replay, "cancelled prefill changed a later request");
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn private_checkpoint_mtp_first_drafts_are_independent_of_previous_request() {
+        let path = std::env::var_os("STARK_TEST_MODEL_PATH").expect("private checkpoint path");
+        let mut model = LilyModel::load_with_mtp(Path::new(&path), true).unwrap();
+        assert!(model.model.config.official_mlx_rounding() && model.supports_mtp());
+        let draft_readouts = |model: &mut LilyModel, count: usize| {
+            model.reset();
+            model.set_mtp_enabled(true).unwrap();
+            let input: Vec<u32> = (0..count).map(|i| 1 + (i % 31) as u32).collect();
+            for &token in &input[..count - 1] {
+                model.ingest(token).unwrap();
+            }
+            let logits = model.step(input[count - 1]).unwrap();
+            let argmax = |values: &[f32]| {
+                values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).unwrap().0 as u32
+            };
+            let mut hashes = Vec::new();
+            model
+                .model
+                .draft_host(&model.context, &mut model.state, &mut model.scratch, argmax(&logits), 2, &mut |values| {
+                    hashes.push(digest_logits(values));
+                    Ok(argmax(values))
+                })
+                .unwrap();
+            hashes
+        };
+        let first = draft_readouts(&mut model, 17);
+        let _ = draft_readouts(&mut model, 65);
+        assert!(draft_readouts(&mut model, 17) == first, "draft readouts retained previous request data");
     }
 
     #[stark_test]
@@ -2377,7 +2783,7 @@ mod tests {
         }
         let next = model.scratch.next_token.view(0, &[2]).unwrap();
         model.scratch.next_token = next.view(0, &[0]).unwrap();
-        let failure = model.forward(input[2]);
+        let failure = model.forward_controlled(input[2], &mut || Ok(()));
         assert!(
             matches!(failure, Err(Error::Invalid("mixed precision input staging failed"))),
             "held-token staging failure boundary"

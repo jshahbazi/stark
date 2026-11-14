@@ -23,6 +23,8 @@ pub enum MetalError {
     CannotCreateCommandQueue,
     #[error("Cannot create buffer")]
     CannotCreateBuffer,
+    #[error("Cannot complete retired resource reclamation")]
+    CannotReclaimRetiredResources,
     #[error("Cannot create heap")]
     CannotCreateHeap,
     #[error("Cannot create command buffer")]

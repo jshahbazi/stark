@@ -318,11 +318,15 @@ pub struct StoragePolicy {
     // The official MLX-Serve pack has an external affine PLE table,
     // pre-folded norm gains and two small BF16 projection categories.
     external_mlx: bool,
+    // Indexed affine exports retain the PLE ranges in ordinary Safetensors,
+    // Q8 embeddings/gates and group-128 trunk shared experts.
+    indexed_mlx: bool,
 }
 
 impl StoragePolicy {
     /// The policy of every checkpoint written before the choice existed.
-    pub const Q4: Self = Self { q8: 0, draft_q4: false, external_mlx: false };
+    pub const Q4: Self =
+        Self { q8: 0, draft_q4: false, external_mlx: false, indexed_mlx: false };
 
     /// The groups whose 8-bit width the draft head would read: its own
     /// attention and shared expert, and the LM head it shares with the
@@ -336,11 +340,16 @@ impl StoragePolicy {
             q8: groups.iter().fold(0, |m, g| m | g.bit()),
             draft_q4: false,
             external_mlx: false,
+            indexed_mlx: false,
         }
     }
 
     pub fn external_mlx(self) -> bool {
         self.external_mlx
+    }
+
+    pub fn indexed_mlx(self) -> bool {
+        self.indexed_mlx
     }
 
     /// The same trunk widths with the draft head's path kept 4-bit.
@@ -714,14 +723,112 @@ fn official_mlx_config(mut value: serde_json::Value) -> Result<serde_json::Value
     let padded = total.div_ceil(divisor) * divisor;
     ensure!(padded <= u32::MAX as u64, "official MLX PLE exceeds row-ID capacity");
     value["text_config"]["split_ngram_parts"] = json!(1);
+    let vision = match value.get("vision_config") {
+        None | Some(Value::Null) => Value::Null,
+        Some(config) => {
+            let depth = config
+                .get("depth")
+                .and_then(Value::as_u64)
+                .filter(|depth| (1..=64).contains(depth))
+                .context("official MLX vision depth")?;
+            json!({"dtype":"bf16", "tensors":9 + 12 * depth})
+        }
+    };
     value["lily"] = json!({
         "format": FORMAT,
         "quantization": {"default":{"bits":4,"group_size":64}, "ngram_embedding":{"bits":4,"group_size":32}, "q8_groups":["attn","gdn","shared","head"]},
         "ple": {"layer_multipliers":multipliers,"ngram_heads_vocab_sizes":sizes,"ngram_heads_offsets":offsets,"padded_vocab_size":padded},
         "mtp": mtp,
-        "dropped": [VISION_PREFIX]
+        "vision": vision,
+        "dropped": if value.get("vision_config").is_some_and(|v| !v.is_null()) { json!([]) } else { json!([VISION_PREFIX]) }
     });
     Ok(value)
+}
+
+/// Normalize the indexed, per-projection affine contract in memory. Actual
+/// tensor shapes and plane widths remain independently checked by the loader.
+fn indexed_mlx_config(mut value: serde_json::Value) -> Result<serde_json::Value> {
+    use serde_json::{Value, json};
+    ensure!(
+        value.get("qwen4_norm_convention").is_none_or(|v| v.as_str() == Some("delta")),
+        "indexed MLX norms must retain zero-centered deltas"
+    );
+    ensure!(
+        value.pointer("/text_config/ple_storage/manifest").and_then(Value::as_str)
+            == Some("ple_manifest.json"),
+        "unsupported indexed MLX PLE manifest"
+    );
+    let parts = value
+        .pointer("/text_config/split_ngram_parts")
+        .and_then(Value::as_u64)
+        .filter(|n| (1..=128).contains(n))
+        .context("unsupported indexed MLX PLE shard count")?;
+    let quant = value
+        .get("quantization")
+        .and_then(Value::as_object)
+        .context("indexed MLX quantization map")?;
+    ensure!(
+        value
+            .get("quantization_config")
+            .is_none_or(|q| q == &Value::Object(quant.clone())),
+        "indexed MLX quantization metadata disagrees"
+    );
+    for (name, spec) in quant {
+        if matches!(name.as_str(), "mode" | "bits" | "group_size") {
+            continue;
+        }
+        ensure!(
+            name.starts_with("language_model.model.")
+                || name.starts_with("language_model.lm_head")
+                || name.starts_with("mtp."),
+            "unsupported indexed MLX precision key"
+        );
+        if name.ends_with(".block_inject_weight") {
+            ensure!(spec == &json!(false), "indexed MLX injection gate must be BF16");
+            continue;
+        }
+        let (bits, group) = if let Some((_, part)) =
+            name.rsplit_once(".ngram_embedding.shards.")
+        {
+            let part = part.parse::<u64>().context("indexed MLX PLE precision key")?;
+            ensure!(part < parts, "indexed MLX PLE precision shard exceeds config");
+            (4, 32)
+        } else if name.contains(".mlp.experts.") || name.contains(".mlp.switch_mlp.") {
+            (4, 64)
+        } else if name.starts_with("language_model.model.")
+            && name.contains(".mlp.shared_expert.")
+        {
+            (8, 128)
+        } else {
+            (8, 64)
+        };
+        ensure!(
+            spec == &json!({"mode":"affine", "bits":bits, "group_size":group}),
+            "unsupported indexed MLX per-projection precision"
+        );
+    }
+    ensure!(
+        quant.get("language_model.model.embed_tokens")
+            == Some(&json!({"mode":"affine","bits":8,"group_size":64})),
+        "indexed MLX embedding precision is missing"
+    );
+    value["ngram_table"] = json!({"file":"ngram_table.bin","bits":4,"group_size":32});
+    // Reuse only the PLE hash/architecture construction. Indexed storage keeps
+    // zero-centered source gains and does not select the MLX-Serve arithmetic.
+    value["qwen4_norm_convention"] = json!("folded");
+    let mut normalized = official_mlx_config(value)?;
+    normalized["text_config"]["split_ngram_parts"] = json!(parts);
+    let rows = normalized
+        .pointer("/lily/ple/padded_vocab_size")
+        .and_then(Value::as_u64)
+        .context("indexed MLX PLE capacity")?;
+    ensure!(
+        rows.is_multiple_of(parts),
+        "indexed MLX PLE shards must have equal row counts"
+    );
+    normalized["lily"]["quantization"]["q8_groups"] =
+        json!(["attn", "gdn", "shared", "head", "embed"]);
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -797,6 +904,80 @@ mod official_mlx_tests {
         assert!(!StoragePolicy::Q4.external_mlx());
         assert_eq!(StoragePolicy::q8(&[Q8Group::Gdn]).bits(Q8Group::Gdn), 8);
     }
+
+    #[test]
+    fn indexed_affine_preserves_ple_shards_and_q8_embedding_policy() {
+        let mut value = metadata();
+        value.as_object_mut().unwrap().remove("ngram_table");
+        value["text_config"]["split_ngram_parts"] = json!(128);
+        value["text_config"]["ple_storage"] =
+            json!({"manifest":"ple_manifest.json","cache_rows":0});
+        value["quantization"]["language_model.model.embed_tokens"] =
+            json!({"mode":"affine","bits":8,"group_size":64});
+        value["quantization"]["language_model.model.layers.0.mlp.shared_expert.gate_proj"] =
+            json!({"mode":"affine","bits":8,"group_size":128});
+        let normalized = indexed_mlx_config(value.clone()).unwrap();
+        assert_eq!(normalized["text_config"]["split_ngram_parts"], 128);
+        assert_eq!(
+            normalized["lily"]["quantization"]["q8_groups"],
+            json!(["attn", "gdn", "shared", "head", "embed"])
+        );
+        value["quantization"]["language_model.model.layers.0.mlp.shared_expert.gate_proj"]
+            ["group_size"] = json!(64);
+        assert!(indexed_mlx_config(value).is_err());
+    }
+
+    #[test]
+    fn indexed_storage_uses_zero_centered_source_norms_and_ordinary_arithmetic() {
+        let mut value = metadata();
+        let fields = json!({
+            "hidden_size":2560,"num_hidden_layers":2,"layer_types":["linear_attention","linear_attention"],
+            "rms_norm_eps":0.000001,"eos_token_id":1,"num_experts":512,"num_experts_per_tok":10,
+            "moe_intermediate_size":640,"shared_expert_intermediate_size":640,"num_attention_heads":24,
+            "num_key_value_heads":2,"head_dim":256,"rope_parameters":{"rope_theta":10000000,
+                "partial_rotary_factor":0.25,"mrope_section":[11,11,10],"mrope_interleaved":true},
+            "linear_num_key_heads":16,"linear_num_value_heads":48,"linear_key_head_dim":128,
+            "linear_value_head_dim":128,"linear_conv_kernel_dim":4,"hidden_act":"silu","hc_count":4,
+            "hc_lowrank":320,"indexer_n_heads":4,"indexer_kv_heads":1,"indexer_head_dim":128,
+            "indexer_budget":2048,"indexer_compress_ratio":4,"split_ngram_parts":128,
+            "ple_storage":{"manifest":"ple_manifest.json"}
+        });
+        for (name, field) in fields.as_object().unwrap() {
+            value["text_config"][name] = field.clone();
+        }
+        value["quantization"]["language_model.model.embed_tokens"] =
+            json!({"mode":"affine","bits":8,"group_size":64});
+        let parsed =
+            Qwen4ExpConfig::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(parsed.storage.indexed_mlx());
+        assert!(parsed.storage.external_mlx());
+        assert!(!parsed.official_mlx_rounding());
+        assert_eq!(parsed.norm_weight_bias(), 1.0);
+        assert_eq!(parsed.storage.bits(Q8Group::Embed), 8);
+        assert_eq!(parsed.ple.unwrap().table_shards, 128);
+        value["qwen4_norm_convention"] = json!("folded");
+        assert!(
+            Qwen4ExpConfig::from_json(&serde_json::to_vec(&value).unwrap()).is_err()
+        );
+    }
+
+    #[test]
+    fn indexed_affine_rejects_unsafe_ple_and_precision_contracts() {
+        let mut base = metadata();
+        base["text_config"]["split_ngram_parts"] = json!(128);
+        base["text_config"]["ple_storage"] = json!({"manifest":"ple_manifest.json"});
+        base["quantization"]["language_model.model.embed_tokens"] =
+            json!({"mode":"affine","bits":8,"group_size":64});
+        for (pointer, bad) in [
+            ("/text_config/ple_storage/manifest", json!("../ple_manifest.json")),
+            ("/text_config/split_ngram_parts", json!(129)),
+            ("/quantization/language_model.model.embed_tokens/bits", json!(6)),
+        ] {
+            let mut value = base.clone();
+            *value.pointer_mut(pointer).unwrap() = bad;
+            assert!(indexed_mlx_config(value).is_err());
+        }
+    }
 }
 
 impl Qwen4ExpConfig {
@@ -811,9 +992,15 @@ impl Qwen4ExpConfig {
     pub fn from_json(bytes: &[u8]) -> Result<Self> {
         let value: serde_json::Value = serde_json::from_slice(bytes)?;
         if value.get("lily").is_none() {
-            let normalized = official_mlx_config(value)?;
+            let indexed = value.pointer("/text_config/ple_storage/manifest").is_some();
+            let normalized = if indexed {
+                indexed_mlx_config(value)?
+            } else {
+                official_mlx_config(value)?
+            };
             let mut config = Self::from_json(&serde_json::to_vec(&normalized)?)?;
             config.storage.external_mlx = true;
+            config.storage.indexed_mlx = indexed;
             return Ok(config);
         }
         let wrapper: WrapperJson =
@@ -1019,13 +1206,18 @@ impl Qwen4ExpConfig {
     /// Operation-rounding compatibility for the strictly admitted external
     /// MLX-Serve contract. Folded norm gains alone do not select this policy.
     pub fn official_mlx_rounding(&self) -> bool {
-        self.storage.external_mlx()
+        self.storage.external_mlx() && !self.storage.indexed_mlx()
     }
 
-    /// Lily stores zero-centered deltas; the official external-table pack
-    /// stores already-folded gains (MLX-Serve v26.10.3 model.zig).
+    /// Lily and indexed affine exports store zero-centered deltas; the
+    /// official external-table pack stores already-folded gains
+    /// (MLX-Serve v26.10.3 model.zig).
     pub fn norm_weight_bias(&self) -> f32 {
-        if self.storage.external_mlx() { 0.0 } else { 1.0 }
+        if self.storage.external_mlx() && !self.storage.indexed_mlx() {
+            0.0
+        } else {
+            1.0
+        }
     }
 
     /// What lily's vision path (plan items 3 to 5) is written for: tanh-GELU
@@ -1037,6 +1229,37 @@ impl Qwen4ExpConfig {
         let Some(v) = &self.vision else {
             return Ok(());
         };
+        // Admission precedes tensor loading and all tower allocations. Bound
+        // aggregate dimensions as well as each individual config field.
+        ensure!(
+            (1..=64).contains(&v.depth)
+                && (1..=4096).contains(&v.hidden_size)
+                && (1..=32768).contains(&v.intermediate_size)
+                && (1..=64).contains(&v.num_heads)
+                && (1..=16384).contains(&v.num_position_embeddings)
+                && (1..=16384).contains(&v.out_hidden_size)
+                && v.patch_size == 16
+                && v.in_channels == 3,
+            "vision geometry exceeds native admission bounds"
+        );
+        let (h, i, m, d, p) = (
+            v.hidden_size as u64,
+            v.intermediate_size as u64,
+            v.out_hidden_size as u64,
+            v.depth as u64,
+            v.num_position_embeddings as u64,
+        );
+        let elements = h * 1536
+            + p * h
+            + d * (4 * h * h + 2 * h * i + 9 * h + i)
+            + 16 * h * h
+            + 4 * h * m
+            + 6 * h
+            + m;
+        ensure!(
+            elements * 2 <= 4 * 1024 * 1024 * 1024,
+            "vision weights exceed native admission budget"
+        );
         ensure!(
             v.hidden_act == "gelu_pytorch_tanh",
             "vision_config.hidden_act {:?} is not supported (lily implements gelu_pytorch_tanh)",

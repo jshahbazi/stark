@@ -233,7 +233,10 @@ def test_invalid_gemma_config_fails_before_unknown_semantics(tmp_path, family, c
         {"rope_parameters": {"rope_type": "default"}},
     ],
 )
-def test_unqualified_gemma_config_fails_closed(tmp_path, family, changes):
+def test_unqualified_gemma_config_fails_closed(tmp_path, monkeypatch, family, changes):
+    # The planner's own dropout check stays covered; the shared normalizer's
+    # separate inactive-dropout rewrite is switched off for this test.
+    monkeypatch.setattr("stark_convert.config_normalization.ZERO_INACTIVE_ATTENTION_DROPOUT", False)
     source = tmp_path / "source"
     config, _ = gemma_fixture(source, family)
     update_config(source, config, **changes)

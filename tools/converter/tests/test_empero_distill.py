@@ -119,9 +119,16 @@ def test_actual_4b_config_and_every_public_tensor_header_plan_without_payloads(t
     assert operations["decoder.transformer.layers.3.mixer.qkvg_projection.weights.weights"].shape == (10240, 2560)
     assert operations["decoder.embedding.embedding.weights"].shape == (248320, 2560)
     consumed = {info for operation in plan.operations for info in operation.sources}
-    ignored = [info for name, info in tensors.items() if name.startswith(("model.visual.", "mtp."))]
+    ignored = [info for name, info in tensors.items() if name.startswith("model.visual.")]
     assert all(not (aux.offset <= info.offset < aux.offset + aux.nbytes) for aux in ignored for info in consumed)
-    # Auxiliary towers remain in verification even though this is text import.
+    # Text import still omits vision, but preserves the complete predictor.
+    assert plan.mtp_config["target_layer"] == 31
+    assert "mtp.fusion.weights.weights" in operations
+    assert all(
+        any(aux.offset <= info.offset < aux.offset + aux.nbytes for info in consumed)
+        for name, aux in tensors.items()
+        if name.startswith("mtp.")
+    )
     assert any(name.startswith("model.visual.") for name in tensors)
     assert any(name.startswith("mtp.") for name in tensors)
     assert set(plan.input_tensors) == set(tensors.values())
@@ -154,7 +161,7 @@ def test_own_generation_stops_and_thinking_profile_do_not_inherit_sampling_defau
 @pytest.mark.parametrize("text_only", [False, True])
 def test_named_profile_converts_without_claiming_native_qualification(tmp_path, source_tooling, text_only):  # noqa: F811
     source = tmp_path / "source"
-    config, _ = qwen35_fixture(source, wrapper=not text_only, mtp=True)
+    config, _ = qwen35_fixture(source, wrapper=not text_only)
     if text_only:
         config["model_type"] = "qwen3_5_text"
         (source / "config.json").write_text(json.dumps(config))

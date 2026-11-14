@@ -141,6 +141,8 @@ pub(crate) struct DecodeGraph {
     parallel_rms: bool,
     rms_prefetch: bool,
     phase_timing: bool,
+    ripple_dense_q8: bool,
+    ripple_dense_q4: bool,
 }
 
 impl DecodeGraph {
@@ -298,6 +300,8 @@ impl DecodeGraph {
                 parallel_rms: std::env::var_os("STARK_GLM53_PARALLEL_RMS").is_some_and(|value| value == "1"),
                 rms_prefetch: std::env::var_os("STARK_GLM53_RMS_PREFETCH").is_some_and(|value| value == "1"),
                 phase_timing,
+                ripple_dense_q8: false,
+                ripple_dense_q4: false,
             })
         })
     }
@@ -366,6 +370,18 @@ impl DecodeGraph {
         // encoder timing and the concurrent-encoder dependency contract.
         self.order_dispatch();
         &self.encoding
+    }
+
+    /// Admit the separately validated Ripple Q8 projection schedule for this
+    /// graph only. Exact shape and storage guards leave all other work on its
+    /// established route; this changes F32 reduction grouping, not precision.
+    /// Enable measured Q4_K and Q6_K projections in Ripple's mixed Q4_K_M artifact.
+    pub fn enable_ripple_dense_q4(&mut self) {
+        self.ripple_dense_q4 = true;
+    }
+
+    pub fn enable_ripple_dense_q8(&mut self) {
+        self.ripple_dense_q8 = true;
     }
 
     /// Raw GLM encoders must call this for each external buffer before binding
@@ -1064,7 +1080,23 @@ impl DecodeGraph {
         let uint4 = chunk32
             && !self.scalar_uint_loads
             && operation.matrices.iter().all(|matrix| matrix.codes.offset.is_multiple_of(16));
-        let pipeline = if uint4 && self.factored_affine {
+        let ripple_q8 =
+            self.ripple_dense_q8 && ripple_dense_q8_shape(operation.format, operation.rows, operation.columns);
+        let ripple_q4 =
+            self.ripple_dense_q4 && ripple_dense_q4_shape(operation.format, operation.rows, operation.columns);
+        let ripple_q6 =
+            self.ripple_dense_q4 && ripple_dense_q6_shape(operation.format, operation.rows, operation.columns);
+        let pipeline = if ripple_q6 {
+            executor.cached_pipeline(operation.format, "hybrid_q6_grouped16_matvec", &executor.ripple_q6_pipelines)?
+        } else if ripple_q4 {
+            executor.cached_pipeline(operation.format, "hybrid_q4_grouped32_matvec", &executor.ripple_q4_pipelines)?
+        } else if ripple_q8 {
+            executor.cached_pipeline(
+                operation.format,
+                "hybrid_q8_grouped8_safe_matvec",
+                &executor.ripple_q8_pipelines,
+            )?
+        } else if uint4 && self.factored_affine {
             executor.cached_pipeline(
                 operation.format,
                 "hybrid_graph_affine_matvec_factored",
@@ -1112,14 +1144,44 @@ impl DecodeGraph {
             self.encoding.set_buffer(Some(&self.failure.buffer), self.failure.offset, 30);
         }
         self.order_dispatch();
-        Executor::encode_matrix_at(
+        Executor::encode_matrix_at_with_geometry(
             &self.encoding,
             operation,
             parameters,
             &pipeline,
             (&input.buffer, input.offset),
             (&output.buffer, output.offset),
+            if ripple_q6 {
+                (operation.rows.div_ceil(4), 64)
+            } else if ripple_q4 {
+                (operation.rows.div_ceil(2), 64)
+            } else if ripple_q8 {
+                (operation.rows.div_ceil(2), 128)
+            } else {
+                (
+                    matrix_groups(operation.format, operation.rows, operation.columns),
+                    matrix_threads(operation.format, operation.rows, operation.columns),
+                )
+            },
         );
+        if ripple_q4 || ripple_q6 {
+            profile::record(
+                if ripple_q4 {
+                    "native.metal.graph.ripple_q4_grouped"
+                } else {
+                    "native.metal.graph.ripple_q6_grouped"
+                },
+                0.0,
+                operation.matrices.iter().map(|matrix| matrix.codes.length).sum(),
+            );
+        }
+        if ripple_q8 {
+            profile::record(
+                "native.metal.graph.ripple_q8_grouped",
+                0.0,
+                operation.matrices.iter().map(|matrix| matrix.codes.length).sum(),
+            );
+        }
         if concurrent {
             self.encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
             self.switch_dispatch(MTLDispatchType::SERIAL)?;

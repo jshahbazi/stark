@@ -1,0 +1,383 @@
+{
+  "schema_version": 1,
+  "captured_date": "2026-11-08",
+  "cohorts": [
+    {
+      "id": "bfcl-v4-2026-04-12-fc",
+      "benchmark": "bfcl",
+      "label": "BFCL v4 FC (2026-04-12)",
+      "metric": "overall accuracy",
+      "authority": "benchmark_publisher",
+      "settings": "Official v4 overall CSV; (FC). bfcl-eval==2025.12.17, harness f7cf735. Per-model decoding and evaluated weight revisions are not included in this snapshot.",
+      "source": {
+        "url": "https://gorilla.cs.berkeley.edu/data_overall.csv",
+        "publisher": "Berkeley Function Calling Leaderboard",
+        "revision": "2026-04-12; evaluator f7cf735",
+        "sha256": "ede5081a24bc5ac7f9b3b09a52af6bcfcd35aa0f1709239fed979db77a8159a6"
+      },
+      "results": [
+        {
+          "model_id": "moonshotai/Kimi-K2-Instruct",
+          "score": "59.06"
+        },
+        {
+          "model_id": "Salesforce/xLAM-2-32b-fc-r",
+          "score": "54.66"
+        },
+        {
+          "model_id": "Salesforce/Llama-xLAM-2-70b-fc-r",
+          "score": "53.07"
+        },
+        {
+          "model_id": "Nanbeige/Nanbeige4-3B-Thinking-2511",
+          "score": "51.40"
+        },
+        {
+          "model_id": "Qwen/Qwen3-32B",
+          "score": "48.71"
+        },
+        {
+          "model_id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+          "score": "47.99"
+        },
+        {
+          "model_id": "Salesforce/Llama-xLAM-2-8b-fc-r",
+          "score": "46.68"
+        },
+        {
+          "model_id": "Qwen/Qwen3-8B",
+          "score": "42.57"
+        },
+        {
+          "model_id": "Team-ACE/ToolACE-2-8B",
+          "score": "42.44"
+        },
+        {
+          "model_id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+          "score": "41.39"
+        },
+        {
+          "model_id": "Salesforce/xLAM-2-3b-fc-r",
+          "score": "41.22"
+        },
+        {
+          "model_id": "Qwen/Qwen3-14B",
+          "score": "41.03"
+        },
+        {
+          "model_id": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+          "score": "37.29"
+        },
+        {
+          "model_id": "Qwen/Qwen3-4B-Instruct-2507",
+          "score": "35.68"
+        },
+        {
+          "model_id": "MadeAgents/Hammer2.1-7b",
+          "score": "31.67"
+        },
+        {
+          "model_id": "Salesforce/xLAM-2-1b-fc-r",
+          "score": "30.44"
+        },
+        {
+          "model_id": "MadeAgents/Hammer2.1-3b",
+          "score": "29.71"
+        },
+        {
+          "model_id": "Qwen/Qwen3-1.7B",
+          "score": "28.41"
+        },
+        {
+          "model_id": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+          "score": "28.13"
+        },
+        {
+          "model_id": "MadeAgents/Hammer2.1-1.5b",
+          "score": "27.88"
+        },
+        {
+          "model_id": "ibm-granite/granite-3.1-8b-instruct",
+          "score": "27.10"
+        },
+        {
+          "model_id": "tiiuae/Falcon3-10B-Instruct",
+          "score": "27.01"
+        },
+        {
+          "model_id": "ibm-granite/granite-3.2-8b-instruct",
+          "score": "26.87"
+        },
+        {
+          "model_id": "openbmb/MiniCPM3-4B",
+          "score": "25.55"
+        },
+        {
+          "model_id": "tiiuae/Falcon3-7B-Instruct",
+          "score": "24.03"
+        },
+        {
+          "model_id": "Qwen/Qwen3-0.6B",
+          "score": "23.93"
+        },
+        {
+          "model_id": "ibm-granite/granite-20b-functioncalling",
+          "score": "23.23"
+        },
+        {
+          "model_id": "MadeAgents/Hammer2.1-0.5b",
+          "score": "21.22"
+        },
+        {
+          "model_id": "ibm-granite/granite-4.0-350m",
+          "score": "18.98"
+        },
+        {
+          "model_id": "tiiuae/Falcon3-3B-Instruct",
+          "score": "16.25"
+        },
+        {
+          "model_id": "mistralai/Ministral-8B-Instruct-2410",
+          "score": "11.10"
+        },
+        {
+          "model_id": "tiiuae/Falcon3-1B-Instruct",
+          "score": "11.08"
+        },
+        {
+          "model_id": "nvidia/Llama-3_1-Nemotron-Ultra-253B-v1",
+          "score": "10.00"
+        }
+      ]
+    },
+    {
+      "id": "bfcl-v4-2026-04-12-prompt",
+      "benchmark": "bfcl",
+      "label": "BFCL v4 Prompt (2026-04-12)",
+      "metric": "overall accuracy",
+      "authority": "benchmark_publisher",
+      "settings": "Official v4 overall CSV; (Prompt). bfcl-eval==2025.12.17, harness f7cf735. Per-model decoding and evaluated weight revisions are not included in this snapshot.",
+      "source": {
+        "url": "https://gorilla.cs.berkeley.edu/data_overall.csv",
+        "publisher": "Berkeley Function Calling Leaderboard",
+        "revision": "2026-04-12; evaluator f7cf735",
+        "sha256": "ede5081a24bc5ac7f9b3b09a52af6bcfcd35aa0f1709239fed979db77a8159a6"
+      },
+      "results": [
+        {
+          "model_id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+          "score": "52.15"
+        },
+        {
+          "model_id": "Qwen/Qwen3-32B",
+          "score": "46.78"
+        },
+        {
+          "model_id": "Qwen/Qwen3-8B",
+          "score": "40.43"
+        },
+        {
+          "model_id": "Qwen/Qwen3-14B",
+          "score": "37.77"
+        },
+        {
+          "model_id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+          "score": "36.70"
+        },
+        {
+          "model_id": "Qwen/Qwen3-4B-Instruct-2507",
+          "score": "35.52"
+        },
+        {
+          "model_id": "microsoft/phi-4",
+          "score": "28.79"
+        },
+        {
+          "model_id": "Qwen/Qwen3-0.6B",
+          "score": "22.38"
+        },
+        {
+          "model_id": "phronetic-ai/RZN-T",
+          "score": "22.25"
+        },
+        {
+          "model_id": "openbmb/MiniCPM3-4B",
+          "score": "22.08"
+        },
+        {
+          "model_id": "speakleash/Bielik-11B-v2.3-Instruct",
+          "score": "21.90"
+        }
+      ]
+    },
+    {
+      "id": "bfcl-v4-2026-04-12-fc-thinking",
+      "benchmark": "bfcl",
+      "label": "BFCL v4 FC thinking (2026-04-12)",
+      "metric": "overall accuracy",
+      "authority": "benchmark_publisher",
+      "settings": "Official v4 overall CSV; (FC thinking). bfcl-eval==2025.12.17, harness f7cf735. Per-model decoding and evaluated weight revisions are not included in this snapshot.",
+      "source": {
+        "url": "https://gorilla.cs.berkeley.edu/data_overall.csv",
+        "publisher": "Berkeley Function Calling Leaderboard",
+        "revision": "2026-04-12; evaluator f7cf735",
+        "sha256": "ede5081a24bc5ac7f9b3b09a52af6bcfcd35aa0f1709239fed979db77a8159a6"
+      },
+      "results": [
+        {
+          "model_id": "zai-org/GLM-4.6",
+          "score": "72.38"
+        }
+      ]
+    },
+    {
+      "id": "hf-open-llm-ifeval-bf16-chat-9c09a7ca",
+      "benchmark": "ifeval",
+      "label": "HF Open LLM Leaderboard IFEval (BF16 chat)",
+      "metric": "published IFEval score",
+      "authority": "benchmark_publisher",
+      "settings": "Official contents dataset, bfloat16, Chat Template=true, Flagged=false. Published IFEval Raw multiplied by 100. Do not interpret as a specific prompt/instruction metric or combine with other IFEval harnesses. Exact decoding and harness revision are not recorded in this extract.",
+      "source": {
+        "url": "https://huggingface.co/datasets/open-llm-leaderboard/contents/resolve/9c09a7cae43334062a82cb164f2ef255013dafa2/data/train-00000-of-00001.parquet",
+        "publisher": "Hugging Face Open LLM Leaderboard",
+        "extraction_revision": "9c09a7cae43334062a82cb164f2ef255013dafa2",
+        "revision": "9c09a7cae43334062a82cb164f2ef255013dafa2",
+        "sha256": "f13a7061e63133bc8745d89f8c7a56148584940ede22d3b27e21cad1e078dca5",
+        "extraction_response_sha256": {
+          "1400": "1ddf75b7772c5107bca184c4206b112062bc32bb4cea33cd4b4273391f89e05f",
+          "1450": "4df38275c357f0b412d8bac1095760dccf42b892082c546f033c6eb0da2aa28b",
+          "1500": "985e3de66043a139aeeb7820e2f191fe666664e3d401ea0165af5b4c6d62fc6f",
+          "1550": "14337d624c842f27d0dca6368ce574c13b6b5b29a7ab978321f490bbb7481c0b",
+          "1600": "adc569522089dffce8b6f81af4f41809e75d16b89cfbe5072a5634c03e8e9fe2",
+          "1650": "339991b02c272852089212b20b0af9c628bd786f2550dcc087bdf8475ac3f1db"
+        },
+        "extraction_endpoint": "https://datasets-server.huggingface.co/rows?dataset=open-llm-leaderboard/contents&config=default&split=train&offset={}&length=100"
+      },
+      "results": [
+        {
+          "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+          "score": "30.7123",
+          "evaluated_revision": "a8b602d9dafd3a75d382e62757d83d89fca3be54"
+        },
+        {
+          "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+          "score": "44.7557",
+          "evaluated_revision": "5fee7c4ed634dc66c6e318c8ac2897b8b9154536"
+        },
+        {
+          "model_id": "Qwen/Qwen2.5-14B-Instruct",
+          "score": "81.5778",
+          "evaluated_revision": "f55224c616ca27d4bcf28969a156de12c98981cf"
+        },
+        {
+          "model_id": "Qwen/Qwen2.5-32B-Instruct",
+          "score": "83.4612",
+          "evaluated_revision": "70e8dfb9ad18a7d499f765fe206ff065ed8ca197"
+        },
+        {
+          "model_id": "Qwen/Qwen2.5-3B-Instruct",
+          "score": "64.7492",
+          "evaluated_revision": "82f42baa094a9600e39ccd80d34058aeeb3abbc1"
+        },
+        {
+          "model_id": "Qwen/Qwen2.5-72B-Instruct",
+          "score": "86.3838",
+          "evaluated_revision": "a13fff9ad76700c7ecff2769f75943ba8395b4a7"
+        },
+        {
+          "model_id": "Qwen/Qwen2.5-7B-Instruct",
+          "score": "75.8525",
+          "evaluated_revision": "52e20a6f5f475e5c8f6a8ebda4ae5fa6b1ea22ac"
+        }
+      ]
+    },
+    {
+      "id": "qwen38-card-livecodebench-v6",
+      "benchmark": "livecodebench",
+      "label": "LiveCodeBench v6 (Qwen developer table)",
+      "metric": "developer-reported score (0-100)",
+      "authority": "model_developer",
+      "settings": "Same five-model comparison table in Qwen3.8-Flash-Next and Qwen3.8-27B cards. Window/split, pass@k, sample count, decoding, generation limit, execution policy, evaluated weight revision and aggregation are undisclosed. Compare only inside this published table.",
+      "source": {
+        "url": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/resolve/812d96e10a0dd82b69d749e68693698cf6c36daa/README.md",
+        "publisher": "Qwen",
+        "revision": "812d96e10a0dd82b69d749e68693698cf6c36daa",
+        "sha256": "5c151489c5de6ba51318e5e03d9ffb80622f118b37e7af550a6c174c5a9fe104",
+        "corroborating_url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/37561816e66b5b9153b1b64c10968c18c1e6f4a0/README.md",
+        "corroborating_sha256": "7c24f46af1e0024e6ce9b799df6f4865f9200acf3b6f92b6530c37248cc9e821"
+      },
+      "results": [
+        {
+          "model_id": "Qwen/Qwen3.8-Flash-Next",
+          "score": "91.9"
+        },
+        {
+          "model_id": "Qwen/Qwen3.8-27B",
+          "score": "90.3"
+        }
+      ]
+    }
+  ],
+  "bindings": [
+    {
+      "repo": "Jundot/Qwen3.8-27B-oQ4e-mtp",
+      "revision": "7dd276b77fcb27c982ebd8d8a434539345713fea",
+      "model_id": "Qwen/Qwen3.8-27B",
+      "relationship": "reviewed_quantized_export_reference_only",
+      "source": {
+        "url": "https://huggingface.co/Jundot/Qwen3.8-27B-oQ4e-mtp/resolve/7dd276b77fcb27c982ebd8d8a434539345713fea/README.md",
+        "publisher": "Jundot",
+        "revision": "7dd276b77fcb27c982ebd8d8a434539345713fea",
+        "sha256": "fa2bcbf91a6f00e705584e8f49445a0f0d34d9ec79459ef7514c11c9eefdfcbe"
+      }
+    },
+    {
+      "repo": "pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit",
+      "revision": "b2c422f3c643e36f04227a64d61796b44a4b1029",
+      "model_id": "Qwen/Qwen3.8-Flash-Next",
+      "relationship": "reviewed_quantized_export_reference_only",
+      "source": {
+        "url": "https://huggingface.co/pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit/resolve/b2c422f3c643e36f04227a64d61796b44a4b1029/README.md",
+        "publisher": "pipenetwork",
+        "revision": "b2c422f3c643e36f04227a64d61796b44a4b1029",
+        "sha256": "f38cdcf3cea1cb2bb905669a23cda9c738967d3e0696e251f928f69994b84976"
+      }
+    },
+    {
+      "repo": "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+      "revision": "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+      "model_id": "Qwen/Qwen3.8-Flash-Next",
+      "relationship": "reviewed_quantized_export_reference_only",
+      "source": {
+        "url": "https://huggingface.co/fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl/resolve/0f94842e3682b49acace4daeb4cf2e65a6f94f83/README.md",
+        "publisher": "fabiogreter",
+        "revision": "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+        "sha256": "e57e4232e01cd1f787d805e6ccab2a5498a28d8040c22b088c75b4d84bdf23b5"
+      }
+    },
+    {
+      "repo": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+      "revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+      "model_id": "Qwen/Qwen3.8-Flash-Next",
+      "relationship": "reviewed_quantized_export_reference_only",
+      "source": {
+        "url": "https://huggingface.co/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit/resolve/788c07a8725642bccf13a0a3b8a21954ab84b4f2/README.md",
+        "publisher": "ddalcu",
+        "revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+        "sha256": "585396fde4a2c02a5dc480eec01c51ae85c999d62565491b02508e47aa04f113"
+      }
+    },
+    {
+      "repo": "mlx-community/Qwen3-4B-4bit",
+      "revision": "4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25",
+      "model_id": "Qwen/Qwen3-4B",
+      "relationship": "reviewed_quantized_export_reference_only",
+      "source": {
+        "url": "https://huggingface.co/mlx-community/Qwen3-4B-4bit/resolve/4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25/README.md",
+        "publisher": "mlx-community",
+        "revision": "4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25",
+        "sha256": "ebb2aa24b01914a5eb2e04bbd7395cb6e740df6adc413047f83d9c01ca273ec3"
+      }
+    }
+  ]
+}

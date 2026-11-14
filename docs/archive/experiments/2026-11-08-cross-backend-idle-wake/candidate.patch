@@ -1,0 +1,554 @@
+diff --git a/crates/stark-engine/src/backends/metal/context.rs b/crates/stark-engine/src/backends/metal/context.rs
+index 9e326077..b7e6e85c 100644
+--- a/crates/stark-engine/src/backends/metal/context.rs
++++ b/crates/stark-engine/src/backends/metal/context.rs
+@@ -10,7 +10,7 @@ use std::{
+ use metal::{
+     MTL4CommandQueue, MTLCaptureDescriptor, MTLCaptureDestination, MTLCaptureManager, MTLCaptureTarget,
+     MTLComputePipelineState, MTLDevice, MTLDeviceExt, MTLFunctionConstantValues, MTLGPUFamily, MTLLibrary,
+-    MTLResidencySet, MTLResidencySetDescriptor, MTLSparsePageSize,
++    MTLResidencySet, MTLResidencySetDescriptor, MTLSharedEvent, MTLSparsePageSize,
+ };
+ use objc2::{rc::Retained, runtime::ProtocolObject};
+ use parking_lot::Mutex;
+@@ -48,10 +48,28 @@ pub struct MetalContext {
+     pub(super) command_buffer_cache: Mutex<Vec<MetalCommandBufferCache>>,
+     library_cache: Mutex<HashMap<usize, Retained<ProtocolObject<dyn MTLLibrary>>>>,
+     pipeline_cache: Mutex<HashMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
++    idle_event: Mutex<Option<(Retained<ProtocolObject<dyn MTLSharedEvent>>, u64)>>,
+     weak_self: Weak<MetalContext>,
+ }
+ 
+ impl MetalContext {
++    /// Owner-thread idle work after request completion. A private event keeps
++    /// queue residency warm without command buffers or model allocations.
++    pub fn maintain_idle_queue(&self) -> Result<(), &'static str> {
++        let mut state = self.idle_event.lock();
++        if state.is_none() {
++            let event = self.device.new_shared_event().ok_or("idle_event_unavailable")?;
++            *state = Some((event, 0));
++        }
++        let (event, value) = state.as_mut().expect("idle event initialized");
++        *value = value.checked_add(1).ok_or("idle_event_value_exhausted")?;
++        self.command_queue.signal_event_value(event.as_ref(), *value);
++        if !event.wait_until_signaled_value_timeout_ms(*value, 5000) {
++            return Err("idle_queue_timeout");
++        }
++        Ok(())
++    }
++
+     fn library(
+         &self,
+         data: &'static [u8],
+@@ -141,6 +159,7 @@ impl Context for MetalContext {
+             command_buffer_cache: Mutex::new(Vec::with_capacity(32)),
+             library_cache: Mutex::new(HashMap::new()),
+             pipeline_cache: Mutex::new(HashMap::new()),
++            idle_event: Mutex::new(None),
+             weak_self: weak_self.clone(),
+         }))
+     }
+diff --git a/crates/stark-engine/src/engine/hybrid/lily.rs b/crates/stark-engine/src/engine/hybrid/lily.rs
+index 673338cd..725e97ea 100644
+--- a/crates/stark-engine/src/engine/hybrid/lily.rs
++++ b/crates/stark-engine/src/engine/hybrid/lily.rs
+@@ -645,9 +645,10 @@ impl LilyModel {
+         self.context.wake().map_err(|_| Error::Invalid("mixed precision idle queue wake failed"))
+     }
+ 
+-    /// Idle latency has been qualified for the Lily numerical policy only.
++    /// Both admitted Lily and official affine policies share this same queue.
++    /// Queue maintenance changes no precision, sampling or model state.
+     pub fn needs_idle_queue_maintenance(&self) -> bool {
+-        !self.model.config.official_mlx_rounding()
++        true
+     }
+ 
+     /// Explicit diagnostic mode for future passes; no payload is captured.
+diff --git a/crates/stark-engine/src/engine/mod.rs b/crates/stark-engine/src/engine/mod.rs
+index 1932609d..2d82cef5 100644
+--- a/crates/stark-engine/src/engine/mod.rs
++++ b/crates/stark-engine/src/engine/mod.rs
+@@ -61,6 +61,11 @@ pub struct MetalDeviceIdentity {
+ 
+ #[cfg(feature = "metal")]
+ impl Engine<Metal> {
++    /// Submit and boundedly wait for an empty queue signal during worker idle.
++    pub fn maintain_idle_queue(&self) -> Result<(), &'static str> {
++        self.context.maintain_idle_queue()
++    }
++
+     /// Stable, non-unique device properties for binding runtime evidence to a
+     /// tested Metal device class. This deliberately excludes host identifiers.
+     pub fn metal_device_identity(&self) -> MetalDeviceIdentity {
+diff --git a/crates/stark-generate/src/native.rs b/crates/stark-generate/src/native.rs
+index 5373e28d..b2d2e67a 100644
+--- a/crates/stark-generate/src/native.rs
++++ b/crates/stark-generate/src/native.rs
+@@ -4,7 +4,7 @@ use std::{
+     io::Read,
+     os::unix::fs::OpenOptionsExt,
+     path::Path,
+-    time::Instant,
++    time::{Duration, Instant},
+ };
+ 
+ use serde_json::Value;
+@@ -55,6 +55,7 @@ fn record_accepted_prefix_round(
+ 
+ pub(crate) struct NativeBackend {
+     model: NativeModel,
++    idle_engine: Option<std::sync::Arc<Engine<Metal>>>,
+     vocab_size: usize,
+     eos_token_ids: Vec<u32>,
+     cancellation: Option<CancelSignal>,
+@@ -194,6 +195,7 @@ impl NativeBackend {
+             |id| tokenizer_ids.contains(&id),
+         )?;
+         Ok(Self {
++            idle_engine: matches!(&model, NativeModel::Text(_)).then(|| engine.clone()),
+             model,
+             vocab_size,
+             eos_token_ids,
+@@ -211,6 +213,17 @@ impl NativeBackend {
+ impl GenerationBackend for NativeBackend {
+     type PreparedImage = NativePreparedImage;
+ 
++    fn idle_maintenance_interval(&self) -> Option<Duration> {
++        self.idle_engine.as_ref().map(|_| Duration::from_millis(500))
++    }
++
++    fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
++        if let Some(engine) = &self.idle_engine {
++            engine.maintain_idle_queue().map_err(|_| "native_idle_maintenance_failed")?;
++        }
++        Ok(())
++    }
++
+     fn mtp_capabilities(&self) -> Option<crate::generation::MtpCapabilities> {
+         match &self.model {
+             NativeModel::Text(model) if model.has_dense_mtp() => Some(crate::generation::MtpCapabilities {
+diff --git a/crates/stark-score/src/scoring.rs b/crates/stark-score/src/scoring.rs
+index 9203aa37..c75541f5 100644
+--- a/crates/stark-score/src/scoring.rs
++++ b/crates/stark-score/src/scoring.rs
+@@ -1,12 +1,14 @@
+ //! Isolated exact-token scoring protocol. Request content is never diagnostic data.
++#[cfg(test)]
++use std::io::Cursor;
+ use std::{
+     collections::HashSet,
+     fs::{File, OpenOptions},
+-    io::{self, BufRead, Read, Write},
+-    os::unix::fs::OpenOptionsExt,
++    io::{self, BufRead, BufReader, Read, Write},
++    os::{fd::FromRawFd, unix::fs::OpenOptionsExt},
+     path::Path,
+     sync::Arc,
+-    time::Instant,
++    time::{Duration, Instant},
+ };
+ 
+ use serde::{Deserialize, Serialize};
+@@ -187,6 +189,12 @@ struct NativeScores {
+ }
+ 
+ trait ScoringBackend {
++    fn idle_maintenance_interval(&self) -> Option<Duration> {
++        None
++    }
++    fn maintain_idle(&mut self) -> Result<(), &'static str> {
++        Ok(())
++    }
+     fn vocab_size(&self) -> usize;
+     fn max_context_length(&self) -> Option<u32>;
+     fn peak_memory_usage(&self) -> Option<usize>;
+@@ -349,6 +357,18 @@ impl NativeBackend {
+ }
+ 
+ impl ScoringBackend for NativeBackend {
++    fn idle_maintenance_interval(&self) -> Option<Duration> {
++        match &self.model {
++            NativeModel::Hybrid(model) => model.idle_maintenance_interval(),
++            NativeModel::Dense(_) => None,
++        }
++    }
++    fn maintain_idle(&mut self) -> Result<(), &'static str> {
++        match &self.model {
++            NativeModel::Hybrid(model) => model.maintain_idle_queue().map_err(|_| "native_idle_maintenance_failed"),
++            NativeModel::Dense(_) => Ok(()),
++        }
++    }
+     fn vocab_size(&self) -> usize {
+         self.vocab_size
+     }
+@@ -651,14 +671,110 @@ pub(super) fn run_lines(
+         "peak_memory_bytes":worker.backend.peak_memory_usage()}),
+     )
+     .map_err(|_| "protocol_write_failed")?;
+-    let mut stdin = io::stdin().lock();
++    run_request_loop(&mut worker, &mut StandardInput::reader(), output)
++}
++
++trait ScoreInput: BufRead {
++    fn wait_readable(
++        &mut self,
++        timeout: Duration,
++    ) -> io::Result<bool>;
++}
++
++#[cfg(test)]
++impl<T: AsRef<[u8]>> ScoreInput for Cursor<T> {
++    fn wait_readable(
++        &mut self,
++        _timeout: Duration,
++    ) -> io::Result<bool> {
++        Ok(true)
++    }
++}
++
++/// stdin wrapper that does not close descriptor 0 and whose read-ahead is
++/// visible to the timed wait below.
++struct StandardInput(std::mem::ManuallyDrop<File>);
++
++impl StandardInput {
++    fn reader() -> BufReader<Self> {
++        // SAFETY: descriptor 0 remains open for the process lifetime and this
++        // ManuallyDrop wrapper never closes it.
++        let file = unsafe { File::from_raw_fd(libc::STDIN_FILENO) };
++        BufReader::with_capacity(64 * 1024, Self(std::mem::ManuallyDrop::new(file)))
++    }
++}
++
++impl Read for StandardInput {
++    fn read(
++        &mut self,
++        buffer: &mut [u8],
++    ) -> io::Result<usize> {
++        self.0.read(buffer)
++    }
++}
++
++impl ScoreInput for BufReader<StandardInput> {
++    fn wait_readable(
++        &mut self,
++        timeout: Duration,
++    ) -> io::Result<bool> {
++        if !self.buffer().is_empty() {
++            return Ok(true);
++        }
++        let mut descriptor = libc::pollfd {
++            fd: libc::STDIN_FILENO,
++            events: libc::POLLIN,
++            revents: 0,
++        };
++        let milliseconds = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
++        loop {
++            match unsafe { libc::poll(&mut descriptor, 1, milliseconds) } {
++                0 => return Ok(false),
++                count if count > 0 => return Ok(true),
++                _ => {
++                    let error = io::Error::last_os_error();
++                    if error.kind() != io::ErrorKind::Interrupted {
++                        return Err(error);
++                    }
++                },
++            }
++        }
++    }
++}
++
++fn run_request_loop<B: ScoringBackend, I: ScoreInput>(
++    worker: &mut ScoreWorker<B>,
++    input: &mut I,
++    output: &mut impl Write,
++) -> Result<(), &'static str> {
++    let interval = worker.backend.idle_maintenance_interval().filter(|interval| !interval.is_zero());
+     loop {
++        if let Some(interval) = interval {
++            match input.wait_readable(interval) {
++                Ok(true) => {},
++                Ok(false) => {
++                    if worker.backend.maintain_idle().is_err() {
++                        worker.cache.clear();
++                        return Err("native_operation_failed");
++                    }
++                    continue;
++                },
++                Err(_) => {
++                    worker.cache.clear();
++                    return Err("protocol_read_failed");
++                },
++            }
++        }
+         let mut bytes = Vec::new();
+-        let count = Read::by_ref(&mut stdin)
+-            .take(MAX_REQUEST_BYTES as u64 + 1)
+-            .read_until(b'\n', &mut bytes)
+-            .map_err(|_| "protocol_read_failed")?;
++        let count = match Read::by_ref(input).take(MAX_REQUEST_BYTES as u64 + 1).read_until(b'\n', &mut bytes) {
++            Ok(count) => count,
++            Err(_) => {
++                worker.cache.clear();
++                return Err("protocol_read_failed");
++            },
++        };
+         if count == 0 {
++            worker.cache.clear();
+             return Ok(());
+         }
+         if bytes.len() > MAX_REQUEST_BYTES {
+@@ -711,6 +827,9 @@ mod tests {
+ 
+     struct FakeBackend {
+         calls: usize,
++        idle_interval: Option<Duration>,
++        idle_calls: usize,
++        fail_idle: bool,
+         fail_score: bool,
+         fail_probe: bool,
+         invalid_output: bool,
+@@ -718,6 +837,17 @@ mod tests {
+         max_context: Option<u32>,
+     }
+     impl ScoringBackend for FakeBackend {
++        fn idle_maintenance_interval(&self) -> Option<Duration> {
++            self.idle_interval
++        }
++        fn maintain_idle(&mut self) -> Result<(), &'static str> {
++            self.idle_calls += 1;
++            if self.fail_idle {
++                Err("private_idle_error")
++            } else {
++                Ok(())
++            }
++        }
+         fn vocab_size(&self) -> usize {
+             6
+         }
+@@ -769,6 +899,9 @@ mod tests {
+         ScoreWorker::new(
+             FakeBackend {
+                 calls: 0,
++                idle_interval: None,
++                idle_calls: 0,
++                fail_idle: false,
+                 fail_score: false,
+                 fail_probe: false,
+                 invalid_output: false,
+@@ -800,6 +933,166 @@ mod tests {
+         request(&[1, 2], &[2, 3], 8192, 1.22)
+     }
+ 
++    enum InputEvent {
++        Timeout,
++        Data(Vec<u8>),
++        Eof,
++        Error,
++    }
++
++    struct ScriptInput {
++        current: Vec<u8>,
++        at: usize,
++        events: std::collections::VecDeque<InputEvent>,
++    }
++
++    impl ScriptInput {
++        fn new(events: impl IntoIterator<Item = InputEvent>) -> Self {
++            Self {
++                current: Vec::new(),
++                at: 0,
++                events: events.into_iter().collect(),
++            }
++        }
++    }
++
++    impl Read for ScriptInput {
++        fn read(
++            &mut self,
++            output: &mut [u8],
++        ) -> io::Result<usize> {
++            let available = self.fill_buf()?;
++            let count = available.len().min(output.len());
++            output[..count].copy_from_slice(&available[..count]);
++            self.consume(count);
++            Ok(count)
++        }
++    }
++
++    impl BufRead for ScriptInput {
++        fn fill_buf(&mut self) -> io::Result<&[u8]> {
++            Ok(&self.current[self.at..])
++        }
++        fn consume(
++            &mut self,
++            amount: usize,
++        ) {
++            self.at = (self.at + amount).min(self.current.len());
++        }
++    }
++
++    impl ScoreInput for ScriptInput {
++        fn wait_readable(
++            &mut self,
++            _timeout: Duration,
++        ) -> io::Result<bool> {
++            if !self.fill_buf()?.is_empty() {
++                return Ok(true);
++            }
++            self.current.clear();
++            self.at = 0;
++            match self.events.pop_front().unwrap_or(InputEvent::Eof) {
++                InputEvent::Timeout => Ok(false),
++                InputEvent::Data(bytes) => {
++                    self.current = bytes;
++                    Ok(true)
++                },
++                InputEvent::Eof => Ok(true),
++                InputEvent::Error => Err(io::Error::other("private input error")),
++            }
++        }
++    }
++
++    fn input_line(request: Value) -> Vec<u8> {
++        let mut bytes = serde_json::to_vec(&request).unwrap();
++        bytes.push(b'\n');
++        bytes
++    }
++
++    fn run_script(
++        worker: &mut ScoreWorker<FakeBackend>,
++        events: impl IntoIterator<Item = InputEvent>,
++    ) -> Result<Vec<Value>, &'static str> {
++        let mut input = ScriptInput::new(events);
++        let mut output = Vec::new();
++        let result = run_request_loop(worker, &mut input, &mut output);
++        let replies = output
++            .split(|byte| *byte == b'\n')
++            .filter(|line| !line.is_empty())
++            .map(|line| serde_json::from_slice(line).unwrap())
++            .collect();
++        result.map(|()| replies)
++    }
++
++    #[test]
++    fn idle_tick_preserves_consecutive_cache_and_hit_is_bit_exact() {
++        let mut worker = worker(true, false);
++        worker.backend.idle_interval = Some(Duration::from_millis(500));
++        let line = input_line(standard());
++        let replies = run_script(
++            &mut worker,
++            [InputEvent::Data(line.clone()), InputEvent::Timeout, InputEvent::Data(line), InputEvent::Eof],
++        )
++        .unwrap();
++        assert_eq!(worker.backend.idle_calls, 1);
++        assert_eq!(worker.backend.calls, 1);
++        assert_eq!(replies[0]["cache_hit"], false);
++        assert_eq!(replies[1]["cache_hit"], true);
++        for field in ["logits", "log_probabilities", "candidate_probabilities"] {
++            let fresh = replies[0][field].as_array().unwrap();
++            let hit = replies[1][field].as_array().unwrap();
++            assert_eq!(fresh.len(), hit.len());
++            for (fresh, hit) in fresh.iter().zip(hit) {
++                assert_eq!(fresh.as_f64().unwrap().to_bits(), hit.as_f64().unwrap().to_bits());
++            }
++        }
++        assert_eq!(worker.hits, 1);
++        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
++    }
++
++    #[test]
++    fn buffered_request_bypasses_idle_wait_and_eof_clears_cache() {
++        let mut worker = worker(true, false);
++        worker.backend.idle_interval = Some(Duration::from_millis(500));
++        let mut both = input_line(standard());
++        both.extend(input_line(standard()));
++        let replies = run_script(&mut worker, [InputEvent::Data(both), InputEvent::Eof]).unwrap();
++        assert_eq!(worker.backend.idle_calls, 0);
++        assert_eq!(replies[1]["cache_hit"], true);
++        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
++    }
++
++    #[test]
++    fn idle_maintenance_failure_clears_cache_and_returns_static_fatal_error() {
++        let mut worker = worker(true, false);
++        worker.backend.idle_interval = Some(Duration::from_millis(500));
++        worker.backend.fail_idle = true;
++        let result = run_script(&mut worker, [InputEvent::Data(input_line(standard())), InputEvent::Timeout]);
++        assert_eq!(result, Err("native_operation_failed"));
++        assert_eq!(worker.backend.calls, 1);
++        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
++    }
++
++    #[test]
++    fn input_wait_failure_clears_cache_and_returns_static_error() {
++        let mut worker = worker(true, false);
++        worker.backend.idle_interval = Some(Duration::from_millis(500));
++        let result = run_script(&mut worker, [InputEvent::Data(input_line(standard())), InputEvent::Error]);
++        assert_eq!(result, Err("protocol_read_failed"));
++        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
++    }
++
++    #[test]
++    fn oversized_line_clears_cache_and_returns_existing_protocol_error() {
++        let mut worker = worker(true, false);
++        worker.backend.idle_interval = Some(Duration::from_millis(500));
++        let mut bytes = vec![b'x'; MAX_REQUEST_BYTES + 1];
++        bytes.push(b'\n');
++        let replies = run_script(&mut worker, [InputEvent::Data(bytes)]).unwrap();
++        assert_eq!(replies[0]["error"], "request_too_large");
++        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
++    }
++
+     #[test]
+     fn disabled_policy_always_scores_and_holds_no_distribution() {
+         let mut worker = worker(false, false);
+diff --git a/scripts/benchmark_stock_engines.py b/scripts/benchmark_stock_engines.py
+index dbf7e978..d51691ef 100644
+--- a/scripts/benchmark_stock_engines.py
++++ b/scripts/benchmark_stock_engines.py
+@@ -43,10 +43,25 @@ def save(path, value):
+ 
+ 
+ def stop(process):
++    # Reap an exited leader before signaling its group. macOS can return
++    # EPERM for a zombie-only group, masking the worker's original failure.
++    process.poll()
+     owned_group = getattr(process, "_owned_group", None)
++    def signal_group(sig):
++        try:
++            os.killpg(owned_group, sig)
++        except PermissionError:
++            # The child can exit between poll and killpg. Reap that race,
++            # then still signal any surviving descendants in its group.
++            try:
++                process.wait(timeout=1)
++            except subprocess.TimeoutExpired:
++                raise PermissionError("worker_group_cleanup_denied") from None
++            os.killpg(owned_group, sig)
++
+     if owned_group:
+         try:
+-            os.killpg(owned_group, signal.SIGTERM)
++            signal_group(signal.SIGTERM)
+         except ProcessLookupError:
+             pass
+     if process.poll() is None:
+@@ -57,7 +72,7 @@ def stop(process):
+         except subprocess.TimeoutExpired:
+             if owned_group:
+                 try:
+-                    os.killpg(owned_group, signal.SIGKILL)
++                    signal_group(signal.SIGKILL)
+                 except ProcessLookupError:
+                     pass
+             else:
+@@ -65,7 +80,7 @@ def stop(process):
+             process.wait(timeout=10)
+     if owned_group:
+         try:
+-            os.killpg(owned_group, signal.SIGKILL)
++            signal_group(signal.SIGKILL)
+         except ProcessLookupError:
+             pass
+ 

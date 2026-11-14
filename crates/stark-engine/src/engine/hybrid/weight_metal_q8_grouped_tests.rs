@@ -780,6 +780,16 @@ fn graph_projection(
     rows: usize,
     columns: usize,
 ) -> Result<Vec<f32>> {
+    graph_projection_policy(encoded, input, rows, columns, false)
+}
+
+fn graph_projection_policy(
+    encoded: &[u8],
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+    ripple_q8: bool,
+) -> Result<Vec<f32>> {
     let matrix = MappedMatrix {
         codes: MappedSlice {
             buffer: buffer(executor()?, encoded)?,
@@ -808,8 +818,246 @@ fn graph_projection(
         );
     }
     let mut graph = DecodeGraph::new()?;
+    if ripple_q8 {
+        graph.enable_ripple_dense_q8();
+    }
     let output = graph.mapped(&operation, &input_vector)?;
     Ok(graph.finish(&[output])?.remove(0))
+}
+
+#[stark_test]
+fn ripple_q8_policy_is_scoped_to_measured_dense_shapes() {
+    for (rows, columns) in [(40960, 5120), (5120, 40960), (10240, 5120), (1024, 5120), (5120, 10240), (100352, 5120)] {
+        assert!(ripple_dense_q8_shape(MatrixFormat::Packed(8), rows, columns));
+        for excluded in [MatrixFormat::Packed(0), MatrixFormat::Packed(12), MatrixFormat::Packed(30)] {
+            assert!(!ripple_dense_q8_shape(excluded, rows, columns));
+        }
+        assert!(!ripple_dense_q8_shape(MatrixFormat::Packed(8), rows, 0), "indexed geometry entered dense policy");
+    }
+    for (rows, columns) in [(13, 128), (1024, 4096), (100353, 5120), (5120, 5120), (16384, 1536)] {
+        assert!(!ripple_dense_q8_shape(MatrixFormat::Packed(8), rows, columns));
+    }
+    let rows = 1024usize;
+    let columns = 5120usize;
+    let encoded = codes(rows, columns);
+    let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+    let p = [rows as u32, columns as u32, 8, 32, 34, 0, 0, 0];
+    let default = graph_projection(&encoded, &input, rows, columns).unwrap();
+    let scalar = run(&pipeline(3), &encoded, &input, p, 1, 256).unwrap();
+    assert!(default.iter().zip(&scalar).all(|(a, b)| a.to_bits() == b.to_bits()), "other graph default changed");
+    let optimized = graph_projection_policy(&encoded, &input, rows, columns, true).unwrap();
+    let expected = run(&production_pipeline(1), &encoded, &input, p, 2, 128).unwrap();
+    assert!(
+        optimized.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+        "Ripple graph schedule/grid mismatch"
+    );
+    let error: f64 = optimized.iter().zip(&scalar).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+    let power: f64 = scalar.iter().map(|&v| f64::from(v).powi(2)).sum();
+    assert!((error / power.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5, "Ripple Q8 scalar RMS");
+}
+
+#[stark_test]
+fn ripple_q8_graph_preserves_extreme_failures_and_recovery() {
+    let rows = 1024usize;
+    let columns = 5120usize;
+    let encoded = codes(rows, columns);
+    let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+    let p = [rows as u32, columns as u32, 8, 32, 34, 0, 0, 0];
+    for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+        let mut invalid = input.clone();
+        invalid[columns - 1] = poison;
+        let expected = run(&pipeline(0), &encoded, &invalid, p, 2, 64);
+        let actual = graph_projection_policy(&encoded, &invalid, rows, columns, true);
+        assert_eq!(actual.is_err(), expected.is_err(), "Ripple Q8 graph finite contract");
+        if let (Ok(a), Ok(b)) = (actual, expected) {
+            assert!(a.iter().zip(&b).all(|(a, b)| a.to_bits() == b.to_bits()), "Ripple Q8 extreme fallback changed");
+        }
+    }
+    let large: Vec<_> = (0..columns)
+        .map(|i| {
+            if i % 2 == 0 {
+                1e30
+            } else {
+                -1e30
+            }
+        })
+        .collect();
+    let expected = run(&pipeline(0), &encoded, &large, p, 2, 64).unwrap();
+    let actual = graph_projection_policy(&encoded, &large, rows, columns, true).unwrap();
+    assert!(
+        actual.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+        "Ripple Q8 large finite fallback changed"
+    );
+    for poison in [half::f16::NAN, half::f16::INFINITY, half::f16::NEG_INFINITY] {
+        let mut invalid = encoded.clone();
+        invalid[..2].copy_from_slice(&poison.to_bits().to_le_bytes());
+        assert!(
+            graph_projection_policy(&invalid, &input, rows, columns, true).is_err(),
+            "Ripple Q8 nonfinite scale escaped"
+        );
+    }
+    let mut zeros = vec![0u8; encoded.len()];
+    for block in zeros.chunks_exact_mut(34) {
+        block[..2].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+    }
+    let maximum = vec![f32::MAX; columns];
+    let actual = graph_projection_policy(&zeros, &maximum, rows, columns, true).unwrap();
+    assert!(actual.iter().all(|v| v.to_bits() == 0), "Ripple Q8 zero times MAX contract");
+    assert!(graph_projection_policy(&encoded, &input, rows, columns, true).is_ok(), "Ripple Q8 fresh-command recovery");
+}
+
+/// Reproducible, aggregate-only dense Ripple component experiment. The
+/// rotating encoded population exceeds the on-chip cache; no model data is
+/// used. Every candidate is bracketed by the original scalar schedule.
+#[stark_test]
+#[ignore]
+fn q8_ripple_dense_gpu_component_timings() {
+    let _activity = super::super::activity::InferenceActivity::begin().unwrap();
+    let executor = executor().unwrap();
+    let variants = [3usize, 0, 1, 2, 4, 5];
+    let names = ["scalar_control", "block2", "grouped8_r2g4", "segmented8", "grouped8_r4g2", "segmented4"];
+    let pipelines = variants.map(pipeline);
+    for (label, rows, columns) in [
+        ("ripple_ffn_gate_up", 40960usize, 5120usize),
+        ("ripple_ffn_down", 5120, 40960),
+        ("ripple_attention_q_gate", 10240, 5120),
+        ("ripple_attention_k_v", 1024, 5120),
+        ("ripple_attention_o", 5120, 10240),
+        ("ripple_output", 100352, 5120),
+    ] {
+        let matrix_bytes = rows * columns / 32 * 34;
+        let row_bytes = matrix_bytes / rows;
+        let banks = (320usize * 1024 * 1024).div_ceil(matrix_bytes);
+        let encoded = codes(rows * banks, columns);
+        let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+        let mut oracle = Vec::new();
+        for bank in 0..banks {
+            for row in [0, rows / 3, rows * 2 / 3, rows - 1] {
+                let at = bank * matrix_bytes + row * row_bytes;
+                oracle.push((bank * rows + row, f64_oracle(8, &encoded[at..at + row_bytes], 1, columns, &input, 0)[0]));
+            }
+        }
+        let encoded = buffer(executor, &encoded).unwrap();
+        let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+        let output = executor.device.new_buffer(rows * banks * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+        let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+        let parameters = [rows as u32, columns as u32, 8u32, 32, 34, 0, 0, 0];
+        let mut timings = vec![vec![Vec::<f64>::new(); 2]; variants.len() - 1];
+        let mut reference = Vec::<f32>::new();
+        let mut maximum_absolute_error = [0.0f64; 6];
+        let mut relative_rms_error = [0.0f64; 6];
+        let mut maximum_f64_error_over_absolute_sum = [0.0f64; 6];
+        for replay in 0..7 {
+            let candidates: Vec<_> = if replay % 2 == 0 {
+                (1..variants.len()).collect()
+            } else {
+                (1..variants.len()).rev().collect()
+            };
+            for candidate in candidates {
+                for variant in [0, candidate, candidate, 0] {
+                    let pipeline = &pipelines[variant];
+                    let (row_group, threads) = geometry(variants[variant]);
+                    let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                        let command = executor.queue.command_buffer().unwrap();
+                        let encoding = command.compute_command_encoder().unwrap();
+                        encoding.set_compute_pipeline_state(pipeline);
+                        encoding.set_buffer(Some(&failure), 0, 30);
+                        encoding.set_buffer(Some(&input), 0, 1);
+                        encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
+                        let offsets = [0u32; 4];
+                        encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+                        for i in 0..banks {
+                            let bank = (i + replay) % banks;
+                            encoding.set_buffer(Some(&encoded), bank * matrix_bytes, 0);
+                            encoding.set_buffer(Some(&output), bank * rows * 4, 2);
+                            encoding.dispatch_threadgroups(
+                                MTLSize {
+                                    width: rows.div_ceil(row_group),
+                                    height: 1,
+                                    depth: 1,
+                                },
+                                MTLSize {
+                                    width: threads,
+                                    height: 1,
+                                    depth: 1,
+                                },
+                            );
+                        }
+                        encoding.end_encoding();
+                        command.commit();
+                        command.wait_until_completed();
+                        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                        // SAFETY: all output banks have completed GPU writers.
+                        let values = unsafe {
+                            std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * banks)
+                        }
+                        .to_vec();
+                        (values, (command.gpu_end_time() - command.gpu_start_time()) / banks as f64)
+                    });
+                    assert_eq!(
+                        unsafe { *failure.contents().as_ptr().cast::<u32>() },
+                        0,
+                        "Ripple Q8 component sticky failure"
+                    );
+                    assert!(values.iter().all(|v| v.is_finite()), "Ripple Q8 component nonfinite");
+                    if reference.is_empty() {
+                        reference = values.clone();
+                    }
+                    if replay > 0 {
+                        timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                    }
+                    maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                        values
+                            .iter()
+                            .zip(&reference)
+                            .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                            .fold(0.0, f64::max),
+                    );
+                    let squared_error: f64 =
+                        values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                    let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                    relative_rms_error[variant] = relative_rms_error[variant]
+                        .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    for &(row, (expected, absolute)) in &oracle {
+                        maximum_f64_error_over_absolute_sum[variant] = maximum_f64_error_over_absolute_sum[variant]
+                            .max((f64::from(values[row]) - expected).abs() / absolute.max(1.0));
+                    }
+                }
+            }
+        }
+        for (pair, schedules) in timings.iter_mut().enumerate() {
+            for (which, samples) in schedules.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                let seconds = (samples[5] + samples[6]) * 0.5;
+                let variant = if which == 0 {
+                    0
+                } else {
+                    pair + 1
+                };
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "component": label, "production_admitted": false, "rows": rows, "columns": columns, "kind": 8,
+                        "math_mode": "safe", "schedule": names[variant], "pair_candidate": names[pair + 1],
+                        "activity_assertion": true, "threads_per_group": geometry(variants[variant]).1,
+                        "rows_per_group": geometry(variants[variant]).0, "rotating_banks": banks,
+                        "encoded_population_bytes": matrix_bytes * banks, "warm_samples": samples.len(),
+                        "median_gpu_microseconds_per_matrix": seconds * 1e6,
+                        "minimum_gpu_microseconds_per_matrix": samples[0] * 1e6,
+                        "maximum_gpu_microseconds_per_matrix": samples[samples.len() - 1] * 1e6,
+                        "encoded_gigabytes_per_second": matrix_bytes as f64 / seconds / 1e9,
+                        "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                        "relative_rms_error_vs_original": relative_rms_error[variant],
+                        "maximum_f64_error_over_absolute_sum": maximum_f64_error_over_absolute_sum[variant],
+                        "f64_oracle_rows": oracle.len(),
+                        "timer_scope": "same_process_safe_ABBA_serial_ripple_rotating_banks_gpu_timestamps"
+                    })
+                );
+                assert!(relative_rms_error[variant] <= 2e-5, "Ripple Q8 component source RMS");
+                assert!(maximum_f64_error_over_absolute_sum[variant] <= 2e-6, "Ripple Q8 component F64 gate");
+            }
+        }
+    }
 }
 
 #[stark_test]

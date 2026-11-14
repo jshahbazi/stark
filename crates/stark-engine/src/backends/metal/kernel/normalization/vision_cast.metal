@@ -1,6 +1,13 @@
 #include <metal_stdlib>
 #include "../common/dsl.h"
 
+PUBLIC KERNEL(ReferenceRoundBF16F32)(
+    const device float* input, device float* output, constant uint& length,
+    const uint index AXIS(length, 32)
+) {
+  output[index] = float(bfloat(input[index]));
+}
+
 PUBLIC KERNEL(VisionCastBF16)(
     const device float* input,
     device bfloat* output,

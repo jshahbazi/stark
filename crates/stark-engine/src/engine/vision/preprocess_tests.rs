@@ -26,12 +26,12 @@ fn insert_png_chunk(
     kind: &[u8; 4],
     payload: &[u8],
 ) {
-    // Tests requiring a rejected header need no CRC: rejection precedes codec dispatch.
     let mut chunk = Vec::new();
     chunk.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     chunk.extend_from_slice(kind);
     chunk.extend_from_slice(payload);
-    chunk.extend_from_slice(&[0; 4]);
+    let crc = crc32fast::hash(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
     bytes.splice(33..33, chunk);
 }
 
@@ -64,6 +64,43 @@ fn image_dimensions_match_pinned_smart_resize_and_admission() {
         ..bounds
     };
     assert!(resized_dimensions(256, 256, &constrained).is_err());
+}
+
+#[stark_test]
+fn retained_image_dimensions_preserve_source_processor_maximum() {
+    let bounds = PreprocessLimits {
+        max_processed_pixels: 16_777_216,
+        max_encoder_patches: 65_536,
+        ..limits()
+    };
+    for (source, expected) in [
+        ((256, 256), (256, 256)),
+        ((1344, 1788), (1344, 1792)),
+        ((4096, 4096), (4096, 4096)),
+        ((8000, 4000), (5792, 2880)),
+    ] {
+        assert_eq!(resized_dimensions(source.0, source.1, &bounds).unwrap(), expected);
+    }
+    assert!(resized_dimensions(8001, 4000, &bounds).is_err());
+    assert!(resized_dimensions(16_385, 32, &bounds).is_err());
+    assert!(resized_dimensions(1, 201, &bounds).is_err());
+}
+
+#[stark_test]
+#[ignore]
+fn retained_private_image_preparation() {
+    // Opt-in private file; neither its path, pixels nor patches are emitted.
+    let source = std::env::var_os("STARK_TEST_IMAGE_PATH").expect("private image required");
+    let bytes = std::fs::read(source).expect("private image unreadable");
+    let bounds = PreprocessLimits {
+        max_processed_pixels: 16_777_216,
+        max_encoder_patches: 65_536,
+        ..limits()
+    };
+    let decoded = decode_image(&bytes, &bounds).expect("private image decoding failed");
+    let prepared = prepare_image(&decoded, &bounds).expect("private image preparation failed");
+    assert!(prepared.grid[1] * prepared.grid[2] <= 65_536);
+    assert!(!prepared.patches.is_empty());
 }
 
 #[stark_test]
@@ -129,6 +166,10 @@ fn image_decode_rejects_animation_depth_truncation_bounds_and_trailing_frames() 
     ] {
         let mut metadata = valid.clone();
         insert_png_chunk(&mut metadata, kind, payload);
+        let decoded = decode_image(&metadata, &bounds).unwrap();
+        assert_eq!(decoded.pixels, [31; 12]);
+        // Ignored metadata still has its CRC checked.
+        metadata[41] ^= 1;
         assert!(decode_image(&metadata, &bounds).is_err());
     }
     let depth16 = png(1, 1, ExtendedColorType::L16, &[0, 0]);
@@ -222,7 +263,10 @@ fn image_decode_jpeg_and_exif_uses_owned_bounded_rgb() {
     assert!(decode_image(&trailing, &bounds).is_err());
     let mut mpo = encoded.clone();
     mpo.splice(2..2, [0xff, 0xe2, 0, 6, b'M', b'P', b'F', 0]);
-    assert!(decode_image(&mpo, &bounds).is_err());
+    mpo.extend_from_slice(&encoded);
+    let primary = decode_image(&mpo, &bounds).unwrap();
+    assert_eq!(primary.pixels, base.pixels);
+    assert_eq!((primary.width, primary.height), (8, 16));
     assert!(decode_image(&encoded[..encoded.len() - 2], &bounds).is_err());
     assert!(jpeg_header(&[0xff, 0xd8, 0xff, 0xc3, 0, 8, 16, 0, 1, 0, 1, 1, 0xff, 0xd9]).is_err());
     let mut too_many_scans = vec![0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0];
@@ -244,4 +288,32 @@ fn image_bicubic_resize_preserves_constant_rgb_and_saturates_edges() {
     assert_eq!(resized.len(), 32 * 32 * 3);
     assert_eq!(resized[0], 0);
     assert!(resized.iter().copied().max().unwrap() > 240);
+}
+
+#[stark_test]
+fn image_ignored_png_profile_does_not_inflate_ancillary_data() {
+    let bounds = limits();
+    let mut encoded = png(2, 2, ExtendedColorType::Rgb8, &[91; 12]);
+    // A broken compressed stream is immaterial: neither profile nor text is
+    // interpreted by the trained pixel preprocessing path.
+    insert_png_chunk(&mut encoded, b"iCCP", b"profile\0\0not-a-zlib-stream");
+    insert_png_chunk(&mut encoded, b"zTXt", b"comment\0\0not-a-zlib-stream");
+    assert_eq!(decode_image(&encoded, &bounds).unwrap().pixels, [91; 12]);
+}
+
+#[stark_test]
+fn image_decode_indexed_png_expands_palette_and_transparency() {
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, 2, 1);
+        encoder.set_color(png::ColorType::Indexed);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_palette(vec![17, 83, 149, 200, 100, 50]);
+        encoder.set_trns(vec![255, 0]);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[0, 1]).unwrap();
+    }
+    assert_eq!(decode_image(&encoded, &limits()).unwrap().pixels, [17, 83, 149, 255, 255, 255]);
+    let rgb = decode_image_discard_alpha(&encoded, &limits(), |_, _| Ok(())).unwrap();
+    assert_eq!(rgb.pixels, [17, 83, 149, 200, 100, 50]);
 }

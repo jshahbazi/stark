@@ -7,7 +7,7 @@ use metal::{
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use parking_lot::Mutex;
 
-use super::retirement::retire_after_queue;
+use super::retirement::{RetirementTracker, retire_after_queue};
 use crate::backends::{
     common::{Buffer, SparseBuffer},
     metal::{
@@ -40,6 +40,7 @@ pub struct MetalSparseBuffer {
     heaps: Arc<MetalHeaps>,
     command_queue: Retained<ProtocolObject<dyn MTL4CommandQueue>>,
     residency_set: Arc<Mutex<Retained<ProtocolObject<dyn MTLResidencySet>>>>,
+    retirements: Arc<RetirementTracker>,
 }
 
 impl MetalSparseBuffer {
@@ -72,6 +73,7 @@ impl MetalSparseBuffer {
             heaps: context.heaps.clone(),
             command_queue: context.command_queue.clone(),
             residency_set: context.residency_set.clone(),
+            retirements: context.retirements.clone(),
         })
     }
 
@@ -89,6 +91,10 @@ impl Buffer for MetalSparseBuffer {
 }
 
 impl SparseBuffer for MetalSparseBuffer {
+    fn mapped_size(&self) -> usize {
+        self.length.div_ceil(self.heaps.page_size().in_bytes()) * self.heaps.page_size().in_bytes()
+    }
+
     fn map(
         &mut self,
         until: usize,
@@ -143,6 +149,7 @@ impl Drop for MetalSparseBuffer {
         }
         retire_after_queue(
             &self.command_queue,
+            &self.retirements,
             SparseRetirement {
                 buffer: self.buffer.clone(),
                 _pages: std::mem::take(&mut self.pages),
