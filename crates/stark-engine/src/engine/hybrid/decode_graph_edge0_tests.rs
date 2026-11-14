@@ -388,6 +388,124 @@ fn edge0_phase4_packed_composition_matches_registered_f64_for_token_batches() {
 }
 
 #[stark_test]
+fn edge0_singleton_specialization_preserves_packed_and_fused_results_bitwise() {
+    let rows = 13;
+    for columns in [512, 1792] {
+        for tokens in [1, 2, 8] {
+            let input = (0..tokens * columns).map(|i| ((i * 17 % 43) as f32 - 21.0) * 0.047).collect::<Vec<_>>();
+            let source = DecodeGraph::upload(&input).unwrap();
+            for kind in [8, 11, 20] {
+                let (block, bytes) = weights::block_layout(kind).unwrap();
+                let make_codes = |seed: usize| {
+                    let mut codes =
+                        (0..rows * (columns / block) * bytes).map(|i| (i * 37 + seed) as u8).collect::<Vec<_>>();
+                    for chunk in codes.chunks_exact_mut(bytes) {
+                        let scale = if kind == 11 {
+                            108
+                        } else {
+                            0
+                        };
+                        chunk[scale..scale + 2].copy_from_slice(&0x2800u16.to_le_bytes());
+                    }
+                    codes
+                };
+                let mapped = matrix(&make_codes(19), 7);
+                let mut graph = DecodeGraph::new().unwrap();
+                let mut outputs = Vec::new();
+                for specialize in [false, true] {
+                    outputs.push(
+                        graph
+                            .edge0_packed_batch_selected(
+                                &mapped,
+                                MatrixFormat::Packed(kind),
+                                rows,
+                                columns,
+                                &source,
+                                tokens,
+                                specialize,
+                            )
+                            .unwrap(),
+                    );
+                }
+                if kind == 11 {
+                    let up = matrix(&make_codes(73), 11);
+                    for specialize in [false, true] {
+                        outputs.push(
+                            graph
+                                .edge0_gate_up_swiglu_batch_selected(
+                                    &mapped, &up, rows, columns, &source, tokens, specialize,
+                                )
+                                .unwrap(),
+                        );
+                    }
+                }
+                let actual = graph.finish(&outputs).unwrap();
+                for pair in actual.chunks_exact(2) {
+                    assert_eq!(
+                        pair[0].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        pair[1].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "Edge0 singleton specialization changed F32 result"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[stark_test]
+fn edge0_singleton_specialization_rejects_poison_and_bad_spans() {
+    for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for kind in [8, 11, 20] {
+            let (block, bytes) = weights::block_layout(kind).unwrap();
+            let mut codes = vec![0x55; 256 / block * bytes];
+            for chunk in codes.chunks_exact_mut(bytes) {
+                let scale = if kind == 11 {
+                    108
+                } else {
+                    0
+                };
+                chunk[scale..scale + 2].copy_from_slice(&0x2800u16.to_le_bytes());
+            }
+            let mapped = matrix(&codes, 7);
+            for fused in [false, true] {
+                if fused && kind != 11 {
+                    continue;
+                }
+                let input = DecodeGraph::zeros(256).unwrap();
+                // SAFETY: fresh owned storage has no pending GPU users.
+                unsafe {
+                    input.buffer.contents().as_ptr().cast::<f32>().add(255).write(poison);
+                }
+                let mut graph = DecodeGraph::new().unwrap();
+                let output = if fused {
+                    graph.edge0_gate_up_swiglu_batch_selected(&mapped, &mapped, 1, 256, &input, 1, true).unwrap()
+                } else {
+                    graph
+                        .edge0_packed_batch_selected(&mapped, MatrixFormat::Packed(kind), 1, 256, &input, 1, true)
+                        .unwrap()
+                };
+                assert!(graph.finish(&[output]).is_err(), "Edge0 singleton specialization concealed nonfinite input");
+            }
+            let input = DecodeGraph::zeros(256).unwrap();
+            let mut truncated = mapped.clone();
+            truncated.codes.length -= 1;
+            let mut graph = DecodeGraph::new().unwrap();
+            assert!(
+                graph
+                    .edge0_packed_batch_selected(&truncated, MatrixFormat::Packed(kind), 1, 256, &input, 1, true)
+                    .is_err()
+            );
+            if kind == 11 {
+                assert!(
+                    graph.edge0_gate_up_swiglu_batch_selected(&mapped, &truncated, 1, 256, &input, 1, true).is_err()
+                );
+            }
+            graph.finish(&[]).unwrap();
+        }
+    }
+}
+
+#[stark_test]
 fn edge0_phase4_bf16_batches_and_row_tails_match_independent_f64() {
     let (rows, columns) = (13, 96);
     let words = (0..rows * columns)

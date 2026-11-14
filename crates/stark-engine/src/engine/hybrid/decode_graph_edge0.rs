@@ -6,6 +6,13 @@ use super::*;
 #[path = "decode_graph_edge0_tests.rs"]
 mod tests;
 
+fn specialize_single() -> bool {
+    // Native workers fix their selectors before model loading. Cache once per
+    // process rather than reading the environment for every selected expert.
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("STARK_EDGE0_SPECIALIZE_SINGLE").is_some_and(|value| value == "1"))
+}
+
 fn geometry(
     rows: usize,
     columns: usize,
@@ -115,6 +122,20 @@ impl DecodeGraph {
         input: &DeviceVector,
         tokens: usize,
     ) -> Result<DeviceVector> {
+        self.edge0_packed_batch_selected(matrix, format, rows, columns, input, tokens, specialize_single())
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "explicit experimental selector for model-free parity tests")]
+    fn edge0_packed_batch_selected(
+        &mut self,
+        matrix: &MappedMatrix,
+        format: MatrixFormat,
+        rows: usize,
+        columns: usize,
+        input: &DeviceVector,
+        tokens: usize,
+        specialize: bool,
+    ) -> Result<DeviceVector> {
         geometry(rows, columns, tokens, input)?;
         let MatrixFormat::Packed(kind @ (0 | 1 | 8 | 11 | 20 | 30)) = format else {
             return Err(Error::Unsupported("Edge0 packed batch format"));
@@ -130,7 +151,12 @@ impl DecodeGraph {
         codes(matrix, length)?;
         let output = self.scratch(rows * tokens)?;
         self.edge0_dispatch(
-            "edge0_graph_packed_batch",
+            match (specialize && tokens == 1, kind) {
+                (true, 8) => "edge0_graph_q8_single",
+                (true, 11) => "edge0_graph_q3_single",
+                (true, 20) => "edge0_graph_iq4_single",
+                _ => "edge0_graph_packed_batch",
+            },
             &[matrix],
             input,
             &output,
@@ -149,6 +175,20 @@ impl DecodeGraph {
         input: &DeviceVector,
         tokens: usize,
     ) -> Result<DeviceVector> {
+        self.edge0_gate_up_swiglu_batch_selected(gate, up, rows, columns, input, tokens, specialize_single())
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "explicit experimental selector for model-free parity tests")]
+    fn edge0_gate_up_swiglu_batch_selected(
+        &mut self,
+        gate: &MappedMatrix,
+        up: &MappedMatrix,
+        rows: usize,
+        columns: usize,
+        input: &DeviceVector,
+        tokens: usize,
+        specialize: bool,
+    ) -> Result<DeviceVector> {
         geometry(rows, columns, tokens, input)?;
         if !columns.is_multiple_of(256) {
             return Err(Error::Invalid("Edge0 fused Q3_K alignment"));
@@ -161,7 +201,11 @@ impl DecodeGraph {
         codes(up, bytes)?;
         let output = self.scratch(rows * tokens)?;
         self.edge0_dispatch(
-            "edge0_graph_gate_up_swiglu_batch",
+            if specialize && tokens == 1 {
+                "edge0_graph_gate_up_swiglu_single"
+            } else {
+                "edge0_graph_gate_up_swiglu_batch"
+            },
             &[gate, up],
             input,
             &output,

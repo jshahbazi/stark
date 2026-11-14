@@ -4,6 +4,83 @@
 // see LICENSE.ggml-hybrid. This file changes scheduling, not storage formats.
 // Each matrix row decodes its weights once for up to eight token inputs.
 
+// Singleton expert jobs do not need dynamic token-indexed accumulators.
+// Format constants also fold decoder branches and packed integer addressing.
+// Keep the original 256-column stride and eight-SIMD-group reduction order.
+template<uint kind, uint block, uint bytes>
+inline void edge0_graph_packed_single_impl(
+    device const uchar *codes, device const float *input, device float *output,
+    constant uint *p, device atomic_uint *failure,
+    uint row, uint tid, uint lane, uint sg, threadgroup float *partial) {
+    const uint rows=p[0], columns=p[1];
+    if (row>=rows) return;
+    float sum=0.0f;
+    const ulong row_bytes=ulong(columns/block)*bytes;
+    const ulong row_offset=ulong(row)*row_bytes;
+    for (uint col=tid;col<columns;col+=256) {
+        const float weight=hybrid_quant(codes+row_offset+ulong(col/block)*bytes,kind,col%block);
+        sum+=weight*input[col];
+    }
+    float total=simd_sum(sum);
+    if (lane==0) partial[sg]=total;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid==0) {
+        float result=0.0f;
+        for (uint group=0;group<8;++group) result+=partial[group];
+        if (!isfinite(result)) atomic_store_explicit(failure,1u,memory_order_relaxed);
+        output[row]=result;
+    }
+}
+
+#define EDGE0_PACKED_SINGLE(NAME,KIND,BLOCK,BYTES) \
+kernel void NAME( \
+    device const uchar *codes [[buffer(0)]], \
+    device const float *input [[buffer(1)]], device float *output [[buffer(2)]], \
+    constant uint *p [[buffer(3)]], device atomic_uint *failure [[buffer(30)]], \
+    uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], \
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { \
+    threadgroup float partial[8]; \
+    edge0_graph_packed_single_impl<KIND,BLOCK,BYTES>(codes,input,output,p,failure,row,tid,lane,sg,partial); \
+}
+EDGE0_PACKED_SINGLE(edge0_graph_q8_single,8,32,34)
+EDGE0_PACKED_SINGLE(edge0_graph_q3_single,11,256,110)
+EDGE0_PACKED_SINGLE(edge0_graph_iq4_single,20,32,18)
+#undef EDGE0_PACKED_SINGLE
+
+kernel void edge0_graph_gate_up_swiglu_single(
+    device const uchar *gate [[buffer(0)]], device const uchar *up [[buffer(1)]],
+    device const float *input [[buffer(2)]], device float *output [[buffer(3)]],
+    constant uint *p [[buffer(4)]], device atomic_uint *failure [[buffer(30)]],
+    uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    const uint rows=p[0], columns=p[1];
+    if (row>=rows) return;
+    float gate_sum=0.0f, up_sum=0.0f;
+    const ulong row_offset=ulong(row)*(columns/256)*110;
+    for (uint col=tid;col<columns;col+=256) {
+        const ulong offset=row_offset+ulong(col/256)*110;
+        const float gw=hybrid_quant(gate+offset,11,col%256);
+        const float uw=hybrid_quant(up+offset,11,col%256);
+        const float value=input[col];
+        gate_sum+=gw*value;
+        up_sum+=uw*value;
+    }
+    threadgroup float partial_gate[8], partial_up[8];
+    float g=simd_sum(gate_sum), u=simd_sum(up_sum);
+    if (lane==0) { partial_gate[sg]=g; partial_up[sg]=u; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid==0) {
+        float gate_total=0.0f, up_total=0.0f;
+        for (uint group=0;group<8;++group) {
+            gate_total+=partial_gate[group];
+            up_total+=partial_up[group];
+        }
+        float result=hybrid_ffn_activation(gate_total,up_total,0.0f);
+        if (!isfinite(result)) atomic_store_explicit(failure,1u,memory_order_relaxed);
+        output[row]=result;
+    }
+}
+
 kernel void edge0_graph_packed_batch(
     device const uchar *codes [[buffer(0)]],
     device const float *input [[buffer(1)]],

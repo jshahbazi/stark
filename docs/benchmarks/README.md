@@ -1,5 +1,10 @@
 # Benchmarks
 
+[Edge0 MTP-off singleton speed, 2026-11-13](2026-11-13-edge0-singleton-speed.md):
+final same-binary observed decode 7.35 to 12.09 tok/s and prefill 12.78 to
+14.71 tok/s; opt-in kernels retain exact F32 reduction order and matching
+outputs. Local non-commercial evaluation; strict timing qualification remains open.
+
 [Edge0 short observed speed, 2026-11-13](2026-11-13-edge0-observed-speed.md):
 matching 128-token inputs and 16-token outputs, median decode 6.35 tok/s with MTP
 off and 2.77 with one draft; two measured requests per route. Immediate local

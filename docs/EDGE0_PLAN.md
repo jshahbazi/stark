@@ -16,6 +16,17 @@ reports 6.35 decode tok/s off and 2.77 with one draft, using matching 128-token
 inputs and 16-token outputs. These practical observations do not claim host
 isolation or complete the strict performance gate.
 Phase 5 performance qualification and phases 6–8 remain unfinished.
+The [MTP-off singleton optimization](benchmarks/2026-11-13-edge0-singleton-speed.md)
+adds opt-in format-specialized single-token Metal kernels with unchanged F32
+reduction order. Initial same-binary observations improve decode from 7.08 to
+11.55 tok/s and prefill from 13.14 to 13.85 tok/s. Enable
+`STARK_EDGE0_SPECIALIZE_SINGLE=1` before worker startup for local evaluation;
+the original kernels remain the default. These observations preserve the
+separate strict qualification gates and all previous rejected measurements.
+The final focused build repeats the improvement with MTP off: 12.78 to 14.71
+prefill tok/s and 7.35 to 12.09 decode tok/s, three measured requests per mode.
+The [upstream executor review](archive/runs/2026-11-13-edge0-reference-performance-ideas.md)
+records source-specific ideas for further prefill and decode work.
 Compatibility attempt
 [`20261112-EDGE0-01`](model-experiments/2026-11-12-edge0-compatibility.md)
 records the intake and prerequisites. The
