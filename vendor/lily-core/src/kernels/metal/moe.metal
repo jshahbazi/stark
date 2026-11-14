@@ -208,25 +208,21 @@ MOE_ROUTER_TOPK_KERNELS(16)
 MOE_ROUTER_TOPK_KERNELS(32)
 
 // Fuses selected-expert gate/up projections and writes SwiGLU output.
-template <uint FIXED_K, uint FIXED_GS, uint FIXED_N>
-static inline void moe_gate_up_body(
-    device const uint* gate_codes,
-    device const bfloat* gate_scales,
-    device const bfloat* gate_biases,
-    device const uint* up_codes,
-    device const bfloat* up_scales,
-    device const bfloat* up_biases,
-    device const bfloat* x,
-    device const uint* indices,
-    device bfloat* y,
-    uint runtime_k,
-    uint runtime_gs,
-    uint runtime_n,
-    uint2 tg,
-    uint lane) {
-    const uint K = FIXED_K ? FIXED_K : runtime_k;
-    const uint GS = FIXED_GS ? FIXED_GS : runtime_gs;
-    const uint N = FIXED_N ? FIXED_N : runtime_n;
+kernel void moe_gather_gemv_q4_gate_up(
+    device const uint* gate_codes [[buffer(0)]],
+    device const bfloat* gate_scales [[buffer(1)]],
+    device const bfloat* gate_biases [[buffer(2)]],
+    device const uint* up_codes [[buffer(3)]],
+    device const bfloat* up_scales [[buffer(4)]],
+    device const bfloat* up_biases [[buffer(5)]],
+    device const bfloat* x [[buffer(6)]],
+    device const uint* indices [[buffer(7)]],
+    device bfloat* y [[buffer(8)]],
+    constant uint& K [[buffer(9)]],
+    constant uint& GS [[buffer(10)]],
+    constant uint& N [[buffer(11)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]) {
     const uint row = tg.x;
     const uint slot = tg.y;
     const ulong grow = (ulong)indices[slot] * N + row;
@@ -278,47 +274,6 @@ static inline void moe_gate_up_body(
         y[(ulong)slot * N + row] =
             bfloat((gate_sum / (1.0f + exp(-gate_sum))) * up_sum);
     }
-}
-
-kernel void moe_gather_gemv_q4_gate_up(
-    device const uint* gate_codes [[buffer(0)]],
-    device const bfloat* gate_scales [[buffer(1)]],
-    device const bfloat* gate_biases [[buffer(2)]],
-    device const uint* up_codes [[buffer(3)]],
-    device const bfloat* up_scales [[buffer(4)]],
-    device const bfloat* up_biases [[buffer(5)]],
-    device const bfloat* x [[buffer(6)]],
-    device const uint* indices [[buffer(7)]],
-    device bfloat* y [[buffer(8)]],
-    constant uint& K [[buffer(9)]],
-    constant uint& GS [[buffer(10)]],
-    constant uint& N [[buffer(11)]],
-    uint2 tg [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_threadgroup]]) {
-    moe_gate_up_body<0, 0, 0>(
-        gate_codes, gate_scales, gate_biases, up_codes, up_scales, up_biases,
-        x, indices, y, K, GS, N, tg, lane);
-}
-
-// Fixed geometry removes runtime integer division; floating operations are shared.
-kernel void stark_moe_gate_up_h2560_i640_g64(
-    device const uint* gate_codes [[buffer(0)]],
-    device const bfloat* gate_scales [[buffer(1)]],
-    device const bfloat* gate_biases [[buffer(2)]],
-    device const uint* up_codes [[buffer(3)]],
-    device const bfloat* up_scales [[buffer(4)]],
-    device const bfloat* up_biases [[buffer(5)]],
-    device const bfloat* x [[buffer(6)]],
-    device const uint* indices [[buffer(7)]],
-    device bfloat* y [[buffer(8)]],
-    constant uint& K [[buffer(9)]],
-    constant uint& GS [[buffer(10)]],
-    constant uint& N [[buffer(11)]],
-    uint2 tg [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_threadgroup]]) {
-    moe_gate_up_body<2560, 64, 640>(
-        gate_codes, gate_scales, gate_biases, up_codes, up_scales, up_biases,
-        x, indices, y, K, GS, N, tg, lane);
 }
 
 // The routed experts' down projections gathered and combined with the

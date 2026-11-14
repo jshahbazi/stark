@@ -1,0 +1,1883 @@
+{
+  "12B": {
+    "decoder": {
+      "bidirectional_image_attention": true,
+      "embedding_config": {
+        "input_scale": 62.0,
+        "logit_scale": null,
+        "logit_soft_cap": 30.0,
+        "materialize_dequant": true,
+        "materialize_soft_cap": true,
+        "type": "TiedEmbeddingConfig"
+      },
+      "embedding_norm_config": null,
+      "gemma4_image_embeddings": false,
+      "ple_model_config": null,
+      "scalar_image_embeddings": true,
+      "transformer_config": {
+        "hidden_dim": 15360,
+        "model_dim": 3840,
+        "output_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        }
+      },
+      "vocab_size": 262144
+    },
+    "layer_order": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1
+    ],
+    "layer_templates": [
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": true,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 256,
+          "image_attention_policy": "windowed_same_image",
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "materialize_rope_bf16": true,
+          "normalize_values": true,
+          "num_groups": 8,
+          "num_heads": 16,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": 1024,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": null,
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 10000.0,
+          "head_dim": 256,
+          "max_sequence_length": 262144,
+          "type": "UnscaledRoPEConfig"
+        }
+      },
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": true,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 512,
+          "image_attention_policy": "causal",
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "materialize_rope_bf16": true,
+          "normalize_values": true,
+          "num_groups": 1,
+          "num_heads": 16,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": null,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": null,
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 1000000.0,
+          "head_dim": 512,
+          "max_sequence_length": 262144,
+          "rotary_dim": 128,
+          "type": "ProportionalRoPEConfig"
+        }
+      }
+    ],
+    "source_config_sha256": "478c46e8d2c52d5c2d85bf67e3b3e8c90e7c9d91086cee27e3c267907e936bd9",
+    "source_repo": "google/gemma-4-12B-it",
+    "source_revision": "43c9d014b231474fa7212dbb48a762566c2b255d"
+  },
+  "26B-A4B": {
+    "decoder": {
+      "bidirectional_image_attention": true,
+      "embedding_config": {
+        "input_scale": 53.0,
+        "logit_scale": null,
+        "logit_soft_cap": 30.0,
+        "materialize_dequant": true,
+        "materialize_soft_cap": true,
+        "type": "TiedEmbeddingConfig"
+      },
+      "embedding_norm_config": null,
+      "gemma4_image_embeddings": false,
+      "ple_model_config": null,
+      "scalar_image_embeddings": true,
+      "transformer_config": {
+        "hidden_dim": 2112,
+        "model_dim": 2816,
+        "output_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        }
+      },
+      "vocab_size": 262144
+    },
+    "layer_order": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1
+    ],
+    "layer_templates": [
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": true,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 256,
+          "image_attention_policy": "windowed_same_image",
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "materialize_rope_bf16": true,
+          "normalize_values": true,
+          "num_groups": 8,
+          "num_heads": 16,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": 1024,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "active_experts": 8,
+          "expert_config": {
+            "activation": {
+              "approximate": true,
+              "type": "GELU"
+            },
+            "gate_clipping": null,
+            "has_down_biases": false,
+            "has_up_biases": false,
+            "linear_config": {},
+            "type": "DenseMLPConfig",
+            "up_clipping": null
+          },
+          "expert_hidden_dim": 704,
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "num_experts": 128,
+          "router_root_scale": 0.018844459036110227,
+          "type": "Gemma4MoeConfig"
+        },
+        "mlp_conv_config": null,
+        "ple_config": null,
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 10000.0,
+          "head_dim": 256,
+          "max_sequence_length": 262144,
+          "type": "UnscaledRoPEConfig"
+        }
+      },
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": true,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 512,
+          "image_attention_policy": "causal",
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "materialize_rope_bf16": true,
+          "normalize_values": true,
+          "num_groups": 2,
+          "num_heads": 16,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": null,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "active_experts": 8,
+          "expert_config": {
+            "activation": {
+              "approximate": true,
+              "type": "GELU"
+            },
+            "gate_clipping": null,
+            "has_down_biases": false,
+            "has_up_biases": false,
+            "linear_config": {},
+            "type": "DenseMLPConfig",
+            "up_clipping": null
+          },
+          "expert_hidden_dim": 704,
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "num_experts": 128,
+          "router_root_scale": 0.018844459036110227,
+          "type": "Gemma4MoeConfig"
+        },
+        "mlp_conv_config": null,
+        "ple_config": null,
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 1000000.0,
+          "head_dim": 512,
+          "max_sequence_length": 262144,
+          "rotary_dim": 128,
+          "type": "ProportionalRoPEConfig"
+        }
+      }
+    ],
+    "source_config_sha256": "ed0c1eb3633de771906e9ba004a44cc5635bcc06ee2062077c3d2e88a50707d3",
+    "source_repo": "google/gemma-4-26B-A4B-it",
+    "source_revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52"
+  },
+  "31B": {
+    "decoder": {
+      "bidirectional_image_attention": true,
+      "embedding_config": {
+        "input_scale": 73.5,
+        "logit_scale": null,
+        "logit_soft_cap": 30.0,
+        "materialize_dequant": true,
+        "materialize_soft_cap": true,
+        "type": "TiedEmbeddingConfig"
+      },
+      "embedding_norm_config": null,
+      "gemma4_image_embeddings": false,
+      "ple_model_config": null,
+      "scalar_image_embeddings": true,
+      "transformer_config": {
+        "hidden_dim": 21504,
+        "model_dim": 5376,
+        "output_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        }
+      },
+      "vocab_size": 262144
+    },
+    "layer_order": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1
+    ],
+    "layer_templates": [
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": true,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 256,
+          "image_attention_policy": "windowed_same_image",
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "materialize_rope_bf16": true,
+          "normalize_values": true,
+          "num_groups": 16,
+          "num_heads": 32,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": 1024,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": null,
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 10000.0,
+          "head_dim": 256,
+          "max_sequence_length": 262144,
+          "type": "UnscaledRoPEConfig"
+        }
+      },
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": true,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 512,
+          "image_attention_policy": "causal",
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "materialize_rope_bf16": true,
+          "normalize_values": true,
+          "num_groups": 4,
+          "num_heads": 32,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": null,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": null,
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 1000000.0,
+          "head_dim": 512,
+          "max_sequence_length": 262144,
+          "rotary_dim": 128,
+          "type": "ProportionalRoPEConfig"
+        }
+      }
+    ],
+    "source_config_sha256": "e967dd38bc5cfd38bd09a995a7bf4a754075df2b46aba68f7fbb5a791e6d8dd1",
+    "source_repo": "google/gemma-4-31B-it",
+    "source_revision": "842da3794eaa0b77d5f08bae87a17459d91ff475"
+  },
+  "E2B": {
+    "decoder": {
+      "embedding_config": {
+        "input_scale": 39.25,
+        "logit_scale": null,
+        "logit_soft_cap": 30.0,
+        "materialize_dequant": true,
+        "materialize_soft_cap": true,
+        "type": "TiedEmbeddingConfig"
+      },
+      "embedding_norm_config": null,
+      "gemma4_image_embeddings": true,
+      "ple_model_config": {
+        "input_scale": 0.7071067690849304,
+        "linear_config": {},
+        "model_projection_scale": 0.025515519082546234,
+        "norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "num_layers": 35,
+        "ple_dim": 256,
+        "ple_embed_scale": 16.0,
+        "ple_vocab_size": 262144,
+        "reference_bf16": true
+      },
+      "transformer_config": {
+        "hidden_dim": 6144,
+        "model_dim": 1536,
+        "output_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        }
+      },
+      "vocab_size": 262144
+    },
+    "layer_order": [
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      2,
+      2,
+      2,
+      2,
+      3,
+      2,
+      2,
+      2,
+      2,
+      3,
+      2,
+      2,
+      2,
+      2,
+      3,
+      2,
+      2,
+      2,
+      2,
+      3
+    ],
+    "layer_templates": [
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": false,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 256,
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "normalize_values": true,
+          "num_groups": 1,
+          "num_heads": 8,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": 512,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "linear_config": {},
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "ple_dim": 256,
+          "reference_bf16": true
+        },
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 10000.0,
+          "head_dim": 256,
+          "max_sequence_length": 131072,
+          "type": "UnscaledRoPEConfig"
+        }
+      },
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": false,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 512,
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "normalize_values": true,
+          "num_groups": 1,
+          "num_heads": 8,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": null,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "linear_config": {},
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "ple_dim": 256,
+          "reference_bf16": true
+        },
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 1000000.0,
+          "head_dim": 512,
+          "max_sequence_length": 131072,
+          "rotary_dim": 128,
+          "type": "ProportionalRoPEConfig"
+        }
+      },
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": 12288,
+        "kv_source_layer_index": 13,
+        "materialize_post_layer_scalar": false,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 256,
+          "is_causal": true,
+          "is_kv_sharing": true,
+          "key_norm_config": null,
+          "logit_soft_cap": null,
+          "normalize_values": true,
+          "num_groups": 1,
+          "num_heads": 8,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": 512,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "linear_config": {},
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "ple_dim": 256,
+          "reference_bf16": true
+        },
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 10000.0,
+          "head_dim": 256,
+          "max_sequence_length": 131072,
+          "type": "UnscaledRoPEConfig"
+        }
+      },
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": 12288,
+        "kv_source_layer_index": 14,
+        "materialize_post_layer_scalar": false,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 512,
+          "is_causal": true,
+          "is_kv_sharing": true,
+          "key_norm_config": null,
+          "logit_soft_cap": null,
+          "normalize_values": true,
+          "num_groups": 1,
+          "num_heads": 8,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": null,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "linear_config": {},
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "ple_dim": 256,
+          "reference_bf16": true
+        },
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 1000000.0,
+          "head_dim": 512,
+          "max_sequence_length": 131072,
+          "rotary_dim": 128,
+          "type": "ProportionalRoPEConfig"
+        }
+      }
+    ],
+    "source_config_sha256": "1b28f3d2c3100f6c594754b81107428bd7b822a7f48272ca681dae9d2ec38330",
+    "source_repo": "google/gemma-4-E2B-it",
+    "source_revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
+  },
+  "E4B": {
+    "decoder": {
+      "embedding_config": {
+        "input_scale": 50.5,
+        "logit_scale": null,
+        "logit_soft_cap": 30.0,
+        "materialize_dequant": true,
+        "materialize_soft_cap": true,
+        "type": "TiedEmbeddingConfig"
+      },
+      "embedding_norm_config": null,
+      "gemma4_image_embeddings": true,
+      "ple_model_config": {
+        "input_scale": 0.7071067690849304,
+        "linear_config": {},
+        "model_projection_scale": 0.019764235243201256,
+        "norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "num_layers": 42,
+        "ple_dim": 256,
+        "ple_embed_scale": 16.0,
+        "ple_vocab_size": 262144,
+        "reference_bf16": true
+      },
+      "transformer_config": {
+        "hidden_dim": 10240,
+        "model_dim": 2560,
+        "output_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        }
+      },
+      "vocab_size": 262144
+    },
+    "layer_order": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      2,
+      2,
+      2,
+      2,
+      2,
+      3,
+      2,
+      2,
+      2,
+      2,
+      2,
+      3,
+      2,
+      2,
+      2,
+      2,
+      2,
+      3
+    ],
+    "layer_templates": [
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": false,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 256,
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "normalize_values": true,
+          "num_groups": 2,
+          "num_heads": 8,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": 512,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "linear_config": {},
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "ple_dim": 256,
+          "reference_bf16": true
+        },
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 10000.0,
+          "head_dim": 256,
+          "max_sequence_length": 131072,
+          "type": "UnscaledRoPEConfig"
+        }
+      },
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": null,
+        "materialize_post_layer_scalar": false,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 512,
+          "is_causal": true,
+          "is_kv_sharing": false,
+          "key_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "logit_soft_cap": null,
+          "normalize_values": true,
+          "num_groups": 2,
+          "num_heads": 8,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": null,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "linear_config": {},
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "ple_dim": 256,
+          "reference_bf16": true
+        },
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 1000000.0,
+          "head_dim": 512,
+          "max_sequence_length": 131072,
+          "rotary_dim": 128,
+          "type": "ProportionalRoPEConfig"
+        }
+      },
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": 22,
+        "materialize_post_layer_scalar": false,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 256,
+          "is_causal": true,
+          "is_kv_sharing": true,
+          "key_norm_config": null,
+          "logit_soft_cap": null,
+          "normalize_values": true,
+          "num_groups": 2,
+          "num_heads": 8,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": 512,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "linear_config": {},
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "ple_dim": 256,
+          "reference_bf16": true
+        },
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 10000.0,
+          "head_dim": 256,
+          "max_sequence_length": 131072,
+          "type": "UnscaledRoPEConfig"
+        }
+      },
+      {
+        "has_post_layer_scalar": true,
+        "hidden_dim": null,
+        "kv_source_layer_index": 23,
+        "materialize_post_layer_scalar": false,
+        "mixer_config": {
+          "has_gate": false,
+          "has_out_biases": false,
+          "has_qkvg_biases": false,
+          "has_sinks": false,
+          "head_dim": 512,
+          "is_causal": true,
+          "is_kv_sharing": true,
+          "key_norm_config": null,
+          "logit_soft_cap": null,
+          "normalize_values": true,
+          "num_groups": 2,
+          "num_heads": 8,
+          "out_projection_config": {},
+          "qkvg_projection_config": {},
+          "query_norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "scale": 1.0,
+          "sliding_window_size": null,
+          "type": "AttentionConfig"
+        },
+        "mixer_conv_config": null,
+        "mlp_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "gate_clipping": null,
+          "has_down_biases": false,
+          "has_up_biases": false,
+          "linear_config": {},
+          "type": "DenseMLPConfig",
+          "up_clipping": null
+        },
+        "mlp_conv_config": null,
+        "ple_config": {
+          "activation": {
+            "approximate": true,
+            "type": "GELU"
+          },
+          "linear_config": {},
+          "norm_config": {
+            "epsilon": 1e-06,
+            "has_biases": false,
+            "has_scale": true,
+            "scale_offset": null,
+            "subtract_mean": false,
+            "upcast_mode": "full_layer"
+          },
+          "ple_dim": 256,
+          "reference_bf16": true
+        },
+        "post_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "post_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mixer_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "pre_mlp_norm_config": {
+          "epsilon": 1e-06,
+          "has_biases": false,
+          "has_scale": true,
+          "scale_offset": null,
+          "subtract_mean": false,
+          "upcast_mode": "full_layer"
+        },
+        "rope_config": {
+          "base": 1000000.0,
+          "head_dim": 512,
+          "max_sequence_length": 131072,
+          "rotary_dim": 128,
+          "type": "ProportionalRoPEConfig"
+        }
+      }
+    ],
+    "source_config_sha256": "33b10c02df3c2e8536cf323d29d53262aaa2f4d11dbe19bc729373fbe90295d4",
+    "source_repo": "google/gemma-4-E4B-it",
+    "source_revision": "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c"
+  }
+}

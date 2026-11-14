@@ -11,10 +11,12 @@ import struct
 from pathlib import Path
 
 from ._build_metadata import open_regular
-from .api_tools import tool_support_for
+from .api_tools import codec_with_template_review, tool_support_for
 from .hybrid_prepare import prepared_identity
+from .hybrid_vision import prepared_image_identity
 from .model_support import normalize_architecture
 from .streaming import authorize_source_path
+from .vision_runtime import VISION_MODEL_TYPES
 
 MAX_METADATA_BYTES = 2 * 1024 * 1024
 MAX_HEADER_BYTES = 1024 * 1024
@@ -324,6 +326,29 @@ def _source(receipt, model):
     return repo, revision if isinstance(revision, str) and _REVISION.fullmatch(revision) else None
 
 
+def template_review_receipt(root):
+    """Return the receipt fields that restrict tool templates or system roles, failing closed.
+
+    An absent receipt (an imported artifact) adds no restriction. A receipt that
+    exists but cannot be read is treated as recording an unreviewed template.
+    """
+    path = Path(root) / "conversion.json"
+    if not path.exists() and not path.is_symlink():
+        return {}
+    try:
+        receipt = _json(_small_file(Path(root), "conversion.json"))
+        if not isinstance(receipt, dict):
+            raise ValueError()
+    except Exception:
+        return {"chat_template_selection": "unreadable_receipt"}
+    # The loader validates the recorded system-role policy exactly.
+    return {
+        key: receipt[key]
+        for key in ("chat_template_selection", "chat_template_system_role")
+        if receipt.get(key) is not None
+    }
+
+
 def model_tool_support(root):
     """Inspect the artifact's bounded codec, independently of saved metadata."""
     try:
@@ -331,7 +356,7 @@ def model_tool_support(root):
         codec = config.get("token_codec_config") if isinstance(config, dict) else None
         if not isinstance(codec, dict) or codec.get("type") != "ChatCodecConfig":
             codec = None
-        return tool_support_for(codec)
+        return tool_support_for(codec_with_template_review(codec, template_review_receipt(root)))
     except Exception:
         return tool_support_for(None)
 
@@ -357,13 +382,15 @@ def model_display(model):
     if hybrid is not None:
         repo = hybrid["repo"]
         result.update(
-            group_id="repo:" + repo,
-            group_name=repo.split("/")[-1],
+            group_id="repo:" + repo if repo else "model:" + model["id"],
+            group_name=repo.split("/")[-1] if repo else model["name"],
             family_id=hybrid["architecture"],
             quantization=hybrid["quantization"],
             weight_bytes=hybrid["weight_bytes"],
             source_revision=hybrid["revision"],
         )
+        if prepared_image_identity(root) is not None:
+            result["artifact_mode"] = "vision-language"
         return result
     try:
         result["weight_bytes"], result["quantization"] = _weights(root)
@@ -372,7 +399,7 @@ def model_display(model):
     try:
         config = _small_file(root, "config.json")
         parsed = _json(config)
-        if isinstance(parsed, dict) and parsed.get("type") == "Qwen35VisionLanguageModelConfig":
+        if isinstance(parsed, dict) and parsed.get("type") in VISION_MODEL_TYPES:
             result["artifact_mode"] = "vision-language"
         elif isinstance(parsed, dict) and parsed.get("type") in {
             "LanguageModelConfig",
@@ -384,12 +411,7 @@ def model_display(model):
         if (
             not isinstance(parsed, dict)
             or parsed.get("type")
-            not in {
-                "LanguageModelConfig",
-                "Qwen35VisionLanguageModelConfig",
-                "Qwen38LanguageModelConfig",
-                "ClassifierModelConfig",
-            }
+            not in {"LanguageModelConfig", "ClassifierModelConfig", "Qwen38LanguageModelConfig", *VISION_MODEL_TYPES}
             or not isinstance(receipt, dict)
         ):
             return result

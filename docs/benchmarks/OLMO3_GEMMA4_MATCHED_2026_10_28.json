@@ -1,0 +1,480 @@
+{
+  "date": "2026-10-28",
+  "host": {
+    "build": "25G241",
+    "chip": "Apple M5 Max",
+    "macos": "26.7.1",
+    "memory_bytes": 137438953472
+  },
+  "implementation_commit": "0f3e855f69b130a3de922fc15fdea760b92d9c92",
+  "numerical_qualification": {
+    "gemma4_e2b_q4": {
+      "generation_worker_cases_passed": 2,
+      "next_token_greedy_agreements": 5,
+      "numeric_cases_passed": 3,
+      "passed": false,
+      "total_cases": 5
+    },
+    "olmo3_q4": {
+      "generation_worker_cases_passed": 2,
+      "next_token_greedy_agreements": 5,
+      "numeric_cases_passed": 4,
+      "passed": false,
+      "total_cases": 5
+    }
+  },
+  "results": [
+    {
+      "aggregate": {
+        "activation_dtype": "bfloat16",
+        "backend": "stark-metal",
+        "context_tokens": 1024,
+        "conversion_receipt_sha256": "511307b7431788c477a3b53afcadf9ca5b2b21caeb7376d0b885ea02a3bff00b",
+        "decode_forward_steps": 128,
+        "device": {
+          "apple_gpu_family": 1010,
+          "gpu_core_count": 40,
+          "name": "Apple M5 Max",
+          "supports_mxu": true
+        },
+        "executable_sha256": "1ba42a051905b89f1058b450c4208a9b8fbd7e00436fe8f34a761b2bd196da24",
+        "input_sha256": "383fbe095bec25537a3692c9800bfa1dfdde7ce854caa2c5ed05877be5f534bf",
+        "input_tokens": 512,
+        "load_seconds": 0.433464458,
+        "measured_runs": 3,
+        "median_request_total_seconds": 1.532450125,
+        "median_work_tokens_per_second": 417.631862570405,
+        "native_config_sha256": "48432cc2edbd4b2c163c8bfe99b3c3db056e850530ea756cba242779e9a7323c",
+        "native_weights_sha256": "80741d14a2d64a740c65c285e2dfca7783f59ce63fa1a2465c12ea31306c3db8",
+        "passed": true,
+        "peak_memory_bytes": 4668833792,
+        "quantization": {
+          "bits": 4,
+          "group_size": 64,
+          "mode": "affine",
+          "overrides_sha256": null
+        },
+        "repeated_outputs_identical": true,
+        "returned_tokens": 128,
+        "runs": [
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.010760583000000157,
+            "first_token_return_seconds": 0.177147542,
+            "input_tokens": 512,
+            "measured": false,
+            "output_sha256": "a72c50085dbef0b283afff251a80870eb511090b72b6b432bb59d0beb09dde14",
+            "remaining_token_returns_seconds": 1.35191225,
+            "request_total_seconds": 1.5398203750000001,
+            "returned_tokens": 128,
+            "run": 0,
+            "stream_setup_seconds": 0.007905208,
+            "work_tokens_per_second": 415.6328948433352
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.01075420799999982,
+            "first_token_return_seconds": 0.158069667,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "a72c50085dbef0b283afff251a80870eb511090b72b6b432bb59d0beb09dde14",
+            "remaining_token_returns_seconds": 1.362831625,
+            "request_total_seconds": 1.5316554999999998,
+            "returned_tokens": 128,
+            "run": 1,
+            "stream_setup_seconds": 0.002551125,
+            "work_tokens_per_second": 417.84853056056016
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.01103112499999992,
+            "first_token_return_seconds": 0.159744833,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "a72c50085dbef0b283afff251a80870eb511090b72b6b432bb59d0beb09dde14",
+            "remaining_token_returns_seconds": 1.362089542,
+            "request_total_seconds": 1.5328655,
+            "returned_tokens": 128,
+            "run": 2,
+            "stream_setup_seconds": 0.002413083,
+            "work_tokens_per_second": 417.51869293163685
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.010705500000000034,
+            "first_token_return_seconds": 0.162387209,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "a72c50085dbef0b283afff251a80870eb511090b72b6b432bb59d0beb09dde14",
+            "remaining_token_returns_seconds": 1.359357416,
+            "request_total_seconds": 1.532450125,
+            "returned_tokens": 128,
+            "run": 3,
+            "stream_setup_seconds": 0.003581,
+            "work_tokens_per_second": 417.631862570405
+          }
+        ],
+        "schema_version": 1,
+        "scope": "matched-pp512-tg128-greedy-v1",
+        "source_config_sha256": "92408f393c6c724d087c8a1ef913a507d1c4aff689e2019fc7577fcacecfdd64",
+        "source_repo": "mlx-community/Olmo-3-7B-Instruct-4bit",
+        "source_revision": "d732c91ae02e90cd5d86e810fbeb9741794b4dd9",
+        "source_weights": [
+          {
+            "bytes": 4105983200,
+            "filename": "model.safetensors",
+            "sha256": "a97f02f033af038a222c4ae3cd22a3df580160d559dc985c6a6a2d512b5210cd"
+          }
+        ],
+        "source_weights_digest": "004d3f52c66fe5485b42fb7ccc6b4632586c137617f138109d5edcad16193510",
+        "timing_boundary": "fresh state, 512-token prefill, 128 returned tokens, 128 decode forwards, final lookahead drain; first-return timing includes lookahead scheduling",
+        "warmup_runs": 1
+      },
+      "receipt_sha256": "0e49081298da925e9e4b8eb3ba9dc2b82dadc4e5858974213b0a9ae27ff2b72e"
+    },
+    {
+      "aggregate": {
+        "backend": "mlx-lm-direct-greedy",
+        "context_tokens": 1024,
+        "decode_forward_steps": 128,
+        "device": {
+          "architecture": "applegpu_g17s",
+          "device_name": "Apple M5 Max",
+          "max_recommended_working_set_size": 115448725504
+        },
+        "floating_parameter_dtypes": [
+          "mlx.core.bfloat16"
+        ],
+        "harness_sha256": "6b3b779314de7b84dc8e41fa6e615a3186b6bfb8bcfa3b9e97ee04ab5bf35a3a",
+        "input_sha256": "383fbe095bec25537a3692c9800bfa1dfdde7ce854caa2c5ed05877be5f534bf",
+        "input_tokens": 512,
+        "load_seconds": 0.13526479084976017,
+        "measured_runs": 3,
+        "median_request_total_seconds": 1.3179131669458002,
+        "median_work_tokens_per_second": 485.6162120932208,
+        "mlx_lm_revision": "1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7",
+        "mlx_version": "0.32.3",
+        "passed": true,
+        "peak_memory_bytes": 4827312234,
+        "quantization": {
+          "bits": 4,
+          "group_size": 64,
+          "mode": "affine",
+          "overrides_sha256": null
+        },
+        "repeated_outputs_identical": true,
+        "returned_tokens": 128,
+        "runs": [
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.004293666919693351,
+            "first_token_return_seconds": 0.17224229197017848,
+            "input_tokens": 512,
+            "measured": false,
+            "output_sha256": "a71d52d60eff63c4060c047d2d0b756655facee0cc6892ec3cfaa6d3a9462561",
+            "remaining_token_returns_seconds": 1.148712458088994,
+            "request_total_seconds": 1.3252484169788659,
+            "returned_tokens": 128,
+            "run": 0,
+            "stream_setup_seconds": 0.16179616702720523,
+            "work_tokens_per_second": 482.92832634276317
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.004264958901330829,
+            "first_token_return_seconds": 0.15515520796179771,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "a71d52d60eff63c4060c047d2d0b756655facee0cc6892ec3cfaa6d3a9462561",
+            "remaining_token_returns_seconds": 1.1584930000826716,
+            "request_total_seconds": 1.3179131669458002,
+            "returned_tokens": 128,
+            "run": 1,
+            "stream_setup_seconds": 0.14427704201079905,
+            "work_tokens_per_second": 485.6162120932208
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.004252291051670909,
+            "first_token_return_seconds": 0.15437966701574624,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "a71d52d60eff63c4060c047d2d0b756655facee0cc6892ec3cfaa6d3a9462561",
+            "remaining_token_returns_seconds": 1.1505976249463856,
+            "request_total_seconds": 1.3092295830138028,
+            "returned_tokens": 128,
+            "run": 2,
+            "stream_setup_seconds": 0.1437830829527229,
+            "work_tokens_per_second": 488.8371056562451
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.004479333991184831,
+            "first_token_return_seconds": 0.15480433288030326,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "a71d52d60eff63c4060c047d2d0b756655facee0cc6892ec3cfaa6d3a9462561",
+            "remaining_token_returns_seconds": 1.1590362500865012,
+            "request_total_seconds": 1.3183199169579893,
+            "returned_tokens": 128,
+            "run": 3,
+            "stream_setup_seconds": 0.14437237498350441,
+            "work_tokens_per_second": 485.4663816934465
+          }
+        ],
+        "schema_version": 1,
+        "scope": "matched-pp512-tg128-greedy-v1",
+        "source_config_sha256": "92408f393c6c724d087c8a1ef913a507d1c4aff689e2019fc7577fcacecfdd64",
+        "source_repo": "mlx-community/Olmo-3-7B-Instruct-4bit",
+        "source_revision": "d732c91ae02e90cd5d86e810fbeb9741794b4dd9",
+        "source_weights": [
+          {
+            "bytes": 4105983200,
+            "filename": "model.safetensors",
+            "sha256": "a97f02f033af038a222c4ae3cd22a3df580160d559dc985c6a6a2d512b5210cd"
+          }
+        ],
+        "source_weights_digest": "004d3f52c66fe5485b42fb7ccc6b4632586c137617f138109d5edcad16193510",
+        "timing_boundary": "fresh cache, 512-token prefill, 128 returned tokens, 128 decode forwards, final lookahead drain; first-return timing includes lookahead scheduling",
+        "transformers_version": "5.7.0",
+        "warmup_runs": 1
+      },
+      "receipt_sha256": "d2f773c0c89619a6ab7a7d2d9e1f8af8ef691e3f46884ef35215f2565db65106"
+    },
+    {
+      "aggregate": {
+        "activation_dtype": "bfloat16",
+        "backend": "stark-metal",
+        "context_tokens": 1024,
+        "conversion_receipt_sha256": "aa3dc2d2254762773f9903da3528ac03361ebccc179ff83aee9afebc79304e73",
+        "decode_forward_steps": 128,
+        "device": {
+          "apple_gpu_family": 1010,
+          "gpu_core_count": 40,
+          "name": "Apple M5 Max",
+          "supports_mxu": true
+        },
+        "executable_sha256": "1ba42a051905b89f1058b450c4208a9b8fbd7e00436fe8f34a761b2bd196da24",
+        "input_sha256": "63eb18db375879d80163bc4592e18777f68214840d010aae2125d754e398f37b",
+        "input_tokens": 512,
+        "load_seconds": 0.481311292,
+        "measured_runs": 3,
+        "median_request_total_seconds": 0.629455,
+        "median_work_tokens_per_second": 1016.7525875559015,
+        "native_config_sha256": "a1205ad1906124f45cbd084f95357f46202e6d9c851c2cc0639293e887c456e1",
+        "native_weights_sha256": "0118a58bcb1ec4a0bc97db53172581eef9e1762238e4b733972a29ec3ba2551b",
+        "passed": true,
+        "peak_memory_bytes": 2790211584,
+        "quantization": {
+          "bits": 4,
+          "group_size": 64,
+          "mode": "affine",
+          "overrides_sha256": null
+        },
+        "repeated_outputs_identical": true,
+        "returned_tokens": 128,
+        "runs": [
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.004895582999999926,
+            "first_token_return_seconds": 0.057574833,
+            "input_tokens": 512,
+            "measured": false,
+            "output_sha256": "a4042d0d899f9716b17091cfd8a92a40e50ac512842ba5ce5a96dfc390af3f74",
+            "remaining_token_returns_seconds": 0.5929080840000001,
+            "request_total_seconds": 0.6553785,
+            "returned_tokens": 128,
+            "run": 0,
+            "stream_setup_seconds": 0.019284792,
+            "work_tokens_per_second": 976.5349336299558
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.004830208999999974,
+            "first_token_return_seconds": 0.031634791,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "a4042d0d899f9716b17091cfd8a92a40e50ac512842ba5ce5a96dfc390af3f74",
+            "remaining_token_returns_seconds": 0.59299,
+            "request_total_seconds": 0.629455,
+            "returned_tokens": 128,
+            "run": 1,
+            "stream_setup_seconds": 0.005728208,
+            "work_tokens_per_second": 1016.7525875559015
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.004818082999999973,
+            "first_token_return_seconds": 0.034209875,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "a4042d0d899f9716b17091cfd8a92a40e50ac512842ba5ce5a96dfc390af3f74",
+            "remaining_token_returns_seconds": 0.59330975,
+            "request_total_seconds": 0.632337708,
+            "returned_tokens": 128,
+            "run": 2,
+            "stream_setup_seconds": 0.006353083,
+            "work_tokens_per_second": 1012.1174048345698
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.00496949999999996,
+            "first_token_return_seconds": 0.030889209,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "a4042d0d899f9716b17091cfd8a92a40e50ac512842ba5ce5a96dfc390af3f74",
+            "remaining_token_returns_seconds": 0.593477916,
+            "request_total_seconds": 0.629336625,
+            "returned_tokens": 128,
+            "run": 3,
+            "stream_setup_seconds": 0.005122334,
+            "work_tokens_per_second": 1016.9438335167606
+          }
+        ],
+        "schema_version": 1,
+        "scope": "matched-pp512-tg128-greedy-v1",
+        "source_config_sha256": "6397cb6eca41b911d1dcab74e17941351057bd759284052a2331918ff6f9246c",
+        "source_repo": "mlx-community/gemma-4-e2b-it-4bit",
+        "source_revision": "238767527555cb75a05732a84dff5d6ba0dd6809",
+        "source_weights": [
+          {
+            "bytes": 3550670554,
+            "filename": "model.safetensors",
+            "sha256": "038e39a37a7667373d2c3991375446b10c96ae1d717a68674870343db376b76e"
+          }
+        ],
+        "source_weights_digest": "7522cb8396b675c572b2d30f9131984f917752513a902d1827a84128b021f1fd",
+        "timing_boundary": "fresh state, 512-token prefill, 128 returned tokens, 128 decode forwards, final lookahead drain; first-return timing includes lookahead scheduling",
+        "warmup_runs": 1
+      },
+      "receipt_sha256": "ca1af9fdfd3dcbf3529327c8a6c69d1e15416497333a82ce5b069bdd686e96c2"
+    },
+    {
+      "aggregate": {
+        "backend": "mlx-lm-direct-greedy",
+        "context_tokens": 1024,
+        "decode_forward_steps": 128,
+        "device": {
+          "architecture": "applegpu_g17s",
+          "device_name": "Apple M5 Max",
+          "max_recommended_working_set_size": 115448725504
+        },
+        "floating_parameter_dtypes": [
+          "mlx.core.bfloat16"
+        ],
+        "harness_sha256": "6b3b779314de7b84dc8e41fa6e615a3186b6bfb8bcfa3b9e97ee04ab5bf35a3a",
+        "input_sha256": "63eb18db375879d80163bc4592e18777f68214840d010aae2125d754e398f37b",
+        "input_tokens": 512,
+        "load_seconds": 0.1244175829924643,
+        "measured_runs": 3,
+        "median_request_total_seconds": 0.6141421659849584,
+        "median_work_tokens_per_second": 1042.1039873944674,
+        "mlx_lm_revision": "1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7",
+        "mlx_version": "0.32.3",
+        "passed": true,
+        "peak_memory_bytes": 3246642942,
+        "quantization": {
+          "bits": 4,
+          "group_size": 64,
+          "mode": "affine",
+          "overrides_sha256": null
+        },
+        "repeated_outputs_identical": true,
+        "returned_tokens": 128,
+        "runs": [
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.002982750069350004,
+            "first_token_return_seconds": 0.18368733418174088,
+            "input_tokens": 512,
+            "measured": false,
+            "output_sha256": "03f17cff595a19aba064fb7ddf00547b52fd0cdf3c908b77db96f2727aba52a1",
+            "remaining_token_returns_seconds": 0.5867342909332365,
+            "request_total_seconds": 0.7734043751843274,
+            "returned_tokens": 128,
+            "run": 0,
+            "stream_setup_seconds": 0.17576566711068153,
+            "work_tokens_per_second": 827.5101881179133
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.0030081248842179775,
+            "first_token_return_seconds": 0.028130250051617622,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "03f17cff595a19aba064fb7ddf00547b52fd0cdf3c908b77db96f2727aba52a1",
+            "remaining_token_returns_seconds": 0.5840199580416083,
+            "request_total_seconds": 0.6151583329774439,
+            "returned_tokens": 128,
+            "run": 1,
+            "stream_setup_seconds": 0.024049540981650352,
+            "work_tokens_per_second": 1040.3825579380828
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.0029989578761160374,
+            "first_token_return_seconds": 0.027568000135943294,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "03f17cff595a19aba064fb7ddf00547b52fd0cdf3c908b77db96f2727aba52a1",
+            "remaining_token_returns_seconds": 0.5835752079728991,
+            "request_total_seconds": 0.6141421659849584,
+            "returned_tokens": 128,
+            "run": 2,
+            "stream_setup_seconds": 0.023384290980175138,
+            "work_tokens_per_second": 1042.1039873944674
+          },
+          {
+            "context_tokens_after": 640,
+            "decode_forward_steps": 128,
+            "final_drain_seconds": 0.0029934998601675034,
+            "first_token_return_seconds": 0.027155499905347824,
+            "input_tokens": 512,
+            "measured": true,
+            "output_sha256": "03f17cff595a19aba064fb7ddf00547b52fd0cdf3c908b77db96f2727aba52a1",
+            "remaining_token_returns_seconds": 0.5829316251911223,
+            "request_total_seconds": 0.6130806249566376,
+            "returned_tokens": 128,
+            "run": 3,
+            "stream_setup_seconds": 0.023052833043038845,
+            "work_tokens_per_second": 1043.9083767249476
+          }
+        ],
+        "schema_version": 1,
+        "scope": "matched-pp512-tg128-greedy-v1",
+        "source_config_sha256": "6397cb6eca41b911d1dcab74e17941351057bd759284052a2331918ff6f9246c",
+        "source_repo": "mlx-community/gemma-4-e2b-it-4bit",
+        "source_revision": "238767527555cb75a05732a84dff5d6ba0dd6809",
+        "source_weights": [
+          {
+            "bytes": 3550670554,
+            "filename": "model.safetensors",
+            "sha256": "038e39a37a7667373d2c3991375446b10c96ae1d717a68674870343db376b76e"
+          }
+        ],
+        "source_weights_digest": "7522cb8396b675c572b2d30f9131984f917752513a902d1827a84128b021f1fd",
+        "timing_boundary": "fresh cache, 512-token prefill, 128 returned tokens, 128 decode forwards, final lookahead drain; first-return timing includes lookahead scheduling",
+        "transformers_version": "5.7.0",
+        "warmup_runs": 1
+      },
+      "receipt_sha256": "2bbaef41f3a96833b045a8abc6f71110388db3b7b5e2b533f5ecf38651176070"
+    }
+  ],
+  "schema_version": 1,
+  "scope": "diagnostic timing of partially validated Q4 paths; not numerical qualification"
+}

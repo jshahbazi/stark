@@ -1,0 +1,1530 @@
+{
+  "schema_version": 1,
+  "scope": "Ripple native Q8 serial worker observed ABBA cohorts",
+  "date_utc": "2026-11-05",
+  "source": {
+    "baseline_checkout": "203ce69e27f25daeb6f0e36eb4755f32e8f65937",
+    "baseline_engine": "4cb209cdb638ee5d8107cd50eb128bacabbef25b",
+    "candidate": "1978a3b17df1ea83b4d7e1139ec2e91619f2acfc",
+    "metadata": "ricursiveAI/Ripple-65B-Preview@e27e171792f303d74c048184e8259ba663cfa0d5",
+    "weights": "AtomicChat/Ripple-65B-Preview-GGUF@57066fdb2348a53f2261f096e0a793b9554b4106",
+    "quantization": "Q8_0",
+    "precision": "F32 activation, accumulation, controls, residuals and KV; Safe Metal math"
+  },
+  "machine": {
+    "model": "Mac17,7",
+    "physical_memory_bytes": 137438953472,
+    "os_version": "26.7.1",
+    "architecture": "arm64"
+  },
+  "identity_checks": {
+    "config_sha256": "b429b1908e2d5857f51b7710d4dd80a6db78e0616cf795ad1bf8eb9eef9c8233",
+    "tokenizer_sha256": "73fd5254624f39a88e3faac6a8e11300fc3c735ed37880d4f4f08db898eaecca",
+    "template_sha256": "877c2dbf365243dda14738ca250b31398059b35ffd91d4ed0ec68be45ca6ebd3",
+    "input_sha256": "0e5338a847150a0598c5dfb91da62bf394602e34b0cfc2f0189cc148c0db4340",
+    "weights": {
+      "receipt_sha256": "958fd9097cc12861392ec249238e4b1ea45a5734452c3b07422ce8d1623864e3",
+      "files": {
+        "Ripple-65B-Preview-Q8_0-00001-of-00002.gguf": {
+          "bytes": 44906597984,
+          "mtime_ns": 1793839347010228717,
+          "inode": 142610745,
+          "prior_verified_sha256": "1fdbb76b6ffcc416b120d74257e2e4412f8b7bb99aac315d9b7088e47adf12b5"
+        },
+        "Ripple-65B-Preview-Q8_0-00002-of-00002.gguf": {
+          "bytes": 23933515584,
+          "mtime_ns": 1793838345853496481,
+          "inode": 142610755,
+          "prior_verified_sha256": "48c6dea463d63c471d7f6d225cd52b1c54f7fbfa56c7f03ae1a7aae3f16fa9a7"
+        }
+      },
+      "verification": "Prior content hashes; size, modification time and inode checked before and after execution."
+    },
+    "method": "Prior verified weight hashes; size, mtime and inode checked before and after each worker cohort."
+  },
+  "workload": {
+    "input_tokens": 10,
+    "sampled_tokens": 32,
+    "decode_steps": 31,
+    "context_tokens": 512,
+    "sampling": "greedy_no_speculation",
+    "screened": false,
+    "warmup_requests_per_process": 1,
+    "measured_requests_per_arm": 4,
+    "rate_policy": "31 / decode_seconds; first sampled token from prefill",
+    "same_output_hash_all_requests": true
+  },
+  "arms": {
+    "baseline": {
+      "measured_requests": 4,
+      "median_decode_tokens_per_second": 2.760398847427121,
+      "pooled_decode_tokens_per_second": 2.7170916613334644,
+      "minimum_decode_tokens_per_second": 2.5600849882149377,
+      "maximum_decode_tokens_per_second": 2.800988533438825,
+      "median_prefill_seconds": 3.438449542,
+      "median_generation_seconds": 14.6691627705,
+      "requests": [
+        {
+          "cohort": "baseline-worker",
+          "worker_sha256": "222d75eade7e381c169b91601333cc38c17220bb50cc7e8b537a101bb27ea4c6",
+          "replay": 0,
+          "warmup": true,
+          "prefill_seconds": 21.309697834,
+          "decode_seconds": 10.133572791,
+          "generation_seconds": 31.444431708,
+          "useful_decode_tokens_per_second": 3.059138236766034,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "baseline-worker",
+          "worker_sha256": "222d75eade7e381c169b91601333cc38c17220bb50cc7e8b537a101bb27ea4c6",
+          "replay": 1,
+          "warmup": false,
+          "prefill_seconds": 3.386685125,
+          "decode_seconds": 11.239681208,
+          "generation_seconds": 14.62685825,
+          "useful_decode_tokens_per_second": 2.7580853430198107,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "baseline-worker",
+          "worker_sha256": "222d75eade7e381c169b91601333cc38c17220bb50cc7e8b537a101bb27ea4c6",
+          "replay": 2,
+          "warmup": false,
+          "prefill_seconds": 3.35669175,
+          "decode_seconds": 11.067521209,
+          "generation_seconds": 14.424657833,
+          "useful_decode_tokens_per_second": 2.800988533438825,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "baseline-post-worker",
+          "worker_sha256": "222d75eade7e381c169b91601333cc38c17220bb50cc7e8b537a101bb27ea4c6",
+          "replay": 0,
+          "warmup": true,
+          "prefill_seconds": 16.681949333,
+          "decode_seconds": 11.178332125,
+          "generation_seconds": 27.861239417,
+          "useful_decode_tokens_per_second": 2.7732223066327975,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "baseline-post-worker",
+          "worker_sha256": "222d75eade7e381c169b91601333cc38c17220bb50cc7e8b537a101bb27ea4c6",
+          "replay": 1,
+          "warmup": false,
+          "prefill_seconds": 3.490213959,
+          "decode_seconds": 11.220856916,
+          "generation_seconds": 14.711467291,
+          "useful_decode_tokens_per_second": 2.762712351834431,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "baseline-post-worker",
+          "worker_sha256": "222d75eade7e381c169b91601333cc38c17220bb50cc7e8b537a101bb27ea4c6",
+          "replay": 2,
+          "warmup": false,
+          "prefill_seconds": 3.610500792,
+          "decode_seconds": 12.108973,
+          "generation_seconds": 15.719866458,
+          "useful_decode_tokens_per_second": 2.5600849882149377,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        }
+      ]
+    },
+    "candidate": {
+      "measured_requests": 4,
+      "median_decode_tokens_per_second": 6.0403205128970905,
+      "pooled_decode_tokens_per_second": 6.013755811598621,
+      "minimum_decode_tokens_per_second": 5.52089651199826,
+      "maximum_decode_tokens_per_second": 6.545145540726606,
+      "median_prefill_seconds": 1.5439907505,
+      "median_generation_seconds": 6.7122630415,
+      "requests": [
+        {
+          "cohort": "candidate-worker",
+          "worker_sha256": "35e560ff933b99b065424d5e3c91b8496a65afdc28e1f356fcd1631378a5e6a5",
+          "replay": 0,
+          "warmup": true,
+          "prefill_seconds": 17.473021625,
+          "decode_seconds": 4.428593792,
+          "generation_seconds": 21.903745041,
+          "useful_decode_tokens_per_second": 6.999964651533341,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "candidate-worker",
+          "worker_sha256": "35e560ff933b99b065424d5e3c91b8496a65afdc28e1f356fcd1631378a5e6a5",
+          "replay": 1,
+          "warmup": false,
+          "prefill_seconds": 1.44198625,
+          "decode_seconds": 4.736334709,
+          "generation_seconds": 6.179737542,
+          "useful_decode_tokens_per_second": 6.545145540726606,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "candidate-worker",
+          "worker_sha256": "35e560ff933b99b065424d5e3c91b8496a65afdc28e1f356fcd1631378a5e6a5",
+          "replay": 2,
+          "warmup": false,
+          "prefill_seconds": 1.5608164169999998,
+          "decode_seconds": 5.615030083,
+          "generation_seconds": 7.177317375,
+          "useful_decode_tokens_per_second": 5.52089651199826,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "candidate-signed-worker",
+          "worker_sha256": "5b87f887c8ec2104db7e16c0e020b66482fb4376634801ba3674b12535a769eb",
+          "replay": 0,
+          "warmup": true,
+          "prefill_seconds": 21.550686042,
+          "decode_seconds": 4.379653333,
+          "generation_seconds": 25.932307667,
+          "useful_decode_tokens_per_second": 7.0781857930215315,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "candidate-signed-worker",
+          "worker_sha256": "5b87f887c8ec2104db7e16c0e020b66482fb4376634801ba3674b12535a769eb",
+          "replay": 1,
+          "warmup": false,
+          "prefill_seconds": 1.527165084,
+          "decode_seconds": 5.036911625,
+          "generation_seconds": 6.56563275,
+          "useful_decode_tokens_per_second": 6.154565000929513,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        },
+        {
+          "cohort": "candidate-signed-worker",
+          "worker_sha256": "5b87f887c8ec2104db7e16c0e020b66482fb4376634801ba3674b12535a769eb",
+          "replay": 2,
+          "warmup": false,
+          "prefill_seconds": 1.626235709,
+          "decode_seconds": 5.2311175,
+          "generation_seconds": 6.858893333,
+          "useful_decode_tokens_per_second": 5.926076024864668,
+          "output_sha256": "8c835e2cfaaec59619db6c181510d1ddedc557b3744540d8a1603d08903d3ada"
+        }
+      ]
+    }
+  },
+  "change": {
+    "median_decode_ratio": 2.1882057074929877,
+    "median_prefill_seconds_reduction_fraction": 0.5509630920446993,
+    "median_request_seconds_reduction_fraction": 0.5424235761431113
+  },
+  "parity": {
+    "f32": {
+      "family": "ricursive",
+      "backend": "metal",
+      "positions": 17,
+      "vocabulary": 64,
+      "max_abs_error": 5.125999450683594e-06,
+      "mean_abs_error": 6.843817091601736e-07,
+      "relative_l2_error": 1.2817431946915377e-06,
+      "greedy_agreement": 17,
+      "tolerance": 2e-05,
+      "reset_replay_exact": true,
+      "failure_rejected": true,
+      "failure_clears_state": true,
+      "elapsed_seconds": 0.028205416,
+      "reference_sha256": "4ef91ffa27ce18c655bde2f46dc91efe632bdf8c64fdac3dd486f7f7ed3ce78a",
+      "native_sha256": "ac8e5530f3d5b3bc7567f84b02613c1ed0944e2c623e1bc53133e54820074fdc",
+      "passed": true
+    },
+    "bf16": {
+      "family": "ricursive",
+      "backend": "metal",
+      "positions": 17,
+      "vocabulary": 64,
+      "max_abs_error": 5.5283308029174805e-06,
+      "mean_abs_error": 6.798004238482784e-07,
+      "relative_l2_error": 1.284588237728877e-06,
+      "greedy_agreement": 17,
+      "tolerance": 2e-05,
+      "reset_replay_exact": true,
+      "failure_rejected": true,
+      "failure_clears_state": true,
+      "elapsed_seconds": 0.029955,
+      "reference_sha256": "0302eb008977c6629b18a20e7363c40b7d600ca5d9d232074fa989aa45c6c13a",
+      "native_sha256": "1f6475d82e947071940412303549e7b28faf00cb9635015c7c38a5b544b74f14",
+      "passed": true
+    },
+    "q8": {
+      "family": "ricursive",
+      "backend": "metal",
+      "positions": 17,
+      "vocabulary": 64,
+      "max_abs_error": 4.827976226806641e-06,
+      "mean_abs_error": 7.239800384816002e-07,
+      "relative_l2_error": 1.3078425114130198e-06,
+      "greedy_agreement": 17,
+      "tolerance": 2e-05,
+      "reset_replay_exact": true,
+      "failure_rejected": true,
+      "failure_clears_state": true,
+      "elapsed_seconds": 0.031184125,
+      "reference_sha256": "05683c1c4e67ececf97729451ef7e7ac04f175120e32fa3397c36f5eb880ca9d",
+      "native_sha256": "dd44ea41a842751483841dce701ca102de4546d75bd4affb16a9e1a52465334a",
+      "passed": true
+    },
+    "full-q8": {
+      "family": "ricursive",
+      "backend": "metal",
+      "positions": 8,
+      "vocabulary": 100352,
+      "max_abs_error": 0.00021457672119140625,
+      "mean_abs_error": 4.1846388332466666e-05,
+      "relative_l2_error": 2.766959999923659e-06,
+      "greedy_agreement": 8,
+      "tolerance": 0.001,
+      "reset_replay_exact": true,
+      "failure_rejected": true,
+      "failure_clears_state": true,
+      "elapsed_seconds": 17.996047584,
+      "reference_sha256": "c47d203efdd3f0041dd4a805cddfc16e6cf2b145f01f2702d03ad0fc46ce7e77",
+      "native_sha256": "84e8f7f54a91fd98a4ab920317b53b2c4bf724010d7479b9540e331fc41164aa",
+      "passed": true
+    }
+  },
+  "signed_generation": {
+    "scope": "bounded_full_checkpoint_functional_smoke",
+    "passed": true,
+    "checks": {
+      "arithmetic": true,
+      "literal_instruction": true,
+      "intervening_request_isolation": true,
+      "invalid_request_rejected": true,
+      "failure_recovery_exact": true
+    },
+    "sampling": "greedy",
+    "context_tokens": 4096,
+    "max_new_tokens": 128,
+    "worker_sha256": "5b87f887c8ec2104db7e16c0e020b66482fb4376634801ba3674b12535a769eb",
+    "config_sha256": "b429b1908e2d5857f51b7710d4dd80a6db78e0616cf795ad1bf8eb9eef9c8233",
+    "harness_sha256": "a1b91603472f58478993e838413f7f595fec159c92b993e265d189e08f9c3b3f",
+    "peak_reported_gpu_memory_bytes": 68398841856,
+    "peak_worker_rss_bytes": 212025344,
+    "system_swap_out_delta_bytes": 2572288,
+    "requests": [
+      {
+        "output_sha256": "01e874ec7dddf66fd212540e215fa3b412858b5b561e9cc9684c4c12edd4357c",
+        "input_tokens": 22,
+        "output_tokens": 1,
+        "sampled_tokens": 2,
+        "finish_reason": "eos",
+        "prefill_seconds": 19.452665209,
+        "decode_seconds": 0.223321416,
+        "output_tokens_per_second": 4.477850883768353
+      },
+      {
+        "output_sha256": "bf3b71446a7ce2d0971a36ba713292f6c515da073ea29a41ae8464d0eba35db4",
+        "input_tokens": 16,
+        "output_tokens": 2,
+        "sampled_tokens": 3,
+        "finish_reason": "eos",
+        "prefill_seconds": 3.605301375,
+        "decode_seconds": 0.485111292,
+        "output_tokens_per_second": 4.122765297328927
+      },
+      {
+        "output_sha256": "01e874ec7dddf66fd212540e215fa3b412858b5b561e9cc9684c4c12edd4357c",
+        "input_tokens": 22,
+        "output_tokens": 1,
+        "sampled_tokens": 2,
+        "finish_reason": "eos",
+        "prefill_seconds": 4.975181625,
+        "decode_seconds": 0.227903292,
+        "output_tokens_per_second": 4.387826043337715
+      },
+      {
+        "output_sha256": "01e874ec7dddf66fd212540e215fa3b412858b5b561e9cc9684c4c12edd4357c",
+        "input_tokens": 22,
+        "output_tokens": 1,
+        "sampled_tokens": 2,
+        "finish_reason": "eos",
+        "prefill_seconds": 5.076525125,
+        "decode_seconds": 0.234308542,
+        "output_tokens_per_second": 4.267876840785429
+      }
+    ]
+  },
+  "signed_worker_integration": {
+    "family": "ricursive",
+    "generate_worker_sha256": "5b87f887c8ec2104db7e16c0e020b66482fb4376634801ba3674b12535a769eb",
+    "generation": {
+      "eos_union": true,
+      "invalid_request_recovery": true,
+      "reference_greedy_agreement": 4,
+      "request_isolation": true,
+      "tokenize_decode": true
+    },
+    "model_config_preserved": true,
+    "passed": true,
+    "prepared_tokenizer_sha256": "0d0c2be94032d3afe3f0caedbdb7ef4e61bca963169825b91eefc37b56446ba8",
+    "private_synthetic_fixture": true,
+    "reference_sha256": "05683c1c4e67ececf97729451ef7e7ac04f175120e32fa3397c36f5eb880ca9d",
+    "score_worker_sha256": "123bfcd8338caedf91e3d739528650428d98a1743aa6a5a00858f44515078e03",
+    "scoring": {
+      "consecutive_repeat_hits": true,
+      "intervening_request_invalidates": true,
+      "invalid_request_clears_cache": true,
+      "maximum_absolute_logit_error": 1.2516975402832031e-06,
+      "reference_logits_close": true,
+      "tokenize": true
+    },
+    "source_config_sha256": "94cf82f9c2ec075524e21b27a29d7dcea5a798307a04a8b73eaedf56ab08b763",
+    "source_weights_sha256": "3106c2ffac7421c51068d39128528ca391addbf8f8a225a6c6646752b2141ea9",
+    "supplemental_tokenizer_metadata": true,
+    "weight_bytes": 82912,
+    "workers_exited_cleanly": true
+  },
+  "evidence_sha256": {
+    "baseline-worker.json": "d6dd07709e951ad1d91ba01036acd612343f70e2986a7a836ab35f57aaa5a3cd",
+    "baseline-post-worker.json": "5d26e41550297bc4ee415175a6339ed0b323f55404be4079499dfbd657f9b063",
+    "candidate-worker.json": "0abd9e277af57cc62bc10b8a25e83b7a1a51d1ffc219dad7f93d1acf4096e7a6",
+    "candidate-signed-worker.json": "e70ae24f13c93e85cb2f87df00b9e33402a7cd32bc1102892a2e1b979c43eed2"
+  },
+  "test_scopes": {
+    "full_engine": {
+      "source": "410bec76c195522b6478c329225d6cbfb84b9977",
+      "unit_passed": 774,
+      "ignored": 79,
+      "integration_passed": 7,
+      "doctests_passed": 3,
+      "log_sha256": "4ff1ddd9d4aa18b8f7a16cc192e19a3c5c1ec149726615bf6fffdfcbd3871eea"
+    },
+    "final_focused": {
+      "source": "1978a3b17df1ea83b4d7e1139ec2e91619f2acfc",
+      "passed": 12,
+      "ignored": 1,
+      "log_sha256": "59948e0f220580b9cd1e700b08d50800f63842c4f7d4e4dc0c156554dd5e460a"
+    }
+  },
+  "executable_sha256": {
+    "raw_generate": "35e560ff933b99b065424d5e3c91b8496a65afdc28e1f356fcd1631378a5e6a5",
+    "raw_score": "4325b237b779500e8cf77003683cf42b3ffead5c53713e953717c819079c487a",
+    "parity": "5a231dadaa2e4eafdc3b788a28d0a7ababa24040e3080a7d68a096404198c485",
+    "profile": "39fba860fa00449776220290bd45e8fabb0431ba93328b272a55f26c349e288f",
+    "signed_generate": "5b87f887c8ec2104db7e16c0e020b66482fb4376634801ba3674b12535a769eb",
+    "signed_score": "123bfcd8338caedf91e3d739528650428d98a1743aa6a5a00858f44515078e03"
+  },
+  "baseline_profile": [
+    {
+      "replay": 0,
+      "input_tokens": 10,
+      "input_sha256": "962efae3999892bb59977e61e2d5a7385d5d53bc2d32a35890f773db7178db76",
+      "activity_assertion": true,
+      "synthetic_repeated_prefix": true,
+      "decode_steps": 16,
+      "prefill_seconds": 22.244875,
+      "decode_seconds": 5.183452792,
+      "decode_tokens_per_second": 3.0867455809945765,
+      "output_sha256": "59ff5d8ca4eedeb7ba7197d5409d00d705658f712acd98d74b63d842dd700f45",
+      "prefill_profile": {
+        "native.metal.allocated_bytes": {
+          "calls": 3201,
+          "seconds": 0.0,
+          "bytes": 206032109322240,
+          "max_bytes": 68295311360
+        },
+        "native.metal.encode": {
+          "calls": 3201,
+          "seconds": 0.015233643000000142,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 3201,
+          "seconds": 21.682923558999935,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 3201,
+          "seconds": 2.9379927458357997,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.map": {
+          "calls": 641,
+          "seconds": 0.023683779999999995,
+          "bytes": 68294410240,
+          "max_bytes": 545931264
+        },
+        "native.metal.pipeline": {
+          "calls": 1,
+          "seconds": 0.000252209,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.readback": {
+          "calls": 3201,
+          "seconds": 0.09109125500000001,
+          "bytes": 367403008,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 5760,
+          "seconds": 0.0,
+          "bytes": 609736310784,
+          "max_bytes": 222838784
+        },
+        "native.metal.static_cache.miss": {
+          "calls": 641,
+          "seconds": 0.0,
+          "bytes": 68294410240,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 411896606588928,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 3201,
+          "seconds": 0.00907704799999994,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 3201,
+          "seconds": 0.08713347900000011,
+          "bytes": 262164480,
+          "max_bytes": 163840
+        },
+        "native.metal.wait": {
+          "calls": 3201,
+          "seconds": 21.657113980999906,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      },
+      "decode_profile": {
+        "native.metal.allocated_bytes": {
+          "calls": 5136,
+          "seconds": 0.0,
+          "bytes": 350763607654400,
+          "max_bytes": 68295311360
+        },
+        "native.metal.encode": {
+          "calls": 5136,
+          "seconds": 0.01443032800000015,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 5136,
+          "seconds": 4.412760955000014,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 5136,
+          "seconds": 3.4460645825020038,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.readback": {
+          "calls": 5136,
+          "seconds": 0.14254258999999941,
+          "bytes": 593625088,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 1092710563840,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 700427471421440,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 5136,
+          "seconds": 0.010605533999999932,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 5136,
+          "seconds": 0.1263648239999999,
+          "bytes": 419758080,
+          "max_bytes": 163840
+        },
+        "native.metal.wait": {
+          "calls": 5136,
+          "seconds": 4.386259249000005,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      }
+    },
+    {
+      "replay": 1,
+      "input_tokens": 10,
+      "input_sha256": "962efae3999892bb59977e61e2d5a7385d5d53bc2d32a35890f773db7178db76",
+      "activity_assertion": true,
+      "synthetic_repeated_prefix": true,
+      "decode_steps": 16,
+      "prefill_seconds": 3.266585583,
+      "decode_seconds": 5.438012291,
+      "decode_tokens_per_second": 2.942251533061127,
+      "output_sha256": "59ff5d8ca4eedeb7ba7197d5409d00d705658f712acd98d74b63d842dd700f45",
+      "prefill_profile": {
+        "native.metal.allocated_bytes": {
+          "calls": 3201,
+          "seconds": 0.0,
+          "bytes": 218612596981760,
+          "max_bytes": 68295311360
+        },
+        "native.metal.encode": {
+          "calls": 3201,
+          "seconds": 0.00899492699999999,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 3201,
+          "seconds": 2.8120895970000017,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 3201,
+          "seconds": 2.1813969591166824,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.readback": {
+          "calls": 3201,
+          "seconds": 0.08620496099999993,
+          "bytes": 367403008,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 678030721024,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 437152519946240,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 3201,
+          "seconds": 0.0066554710000000065,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 3201,
+          "seconds": 0.08112730699999987,
+          "bytes": 262164480,
+          "max_bytes": 163840
+        },
+        "native.metal.wait": {
+          "calls": 3201,
+          "seconds": 2.7955214949999987,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      },
+      "decode_profile": {
+        "native.metal.allocated_bytes": {
+          "calls": 5136,
+          "seconds": 0.0,
+          "bytes": 350763607654400,
+          "max_bytes": 68295311360
+        },
+        "native.metal.encode": {
+          "calls": 5136,
+          "seconds": 0.016205182999999995,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 5136,
+          "seconds": 4.625146837999999,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 5136,
+          "seconds": 3.542387582710944,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.readback": {
+          "calls": 5136,
+          "seconds": 0.13840676700000032,
+          "bytes": 593625088,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 1092710563840,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 700427471421440,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 5136,
+          "seconds": 0.011355358999999999,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 5136,
+          "seconds": 0.1419832879999997,
+          "bytes": 419758080,
+          "max_bytes": 163840
+        },
+        "native.metal.wait": {
+          "calls": 5136,
+          "seconds": 4.596035302000002,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      }
+    },
+    {
+      "replay": 2,
+      "input_tokens": 10,
+      "input_sha256": "962efae3999892bb59977e61e2d5a7385d5d53bc2d32a35890f773db7178db76",
+      "activity_assertion": true,
+      "synthetic_repeated_prefix": true,
+      "decode_steps": 16,
+      "prefill_seconds": 3.427721625,
+      "decode_seconds": 5.629954708,
+      "decode_tokens_per_second": 2.8419411575841758,
+      "output_sha256": "59ff5d8ca4eedeb7ba7197d5409d00d705658f712acd98d74b63d842dd700f45",
+      "prefill_profile": {
+        "native.metal.allocated_bytes": {
+          "calls": 3201,
+          "seconds": 0.0,
+          "bytes": 218612596981760,
+          "max_bytes": 68295311360
+        },
+        "native.metal.encode": {
+          "calls": 3201,
+          "seconds": 0.008921072999999974,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 3201,
+          "seconds": 2.9555302959999987,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 3201,
+          "seconds": 2.2730625411495566,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.readback": {
+          "calls": 3201,
+          "seconds": 0.0870214430000001,
+          "bytes": 367403008,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 678030721024,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 437152519946240,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 3201,
+          "seconds": 0.006654136000000002,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 3201,
+          "seconds": 0.087012191,
+          "bytes": 262164480,
+          "max_bytes": 163840
+        },
+        "native.metal.wait": {
+          "calls": 3201,
+          "seconds": 2.9389953679999983,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      },
+      "decode_profile": {
+        "native.metal.allocated_bytes": {
+          "calls": 5136,
+          "seconds": 0.0,
+          "bytes": 350763607654400,
+          "max_bytes": 68295311360
+        },
+        "native.metal.encode": {
+          "calls": 5136,
+          "seconds": 0.014901171999999924,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 5136,
+          "seconds": 4.8276493990000064,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 5136,
+          "seconds": 3.7426266238908283,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.readback": {
+          "calls": 5136,
+          "seconds": 0.13509077899999972,
+          "bytes": 593625088,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 1092710563840,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 700427471421440,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 5136,
+          "seconds": 0.01130401500000008,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 5136,
+          "seconds": 0.14389192999999995,
+          "bytes": 419758080,
+          "max_bytes": 163840
+        },
+        "native.metal.wait": {
+          "calls": 5136,
+          "seconds": 4.799930768000001,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      }
+    }
+  ],
+  "candidate_profile": [
+    {
+      "replay": 0,
+      "input_tokens": 10,
+      "input_sha256": "962efae3999892bb59977e61e2d5a7385d5d53bc2d32a35890f773db7178db76",
+      "activity_assertion": true,
+      "synthetic_repeated_prefix": true,
+      "decode_steps": 16,
+      "prefill_seconds": 18.850999584,
+      "decode_seconds": 2.227685,
+      "decode_tokens_per_second": 7.182344002854982,
+      "output_sha256": "59ff5d8ca4eedeb7ba7197d5409d00d705658f712acd98d74b63d842dd700f45",
+      "prefill_profile": {
+        "native.metal.encode": {
+          "calls": 10,
+          "seconds": 0.019715124999999997,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 10,
+          "seconds": 18.819060291000003,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 10,
+          "seconds": 15.47844862495549,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.graph.projection_levels": {
+          "calls": 1600,
+          "seconds": 0.0,
+          "bytes": 1600,
+          "max_bytes": 1
+        },
+        "native.metal.graph.ripple_q8_grouped": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 677926010880,
+          "max_bytes": 545914880
+        },
+        "native.metal.graph.scratch": {
+          "calls": 671,
+          "seconds": 0.0,
+          "bytes": 703594496,
+          "max_bytes": 1048576
+        },
+        "native.metal.graph.scratch_high_water": {
+          "calls": 671,
+          "seconds": 0.0,
+          "bytes": 23957864448,
+          "max_bytes": 71303168
+        },
+        "native.metal.map": {
+          "calls": 641,
+          "seconds": 0.003945412000000004,
+          "bytes": 68294410240,
+          "max_bytes": 545931264
+        },
+        "native.metal.pipeline": {
+          "calls": 1,
+          "seconds": 0.000101458,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.readback": {
+          "calls": 1,
+          "seconds": 0.00015875,
+          "bytes": 401408,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 5760,
+          "seconds": 0.0,
+          "bytes": 609736310784,
+          "max_bytes": 222838784
+        },
+        "native.metal.static_cache.miss": {
+          "calls": 641,
+          "seconds": 0.0,
+          "bytes": 68294410240,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 411896606588928,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 10,
+          "seconds": 8.583399999999999e-05,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 491,
+          "seconds": 0.0021557410000000005,
+          "bytes": 6860800,
+          "max_bytes": 20480
+        },
+        "native.metal.wait": {
+          "calls": 10,
+          "seconds": 18.818948544999998,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      },
+      "decode_profile": {
+        "native.metal.encode": {
+          "calls": 96,
+          "seconds": 0.022612077999999994,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 96,
+          "seconds": 2.192932502,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 96,
+          "seconds": 2.159899916499853,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.graph.projection_levels": {
+          "calls": 2560,
+          "seconds": 0.0,
+          "bytes": 2560,
+          "max_bytes": 1
+        },
+        "native.metal.graph.ripple_q8_grouped": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 1092542791680,
+          "max_bytes": 545914880
+        },
+        "native.metal.graph.scratch": {
+          "calls": 1168,
+          "seconds": 0.0,
+          "bytes": 1224736768,
+          "max_bytes": 1048576
+        },
+        "native.metal.graph.scratch_high_water": {
+          "calls": 1168,
+          "seconds": 0.0,
+          "bytes": 39443234816,
+          "max_bytes": 71303168
+        },
+        "native.metal.readback": {
+          "calls": 16,
+          "seconds": 0.001506958,
+          "bytes": 6422528,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 1092710563840,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 700427471421440,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 96,
+          "seconds": 0.0002230839999999999,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 16,
+          "seconds": 1.6666999999999998e-05,
+          "bytes": 327680,
+          "max_bytes": 20480
+        },
+        "native.metal.wait": {
+          "calls": 96,
+          "seconds": 2.192679623000001,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      }
+    },
+    {
+      "replay": 1,
+      "input_tokens": 10,
+      "input_sha256": "962efae3999892bb59977e61e2d5a7385d5d53bc2d32a35890f773db7178db76",
+      "activity_assertion": true,
+      "synthetic_repeated_prefix": true,
+      "decode_steps": 16,
+      "prefill_seconds": 1.374416375,
+      "decode_seconds": 2.329878875,
+      "decode_tokens_per_second": 6.867309786651463,
+      "output_sha256": "59ff5d8ca4eedeb7ba7197d5409d00d705658f712acd98d74b63d842dd700f45",
+      "prefill_profile": {
+        "native.metal.encode": {
+          "calls": 10,
+          "seconds": 0.013703793,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 10,
+          "seconds": 1.3481483339999998,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 10,
+          "seconds": 1.3383959999191575,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.graph.projection_levels": {
+          "calls": 1600,
+          "seconds": 0.0,
+          "bytes": 1600,
+          "max_bytes": 1
+        },
+        "native.metal.graph.ripple_q8_grouped": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 677926010880,
+          "max_bytes": 545914880
+        },
+        "native.metal.graph.scratch": {
+          "calls": 671,
+          "seconds": 0.0,
+          "bytes": 703594496,
+          "max_bytes": 1048576
+        },
+        "native.metal.graph.scratch_high_water": {
+          "calls": 671,
+          "seconds": 0.0,
+          "bytes": 23957864448,
+          "max_bytes": 71303168
+        },
+        "native.metal.readback": {
+          "calls": 1,
+          "seconds": 5.6041e-05,
+          "bytes": 401408,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 678030721024,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 437152519946240,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 10,
+          "seconds": 6.1373e-05,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 491,
+          "seconds": 0.004350799,
+          "bytes": 6860800,
+          "max_bytes": 20480
+        },
+        "native.metal.wait": {
+          "calls": 10,
+          "seconds": 1.3480719600000002,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      },
+      "decode_profile": {
+        "native.metal.encode": {
+          "calls": 96,
+          "seconds": 0.02493021,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 96,
+          "seconds": 2.290274703,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 96,
+          "seconds": 2.256018291285727,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.graph.projection_levels": {
+          "calls": 2560,
+          "seconds": 0.0,
+          "bytes": 2560,
+          "max_bytes": 1
+        },
+        "native.metal.graph.ripple_q8_grouped": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 1092542791680,
+          "max_bytes": 545914880
+        },
+        "native.metal.graph.scratch": {
+          "calls": 1168,
+          "seconds": 0.0,
+          "bytes": 1224736768,
+          "max_bytes": 1048576
+        },
+        "native.metal.graph.scratch_high_water": {
+          "calls": 1168,
+          "seconds": 0.0,
+          "bytes": 39443234816,
+          "max_bytes": 71303168
+        },
+        "native.metal.readback": {
+          "calls": 16,
+          "seconds": 0.001364001,
+          "bytes": 6422528,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 1092710563840,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 700427471421440,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 96,
+          "seconds": 0.00030400200000000005,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 16,
+          "seconds": 2.0541000000000005e-05,
+          "bytes": 327680,
+          "max_bytes": 20480
+        },
+        "native.metal.wait": {
+          "calls": 96,
+          "seconds": 2.289925537,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      }
+    },
+    {
+      "replay": 2,
+      "input_tokens": 10,
+      "input_sha256": "962efae3999892bb59977e61e2d5a7385d5d53bc2d32a35890f773db7178db76",
+      "activity_assertion": true,
+      "synthetic_repeated_prefix": true,
+      "decode_steps": 16,
+      "prefill_seconds": 1.474028792,
+      "decode_seconds": 2.4030565,
+      "decode_tokens_per_second": 6.658187187858463,
+      "output_sha256": "59ff5d8ca4eedeb7ba7197d5409d00d705658f712acd98d74b63d842dd700f45",
+      "prefill_profile": {
+        "native.metal.encode": {
+          "calls": 10,
+          "seconds": 0.014195707000000002,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 10,
+          "seconds": 1.4483805840000001,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 10,
+          "seconds": 1.438879041641485,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.graph.projection_levels": {
+          "calls": 1600,
+          "seconds": 0.0,
+          "bytes": 1600,
+          "max_bytes": 1
+        },
+        "native.metal.graph.ripple_q8_grouped": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 677926010880,
+          "max_bytes": 545914880
+        },
+        "native.metal.graph.scratch": {
+          "calls": 671,
+          "seconds": 0.0,
+          "bytes": 703594496,
+          "max_bytes": 1048576
+        },
+        "native.metal.graph.scratch_high_water": {
+          "calls": 671,
+          "seconds": 0.0,
+          "bytes": 23957864448,
+          "max_bytes": 71303168
+        },
+        "native.metal.readback": {
+          "calls": 1,
+          "seconds": 7.1708e-05,
+          "bytes": 401408,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 678030721024,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 6401,
+          "seconds": 0.0,
+          "bytes": 437152519946240,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 10,
+          "seconds": 6.0208000000000004e-05,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 491,
+          "seconds": 0.004376374999999999,
+          "bytes": 6860800,
+          "max_bytes": 20480
+        },
+        "native.metal.wait": {
+          "calls": 10,
+          "seconds": 1.448309168,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      },
+      "decode_profile": {
+        "native.metal.encode": {
+          "calls": 96,
+          "seconds": 0.022530994999999998,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.execute": {
+          "calls": 96,
+          "seconds": 2.3679578729999995,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.gpu": {
+          "calls": 96,
+          "seconds": 2.333778624830302,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.graph.projection_levels": {
+          "calls": 2560,
+          "seconds": 0.0,
+          "bytes": 2560,
+          "max_bytes": 1
+        },
+        "native.metal.graph.ripple_q8_grouped": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 1092542791680,
+          "max_bytes": 545914880
+        },
+        "native.metal.graph.scratch": {
+          "calls": 1168,
+          "seconds": 0.0,
+          "bytes": 1224736768,
+          "max_bytes": 1048576
+        },
+        "native.metal.graph.scratch_high_water": {
+          "calls": 1168,
+          "seconds": 0.0,
+          "bytes": 39443234816,
+          "max_bytes": 71303168
+        },
+        "native.metal.readback": {
+          "calls": 16,
+          "seconds": 0.0011567910000000001,
+          "bytes": 6422528,
+          "max_bytes": 401408
+        },
+        "native.metal.static_cache.hit": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 1092710563840,
+          "max_bytes": 545931264
+        },
+        "native.metal.static_cache.registered_bytes": {
+          "calls": 10256,
+          "seconds": 0.0,
+          "bytes": 700427471421440,
+          "max_bytes": 68294410240
+        },
+        "native.metal.submit": {
+          "calls": 96,
+          "seconds": 0.00025437699999999997,
+          "bytes": 0,
+          "max_bytes": 0
+        },
+        "native.metal.upload": {
+          "calls": 16,
+          "seconds": 1.5872e-05,
+          "bytes": 327680,
+          "max_bytes": 20480
+        },
+        "native.metal.wait": {
+          "calls": 96,
+          "seconds": 2.367668581,
+          "bytes": 0,
+          "max_bytes": 0
+        }
+      }
+    }
+  ],
+  "q8_components": [
+    {
+      "component": "ripple_ffn_gate_up",
+      "production_admitted": false,
+      "rows": 40960,
+      "columns": 5120,
+      "kind": 8,
+      "math_mode": "safe",
+      "schedule": "grouped8_r2g4",
+      "pair_candidate": "grouped8_r2g4",
+      "activity_assertion": true,
+      "threads_per_group": 128,
+      "rows_per_group": 2,
+      "rotating_banks": 2,
+      "encoded_population_bytes": 445644800,
+      "warm_samples": 12,
+      "median_gpu_microseconds_per_matrix": 398.9687393186614,
+      "minimum_gpu_microseconds_per_matrix": 397.60416257195175,
+      "maximum_gpu_microseconds_per_matrix": 400.9583208244294,
+      "encoded_gigabytes_per_second": 558.4958871226974,
+      "maximum_absolute_error_vs_original": 1.52587890625e-05,
+      "relative_rms_error_vs_original": 1.5424176798383794e-07,
+      "maximum_f64_error_over_absolute_sum": 3.726991184280898e-09,
+      "f64_oracle_rows": 8,
+      "timer_scope": "same_process_safe_ABBA_serial_ripple_rotating_banks_gpu_timestamps"
+    },
+    {
+      "component": "ripple_ffn_down",
+      "production_admitted": false,
+      "rows": 5120,
+      "columns": 40960,
+      "kind": 8,
+      "math_mode": "safe",
+      "schedule": "grouped8_r2g4",
+      "pair_candidate": "grouped8_r2g4",
+      "activity_assertion": true,
+      "threads_per_group": 128,
+      "rows_per_group": 2,
+      "rotating_banks": 2,
+      "encoded_population_bytes": 445644800,
+      "warm_samples": 12,
+      "median_gpu_microseconds_per_matrix": 485.71874503977597,
+      "minimum_gpu_microseconds_per_matrix": 481.66667693294585,
+      "maximum_gpu_microseconds_per_matrix": 491.41666386276484,
+      "encoded_gigabytes_per_second": 458.74778825295874,
+      "maximum_absolute_error_vs_original": 6.4849853515625e-05,
+      "relative_rms_error_vs_original": 2.828778539099305e-07,
+      "maximum_f64_error_over_absolute_sum": 1.7996200689953841e-09,
+      "f64_oracle_rows": 8,
+      "timer_scope": "same_process_safe_ABBA_serial_ripple_rotating_banks_gpu_timestamps"
+    },
+    {
+      "component": "ripple_attention_q_gate",
+      "production_admitted": false,
+      "rows": 10240,
+      "columns": 5120,
+      "kind": 8,
+      "math_mode": "safe",
+      "schedule": "grouped8_r2g4",
+      "pair_candidate": "grouped8_r2g4",
+      "activity_assertion": true,
+      "threads_per_group": 128,
+      "rows_per_group": 2,
+      "rotating_banks": 7,
+      "encoded_population_bytes": 389939200,
+      "warm_samples": 12,
+      "median_gpu_microseconds_per_matrix": 116.62797520070204,
+      "minimum_gpu_microseconds_per_matrix": 115.8750050568155,
+      "maximum_gpu_microseconds_per_matrix": 119.08928198473794,
+      "encoded_gigabytes_per_second": 477.6349748346199,
+      "maximum_absolute_error_vs_original": 1.52587890625e-05,
+      "relative_rms_error_vs_original": 1.5424815236140616e-07,
+      "maximum_f64_error_over_absolute_sum": 3.768010256318712e-09,
+      "f64_oracle_rows": 28,
+      "timer_scope": "same_process_safe_ABBA_serial_ripple_rotating_banks_gpu_timestamps"
+    },
+    {
+      "component": "ripple_attention_k_v",
+      "production_admitted": false,
+      "rows": 1024,
+      "columns": 5120,
+      "kind": 8,
+      "math_mode": "safe",
+      "schedule": "grouped8_r2g4",
+      "pair_candidate": "grouped8_r2g4",
+      "activity_assertion": true,
+      "threads_per_group": 128,
+      "rows_per_group": 2,
+      "rotating_banks": 61,
+      "encoded_population_bytes": 339804160,
+      "warm_samples": 12,
+      "median_gpu_microseconds_per_matrix": 18.788934360853716,
+      "minimum_gpu_microseconds_per_matrix": 18.758196421883632,
+      "maximum_gpu_microseconds_per_matrix": 18.821037794295396,
+      "encoded_gigabytes_per_second": 296.4808909868845,
+      "maximum_absolute_error_vs_original": 1.52587890625e-05,
+      "relative_rms_error_vs_original": 1.5446871697117225e-07,
+      "maximum_f64_error_over_absolute_sum": 5.9372210621092085e-09,
+      "f64_oracle_rows": 244,
+      "timer_scope": "same_process_safe_ABBA_serial_ripple_rotating_banks_gpu_timestamps"
+    },
+    {
+      "component": "ripple_attention_o",
+      "production_admitted": false,
+      "rows": 5120,
+      "columns": 10240,
+      "kind": 8,
+      "math_mode": "safe",
+      "schedule": "grouped8_r2g4",
+      "pair_candidate": "grouped8_r2g4",
+      "activity_assertion": true,
+      "threads_per_group": 128,
+      "rows_per_group": 2,
+      "rotating_banks": 7,
+      "encoded_population_bytes": 389939200,
+      "warm_samples": 12,
+      "median_gpu_microseconds_per_matrix": 118.19940326469286,
+      "minimum_gpu_microseconds_per_matrix": 117.50595045409031,
+      "maximum_gpu_microseconds_per_matrix": 119.25000165190016,
+      "encoded_gigabytes_per_second": 471.2849512044848,
+      "maximum_absolute_error_vs_original": 2.47955322265625e-05,
+      "relative_rms_error_vs_original": 1.7779914811761883e-07,
+      "maximum_f64_error_over_absolute_sum": 3.585784487873192e-09,
+      "f64_oracle_rows": 28,
+      "timer_scope": "same_process_safe_ABBA_serial_ripple_rotating_banks_gpu_timestamps"
+    },
+    {
+      "component": "ripple_output",
+      "production_admitted": false,
+      "rows": 100352,
+      "columns": 5120,
+      "kind": 8,
+      "math_mode": "safe",
+      "schedule": "grouped8_r2g4",
+      "pair_candidate": "grouped8_r2g4",
+      "activity_assertion": true,
+      "threads_per_group": 128,
+      "rows_per_group": 2,
+      "rotating_banks": 1,
+      "encoded_population_bytes": 545914880,
+      "warm_samples": 12,
+      "median_gpu_microseconds_per_matrix": 940.8541664015502,
+      "minimum_gpu_microseconds_per_matrix": 937.9166876897216,
+      "maximum_gpu_microseconds_per_matrix": 942.8750490769744,
+      "encoded_gigabytes_per_second": 580.2332598344547,
+      "maximum_absolute_error_vs_original": 1.52587890625e-05,
+      "relative_rms_error_vs_original": 1.5439007108020358e-07,
+      "maximum_f64_error_over_absolute_sum": 3.726991184280898e-09,
+      "f64_oracle_rows": 4,
+      "timer_scope": "same_process_safe_ABBA_serial_ripple_rotating_banks_gpu_timestamps"
+    }
+  ]
+}

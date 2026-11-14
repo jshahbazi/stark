@@ -1,0 +1,92 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -12,6 +12,8 @@
+ include = ["/src/**", "/examples/demo.rs", "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/readme.md"]
+ keywords = ["macos", "apple-silicon", "monitoring", "prometheus", "tui"]
+ categories = ["command-line-utilities", "hardware-support", "visualization"]
++
++[workspace]
+ 
+ [package.metadata.docs.rs]
+ no-default-features = true
+--- a/src/sources.rs
++++ b/src/sources.rs
+@@ -1150,7 +1150,8 @@
+ pub struct IOReport {
+   subs: IOReportSubscriptionRef,
+   chan: CFMutableDictionaryRef,
+-  prev: Option<(CFDictionaryRef, std::time::Instant)>,
++  prev: Option<(CFDictionaryRef, std::time::Instant, f64, f64)>,
++  pub(crate) last_interval_unix: Option<(f64, f64, f64, f64)>,
+ }
+ 
+ impl IOReport {
+@@ -1168,7 +1169,7 @@
+       unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
+     }
+     let (subs, chan) = cfio_get_subs(channels.chan)?;
+-    Ok(Self { subs, chan, prev: None })
++    Ok(Self { subs, chan, prev: None, last_interval_unix: None })
+   }
+ 
+   /// Subscription to the channels `filter` selects, or None when it selects none (a VM).
+@@ -1178,7 +1179,7 @@
+       return Ok(None);
+     }
+     let (subs, chan) = cfio_get_subs(channels.chan)?;
+-    Ok(Some(Self { subs, chan, prev: None }))
++    Ok(Some(Self { subs, chan, prev: None, last_interval_unix: None }))
+   }
+ 
+   /// Subscribe to IOReport channels by group and optional subgroup.
+@@ -1215,8 +1216,13 @@
+     }
+   }
+ 
+-  fn raw_sample(&self) -> (CFDictionaryRef, std::time::Instant) {
+-    (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
++  fn raw_sample(&self) -> (CFDictionaryRef, std::time::Instant, f64, f64) {
++    // Stark diagnostic: bracket the actual source read, before SMC/JSON work.
++    let unix = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
++    let before = unix();
++    let sample = unsafe { IOReportCreateSamples(self.subs, self.chan, null()) };
++    let instant = std::time::Instant::now();
++    (sample, instant, before, unix())
+   }
+ 
+   pub(crate) fn get_sample_interval(&mut self, duration: Duration) -> (IOReportIterator, Duration) {
+@@ -1236,6 +1242,7 @@
+     unsafe { CFRelease(prev.0 as _) };
+ 
+     let elapsed = next.1.duration_since(prev.1).max(Duration::from_nanos(1));
++    self.last_interval_unix = Some((prev.2, next.3, (prev.3 - prev.2).max(next.3 - next.2), elapsed.as_secs_f64()));
+     self.prev = Some(next);
+ 
+     (IOReportIterator::from_sample(diff), elapsed)
+--- a/src/metrics.rs
++++ b/src/metrics.rs
+@@ -146,6 +146,11 @@
+ /// ```
+ #[derive(Debug, Default, Serialize)]
+ pub struct Metrics {
++  /// Stark diagnostic: conservative host brackets of the IOReport source interval.
++  pub sample_start_unix_seconds: f64,
++  pub sample_end_unix_seconds: f64,
++  pub sample_boundary_uncertainty_seconds: f64,
++  pub sample_duration_seconds: f64,
+   /// Temperature metrics.
+   pub temp: TempMetrics,
+   /// Memory and swap metrics.
+@@ -770,6 +775,12 @@
+       self.cpu_ticks = Some(cur);
+     }
+     let mut rs = aggregate_ioreport_metrics(rs, &self.soc);
++    if let Some((start, end, uncertainty, duration)) = self.ior.as_ref().and_then(|ior| ior.last_interval_unix) {
++      rs.sample_start_unix_seconds = start;
++      rs.sample_end_unix_seconds = end;
++      rs.sample_boundary_uncertainty_seconds = uncertainty;
++      rs.sample_duration_seconds = duration;
++    }
+ 
+     rs.memory = self.get_mem()?;
+     rs.temp = self.get_temp()?;

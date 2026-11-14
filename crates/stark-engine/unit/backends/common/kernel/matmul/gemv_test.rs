@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Display};
 
-use half::bf16;
+use half::{bf16, f16};
 use num_traits::Float;
 use rstest::rstest;
 use stark_engine_macros::stark_test;
@@ -343,6 +343,24 @@ fn gemv_bf16(
     #[case] n: usize,
 ) {
     test::<bf16>(m, k, n, 0.1);
+}
+
+// F16 operands run only as an all-F16 product with F32 accumulation.
+#[rstest]
+#[test_attr(stark_test)]
+#[case::m1(1, 128, 64)]
+#[case::batched(4, 128, 64)]
+#[case::max_batch(8, 128, 64)]
+#[case::unaligned_k(1, 33, 64)]
+#[case::unaligned_n(1, 128, 11)]
+#[case::large(1, 4096, 2048)]
+#[case::prefill_gemm(64, 256, 96)]
+fn gemv_f16(
+    #[case] m: usize,
+    #[case] k: usize,
+    #[case] n: usize,
+) {
+    test::<f16>(m, k, n, 0.02);
 }
 
 #[cfg(backend = "metal")]

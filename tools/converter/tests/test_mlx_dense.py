@@ -12,7 +12,7 @@ from test_granite_smollm import fixture as granite_fixture
 from test_mlx import _float_values, mlx_qwen_fixture, save_mlx_fixture
 from test_streaming import tensor_bytes
 
-from stark_convert.adapters import build_llama_plan, build_mistral_plan, build_qwen2_plan
+from stark_convert.adapters import build_llama_plan
 from stark_convert.adapters.granite import build_granite_plan
 from stark_convert.adapters.smollm3 import build_smollm3_plan
 from stark_convert.streaming import ConversionError, UnsupportedConversion, read_safetensors_header, write_plan
@@ -224,14 +224,14 @@ def test_quantization_metadata_requires_actual_packed_matrix(tmp_path, family):
         PLANNERS[family](source)
 
 
-@pytest.mark.parametrize("family", ("qwen2", "mistral", "granite"))
-def test_other_dense_families_retain_quantized_coverage_rejection(tmp_path, family):
+def test_granite_retains_quantized_coverage_rejection(tmp_path):
+    # Qwen2 and Mistral MLX contracts are in test_mlx_qwen2_mistral.py.
     source = tmp_path / "source"
-    config, _ = granite_fixture(source) if family == "granite" else dense_fixture(source, family)
+    config, _ = granite_fixture(source)
     config["quantization"] = {"bits": 4, "group_size": 32}
     (source / "config.json").write_text(json.dumps(config))
     with pytest.raises(UnsupportedConversion, match="Quantized checkpoint"):
-        {"qwen2": build_qwen2_plan, "mistral": build_mistral_plan, "granite": build_granite_plan}[family](source)
+        build_granite_plan(source)
 
 
 def test_smollm3_biases_are_separate_from_dequantization_biases(tmp_path):

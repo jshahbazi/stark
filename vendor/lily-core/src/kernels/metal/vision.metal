@@ -112,7 +112,11 @@ kernel void vision_qkv_rope_bf16(device bfloat*       qkv   [[buffer(0)]],
 }
 
 // Full bidirectional attention over the N patches of one image, one query
-// tile and head per threadgroup, online softmax in float32: the tensor-op
+// tile and head per threadgroup. The pinned eager source rounds QK to BF16,
+// scales and rounds again, then casts globally normalized probabilities to
+// BF16 before PV. Two QK passes retain those boundaries without an N x N
+// allocation: first the global softmax statistics, then normalized P and PV.
+// The tensor-op
 // flash kernel of attention.metal without the causal limit and the KV cache,
 // reading q, k and v straight out of the fused qkv rows (row stride 3H) and
 // writing out [N, H]. Copied rather than shared so the text path's kernel
@@ -121,7 +125,21 @@ kernel void vision_qkv_rope_bf16(device bfloat*       qkv   [[buffer(0)]],
 #include <metal_tensor>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 
-template <int D, int BQ, int BK, int SG>
+// Integer RNE barriers preserve the source's BF16 arithmetic boundaries even
+// when native bfloat promotion/fast math elides an intermediate constructor.
+// Mirrors the existing Stark integer-BF16 policy; no math mode changes.
+static inline float vision_round_bf16(float value) {
+    const uint bits = as_type<uint>(value);
+    if ((bits & 0x7f800000u) == 0x7f800000u) return value;
+    const uint rounded = bits + 0x7fffu + ((bits >> 16) & 1u);
+    return as_type<float>(rounded & 0xffff0000u);
+}
+
+static inline float vision_scaled_score(float dot, float scale) {
+    return vision_round_bf16(vision_round_bf16(dot) * scale);
+}
+
+template <int D, int BQ, int BK, int SG, bool TRACE = false>
 static void vision_attn_body(device bfloat* qkv,
                              device bfloat* out,
                              uint N,
@@ -131,7 +149,7 @@ static void vision_attn_body(device bfloat* qkv,
                              threadgroup bfloat* p_tile,
                              threadgroup float* row_max,
                              threadgroup float* row_sum,
-                             threadgroup float* row_alpha,
+                             device float* stages,
                              uint2 tg,
                              uint tid,
                              uint2 tg_size) {
@@ -197,7 +215,6 @@ static void vision_attn_body(device bfloat* qkv,
 
     for (int k0 = 0; k0 < len; k0 += BK) {
         auto kSlice = tK.slice(0, k0);
-        auto vSlice = tV.slice(0, k0);
         auto sT = qk_op.template get_destination_cooperative_tensor<decltype(tQ), KSlice, float>();
         qk_op.run(tQ, kSlice, sT);
         sT.store(tS);
@@ -209,7 +226,8 @@ static void vision_attn_body(device bfloat* qkv,
         float local = prev_max;
         for (uint j = j0; j < j0 + cols; ++j) {
             if (int(j) < limit) {
-                local = max(local, s_tile[row * BK + j] * scale);
+                const float score = vision_scaled_score(s_tile[row * BK + j], scale);
+                local = max(local, score);
             }
         }
         for (uint off = 1u; off < LANES; off <<= 1) {
@@ -219,11 +237,19 @@ static void vision_attn_body(device bfloat* qkv,
         const float alpha = exp(prev_max - mx);
         float psum = 0.0f;
         for (uint j = j0; j < j0 + cols; ++j) {
-            const float p = int(j) < limit
-                ? exp(s_tile[row * BK + j] * scale - mx)
-                : 0.0f;
-            p_tile[row * BK + j] = bfloat(p);
-            psum += p;
+            if (int(j) < limit) {
+                const float qk = vision_round_bf16(s_tile[row * BK + j]);
+                const float score = vision_round_bf16(qk * scale);
+                if constexpr (TRACE) {
+                    if (q0 + int(row) < len) {
+                        const ulong index = ((ulong)head * N + q0 + row) * N + k0 + j;
+                        const ulong plane = (ulong)(H / D) * N * N;
+                        stages[index] = qk;
+                        stages[plane + index] = score;
+                    }
+                }
+                psum += exp(score - mx);
+            }
         }
         for (uint off = 1u; off < LANES; off <<= 1) {
             psum += simd_shuffle_xor(psum, off);
@@ -231,14 +257,40 @@ static void vision_attn_body(device bfloat* qkv,
         if (lane == 0u) {
             row_sum[row] = row_sum[row] * alpha + psum;
             row_max[row] = mx;
-            row_alpha[row] = alpha;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (uint16_t i = 0; i < acc.get_capacity(); ++i) {
-            if (acc.is_valid_element(i)) {
-                auto ix = acc.get_multidimensional_index(i);
-                acc[i] *= row_alpha[ix[1]];
+    }
+
+    // A normalized probability is rounded exactly once, after the full row's
+    // denominator is known. Rounding unnormalized tile exponentials and
+    // dividing the completed PV changes the source's BF16 operation graph.
+    for (int k0 = 0; k0 < len; k0 += BK) {
+        auto kSlice = tK.slice(0, k0);
+        auto vSlice = tV.slice(0, k0);
+        auto sT = qk_op.template get_destination_cooperative_tensor<decltype(tQ), KSlice, float>();
+        qk_op.run(tQ, kSlice, sT);
+        sT.store(tS);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const int limit = min(len - k0, BK);
+        for (uint j = j0; j < j0 + cols; ++j) {
+            float probability = 0.0f;
+            if (int(j) < limit) {
+                const float score = vision_scaled_score(s_tile[row * BK + j], scale);
+                probability = exp(score - row_max[row]) / row_sum[row];
+            }
+            p_tile[row * BK + j] = bfloat(vision_round_bf16(probability));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if constexpr (TRACE) {
+            if (q0 + int(row) < len) {
+                const ulong plane = (ulong)(H / D) * N * N;
+                for (uint j = j0; j < j0 + cols; ++j) {
+                    if (int(j) < limit) {
+                        const ulong index = ((ulong)head * N + q0 + row) * N + k0 + j;
+                        stages[2 * plane + index] = float(p_tile[row * BK + j]);
+                    }
+                }
             }
         }
         pv_op.run(tP, vSlice, acc);
@@ -251,7 +303,7 @@ static void vision_attn_body(device bfloat* qkv,
             auto ix = acc.get_multidimensional_index(i);
             const int r = ix[1], col = ix[0];
             if (q0 + r < len) {
-                out[(ulong)(q0 + r) * H + head * D + col] = bfloat(acc[i] / row_sum[r]);
+                out[(ulong)(q0 + r) * H + head * D + col] = bfloat(acc[i]);
             }
         }
     }
@@ -268,15 +320,14 @@ kernel void NAME(device bfloat* qkv   [[buffer(0)]],                            
                  uint2 tg_size [[threads_per_threadgroup]]) {                            \
     threadgroup float  s_tile[(BQ) * (BK)];                                              \
     threadgroup bfloat p_tile[(BQ) * (BK)];                                              \
-    threadgroup float  row_max[(BQ)], row_sum[(BQ)], row_alpha[(BQ)];                    \
+    threadgroup float  row_max[(BQ)], row_sum[(BQ)];                                    \
     vision_attn_body<(D), (BQ), (BK), (SG)>(                                             \
-        qkv, out, N, H, scale, s_tile, p_tile, row_max, row_sum, row_alpha,              \
+        qkv, out, N, H, scale, s_tile, p_tile, row_max, row_sum, nullptr,                \
         tg, tid, tg_size);                                                               \
 }
 
-// Head dim 72 (16 heads of 1152): 32-query tiles over 64-key tiles. Measured
-// at 8 160 patches against 16 x 128, 32 x 128 and 64 x 64 tiles, this is the
-// fastest by a few percent (12 KB of threadgroup memory instead of 24 lets two
-// threadgroups share a core); 256-key tiles exceed the 32 KB limit.
+// Head dim 72 (16 heads of 1152): retain the upstream 32-query/64-key geometry
+// and roughly 12 KB threadgroup scratch. Upstream's one-pass speed comparison
+// does not qualify this two-pass implementation; it needs separate timing.
 VISION_ATTN_KERNEL(vision_attn_nax_d72, 72, 32, 64, 4)
 #endif

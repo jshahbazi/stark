@@ -12,7 +12,9 @@ import json
 import math
 from pathlib import Path
 
+from ..checkpoint_metadata import CheckpointMetadata, tensor_aliases_equal
 from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
+from ..config_normalization import normalize_config
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -20,7 +22,6 @@ from ..streaming import (
     UnsupportedConversion,
     load_checkpoint,
     read_json,
-    tensor_sha256,
     validate_planning_layers,
 )
 from .dense import _DTYPES, _bool, _positive_float, _positive_int
@@ -73,9 +74,13 @@ _KEYS = {
 }
 
 
-def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_lfm2_plan(
+    source: Path, *, dtype: str = "bfloat16", checkpoint_metadata: CheckpointMetadata | None = None
+) -> ConversionPlan:
     """Validate an explicit LFM2 topology and consume every input tensor."""
-    config = read_json(source / "config.json")
+    config = normalize_config(
+        "lfm2", read_json(source / "config.json") if checkpoint_metadata is None else checkpoint_metadata.config
+    )[0]
     if config.get("model_type") != "lfm2":
         raise UnsupportedConversion("Checkpoint model_type does not match selected adapter")
     if dtype not in _DTYPES:
@@ -143,7 +148,7 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
             raise ConversionError("LFM2 adjusted intermediate dimension is invalid")
     else:
         hidden_dim = config.get("intermediate_size") or ff_dim
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if checkpoint_metadata is None else checkpoint_metadata.tensors
     validate_planning_layers(layers, tensors)
     indices = config.get("full_attn_idxs")
     if indices is not None:
@@ -268,14 +273,14 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
                 inputs = read_mlx_matrix(tensors, "model.embed_tokens.weight", (vocab, model_dim), quantization)
                 expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
                 if any(
-                    left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                    not tensor_aliases_equal(left, right, header_only=checkpoint_metadata is not None)
                     for left, right in zip(head.planes, inputs.planes, strict=True)
                 ):
                     raise ConversionError("Tied MLX LFM2 lm_head differs from the input embedding")
             else:
                 head = tensor("lm_head.weight", ((vocab, model_dim),))
                 inputs = tensors["model.embed_tokens.weight"]
-                if head.dtype != inputs.dtype or tensor_sha256(head) != tensor_sha256(inputs):
+                if not tensor_aliases_equal(head, inputs, header_only=checkpoint_metadata is not None):
                     raise ConversionError("Tied LFM2 lm_head differs from the input embedding")
     else:
         matrix("decoder.embedding.output_embedding", ("lm_head.weight",), ((vocab, model_dim),), (vocab, model_dim))

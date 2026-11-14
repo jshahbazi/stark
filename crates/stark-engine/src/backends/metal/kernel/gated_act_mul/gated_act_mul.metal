@@ -17,7 +17,7 @@ using namespace stark::gated_act_mul;
 #define EMITS_GROUP_SUMS (ops == GatedActMulOp::QuantizeWithGroupSums)
 
 template <typename T>
-VARIANTS(T, float, bfloat)
+VARIANTS(T, float, half, bfloat)
 PUBLIC KERNEL(GatedActMul) (
     const device T* act_operand,
     const device T* value_operand OPTIONAL(!interleaved),

@@ -7,7 +7,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use stark_resource_budget::Budget;
+#[cfg(any(feature = "metal", test))]
+pub(crate) use stark_resource_budget::admit_inference_memory as admit_request_memory;
+use stark_resource_budget::{Budget, inference_memory_budget};
 
 use crate::{
     media::{ImageLease, ImageReference, MediaStore, opaque_id, valid_id},
@@ -17,12 +19,6 @@ use crate::{
 #[cfg(test)]
 const TEST_WIRE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_EXTRA_STOPS: usize = 256;
-
-fn automatic_memory_budget(available: usize) -> usize {
-    // Use three quarters of the quarter-RAM envelope, keeping serialization
-    // and memory-pressure headroom before the native allocation recheck.
-    available.saturating_sub(256 * 1024 * 1024) / 16 * 3
-}
 
 /// Protocol policy independent of the optional native/Metal dependency.
 /// Native backends translate their loaded model's capabilities at this boundary.
@@ -78,6 +74,7 @@ impl Sampling {
         } = self
             && (!temperature.is_finite()
                 || *temperature <= 0.0
+                || !temperature.recip().is_finite()
                 || *temperature > 100.0
                 || top_k.is_some_and(|k| k == 0 || k as usize > vocab_size)
                 || top_p.is_some_and(|p| !p.is_finite() || p <= 0.0 || p > 1.0)
@@ -105,6 +102,16 @@ enum Request {
     PlanGeneration {
         input_tokens: u32,
         context_tokens: u32,
+        #[serde(default, deserialize_with = "present_value")]
+        input_token_ids: Option<Vec<u32>>,
+        #[serde(default, deserialize_with = "present_value")]
+        cache_scope: Option<String>,
+        #[serde(default, deserialize_with = "present_value")]
+        mtp: Option<bool>,
+        #[serde(default, deserialize_with = "present_value")]
+        mtp_drafts: Option<u32>,
+        #[serde(default)]
+        sampling: Sampling,
     },
     Generate {
         #[serde(default)]
@@ -182,7 +189,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        matches!(self.schema_version, 2 | 3)
+        matches!(self.schema_version, 2..=6)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
@@ -197,6 +204,64 @@ impl ImageArtifactIdentity<'_> {
     }
 }
 
+/// Bind each implementation profile to its artifact schema and actual geometry.
+/// Capability recognition never implies that an artifact has been qualified.
+fn image_family_limits(
+    profile: &str,
+    version: u32,
+    schema: u32,
+    geometry: (u32, u32),
+) -> Option<(u32, u32, u32)> {
+    let (expected_geometry, patches, tokens) = match (profile, version, schema) {
+        ("qwen35-dense-bf16-merged-v1", 1, 2 | 3)
+        | ("qwen35-dense-bf16-merged-v2", 2, 3)
+        | ("qwen35-dense-affine-merged-v3", 3, 3)
+        | ("qwen35-moe-affine-merged-v4", 4, 3)
+        | ("qwen35-moe-bf16-merged-v5", 5, 3) => ((16, 2), 4096, 1024),
+        ("qwen38-lily-retained-bf16-vision-v1", 1, 6) => ((16, 2), 65_536, 16_384),
+        (
+            "gemma4-e2b-bf16-v1"
+            | "gemma4-e4b-bf16-v1"
+            | "gemma4-31b-bf16-v1"
+            | "gemma4-12b-bf16-v1"
+            | "gemma4-26b-a4b-bf16-v1",
+            1,
+            4,
+        ) => ((16, 3), 2520, 280),
+        ("gemma3-siglip-bf16-v1", 1, 5) => ((14, 4), 4096, 256),
+        _ => return None,
+    };
+    (geometry == expected_geometry).then_some((patches, tokens, patches * geometry.0 * geometry.0))
+}
+
+#[cfg(test)]
+mod image_family_tests {
+    use super::image_family_limits;
+
+    #[test]
+    fn family_handshakes_require_matching_schema_version_and_geometry() {
+        for (profile, version, schema, geometry, expected) in [
+            ("qwen35-dense-bf16-merged-v2", 2, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-dense-affine-merged-v3", 3, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-moe-affine-merged-v4", 4, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen35-moe-bf16-merged-v5", 5, 3, (16, 2), (4096, 1024, 1048576)),
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, (16, 2), (65_536, 16_384, 16_777_216)),
+            ("gemma4-e2b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-e4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-31b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-12b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma4-26b-a4b-bf16-v1", 1, 4, (16, 3), (2520, 280, 645120)),
+            ("gemma3-siglip-bf16-v1", 1, 5, (14, 4), (4096, 256, 802816)),
+        ] {
+            assert_eq!(image_family_limits(profile, version, schema, geometry), Some(expected));
+            assert_eq!(image_family_limits(profile, version + 1, schema, geometry), None);
+            assert_eq!(image_family_limits(profile, version, 1, geometry), None);
+            assert_eq!(image_family_limits(profile, version, schema, (1, 1)), None);
+        }
+        assert_eq!(image_family_limits("unimplemented", 1, 5, (14, 4)), None);
+    }
+}
+
 struct PreparedRequest<P> {
     id: String,
     image: P,
@@ -205,20 +270,32 @@ struct PreparedRequest<P> {
     _lease: ImageLease,
 }
 
-fn valid_image_metadata(metadata: &PreparedImageMetadata) -> bool {
+fn valid_image_metadata(
+    metadata: &PreparedImageMetadata,
+    geometry: (u32, u32),
+) -> bool {
+    let (patch_size, merge_size) = geometry;
+    let (max_patches, max_image_tokens) = match geometry {
+        (16, 2) => (65_536, 16_384),
+        (16, 3) => (2520, 280),
+        (14, 4) if metadata.grid == [1, 64, 64] && metadata.processed_dimensions == [896, 896] => (4096, 256),
+        _ => return false,
+    };
     let [temporal, height, width] = metadata.grid;
     temporal == 1
         && height > 0
         && width > 0
-        && height.is_multiple_of(2)
-        && width.is_multiple_of(2)
-        && height.checked_mul(width).is_some_and(|patches| patches <= 4096 && patches / 4 == metadata.image_tokens)
-        && metadata.processed_dimensions[0].checked_div(16) == Some(width)
-        && metadata.processed_dimensions[1].checked_div(16) == Some(height)
-        && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(16))
+        && height.is_multiple_of(merge_size)
+        && width.is_multiple_of(merge_size)
+        && height.checked_mul(width).is_some_and(|patches| {
+            patches <= max_patches && patches / (merge_size * merge_size) == metadata.image_tokens
+        })
+        && metadata.processed_dimensions[0].checked_div(patch_size) == Some(width)
+        && metadata.processed_dimensions[1].checked_div(patch_size) == Some(height)
+        && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(patch_size))
         && metadata.input_tokens >= metadata.image_tokens as usize + 2
         && metadata.image_tokens > 0
-        && metadata.image_tokens <= 1024
+        && metadata.image_tokens <= max_image_tokens
 }
 
 #[derive(Clone)]
@@ -234,6 +311,15 @@ pub(crate) struct GenerationOptions {
     pub request_id: u64,
     /// Present only when prefix reuse is enabled and the host supplied a scope.
     pub cache_scope: Option<CacheScope>,
+}
+
+/// Actual request identity needed to inventory retained state safely. Legacy
+/// count-only plans cannot establish a reusable token prefix.
+pub(crate) struct ContextPlanningRequest<'a> {
+    pub input_tokens: u32,
+    pub maximum: u32,
+    pub input_token_ids: Option<&'a [u32]>,
+    pub options: &'a GenerationOptions,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -413,6 +499,14 @@ fn collect_tokens_with_clock_and_callback(
 pub(crate) trait GenerationBackend {
     type PreparedImage;
 
+    /// Optional owner-thread work between complete requests. No inference or
+    /// prefix state may be changed by this callback.
+    fn idle_maintenance_interval(&self) -> Option<Duration> {
+        None
+    }
+    fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
     /// Select a safe context capacity for text generation. Backends with a
@@ -427,6 +521,13 @@ pub(crate) trait GenerationBackend {
         let minimum = input_tokens.checked_add(1)?;
         let capacity = self.max_context_length()?.min(maximum);
         (capacity >= minimum).then_some(capacity)
+    }
+    fn plan_context_length(
+        &mut self,
+        request: &ContextPlanningRequest<'_>,
+        memory_budget_bytes: usize,
+    ) -> Result<Option<u32>, &'static str> {
+        Ok(self.automatic_context_length(request.input_tokens, request.maximum, memory_budget_bytes))
     }
     fn supports_automatic_context_planning(&self) -> bool {
         false
@@ -461,6 +562,9 @@ pub(crate) trait GenerationBackend {
     fn mtp_metadata(&self) -> Option<Value> {
         None
     }
+    fn loaded_memory_metadata(&self) -> Option<Value> {
+        None
+    }
     /// Resolve sampling support before prefix planning and generation. Backends
     /// may fall back to serial, and the reply reports the effective selection.
     fn effective_mtp_drafts(
@@ -468,6 +572,9 @@ pub(crate) trait GenerationBackend {
         options: &GenerationOptions,
     ) -> Result<u32, &'static str> {
         Ok(options.mtp_drafts)
+    }
+    fn image_geometry(&self) -> (u32, u32) {
+        (16, 2)
     }
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
         None
@@ -549,7 +656,6 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     /// `Some(enabled)` when the host requested prefix reuse at startup.
     prefix_cache: Option<bool>,
     budget: Budget,
-    planned_context_tokens: Option<u32>,
 }
 
 fn valid_ids(
@@ -616,12 +722,24 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             prepared: None,
             prefix_cache,
             budget,
-            planned_context_tokens: None,
         })
     }
 
     fn prefix_cache_enabled(&self) -> bool {
         self.prefix_cache == Some(true)
+    }
+
+    fn resolve_cache_scope(
+        &self,
+        scope: Option<String>,
+    ) -> Result<Option<CacheScope>, &'static str> {
+        match scope {
+            None => Ok(None),
+            Some(scope) if self.prefix_cache_enabled() => {
+                prefix_cache::parse_scope(&scope).map(Some).ok_or("invalid_generation_request")
+            },
+            Some(_) => Err("invalid_generation_request"),
+        }
     }
 
     fn resolve_mtp(
@@ -723,7 +841,6 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         }
         let mut emitted = String::new();
         let mut emitted_bytes = 0usize;
-        let mut progress_bytes = 0usize;
         let sampled_tokens = Cell::new(0usize);
         let output_byte_budget = self.budget.input_bytes;
         let generated = {
@@ -756,12 +873,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 sampled_tokens.set(value.sampled_tokens);
                 if stream {
                     let frame = progress(value.sampled_tokens, value.elapsed_seconds, value.prefill_seconds);
-                    let encoded = serde_json::to_vec(&frame).map_err(|_| "protocol_serialization_failed")?;
-                    if progress_bytes.checked_add(encoded.len() + 1).is_some_and(|size| size <= output_byte_budget / 16)
-                    {
-                        write_reply(&mut **output.borrow_mut(), &frame)?;
-                        progress_bytes += encoded.len() + 1;
-                    }
+                    write_reply(&mut **output.borrow_mut(), &frame)?;
                 }
                 Ok(())
             };
@@ -893,35 +1005,66 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             Request::PlanGeneration {
                 input_tokens,
                 context_tokens,
+                input_token_ids,
+                cache_scope,
+                mtp,
+                mtp_drafts,
+                sampling,
             } => {
                 if !self.backend.supports_automatic_context_planning() {
                     return Err("context_planning_unavailable");
                 }
                 let token_limit = (self.budget.input_bytes / std::mem::size_of::<u32>()).min(u32::MAX as usize) as u32;
-                let maximum = input_tokens.saturating_add(token_limit).min(context_tokens);
-                if input_tokens == 0 || input_tokens > token_limit || context_tokens <= input_tokens {
+                let maximum = input_tokens
+                    .saturating_add(token_limit)
+                    .min(context_tokens)
+                    .min(self.backend.max_context_length().unwrap_or(u32::MAX));
+                if input_tokens == 0 || input_tokens > token_limit || maximum <= input_tokens {
                     return Err("invalid_generation_request");
                 }
+                if input_token_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.len() != input_tokens as usize || !valid_ids(ids, self.backend.vocab_size()))
+                {
+                    return Err("invalid_generation_request");
+                }
+                let mut options = GenerationOptions {
+                    context_tokens: maximum,
+                    max_new_tokens: maximum - input_tokens,
+                    seed: 0,
+                    sampling,
+                    mtp_drafts: self.resolve_mtp(mtp, mtp_drafts)?,
+                    eos_token_ids: self.backend.eos_token_ids().to_vec(),
+                    extra_stop_token_ids: Vec::new(),
+                    stop: Vec::new(),
+                    request_id: 0,
+                    cache_scope: self.resolve_cache_scope(cache_scope)?,
+                };
+                self.validate_options(&options)?;
+                let effective = self.backend.effective_mtp_drafts(&options)?;
+                if effective > options.mtp_drafts || (effective != 0 && effective != options.mtp_drafts) {
+                    return Err("invalid_generation_output");
+                }
+                options.mtp_drafts = effective;
                 let available = stark_resource_budget::available_memory_bytes().unwrap_or(0);
-                // Keep 25% inside the host's quarter-RAM admission envelope
-                // for request serialization and available-memory jitter.
-                let memory_budget = automatic_memory_budget(available);
+                // Use the same remaining-memory contract as execution's
+                // allocation recheck, including its transient host reserve.
+                let memory_budget = inference_memory_budget(available);
                 let capacity = self
                     .backend
-                    .automatic_context_length(input_tokens, maximum, memory_budget)
+                    .plan_context_length(
+                        &ContextPlanningRequest {
+                            input_tokens,
+                            maximum,
+                            input_token_ids: input_token_ids.as_deref(),
+                            options: &options,
+                        },
+                        memory_budget,
+                    )?
                     .ok_or("resource_budget_exceeded")?;
-                let capacity = self
-                    .planned_context_tokens
-                    .filter(|previous| {
-                        *previous > input_tokens
-                            && *previous <= capacity
-                            && previous.saturating_sub(input_tokens) >= capacity.saturating_sub(input_tokens) / 2
-                    })
-                    .unwrap_or(capacity);
                 if capacity <= input_tokens || capacity > maximum {
                     return Err("resource_budget_exceeded");
                 }
-                self.planned_context_tokens = Some(capacity);
                 Ok(json!({"context_tokens":capacity,
                     "max_new_tokens":capacity - input_tokens,
                     "context_capacity_known":self.backend.max_context_length().is_some(),
@@ -942,13 +1085,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 request_id,
                 cache_scope,
             } => {
-                let cache_scope = match cache_scope {
-                    None => None,
-                    Some(scope) if self.prefix_cache_enabled() => {
-                        Some(prefix_cache::parse_scope(&scope).ok_or("invalid_generation_request")?)
-                    },
-                    Some(_) => return Err("invalid_generation_request"),
-                };
+                let cache_scope = self.resolve_cache_scope(cache_scope)?;
                 let options = GenerationOptions {
                     context_tokens,
                     max_new_tokens,
@@ -1037,7 +1174,20 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if self.backend.cancelled(request_id)? {
                     return Err("generation_cancelled");
                 }
-                if !valid_image_metadata(&metadata) {
+                let limits = self.backend.image_family_profile().and_then(|(profile, version)| {
+                    image_family_limits(
+                        profile,
+                        version,
+                        self.backend.image_artifact_identity()?.schema_version,
+                        self.backend.image_geometry(),
+                    )
+                });
+                if !valid_image_metadata(&metadata, self.backend.image_geometry())
+                    || limits.is_none_or(|(patches, tokens, _)| {
+                        metadata.grid[1].checked_mul(metadata.grid[2]).is_none_or(|count| count > patches)
+                            || metadata.image_tokens > tokens
+                    })
+                {
                     return Err("invalid_image_preparation_output");
                 }
                 if metadata
@@ -1194,6 +1344,65 @@ impl<B: GenerationBackend> GenerationWorker<B> {
     }
 }
 
+/// Wait without extending the retained prefix's original idle deadline on
+/// maintenance ticks. Returning input/EOF immediately avoids a poll-sized
+/// request delay; backends without maintenance retain their blocking behavior.
+fn wait_for_request<B: GenerationBackend>(
+    backend: &mut B,
+    input: &mut impl RequestInput,
+) -> Result<(), &'static str> {
+    wait_for_request_with_clock(backend, input, Instant::now)
+}
+
+fn wait_for_request_with_clock<B: GenerationBackend>(
+    backend: &mut B,
+    input: &mut impl RequestInput,
+    mut now: impl FnMut() -> Instant,
+) -> Result<(), &'static str> {
+    let interval = backend.idle_maintenance_interval().filter(|interval| !interval.is_zero());
+    let cache_limit = backend.prefix_cache_retained().then_some(Duration::from_secs(prefix_cache::IDLE_SECONDS));
+    let started = now();
+    let mut cache_remaining = cache_limit;
+    loop {
+        let timeout = match (interval, cache_remaining) {
+            (Some(tick), Some(cache)) => tick.min(cache),
+            (Some(tick), None) => tick,
+            (None, Some(cache)) => cache,
+            (None, None) => return Ok(()),
+        };
+        if input.wait_readable(timeout).map_err(|_| "protocol_read_failed")? {
+            if cache_remaining.is_some()
+                && cache_limit.is_some_and(|limit| now().saturating_duration_since(started) >= limit)
+            {
+                backend.clear_prefix_cache();
+            }
+            return Ok(());
+        }
+        if let Some(remaining) = cache_remaining {
+            let elapsed = now().saturating_duration_since(started);
+            if remaining <= timeout || cache_limit.is_some_and(|limit| elapsed >= limit) {
+                backend.clear_prefix_cache();
+                cache_remaining = None;
+            } else {
+                cache_remaining = cache_limit.map(|limit| limit.saturating_sub(elapsed));
+            }
+        }
+        if interval.is_some() {
+            backend.maintain_idle_queue()?;
+            // Maintenance itself can take time, including a slow device wake.
+            // Recompute before waiting again, even if input is already ready.
+            if cache_remaining.is_some() {
+                cache_remaining =
+                    cache_limit.map(|limit| limit.saturating_sub(now().saturating_duration_since(started)));
+                if cache_remaining.is_some_and(|remaining| remaining.is_zero()) {
+                    backend.clear_prefix_cache();
+                    cache_remaining = None;
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn run_lines<B: GenerationBackend>(
     worker: &mut GenerationWorker<B>,
     input: &mut impl RequestInput,
@@ -1227,6 +1436,10 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         };
         readiness["operations"] = operations;
         readiness["generation_budget"] = json!("memory-context-v1");
+        readiness["generation_budget_inputs"] = json!("token-ids-v1");
+    }
+    if let Some(memory) = worker.backend.loaded_memory_metadata() {
+        readiness["loaded_memory"] = memory;
     }
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
@@ -1243,21 +1456,22 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             .filter(ImageArtifactIdentity::valid)
             .ok_or("invalid_model_config")?;
         let runtime_identity = worker.backend.runtime_identity().ok_or("invalid_model_config")?;
-        let (family_profile, family_version) = worker
-            .backend
-            .image_family_profile()
-            .filter(|(profile, version)| {
-                matches!((*profile, *version), ("qwen35-dense-bf16-merged-v1", 1) | ("qwen35-dense-bf16-merged-v2", 2))
-            })
-            .ok_or("invalid_model_config")?;
+        let (family_profile, family_version) = worker.backend.image_family_profile().ok_or("invalid_model_config")?;
         let (model_source, model_revision) = worker.backend.image_source_identity().ok_or("invalid_model_config")?;
+        let (max_patches, max_image_tokens, max_processed_pixels) = image_family_limits(
+            family_profile,
+            family_version,
+            identity.schema_version,
+            worker.backend.image_geometry(),
+        )
+        .ok_or("invalid_model_config")?;
         readiness["image_input"] = json!({
             "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],
             "formats":["image/jpeg","image/png"],"max_images":1,
             "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":32_000_000,
             "max_source_dimension":16_384,
-            "max_processed_pixels":1_048_576,"max_patches":4096,"max_image_tokens":1024,
+            "max_processed_pixels":max_processed_pixels,"max_patches":max_patches,"max_image_tokens":max_image_tokens,
             "artifact_schema_version":identity.schema_version,"model_source":model_source,
             "model_revision":model_revision,"family_profile":family_profile,"family_version":family_version,
             "artifact_sha256":identity.artifact_sha256,"config_sha256":identity.config_sha256,
@@ -1269,17 +1483,10 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     }
     write_reply(output, &readiness)?;
     loop {
-        // Release retained state when the host stays idle.
-        if worker.backend.prefix_cache_retained() {
-            match input.wait_readable(Duration::from_secs(prefix_cache::IDLE_SECONDS)) {
-                Ok(true) => {},
-                Ok(false) => worker.backend.clear_prefix_cache(),
-                Err(_) => {
-                    worker.backend.clear_prefix_cache();
-                    worker.prepared = None;
-                    return Err("protocol_read_failed");
-                },
-            }
+        if let Err(code) = wait_for_request(&mut worker.backend, input) {
+            worker.backend.clear_prefix_cache();
+            worker.prepared = None;
+            return Err(code);
         }
         let mut bytes = Vec::new();
         let count = match Read::by_ref(input).take(worker.budget.wire_bytes as u64 + 1).read_until(b'\n', &mut bytes) {
@@ -1347,7 +1554,20 @@ mod tests {
         }
     }
 
+    #[derive(Debug, PartialEq)]
+    struct RecordedPlan {
+        input_tokens: u32,
+        maximum: u32,
+        input_len: Option<usize>,
+        cache_scope: Option<CacheScope>,
+        mtp_drafts: u32,
+        stochastic: bool,
+    }
+
     struct FakeBackend {
+        idle_interval: Option<Duration>,
+        idle_calls: usize,
+        fail_idle: bool,
         max_context: Option<u32>,
         tokens: Vec<Result<u64, &'static str>>,
         eos: Vec<u32>,
@@ -1374,12 +1594,15 @@ mod tests {
         cancel_image: bool,
         cancel_after_prepare: bool,
         fail_image_prepare: bool,
+        prepared_metadata_override: Option<PreparedImageMetadata>,
         prefix_supported: bool,
         prefix_entry: Option<prefix_cache::PrefixEntry<usize>>,
         prefix_pending: Option<prefix_cache::PrefixEntry<usize>>,
         state_allocations: usize,
         prefix_chunk: usize,
         prefix_reuse_override: Option<usize>,
+        plans: Vec<RecordedPlan>,
+        planning_allowed: bool,
     }
 
     struct FakePreparedImage {
@@ -1395,6 +1618,17 @@ mod tests {
     impl GenerationBackend for FakeBackend {
         type PreparedImage = FakePreparedImage;
 
+        fn idle_maintenance_interval(&self) -> Option<Duration> {
+            self.idle_interval
+        }
+        fn maintain_idle_queue(&mut self) -> Result<(), &'static str> {
+            self.idle_calls += 1;
+            if self.fail_idle {
+                Err("native_idle_maintenance_failed")
+            } else {
+                Ok(())
+            }
+        }
         fn vocab_size(&self) -> usize {
             8
         }
@@ -1407,6 +1641,9 @@ mod tests {
             maximum: u32,
             _memory_budget_bytes: usize,
         ) -> Option<u32> {
+            if !self.planning_allowed {
+                return None;
+            }
             if self.max_context.is_some() {
                 let minimum = input_tokens.checked_add(1)?;
                 let capacity = self.max_context?.min(maximum);
@@ -1416,6 +1653,21 @@ mod tests {
         }
         fn supports_automatic_context_planning(&self) -> bool {
             self.max_context.is_none() || self.max_context == Some(0)
+        }
+        fn plan_context_length(
+            &mut self,
+            request: &ContextPlanningRequest<'_>,
+            memory_budget_bytes: usize,
+        ) -> Result<Option<u32>, &'static str> {
+            self.plans.push(RecordedPlan {
+                input_tokens: request.input_tokens,
+                maximum: request.maximum,
+                input_len: request.input_token_ids.map(<[u32]>::len),
+                cache_scope: request.options.cache_scope,
+                mtp_drafts: request.options.mtp_drafts,
+                stochastic: matches!(request.options.sampling, Sampling::Stochastic { .. }),
+            });
+            Ok(self.automatic_context_length(request.input_tokens, request.maximum, memory_budget_bytes))
         }
         fn eos_token_ids(&self) -> &[u32] {
             &self.eos
@@ -1586,8 +1838,18 @@ mod tests {
             self.images.then_some((self.family_profile, self.family_version))
         }
 
+        fn image_geometry(&self) -> (u32, u32) {
+            if self.family_profile == "gemma4-e2b-bf16-v1" {
+                (16, 3)
+            } else {
+                (16, 2)
+            }
+        }
+
         fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
-            self.images.then_some(if self.image_schema == 3 {
+            self.images.then_some(if self.image_schema == 4 {
+                ("google/gemma-4-E2B-it", Some("3e22461f65e89153144f8adb70e3b8c2cc9845a7"))
+            } else if self.image_schema == 3 {
                 ("local:synthetic-merged-model", None)
             } else {
                 ("Qwen/Qwen3.5-0.8B", Some("2fc06364715b967f1860aea9cf38778875588b17"))
@@ -1629,12 +1891,24 @@ mod tests {
                 FakePreparedImage {
                     dropped: self.prepared_drops.clone(),
                 },
-                PreparedImageMetadata {
+                self.prepared_metadata_override.take().unwrap_or(PreparedImageMetadata {
                     input_tokens: 7,
-                    image_tokens: 4,
-                    grid: [1, 4, 4],
-                    processed_dimensions: [64, 64],
-                },
+                    image_tokens: if self.image_schema == 4 {
+                        1
+                    } else {
+                        4
+                    },
+                    grid: if self.image_schema == 4 {
+                        [1, 3, 3]
+                    } else {
+                        [1, 4, 4]
+                    },
+                    processed_dimensions: if self.image_schema == 4 {
+                        [48, 48]
+                    } else {
+                        [64, 64]
+                    },
+                }),
             ))
         }
 
@@ -1651,6 +1925,9 @@ mod tests {
     }
     fn worker() -> GenerationWorker<FakeBackend> {
         GenerationWorker::new(FakeBackend {
+            idle_interval: None,
+            idle_calls: 0,
+            fail_idle: false,
             max_context: Some(1024),
             tokens: vec![Ok(3), Ok(4), Ok(1), Ok(7)],
             eos: vec![1],
@@ -1677,12 +1954,15 @@ mod tests {
             cancel_image: false,
             cancel_after_prepare: false,
             fail_image_prepare: false,
+            prepared_metadata_override: None,
             prefix_supported: false,
             prefix_entry: None,
             prefix_pending: None,
             state_allocations: 0,
             prefix_chunk: prefix_cache::PREFILL_CHUNK_TOKENS,
             prefix_reuse_override: None,
+            plans: Vec::new(),
+            planning_allowed: true,
         })
         .unwrap()
     }
@@ -1985,6 +2265,19 @@ mod tests {
     }
 
     #[test]
+    fn mtp_execution_method_is_separate_from_stable_verification_contract() {
+        for method in ["transactional-greedy-batch", "exact-rejection-serial"] {
+            let mut worker = mtp_worker(3, 2);
+            worker.backend.mtp_reply_override = Some(json!({"verification_method":method}));
+            let mut request = standard();
+            request["mtp"] = json!(true);
+            let reply = post(&mut worker, request);
+            assert_eq!(reply["mtp"]["verification"], "fake-model-exact-v1");
+            assert_eq!(reply["mtp"]["verification_method"], method);
+        }
+    }
+
+    #[test]
     fn contradictory_mtp_backend_acknowledgements_fence_output() {
         for metadata in [
             json!(null),
@@ -2035,6 +2328,47 @@ mod tests {
     }
 
     #[test]
+    fn image_preparation_enforces_each_loaded_familys_advertised_ceiling() {
+        for (profile, version, schema, side, expected_patches, accepted) in [
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, [256, 256], 65_536, true),
+            ("qwen38-lily-retained-bf16-vision-v1", 1, 6, [256, 258], 65_536, false),
+            ("qwen35-dense-bf16-merged-v2", 2, 3, [64, 64], 4096, true),
+            ("qwen35-dense-bf16-merged-v2", 2, 3, [64, 66], 4096, false),
+            ("qwen35-dense-bf16-merged-v2", 2, 3, [256, 256], 4096, false),
+        ] {
+            let root = crate::media::tests::PrivateRoot::new();
+            let mut worker = image_worker(&root);
+            worker.backend.family_profile = profile;
+            worker.backend.family_version = version;
+            worker.backend.image_schema = schema;
+            worker.backend.max_context = Some(65_536);
+            let image_tokens = side[0] * side[1] / 4;
+            worker.backend.prepared_metadata_override = Some(PreparedImageMetadata {
+                input_tokens: image_tokens as usize + 3,
+                image_tokens,
+                grid: [1, side[0], side[1]],
+                processed_dimensions: [side[1] * 16, side[0] * 16],
+            });
+            assert_eq!(readiness(&mut worker)["image_input"]["max_patches"], expected_patches);
+            let mut request = image_prepare(&root);
+            request["context_tokens"] = json!(65_536);
+            let mut output = Vec::new();
+            let result = worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output);
+            let reply: Value = serde_json::from_slice(&output).unwrap();
+            if accepted {
+                assert!(result.is_ok());
+                assert!(reply.get("prepared_id").is_some());
+                assert_eq!(reply["image_tokens"], image_tokens);
+            } else {
+                assert_eq!(result, Err("native_operation_failed"));
+                assert_eq!(reply["error"], "invalid_image_preparation_output");
+                assert!(worker.prepared.is_none());
+                assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[test]
     fn image_prepare_reports_expanded_counts_and_generation_consumes_once() {
         let root = crate::media::tests::PrivateRoot::new();
         let mut worker = image_worker(&root);
@@ -2054,6 +2388,47 @@ mod tests {
         assert_eq!(post(&mut worker, request)["error"], "invalid_prepared_image");
         assert_eq!(post(&mut worker, json!({"operation":"discard_image"}))["discarded"], false);
         assert_eq!(post(&mut worker, standard())["finish_reason"], "eos");
+    }
+
+    #[test]
+    fn image_requests_keep_drafts_zero_between_mtp_text_requests() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut backend = worker().backend;
+        backend.images = true;
+        backend.mtp = Some(capabilities(3, 2));
+        backend.default_mtp_drafts = 2;
+        let mut worker = GenerationWorker::new(backend).unwrap();
+        worker.media = Some(MediaStore::open(&root.0).unwrap());
+        assert_eq!(post(&mut worker, standard())["mtp"]["drafts"], 2);
+        let prepared = post(&mut worker, image_prepare(&root));
+        let mut forbidden = image_generate(&prepared);
+        forbidden["mtp_drafts"] = json!(2);
+        assert_eq!(post(&mut worker, forbidden)["error"], "invalid_request");
+        let prepared = post(&mut worker, image_prepare(&root));
+        let reply = post(&mut worker, image_generate(&prepared));
+        assert!(reply.get("error").is_none());
+        assert_eq!(reply["mtp"]["drafts"], 0);
+        assert_eq!(worker.backend.image_generations, 1);
+        assert_eq!(post(&mut worker, standard())["mtp"]["drafts"], 2);
+        assert_eq!(worker.backend.mtp_requests, [2, 0, 2]);
+    }
+
+    #[test]
+    fn image_memory_rejection_releases_prepared_state_and_accepts_same_worker_retry() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        let prepared = post(&mut worker, image_prepare(&root));
+        worker.backend.tokens = vec![Err("resource_budget_exceeded")];
+        assert_eq!(post(&mut worker, image_generate(&prepared))["error"], "resource_budget_exceeded");
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(post(&mut worker, json!({"operation":"discard_image"}))["discarded"], false);
+        worker.backend.tokens = vec![Ok(3), Ok(1)];
+        let prepared = post(&mut worker, image_prepare(&root));
+        let retry = post(&mut worker, image_generate(&prepared));
+        assert_eq!(retry["input_tokens"], 7);
+        assert_eq!(retry["finish_reason"], "eos");
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 2);
+        assert_eq!(worker.backend.image_generations, 2);
     }
 
     #[test]
@@ -2238,6 +2613,40 @@ mod tests {
             );
             assert!(output.is_empty());
         }
+    }
+
+    #[test]
+    fn gemma_image_readiness_and_preparation_use_three_by_three_pooling() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        worker.backend.image_schema = 4;
+        worker.backend.family_profile = "gemma4-e2b-bf16-v1";
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let ready: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(ready["image_input"]["artifact_schema_version"], 4);
+        assert_eq!(ready["image_input"]["max_image_tokens"], 280);
+        assert_eq!(ready["image_input"]["max_patches"], 2520);
+        assert_eq!(ready["image_input"]["max_processed_pixels"], 645120);
+        assert_eq!(ready["image_input"]["qualification"], "unverified");
+        let prepared = post(&mut worker, image_prepare(&root));
+        assert_eq!(prepared["image_tokens"], 1);
+        assert_eq!(prepared["grid"], json!([1, 3, 3]));
+        assert!(prepared.get("prepared_id").is_some());
+        let metadata = PreparedImageMetadata {
+            input_tokens: 7,
+            image_tokens: 1,
+            grid: [1, 3, 3],
+            processed_dimensions: [48, 48],
+        };
+        assert!(valid_image_metadata(&metadata, (16, 3)));
+        assert!(!valid_image_metadata(&metadata, (16, 2)));
+        assert!(!valid_image_metadata(&metadata, (16, 0)));
+        worker.backend.image_schema = 3;
+        assert_eq!(
+            run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut Vec::new()),
+            Err("invalid_model_config")
+        );
     }
 
     #[test]
@@ -2428,6 +2837,42 @@ mod tests {
         worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
         let frame: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(frame, json!({"error":"context_overflow"}));
+    }
+
+    #[test]
+    fn progress_stream_continues_beyond_former_cumulative_frame_budget() {
+        let mut worker = worker();
+        worker.budget = Budget {
+            mib: 1,
+            input_bytes: 16 * 1024,
+            wire_bytes: 64 * 1024,
+            template_live_bytes: 4096,
+            template_cumulative_bytes: 4096,
+        };
+        worker.backend.tokens = vec![Ok(2); 128];
+        let mut request = standard();
+        request["context_tokens"] = json!(256);
+        request["max_new_tokens"] = json!(128);
+        request["stream"] = json!(true);
+        let mut output = Vec::new();
+        worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
+        let frames: Vec<Value> = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        let progress: Vec<&Value> = frames.iter().filter(|frame| frame["event"] == "progress").collect();
+        assert_eq!(progress.last().unwrap()["sampled_tokens"], 128);
+        // The former cumulative cap was input_bytes / 16 = 1 KiB. The progress
+        // frames for this request exceed that total, so reaching the final
+        // sample proves late updates are still delivered.
+        let progress_bytes: usize = frames
+            .iter()
+            .filter(|frame| frame["event"] == "progress")
+            .map(|frame| serde_json::to_vec(frame).unwrap().len() + 1)
+            .sum();
+        assert!(progress_bytes > worker.budget.input_bytes / 16);
+        assert_eq!(frames.last().unwrap()["finish_reason"], "length");
     }
 
     #[test]
@@ -2735,12 +3180,34 @@ mod tests {
 
     #[test]
     fn image_metadata_accepts_long_text_contexts() {
-        assert!(valid_image_metadata(&PreparedImageMetadata {
-            input_tokens: 16_385,
-            image_tokens: 4,
-            grid: [1, 4, 4],
-            processed_dimensions: [64, 64],
-        }));
+        assert!(valid_image_metadata(
+            &PreparedImageMetadata {
+                input_tokens: 16_385,
+                image_tokens: 4,
+                grid: [1, 4, 4],
+                processed_dimensions: [64, 64],
+            },
+            (16, 2)
+        ));
+    }
+
+    #[test]
+    fn gemma3_preparation_requires_its_complete_fixed_grid() {
+        let mut metadata = PreparedImageMetadata {
+            input_tokens: 273,
+            image_tokens: 256,
+            grid: [1, 64, 64],
+            processed_dimensions: [896, 896],
+        };
+        assert!(valid_image_metadata(&metadata, (14, 4)));
+        assert!(!valid_image_metadata(&metadata, (16, 2)));
+        metadata.grid = [1, 32, 64];
+        metadata.processed_dimensions = [896, 448];
+        metadata.image_tokens = 128;
+        assert!(!valid_image_metadata(&metadata, (14, 4)));
+        metadata.grid = [1, 64, 64];
+        metadata.processed_dimensions = [896, 896];
+        assert!(!valid_image_metadata(&metadata, (14, 4)));
     }
 
     #[test]
@@ -2793,6 +3260,7 @@ mod tests {
             json!({"rendered_prompt":"both sources"}),
             json!({"input_token_ids":null}),
             json!({"sampling":{"mode":"stochastic","temperature":0.0}}),
+            json!({"sampling":{"mode":"stochastic","temperature":1e-40}}),
             json!({"sampling":{"mode":"stochastic","temperature":0.6,"top_k":0}}),
             json!({"sampling":{"mode":"stochastic","temperature":0.6,"top_k":9}}),
             json!({"sampling":{"mode":"stochastic","temperature":0.6,"top_p":0.0}}),
@@ -3017,30 +3485,37 @@ mod tests {
     }
 
     #[test]
-    fn automatic_budget_reserves_ram_and_leaves_planning_headroom() {
+    fn planning_and_execution_share_available_memory_after_host_reserve() {
         const MIB: usize = 1024 * 1024;
-        assert_eq!(automatic_memory_budget(0), 0);
-        assert_eq!(automatic_memory_budget(256 * MIB), 0);
-        assert_eq!(automatic_memory_budget(1024 * MIB), 144 * MIB);
-        assert!(automatic_memory_budget(usize::MAX) < usize::MAX / 4);
+        let available = 1024 * MIB;
+        let planned = inference_memory_budget(available);
+        assert_eq!(planned, 768 * MIB);
+        // A valid allocation above the former quarter-RAM threshold fits.
+        assert_eq!(admit_request_memory(Some(512 * MIB), available), Ok(()));
+        assert_eq!(admit_request_memory(Some(planned), available), Ok(()));
+        assert_eq!(admit_request_memory(Some(planned + 1), available), Err("resource_budget_exceeded"));
+        assert_eq!(inference_memory_budget(0), 0);
+        assert_eq!(inference_memory_budget(256 * MIB), 0);
+        assert_eq!(admit_request_memory(Some(1), 256 * MIB), Err("resource_budget_exceeded"));
+        assert_eq!(admit_request_memory(None, available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_request_memory(Some(usize::MAX), usize::MAX), Err("resource_budget_exceeded"));
+        assert_eq!(inference_memory_budget(usize::MAX), usize::MAX - 256 * MIB);
     }
 
     #[test]
-    fn unknown_context_planning_is_bounded_recoverable_and_preserves_prefix_cache() {
+    fn count_only_context_planning_remains_bounded_and_compatible() {
         let mut worker = prefix_worker(true);
         worker.backend.max_context = None;
-        worker.backend.prefix_entry =
-            Some(prefix_cache::PrefixEntry::new(7, prefix_cache::parse_scope(SCOPE).unwrap(), 64, &vec![2; 1025]));
         let reply = post(&mut worker, json!({"operation":"plan_generation","input_tokens":8,"context_tokens":128}));
         assert_eq!(reply["context_tokens"], 128);
         assert_eq!(reply["max_new_tokens"], 120);
         assert_eq!(reply["context_capacity_known"], false);
         assert_eq!(reply["budget_kind"], "memory");
-        assert!(worker.backend.prefix_entry.is_some());
+        assert_eq!(worker.backend.plans[0].input_len, None);
 
         let invalid = post(&mut worker, json!({"operation":"plan_generation","input_tokens":0,"context_tokens":128}));
         assert_eq!(invalid["error"], "invalid_generation_request");
-        assert!(worker.backend.prefix_entry.is_none());
+        assert_eq!(worker.backend.plans.len(), 1);
     }
 
     #[test]
@@ -3052,9 +3527,78 @@ mod tests {
             json!({"operation":"plan_generation","input_tokens":4294967295u64,"context_tokens":4294967295u64}),
         );
         assert_eq!(overflow["error"], "invalid_generation_request");
-        worker.backend.max_context = Some(0);
+        worker.backend.planning_allowed = false;
         let reply = post(&mut worker, json!({"operation":"plan_generation","input_tokens":1,"context_tokens":16}));
         assert_eq!(reply["error"], "resource_budget_exceeded");
+    }
+
+    #[test]
+    fn planning_receives_validated_prefix_identity_and_effective_mtp_selection() {
+        let mut worker = prefix_worker(true);
+        worker.backend.max_context = None;
+        worker.backend.mtp = Some(capabilities(3, 2));
+        worker.mtp = worker.backend.mtp;
+        let request = json!({"operation":"plan_generation","input_tokens":2,"context_tokens":128,
+            "input_token_ids":[2,3],"cache_scope":SCOPE,"mtp_drafts":2,
+            "sampling":{"mode":"stochastic","temperature":0.7,"top_p":0.9}});
+        assert_eq!(post(&mut worker, request.clone())["context_tokens"], 128);
+        assert_eq!(
+            worker.backend.plans,
+            vec![RecordedPlan {
+                input_tokens: 2,
+                maximum: 128,
+                input_len: Some(2),
+                cache_scope: prefix_cache::parse_scope(SCOPE),
+                mtp_drafts: 2,
+                stochastic: true,
+            }]
+        );
+        worker.backend.mtp_effective_override = Some(0);
+        assert_eq!(post(&mut worker, request)["context_tokens"], 128);
+        assert_eq!(worker.backend.plans[1].mtp_drafts, 0);
+        let advertised = readiness(&mut worker);
+        assert_eq!(advertised["generation_budget_inputs"], "token-ids-v1");
+    }
+
+    #[test]
+    fn malformed_planning_identity_is_rejected_before_backend_inventory() {
+        for extra in [
+            json!({"input_token_ids":[2]}),
+            json!({"input_token_ids":[2,8]}),
+            json!({"input_token_ids":null}),
+            json!({"cache_scope":"invalid"}),
+            json!({"mtp":false,"mtp_drafts":0}),
+            json!({"sampling":{"mode":"stochastic","temperature":0.0}}),
+        ] {
+            let mut worker = prefix_worker(true);
+            worker.backend.max_context = None;
+            let mut request = json!({"operation":"plan_generation","input_tokens":2,"context_tokens":128});
+            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(post(&mut worker, request).get("error").is_some());
+            assert!(worker.backend.plans.is_empty());
+        }
+        let mut worker = worker();
+        worker.backend.max_context = None;
+        let reply = post(
+            &mut worker,
+            json!({"operation":"plan_generation","input_tokens":2,
+            "context_tokens":128,"input_token_ids":[2,3],"cache_scope":SCOPE}),
+        );
+        assert_eq!(reply["error"], "invalid_generation_request");
+        assert!(worker.backend.plans.is_empty());
+    }
+
+    #[test]
+    fn automatic_context_planning_honors_larger_current_allowance() {
+        let mut worker = worker();
+        worker.backend.max_context = None;
+        let first = post(&mut worker, json!({"operation":"plan_generation","input_tokens":8,"context_tokens":128}));
+        assert_eq!(first["context_tokens"], 128);
+        // The previous plan still exceeds half of the newly admitted span.
+        // Reuse preferences must not silently retain that smaller allowance.
+        let larger = post(&mut worker, json!({"operation":"plan_generation","input_tokens":8,"context_tokens":200}));
+        assert_eq!(larger["context_tokens"], 200);
+        assert_eq!(larger["max_new_tokens"], 192);
     }
 
     #[test]
@@ -3252,6 +3796,8 @@ mod tests {
     struct IdleInput {
         input: io::Cursor<Vec<u8>>,
         waits: Vec<bool>,
+        expected_timeouts: Vec<Duration>,
+        fail_wait: bool,
     }
 
     impl Read for IdleInput {
@@ -3280,7 +3826,10 @@ mod tests {
             &mut self,
             timeout: Duration,
         ) -> io::Result<bool> {
-            assert_eq!(timeout, Duration::from_secs(600));
+            if self.fail_wait {
+                return Err(io::Error::other("failed wait"));
+            }
+            assert_eq!(timeout, self.expected_timeouts.remove(0));
             Ok(self.waits.remove(0))
         }
     }
@@ -3292,7 +3841,9 @@ mod tests {
     ) -> Vec<Value> {
         let mut input = IdleInput {
             input: io::Cursor::new(lines.iter().flat_map(|line| line.iter().copied().chain(*b"\n")).collect()),
+            expected_timeouts: vec![Duration::from_secs(600); waits.len()],
             waits,
+            fail_wait: false,
         };
         let mut output = Vec::new();
         run_lines(worker, &mut input, &mut output).unwrap();
@@ -3323,5 +3874,152 @@ mod tests {
         let replies = run_requests(&mut prefix, &[request.clone(), oversized, request.clone()], vec![true, true]);
         assert_eq!(replies[1]["error"], "request_too_large");
         assert_eq!(replies[2]["reused_input_tokens"], 0);
+    }
+
+    fn idle_input(
+        waits: Vec<bool>,
+        timeouts: Vec<Duration>,
+    ) -> IdleInput {
+        IdleInput {
+            input: io::Cursor::new(Vec::new()),
+            waits,
+            expected_timeouts: timeouts,
+            fail_wait: false,
+        }
+    }
+
+    #[test]
+    fn idle_maintenance_runs_without_a_retained_prefix_and_stops_at_eof() {
+        let mut worker = worker();
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut input = idle_input(vec![false, false, true], vec![Duration::from_millis(500); 3]);
+        let mut output = Vec::new();
+        assert_eq!(run_lines(&mut worker, &mut input, &mut output), Ok(()));
+        assert_eq!(worker.backend.idle_calls, 2);
+        assert_eq!(worker.backend.generation_calls, 0);
+        assert!(input.waits.is_empty());
+        assert_eq!(output.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).count(), 1);
+    }
+
+    #[test]
+    fn idle_maintenance_preserves_ready_input_and_prefix_state() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut input = idle_input(vec![false, true], vec![Duration::from_millis(500); 2]);
+        assert_eq!(wait_for_request(&mut worker.backend, &mut input), Ok(()));
+        assert_eq!(worker.backend.idle_calls, 1);
+        assert_eq!(reused(&mut worker, 3_000), 2048);
+    }
+
+    #[test]
+    fn idle_maintenance_does_not_extend_prefix_expiry() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        worker.backend.idle_interval = Some(Duration::from_millis(500));
+        let mut input = idle_input(
+            vec![false, false, false, true],
+            vec![
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                Duration::from_millis(250),
+                Duration::from_millis(500),
+            ],
+        );
+        let start = Instant::now();
+        let mut times =
+            [0, 500, 500, 599_750, 599_750, 600_000].into_iter().map(|ms| start + Duration::from_millis(ms));
+        assert_eq!(wait_for_request_with_clock(&mut worker.backend, &mut input, || times.next().unwrap()), Ok(()));
+        assert!(!worker.backend.prefix_cache_retained());
+        assert_eq!(worker.backend.idle_calls, 3);
+    }
+
+    #[test]
+    fn idle_failures_exit_and_clear_retained_state() {
+        for fail_wait in [false, true] {
+            let mut worker = prefix_worker(true);
+            assert_eq!(reused(&mut worker, 3_000), 0);
+            worker.backend.idle_interval = Some(Duration::from_millis(500));
+            worker.backend.fail_idle = !fail_wait;
+            let mut input = idle_input(vec![false], vec![Duration::from_millis(500)]);
+            input.fail_wait = fail_wait;
+            assert_eq!(
+                run_lines(&mut worker, &mut input, &mut Vec::new()),
+                Err(if fail_wait {
+                    "protocol_read_failed"
+                } else {
+                    "native_idle_maintenance_failed"
+                })
+            );
+            assert!(!worker.backend.prefix_cache_retained());
+        }
+    }
+
+    #[test]
+    fn ready_input_cannot_reuse_a_prefix_after_idle_expiry() {
+        for callback_crosses_deadline in [false, true] {
+            let mut worker = prefix_worker(true);
+            assert_eq!(reused(&mut worker, 3_000), 0);
+            worker.backend.idle_interval = Some(Duration::from_millis(500));
+            let mut input = idle_input(
+                if callback_crosses_deadline {
+                    vec![false, true]
+                } else {
+                    vec![true]
+                },
+                vec![
+                    Duration::from_millis(500);
+                    if callback_crosses_deadline {
+                        2
+                    } else {
+                        1
+                    }
+                ],
+            );
+            let start = Instant::now();
+            let mut times = if callback_crosses_deadline {
+                vec![0, 500, 600_001]
+            } else {
+                vec![0, 600_001]
+            }
+            .into_iter()
+            .map(|ms| start + Duration::from_millis(ms));
+            assert_eq!(wait_for_request_with_clock(&mut worker.backend, &mut input, || times.next().unwrap()), Ok(()));
+            assert!(!worker.backend.prefix_cache_retained());
+        }
+    }
+}
+
+#[cfg(all(test, feature = "metal"))]
+mod native_sampling_recovery_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a private converted dense artifact with ordinary streaming"]
+    fn accepted_tiny_temperature_keeps_the_loaded_worker_usable() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("STARK_DENSE_RECOVERY_MODEL_PATH").expect("set private converted model path"),
+        );
+        let backend = crate::native::NativeBackend::load(&path, None).unwrap();
+        let mut worker = GenerationWorker::new(backend).unwrap();
+        let mut request = json!({
+            "operation":"generate", "input_token_ids":[2,3,4,5],
+            "context_tokens":512,"max_new_tokens":4,"seed":42,"mtp":false,
+            "sampling":{"mode":"stochastic","temperature":1e-38,"top_k":20,"top_p":0.9}
+        });
+        for stochastic in [true, false] {
+            if !stochastic {
+                request["sampling"] = json!({"mode":"greedy"});
+            }
+            let mut output = Vec::new();
+            let result = worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output);
+            assert!(result.is_ok(), "accepted temperature request or following request stopped the worker");
+            let reply: Value = serde_json::from_slice(&output).unwrap();
+            assert!(reply.get("error").is_none(), "native sampling request returned an error");
+            assert!(
+                reply["generated_token_ids"].as_array().is_some_and(|ids| !ids.is_empty()),
+                "native sampling request did not emit output"
+            );
+        }
     }
 }

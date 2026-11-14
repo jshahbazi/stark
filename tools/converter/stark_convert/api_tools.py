@@ -341,7 +341,28 @@ def template_messages(messages: list[dict], *, parser=None, tools=None) -> list[
     return adapt_history(result, parser, tools)
 
 
+# Python-only codec annotation. config.json is strict (the native loader rejects
+# unknown codec fields), so loaders add this from the conversion receipt.
+UNREVIEWED_TOOL_TEMPLATES = "_stark_unreviewed_tool_templates"
+
+
+def codec_with_template_review(codec: dict | None, receipt: object) -> dict | None:
+    """Mark a codec whose template came from a named chat-template list.
+
+    Only the list's `default` entry is rendered; its `tool_use` or other entries
+    are unreviewed, so tool calling stays unavailable until the template review
+    in docs/MODEL_ONBOARDING.md admits a parser for that exact artifact.
+    """
+    if not isinstance(codec, dict) or not isinstance(receipt, dict):
+        return codec
+    if receipt.get("chat_template_selection") is None:
+        return codec
+    return {**codec, UNREVIEWED_TOOL_TEMPLATES: True}
+
+
 def tool_parser_for(codec: dict | None) -> str | None:
+    if UNREVIEWED_TOOL_TEMPLATES in (codec or {}):
+        return None
     source = (codec or {}).get("prompt_template")
     if not isinstance(source, str) or not source or len(source) > MAX_TEMPLATE_BYTES:
         return None

@@ -242,7 +242,10 @@ def write_classifier_metadata(
                 **model_entry,
                 "files": {key: value for key, value in model_entry["files"].items() if key != "chat_template"},
             }
-    prompt_template = _chat_template(source, model_entry, tokenizer_config, resolve_file)
+    prompt_template, template_selection = _chat_template(source, model_entry, tokenizer_config, resolve_file)
+    if template_selection is not None:
+        # Named template lists are admitted for language conversion only.
+        raise UnsupportedMetadata("Unsupported chat-template representation.")
     codec_profile = _profile_codec(model_entry["metadata"])
     system_prompt = None
     if "system_prompt" in model_entry["files"]:

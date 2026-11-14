@@ -36,6 +36,7 @@ struct GemvParams {
   GemmDTransform output_transform;
   bool gathered;
   bool signed_codes;
+  bool reference_bf16_weights;
 };
 
 } // namespace gemm

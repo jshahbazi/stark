@@ -38,6 +38,11 @@ pub fn unified_sampling<T: ArrayElement + Float>(
         .map(|logit| logit.to_f32().unwrap())
         .collect::<Vec<f32>>();
 
+        if logits.iter().any(|logit| !logit.is_finite()) {
+            unsafe { *output.wrapping_add(batch_idx as usize) = u32::MAX };
+            continue;
+        }
+
         if has_bitmask {
             let bitmask = unsafe {
                 std::slice::from_raw_parts(
@@ -54,7 +59,20 @@ pub fn unified_sampling<T: ArrayElement + Float>(
 
         if has_temperature {
             let recip_temperature = 1.0 / temperature.unwrap();
+            // Preserve the qualified arithmetic in the normal range. When
+            // finite raw logits cannot be scaled, a uniform logit translation
+            // makes the maximum zero. Negative overflow then means zero mass,
+            // rather than invalidating an otherwise valid sampling request.
+            let center = logits.iter().any(|logit| logit.is_finite() && !(*logit * recip_temperature).is_finite());
+            let shift = if center {
+                logits.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            } else {
+                0.0
+            };
             for logit in logits.iter_mut() {
+                if center {
+                    *logit -= shift;
+                }
                 *logit *= recip_temperature;
             }
         }
@@ -91,9 +109,9 @@ pub fn unified_sampling<T: ArrayElement + Float>(
             .into_iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal).then(b.0.cmp(&a.0)))
-            .unwrap()
-            .0;
+            .filter(|(_, logit)| logit.is_finite())
+            .map_or(u32::MAX, |(index, _)| index as u32);
 
-        unsafe { *output.wrapping_add(batch_idx as usize) = argmax as u32 }
+        unsafe { *output.wrapping_add(batch_idx as usize) = argmax }
     }
 }

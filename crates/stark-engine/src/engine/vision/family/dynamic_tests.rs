@@ -2,6 +2,124 @@ use stark_engine_macros::stark_test;
 
 use super::*;
 
+fn bf16_moe_decoder() -> (Value, Value) {
+    let (mut decoder, vision) = fixture(2048, 512, 40, 16, 2, 32, 16, false, 27, 1152, 4304, 16);
+    for layer in decoder["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+        layer["mlp_config"] = json!({"type":"MixtureOfExpertsConfig","expert_config":layer["mlp_config"],
+            "router_config":{},"routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":256,
+            "num_active_routed_experts":8,"router_has_biases":false,"num_shared_experts":1,
+            "expert_hidden_dim":512,"gate_config":{}});
+    }
+    (decoder, vision)
+}
+
+#[stark_test]
+fn bf16_moe_geometry_admits_official_dimensions_with_unfolded_norms_and_full_banks() {
+    let (decoder, vision) = bf16_moe_decoder();
+    let admitted = geometry_bf16_moe(&decoder, &vision).unwrap();
+    assert!(!admitted.tensors.affine);
+    assert_eq!(
+        admitted.tensors.tensors["decoder.transformer.layers.0.mlp.experts.up_projection.weights.weights"],
+        ("BF16", vec![262144, 2048])
+    );
+    assert_eq!(
+        admitted.tensors.tensors["decoder.transformer.layers.0.mlp.experts.down_projection.weights.weights"],
+        ("BF16", vec![524288, 512])
+    );
+    assert!(geometry_moe(&decoder, &vision).is_err());
+    assert!(geometry(&decoder, &vision).is_err());
+    for (pointer, value) in [
+        ("/transformer_config/output_norm_config/scale_offset", Value::Null),
+        ("/transformer_config/layer_configs/0/mixer_config/reference_bf16", json!(false)),
+        ("/transformer_config/layer_configs/0/mlp_config/num_active_routed_experts", json!(257)),
+        ("/transformer_config/layer_configs/0/mlp_config/num_shared_experts", json!(2)),
+        ("/transformer_config/layer_configs/0/mlp_config/gate_config", Value::Null),
+        ("/transformer_config/layer_configs/0/mlp_config/expert_hidden_dim", json!(513)),
+    ] {
+        let mut changed = decoder.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        assert!(geometry_bf16_moe(&changed, &vision).is_err(), "accepted {pointer}");
+    }
+    // Full banks are constrained by u32 indexing and aggregate storage before allocation.
+    let mut huge = decoder.clone();
+    for layer in huge["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+        layer["mlp_config"]["expert_hidden_dim"] = json!(131072);
+    }
+    assert!(geometry_bf16_moe(&huge, &vision).is_err());
+}
+
+#[stark_test]
+fn moe_geometry_binds_selected_experts_shared_branch_and_flattened_banks() {
+    let mut decoder = decoder_profile();
+    fn folded(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                if let Some(offset) = map.get_mut("scale_offset") {
+                    *offset = Value::Null;
+                }
+                for value in map.values_mut() {
+                    folded(value);
+                }
+            },
+            Value::Array(values) => {
+                for value in values {
+                    folded(value);
+                }
+            },
+            _ => {},
+        }
+    }
+    folded(&mut decoder);
+    for layer in decoder["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+        layer["mlp_config"] = json!({"type":"MixtureOfExpertsConfig","expert_config":layer["mlp_config"],
+            "router_config":{},"routing_function":{"type":"SoftmaxRouting"},"num_routed_experts":4,
+            "num_active_routed_experts":2,"router_has_biases":false,"num_shared_experts":1,
+            "expert_hidden_dim":512,"gate_config":{}});
+    }
+    let geometry = geometry_moe(&decoder, &vision_profile()).unwrap();
+    assert!(geometry.tensors.affine);
+    assert_eq!(
+        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.experts.up_projection.weights.weights"].1,
+        vec![4096, 1024]
+    );
+    assert_eq!(
+        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.experts.down_projection.weights.weights"].1,
+        vec![4096, 512]
+    );
+    assert_eq!(
+        geometry.tensors.tensors["decoder.transformer.layers.0.mlp.shared_gate.weights.weights"].1,
+        vec![1, 1024]
+    );
+    for (field, value) in
+        [("num_shared_experts", 2), ("num_active_routed_experts", 5), ("num_routed_experts", u32::MAX)]
+    {
+        let mut invalid = decoder.clone();
+        invalid["transformer_config"]["layer_configs"][0]["mlp_config"][field] = json!(value);
+        assert!(geometry_moe(&invalid, &vision_profile()).is_err());
+    }
+}
+
+#[stark_test]
+fn affine_geometry_requires_folded_norms_and_keeps_the_exact_operation_graph() {
+    let mut decoder = decoder_profile();
+    assert!(geometry_affine(&decoder, &vision_profile()).is_err());
+    decoder["transformer_config"]["output_norm_config"]["scale_offset"] = Value::Null;
+    for layer in decoder["transformer_config"]["layer_configs"].as_array_mut().unwrap() {
+        for name in ["pre_mixer_norm_config", "pre_mlp_norm_config"] {
+            layer[name]["scale_offset"] = Value::Null;
+        }
+        if layer["mixer_config"]["type"] == "AttentionConfig" {
+            for name in ["query_norm_config", "key_norm_config"] {
+                layer["mixer_config"][name]["scale_offset"] = Value::Null;
+            }
+        }
+    }
+    assert!(geometry(&decoder, &vision_profile()).is_err());
+    assert!(geometry_affine(&decoder, &vision_profile()).unwrap().tensors.affine);
+    decoder["transformer_config"]["layer_configs"][0]["mixer_config"]["reference_bf16"] = json!(false);
+    assert!(geometry_affine(&decoder, &vision_profile()).is_err());
+}
+
 fn fixture(
     model: u32,
     hidden: u32,

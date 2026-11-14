@@ -19,10 +19,11 @@ from functools import partial
 from pathlib import Path
 
 from . import __version__
+from .adapters.gemma4_vision import PROFILES as GEMMA4_IMAGE_PROFILES
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
-from .model_support import MODES, preflight_source, support_matrix
+from .model_support import MODES, NATIVE_F16_FAMILIES, auto_f16_refusal, preflight_source, support_matrix
 from .profiles import GENERIC_PROFILE, generic_entry
-from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
+from .progress import FDProgressSink, ProgressCallback, ProgressReporter, converter_failure_category, reporter
 from .provenance import file_hash, toolchain_provenance
 from .registry import (
     CONFIG_ADAPTERS,
@@ -35,7 +36,7 @@ from .registry import (
 from .sources import SourceSnapshot, huggingface_repository, resolve_source
 from .streaming import ConversionError, UnsupportedConversion, read_json, read_regular_bytes, write_plan
 from .vision_contract import REPO as VISION_REPO
-from .vision_contract import source_rules, validate_vision_source
+from .vision_contract import source_rules, validate_vision_source, vision_output_contract
 from .vision_family import (
     ALTERNATE_OUTPUT_TOKENIZER_SHA256,
     COMPONENT_FILES,
@@ -49,20 +50,116 @@ from .vision_family import (
 )
 
 
+def _native_f16(dtype: str, adapter: str | None) -> bool:
+    """F16 output that the native dense engine can load (full attention only)."""
+    return dtype == "float16" and adapter in NATIVE_F16_FAMILIES
+
+
+def _concrete_dtype(dtype: str) -> str:
+    """`auto` resolves only after planning; admission before that uses its BF16 fallback."""
+    return "bfloat16" if dtype == "auto" else dtype
+
+
+def _select_auto_dtype(
+    snapshot: SourceSnapshot, planned: PlannedConversion, support_mode: str | None
+) -> tuple[PlannedConversion, dict]:
+    """Choose F16 for an all-F16 MLX affine source whose family has a recorded F16 pass.
+
+    `planned` is the BF16 plan. Any refusal keeps it unchanged, so every other
+    source converts exactly as an explicit `--dtype bfloat16` request would.
+    """
+    from .qualifications import has_recorded_qualification
+
+    request, tensors = planned.request, planned.tensors
+    sources = tensors.input_tensors or tuple(
+        source for operation in tensors.operations for source in operation.sources
+    )
+    specs = (json.loads(value).get("type") for key, value in tensors.metadata.items() if key.endswith(".spec"))
+    reason = auto_f16_refusal(
+        planned.capability.adapter,
+        planned.model_config,
+        (source.dtype for source in sources),
+        specs,
+        mode=support_mode or request.artifact_mode,
+        artifact_mode=request.artifact_mode,
+        model_kind=request.model_kind,
+        require_native_support=request.require_native_support,
+        qualified=has_recorded_qualification(request.repo),
+    )
+    if reason is None:
+        candidate = plan_conversion(snapshot, replace(request, dtype="float16"))
+        if candidate.capability.native_loading != "runtime_blocked":
+            return candidate, {"requested": "auto", "selected": "float16", "reason": "all_f16_mlx_affine_source"}
+        reason = candidate.capability.reason or "native_f16_runtime_blocked"
+    return planned, {"requested": "auto", "selected": "bfloat16", "reason": reason}
+
+
 def capability(request: ConversionRequest) -> CapabilityResult:
     """Probe catalog coverage only; this does not validate checkpoint contents."""
     if request.artifact_mode != "text":
+        if request.architecture == "qwen4_exp":
+            supported = (
+                request.artifact_mode == "vision-language"
+                and request.dtype == "bfloat16"
+                and request.model_kind == "language"
+                and request.metadata_profile in {None, GENERIC_PROFILE}
+            )
+            return CapabilityResult(
+                adapter="qwen4_exp" if supported else None,
+                model_kind=request.model_kind,
+                conversion="implemented" if supported else "unsupported",
+                native_loading="supported_family_unverified" if supported else "runtime_blocked",
+                reason=None if supported else "unsupported_flash_next_vision_tuple",
+            )
+        if request.architecture == "gemma3" or request.repo in {
+            "google/gemma-3-4b-it",
+            "google/gemma-3-12b-it",
+            "google/gemma-3-27b-it",
+        }:
+            supported = (
+                request.artifact_mode == "vision-language"
+                and request.dtype == "bfloat16"
+                and request.model_kind == "language"
+                and request.architecture in {None, "gemma3"}
+                and request.metadata_profile in {None, GENERIC_PROFILE}
+            )
+            return CapabilityResult(
+                adapter="gemma3" if supported else None,
+                model_kind=request.model_kind,
+                conversion="implemented" if supported else "unsupported",
+                native_loading="supported_family_unverified" if supported else "runtime_blocked",
+                reason=None if supported else "unsupported_gemma3_vision_tuple",
+            )
+        if request.repo in GEMMA4_IMAGE_PROFILES:
+            supported = (
+                request.artifact_mode == "vision-language"
+                and request.dtype == "bfloat16"
+                and request.model_kind == "language"
+                and request.architecture in {None, "gemma4_text"}
+                and request.metadata_profile is None
+            )
+            return CapabilityResult(
+                adapter="gemma4_text" if supported else None,
+                model_kind=request.model_kind,
+                conversion="implemented" if supported else "unsupported",
+                native_loading="supported_family_unverified" if supported else "runtime_blocked",
+                reason=None if supported else "unsupported_gemma4_vision_tuple",
+            )
         official = request.repo == VISION_REPO
         supported = (
             request.artifact_mode == "vision-language"
-            and (official or get_model(request.repo) is None or get_model(request.repo).get("adapter") == "qwen3_5")
+            and (
+                official
+                or get_model(request.repo) is None
+                or get_model(request.repo).get("adapter") in {"qwen3_5", "qwen3_5_moe"}
+            )
             and request.dtype == "bfloat16"
             and request.model_kind == "language"
-            and request.architecture in {None, "qwen3_5"}
+            and request.architecture in {None, "qwen3_5", "qwen3_5_moe"}
             and request.metadata_profile in ({None} if official else {None, GENERIC_PROFILE})
         )
         return CapabilityResult(
-            adapter="qwen3_5" if supported else None,
+            adapter=(request.architecture or "qwen3_5") if supported else None,
             model_kind=request.model_kind,
             conversion="implemented" if supported else "unsupported",
             native_loading=("supported_layout_unverified_tuple" if official else "supported_family_unverified")
@@ -81,7 +178,9 @@ def capability(request: ConversionRequest) -> CapabilityResult:
             adapter=request.architecture if supported else None,
             model_kind=request.model_kind,
             conversion="implemented" if supported else "unsupported",
-            native_loading="runtime_blocked" if supported and request.dtype != "bfloat16" else "unverified",
+            native_loading="runtime_blocked"
+            if supported and request.dtype != "bfloat16" and not _native_f16(request.dtype, request.architecture)
+            else "unverified",
             reason=None if supported else "checkpoint_architecture_required",
         )
     kind = {"LanguageModelSpec": "language", "ClassifierModelSpec": "classifier", "TTSModelSpec": "tts"}
@@ -93,7 +192,7 @@ def capability(request: ConversionRequest) -> CapabilityResult:
     if supported and entry["adapter"] in {"qwen3_5", "lfm2", "llamba", "modernbert"}:
         native = "unverified"
     if supported and request.dtype != "bfloat16":
-        native = "runtime_blocked"
+        native = "unverified" if _native_f16(request.dtype, entry["adapter"]) else "runtime_blocked"
     return CapabilityResult(
         adapter=entry["adapter"] if supported else None,
         model_kind=actual_kind,
@@ -147,21 +246,7 @@ def _validate_request(request: ConversionRequest) -> None:
 
 def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> PlannedConversion:
     """Validate a complete supported layout and build its single tensor/config plan."""
-    from .adapters import (
-        build_gemma_plan,
-        build_granite_plan,
-        build_lfm2_plan,
-        build_llama_plan,
-        build_llamba_plan,
-        build_mistral_plan,
-        build_modernbert_plan,
-        build_phi_plan,
-        build_qwen2_plan,
-        build_qwen35_plan,
-        build_qwen38_plan,
-        build_smollm3_plan,
-    )
-    from .qwen3 import build_qwen3_plan
+    from .planning import planner_for
 
     if request.artifact_mode == "vision-language" and snapshot.conversion_profile is not None:
         request = replace(
@@ -182,9 +267,25 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         if request.artifact_mode == "vision-language"
         else read_json(snapshot.config_path)
     )
-    artifact_contract = (
-        validate_vision_source(snapshot, request.dtype) if request.artifact_mode == "vision-language" else None
-    )
+    gemma3_images = request.artifact_mode == "vision-language" and config.get("model_type") == "gemma3"
+    gemma_images = request.artifact_mode == "vision-language" and snapshot.repo in GEMMA4_IMAGE_PROFILES
+    if gemma_images:
+        from .adapters.gemma4_vision import gemma4_vision_contract
+
+        artifact_contract = gemma4_vision_contract(snapshot.checkpoint, snapshot.repo, snapshot.revision)
+        artifact_contract["source"]["hashes"] = {
+            record["filename"]: record["sha256"]
+            for record in snapshot.manifest["files"]
+            if record["role"] not in {"weights", "weight_index"}
+        }
+    elif gemma3_images:
+        from .gemma3_contract import validate_gemma3_source
+
+        artifact_contract = validate_gemma3_source(snapshot, request.dtype)
+    else:
+        artifact_contract = (
+            validate_vision_source(snapshot, request.dtype) if request.artifact_mode == "vision-language" else None
+        )
     if snapshot.conversion_profile is not None:
         if request.metadata_profile != GENERIC_PROFILE:
             raise ConversionError("Request and source metadata profile disagree")
@@ -200,17 +301,31 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             raise ConversionError("Requested architecture disagrees with catalog profile")
     if request.model_kind != model_kind_for_architecture(adapter):
         raise UnsupportedConversion("Checkpoint architecture disagrees with the requested model kind")
-    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2"}:
+    if adapter in {
+        "qwen3",
+        "llama",
+        "smollm3",
+        "gemma3_text",
+        "gemma4_text",
+        "olmo3",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "lfm2",
+    }:
         from .compressed import parse_mlx_quantization
 
         entry = get_model(request.repo)
         packing = entry.get("compressed_format") if entry else None
         packing_config = config
-        if adapter == "qwen3_5":
+        if adapter in {"qwen3_5", "qwen3_5_moe"}:
             from .adapters.qwen35 import normalize_qwen35_config
 
             packing_config = normalize_qwen35_config(config)
-        quantization = parse_mlx_quantization(packing_config, allow_mixed=adapter == "qwen3_5")
+        elif adapter == "gemma4_text":
+            from .adapters.gemma4 import normalize_gemma4_config
+
+            packing_config = normalize_gemma4_config(config)
+        quantization = parse_mlx_quantization(packing_config, allow_mixed=adapter in {"qwen3_5", "qwen3_5_moe"})
         if packing is not None:
             if quantization is None or quantization.bits != packing["bits"]:
                 raise ConversionError("Checkpoint packing disagrees with its catalog profile")
@@ -230,27 +345,16 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             raise UnsupportedConversion("Packed checkpoint requires a registered compressed profile")
         if llamba_packing is not None and quantization is not None and quantization.bits != llamba_packing["bits"]:
             raise ConversionError("Checkpoint packing disagrees with its catalog profile")
-    planners = {
-        "qwen3": build_qwen3_plan,
-        "qwen2": build_qwen2_plan,
-        "llama": build_llama_plan,
-        "mistral": build_mistral_plan,
-        "gemma2": partial(build_gemma_plan, family="gemma2"),
-        "gemma3_text": partial(build_gemma_plan, family="gemma3_text"),
-        "phi3": build_phi_plan,
-        "granite": build_granite_plan,
-        "smollm3": build_smollm3_plan,
-        "qwen3_5": partial(build_qwen35_plan, include_vision=request.artifact_mode == "vision-language"),
-        "qwen4_exp": build_qwen38_plan,
-        "lfm2": build_lfm2_plan,
-        "llamba": partial(
-            build_llamba_plan,
+    planner = planner_for(adapter, mode=request.artifact_mode)
+    if adapter == "llamba":
+        planner = partial(
+            planner,
             config=config,
             expected_mlx_bits=llamba_packing["bits"] if llamba_packing else None,
-        ),
-        "modernbert": build_modernbert_plan,
-    }
-    tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
+        )
+    tensors = planner(snapshot.checkpoint, dtype=request.dtype)
+    if artifact_contract is not None:
+        artifact_contract = vision_output_contract(artifact_contract, tensors.mtp_config)
     if artifact_contract is not None and artifact_contract["schema_version"] == 3:
         validate_family_plan(tensors)
         if any(
@@ -258,13 +362,19 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             not in (
                 {"BF16", "F32"}
                 if operation.kind == "cast_f32" and operation.name.endswith((".scales", ".a_log", ".dt_bias"))
+                else {"I32", "U32"}
+                if artifact_contract["family"]["profile"]
+                in {"qwen35-dense-affine-merged-v3", "qwen35-moe-affine-merged-v4"}
+                and operation.kind in {"mlx_repack", "mlx_widen"}
                 else {"BF16"}
             )
             for operation in tensors.operations
             for source in operation.sources
         ):
-            raise UnsupportedConversion("Vision family requires merged BF16 matrices and BF16/F32 control weights")
-    if artifact_contract is not None:
+            raise UnsupportedConversion(
+                "Vision family requires merged BF16 matrices or admitted affine decoder planes and BF16/F32 controls"
+            )
+    if artifact_contract is not None and adapter in {"qwen3_5", "qwen3_5_moe"}:
         for layer in tensors.decoder_config["transformer_config"]["layer_configs"]:
             if layer["rope_config"] is not None:
                 layer["rope_config"] = {
@@ -272,10 +382,14 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
                     "type": "Qwen35MRoPEConfig",
                     **artifact_contract["position_contract"],
                 }
-    if adapter == "qwen3_5":
+    if adapter in {"qwen3_5", "qwen3_5_moe"}:
         from .adapters.qwen35 import normalize_qwen35_config
 
         config = normalize_qwen35_config(config)
+    elif adapter == "gemma4_text":
+        from .adapters.gemma4 import normalize_gemma4_config
+
+        config = normalize_gemma4_config(config)
     # Metadata and final content verification are still pending. Only a
     # successfully published conversion reports complete source validation.
     result = capability(request)
@@ -290,6 +404,12 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             result = replace(result, native_loading="runtime_blocked", reason="native_delta_net_dimensions")
         if mixer["type"] in {"DeltaNetConfig", "ShortConvConfig", "Mamba2Config"} and mixer["kernel_size"] < 2:
             result = replace(result, native_loading="runtime_blocked", reason="native_convolution_kernel")
+        if (
+            request.dtype == "float16"
+            and result.native_loading != "runtime_blocked"
+            and mixer.get("sliding_window_size") is not None
+        ):
+            result = replace(result, native_loading="runtime_blocked", reason="native_f16_sliding_window")
     return PlannedConversion(request, result, tensors, config, artifact_contract)
 
 
@@ -328,10 +448,17 @@ def convert(
     metadata_profile: str | None = None,
     artifact_mode: str = "text",
     progress: ProgressCallback | ProgressReporter | None = None,
+    support_mode: str | None = None,
 ) -> dict:
-    """Publish complete independently converted outputs; unsupported inputs fail."""
+    """Publish complete independently converted outputs; unsupported inputs fail.
+
+    `dtype="auto"` plans BF16 and switches to F16 only under `_select_auto_dtype`;
+    `support_mode` names the app mode whose native F16 admission must hold.
+    """
     from .metadata import write_metadata
 
+    automatic = dtype == "auto"
+    dtype = _concrete_dtype(dtype)
     if isinstance(source, SourceSnapshot) and source.conversion_profile is not None:
         profile = source.conversion_profile
         metadata_profile = metadata_profile or profile["metadata_profile"]
@@ -376,8 +503,39 @@ def convert(
         os.chmod(staging, 0o700)
         if progress is not None:
             progress.emit("conversion", "running", force=True)
+        if snapshot.conversion_profile is not None and snapshot.conversion_profile["architecture"] == "qwen4_exp":
+            from . import qwen38_external
+            from .model_support import read_support_config
+
+            config = read_support_config(snapshot.config_path, root=snapshot.root)
+            if artifact_mode == "vision-language":
+                from .hybrid_prepare import stage_retained_qwen
+
+                if dtype != "bfloat16" or snapshot.artifact_mode != artifact_mode:
+                    raise UnsupportedConversion("Retained Flash Next images require native BF16 execution mode")
+                receipt = stage_retained_qwen(snapshot, staging)
+                _publish(staging, output)
+                if progress is not None:
+                    weight_bytes = receipt["weight_bytes"]
+                    progress.emit("conversion", "complete", weight_bytes, weight_bytes, force=True)
+                return receipt
+            if qwen38_external.is_external_affine(config):
+                from .hybrid_prepare import stage_external_qwen
+
+                if dtype != "bfloat16" or artifact_mode != "text" or snapshot.artifact_mode != "text":
+                    raise UnsupportedConversion("External Qwen3.8 preparation requires native text mode")
+                receipt = stage_external_qwen(snapshot, staging)
+                _publish(staging, output)
+                if progress is not None:
+                    weight_bytes = receipt["weight_bytes"]
+                    progress.emit("conversion", "complete", weight_bytes, weight_bytes, force=True)
+                return receipt
         provenance = toolchain_provenance()
         planned = plan_conversion(snapshot, request)
+        dtype_selection = None
+        if automatic:
+            planned, dtype_selection = _select_auto_dtype(snapshot, planned, support_mode)
+            dtype = planned.request.dtype
         entry = get_model(repo)
         if artifact_mode == "vision-language" and entry is not None and snapshot.conversion_profile is None:
             entry = {
@@ -406,7 +564,7 @@ def convert(
             ):
                 entry["metadata"]["reasoning_id"] = family_reasoning_profile(planned.artifact_contract)
         config = {**planned.model_config, "_stark_model_repo": repo}
-        if artifact_mode == "vision-language":
+        if artifact_mode == "vision-language" and planned.capability.adapter != "gemma3":
             # The exact checkpoint publishes the same template inline and as a
             # sidecar. Pin both, then give the metadata writer one unambiguous
             # source without changing its rules for other catalog profiles.
@@ -419,6 +577,7 @@ def convert(
                     **entry,
                     "files": {key: value for key, value in entry["files"].items() if key != "chat_template"},
                 }
+        template_provenance = {}
         if planned.request.model_kind == "classifier":
             from .classifier_metadata import write_classifier_metadata
 
@@ -432,10 +591,38 @@ def convert(
             }
         else:
             fragments = write_metadata(
-                snapshot.root, staging, config, model_entry=entry, resolve_file=snapshot.resolve_file
+                snapshot.root,
+                staging,
+                config,
+                model_entry=entry,
+                resolve_file=snapshot.resolve_file,
+                provenance=template_provenance,
             )
+            if template_provenance and artifact_mode != "text":
+                # Image artifacts pin their own reviewed templates.
+                raise UnsupportedConversion("Image conversion requires a plain chat template")
+            codec = fragments.get("token_codec_config")
+            if artifact_mode == "text" and isinstance(codec, dict) and isinstance(codec.get("prompt_template"), str):
+                from .template_runtime import TemplateHelperMissing, probe_system_role
+
+                try:
+                    # Test-render with fixed synthetic messages. A program that
+                    # refuses only a leading system message gets the fold policy.
+                    system_role = probe_system_role(
+                        codec["prompt_template"], bos_token=codec.get("bos_token"), eos_token=codec.get("eos_token")
+                    )
+                except TemplateHelperMissing:
+                    raise ConversionError("Native chat-template helper is missing") from None
+                if system_role is not None:
+                    template_provenance["chat_template_system_role"] = system_role
             root_config = {
-                "type": "Qwen35VisionLanguageModelConfig"
+                "type": (
+                    "Gemma3VisionLanguageModelConfig"
+                    if planned.capability.adapter == "gemma3"
+                    else "Gemma4VisionLanguageModelConfig"
+                    if planned.capability.adapter == "gemma4_text"
+                    else "Qwen35VisionLanguageModelConfig"
+                )
                 if artifact_mode == "vision-language"
                 else "Qwen38LanguageModelConfig"
                 if planned.capability.adapter == "qwen4_exp"
@@ -446,12 +633,26 @@ def convert(
             if planned.tensors.mtp_config is not None:
                 root_config["mtp_config"] = planned.tensors.mtp_config
         family = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 3
+        gemma_image = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 4
+        gemma3_image = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 5
         if planned.artifact_contract is not None:
             root_config["artifact_contract"] = planned.artifact_contract
             for filename in ("preprocessor_config.json", "chat_template.jinja"):
                 hashes = planned.artifact_contract["source"]["hashes"]
+                if gemma3_image:
+                    if filename == "preprocessor_config.json":
+                        payload = json.dumps(planned.artifact_contract["processor_config"], indent=2).encode("utf-8")
+                    else:
+                        metadata = read_json(snapshot.resolve_file("tokenizer_config.json"))
+                        payload = metadata["chat_template"].encode("utf-8")
+                        if hashlib.sha256(payload).hexdigest() != hashes[filename]:
+                            raise ConversionError("Gemma 3 source template changed during conversion")
+                    (staging / filename).write_bytes(payload)
+                    continue
                 source_filename = (
-                    family_processor_filename(hashes)
+                    "processor_config.json"
+                    if gemma_image and filename == "preprocessor_config.json"
+                    else family_processor_filename(hashes)
                     if family and filename == "preprocessor_config.json"
                     else filename
                 )
@@ -472,6 +673,9 @@ def convert(
             planned.artifact_contract["component_hashes"] = {name: "0" * 64 for name in COMPONENT_FILES}
             (staging / "config.json").write_bytes(family_config_bytes(root_config))
             validate_family_output_header(planned.tensors)
+        elif gemma_image or gemma3_image:
+            planned.artifact_contract["component_hashes"] = {name: "0" * 64 for name in COMPONENT_FILES}
+            (staging / "config.json").write_bytes(family_config_bytes(root_config))
         else:
             (staging / "config.json").write_text(json.dumps(root_config, indent=4), encoding="utf-8")
         stats = write_plan(
@@ -487,7 +691,7 @@ def convert(
             storage_validation = validate_qwen38_artifact(
                 planned.tensors, staging / "model.safetensors", chunk_bytes=chunk_bytes
             )
-        if family:
+        if family or gemma_image or gemma3_image:
             planned.artifact_contract["component_hashes"] = {
                 name: file_hash(staging / name) for name in COMPONENT_FILES
             }
@@ -556,6 +760,8 @@ def convert(
             "config_sha256": artifact_hashes["config_sha256"],
             "tokenizer_sha256": artifact_hashes["tokenizer_sha256"],
             "native_qualification": qualification,
+            **({"dtype_selection": dtype_selection} if dtype_selection is not None else {}),
+            **template_provenance,
             **({"storage_validation": storage_validation} if storage_validation is not None else {}),
             "architecture": planned.capability.adapter,
             "metadata_profile": planned.request.metadata_profile or entry["metadata_profile"],
@@ -601,7 +807,13 @@ def main() -> int:
     parser.add_argument("--revision", help="HF revision resolved to an immutable commit")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--backend", choices=("auto", "streaming"), default="auto")
-    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
+    parser.add_argument(
+        "--dtype",
+        choices=("bfloat16", "float16", "float32", "auto"),
+        default="bfloat16",
+        help="Output dtype; auto selects F16 only for an all-F16 MLX affine source of a family with a recorded "
+        "native F16 pass, and BF16 otherwise",
+    )
     parser.add_argument("--model-kind", choices=("language", "classifier", "tts"))
     parser.add_argument(
         "--artifact-mode",
@@ -632,6 +844,16 @@ def main() -> int:
         help="Continue family-model browsing from a candidate offset",
     )
     parser.add_argument(
+        "--catalog-cache-dir",
+        type=Path,
+        help="Reuse family-model browsing verdicts for unchanged revisions from this directory",
+    )
+    parser.add_argument(
+        "--catalog-stream",
+        action="store_true",
+        help="Print each family-model row as a JSON line when it is checked, before the full report",
+    )
+    parser.add_argument(
         "--preflight", action="store_true", help="Check bounded model metadata without downloading weights"
     )
     parser.add_argument("--support-mode", choices=MODES, help="Check the requested app mode before weight downloads")
@@ -657,15 +879,21 @@ def main() -> int:
                 raise ValueError("invalid_catalog_offset")
             logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
             os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-            print(
-                json.dumps(
-                    family_catalog(args.family_models, offset=args.catalog_offset, offline=args.offline),
-                    sort_keys=True,
+            options = {"offset": args.catalog_offset, "offline": args.offline}
+            if args.catalog_cache_dir is not None:
+                options["cache_dir"] = args.catalog_cache_dir
+            if args.catalog_stream:
+                # One JSON document per line: each checked row as it is ready,
+                # then the complete report.
+                options["on_item"] = lambda item: print(
+                    json.dumps({"partial_items": [item]}, sort_keys=True), flush=True
                 )
-            )
+            print(json.dumps(family_catalog(args.family_models, **options), sort_keys=True))
             return 0
         if args.catalog_offset != 0:
             raise ValueError("catalog_offset_requires_family_models")
+        if args.catalog_cache_dir is not None or args.catalog_stream:
+            raise ValueError("catalog_options_require_family_models")
         if args.list_families:
             print(json.dumps(support_matrix(), sort_keys=True))
             return 0
@@ -687,7 +915,10 @@ def main() -> int:
                 repo=repo,
                 revision=args.revision,
                 mode=args.support_mode or args.artifact_mode,
-                dtype=args.dtype,
+                # Tensor dtypes are unknown before download. `auto` admits by
+                # its BF16 fallback; conversion selects F16 only if F16
+                # admission also holds for the downloaded tensors.
+                dtype=_concrete_dtype(args.dtype),
                 model_kind=args.model_kind,
                 architecture=args.architecture,
                 offline=args.offline,
@@ -701,7 +932,7 @@ def main() -> int:
         model_kind = args.model_kind or "language"
         request = ConversionRequest(
             repo,
-            args.dtype,
+            _concrete_dtype(args.dtype),
             model_kind,
             args.backend,
             args.chunk_mib * 1024 * 1024,
@@ -753,7 +984,7 @@ def main() -> int:
             metadata_profile=args.metadata_profile,
             artifact_mode=args.artifact_mode,
             support_mode=args.support_mode,
-            dtype=args.dtype,
+            dtype=_concrete_dtype(args.dtype),
             model_kind=model_kind,
             **({"progress": progress} if progress is not None else {}),
         )
@@ -772,9 +1003,12 @@ def main() -> int:
             metadata_profile=args.metadata_profile,
             artifact_mode=args.artifact_mode,
             **({"progress": progress} if progress is not None else {}),
+            support_mode=args.support_mode,
         )
     except BaseException as error:
-        category = "interrupted" if isinstance(error, KeyboardInterrupt) else type(error).__name__
+        category = "interrupted" if isinstance(error, KeyboardInterrupt) else converter_failure_category(error)
+        if progress is not None and category != "interrupted":
+            progress.failure(category)
         print(json.dumps({"status": "error", "error_category": category}), file=sys.stderr)
         return 130 if isinstance(error, KeyboardInterrupt) else 1
     finally:

@@ -15,5 +15,7 @@ enum class ActivationType : uint32_t {
   GELUExact = 2,
   IDENTITY = 3,
   SOFTPLUS = 4,
+  SILUMaterializedSigmoid = 5,
+  GELUMaterializedPolynomial = 6,
 };
 } // namespace stark::activation_type

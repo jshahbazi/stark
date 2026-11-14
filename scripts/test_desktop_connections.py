@@ -33,6 +33,7 @@ SCENARIOS = (
     "broker-write",
     "broker-cleanup",
     "opencode-approval",
+    "opencode-model-discovery",
     "opencode-pending",
     "opencode-deny",
     "opencode-disabled",

@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Create private, original-source Gemma 3 CPU image reference fixtures.
+
+Uses unchanged Transformers Gemma3/SigLIP forward functions. All pixels,
+features, prompts, tokens and logits remain inside an ignored private directory.
+Only source identities and aggregate counts are printed. This fixture checks
+numerical implementation and request lifecycle; it does not measure quality.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import inspect
+import json
+import os
+import subprocess
+from pathlib import Path
+
+REVISION = "093f9f388b31de276ce2de164bdc2081324b9767"
+TEMPLATE_HASH = "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"
+REFERENCE_HASHES = {
+    "modeling_gemma3.py": "0d8d5dff8e72b1207e54edce0bd2b22a34b3194edfa114996b04cef1acf4ef6a",
+    "modeling_siglip.py": "0a0d2b55f4fcb977b74549540211e42a3c3f41d0d446dc474dcc244a925791aa",
+}
+PROCESSOR_HASHES = {
+    "image_processing_gemma3.py": "e8450028ceb6eb1f4d44255ebfaa27c75e3921a5acf0bd741e139f306ec08a56",
+    "image_processing_backends.py": "5f3176903638125ee01af36e8c74741a7bab19581f3c13349a775b093cb1bbb0",
+}
+PHASE = "startup"
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, sort_keys=True) + "\n")
+    path.chmod(0o600)
+
+
+def validate_resume(source, previous, source_manifest, output):
+    """Freeze preserved inputs and verify the original complete source tuple."""
+    document = json.loads(source_manifest.read_text())
+    if document.get("primary_repo") != "google/gemma-3-4b-it" or document.get("primary_revision") != REVISION:
+        raise ValueError("resume_source_identity_changed")
+    records = document.get("files", [])
+    if not records or any(record.get("repo") != "google/gemma-3-4b-it" or record.get("revision") != REVISION for record in records):
+        raise ValueError("resume_source_provenance_changed")
+    verified_source = {}
+    for record in records:
+        name = record["filename"]
+        if Path(name).name != name:
+            raise ValueError("resume_source_filename_invalid")
+        path = source / name
+        if path.stat().st_size != record["size"] or digest(path) != record["sha256"]:
+            raise ValueError("resume_source_payload_changed")
+        verified_source[name] = record["sha256"]
+    files = {path.name: digest(path) for path in previous.iterdir() if path.is_file()}
+    expected = {f"{name}{suffix}" for name in ("red", "blue", "pattern")
+                for suffix in (".png", "-patches.f32", "-features.f32")}
+    expected |= {f"{name}{suffix}" for name in ("red", "blue") for suffix in ("-logits.f32", "-tokens.json")}
+    if set(files) != expected:
+        raise ValueError("resume_fixture_inventory_changed")
+    receipt = {"source_manifest_sha256": digest(source_manifest), "verified_source_files": verified_source,
+               "preserved_fixture_hashes": files, "completed_cases": ["red", "blue"], "missing_case": "pattern"}
+    write_json(output / "resume-inputs.json", receipt)
+    return files
+
+
+def run(args):
+    global PHASE
+    import numpy as np
+    import torch
+    import transformers
+    from PIL import Image
+    from transformers import AutoProcessor, Gemma3ForConditionalGeneration
+    from transformers.models.gemma3 import modeling_gemma3
+    from transformers.models.siglip import modeling_siglip
+    from transformers.models.gemma3 import image_processing_gemma3
+    from transformers import image_processing_backends
+
+    if torch.__version__.split("+")[0] != "2.14.1" or transformers.__version__ != "5.15.1":
+        raise ValueError("reference_versions_changed")
+    reference_hashes = {"modeling_gemma3.py": digest(Path(inspect.getfile(modeling_gemma3))),
+        "modeling_siglip.py": digest(Path(inspect.getfile(modeling_siglip)))}
+    if reference_hashes != REFERENCE_HASHES:
+        raise ValueError("reference_implementation_changed")
+    processor_hashes = {"image_processing_gemma3.py": digest(Path(inspect.getfile(image_processing_gemma3))),
+        "image_processing_backends.py": digest(Path(inspect.getfile(image_processing_backends)))}
+    if processor_hashes != PROCESSOR_HASHES:
+        raise ValueError("reference_processor_implementation_changed")
+    source, output = args.source.resolve(strict=True), args.output.resolve()
+    repo = Path(__file__).resolve().parents[1]
+    if source.name != REVISION or output.exists() or subprocess.run(
+        ["git", "check-ignore", "--quiet", "--", str(output)], cwd=repo, check=False
+    ).returncode:
+        raise ValueError("source_or_private_output_identity_invalid")
+    template = json.loads((source / "tokenizer_config.json").read_text())["chat_template"]
+    if hashlib.sha256(template.encode()).hexdigest() != TEMPLATE_HASH:
+        raise ValueError("reference_template_changed")
+    torch.set_num_threads(4)
+    output.mkdir(parents=True, exist_ok=False, mode=0o700)
+    previous = args.resume_fixture.resolve(strict=True) if args.resume_fixture else None
+    preserved = validate_resume(source, previous, args.source_manifest.resolve(strict=True), output) if previous else {}
+
+    def preserve(name):
+        if digest(previous / name) != preserved[name]:
+            raise ValueError("preserved_fixture_changed")
+        os.link(previous / name, output / name)
+
+    def definition(name):
+        names = {"image":f"{name}.png", "patches":f"{name}-patches.f32", "features":f"{name}-features.f32",
+                 "logits":f"{name}-logits.f32", "tokens":f"{name}-tokens.json"}
+        return {"name":name, **names, "hashes":{filename:digest(output / filename) for filename in names.values()}}
+
+    PHASE = "model_load"
+    transformers.utils.logging.set_verbosity_error()
+    model = Gemma3ForConditionalGeneration.from_pretrained(
+        source, local_files_only=True, dtype=torch.bfloat16, attn_implementation="eager"
+    ).eval()
+    processor = AutoProcessor.from_pretrained(source, local_files_only=True, trust_remote_code=False)
+    if type(processor.image_processor) is not image_processing_gemma3.Gemma3ImageProcessor:
+        raise ValueError("reference_processor_backend_changed")
+    definitions = []
+    prompt = "Describe the image briefly."
+    for name, width, height in (("red", 64, 48), ("blue", 48, 64), ("pattern", 111, 79)):
+        if f"{name}-tokens.json" in preserved:
+            for suffix in (".png", "-patches.f32", "-features.f32", "-logits.f32", "-tokens.json"):
+                preserve(name + suffix)
+            tokens = json.loads((output / f"{name}-tokens.json").read_text())
+            if len(tokens["generated"]) != args.tokens or (output / f"{name}-logits.f32").stat().st_size != args.tokens * 262208 * 4:
+                raise ValueError("completed_reference_shape_changed")
+            definitions.append(definition(name))
+            continue
+        PHASE = "fixture_" + name
+        pixels = np.zeros((height, width, 3), dtype=np.uint8)
+        if name == "red":
+            pixels[:, :, 0] = 255
+        elif name == "blue":
+            pixels[:, :, 2] = 255
+        else:
+            yy, xx = np.indices((height, width))
+            pixels[:, :, 0] = (xx * 17 + yy * 3) % 256
+            pixels[:, :, 1] = (xx * 5 + yy * 19) % 256
+            pixels[:, :, 2] = (xx * 11 + yy * 7) % 256
+        image = Image.fromarray(pixels)
+        image_path = output / f"{name}.png"
+        if image_path.name in preserved:
+            if not np.array_equal(np.asarray(Image.open(previous / image_path.name)), pixels):
+                raise ValueError("preserved_image_pixels_changed")
+            preserve(image_path.name)
+        else:
+            image.save(image_path)
+            image_path.chmod(0o600)
+        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
+        rendered = processor.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        raw_tokens = processor.tokenizer.encode(rendered, add_special_tokens=False)
+        inputs = processor(text=rendered, images=image, return_tensors="pt", do_pan_and_scan=False, add_special_tokens=False)
+        inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
+        if len(inputs["input_ids"][0]) - len(raw_tokens) != 258:
+            raise ValueError("processor_expansion_accounting_changed")
+        patches = inputs["pixel_values"].reshape(1, 3, 64, 14, 64, 14).permute(0, 2, 4, 1, 3, 5).reshape(4096, 588)
+        patch_path = output / f"{name}-patches.f32"
+        patch_bytes = patches.float().numpy().astype("<f4").tobytes()
+        if patch_path.name in preserved:
+            if hashlib.sha256(patch_bytes).hexdigest() != preserved[patch_path.name]:
+                raise ValueError("preserved_processor_patches_changed")
+            preserve(patch_path.name)
+        else:
+            patch_path.write_bytes(patch_bytes)
+            patch_path.chmod(0o600)
+        with torch.inference_mode():
+            PHASE = "vision_" + name
+            features_path = output / f"{name}-features.f32"
+            observed = []
+            hook = None
+            if features_path.name in preserved:
+                preserve(features_path.name)
+
+                def verify_features(_module, _inputs, features):
+                    observed.append(hashlib.sha256(features.float().numpy().astype("<f4").tobytes()).hexdigest())
+                    if observed[-1] != preserved[features_path.name]:
+                        raise ValueError("preserved_vision_features_changed")
+
+                hook = model.model.multi_modal_projector.register_forward_hook(verify_features)
+            else:
+                features = model.model.get_image_features(inputs["pixel_values"])
+                if not isinstance(features, torch.Tensor):
+                    features = features.pooler_output
+                features.float().numpy().astype("<f4").tofile(features_path)
+                features_path.chmod(0o600)
+            PHASE = "generation_" + name
+            # The full unchanged multimodal forward independently recomputes
+            # its image features and builds the official bidirectional masks.
+            result = model(**inputs, use_cache=True, logits_to_keep=1)
+            if hook is not None:
+                hook.remove()
+                if len(observed) != 1:
+                    raise ValueError("canonical_vision_forward_not_observed")
+            logits = []
+            generated = []
+            cache = result.past_key_values
+            for step in range(args.tokens):
+                row = result.logits[0, -1].float()
+                logits.append(row.numpy())
+                token = int(row.argmax().item())
+                generated.append(token)
+                if step + 1 < args.tokens:
+                    next_token = torch.tensor([[token]], dtype=torch.long)
+                    result = model(input_ids=next_token, past_key_values=cache, use_cache=True, logits_to_keep=1)
+                    cache = result.past_key_values
+            logits_path = output / f"{name}-logits.f32"
+            np.stack(logits).astype("<f4").tofile(logits_path)
+            logits_path.chmod(0o600)
+        write_json(output / f"{name}-tokens.json", {"raw": raw_tokens, "expanded": inputs["input_ids"][0].tolist(),
+            "generated": generated})
+        definitions.append(definition(name))
+    PHASE = "manifest"
+    manifest = {"schema_version": 1, "source_repo": "google/gemma-3-4b-it", "source_revision": REVISION,
+        "reference_profile": "transformers-canonical-eager-bf16", "torch": torch.__version__.split("+")[0],
+        "transformers": transformers.__version__, "tokens_per_case": args.tokens,
+        "source_hashes": {path.name: digest(path) for path in (source / "config.json", source / "model.safetensors.index.json")},
+        "reference_hashes": reference_hashes, "processor_hashes": processor_hashes,
+        "processor_backend": "torchvision-cpu-uint8-antialiased-bilinear", "cases": definitions}
+    if previous:
+        if any(digest(previous / name) != value for name, value in preserved.items()):
+            raise ValueError("preserved_inputs_changed_during_resume")
+        manifest["resume_inputs_sha256"] = digest(output / "resume-inputs.json")
+    write_json(output / "manifest.json", manifest)
+    return {"passed": True, "cases": len(definitions), "tokens_per_case": args.tokens,
+        "manifest_sha256": digest(output / "manifest.json"), "reference_hashes": manifest["reference_hashes"]}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--tokens", default=8, type=int, choices=range(1, 33))
+    parser.add_argument("--resume-fixture", type=Path)
+    parser.add_argument("--source-manifest", type=Path)
+    args = parser.parse_args()
+    if args.resume_fixture and args.source_manifest is None:
+        parser.error("--resume-fixture requires --source-manifest")
+    os.umask(0o077)
+    try:
+        result = run(args)
+    except Exception:
+        print(json.dumps({"passed": False, "phase": PHASE}))
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

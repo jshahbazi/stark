@@ -6,7 +6,7 @@ using namespace metal;
 using namespace stark::ring;
 
 template <typename T>
-VARIANTS(T, float, bfloat)
+VARIANTS(T, float, half, bfloat)
 PUBLIC KERNEL(RepetitionPenalty)(
     const device T* original_logits,
     device T* logits_copy,

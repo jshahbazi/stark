@@ -24,11 +24,16 @@ fn get_output<T: ArrayElement + Float, B: Backend>(
     logits: &[T],
     scale: f32,
     soft_cap: Option<f32>,
+    materialize: bool,
 ) -> Vec<T> {
     let context = B::Context::new().expect("Failed to create Context");
-    let kernel =
-        <<B as Backend>::Kernels as Kernels>::LogitTransformKernel::new(&context, T::data_type(), soft_cap.is_some())
-            .expect("Failed to create LogitTransformKernel");
+    let kernel = <<B as Backend>::Kernels as Kernels>::LogitTransformKernel::new(
+        &context,
+        T::data_type(),
+        soft_cap.is_some(),
+        materialize,
+    )
+    .expect("Failed to create LogitTransformKernel");
 
     let mut logits_buffer = create_buffer_with_data::<B, T>(&context, logits);
     let mut command_buffer = context.create_command_buffer(None, None).expect("Failed to create command buffer");
@@ -46,7 +51,7 @@ fn test_logit_transform<T: ArrayElement + Float + Display>(
         .into_iter()
         .map(|value| T::from(value).unwrap())
         .collect::<Box<[_]>>();
-    let expected = get_output::<T, Cpu>(&logits, scale, soft_cap);
+    let expected = get_output::<T, Cpu>(&logits, scale, soft_cap, false);
     let epsilon = if matches!(T::data_type(), DataType::BF16) {
         0.05
     } else {
@@ -54,7 +59,7 @@ fn test_logit_transform<T: ArrayElement + Float + Display>(
     };
 
     for_each_non_cpu_backend!(|B| {
-        let actual = get_output::<T, B>(&logits, scale, soft_cap);
+        let actual = get_output::<T, B>(&logits, scale, soft_cap, false);
         let message = format!(
             "LogitTransform failed with backend={}, scale={}, soft_cap={:?}",
             std::any::type_name::<B>(),
@@ -93,4 +98,23 @@ fn test_scale_and_soft_cap_f32() {
 #[stark_test]
 fn test_scale_and_soft_cap_bf16() {
     test_logit_transform::<bf16>(2.5, Some(30.0));
+}
+
+#[stark_test]
+fn materialized_bf16_softcap_preserves_each_tensor_boundary() {
+    let logits: Vec<bf16> = (-1024..=1024).map(|i| bf16::from_f32(i as f32 / 32.0)).collect();
+    let expected: Vec<bf16> = logits
+        .iter()
+        .map(|x| {
+            let divided = bf16::from_f64(x.to_f64() / 30.0);
+            let activated = bf16::from_f64(divided.to_f64().tanh());
+            bf16::from_f64(activated.to_f64() * 30.0)
+        })
+        .collect();
+    let fused: Vec<bf16> = logits.iter().map(|x| bf16::from_f64((x.to_f64() / 30.0).tanh() * 30.0)).collect();
+    assert_ne!(expected, fused, "fixture must distinguish the source tensor boundaries");
+    assert_eq!(get_output::<bf16, Cpu>(&logits, 1.0, Some(30.0), true), expected);
+    for_each_non_cpu_backend!(|B| {
+        assert_eq!(get_output::<bf16, B>(&logits, 1.0, Some(30.0), true), expected);
+    });
 }

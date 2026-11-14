@@ -200,7 +200,9 @@ final class OpenWorkConnectionController: ObservableObject {
         observedModels.removeAll()
         for model in value["models"] as? [[String: Any]] ?? [] {
             if let id = model["id"] as? String, let context = model["context_length"] as? Int,
-               context > 0, model["tool_calling"] as? Bool == true {
+               context > 0, model["context_capacity_known"] as? Bool == true,
+               let output = model["max_output_tokens"] as? Int, output > 0, output <= context,
+               model["tool_calling"] as? Bool == true {
                 observedModels[id] = context
             }
         }

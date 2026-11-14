@@ -12,6 +12,10 @@ pub struct PLEModelConfig {
     pub input_scale: f32,
     pub linear_config: LinearConfig,
     pub norm_config: NormalizationConfig,
+    /// Materialize the Gemma 4 BF16 scaling/addition boundaries instead of
+    /// algebraically moving scales through RMS normalization and residual sums.
+    #[serde(default)]
+    pub reference_bf16: bool,
 }
 
 #[stark_config]
@@ -20,4 +24,6 @@ pub struct PLELayerConfig {
     pub norm_config: NormalizationConfig,
     pub ple_dim: u32,
     pub activation: AnyActivation,
+    #[serde(default)]
+    pub reference_bf16: bool,
 }

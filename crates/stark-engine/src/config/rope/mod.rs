@@ -5,6 +5,7 @@ use crate::backends::common::InvalidInput;
 pub mod linear_scaling_rope;
 pub mod llama_rope;
 pub mod longrope;
+pub mod proportional_rope;
 pub mod qwen35_mrope;
 pub mod unscaled_rope;
 pub mod yarn_rope;
@@ -15,6 +16,7 @@ pub mod yarn_rope;
     yarn_rope::YARNRoPEConfig,
     linear_scaling_rope::LinearScalingRoPEConfig,
     longrope::LongRoPEConfig,
+    proportional_rope::ProportionalRoPEConfig,
     qwen35_mrope::Qwen35MRoPEConfig
 )]
 pub struct RoPEConfig {
@@ -33,6 +35,11 @@ impl AnyRoPEConfig {
         }
         if let Self::Qwen35MRoPEConfig(config) = self {
             config.validate()?;
+        }
+        if let Self::ProportionalRoPEConfig(config) = self
+            && (config.rotary_dim == 0 || !config.rotary_dim.is_multiple_of(2) || config.rotary_dim > config.head_dim)
+        {
+            return Err(InvalidInput("proportional rotary width must be positive, even and fit the complete head"));
         }
         Ok(())
     }

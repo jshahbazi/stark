@@ -23,6 +23,7 @@ pub fn attention_single_pass<T: ArrayElement + Float, const HEAD_DIM: u32>(
     v_seq_stride: u32,
     #[optional(is_kv_cache_ring)] ring_params: Option<crate::backends::common::gpu_types::ring::RingParams>,
     scale: f32,
+    #[optional(has_logit_soft_cap)] logit_soft_cap: Option<f32>,
     #[optional(is_trie)] trie: Option<*const TrieNode>,
     #[optional(is_sliding_window)] sliding_window_size: Option<u32>,
     #[optional(has_sinks)] sinks: Option<*const T>,
@@ -33,6 +34,7 @@ pub fn attention_single_pass<T: ArrayElement + Float, const HEAD_DIM: u32>(
     #[specialize] is_causal: bool,
     #[specialize] is_trie: bool,
     #[specialize] is_sliding_window: bool,
+    #[specialize] has_logit_soft_cap: bool,
 ) {
     assert_eq!(ring_params.is_some(), is_kv_cache_ring);
     assert_eq!(sliding_window_size.is_some(), is_sliding_window);
@@ -98,6 +100,10 @@ pub fn attention_single_pass<T: ArrayElement + Float, const HEAD_DIM: u32>(
                     let mut score = 0.0f32;
                     for j in 0..HEAD_DIM as usize {
                         score += q[j] * unsafe { *keys.add(j) }.to_f32().unwrap();
+                    }
+                    if has_logit_soft_cap {
+                        let cap = logit_soft_cap.unwrap();
+                        score = cap * (score / cap).tanh();
                     }
 
                     // Update the accumulators

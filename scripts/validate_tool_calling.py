@@ -137,6 +137,7 @@ def run_checks(worker, template, codec, *, context, maximum):
     checks = {
         "single_call_and_arguments": False,
         "tool_result_use": False,
+        "autonomous_tool_result_use": False,
         "ordinary_chat": False,
     }
     try:
@@ -149,6 +150,22 @@ def run_checks(worker, template, codec, *, context, maximum):
             and json.loads(calls[0]["function"]["arguments"]) == {"key": "alpha"}
         )
         if checks["single_call_and_arguments"]:
+            # Keep tools available and supply only the tool result. A fresh
+            # user instruction plus tool_choice=none cannot qualify the
+            # autonomous continuation used by OpenWork.
+            continuation = [
+                *messages,
+                assistant,
+                {"role": "tool", "tool_call_id": calls[0]["id"], "content": "The lookup result is K7V3M9."},
+            ]
+            try:
+                answer, reason, initial_thinking = generate(continuation, tools, "auto")
+                visible = final_text(answer, initial_thinking=initial_thinking)
+                checks["autonomous_tool_result_use"] = (
+                    reason == "stop" and visible is not None and "K7V3M9" in visible
+                )
+            except Exception:  # noqa: BLE001 - aggregate-only model qualification.
+                checks["autonomous_tool_result_use"] = False
             messages += [
                 assistant,
                 {
@@ -199,8 +216,8 @@ def main():
             "Choose a positive output budget below context and a timeout up to 3600 seconds."
         )
     report = {
-        "schema_version": 1,
-        "scope": "bounded_synthetic_tool_workflow",
+        "schema_version": 2,
+        "scope": "bounded_synthetic_tool_workflow_with_autonomous_continuation",
         "date_utc": datetime.now(UTC).isoformat(),
         "platform": platform.platform(),
         "context_tokens": args.context_tokens,

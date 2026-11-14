@@ -1,0 +1,15 @@
+{
+  "files_sha256": {
+    "LICENSE": "7d199dae43eadc04df4e22e84c2a0fde05f25399e692351759d907ac2075ec31",
+    "extensions/stark-stream-guard.mjs": "0431e48b1120b549a3b3abef3a6702abef68f8b0aa0c1c8249918e47917cc421",
+    "package.json": "509d843602ffdd59096ce1d1d54b3c00ac27b9c655dbbeb0770093e958eb3322",
+    "src/config.mjs": "427571e2691cdddc09821b02dbb118af86c945dc29ecdbb7f0451801c9f762bc",
+    "src/default-profile.mjs": "f66deab7c44e94bea2813b72b87b445d2ae6ece10cd23660967a11b461a49139",
+    "src/desktop-launch.mjs": "989a6fc8f0717f094ce58fb385f022464b05c8d94ad89b0e51efa49eb07077fa",
+    "src/desktop-setup.mjs": "3dac67f1feb7e60551391a484c30322f0c47825c578ac3a3bcb3f96924fad1c7",
+    "src/guarded-fetch.mjs": "386429c89911c8fd2f4176b7d0e746195345b1defed66016875a3f5a2daff15a"
+  },
+  "repository": "https://github.com/jshahbazi/stark-agent-clients",
+  "revision": "e01f7735ac46c741d2e94435871d42e6d3240609",
+  "schema_version": 1
+}

@@ -23,7 +23,8 @@ template <
     ushort THREADGROUP_LEADING_DIMENSION_A,
     ushort THREADGROUP_LEADING_DIMENSION_B,
     typename AccumulatorType = float,
-    typename Epilogue = TransformNone<DT, AccumulatorType>>
+    typename Epilogue = TransformNone<DT, AccumulatorType>,
+    bool WIDEN_OPERANDS = false>
 struct ThreadgroupTile {
   STARK_CONST ushort SIMDGROUP_BLOCK_SIZE = 8;
   using SimdgroupMMAType = SimdgroupMMA<AccumulatorType, SIMDGROUP_BLOCK_SIZE, SIMDGROUP_BLOCK_SIZE>;
@@ -40,8 +41,10 @@ struct ThreadgroupTile {
   STARK_CONST ushort TILE_STRIDE_A = SIMDGROUP_BLOCK_SIZE * A_STRIDE_INNER;
   STARK_CONST ushort TILE_STRIDE_B = SIMDGROUP_BLOCK_SIZE * B_STRIDE_INNER;
 
-  Fragment<AT, TILE_ROWS, 1, SimdgroupFragmentOps> a_fragment;
-  Fragment<BT, 1, TILE_COLS, SimdgroupFragmentOps> b_fragment;
+  using ARegister = metal::conditional_t<WIDEN_OPERANDS, AccumulatorType, AT>;
+  using BRegister = metal::conditional_t<WIDEN_OPERANDS, AccumulatorType, BT>;
+  Fragment<ARegister, TILE_ROWS, 1, SimdgroupFragmentOps> a_fragment;
+  Fragment<BRegister, 1, TILE_COLS, SimdgroupFragmentOps> b_fragment;
   Fragment<AccumulatorType, TILE_ROWS, TILE_COLS, SimdgroupFragmentOps> c_fragment;
 
   ushort simdgroup_row_offset;

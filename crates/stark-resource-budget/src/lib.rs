@@ -2,9 +2,32 @@
 
 pub const DEFAULT_MIB: usize = 16;
 pub const MIN_MIB: usize = 1;
-pub const MAX_MIB: usize = 64;
 const MIB: usize = 1024 * 1024;
+// Keep every derived byte allowance representable as an allocation size. The
+// cumulative template allowance is the largest formula, 32 MiB + 32B. This is
+// derived from the allocation address space.
+pub const MAX_MIB: usize = (isize::MAX as usize - 32 * MIB) / (32 * MIB);
 pub const ENVIRONMENT_VARIABLE: &str = "STARK_REQUEST_BUDGET_MIB";
+
+/// Memory available to an inference request after transient serialization and
+/// host bookkeeping. Model loading applies its own residency checks. Callers
+/// inventory additional allocations, or conservatively inventory their whole
+/// request, against this same current-headroom policy.
+pub fn inference_memory_budget(available: usize) -> usize {
+    available.saturating_sub(256 * MIB)
+}
+
+/// Reject unavailable or overflowing estimates without exposing request data.
+pub fn admit_inference_memory(
+    request_bytes: Option<usize>,
+    available: usize,
+) -> Result<(), &'static str> {
+    let request_bytes = request_bytes.ok_or("resource_budget_exceeded")?;
+    if request_bytes > inference_memory_budget(available) {
+        return Err("resource_budget_exceeded");
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Budget {
@@ -19,15 +42,27 @@ impl Budget {
     pub const DEFAULT: Self = Self::build(DEFAULT_MIB);
 
     const fn build(mib: usize) -> Self {
-        let input_bytes = mib * MIB;
+        let input_bytes = mib.checked_mul(MIB).expect("budget input overflow");
         Self {
             mib,
             input_bytes,
             // A JSON control byte can expand to six ASCII bytes. Reserve
             // additional space for template source, keys and protocol framing.
-            wire_bytes: 6 * input_bytes + 2 * MIB,
-            template_live_bytes: 128 * MIB + 8 * input_bytes,
-            template_cumulative_bytes: 32 * MIB + 32 * input_bytes,
+            wire_bytes: input_bytes
+                .checked_mul(6)
+                .expect("budget wire overflow")
+                .checked_add(2 * MIB)
+                .expect("budget wire overflow"),
+            template_live_bytes: input_bytes
+                .checked_mul(8)
+                .expect("budget live overflow")
+                .checked_add(128 * MIB)
+                .expect("budget live overflow"),
+            template_cumulative_bytes: input_bytes
+                .checked_mul(32)
+                .expect("budget cumulative overflow")
+                .checked_add(32 * MIB)
+                .expect("budget cumulative overflow"),
         }
     }
 
@@ -39,7 +74,10 @@ impl Budget {
     }
 
     pub fn parse(value: &str) -> Result<Self, &'static str> {
-        if value.is_empty() || value.len() > 2 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        if value.is_empty()
+            || value.len() > MAX_MIB.ilog10() as usize + 1
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
             return Err("invalid_resource_budget");
         }
         Self::for_mib(value.parse().map_err(|_| "invalid_resource_budget")?)
@@ -179,6 +217,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inference_admission_uses_current_headroom_after_transient_reserve() {
+        let available = 1024 * MIB;
+        let budget = inference_memory_budget(available);
+        assert_eq!(budget, 768 * MIB);
+        assert_eq!(admit_inference_memory(Some(512 * MIB), available), Ok(()));
+        assert_eq!(admit_inference_memory(Some(budget), available), Ok(()));
+        assert_eq!(admit_inference_memory(Some(budget + 1), available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_inference_memory(None, available), Err("resource_budget_exceeded"));
+        assert_eq!(admit_inference_memory(Some(1), 0), Err("resource_budget_exceeded"));
+        assert_eq!(admit_inference_memory(Some(1), 256 * MIB), Err("resource_budget_exceeded"));
+        assert_eq!(admit_inference_memory(Some(usize::MAX), usize::MAX), Err("resource_budget_exceeded"));
+        assert_eq!(inference_memory_budget(usize::MAX), usize::MAX - 256 * MIB);
+    }
+
+    #[test]
     fn policy_has_escaping_and_allocation_headroom() {
         for mib in [MIN_MIB, DEFAULT_MIB, MAX_MIB] {
             let budget = Budget::for_mib(mib).unwrap();
@@ -186,23 +239,30 @@ mod tests {
             assert_eq!(budget.wire_bytes, 6 * budget.input_bytes + 2 * MIB);
             assert!(budget.template_live_bytes > budget.wire_bytes);
             assert!(budget.template_cumulative_bytes > budget.input_bytes);
+            assert!(budget.template_cumulative_bytes <= isize::MAX as usize);
         }
+        assert_eq!(Budget::for_mib(MAX_MIB + 1), Err("invalid_resource_budget"));
     }
 
     #[test]
     fn configuration_is_strict_and_errors_are_content_free() {
-        for value in ["", "0", "65", "100", " 16", "16 ", "+16", "1.5", "١٦", "private"] {
+        for value in ["", "0", " 16", "16 ", "+16", "1.5", "١٦", "private"] {
             assert_eq!(Budget::parse(value), Err("invalid_resource_budget"));
         }
         assert_eq!(Budget::parse("16"), Ok(Budget::DEFAULT));
         assert_eq!(Budget::parse("01"), Budget::for_mib(1));
+        assert_eq!(Budget::parse("128"), Budget::for_mib(128));
+        assert_eq!(Budget::parse(&MAX_MIB.to_string()), Budget::for_mib(MAX_MIB));
+        assert_eq!(Budget::parse(&(MAX_MIB + 1).to_string()), Err("invalid_resource_budget"));
+        assert_eq!(Budget::parse(&usize::MAX.to_string()), Err("invalid_resource_budget"));
     }
 
     #[test]
-    fn automatic_budget_tracks_headroom_with_conservative_bounds() {
-        for (available, mib) in [(0, 16), (2 << 30, 16), (4 << 30, 32), (8 << 30, 64), (usize::MAX, 64)] {
+    fn automatic_budget_tracks_headroom_without_a_fixed_content_ceiling() {
+        for (available, mib) in [(0, 16), (2 << 30, 16), (4 << 30, 32), (8 << 30, 64), (16 << 30, 128)] {
             assert_eq!(Budget::automatic(available).mib, mib);
         }
+        assert_eq!(Budget::automatic(usize::MAX).mib, usize::MAX / (128 * MIB));
     }
 
     #[cfg(target_os = "macos")]

@@ -8,14 +8,14 @@
 //!
 //! Decoder policy: one 8-bit JPEG/PNG, upright EXIF orientation, RGB channels,
 //! grayscale expansion and transparency composited over white. ICC profiles are
-//! not color transformed. Compressed PNG metadata, CMYK, 16-bit, animated and
-//! multi-image inputs fail before decoding.
+//! not color transformed; ICC and text chunks are skipped without inflation.
+//! MPO JPEGs use only the primary image. CMYK, 16-bit and animated inputs fail
+//! before decoding; unlabelled concatenated images remain unsupported.
 //! Errors are content-free; request pixels and patch vectors have no Debug impl.
 
 use std::io::Cursor;
 
 use half::bf16;
-use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
 use crate::backends::common::InvalidInput;
 
@@ -79,14 +79,16 @@ impl RgbImage {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn width(&self) -> u32 {
         self.width
     }
 
-    #[cfg(test)]
     pub(crate) fn height(&self) -> u32 {
         self.height
+    }
+
+    pub(crate) fn pixels(&self) -> &[u8] {
+        &self.pixels
     }
 
     #[cfg(test)]
@@ -258,6 +260,11 @@ fn png_header(data: &[u8]) -> Result<(u32, u32, u8), InvalidInput> {
         if chunk_end > data.len() || ended {
             return Err(InvalidInput("invalid PNG framing"));
         }
+        // The codec skips ancillary CRCs when those chunks are ignored. Keep
+        // framing/integrity validation independent of metadata inflation.
+        if crc32fast::hash(&data[kind_start..payload_end]) != be_u32(&data[payload_end..chunk_end])? {
+            return Err(InvalidInput("PNG chunk CRC mismatch"));
+        }
         match kind {
             b"IHDR" => {
                 if shape.is_some() || cursor != 8 || length != 13 || payload[8] != 8 {
@@ -266,18 +273,6 @@ fn png_header(data: &[u8]) -> Result<(u32, u32, u8), InvalidInput> {
                 shape = Some((be_u32(payload)?, be_u32(&payload[4..])?));
             },
             b"acTL" | b"fcTL" | b"fdAT" => return Err(InvalidInput("animated PNG is unsupported")),
-            // The image wrapper eagerly parses ancillary metadata. Reject its
-            // compressed forms before codec construction, rather than relying
-            // on a best-effort allocation limit to bound unrelated inflation.
-            b"iCCP" | b"zTXt" => return Err(InvalidInput("compressed PNG metadata is unsupported")),
-            b"iTXt" => {
-                let flag = payload.iter().position(|byte| *byte == 0).and_then(|end| payload.get(end + 1));
-                match flag {
-                    Some(0) => {},
-                    Some(1) => return Err(InvalidInput("compressed PNG metadata is unsupported")),
-                    _ => return Err(InvalidInput("invalid PNG text metadata")),
-                }
-            },
             b"eXIf" => {
                 if orientation.is_some() {
                     return Err(InvalidInput("duplicate EXIF metadata"));
@@ -298,12 +293,13 @@ fn png_header(data: &[u8]) -> Result<(u32, u32, u8), InvalidInput> {
     Ok((width, height, orientation.unwrap_or(1)))
 }
 
-fn jpeg_header(data: &[u8]) -> Result<(u32, u32, u8), InvalidInput> {
+fn jpeg_header(data: &[u8]) -> Result<(u32, u32, u8, usize), InvalidInput> {
     let mut cursor = 2usize;
     let mut entropy = false;
     let mut shape = None;
     let mut orientation = None;
     let mut scans = 0usize;
+    let mut multi_picture = false;
     loop {
         let marker = loop {
             let byte = *data.get(cursor).ok_or(InvalidInput("incomplete JPEG image"))?;
@@ -326,11 +322,11 @@ fn jpeg_header(data: &[u8]) -> Result<(u32, u32, u8), InvalidInput> {
         };
         entropy = false;
         if marker == 0xd9 {
-            if cursor != data.len() {
-                return Err(InvalidInput("multiple or trailing JPEG images are unsupported"));
+            if cursor != data.len() && !(multi_picture && data[cursor..].starts_with(&[0xff, 0xd8])) {
+                return Err(InvalidInput("unlabelled trailing JPEG data is unsupported"));
             }
             let (width, height) = shape.ok_or(InvalidInput("missing JPEG frame"))?;
-            return Ok((width, height, orientation.unwrap_or(1)));
+            return Ok((width, height, orientation.unwrap_or(1), cursor));
         }
         if marker == 0xd8 || marker == 0 || (0xd0..=0xd7).contains(&marker) {
             return Err(InvalidInput("invalid or multiple JPEG frames"));
@@ -368,7 +364,7 @@ fn jpeg_header(data: &[u8]) -> Result<(u32, u32, u8), InvalidInput> {
                 }
                 orientation = Some(exif_orientation(&payload[6..])?);
             },
-            0xe2 if payload.starts_with(b"MPF\0") => return Err(InvalidInput("multi-picture JPEG is unsupported")),
+            0xe2 if payload.starts_with(b"MPF\0") => multi_picture = true,
             0xda => {
                 if shape.is_none() {
                     return Err(InvalidInput("missing JPEG frame"));
@@ -420,66 +416,108 @@ pub(crate) fn decode_image(
     data: &[u8],
     limits: &PreprocessLimits,
 ) -> Result<RgbImage, InvalidInput> {
+    decode_image_alpha(data, limits, true, |width, height| resized_dimensions(width, height, limits).map(|_| ()))
+}
+
+/// Match PIL's RGB conversion for processors that discard alpha channels.
+/// Codec and allocation bounds are shared with the white-compositing profile.
+pub(super) fn decode_image_discard_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
+    data: &[u8],
+    limits: &PreprocessLimits,
+    validate_processed: F,
+) -> Result<RgbImage, InvalidInput> {
+    decode_image_alpha(data, limits, false, validate_processed)
+}
+
+fn decode_image_alpha<F: FnOnce(u32, u32) -> Result<(), InvalidInput>>(
+    data: &[u8],
+    limits: &PreprocessLimits,
+    white_background: bool,
+    validate_processed: F,
+) -> Result<RgbImage, InvalidInput> {
     if data.is_empty() || data.len() > limits.max_encoded_bytes {
         return Err(InvalidInput("encoded image exceeds preprocessing bounds"));
     }
-    let (format, (width, height, orientation)) = if data.starts_with(b"\x89PNG\r\n\x1a\n") {
-        (ImageFormat::Png, png_header(data)?)
-    } else if data.starts_with(&[0xff, 0xd8]) {
-        (ImageFormat::Jpeg, jpeg_header(data)?)
+    let jpeg = data.starts_with(&[0xff, 0xd8]);
+    let (width, height, orientation, primary_end) = if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let (width, height, orientation) = png_header(data)?;
+        (width, height, orientation, data.len())
+    } else if jpeg {
+        jpeg_header(data)?
     } else {
         return Err(InvalidInput("only JPEG and PNG are supported"));
     };
     check_source_dimensions(width, height, limits)?;
-    // Reject a processor/admission overflow before allocating the decoded image.
-    resized_dimensions(width, height, limits)?;
-    if format == ImageFormat::Jpeg {
-        let pixels = decode_jpeg_rgb(data, width, height)?;
-        let (pixels, width, height) = orient_rgb(pixels, width, height, orientation)?;
-        return RgbImage::try_new(width, height, pixels, limits);
-    }
-    let mut codec_limits = Limits::default();
-    codec_limits.max_image_width = Some(limits.max_source_dimension);
-    codec_limits.max_image_height = Some(limits.max_source_dimension);
-    // Decoder max_alloc is best effort; strict dimension checks and the checked
-    // pixel/output sizes above provide the independent geometry boundary.
-    codec_limits.max_alloc = Some(limits.max_source_pixels.saturating_mul(8));
-    let mut reader = ImageReader::with_format(Cursor::new(data), format);
-    reader.limits(codec_limits);
-    let decoder = reader.into_decoder().map_err(|_| InvalidInput("image header decoding failed"))?;
-    if decoder.dimensions() != (width, height) || decoder.total_bytes() > limits.max_source_pixels.saturating_mul(4) {
-        return Err(InvalidInput("decoded image layout exceeds preprocessing bounds"));
-    }
-    let decoded = DynamicImage::from_decoder(decoder).map_err(|_| InvalidInput("image decoding failed"))?;
-    let pixels = match decoded {
-        DynamicImage::ImageRgb8(image) => image.into_raw(),
-        DynamicImage::ImageLuma8(image) => {
-            let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
-            for (pixel, gray) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(image.into_raw()) {
-                pixel.fill(gray);
-            }
-            rgb
-        },
-        DynamicImage::ImageLumaA8(image) => {
-            let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
-            for (pixel, gray) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(image.into_raw().as_chunks::<2>().0.iter()) {
-                pixel.fill(composite_white(gray[0], gray[1]));
-            }
-            rgb
-        },
-        DynamicImage::ImageRgba8(image) => {
-            let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
-            for (pixel, rgba) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(image.into_raw().as_chunks::<4>().0.iter()) {
-                for channel in 0..3 {
-                    pixel[channel] = composite_white(rgba[channel], rgba[3]);
-                }
-            }
-            rgb
-        },
-        _ => return Err(InvalidInput("only 8-bit image channels are supported")),
+    validate_processed(width, height)?;
+    let pixels = if jpeg {
+        decode_jpeg_rgb(&data[..primary_end], width, height)?
+    } else {
+        decode_png_rgb(data, width, height, limits, white_background)?
     };
     let (pixels, width, height) = orient_rgb(pixels, width, height, orientation)?;
     RgbImage::try_new(width, height, pixels, limits)
+}
+
+fn decode_png_rgb(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    limits: &PreprocessLimits,
+    white_background: bool,
+) -> Result<Vec<u8>, InvalidInput> {
+    let max_bytes =
+        usize::try_from(limits.max_source_pixels.checked_mul(8).ok_or(InvalidInput("PNG allocation bound overflow"))?)
+            .map_err(|_| InvalidInput("PNG allocation bound overflow"))?;
+    let mut decoder = png::Decoder::new_with_limits(
+        Cursor::new(data),
+        png::Limits {
+            bytes: max_bytes,
+        },
+    );
+    // The processor uses encoded RGB values, never ICC/text metadata. Skip
+    // these chunks in the codec, retaining CRC/framing validation and avoiding
+    // unbounded ancillary decompression before the pixel allocation limit.
+    decoder.set_ignore_text_chunk(true);
+    decoder.set_ignore_iccp_chunk(true);
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder.read_info().map_err(|_| InvalidInput("PNG header decoding failed"))?;
+    if (reader.info().width, reader.info().height) != (width, height) {
+        return Err(InvalidInput("PNG dimensions changed during decoding"));
+    }
+    let count = reader.output_buffer_size().ok_or(InvalidInput("PNG decoded size overflow"))?;
+    if count as u64 > limits.max_source_pixels.saturating_mul(4) {
+        return Err(InvalidInput("PNG decoded size exceeds preprocessing bounds"));
+    }
+    let mut decoded = zeroed_bytes(count)?;
+    let info = reader.next_frame(&mut decoded).map_err(|_| InvalidInput("PNG image decoding failed"))?;
+    if info.bit_depth != png::BitDepth::Eight || info.buffer_size() != count {
+        return Err(InvalidInput("only 8-bit PNG channels are supported"));
+    }
+    if info.color_type == png::ColorType::Rgb {
+        return Ok(decoded);
+    }
+    let channels = match info.color_type {
+        png::ColorType::Grayscale => 1,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Rgba => 4,
+        _ => return Err(InvalidInput("unsupported PNG color channels")),
+    };
+    let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
+    for (pixel, source) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(decoded.chunks_exact(channels)) {
+        for channel in 0..3 {
+            let value = source[if channels == 4 {
+                channel
+            } else {
+                0
+            }];
+            pixel[channel] = if white_background && channels > 1 {
+                composite_white(value, source[channels - 1])
+            } else {
+                value
+            };
+        }
+    }
+    Ok(rgb)
 }
 
 fn composite_white(
@@ -590,7 +628,7 @@ fn resize_weights(
     ))
 }
 
-fn resize_rgb(
+pub(super) fn resize_rgb(
     image: &RgbImage,
     width: u32,
     height: u32,

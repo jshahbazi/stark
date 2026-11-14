@@ -3,3 +3,6 @@ node_modules/
 .sites-runtime/
 .sites-checkout/
 *.tgz
+
+node_modules/
+docs-site/.astro/

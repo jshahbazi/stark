@@ -59,9 +59,10 @@ struct QuantChunk {
       uint row
   ) {
     static_assert(
-        metal::is_same_v<AT, bfloat> || metal::is_same_v<AT, float>,
-        "GEMV quantized input must be bfloat or float; half cannot use bfloat widening"
+        metal::is_same_v<AT, bfloat> || metal::is_same_v<AT, half> || metal::is_same_v<AT, float>,
+        "GEMV quantized input must be bfloat, half or float"
     );
+    // Only BF16 uses bit widening; half and float convert element-wise.
     constexpr bool EXPANDS_BF16 = metal::is_same_v<AT, bfloat>;
     if constexpr (ALIGNED) {
       load_values<false, EXPANDS_BF16>(source, values, VALUES);

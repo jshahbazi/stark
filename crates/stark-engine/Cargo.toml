@@ -99,7 +99,7 @@ derive_more = { workspace = true, features = ["debug"] }
 half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "=0.10.9"
+sha2 = { version = "=0.10.9", features = ["asm-aarch64"] }
 monostate.workspace = true
 thiserror.workspace = true
 tokenizers.workspace = true
@@ -110,7 +110,8 @@ libm.workspace = true
 libc.workspace = true
 itertools.workspace = true
 parking_lot.workspace = true
-image = { version = "=0.25.10", default-features = false, features = ["png"] }
+png = "=0.18.1"
+crc32fast = "=1.5.3"
 jpeg-decoder = { version = "=0.3.2", default-features = false }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "visionos"))'.dependencies]
@@ -154,3 +155,11 @@ required-features = ["grammar"]
 [[example]]
 name = "glm_exl3_validate"
 required-features = ["glm-exl3"]
+
+[[example]]
+name = "dense_parity"
+required-features = ["metal"]
+
+[[example]]
+name = "dense_profile"
+required-features = ["metal"]

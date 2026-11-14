@@ -2,11 +2,30 @@
 
 Reviewed 2026-11-08 against main `2c1e75b1` and the open [text-prefix PR #110](https://github.com/jshahbazi/stark/pull/110). Saved on `codex/catalog-image-capability` as requested. This is a source/evidence audit; no new models were run for this inventory. It does not describe the capabilities of an installed release.
 
+The [default-image parity worklist](IMAGE_DEFAULT_PARITY_PLAN.md) turns this
+inventory into current implementation/qualification tasks, includes the later
+Lily text-MTP evidence on PR #112, and defines the standing requirements for
+future models. The source-bound snapshot below retains its original scope.
+
 The scope is all 18 generic converter families plus the two additional native families, their distinct image paths, and all 120 pinned repository entries. Live Hugging Face discovery can return more compatible checkpoints; those cannot be exhaustively enumerated and need individual preflight and validation.
 
 **Added** means implementation exists. **Verified** names the actual evidence. **Qualify** means run the missing checks; it does not imply a known numerical defect. **Implement/fix** identifies missing code or metadata. A text-only artifact can come from an image-capable source. Its format and preparation route determine what Stark can load.
 
 ## Image-capable models and artifact paths
+
+2026-11-12 update: Add Source now uses repository-independent retained-image
+admission for supported Flash Next Lily, external-table affine and indexed PLE
+layouts. The actual `nace-ai/Qwen3.8-Flash-Next-MLX-KQuant` artifact passed the
+Add Source controller's installation and local image checks, plus 14 explicit
+image/text/MTP/prefix lifecycle controls. This adds evidence for that exact
+artifact; older rows retain their original checkpoint-specific evidence.
+The follow-up review added strict Lily draft/control admission, selected-dialect
+sidecar checks and derived processor provenance. Complete pinned headers pass
+for the Lily, MLX-Serve and nace exports. Four additional actual nace color
+fixtures pass square/portrait/landscape PNG and square JPEG checks. Official
+FP8 and legacy PipeNetwork/F32 exports remain outside this image route;
+whole-family execution and general visual quality are unqualified.
+See the [implementation and qualification record](archive/runs/2026-11-12-flashnext-general-images.md).
 
 | Model / artifact | Images added in Stark? | Verified evidence and limits | Text optimizations with images loaded | Remaining action |
 | --- | --- | --- | --- | --- |
@@ -18,12 +37,13 @@ The scope is all 18 generic converter families plus the two additional native fa
 | Qwen3.5 35B-A3B, BF16-source MoE profile v5 | Structural conversion/admission and operators added | Router/expert/scratch component controls exist. Complete official checkpoint image execution and parity are unverified. [Vision contract][vision] | Eligible snapshot primitives alone do not establish full-model restoration. | Run full artifact admission, image execution, decoder parity, memory and caching checks. This is unfinished qualification. |
 | Qwen3.8 Flash Next, retained `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, schema 6 | Yes: explicit retained image preparation/upgrade | All 27 vision-tower layers exact on two source fixtures; actual image-worker lifecycle passes. Full retained-decoder parity and image throughput remain unverified. [Retained images][retained] | Engine already supports a 4,096-token text snapshot when no image transaction is active. PR #110 makes the host request this capability for vision workers. Loading in image mode disables MTP heads even for ordinary text. | Qualify text reuse and speed with the tower loaded; separately enable/qualify text-only MTP on image-loaded instances. |
 | Qwen3.8 Flash Next, retained `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, schema 6 | Explicit preparation and retained image path added | This distinct complete artifact lacks image execution qualification in the cited work. [Retained images][retained] | Lily-backed retained state has text snapshot support; host enablement is in PR #110. Actual artifact/readiness and performance need checking. Image-mode MTP disabled. | Qualify actual image execution, text caching, speed and memory before treating it like the pinned Lily result. |
+| Qwen3.8 Flash Next, indexed affine `nace-ai/Qwen3.8-Flash-Next-MLX-KQuant`, revision `05cb5c56` | Yes: shared Add Source preparation, preserving BF16 tower, PLE ranges and MTP | Complete real-source header admission, actual controller install, automatic image checks and 14 bounded lifecycle controls pass. Full source-reference decoder parity and general image quality remain unassessed. [Run record](archive/runs/2026-11-12-flashnext-general-images.md) | Actual MTP0/MTP2 text equality, proposal counters and exact 4,096-token restoration pass with images loaded. Short paired timing meets the 5% bounds but fails the strict clean-endpoint screen; no general speed claim. Images use zero drafts/reuse and clear text prefixes. | Qualify MTP1/MTP3, broader workloads, sustained performance and other artifacts separately. |
 | Qwen3.8 Flash Next, typed Uzu `qwen4_exp` text conversion | No image components in this artifact | Separate implemented text route; converter intentionally omits vision and MTP. [Native reference][native] | Existing typed-text reuse qualification is separate from retained images. | Use the explicit retained image route for images. Adding images to this typed format would require new implementation and qualification. |
 | Qwen3.8 Flash Next, original PipeNetwork/F32 text route | No image-fusion bridge | Text implementation exists; retained vision payload alone does not enable images. [Native reference][native] | F32 graph keeps prefix capability disabled. | Implement a bridge and exact state restoration if this route is to support them; use retained image preparation where applicable. |
-| Gemma 3 4B BF16, `google/gemma-3-4b-it` | Yes | Exact processor patches; canonical feature/logit limits, greedy trajectories and worker/API lifecycle pass. Full-model logits are within fixed tolerances, not universally bit-exact. [Gemma ledger][gemma] | Sliding KV rings lack snapshot/restore; prefix reuse disabled. | Implement and qualify ring-state snapshots. Reconcile stale pinned catalog status. Image speed/UI checks remain. |
-| Gemma 3 12B / 27B BF16 | Structural conversion/admission added | Full actual-checkpoint numerical replay and image-worker execution unverified. [Gemma ledger][gemma] | Same ring-state caching blocker. | Qualify full models, implement ring snapshots; reconcile stale 27B catalog status. |
+| Gemma 3 4B BF16, `google/gemma-3-4b-it` | Yes | Exact processor patches; canonical feature/logit limits, greedy trajectories and worker/API lifecycle pass. Full-model logits are within fixed tolerances, not universally bit-exact. [Gemma ledger][gemma] | Physical-ring snapshot/restore and scoped cache lifecycle pass for the pinned 4B artifact. [Continuation][gemma-next] | Larger/quantized artifacts and installed UI execution remain separate; prior-text baseline timing is ineligible. |
+| Gemma 3 12B / 27B BF16 | Structural conversion/admission added | Full actual-checkpoint numerical replay and image-worker execution unverified. [Gemma ledger][gemma] | Ring snapshot implementation exists; these artifacts lack their own replay. | Qualify full models and cache lifecycle; reconcile stale 27B catalog status. |
 | Gemma 3 quantized image checkpoints | No qualified native quantized image path in this inventory | BF16 Gemma 3 results do not qualify 4/8-bit exports. | No image cache qualification. | Implement/admit the intended quantization and qualify it; do not label these exports ready from the BF16 results. |
-| Gemma 4 E2B / E4B BF16, pinned instruct image profiles | Yes, separate profiles | Source/execution evidence and retained canonical worker replays exist for each. This is not universal full-logit parity. [Gemma ledger][gemma] | Sliding-ring prefix reuse disabled. | Implement/qualify ring snapshots; measure image throughput and installed UI execution. |
+| Gemma 4 E2B / E4B BF16, pinned instruct image profiles | Yes, separate profiles | Source/execution evidence and retained canonical worker replays exist for each. This is not universal full-logit parity. [Gemma ledger][gemma] | Physical-ring snapshots and source-bound ordinary-text cache controls exist for both small profiles. E2B assistant remains staged. [Continuation][gemma-next] | Broader/default assistant context and companion provisioning remain open; staged serial MTP is slower, so preference defaults off. |
 | Gemma 4 12B BF16 unified | Encoder-free patch/embedder implementation added | Extracted three-image component comparison passes; full 12B decoder generation unverified. [Gemma ledger][gemma] | Ring-state snapshot blocker. | Full model execution/parity/memory qualification, then caching. |
 | Gemma 4 26B-A4B BF16 | Tower and bounded MoE/decoder implementation added | Component/synthetic controls exist; released expert weights and complete generation unqualified. [Gemma ledger][gemma] | Ring-state snapshot blocker. | Validate actual expert/decoder weights and complete requests; implement caching restoration. |
 | Gemma 4 31B BF16 | Pinned tower/projector and decoder admission implemented | Three source feature gates pass; component similarity is not full 31B generation proof. One broad scalar control counterexample remains documented. [Gemma ledger][gemma] | Ring-state snapshot blocker. | Full checkpoint/reference execution; resolve or bound remaining numerical differences; implement caching restoration. |
@@ -44,8 +64,8 @@ The quick Lily regression in this chat used its existing **text-loaded** worker.
 | Mistral dense `mistral` | Implemented text/conditional Decision | No image route | Multimodal siblings need separate implementation. |
 | Gemma 2 `gemma2` | Implemented text/conditional Decision | No image route | Text coverage; image support would be new scope. |
 | Gemma 3 text `gemma3_text` | Implemented text/conditional Decision, including compatible derivatives | Text artifact omits images | Use the separate Gemma 3 image adapter where supported; source model capability must be inspected. |
-| Gemma 3 images `gemma3` | Image-artifact conversion; text prompts can run through admitted image model | BF16 paths above | 4B has execution evidence; 12B/27B need qualification; ring caching missing. |
-| Gemma 4 `gemma4_text` and aliases | Dense text paths plus distinct pinned BF16 image profiles | Five named image profiles above | Small profiles have stronger evidence; larger profiles remain component/structural; ring caching missing. |
+| Gemma 3 images `gemma3` | Image-artifact conversion; text prompts can run through admitted image model | BF16 paths above | 4B has source-bound ring/cache evidence; 12B/27B remain independently unqualified. |
+| Gemma 4 `gemma4_text` and aliases | Dense text paths plus distinct pinned BF16 image profiles | Five named image profiles above | Small profiles have ring/cache evidence and staged E2B assistant controls; larger profiles remain independently unqualified. |
 | OLMo 3 `olmo3` | Implemented native text/conditional Decision | No image route | The Gemma work does not add images to OLMo. |
 | Phi-3 dense `phi3` | Implemented text/conditional Decision with constraints | No image route | Phi vision variants require separate support. |
 | Granite dense `granite` | Implemented text/conditional Decision | No image route | No image implementation/qualification established by this adapter. |
@@ -68,7 +88,7 @@ Decision mode additionally requires a compatible direct-answer template, unique 
 | Finish review/CI and ship #110; qualify additional artifacts | Eligible converted Qwen vision decoders; vision-worker host capability request | Added on PR, not merged as of this audit |
 | Test image-loaded text caching and speed | Retained Lily Q4-XL first, then distinct retained mixed-4/8 artifact | Qualification gap; existing text-only benchmark does not cover it |
 | Restore text-only MTP availability while images are loaded | Retained Lily/mixed: loader currently disables heads; converted Qwen vision: conversion omits predictor weights | Implementation plus separate state/key/numerical qualification; image-request MTP remains separate |
-| Implement exact sliding-ring payload snapshots | Gemma 3/4 | Missing cache implementation; pointer/token-count rewind cannot recover overwritten rows |
+| Qualify remaining ring/cache artifacts | Larger/quantized Gemma 3/4 | Physical snapshot implementation exists; each additional artifact still requires its own cache/lifecycle proof |
 | Complete full-model image checks | BF16-source Qwen MoE; larger Gemma 3/4; retained mixed artifact; other precise quantizations | Qualification, with numerical repair only if a test demonstrates a defect |
 | Reconcile stale pinned catalog rows | Official Gemma 3 4B/27B and Qwen3.5-35B-A3B legacy “planned” entries | Metadata fix; distinguish actual implemented profile from unqualified variants |
 | Reconcile reference copy about retained images | Generic model-support mode table still summarizes fewer image paths than the implementation | Documentation fix; explicit retained and Gemma paths must remain visible |
@@ -219,3 +239,5 @@ No source-model modality is inferred solely from a brand or repository name.
 [native]: https://github.com/jshahbazi/stark/blob/2c1e75b1/docs/NATIVE_HYBRID_MODELS.md
 
 Pinned appendix source: [catalog.json][catalog]. The [image integration review](https://github.com/jshahbazi/stark/blob/2c1e75b1/docs/archive/runs/2026-11-07-image-family-pr-review.md) and [retrospective](https://github.com/jshahbazi/stark/blob/2c1e75b1/docs/model-experiments/2026-11-08-image-support-retrospective.md) preserve the scope and remaining failures. Prefix implementation and its named artifact proof are in [PR #110](https://github.com/jshahbazi/stark/pull/110).
+
+[gemma-next]: model-experiments/2026-11-09-gemma-next-image-parity.md

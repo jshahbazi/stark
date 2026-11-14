@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from test_sources import PIN, PRIMARY, Hub, files
@@ -14,10 +15,50 @@ from stark_convert.streaming import ConversionError, UnsupportedConversion
 FUTURE = "example/future-model"
 
 
+def test_pinned_12b_metadata_preflight_uses_its_own_processor_bytes(tmp_path, monkeypatch):
+    from stark_convert.adapters.gemma4_vision import PROFILES, TOKENS, UNIFIED_GEOMETRY
+
+    repo = "google/gemma-4-12B-it"
+    profile = dict(PROFILES[repo])
+    assert profile["source_processor_sha256"] == "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9"
+    root = files(tmp_path / "source")
+    config = {
+        "model_type": "gemma4_unified",
+        "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+        "text_config": {
+            "model_type": "gemma4_unified_text",
+            "hidden_size": 3840,
+            "num_hidden_layers": 48,
+            "hidden_size_per_layer_input": 0,
+            "attention_k_eq_v": True,
+        },
+        "vision_config": dict(UNIFIED_GEOMETRY),
+        "image_token_id": TOKENS["image"],
+        "boi_token_id": TOKENS["vision_start"],
+        "eoi_token_id": TOKENS["vision_end"],
+        "audio_token_id": TOKENS["audio"],
+        "video_token_id": TOKENS["video"],
+    }
+    (root / "config.json").write_text(json.dumps(config))
+    processor = (Path(__file__).parent / "fixtures/gemma4_unified_processor_config.json").read_bytes()
+    (root / "processor_config.json").write_bytes(processor)
+    template = b"synthetic reviewed template"
+    (root / "chat_template.jinja").write_bytes(template)
+    profile["template_sha256"] = hashlib.sha256(template).hexdigest()
+    monkeypatch.setitem(PROFILES, repo, profile)
+    report = preflight_source(root, repo=repo, revision=profile["revision"], mode="vision-language", offline=True)
+    assert report["status"] == "conditional"
+    assert report["qualification"]["status"] == "not_assessed"
+    # Geometry-equivalent bytes must not inherit the immutable source identity.
+    (root / "processor_config.json").write_bytes(processor + b"\n")
+    report = preflight_source(root, repo=repo, revision=profile["revision"], mode="vision-language", offline=True)
+    assert report["reasons"] == ["unsupported_processing_metadata"]
+
+
 def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification():
     matrix = support_matrix()
     assert matrix["schema_version"] == 1 and matrix["modes"] == list(model_support.MODES)
-    assert len(matrix["families"]) == 15
+    assert len(matrix["families"]) == len(model_support.CONFIG_ADAPTERS) + 3
     assert len(json.dumps(matrix).encode()) < 65536
     assert matrix["qualification"] == {
         "status": "not_assessed",
@@ -28,6 +69,17 @@ def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification(
     assert registry.architecture_for_config({"model_type": "qwen3_5_text"}) == "qwen3_5"
     matrix["families"][0]["modes"]["text"]["status"] = "qualified"
     assert support_matrix()["families"][0]["modes"]["text"]["status"] == "conditional"
+
+
+def test_gemma4_image_family_advertises_all_pinned_profiles_without_qualification():
+    family = next(item for item in support_matrix()["families"] if item["family_id"] == "gemma4_text")
+    image = family["modes"]["vision-language"]
+    assert image["status"] == "conditional"
+    assert image["message"] == (
+        "Image input requires a pinned Gemma 4 E2B, E4B, 12B, 26B-A4B or 31B BF16 image artifact "
+        "and local execution checks."
+    )
+    assert "gemma4_pinned_bf16_image_geometry" in image["caveats"]
 
 
 def test_native_glm_is_listed_without_generic_architecture_admission():
@@ -42,11 +94,25 @@ def test_native_glm_is_listed_without_generic_architecture_admission():
     assert preflight_model({"model_type": "glm5_next"}, mode="text")["reasons"] == ["unsupported_architecture"]
 
 
+@pytest.mark.parametrize("architecture", ["qwen4", "qwen4_text", "qwen4_moe"])
+def test_unimplemented_qwen4_names_do_not_inherit_qwen_support(architecture):
+    report = preflight_model({"model_type": architecture}, mode="text")
+    assert report["status"] == "unsupported"
+    assert report["reasons"] == ["unsupported_architecture"]
+    assert report["family_id"] is None
+
+
+def test_qwen38_preview_preflight_keeps_its_separate_family_id():
+    report = preflight_model({"model_type": "qwen4_exp"}, mode="text")
+    assert report["family_id"] == "qwen4_exp"
+    assert report["status"] == "conditional"
+
+
 @pytest.mark.parametrize("architecture", list(model_support.CONFIG_ADAPTERS.values()))
 @pytest.mark.parametrize("mode", ["text", "decision"])
 def test_each_family_has_explicit_app_modes_without_checkpoint_qualification(architecture, mode):
     report = preflight_model({"model_type": architecture}, mode=mode)
-    assert report["status"] == ("unsupported" if architecture == "modernbert" else "conditional")
+    assert report["status"] == ("unsupported" if architecture in {"modernbert", "gemma3"} else "conditional")
     assert report["qualification"]["status"] == "not_assessed"
 
 
@@ -57,12 +123,117 @@ def test_classifier_conversion_remains_distinct_from_app_modes():
         assert preflight_model(config, mode=mode)["status"] == "unsupported"
 
 
+def test_new_text_families_do_not_imply_image_or_checkpoint_qualification():
+    for architecture in ("olmo3", "gemma4_text"):
+        config = {"model_type": architecture}
+        assert preflight_model(config, mode="text")["status"] == "conditional"
+        report = preflight_model(config, mode="vision-language")
+        assert report["status"] == "unsupported"
+        assert report["qualification"]["status"] == "not_assessed"
+
+
+def test_gemma4_wrapper_has_bounded_dense_text_coverage():
+    config = {
+        "model_type": "gemma4",
+        "text_config": {"model_type": "gemma4_text", "hidden_size_per_layer_input": 256},
+        "vision_config": {},
+        "audio_config": {},
+    }
+    report = preflight_model(config, mode="text")
+    assert report["family_id"] == "gemma4_text" and report["status"] == "conditional"
+    assert len(report["warnings"]) == 2
+    config["text_config"]["enable_moe_block"] = True
+    assert preflight_model(config, mode="text")["reasons"] == ["unsupported_moe"]
+    config["text_config"]["enable_moe_block"] = False
+    config["text_config"]["hidden_size_per_layer_input"] = 0
+    assert preflight_model(config, mode="text")["reasons"] == ["unsupported_native_geometry"]
+
+
+def test_gemma4_nested_architecture_cannot_masquerade_as_supported_text():
+    config = {"model_type": "gemma4", "text_config": {"model_type": "different_decoder"}}
+    assert preflight_model(config, mode="text")["reasons"] == ["unsupported_nested_architecture"]
+
+
+@pytest.mark.parametrize("wrapper", [False, True])
+@pytest.mark.parametrize("bits", [4, 8])
+def test_gemma4_quantized_global_kv_is_rejected_before_tensor_download(tmp_path, wrapper, bits):
+    from stark_convert.adapters.gemma4 import build_gemma4_plan
+
+    text = {"model_type": "gemma4_text", "hidden_size_per_layer_input": 0, "attention_k_eq_v": True}
+    config = {"model_type": "gemma4", "text_config": text} if wrapper else text
+    config["quantization"] = {"bits": bits, "group_size": 64}
+    report = preflight_model(config, mode="text")
+    assert report["status"] == "unsupported"
+    assert report["reasons"] == ["unsupported_weight_format"]
+    assert "requires canonical BF16" in report["message"]
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(UnsupportedConversion, match=report["message"]):
+        build_gemma4_plan(tmp_path)
+    del config["quantization"]
+    assert preflight_model(config, mode="text")["status"] == "conditional"
+
+
+def test_gemma4_wrapper_cannot_hide_conflicting_nested_quantization():
+    config = {
+        "model_type": "gemma4",
+        "text_config": {
+            "model_type": "gemma4_text",
+            "hidden_size_per_layer_input": 256,
+            "quantization": {"bits": 8, "group_size": 64},
+        },
+        "quantization": {"bits": 4, "group_size": 64},
+    }
+    report = preflight_model(config, mode="text")
+    assert report["status"] == "unsupported"
+    assert report["message"] == "Gemma 4 wrapper and text quantization disagree"
+
+
+def test_qwen35_quantization_alias_requires_baked_norm_marker(tmp_path):
+    from stark_convert.adapters.qwen35 import build_qwen35_plan
+
+    config = {"model_type": "qwen3_5", "quantization_config": {"bits": 4, "group_size": 64}}
+    report = preflight_model(config, mode="text")
+    assert report["status"] == "unsupported"
+    assert "requires the quantization field" in report["message"]
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    with pytest.raises(UnsupportedConversion, match=report["message"]):
+        build_qwen35_plan(tmp_path)
+    config["quantization"] = config["quantization_config"]
+    assert preflight_model(config, mode="text")["status"] == "conditional"
+
+
 @pytest.mark.parametrize("source_dtype", ["float16", "float32", "bfloat16"])
 def test_floating_source_precision_is_not_confused_with_native_output_dtype(source_dtype):
     config = {"model_type": "qwen3", "torch_dtype": source_dtype}
     assert preflight_model(config, mode="text", dtype="bfloat16")["status"] == "conditional"
     assert preflight_model(config, dtype="float32")["status"] == "conditional"
     assert preflight_model(config, mode="text", dtype="float32")["reasons"] == ["unsupported_native_dtype"]
+
+
+@pytest.mark.parametrize("architecture", ["llama", "qwen2", "mistral"])
+def test_native_f16_output_is_limited_to_full_attention_dense_text_and_decision(architecture):
+    config = {"model_type": architecture, "torch_dtype": "float16"}
+    for mode in ("text", "decision"):
+        assert preflight_model(config, mode=mode, dtype="float16")["status"] == "conditional"
+        assert preflight_model(config, mode=mode, dtype="float32")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(config, mode="vision-language", dtype="float16")["status"] == "unsupported"
+    windowed = {
+        "llama": {**config, "layer_types": ["sliding_attention", "full_attention"]},
+        "qwen2": {**config, "use_sliding_window": True, "sliding_window": 4096},
+        "mistral": {**config, "sliding_window": 4096},
+    }[architecture]
+    assert preflight_model(windowed, mode="text", dtype="float16")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(windowed, mode="text")["status"] == "conditional"
+    if architecture == "qwen2":
+        inactive = {**config, "use_sliding_window": False, "sliding_window": 32768}
+        assert preflight_model(inactive, mode="text", dtype="float16")["status"] == "conditional"
+
+
+@pytest.mark.parametrize("architecture", ["qwen3", "gemma2", "phi3", "smollm3"])
+def test_native_f16_output_stays_blocked_outside_the_dense_f16_families(architecture):
+    config = {"model_type": architecture, "tie_word_embeddings": True}
+    assert preflight_model(config, mode="text", dtype="float16")["reasons"] == ["unsupported_native_dtype"]
+    assert preflight_model(config, dtype="float16")["status"] == "conditional"
 
 
 @pytest.mark.parametrize("bits", [4, 8])
@@ -82,7 +253,7 @@ def test_mlx_text_representation_is_implemented_but_unqualified(bits):
             {"model_type": "llama", "quantization_config": {"quant_method": "gptq", "bits": 4}},
             "unsupported_weight_format",
         ),
-        ({"model_type": "qwen2", "quantization": {"bits": 4, "group_size": 64}}, "unsupported_weight_format"),
+        ({"model_type": "granite", "quantization": {"bits": 4, "group_size": 64}}, "unsupported_weight_format"),
     ],
 )
 def test_explicit_unsupported_metadata_has_a_fixed_reason(config, reason):
@@ -101,6 +272,26 @@ def test_known_phi_annotation_is_validated_without_executing_custom_code():
     assert preflight_model(config, mode="text")["status"] == "conditional"
     config["auto_map"]["AutoConfig"] = "other.CustomConfig"
     assert preflight_model(config, mode="text")["status"] == "unsupported"
+
+
+@pytest.mark.parametrize("tied", [True, False])
+def test_phi3_embedding_layout_is_left_to_the_tensor_planner(tied):
+    report = preflight_model({"model_type": "phi3", "tie_word_embeddings": tied}, mode="text")
+    assert report["status"] == "conditional" and report["reasons"] == ["structural_path_implemented"]
+    phi = next(family for family in support_matrix()["families"] if family["family_id"] == "phi3")
+    assert all("tied_embeddings_required" not in mode["caveats"] for mode in phi["modes"].values())
+
+
+@pytest.mark.parametrize(
+    "width,heads,supported", [(3072, 24, True), (5120, 40, True), (3072, 32, False), (2560, 32, False)]
+)
+def test_phi3_head_dimension_without_a_metal_kernel_is_unsupported(width, heads, supported):
+    config = {"model_type": "phi3", "tie_word_embeddings": False, "hidden_size": width, "num_attention_heads": heads}
+    report = preflight_model(config, mode="text")
+    if supported:
+        assert report["status"] == "conditional"
+    else:
+        assert report["status"] == "unsupported" and report["reasons"] == ["unsupported_native_geometry"]
 
 
 def test_unknown_metadata_is_inconclusive_in_every_mode():
@@ -188,6 +379,17 @@ def test_resolver_rechecks_metadata_and_blocks_weights_for_unsupported_or_inconc
     assert all(not event[2].endswith(".safetensors") for event in hub.events if event[0] == "download")
 
 
+@pytest.mark.parametrize("architecture", ["qwen4", "qwen4_text", "qwen4_moe"])
+def test_unimplemented_qwen4_names_are_rejected_before_weight_retrieval(tmp_path, architecture):
+    root = files(tmp_path / "source")
+    (root / "config.json").write_text(json.dumps({"model_type": architecture}))
+    hub = ObservedHub({PRIMARY: root})
+    with pytest.raises(UnsupportedConversion):
+        sources.resolve_source(PRIMARY, hub=hub)
+    assert [event[2] for event in hub.events if event[0] == "download"] == ["config.json"]
+    assert all(not event[2].endswith(".safetensors") for event in hub.events if event[0] == "metadata")
+
+
 def test_resolver_checks_metadata_size_before_downloading_config(tmp_path):
     root = files(tmp_path / "source")
     with (root / "config.json").open("wb") as stream:
@@ -231,7 +433,7 @@ def test_resolver_rechecks_small_vision_processing_before_any_weights(tmp_path):
     assert all(not event[2].endswith(".safetensors") for event in hub.events if event[0] == "download")
 
 
-@pytest.mark.parametrize("architecture", ["phi3", "gemma2", "gemma3_text"])
+@pytest.mark.parametrize("architecture", ["gemma2", "gemma3_text"])
 def test_known_untied_layout_exclusion_precedes_weights(tmp_path, architecture):
     root = files(tmp_path / "source", model_type=architecture)
     (root / "config.json").write_text(json.dumps({"model_type": architecture, "tie_word_embeddings": False}))
@@ -251,7 +453,7 @@ def test_resolver_rejects_changed_explicit_immutable_revision_before_metadata(tm
 def test_cli_family_listing_and_local_preflight_need_no_output(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["stark-convert", "--list-families"])
     assert cli.main() == 0
-    assert len(json.loads(capsys.readouterr().out)["families"]) == 15
+    assert len(json.loads(capsys.readouterr().out)["families"]) == len(model_support.CONFIG_ADAPTERS) + 3
     root = files(tmp_path / "source")
     monkeypatch.setattr(
         "sys.argv", ["stark-convert", str(root), "--preflight", "--offline", "--support-mode", "decision"]
@@ -281,7 +483,7 @@ def test_actual_conversion_mode_mismatch_stops_before_resolution(tmp_path, monke
         ["stark-convert", FUTURE, "--output", str(tmp_path / "output"), "--support-mode", "vision-language"],
     )
     assert cli.main() == 1
-    assert json.loads(capsys.readouterr().err)["error_category"] == "ValueError"
+    assert json.loads(capsys.readouterr().err)["error_category"] == "conversion_failed"
 
 
 @pytest.mark.parametrize(
@@ -289,7 +491,7 @@ def test_actual_conversion_mode_mismatch_stops_before_resolution(tmp_path, monke
     [
         ({"model_type": "qwen3", "num_experts": 8}, {}),
         ({"model_type": "qwen3", "auto_map": {"AutoModel": "private.Custom"}}, {}),
-        ({"model_type": "phi3", "tie_word_embeddings": False}, {}),
+        ({"model_type": "gemma2", "tie_word_embeddings": False}, {}),
         ({"model_type": "qwen3", "quantization": {"quant_method": "gptq", "bits": 4}}, {}),
         ({"model_type": "qwen3"}, {"dtype": "float16"}),
         ({"model_type": "qwen3"}, {"container": ".gguf"}),
@@ -301,12 +503,16 @@ def test_source_wide_exclusions_do_not_offer_known_impossible_alternatives(confi
     assert set(report["modes"].values()) == {"unsupported"} and report["alternatives"] == []
 
 
-def test_image_only_quantized_layout_preserves_valid_text_alternatives():
+def test_affine_image_metadata_is_conditional_until_complete_tensor_admission():
     config = geometry()
     config["quantization"] = {"bits": 4, "group_size": 64}
     report = preflight_model(config, mode="vision-language")
-    assert report["reasons"] == ["unsupported_vision_weight_format"]
-    assert report["alternatives"] == ["text", "decision"]
+    assert report["status"] == "conditional"
+    assert report["reasons"] == ["structural_path_implemented"]
+    config["quantization"]["group_size"] = 32
+    report = preflight_model(config, mode="vision-language")
+    assert report["status"] == "unsupported"
+    assert report["reasons"] == ["unsupported_vision_geometry"]
 
 
 def test_missing_shared_inventory_does_not_offer_other_conditional_modes(tmp_path):
@@ -338,7 +544,7 @@ def test_malformed_shared_tokenizer_metadata_leaves_no_conditional_alternatives(
     [
         ({"model_type": "qwen3", "num_experts": 8}, {}),
         ({"model_type": "qwen3", "auto_map": {"AutoModel": "private.Custom"}}, {}),
-        ({"model_type": "phi3", "tie_word_embeddings": False}, {}),
+        ({"model_type": "gemma2", "tie_word_embeddings": False}, {}),
         ({"model_type": "qwen3", "quantization": {"quant_method": "gptq", "bits": 4}}, {}),
         ({"model_type": "qwen3", "quantization_config": []}, {}),
         ({"model_type": "qwen3"}, {"dtype": "float16"}),

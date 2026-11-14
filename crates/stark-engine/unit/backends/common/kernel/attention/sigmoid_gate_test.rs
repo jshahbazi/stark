@@ -29,7 +29,7 @@ fn get_output<T: ArrayElement + Float, B: Backend>(
     config: &Config,
 ) -> Vec<T> {
     let context = B::Context::new().expect("Failed to create Context");
-    let kernel = <<B as Backend>::Kernels as Kernels>::SigmoidGateKernel::new(&context, T::data_type(), false)
+    let kernel = <<B as Backend>::Kernels as Kernels>::SigmoidGateKernel::new(&context, T::data_type(), false, false)
         .expect("Failed to create SigmoidGateKernel");
 
     let qkvg = create_buffer_with_data::<B, T>(&context, qkvg_data);
@@ -158,7 +158,7 @@ fn test_sigmoid_gate_bf16() {
 fn run_reference_bf16<B: Backend>() {
     let context = B::Context::new().unwrap();
     let kernel =
-        <<B as Backend>::Kernels as Kernels>::SigmoidGateKernel::new(&context, bf16::data_type(), true).unwrap();
+        <<B as Backend>::Kernels as Kernels>::SigmoidGateKernel::new(&context, bf16::data_type(), true, false).unwrap();
     // Independent pinned Torch BF16 sigmoid then product on public values.
     // A single final cast gives one lower BF16 unit at all four positions.
     let gate = create_buffer_with_data::<B, bf16>(&context, &[49272, 49256, 49240, 49232].map(bf16::from_bits));
@@ -173,4 +173,32 @@ fn run_reference_bf16<B: Backend>() {
 fn test_sigmoid_gate_reference_bf16_materializes_sigmoid() {
     run_reference_bf16::<Cpu>();
     for_each_non_cpu_backend!(|B| run_reference_bf16::<B>());
+}
+
+fn run_source_bf16<B: Backend>() {
+    let context = B::Context::new().unwrap();
+    let kernel =
+        <<B as Backend>::Kernels as Kernels>::SigmoidGateKernel::new(&context, bf16::data_type(), false, true).unwrap();
+    // Exact BF16 scalar-rounding witnesses for the source exp/denominator/
+    // reciprocal/complement/product contract. These differ from the existing
+    // Torch-reference policy and from a single final float-product cast.
+    // Poisoned row padding verifies that the noncompact gate stride survives.
+    let gate = create_buffer_with_data::<B, bf16>(
+        &context,
+        &[49272, 49256, 49240, 49232, 0x7fc0, 16320, 0, 32768, 16512, 0x7fc0].map(bf16::from_bits),
+    );
+    let mut output = create_buffer_with_data::<B, bf16>(&context, &[bf16::from_bits(16269); 8]);
+    let mut command = context.create_command_buffer(None, None).unwrap();
+    kernel.encode(&gate, &mut output, 4, 2, 5, &mut command);
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    assert_eq!(
+        buffer_to_vec::<B, bf16>(&output),
+        [15543, 15595, 15637, 15657, 16230, 16141, 16141, 16266].map(bf16::from_bits)
+    );
+}
+
+#[stark_test]
+fn test_sigmoid_gate_source_bf16_rounding_and_row_stride() {
+    run_source_bf16::<Cpu>();
+    for_each_non_cpu_backend!(|B| run_source_bf16::<B>());
 }
