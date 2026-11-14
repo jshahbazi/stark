@@ -178,7 +178,7 @@ stay in the browser. The download byte count is an estimate that advances with n
 selecting it; choose it and **Run** when ready. Some image installations stop
 the running model for their required local checks.
 
-Stopped or failed catalog downloads retain their last reported download progress on the model row for the current app session. Restarting that model’s download hides the row summary while the full progress panel is shown. Progress is matched by repository, pinned revision and artifact mode; it is not a fresh measurement of the download cache.
+Stopping a catalog download keeps the selected family, discovered models and pagination available for another download. Stopped or failed catalog downloads retain their last reported download progress on the model row for the current app session. Restarting that model’s download hides the row summary while the full progress panel is shown. Progress is matched by repository, pinned revision and artifact mode; it is not a fresh measurement of the download cache.
 
 The catalogue starts with known sources, then follows the family's Hugging Face
 architecture search through successive pages. Each request checks up to 30

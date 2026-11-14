@@ -1773,13 +1773,15 @@ extension EngineController {
                           "phase": "download", "state": "running", "completed_bytes": Int64(40), "total_bytes": Int64(100)])
             guard engine.retainedCatalogDownloadProgress(for: item) == nil else { return false }
             engine.stop()
-            _ = commands()
+            let stop = commands().last!
+            guard stop["command"] as? String == "stop", stop["preserve_catalog"] as? Bool == true,
+                  engine.catalog?.items.first?.id == item.id, engine.catalogFamilyID == "qwen3",
+                  engine.catalogRequestID == browse["request_id"] as? String else { return false }
             guard let retained = engine.retainedCatalogDownloadProgress(for: item),
                   retained.completedBytes == 40, retained.totalBytes == 100,
                   retained.state == "cancelled", retained.fraction == 0.4 else { return false }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
-            engine.requestModelCatalog(familyID: "qwen3")
-            let refresh = command(); engine.apply(catalogReply(refresh))
+            guard !engine.busy, engine.catalog?.status == .ready else { return false }
             guard engine.retainedCatalogDownloadProgress(for: item)?.completedBytes == 40 else { return false }
             var changed = catalogItem(); changed["revision"] = String(repeating: "b", count: 40)
             guard let otherRevision = FamilyModelCatalog.Item(changed),
@@ -1906,7 +1908,8 @@ extension EngineController {
             engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Stale failure"])
             engine.apply(catalogReply(browse))
             return engine.selectedID == "replacement" && engine.loadedID == "replacement" && engine.modelReady &&
-                engine.catalog == nil && engine.errorMessage == nil
+                engine.catalog?.items.first?.id == "entry" && engine.catalogFamilyID == "qwen3" &&
+                engine.catalogInstallation == nil && engine.errorMessage == nil
         case "model-removal-confirmation":
             let imported = InstalledModel(id: "imported", name: "Exact imported name", path: "/private/imported", apiID: "id",
                                           removal: InstalledModelRemoval(removal("unregister")))

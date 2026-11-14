@@ -2318,8 +2318,10 @@ final class EngineController: ObservableObject {
         }
     }
 
-    private func clearBrowserRequests() {
-        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil; pendingCatalogOffset = nil
+    private func clearBrowserRequests(preservingCatalog: Bool = false) {
+        if !preservingCatalog {
+            catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil; pendingCatalogOffset = nil
+        }
         activeInstallRequestID = nil; catalogInstallation = nil; catalogInstallMessage = nil; catalogInstallFailed = false
         removalRequestID = nil; removingModelID = nil; removalAction = nil; removalError = nil
         beginnerRequestID = nil; beginnerChoicesLoading = false; beginnerReport = nil
@@ -2401,20 +2403,22 @@ final class EngineController: ObservableObject {
     }
 
     func stop() {
+        let preserveCatalog = catalogInstallation != nil && catalogRequestID != nil
         if let model = models.first(where: { $0.id == modelControlID }) {
             stoppedModel = (model.id, loadedMode ?? mode)
         }
         errorMessage = nil
         clearInstallSupport()
         if state == "installing" { endInstallProgress("cancelled") }
-        clearBrowserRequests()
+        clearBrowserRequests(preservingCatalog: preserveCatalog)
         discardPendingMessage()
         clearConversation()
         clearDecision()
         supportsImages = false
         imageVerification = "unverified"
         state = "stopping"; message = "Stopping…"
-        send(["command": "stop"])
+        if preserveCatalog { send(["command": "stop", "preserve_catalog": true]) }
+        else { send(["command": "stop"]) }
     }
 
     func resetInstallProgress(kind: String) {

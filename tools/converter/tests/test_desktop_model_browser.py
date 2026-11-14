@@ -85,6 +85,24 @@ def test_catalogue_is_read_only_and_stale_family_results_cannot_publish(host, mo
     assert len(events(host)) == before and host.catalog_entries == {}
 
 
+def test_stopping_catalogue_download_preserves_choices_and_fences_installation(host, monkeypatch):
+    host.catalog_request_id, host.catalog_family_id = "request", "qwen3"
+    monkeypatch.setattr(host, "run_catalog_check", lambda *_args: report())
+    host.load_catalog("qwen3", "request", host.catalog_generation)
+    entries = host.catalog_entries.copy()
+    generation, epoch = host.catalog_generation, host.epoch
+    host.install_epoch = epoch
+    host.install_progress = {"download": {"state": "running", "completed_bytes": 40, "total_bytes": 100}}
+    assert host.dispatch({"command": "stop", "preserve_catalog": True})
+    assert host.epoch == epoch + 1 and host.install_epoch is None
+    assert host.catalog_request_id == "request" and host.catalog_family_id == "qwen3"
+    assert host.catalog_generation == generation and host.catalog_entries == entries
+    assert events(host)[-1]["state"] == "idle"
+    assert any(event.get("phase") == "download" and event.get("state") == "cancelled" for event in events(host))
+    host.dispatch({"command": "stop"})
+    assert host.catalog_entries == {} and host.catalog_request_id is None
+
+
 @pytest.mark.parametrize(
     "kind",
     [

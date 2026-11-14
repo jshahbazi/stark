@@ -1272,8 +1272,9 @@ class Desktop:
             previous = self.install_progress.get(phase, {})
             self.progress(epoch, phase, "failed", previous.get("completed_bytes", 0), previous.get("total_bytes"))
 
-    def stop(self, quiet=False):
-        self.cancel_catalog()
+    def stop(self, quiet=False, *, preserve_catalog=False):
+        if not preserve_catalog:
+            self.cancel_catalog()
         self.cancel_guided_discovery()
         with self.lock:
             cancelled = self.install_progress.copy() if self.install_epoch == self.epoch else {}
@@ -2972,7 +2973,7 @@ class Desktop:
                 request_id=request_id,
             )
         elif command in ("stop", "quit"):
-            self.stop()
+            self.stop(preserve_catalog=command == "stop" and payload.get("preserve_catalog") is True)
             return command != "quit"
         elif command == "run" and isinstance(payload.get("model_id"), str):
             mode = payload.get("mode", "chat")
