@@ -32,7 +32,7 @@ from .guided_memory import config_identity, native_request_bytes
 from .guided_memory_profiles import ResidentProfile, qualified_profile, source_profile
 from .model_inventory import MAX_HEADER_BYTES, _weights
 from .recommendation_benchmarks import load_registry
-from .recommendation_leaderboard import load_snapshot, speed_policy
+from .recommendation_leaderboard import MAX_ALTERNATIVE_SCORE_GAP, load_snapshot, speed_policy
 from .registry import get_model
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, read_safetensors_header
 
@@ -690,13 +690,14 @@ def setup_credit(recipe, host):
     )
 
 
-def installation_allowed(recipe, host, *, installed=False):
+def recommendation_allowed(recipe, host, *, installed=False):
+    """Offer models against installed hardware capacity and setup storage."""
     if recipe.installed_only and not installed:
         return False
     if host.get("supported") is not True:
         return False
     physical = host.get("physical_memory_bytes")
-    if type(physical) is not int or physical < recipe.minimum_memory:
+    if type(physical) is not int or physical < max(recipe.minimum_memory, recipe.runtime_memory + 2 * GIB):
         return False
     if recipe.native_choice is not None and "gpu_available" not in host:
         return False
@@ -708,21 +709,25 @@ def installation_allowed(recipe, host, *, installed=False):
             or type(budget) is not int
             or budget <= 0
             or recipe.gpu_runtime_memory * 100 > budget * 85
-            or recipe.runtime_memory + 2 * GIB > physical
         ):
             return False
     if installed:
         return True
-    available = host.get("available_memory_bytes")
     space, download_space = host.get("free_disk_bytes"), host.get("download_free_disk_bytes")
     return (
-        type(available) is int
-        and available >= 2 * GIB
-        and type(space) is int
+        type(space) is int
         and space + setup_credit(recipe, host) >= recipe.setup_bytes
         and (
             recipe.native_choice is not None or type(download_space) is int and download_space >= recipe.download_bytes
         )
+    )
+
+
+def installation_allowed(recipe, host, *, installed=False):
+    """Recheck capacity plus the small working allowance for preparation."""
+    available = host.get("available_memory_bytes")
+    return recommendation_allowed(recipe, host, installed=installed) and (
+        installed or type(available) is int and available >= 2 * GIB
     )
 
 
@@ -733,10 +738,10 @@ def _planning_budget(host):
 
 
 def execution_allowed(recipe, host):
-    """Shared current-memory gate for recommendations and fresh worker starts."""
+    """Recheck current available memory immediately before a worker starts."""
     available = host.get("available_memory_bytes")
     return (
-        installation_allowed(recipe, host, installed=True)
+        recommendation_allowed(recipe, host, installed=True)
         and type(available) is int
         and available >= recipe.startup_memory
     )
@@ -917,8 +922,7 @@ def recommendation_report(
         recipe
         for recipe in candidates
         if recipe.id not in excluded_recipe_ids
-        and installation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
-        and execution_allowed(recipe, host)
+        and recommendation_allowed(recipe, host, installed=bool(installed.get(recipe.id)))
     ]
     eligible.sort(key=lambda recipe: _ranking_key(recipe, host, installed, task, preference))
     benchmarks = load_registry() if benchmarks is None else benchmarks
@@ -954,7 +958,7 @@ def recommendation_report(
             reason = (
                 "Selected using the cached whatmodel.sh "
                 + ("Coding" if guide_task == "coding" else "General Work")
-                + " leaderboard among models admitted by Stark's RAM, GPU, current memory and disk checks. "
+                + " leaderboard among models admitted by Stark's installed RAM, GPU and disk checks. "
                 + (
                     "This model has a published parent-model score; this Stark artifact has not been benchmarked."
                     if recipe.id in leaderboard_used
@@ -967,7 +971,7 @@ def recommendation_report(
                 "Selected by cached task score within a weight budget of 25% of this Mac's RAM, "
                 f"with a minimum parent-model reference score of {speed_limits['minimum_score']}. "
                 "Exact export weights determine the budget; quantized answer quality and response speed "
-                "have not been measured by this ranking. Stark's RAM, GPU, current memory and disk checks also pass."
+                "have not been measured by this ranking. Stark's installed RAM, GPU and disk checks also pass."
             )
         ids = list(installed.get(recipe.id, ()))
         license_name = (
@@ -1072,6 +1076,10 @@ def recommendation_report(
         "message": message,
         "host": dict(host),
         "items": items,
+        "alternative_policy": {
+            "maximum_score_gap": MAX_ALTERNATIVE_SCORE_GAP,
+            "distinct_parent_models": True,
+        },
         "speed_policy": speed_limits,
         "leaderboard_ranking": {
             "captured": leaderboard.captured,

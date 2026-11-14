@@ -98,6 +98,7 @@ _SEARCH_TERMS = {
 def _repository_search(api, definition, remaining, expected=0):
     """Interleave aliases and name searches so large tags cannot starve others.
 
+    Each repository contributes one listing position across overlapping queries.
     ``expected`` is how many listing positions the caller plans to walk. Each
     listing is requested at about that size and grows only if more are needed,
     because a listing reply carries every repository's file list.
@@ -124,6 +125,7 @@ def _repository_search(api, definition, remaining, expected=0):
             sent, size = count, size * 2
 
     streams = [iter(results(query)) for query in queries]
+    seen = set()
     while streams:
         active = []
         for stream in streams:
@@ -134,7 +136,8 @@ def _repository_search(api, definition, remaining, expected=0):
                 continue
             active.append(stream)
             repo = _repo(_field(item, "id"))
-            if repo is not None:
+            if repo is not None and repo.casefold() not in seen:
+                seen.add(repo.casefold())
                 # The listing's head revision lets a cached verdict answer
                 # without any per-repository request.
                 revision = _field(item, "sha")
@@ -965,13 +968,16 @@ def family_catalog(
     cache_dir=None,
     on_item=None,
     physical_memory=None,
+    ranking_task=None,
 ):
     """Return candidate downloads; actual installation must repeat pinned preflight.
 
     ``cache_dir`` reuses verdicts for unchanged revisions. ``on_item`` receives
     each accepted row as soon as it is checked, before the sorted report.
     Browsing rows carry a parent-model reference score when one is known, and
-    sources with one are inspected first; ``physical_memory`` (this machine's
+    sources with one are inspected first. Guided planning can also set
+    ``ranking_task`` to prioritize its bounded listing window without attaching
+    reference scores to its planned rows. ``physical_memory`` (this machine's
     by default) prefers models from a RAM list this machine can use.
     """
     from .catalog_cache import VerdictCache
@@ -1024,14 +1030,17 @@ def family_catalog(
         hub = huggingface_hub
     deadline = time.monotonic() + deadline_seconds
     cache = VerdictCache(cache_dir, family, planning=planning) if cache_dir is not None else None
-    # Guided setup ranks its own planned recipes; only browsing is ordered here.
-    ranking = None if planning else reference_scores()
+    if ranking_task not in (None, "general", "coding"):
+        return report(family, "error", "The model catalogue request is invalid.")
+    # Guided planning uses reference scores only to choose which bounded source
+    # metadata to inspect first. Its own report remains score-free.
+    ranking = reference_scores() if not planning or ranking_task is not None else None
     if ranking is not None and physical_memory is None:
         physical_memory = host_memory()
 
     def scored(item, tags=()):
         """Attach the reference score a checked row may show."""
-        if ranking is None:
+        if ranking is None or planning:
             return item
         base_name = _without_quantization_suffix(item["repo"].split("/")[-1], item["quantization"])
         reference = ranking.reference(item["repo"], item["revision"], item["quantization"], tags, base_name)
@@ -1056,8 +1065,12 @@ def family_catalog(
 
         def repositories():
             nonlocal discovery_failed
-            for seed in seeds:
-                yield seed, None, None
+            prioritize_seeds = planning and ranking is not None
+            seed_entries = [
+                (seed, pins.get(seed) or native_items.get(seed, {}).get("revision"), None) for seed in seeds
+            ]
+            if not prioritize_seeds or api is None:
+                yield from seed_entries
             if api is None:
                 return
             expected = offset + limit + 1
@@ -1075,6 +1088,16 @@ def family_catalog(
                             break
                 except Exception:
                     failed = True
+                if prioritize_seeds:
+                    # Registry order must not spend the guide's candidate
+                    # slots before its selected-task scores are considered.
+                    combined = {entry[0].casefold(): entry for entry in seed_entries}
+                    fixed = {repo.casefold() for repo in (*pins, *native_items)}
+                    for entry in window:
+                        key = entry[0].casefold()
+                        if key not in combined or key not in fixed:
+                            combined[key] = entry
+                    window = list(combined.values())
 
                 def placement(entry):
                     siblings = _field(entry[2], "siblings")
@@ -1084,10 +1107,26 @@ def family_catalog(
                         str(_field(sibling, "rfilename")).endswith(".safetensors") for sibling in siblings
                     )
                     rank = (
-                        ranking.priority(entry[0], _field(entry[2], "tags"), physical_memory) if importable else None
+                        ranking.priority(
+                            entry[0],
+                            _field(entry[2], "tags"),
+                            physical_memory,
+                            task=ranking_task if planning else None,
+                            revision=entry[1],
+                            exact_first=planning,
+                        )
+                        if importable
+                        else None
                     )
-                    # Scored sources from a list this machine can use, then
-                    # other scored sources, then the rest in listing order.
+                    if planning:
+                        # Exact scored parents and revision-reviewed exports
+                        # must reach guided admission before inferred quantized
+                        # variants, regardless of their inherited parent score.
+                        if rank is None:
+                            return (2, 1, 0)
+                        exact, fits, score = rank
+                        return (0 if exact else 1, 0 if fits else 1, -score)
+                    # Browsing preserves its established host-fit-first order.
                     return (2, 0) if rank is None else (0 if rank[0] else 1, -rank[1])
 
                 yield from sorted(window, key=placement)

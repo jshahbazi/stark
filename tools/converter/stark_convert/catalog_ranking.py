@@ -80,8 +80,8 @@ class ReferenceScores:
             "captured": self.captured,
         }
 
-    def priority(self, repo, tags, physical_memory=None):
-        """Order an unchecked listing entry: ``(fits a host-sized list, score)`` or ``None``.
+    def priority(self, repo, tags, physical_memory=None, *, task=None, revision=None, exact_first=False):
+        """Order an unchecked entry; ``exact_first`` adds an exact-source tier.
 
         The export format is unknown before inspection, so common export
         suffixes stand in for it here. Only ordering depends on this guess; a
@@ -91,12 +91,20 @@ class ReferenceScores:
         name = repo.split("/", 1)[1]
         folded = name.casefold()
         base_name = next((name[: -len(suffix)] for suffix in _EXPORT_SUFFIXES if folded.endswith(suffix)), None)
-        parent, _relationship = self._parent(repo, None, tags, base_name, True)
+        parent, relationship = self._parent(repo, revision, tags, base_name, True)
         rows = self.rows.get(parent)
         if not rows:
             return None
-        score = (rows.get("general") or rows["coding"])["score"]
-        _bucket, hosted = self.snapshot.for_host("general", physical_memory)
+        selected_task = task
+        if task is None:
+            task = "general" if "general" in rows else "coding"
+        if task not in TASKS or task not in rows:
+            return None
+        score = rows[task]["score"]
+        _bucket, hosted = self.snapshot.for_host(selected_task or "general", physical_memory)
+        if exact_first:
+            exact = relationship in {BENCHMARKED_MODEL, REVIEWED_EXPORT}
+            return exact, parent in hosted, score
         return parent in hosted, score
 
 
