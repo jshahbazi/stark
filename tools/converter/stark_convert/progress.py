@@ -34,28 +34,30 @@ CONVERTER_FAILURE_CATEGORIES = frozenset(
 
 def converter_failure_category(error: BaseException) -> str:
     """Map failures to a fixed, content-free diagnostic category."""
-    error_name = type(error).__name__
-    error_number = getattr(error, "errno", None)
-    if error_number in {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}:
-        return "disk_full"
-    if isinstance(error, PermissionError) or error_number in {errno.EPERM, errno.EACCES}:
-        return "permission_denied"
-    if error_name == "UnsupportedConversion":
-        return "unsupported_format_or_config"
-    if error_name == "ConversionError":
-        return "invalid_checkpoint"
     # Hub may wrap a transport error in LocalEntryNotFoundError. Inspect only
     # typed causes, never exception text (which can contain URLs or secrets).
     seen = set()
     current = error
+    transient = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        error_name = type(current).__name__
+        error_number = getattr(current, "errno", None)
+        if error_number in {errno.ENOSPC, getattr(errno, "EDQUOT", -1)}:
+            return "disk_full"
+        if isinstance(current, PermissionError) or error_number in {errno.EPERM, errno.EACCES}:
+            return "permission_denied"
+        if error_name == "UnsupportedConversion":
+            return "unsupported_format_or_config"
+        if error_name == "ConversionError":
+            return "invalid_checkpoint"
         response = getattr(current, "response", None)
         status = getattr(response, "status_code", None)
         if isinstance(status, int):
             if status in {408, 429, 500, 502, 503, 504}:
-                return "network_unavailable"
-            break  # Authentication, access and missing files require user action.
+                transient = True
+            else:
+                return "conversion_failed"  # Access and missing files require user action.
         if isinstance(
             current,
             (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, ConnectionError, TimeoutError),
@@ -66,9 +68,9 @@ def converter_failure_category(error: BaseException) -> str:
             errno.ECONNRESET,
             errno.ETIMEDOUT,
         }:
-            return "network_unavailable"
+            transient = True
         current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
-    return "conversion_failed"
+    return "network_unavailable" if transient else "conversion_failed"
 
 
 class FDProgressSink:

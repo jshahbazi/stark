@@ -155,6 +155,28 @@ def test_wrapped_transport_failure_and_terminal_errors():
     assert converter_failure_category(TimeoutError("private")) == "network_unavailable"
 
 
+@pytest.mark.parametrize(
+    "cause,category",
+    [
+        (PermissionError(13, "private"), "permission_denied"),
+        (OSError(28, "private"), "disk_full"),
+        (UnsupportedConversion("private"), "unsupported_format_or_config"),
+    ],
+)
+@pytest.mark.parametrize("wrapper", [RuntimeError, httpx.ConnectError])
+def test_wrapped_terminal_failure_does_not_retry_older_network_context(cause, category, wrapper):
+    outer = wrapper("private")
+    outer.__cause__ = cause
+    cause.__context__ = httpx.ConnectError("private")
+    assert converter_failure_category(outer) == category
+
+
+def test_untyped_cyclic_failure_chain_is_bounded():
+    outer, inner = RuntimeError("private"), RuntimeError("private")
+    outer.__cause__, inner.__cause__ = inner, outer
+    assert converter_failure_category(outer) == "conversion_failed"
+
+
 class ProgressHub(Hub):
     def __init__(self, repositories, *, cached=(), resume=()):
         super().__init__(repositories)

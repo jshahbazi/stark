@@ -3021,6 +3021,44 @@ def test_remote_download_resumes_same_command_and_staging_after_network_failure(
     assert [e["completed_bytes"] for e in progress_events(desktop, "download")] == [0, 40, 100]
 
 
+def test_download_retries_accumulate_network_bytes_without_regressing_completed_bytes(
+    desktop, model, converter_support
+):
+    def transfer(completed, transferred, state="running"):
+        return json.dumps(
+            {
+                "phase": "download",
+                "state": state,
+                "completed_bytes": completed,
+                "total_bytes": 100,
+                "transferred_bytes": transferred,
+            }
+        ).encode()
+
+    failure = json.dumps({"phase": "failure", "category": "network_unavailable"}).encode()
+    attempts = iter(
+        [
+            progress_spawn(model, [transfer(40, 100), failure], exit_code=1),
+            progress_spawn(model, [transfer(20, 30), transfer(60, 60), failure], exit_code=1),
+            progress_spawn(model, [transfer(100, 25, "complete")]),
+        ]
+    )
+    with (
+        patch(
+            "stark_convert.desktop.subprocess.Popen",
+            side_effect=lambda command, **kwargs: next(attempts)(command, **kwargs),
+        ),
+        patch("stark_convert.desktop.DOWNLOAD_RETRY_INITIAL_SECONDS", 0.001),
+    ):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+    download = progress_events(desktop, "download")
+    assert [e["completed_bytes"] for e in download] == [0, 40, 40, 60, 100]
+    assert [e.get("transferred_bytes") for e in download] == [None, 100, 130, 160, 185]
+    assert len(desktop.models) == 1
+    assert desktop.download_transferred_offset == 0
+
+
 @pytest.mark.parametrize("stop", [True, False])
 def test_download_retry_wait_can_be_cancelled_without_a_second_child(desktop, model, converter_support, stop):
     lines = [json.dumps({"phase": "failure", "category": "network_unavailable"}).encode()]

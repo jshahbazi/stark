@@ -463,6 +463,7 @@ class Desktop:
         self.download_retry_wake = threading.Event()
         self.download_retry_epoch = None
         self.download_interrupted_epoch = None
+        self.download_transferred_offset = 0
         self.guided_reports = {}
         self.guided_install_offer_id = None
         self.guided_hardware = {}
@@ -1689,6 +1690,8 @@ class Desktop:
         discarding = False
         exited_at = None
         failure_category = None
+        with self.lock:
+            transferred_offset = self.download_transferred_offset if self.download_retry_epoch == epoch else 0
         while True:
             if process.poll() is not None:
                 exited_at = exited_at or time.monotonic()
@@ -1721,6 +1724,22 @@ class Desktop:
                     # The app still validates/publishes the model and registry.
                     if event["phase"] == "conversion" and event["state"] == "complete":
                         event["state"] = "running"
+                    if event["phase"] == "download" and transferred_offset and "transferred_bytes" in event:
+                        event["transferred_bytes"] = min(2**63 - 1, transferred_offset + event["transferred_bytes"])
+                        # Initial cache-discovery frames from a restarted child
+                        # can trail the last attempt's logical byte count. Keep
+                        # its transfer accounting without moving the bar back.
+                        with self.lock:
+                            previous = self.install_progress.get("download", {})
+                            event["completed_bytes"] = max(
+                                event["completed_bytes"], previous.get("completed_bytes", 0)
+                            )
+                            totals = [
+                                value
+                                for value in (event["total_bytes"], previous.get("total_bytes"))
+                                if value is not None
+                            ]
+                            event["total_bytes"] = max(*totals, event["completed_bytes"]) if totals else None
                     self.progress(epoch, **event)
             if len(pending) > MAX_PROGRESS_BYTES:
                 pending = b""
@@ -1776,11 +1795,13 @@ class Desktop:
         """
         with self.lock:
             self.download_retry_epoch = epoch
+            self.download_transferred_offset = 0
         try:
             return self.retry_download_converter(command, environment, epoch)
         finally:
             with self.lock:
                 self.download_retry_epoch = None
+                self.download_transferred_offset = 0
 
     def retry_download_converter(self, command, environment, epoch):
         delay = DOWNLOAD_RETRY_INITIAL_SECONDS
@@ -1826,6 +1847,9 @@ class Desktop:
                 if epoch != self.epoch:
                     return result
                 self.check_install_cancelled(epoch)
+                self.download_transferred_offset = self.install_progress.get("download", {}).get(
+                    "transferred_bytes", 0
+                )
                 self.status("installing", "Resuming model download…", epoch)
             delay = min(delay * 2, 60)
 
@@ -1869,6 +1893,8 @@ class Desktop:
                 if epoch != self.epoch:
                     return None
                 self.check_install_cancelled(epoch)
+                if self.download_retry_epoch == epoch and self.system_asleep:
+                    return None
                 process = subprocess.Popen(
                     command,
                     stdin=subprocess.DEVNULL,
@@ -1931,6 +1957,55 @@ class Desktop:
                     if self.converter is process:
                         self.converter = None
 
+    def run_install_support_check(self, command, environment, epoch):
+        """Resume remote installation preflight only after sleep interrupted it.
+
+        Discovery and local checks retain their existing failure behavior. A
+        complete report, including unsupported/inconclusive results, remains
+        authoritative even if sleep arrived while its child was finishing.
+        """
+        with self.lock:
+            if epoch != self.epoch:
+                return None
+            self.download_retry_epoch = epoch
+        try:
+            while True:
+                with self.lock:
+                    if epoch != self.epoch:
+                        return None
+                    self.check_install_cancelled(epoch)
+                    asleep = self.system_asleep
+                    if asleep:
+                        self.status("installing", "Download paused. Waiting for a connection…", epoch)
+                if asleep and not self.wait_for_download_retry(epoch, 0):
+                    return None
+                failure = None
+                try:
+                    report = self.run_support_check(command, environment, epoch)
+                except DesktopError as error:
+                    report, failure = None, error
+                with self.lock:
+                    if epoch != self.epoch:
+                        return None
+                    self.check_install_cancelled(epoch)
+                    interrupted = self.download_interrupted_epoch == epoch
+                    self.download_interrupted_epoch = None
+                    if report is not None:
+                        return report
+                    if not interrupted:
+                        if failure is not None:
+                            raise failure
+                        return None
+                    self.status("installing", "Download paused. Waiting for a connection…", epoch)
+                if not self.wait_for_download_retry(epoch, 0):
+                    return None
+                self.status("installing", "Checking model family before downloading weights…", epoch)
+        finally:
+            with self.lock:
+                self.download_retry_epoch = None
+                if self.download_interrupted_epoch == epoch:
+                    self.download_interrupted_epoch = None
+
     def check_install_support(
         self,
         epoch,
@@ -1963,7 +2038,11 @@ class Desktop:
             command.append("--offline")
         environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
         self.status("installing", "Checking model family before downloading weights…", epoch)
-        report = self.run_support_check(command, environment, epoch)
+        report = (
+            self.run_install_support_check(command, environment, epoch)
+            if kind == "huggingface"
+            else self.run_support_check(command, environment, epoch)
+        )
         with self.lock:
             if epoch != self.epoch:
                 return None
