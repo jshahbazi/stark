@@ -5,6 +5,7 @@ struct CatalogModelRow: View {
     let downloaded: Bool
     let busy: Bool
     let showsRepositoryLink: Bool
+    let downloadProgress: InstallProgress?
     let download: () -> Void
 
     private var parameterLabel: String? {
@@ -14,6 +15,18 @@ struct CatalogModelRow: View {
     }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            row
+            if let progress = downloadProgress {
+                InstallStageView(title: "Download", phase: "download", progress: progress)
+            }
+        }
+        .help(item.repo + "\nVersion " + item.revision)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(item.name + ", version " + item.revision.prefix(7))
+    }
+
+    private var row: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
                 metadata
@@ -31,9 +44,6 @@ struct CatalogModelRow: View {
                 HStack { Spacer(minLength: 0); controls }
             }
         }
-        .help(item.repo + "\nVersion " + item.revision)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(item.name + ", version " + item.revision.prefix(7))
     }
 
     private var metadata: some View {

@@ -803,6 +803,7 @@ struct CatalogModelInstallation {
     let entryID: String
     let name: String
     let artifactMode: ModelArtifactMode
+    let progressKey: String
 }
 
 struct ModelRemovalConfirmation: Identifiable {
@@ -1190,6 +1191,7 @@ final class EngineController: ObservableObject {
     @Published private(set) var catalogLoading = false
     @Published private(set) var catalogError: String?
     @Published private(set) var catalogInstallation: CatalogModelInstallation?
+    @Published private var catalogDownloadProgress: [String: InstallProgress] = [:]
     @Published private(set) var catalogInstallMessage: String?
     @Published private(set) var catalogInstallFailed = false
     @Published private(set) var removingModelID: String?
@@ -1622,6 +1624,7 @@ final class EngineController: ObservableObject {
             pendingSupportRequestID = nil
             activeInstallRequestID = nil
             if let completed = catalogInstallation {
+                catalogDownloadProgress.removeValue(forKey: completed.progressKey)
                 catalogInstallation = nil
                 catalogInstallMessage = "Downloaded"; catalogInstallFailed = false
                 if let familyID = catalogFamilyID { requestModelCatalog(familyID: familyID) }
@@ -1764,7 +1767,10 @@ final class EngineController: ObservableObject {
             let total = event["total_bytes"] as? Int64
             guard total == nil || (total! >= 0 && completed <= total!) else { return }
             let progress = InstallProgress(state: progressState, completedBytes: completed, totalBytes: total)
-            if phase == "download" { downloadProgress = progress } else { conversionProgress = progress }
+            if phase == "download" {
+                downloadProgress = progress
+                if let installation = catalogInstallation { catalogDownloadProgress[installation.progressKey] = progress }
+            } else { conversionProgress = progress }
         default: break
         }
     }
@@ -2263,6 +2269,17 @@ final class EngineController: ObservableObject {
         models.contains { item.installedIDs.contains($0.id) && $0.artifactMode == artifactMode }
     }
 
+    private func catalogProgressKey(_ item: FamilyModelCatalog.Item) -> String {
+        [item.repo, item.revision, item.installationMode.rawValue].joined(separator: "|")
+    }
+
+    func retainedCatalogDownloadProgress(for item: FamilyModelCatalog.Item) -> InstallProgress? {
+        let key = catalogProgressKey(item)
+        guard catalogInstallation?.progressKey != key,
+              !catalogItemIsDownloaded(item, artifactMode: item.installationMode) else { return nil }
+        return catalogDownloadProgress[key]
+    }
+
     func installCatalogItem(id: String) {
         guard !busy, let requestID = catalogRequestID, let catalog = catalog, catalog.status == .ready,
               let item = catalog.items.first(where: { $0.id == id }), item.downloadable,
@@ -2272,7 +2289,8 @@ final class EngineController: ObservableObject {
         let supportID = UUID().uuidString.lowercased()
         pendingSupportRequestID = supportID; activeInstallRequestID = supportID
         catalogInstallation = CatalogModelInstallation(requestID: supportID, catalogRequestID: requestID,
-                                                       entryID: id, name: item.name, artifactMode: artifactMode)
+                                                       entryID: id, name: item.name, artifactMode: artifactMode,
+                                                       progressKey: catalogProgressKey(item))
         catalogInstallMessage = nil; catalogInstallFailed = false
         state = "installing"; message = "Checking model support…"
         if !send(["command": "install_catalog", "catalog_request_id": requestID, "entry_id": id,
@@ -2418,6 +2436,10 @@ final class EngineController: ObservableObject {
     private func endInstallProgress(_ state: String) {
         if ["waiting", "running"].contains(downloadProgress.state) { downloadProgress.state = state }
         if ["waiting", "running"].contains(conversionProgress.state) { conversionProgress.state = state }
+        if let installation = catalogInstallation, var progress = catalogDownloadProgress[installation.progressKey] {
+            if ["waiting", "running"].contains(progress.state) { progress.state = state }
+            catalogDownloadProgress[installation.progressKey] = progress
+        }
     }
 
     private func discardPendingMessage() {
@@ -2998,7 +3020,8 @@ struct ModelsView: View {
                 if item.id != group.items.first?.id { Divider().padding(.vertical, 6) }
                 CatalogModelRow(item: item,
                     downloaded: engine.catalogItemIsDownloaded(item, artifactMode: item.installationMode),
-                    busy: engine.busy, showsRepositoryLink: group.items.count > 1) {
+                    busy: engine.busy, showsRepositoryLink: group.items.count > 1,
+                    downloadProgress: engine.retainedCatalogDownloadProgress(for: item)) {
                         engine.installCatalogItem(id: item.id)
                     }
             }
