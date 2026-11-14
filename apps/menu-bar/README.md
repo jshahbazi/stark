@@ -293,6 +293,10 @@ installation on the next launch. Disk, permission, access, checkpoint and
 conversion failures still require action. Model failure messages include the
 requested model's short name, including when another model remains loaded.
 
+Stopping a catalog download keeps the selected family, discovered models and pagination available for another download. Stopped or failed catalog downloads retain their last reported download progress on the model row for the current app session. Restarting that model’s download hides the row summary while the full progress panel is shown. Progress is matched by repository, pinned revision and artifact mode; it is not a fresh measurement of the download cache.
+
+For converted checkpoints, the download byte count estimates progress from network activity when file reconstruction lags, includes cached files, and caps transfer estimates below completion until reconstruction catches up.
+
 The catalogue starts with known sources, then follows the family's Hugging Face
 architecture search through successive pages. Each request checks up to 30
 distinct candidates; there is no fixed total result ceiling. **Load more models**

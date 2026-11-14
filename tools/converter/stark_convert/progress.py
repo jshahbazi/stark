@@ -1,7 +1,8 @@
 """Private, content-free byte progress for model installation.
 
 Only phase names, fixed states and numeric counts leave this module. Download
-counts describe source bytes available locally, including reusable cached bytes.
+counts estimate source-download progress, including reusable cached bytes and
+network activity when file reconstruction lags.
 """
 
 from __future__ import annotations
@@ -197,6 +198,7 @@ class DownloadProgress:
             def __init__(self, *args, total=None, initial=0, **kwargs):
                 self.total = total if type(total) is int and total >= 0 else owner.sizes.get(key)
                 self.n = initial if type(initial) is int and initial >= 0 else 0
+                self.transferred = self.n
                 owner.count(key, self.n, self.total)
 
             def update(self, amount=1):
@@ -204,11 +206,18 @@ class DownloadProgress:
                     self.n = max(0, self.n + amount)
                     owner.count(key, self.n, self.total)
 
-            def update_transfer(self, _amount=1):
-                # HF Xet discovers this method and uses a single bar. File
-                # reconstruction is the source-byte count; network transfers
-                # are a separate counter and must not be added to it.
-                pass
+            def update_transfer(self, amount=1):
+                if type(amount) is not int:
+                    return
+                with owner.lock:
+                    self.transferred = max(0, self.transferred + amount)
+                    estimate = self.transferred
+                    if self.total is not None:
+                        # Transfers can exceed file size (retries/Xet overhead).
+                        # Leave completion to reconstruction and validation.
+                        estimate = min(estimate, self.total * 99 // 100)
+                    # Both counters describe the same file; never sum them.
+                    owner.count(key, max(self.n, estimate), self.total)
 
             def set_postfix_str(self, *_args, **_kwargs):
                 pass

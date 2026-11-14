@@ -2169,6 +2169,36 @@ extension EngineController {
                   !engine.catalogItemIsDownloaded(parsed, artifactMode: .visionLanguage) else { return false }
             engine.apply(["event": "models", "models": [["id": "fixture-model", "name": "Exact saved name", "path": "/private/model", "artifact_mode": "unknown"]]])
             return !engine.catalogItemIsDownloaded(parsed, artifactMode: .text) && engine.loadedID == "fixture-model"
+        case "catalog-retained-download-progress":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            guard let item = engine.catalog?.items.first else { return false }
+            engine.installCatalogItem(id: item.id)
+            let install = command()
+            engine.apply(["event": "progress", "request_id": install["support_request_id"]!,
+                          "phase": "download", "state": "running", "completed_bytes": Int64(40), "total_bytes": Int64(100)])
+            guard engine.retainedCatalogDownloadProgress(for: item) == nil else { return false }
+            engine.stop()
+            let stop = commands().last!
+            guard stop["command"] as? String == "stop", stop["preserve_catalog"] as? Bool == true,
+                  engine.catalog?.items.first?.id == item.id, engine.catalogFamilyID == "qwen3",
+                  engine.catalogRequestID == browse["request_id"] as? String else { return false }
+            guard let retained = engine.retainedCatalogDownloadProgress(for: item),
+                  retained.completedBytes == 40, retained.totalBytes == 100,
+                  retained.state == "cancelled", retained.fraction == 0.4 else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard !engine.busy, engine.catalog?.status == .ready else { return false }
+            guard engine.retainedCatalogDownloadProgress(for: item)?.completedBytes == 40 else { return false }
+            var changed = catalogItem(); changed["revision"] = String(repeating: "b", count: 40)
+            guard let otherRevision = FamilyModelCatalog.Item(changed),
+                  engine.retainedCatalogDownloadProgress(for: otherRevision) == nil else { return false }
+            engine.installCatalogItem(id: item.id)
+            guard engine.catalogInstallation != nil,
+                  engine.retainedCatalogDownloadProgress(for: item) == nil else { return false }
+            engine.apply(["event": "progress", "request_id": install["support_request_id"]!,
+                          "phase": "download", "state": "running", "completed_bytes": Int64(99), "total_bytes": Int64(100)])
+            engine.stop()
+            return engine.retainedCatalogDownloadProgress(for: item)?.completedBytes == 40
         case "catalog-install-selection":
             var callbacks = 0; engine.onInstalled = { callbacks += 1 }
             engine.requestModelCatalog(familyID: "qwen3")
@@ -2303,10 +2333,9 @@ extension EngineController {
             let install = command()
             engine.stop()
             let stoppedCommands = commands()
-            guard stoppedCommands.map({ $0["command"] as! String }) == ["stop", "catalog"],
-                  let refresh = stoppedCommands.last,
-                  refresh["request_id"] as? String != browse["request_id"] as? String,
-                  engine.catalogFamilyID == "qwen3", engine.catalogLoading,
+            guard stoppedCommands.map({ $0["command"] as! String }) == ["stop"],
+                  stoppedCommands.first?["preserve_catalog"] as? Bool == true,
+                  engine.catalogFamilyID == "qwen3", !engine.catalogLoading,
                   engine.catalogInstallation == nil, engine.activeInstallRequestID == nil else { return false }
             engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
             engine.selectedID = "replacement"
@@ -2314,16 +2343,9 @@ extension EngineController {
             engine.apply(["event": "installed", "support_request_id": install["support_request_id"]!, "model": ["id": "stale-model"]])
             engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Stale failure"])
             engine.apply(catalogReply(browse))
-            guard engine.catalog == nil, engine.catalogLoading, engine.errorMessage == nil,
-                  engine.catalogInstallMessage == nil, !engine.catalogInstallFailed else { return false }
-            engine.apply(catalogReply(refresh))
-            guard engine.selectedID == "replacement", engine.loadedID == "replacement", engine.modelReady,
-                  engine.catalog?.status == .ready, engine.catalog?.items.map(\.id) == ["entry"],
-                  !engine.catalogLoading, engine.catalogError == nil else { return false }
-            engine.installCatalogItem(id: "entry")
-            let retry = command()
-            return retry["command"] as? String == "install_catalog" &&
-                retry["catalog_request_id"] as? String == refresh["request_id"] as? String
+            return engine.selectedID == "replacement" && engine.loadedID == "replacement" && engine.modelReady &&
+                engine.catalog?.items.first?.id == "entry" && engine.catalogFamilyID == "qwen3" &&
+                engine.catalogInstallation == nil && engine.errorMessage == nil
         case "model-removal-confirmation":
             let imported = InstalledModel(id: "imported", name: "Exact imported name", path: "/private/imported", apiID: "id",
                                           removal: InstalledModelRemoval(removal("unregister")))
@@ -3298,6 +3320,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_downloaded_catalog_status_matches_live_ids_and_artifact_mode(self):
         self.exercise("catalog-installed-mode")
+
+    def test_catalog_retains_stopped_download_progress_until_restart(self):
+        self.exercise("catalog-retained-download-progress")
 
     def test_catalog_install_retains_selection_and_browser_after_terminal_status(self):
         self.exercise("catalog-install-selection")
