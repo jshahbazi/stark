@@ -60,18 +60,28 @@ URLs may produce different inputs.
 
 ## Approved entries
 
-| Family ID | Family | Index | Scored models |
-| --- | --- | ---: | ---: |
-| qwen4_exp | Qwen3.8 Flash Next | 100.0 | 1 |
-| glm5_next | GLM-5.3 Flash | 97.3 | 1 |
-| qwen3_5 | Qwen3.5 dense | 61.1 | 6 |
-| qwen3 | Qwen3 dense | 48.3 | 3 |
-| qwen2 | Qwen2 dense | 41.0 | 6 |
-| phi3 | Phi-3 dense | 34.9 | 1 |
-| gemma3_text | Gemma 3 text | 25.2 | 3 |
-| mistral | Mistral dense | 18.3 | 3 |
-| llama | Llama dense | 13.3 | 3 |
-| gemma2 | Gemma 2 dense | 1.3 | 1 |
+| Family ID | Family | Index | Reference models | Shared benchmarks |
+| --- | --- | ---: | ---: | ---: |
+| qwen4_exp | Qwen3.8 Flash Next | 100.0 | 1 | 5 |
+| glm5_next | GLM-5.3 Flash | 97.3 | 1 | 8 |
+| qwen3_5 | Qwen3.5 dense | 61.1 | 6 | 18 |
+| qwen3 | Qwen3 dense | 48.3 | 3 | 6 |
+| qwen2 | Qwen2 dense | 41.0 | 6 | 17 |
+| phi3 | Phi-3 dense | 34.9 | 1 | 4 |
+| gemma3_text | Gemma 3 text | 25.2 | 3 | 9 |
+| mistral | Mistral dense | 18.3 | 3 | 5 |
+| llama | Llama dense | 13.3 | 3 | 13 |
+| gemma2 | Gemma 2 dense | 1.3 | 1 | 3 |
+
+The UI labels model coverage as **Based on N reference models** and shows
+**N shared benchmarks** separately. The benchmark count is the union of
+distinct source/version columns on retained comparison edges incident to a
+family's scored models. Repeated use of a column across model pairs counts
+once. Related benchmark variants can be separate columns within one weighted
+group; this count does not imply independent groups or identical coverage for
+every model. The aggregate JSON retains each family's exact column IDs.
+These counts were derived from the same frozen 28-model, 167-edge graph;
+the scores and ranking were not recalculated against the newer catalog roster.
 
 ## Interpretation
 

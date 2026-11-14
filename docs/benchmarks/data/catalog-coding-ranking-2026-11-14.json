@@ -10,7 +10,15 @@
         1,
         1
       ],
-      "disconnected_trials": 0
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 5,
+      "shared_benchmark_columns": [
+        "models-dev:nl2repo",
+        "whatmodel:deepswe-v1-1",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:swe-bench-multilingual",
+        "whatmodel:swe-bench-pro-qwen-refined"
+      ]
     },
     {
       "family": "GLM-5.3 Flash",
@@ -20,7 +28,18 @@
         2,
         2
       ],
-      "disconnected_trials": 0
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 8,
+      "shared_benchmark_columns": [
+        "livebench:v2/2026-11-06/coding",
+        "vals:code-migration/overall",
+        "vals:ioi/overall",
+        "vals:lcb/overall",
+        "vals:programbench/overall",
+        "vals:skillsbench/overall",
+        "whatmodel:deepswe-v1-1",
+        "whatmodel:luau-leetcode-full-pass"
+      ]
     },
     {
       "family": "Qwen3.5 dense",
@@ -30,7 +49,28 @@
         3,
         3
       ],
-      "disconnected_trials": 3
+      "disconnected_trials": 3,
+      "shared_benchmark_count": 18,
+      "shared_benchmark_columns": [
+        "livebench:v2/2026-11-06/coding",
+        "models-dev:nl2repo",
+        "vals:code-migration/overall",
+        "vals:ioi/overall",
+        "vals:lcb/overall",
+        "vals:programbench/overall",
+        "vals:skillsbench/overall",
+        "whatmodel:deepswe-v1-1",
+        "whatmodel:humaneval-plus",
+        "whatmodel:livecodebench-pro-2025q2-easy",
+        "whatmodel:livecodebench-pro-2025q2-medium",
+        "whatmodel:livecodebench-v6",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:mbpp-plus",
+        "whatmodel:multipl-e",
+        "whatmodel:swe-bench-multilingual",
+        "whatmodel:swe-bench-pro-qwen-refined",
+        "whatmodel:swe-bench-verified"
+      ]
     },
     {
       "family": "Qwen3 dense",
@@ -40,7 +80,16 @@
         4,
         4
       ],
-      "disconnected_trials": 0
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 6,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-polyglot",
+        "whatmodel:livecodebench-v6",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:multipl-e",
+        "whatmodel:swe-bench-verified",
+        "whatmodel:webapp1k-duo-react-pass1"
+      ]
     },
     {
       "family": "Qwen2 dense",
@@ -50,7 +99,27 @@
         5,
         6
       ],
-      "disconnected_trials": 0
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 17,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-code-editing",
+        "whatmodel:aider-polyglot",
+        "whatmodel:codereviewqa-acr-exact-match",
+        "whatmodel:codereviewqa-clh-invariant-accuracy",
+        "whatmodel:codereviewqa-ctr-invariant-accuracy",
+        "whatmodel:codereviewqa-sih-invariant-accuracy",
+        "whatmodel:cruxeval-i",
+        "whatmodel:cruxeval-o",
+        "whatmodel:humaneval",
+        "whatmodel:humaneval-plus",
+        "whatmodel:livecodebench-official-20240101-20241101",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:mbpp",
+        "whatmodel:mbpp-plus",
+        "whatmodel:multipl-e",
+        "whatmodel:webapp1k-duo-react-pass1",
+        "whatmodel:webapp1k-react-pass1"
+      ]
     },
     {
       "family": "Phi-3 dense",
@@ -60,7 +129,14 @@
         6,
         6
       ],
-      "disconnected_trials": 0
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 4,
+      "shared_benchmark_columns": [
+        "whatmodel:humaneval",
+        "whatmodel:humaneval-plus",
+        "whatmodel:mbpp",
+        "whatmodel:mbpp-plus"
+      ]
     },
     {
       "family": "Gemma 3 text",
@@ -70,7 +146,19 @@
         7,
         7
       ],
-      "disconnected_trials": 0
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 9,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-polyglot",
+        "whatmodel:bird-sql-dev",
+        "whatmodel:humaneval",
+        "whatmodel:livecodebench-v6",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:mbpp",
+        "whatmodel:viseditbench-pass",
+        "whatmodel:webapp1k-duo-react-pass1",
+        "whatmodel:webapp1k-react-pass1"
+      ]
     },
     {
       "family": "Mistral dense",
@@ -80,7 +168,15 @@
         8,
         8
       ],
-      "disconnected_trials": 2
+      "disconnected_trials": 2,
+      "shared_benchmark_count": 5,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-code-editing",
+        "whatmodel:humaneval",
+        "whatmodel:humaneval-plus",
+        "whatmodel:mbpp",
+        "whatmodel:mbpp-plus"
+      ]
     },
     {
       "family": "Llama dense",
@@ -90,7 +186,23 @@
         8,
         9
       ],
-      "disconnected_trials": 0
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 13,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-code-editing",
+        "whatmodel:codereviewqa-acr-exact-match",
+        "whatmodel:codereviewqa-clh-invariant-accuracy",
+        "whatmodel:codereviewqa-ctr-invariant-accuracy",
+        "whatmodel:codereviewqa-sih-invariant-accuracy",
+        "whatmodel:cruxeval-zeroeval",
+        "whatmodel:humaneval",
+        "whatmodel:humaneval-plus",
+        "whatmodel:livecodebench-official-20240101-20241101",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:mbpp",
+        "whatmodel:mbpp-plus",
+        "whatmodel:webapp1k-react-pass1"
+      ]
     },
     {
       "family": "Gemma 2 dense",
@@ -100,7 +212,13 @@
         9,
         10
       ],
-      "disconnected_trials": 0
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 3,
+      "shared_benchmark_columns": [
+        "whatmodel:cruxeval-zeroeval",
+        "whatmodel:humaneval",
+        "whatmodel:mbpp"
+      ]
     }
   ],
   "models": [
@@ -340,5 +458,6 @@
     "stark-llmbench-livebench.json": "94df54db64e49e49fbd23389273d04830cc05fbc5f5e86a3f5e9d165aff7fdf5",
     "stark-llmbench-vals.json": "141794ca6c5b0351b20741f9270b913ca0e4affd00271b97464a20d59f4dc23f"
   },
-  "roster_sha256": "d497c720060d226f325d417df773ed8516c3a37ad7449ceb904aa6281db0262b"
+  "roster_sha256": "d497c720060d226f325d417df773ed8516c3a37ad7449ceb904aa6281db0262b",
+  "benchmark_count_definition": "Distinct source/version benchmark columns participating in at least one retained two-group pairwise comparison involving a scored reference model in the family; union across models, not sum."
 }

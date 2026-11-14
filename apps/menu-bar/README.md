@@ -202,7 +202,9 @@ The family overview uses compact, full-width rows in a single column.
 
 **Top Models** shows the ten ranked families from the November 14, 2026
 llmbench shared-benchmark calculation, in descending coding-index order. Each
-row shows its original rank, relative index and number of scored models. Search
+row shows its original rank, relative index, **Based on N reference models**
+and a separate shared-benchmark count. Benchmarks count once across the family
+when used in a retained comparison; individual model coverage varies. Search
 preserves that order; selecting a row opens the existing family catalog, with
 Back returning to the ranking. The snapshot remains visible before the backend
 is ready; browsing is enabled when that family is available. It does not fetch
