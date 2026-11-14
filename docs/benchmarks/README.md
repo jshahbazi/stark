@@ -12,6 +12,15 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Catalog coding ranking snapshot (2026-11-14).** The Top Models tab uses a
+shared-benchmark relative index across 28 catalog-matched models and 167
+pairwise comparisons, averaged into ten family entries. This is external
+reference-model evidence, independent of Stark's native performance and
+artifact qualification records. See the [calculation and provenance](2026-11-14-catalog-coding-ranking.md)
+and [aggregate results](data/catalog-coding-ranking-2026-11-14.json).
+This replaces the earlier exploratory percentile calculation for this UI;
+it does not supersede any native validation result.
+
 **Ripple attention decode diagnostic (2026-11-12).** A same-loaded-model,
 teacher-forced snapshot diagnostic at a 1,024-token prefix measures median
 native decode at 6.639

@@ -1042,13 +1042,43 @@ struct ModelRemovalConfirmation: Identifiable {
     }
 }
 
+// Frozen shared-benchmark calculation; provenance and limitations:
+// docs/benchmarks/2026-11-14-catalog-coding-ranking.md
+struct TopModelRanking: Identifiable {
+    let id: String
+    let name: String
+    let index: Double
+    let modelCount: Int
+    let benchmarkCount: Int
+
+    static let entries: [Self] = [
+        .init(id: "qwen4_exp", name: "Qwen3.8 Flash Next", index: 100.0, modelCount: 1, benchmarkCount: 5),
+        .init(id: "glm5_next", name: "GLM-5.3 Flash", index: 97.3, modelCount: 1, benchmarkCount: 8),
+        .init(id: "qwen3_5", name: "Qwen3.5 dense", index: 61.1, modelCount: 6, benchmarkCount: 18),
+        .init(id: "qwen3", name: "Qwen3 dense", index: 48.3, modelCount: 3, benchmarkCount: 6),
+        .init(id: "qwen2", name: "Qwen2 dense", index: 41.0, modelCount: 6, benchmarkCount: 17),
+        .init(id: "phi3", name: "Phi-3 dense", index: 34.9, modelCount: 1, benchmarkCount: 4),
+        .init(id: "gemma3_text", name: "Gemma 3 text", index: 25.2, modelCount: 3, benchmarkCount: 9),
+        .init(id: "mistral", name: "Mistral dense", index: 18.3, modelCount: 3, benchmarkCount: 5),
+        .init(id: "llama", name: "Llama dense", index: 13.3, modelCount: 3, benchmarkCount: 13),
+        .init(id: "gemma2", name: "Gemma 2 dense", index: 1.3, modelCount: 1, benchmarkCount: 3),
+    ]
+
+    var rank: Int { (Self.entries.firstIndex(where: { $0.id == id }) ?? 0) + 1 }
+
+    static func matching(_ query: String) -> [Self] {
+        entries.filter { ModelBrowserSearch.matches(query, fields: [$0.name, $0.id]) }
+    }
+}
+
 enum ModelsSheetTab: String, CaseIterable {
-    case installed, download, installModel
+    case installed, topModels, download, installModel
     static let initial = Self.installed
 
     func title(modelCount: Int) -> String {
         switch self {
         case .installed: return "Installed (\(modelCount))"
+        case .topModels: return "Top Models"
         case .download: return "Model Catalog"
         case .installModel: return "Add from Source"
         }
@@ -1057,6 +1087,7 @@ enum ModelsSheetTab: String, CaseIterable {
     var emptyTitle: String {
         switch self {
         case .installed: return "No models yet"
+        case .topModels: return "No ranked families"
         case .download: return "No families available"
         case .installModel: return "Install a model"
         }
@@ -1064,6 +1095,7 @@ enum ModelsSheetTab: String, CaseIterable {
     var emptyMessage: String {
         switch self {
         case .installed: return "Install a model to add it here."
+        case .topModels: return "Ranked model families will appear here."
         case .download: return "No model families are available in this version of Stark."
         case .installModel: return "Choose a repository or local folder."
         }
@@ -3017,6 +3049,7 @@ struct ModelsView: View {
     @State private var selectedFamily: ModelsInventory.Family?
     @State private var removalConfirmation: ModelRemovalConfirmation?
     @State private var savedQuery = ""
+    @State private var topModelsQuery = ""
     @State private var familiesQuery = ""
     @State private var catalogQuery = ""
     @State private var catalogQuantization = CatalogQuantizationFilter.all
@@ -3049,6 +3082,7 @@ struct ModelsView: View {
     }
 
     private var searchPrompt: String {
+        if navigation.tab == .topModels && selectedFamily == nil { return "Search top families" }
         switch browserScope {
         case .saved: return "Search downloaded models"
         case .families: return "Search families"
@@ -3057,6 +3091,9 @@ struct ModelsView: View {
     }
 
     private var queryBinding: Binding<String> {
+        if navigation.tab == .topModels && selectedFamily == nil {
+            return Binding(get: { topModelsQuery }, set: { topModelsQuery = $0 })
+        }
         let scope = browserScope
         return Binding(get: {
             switch scope { case .saved: return savedQuery; case .families: return familiesQuery; case .catalog: return catalogQuery }
@@ -3086,7 +3123,7 @@ struct ModelsView: View {
         let inventory = self.inventory
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
-                if navigation.tab == .download, let family = selectedFamily {
+                if let family = selectedFamily {
                     Button { leaveFamily() } label: { Label("Back", systemImage: "chevron.left") }.buttonStyle(.link)
                     Text(family.name).font(.title2.weight(.semibold))
                 } else { Text("Manage Models").font(.title2.weight(.semibold)) }
@@ -3112,9 +3149,11 @@ struct ModelsView: View {
                         Button { queryBinding.wrappedValue = "" } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain).foregroundStyle(.secondary).help("Clear search").accessibilityLabel("Clear search")
                     }
-                    Picker("Sort", selection: sortBinding) {
-                        ForEach(browserScope.sorts, id: \.self) { Text($0.title).tag($0) }
-                    }.labelsHidden().frame(width: 178).accessibilityLabel("Sort models")
+                    if navigation.tab != .topModels || selectedFamily != nil {
+                        Picker("Sort", selection: sortBinding) {
+                            ForEach(browserScope.sorts, id: \.self) { Text($0.title).tag($0) }
+                        }.labelsHidden().frame(width: 178).accessibilityLabel("Sort models")
+                    }
                 }
                 if selectedFamily == nil && navigation.tab == .download {
                     Label("Scroll to browse all model families", systemImage: "arrow.down")
@@ -3135,6 +3174,7 @@ struct ModelsView: View {
                 }
                 ScrollView {
                     if let family = selectedFamily { catalogContent(family) }
+                    else if navigation.tab == .topModels { topModelsContent(inventory.families) }
                     else if navigation.tab == .installed {
                         if engine.models.isEmpty { emptyState(navigation.tab) }
                         else if inventory.groups.isEmpty { noSearchResults("No matching models") }
@@ -3246,6 +3286,49 @@ struct ModelsView: View {
             Text(selection.emptyTitle).font(.headline)
             Text(selection.emptyMessage).font(.callout).foregroundStyle(.secondary)
         }.frame(maxWidth: .infinity, minHeight: 300)
+    }
+
+    private func topModelsContent(_ families: [ModelsInventory.Family]?) -> some View {
+        LazyVStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Coding index · November 14, 2026").font(.caption.weight(.semibold))
+                Spacer()
+                Link("llmbench.site", destination: URL(string: "https://llmbench.site/data/")!).font(.caption)
+            }
+            Text("Top 10 families by shared coding benchmarks. Family averages cover reference models; Flash Next = 100.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .help("Experimental relative index, not a pass percentage. Coverage and evaluation settings vary. Publisher results do not qualify Stark's quantized models. Phi-3's scored model is Phi-4 Mini.")
+                .padding(.bottom, 4)
+            if TopModelRanking.matching(topModelsQuery).isEmpty { noSearchResults("No matching top families") }
+            ForEach(TopModelRanking.matching(topModelsQuery)) { entry in
+                let family = families?.first(where: { $0.id == entry.id })
+                Button {
+                    guard let family else { return }
+                    selectedFamily = family; catalogQuery = ""; catalogQuantization = .all
+                    engine.requestModelCatalog(familyID: family.id)
+                } label: {
+                    HStack(spacing: 10) {
+                        Text("\(entry.rank)").font(.callout.monospacedDigit()).foregroundStyle(.secondary).frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.name).font(.callout.weight(.medium))
+                            HStack(spacing: 10) {
+                                Text("Based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models")")
+                                Text("\(entry.benchmarkCount) shared benchmarks")
+                                    .help("Distinct benchmark results used in comparisons involving this family's reference models. Each benchmark counts once across the family; coverage varies by model.")
+                            }.font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                        Text(entry.index, format: .number.precision(.fractionLength(1)))
+                            .font(.callout.monospacedDigit().weight(.semibold))
+                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, minHeight: 38, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary, lineWidth: 1))
+                }.buttonStyle(.plain).disabled(family == nil)
+                    .help(family == nil ? "Family browsing will be available when Stark is ready." : "Browse \(entry.name) models")
+                    .accessibilityLabel("Rank \(entry.rank), \(entry.name), coding index \(entry.index.formatted(.number.precision(.fractionLength(1)))), based on \(entry.modelCount) reference \(entry.modelCount == 1 ? "model" : "models"), \(entry.benchmarkCount) shared benchmarks")
+            }
+        }
     }
 
     private func noSearchResults(_ title: String) -> some View {
