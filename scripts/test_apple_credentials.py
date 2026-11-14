@@ -37,6 +37,53 @@ def environment(root: Path) -> dict[str, str]:
 
 
 class AppleCredentialTests(unittest.TestCase):
+    def test_failure_stages_identify_operations_without_exposing_diagnostics(self):
+        cases = (
+            (("import",), "import_certificate"),
+            (("clang",), "signing_probe_compile"),
+            (("--force",), "signing_probe_sign"),
+            (("--verify",), "signing_probe_verify"),
+            (("notarytool", "store-credentials"), "store_notary_credentials"),
+        )
+        for failing_prefix, stage in cases:
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                commands = []
+
+                def run(arguments, **kwargs):
+                    commands.append(arguments)
+                    if arguments[1 : 1 + len(failing_prefix)] == failing_prefix:
+                        return subprocess.CompletedProcess(
+                            arguments,
+                            1,
+                            b"synthetic secret stdout",
+                            b"synthetic secret stderr",
+                        )
+                    if arguments[1] == "create-keychain":
+                        Path(arguments[-1]).touch()
+                    return subprocess.CompletedProcess(
+                        arguments, 0, b'"/original/login.keychain-db"\n', b""
+                    )
+
+                progress, errors = io.StringIO(), io.StringIO()
+                with (
+                    patch.dict(os.environ, environment(root), clear=True),
+                    patch.object(credentials.subprocess, "run", side_effect=run),
+                    contextlib.redirect_stdout(progress),
+                    contextlib.redirect_stderr(errors),
+                ):
+                    self.assertEqual(credentials.main(["setup"]), 1)
+                self.assertEqual(
+                    progress.getvalue().splitlines()[-1],
+                    f"apple_credentials_setup_stage={stage}",
+                )
+                self.assertEqual(errors.getvalue(), "apple_credentials_setup_failed\n")
+                self.assertNotIn("synthetic", progress.getvalue() + errors.getvalue())
+                self.assertFalse((root / "stark-signing").exists())
+                self.assertTrue(
+                    any(command[1] == "delete-keychain" for command in commands)
+                )
+
     def test_private_files_refuse_replacement_and_use_owner_permissions(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "private"
