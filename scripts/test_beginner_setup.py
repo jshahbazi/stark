@@ -533,6 +533,7 @@ struct BeginnerChecks {
                 "license": "test", "qualification": "Synthetic fixture", "caveats": [String]()
             ]
             guard let legacy = BeginnerModelReport.Item(raw), legacy.gpuRuntimeBytes == 100,
+                  legacy.startupBytes == 100,
                   legacy.memoryDetails.count == 1, legacy.benchmarkDetails.isEmpty else { return false }
             let report: [String: Any] = ["schema_version": 1, "status": "ready", "message": "Fixture",
                                         "host": ["available_memory_bytes": 0], "items": [raw]]
@@ -550,6 +551,15 @@ struct BeginnerChecks {
             raw["gpu_memory_bytes_estimate"] = 50
             guard let paged = BeginnerModelReport.Item(raw), paged.gpuRuntimeBytes == 50,
                   paged.memoryDetails.count == 3 else { return false }
+            raw["startup_memory_bytes_estimate"] = 60
+            guard let resident = BeginnerModelReport.Item(raw), resident.startupBytes == 60,
+                  !resident.beginnerSummary(availableMemoryBytes: 60).contains("Free up memory"),
+                  resident.beginnerSummary(availableMemoryBytes: 59).contains("Free up memory") else { return false }
+            for invalid in [0, -1, 101, true, 1.5, "60"] as [Any] {
+                raw["startup_memory_bytes_estimate"] = invalid
+                if BeginnerModelReport.Item(raw) != nil { return false }
+            }
+            raw.removeValue(forKey: "startup_memory_bytes_estimate")
             raw["setup_disk_bytes_remaining_estimate"] = 20
             guard BeginnerModelReport.Item(raw)?.setupBytes == 20 else { return false }
             raw["setup_disk_bytes_remaining_estimate"] = 101

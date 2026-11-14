@@ -32,7 +32,7 @@ from .guided_memory import config_identity, native_request_bytes
 from .guided_memory_profiles import ResidentProfile, qualified_profile, source_profile
 from .model_inventory import MAX_HEADER_BYTES, _weights
 from .recommendation_benchmarks import load_registry
-from .recommendation_leaderboard import QUALITY_MAX_SCORE_GAP, load_snapshot, speed_policy
+from .recommendation_leaderboard import MAX_ALTERNATIVE_SCORE_GAP, load_snapshot, speed_policy
 from .registry import get_model
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, read_safetensors_header
 
@@ -1076,8 +1076,8 @@ def recommendation_report(
         "message": message,
         "host": dict(host),
         "items": items,
-        "quality_policy": {
-            "maximum_alternative_score_gap": QUALITY_MAX_SCORE_GAP,
+        "alternative_policy": {
+            "maximum_score_gap": MAX_ALTERNATIVE_SCORE_GAP,
             "distinct_parent_models": True,
         },
         "speed_policy": speed_limits,

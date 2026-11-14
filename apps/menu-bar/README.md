@@ -372,13 +372,14 @@ the same physical memory; the algorithm never adds their budgets together.
 
 Quality uses bundled, dated whatmodel.sh General Work/Coding rankings for
 11 RAM sizes from 8–512 GB, after Stark’s compatibility and resource checks.
-Quality alternatives must be within 10 cached task-score points of the best
-admitted model and represent distinct parent models. A distant or unknown
+Alternatives in both Quality and Speed must be within 10 cached task-score
+points of that mode's best admitted model and represent distinct parent models. A distant or unknown
 score does not fill an alternative slot; without cached coverage, the guide
 offers one fallback. Cards show the reference score and its quantization
 limitation. Model offers use installed RAM and the GPU memory budget. Current
 available memory can add a reminder to free memory before starting; changes
-in current memory do not alter the model ranking.
+in current memory do not alter the model ranking. That reminder uses the
+artifact's startup working set when it differs from total mapped memory.
 No recommendation click requests the leaderboard. Speed selects the highest
 cached task score above its reference floor within an export-weight budget of
 25% of physical RAM, after the normal resource checks. A missing qualifying

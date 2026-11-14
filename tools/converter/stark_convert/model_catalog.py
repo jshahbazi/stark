@@ -98,6 +98,7 @@ _SEARCH_TERMS = {
 def _repository_search(api, definition, remaining, expected=0):
     """Interleave aliases and name searches so large tags cannot starve others.
 
+    Each repository contributes one listing position across overlapping queries.
     ``expected`` is how many listing positions the caller plans to walk. Each
     listing is requested at about that size and grows only if more are needed,
     because a listing reply carries every repository's file list.
@@ -124,6 +125,7 @@ def _repository_search(api, definition, remaining, expected=0):
             sent, size = count, size * 2
 
     streams = [iter(results(query)) for query in queries]
+    seen = set()
     while streams:
         active = []
         for stream in streams:
@@ -134,7 +136,8 @@ def _repository_search(api, definition, remaining, expected=0):
                 continue
             active.append(stream)
             repo = _repo(_field(item, "id"))
-            if repo is not None:
+            if repo is not None and repo.casefold() not in seen:
+                seen.add(repo.casefold())
                 # The listing's head revision lets a cached verdict answer
                 # without any per-repository request.
                 revision = _field(item, "sha")
@@ -1062,8 +1065,12 @@ def family_catalog(
 
         def repositories():
             nonlocal discovery_failed
-            for seed in seeds:
-                yield seed, None, None
+            prioritize_seeds = planning and ranking is not None
+            seed_entries = [
+                (seed, pins.get(seed) or native_items.get(seed, {}).get("revision"), None) for seed in seeds
+            ]
+            if not prioritize_seeds or api is None:
+                yield from seed_entries
             if api is None:
                 return
             expected = offset + limit + 1
@@ -1081,6 +1088,16 @@ def family_catalog(
                             break
                 except Exception:
                     failed = True
+                if prioritize_seeds:
+                    # Registry order must not spend the guide's candidate
+                    # slots before its selected-task scores are considered.
+                    combined = {entry[0].casefold(): entry for entry in seed_entries}
+                    fixed = {repo.casefold() for repo in (*pins, *native_items)}
+                    for entry in window:
+                        key = entry[0].casefold()
+                        if key not in combined or key not in fixed:
+                            combined[key] = entry
+                    window = list(combined.values())
 
                 def placement(entry):
                     siblings = _field(entry[2], "siblings")

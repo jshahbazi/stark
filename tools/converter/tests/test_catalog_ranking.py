@@ -270,6 +270,56 @@ def test_guided_exact_parent_precedes_inferred_exports_within_candidate_limit(tm
     assert all("reference_score" not in item for item in report["items"])
 
 
+def test_guided_registry_seeds_do_not_crowd_out_scored_discovery(tmp_path, monkeypatch):
+    hub = ListingHub()
+    seeds = [f"someone/Registered-{index:02d}" for index in range(35)]
+    for repo in [*seeds, "maker/Big-70B"]:
+        hub.add(tmp_path / "hub", repo, CONFIG)
+    monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: seeds)
+    hub.discovered["qwen3"] = ["maker/Big-70B"]
+    hub.listing["maker/Big-70B"] = listed(["config.json", "model.safetensors"])
+
+    report = catalog.family_catalog("qwen3", hub=hub, limit=1, planning=True, ranking_task="general")
+    assert [item["repo"] for item in report["items"]] == ["maker/Big-70B"]
+
+
+def test_guided_registry_seeds_are_ordered_by_selected_task(tmp_path, monkeypatch):
+    hub = ListingHub()
+    seeds = ["maker/Small-4B", "maker/Big-70B", "maker/Coder-7B"]
+    for repo in seeds:
+        hub.add(tmp_path / "hub", repo, CONFIG)
+    monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: seeds)
+    general = catalog.family_catalog("qwen3", hub=hub, limit=1, planning=True, ranking_task="general")
+    coding = catalog.family_catalog("qwen3", hub=hub, limit=1, planning=True, ranking_task="coding")
+    assert [item["repo"] for item in general["items"]] == ["maker/Big-70B"]
+    assert [item["repo"] for item in coding["items"]] == ["maker/Coder-7B"]
+
+
+def test_overlapping_hub_queries_cannot_shrink_the_priority_window(tmp_path):
+    hub = ListingHub()
+    order = [f"someone/Popular-{index:03d}" for index in range(160)] + ["maker/Big-70B"]
+    for repo in order:
+        hub.add(tmp_path / "hub", repo, CONFIG)
+        hub.listing[repo] = listed(["config.json", "model.safetensors"])
+    hub.discovered["qwen3"] = order
+    hub.searched["Qwen3"] = order
+    report = catalog.family_catalog("qwen3", hub=hub, limit=1, planning=True, ranking_task="general")
+    assert [item["repo"] for item in report["items"]] == ["maker/Big-70B"]
+
+
+def test_guided_pinned_seed_is_not_screened_by_a_different_head_listing(tmp_path, monkeypatch):
+    hub = ListingHub()
+    repo = "maker/Big-70B"
+    hub.add(tmp_path / "hub", repo, CONFIG)
+    monkeypatch.setattr(catalog, "_catalog_seeds", lambda _family: [repo])
+    monkeypatch.setattr(catalog, "_catalog_pins", lambda _family: {repo: PIN})
+    hub.discovered["qwen3"] = [repo]
+    hub.listing[repo] = listed(["model.gguf"], sha="b" * 40)
+    report = catalog.family_catalog("qwen3", hub=hub, limit=1, planning=True, ranking_task="general")
+    assert [item["repo"] for item in report["items"]] == [repo]
+    assert report["items"][0]["revision"] == PIN
+
+
 def reference(**changes):
     return {
         "model_id": "maker/Small-4B",

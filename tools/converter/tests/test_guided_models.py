@@ -621,6 +621,17 @@ def test_current_worker_memory_pressure_does_not_remove_static_fit_choices():
 
 
 @pytest.mark.parametrize(
+    "available,may_prepare", [(None, False), (True, False), (2 * guided.GIB - 1, False), (2 * guided.GIB, True)]
+)
+def test_recommendation_preparation_and_startup_have_separate_memory_boundaries(available, may_prepare):
+    recipe = guided.RECIPES[0]
+    machine = resources(available_memory_bytes=available)
+    assert guided.recommendation_allowed(recipe, machine)
+    assert guided.installation_allowed(recipe, machine) is may_prepare
+    assert not guided.execution_allowed(recipe, machine)
+
+
+@pytest.mark.parametrize(
     "changes",
     [
         {"gpu_available": False},

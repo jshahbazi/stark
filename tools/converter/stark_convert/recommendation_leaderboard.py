@@ -20,9 +20,9 @@ HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 SPEED_MINIMUM_SCORE = {"general": 40, "coding": 35}
 SPEED_WEIGHT_BUDGET_DIVISOR = 4
 # Editorial distance on each task's cached relative scale, not a percentage
-# quality guarantee. Do not fill Quality alternatives with distant/unknown
+# quality guarantee. Do not fill alternatives with distant/unknown
 # scores or multiple exports of the same parent.
-QUALITY_MAX_SCORE_GAP = 10
+MAX_ALTERNATIVE_SCORE_GAP = 10
 
 
 def speed_policy(task, preference, physical_bytes):
@@ -38,6 +38,19 @@ def speed_policy(task, preference, physical_bytes):
 
 def _number(value):
     return type(value) in (int, float) and math.isfinite(value)
+
+
+def _alternatives(ordered, records, model_id):
+    if not ordered:
+        return []
+    minimum = records[model_id(ordered[0])]["score"] - MAX_ALTERNATIVE_SCORE_GAP
+    selected, parents = [], set()
+    for recipe in ordered:
+        parent = model_id(recipe)
+        if records[parent]["score"] >= minimum and parent not in parents:
+            selected.append(recipe)
+            parents.add(parent)
+    return selected
 
 
 class LeaderboardSnapshot:
@@ -99,15 +112,7 @@ class LeaderboardSnapshot:
             scored = [recipe for recipe in ordered if model_id(recipe) in records]
             # Stable sort retains resource preference and deterministic ties.
             scored.sort(key=lambda recipe: -records[model_id(recipe)]["score"])
-            selected, parents = [], set()
-            for recipe in scored:
-                parent = model_id(recipe)
-                if (
-                    records[parent]["score"] >= records[model_id(scored[0])]["score"] - QUALITY_MAX_SCORE_GAP
-                    and parent not in parents
-                ):
-                    selected.append(recipe)
-                    parents.add(parent)
+            selected = _alternatives(scored, records, model_id)
             used = {recipe.id for recipe in selected}
             # With no comparable scores, retain one explicitly unknown fallback.
             ordered = selected if scored else ordered[:1]
@@ -129,6 +134,7 @@ class LeaderboardSnapshot:
                     recipe.weight_bytes,
                 )
             )
+            ordered = _alternatives(ordered, records, model_id)
             used = {recipe.id for recipe in ordered}
         return ordered, bucket, records, used
 

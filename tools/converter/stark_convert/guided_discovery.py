@@ -3,14 +3,30 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .model_catalog import family_catalog
+from .model_catalog import MAX_ITEMS, family_catalog
 from .model_support import support_matrix
 
 FAMILY_SECONDS = 10
 MAX_FAMILY_PAGES = 10
+FAMILY_WORKERS = 3
+STARTUP_SERIALIZATION_MARGIN_SECONDS = 10
+
+
+def discovery_bounds(family_count=None):
+    """Return (maximum downloadable rows, subprocess timeout) for this scan."""
+    if family_count is None:
+        family_count = sum(
+            family["modes"]["text"]["status"] == "conditional" for family in support_matrix()["families"]
+        )
+    waves = math.ceil(family_count / FAMILY_WORKERS)
+    return (
+        family_count * MAX_ITEMS,
+        waves * FAMILY_SECONDS + STARTUP_SERIALIZATION_MARGIN_SECONDS,
+    )
 
 
 def _discover_family(catalog, family, task="general"):
@@ -23,7 +39,7 @@ def _discover_family(catalog, family, task="general"):
         seconds = FAMILY_SECONDS if page == 0 else deadline - time.monotonic()
         if seconds <= 0:
             break
-        options = {"planning": True, "deadline_seconds": seconds, "limit": 30, "ranking_task": task}
+        options = {"planning": True, "deadline_seconds": seconds, "limit": MAX_ITEMS, "ranking_task": task}
         if offset:
             options["offset"] = offset
         try:
@@ -33,7 +49,7 @@ def _discover_family(catalog, family, task="general"):
                 raise
             return {"status": "error", "has_more": True, "items": list(items.values())}
         for item in report["items"]:
-            if isinstance(item, dict) and isinstance(item.get("id"), str):
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("downloadable") is True:
                 items[item["id"]] = item
         if (
             report["status"] != "ready"
@@ -59,7 +75,7 @@ def discover(*, catalog=family_catalog, task="general"):
         if family["modes"]["text"]["status"] == "conditional"
     ]
     items, checked, incomplete, failed = {}, 0, False, 0
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=FAMILY_WORKERS) as pool:
         futures = {pool.submit(_discover_family, catalog, family, task): family for family in families}
         for future in as_completed(futures):
             try:

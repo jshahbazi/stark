@@ -1070,6 +1070,9 @@ class Desktop:
     def run_guided_discovery(self, generation, task="general"):
         process = None
         try:
+            from .guided_discovery import discovery_bounds
+
+            maximum_items, timeout_seconds = discovery_bounds()
             with self.lock:
                 if generation != self.guided_discovery_generation:
                     return None
@@ -1082,7 +1085,7 @@ class Desktop:
                     start_new_session=True,
                 )
                 self.guided_discovery_process = process
-            pending, deadline = bytearray(), time.monotonic() + 65
+            pending, deadline = bytearray(), time.monotonic() + timeout_seconds
             while True:
                 with self.lock:
                     if generation != self.guided_discovery_generation:
@@ -1105,7 +1108,7 @@ class Desktop:
                 not isinstance(report, dict)
                 or report.get("schema_version") != 1
                 or not isinstance(report.get("items"), list)
-                or len(report["items"]) > 450
+                or len(report["items"]) > maximum_items
             ):
                 raise ValueError()
             return report

@@ -38,6 +38,9 @@ previous worker; available memory must then cover the effective startup plan.
 An installed copy waives download space, never current execution headroom.
 The [installed-RAM policy check](archive/runs/2026-11-13-guided-capacity-recommendations.md)
 records stable native offers across different available-memory observations.
+The [corner-case review](archive/runs/2026-11-13-guided-recommendation-review.md)
+records the effective startup reminder, shared alternative policy and
+discovery ordering/protocol regressions.
 
 For the 128 GiB / 107.52 GB Metal-budget envelope, the current 32K-context
 estimates are 29 GiB for Flint, 87 GiB system for qualified Lily and 88 GiB for
@@ -93,7 +96,7 @@ The recommendation path never requests whatmodel.sh. Hardware checks and support
 2. Select the largest cached RAM bucket no greater than this Mac's physical RAM in GiB. Below the smallest bucket, cached coverage is unavailable; above the largest, use the largest bucket with actual resource checks.
 3. Match exact parent repositories from the pinned source catalogue. Reviewed export-to-parent bindings also require the exact export repository and revision. No fuzzy names, quantization labels or mutable commands establish identity. Ambiguous parents have no automatic score. A changed export revision requires another review.
 4. **Quality** selects descending task score after admission. Alternatives must have a cached score within **10 points** of the best admitted model on the same task scale, and each offer must represent a distinct parent model. Equal scores retain deterministic fallback order. Unknown scores never fill alternatives behind a scored choice. With no cached scores, offer one explicitly unknown benchmark/resource fallback. The 10-point distance is an editorial product threshold, reviewed with snapshot refreshes; it does not establish comparable measured artifact quality. Signed relative scores are not percentages or native artifact accuracy measurements. Parent scores do not establish export equivalence.
-5. **Speed** admits only candidates with a cached parent-model task score of at least **40 for General Work** or **35 for Coding**, and exact export weights no larger than **25% of physical RAM**. All normal runtime, GPU, free-memory and disk checks still apply. Within that pool, select descending task score; ties prefer a smaller runtime plan, then smaller weight payload, then deterministic fallback order. The increasing payload allowance lets larger Macs select stronger models without always choosing the smallest eligible checkpoint. Unknown scores, candidates below the floor and exports over the budget are excluded from all Speed alternatives. These are editorial product thresholds on separate relative score scales; review them when refreshing the leaderboard. They do not certify quantized task quality or measured response speed. Source speeds retain their provenance but do not rank these candidates.
+5. **Speed** admits only candidates with a cached parent-model task score of at least **40 for General Work** or **35 for Coding**, and exact export weights no larger than **25% of physical RAM**. Installed RAM, GPU and disk checks still apply. Within that pool, select descending task score; ties prefer a smaller runtime plan, then smaller weight payload, then deterministic fallback order. Alternatives use the same **10-point distance** and **distinct-parent** rule as Quality, measured against the best candidate inside Speed's eligible pool. The increasing payload allowance lets larger Macs select stronger models without always choosing the smallest eligible checkpoint. Unknown scores, candidates below the floor and exports over the budget are excluded from all Speed alternatives. These are editorial product thresholds on separate relative score scales; review them when refreshing the leaderboard. They do not certify quantized task quality or measured response speed. Source speeds retain their provenance but do not rank these candidates.
 6. Offer one primary recommendation with up to two alternatives behind a disclosure; fewer are shown when the policy admits fewer. Each cached Quality offer shows its score and the parent-model/unevaluated-quantization limitation directly on its card. Historical benchmark results remain reference information when the cached leaderboard determines ordering.
 
 The site's memory/variant estimates use an 8K conversation allowance. Stark's 32K model-specific plan remains authoritative, including actual export weights and state. The captured site's ranking applies the same parent score across quantized variants; it does not benchmark each quantization separately. Speed's budget uses actual export weight bytes, so a quantized export may fit while its BF16 counterpart does not. Its parent score does not establish that the export preserves quality. The guide labels this limitation, and structured evidence explicitly marks quantization quality as unevaluated by this ranking. No generic bit-width quality penalty is invented. Site quantizations remain provenance and are not automatically installed. Snapshot inclusion adds no backend, conversion route or native qualification.
@@ -105,7 +108,14 @@ If the snapshot is unavailable, malformed or covers none of the eligible models,
 Guided discovery checks a bounded metadata window, not every repository. It
 prioritizes the selected task's cached sources before inspecting that window;
 popularity alone must not spend the candidate budget before scored models are
-checked. Search priority does not grant a parent score or waive compatibility,
+checked. Registered seeds join the same priority ordering, and overlapping
+Hub queries contribute each repository once. Pinned seeds retain their source
+revision and are not screened using metadata from a different head revision.
+Only downloadable rows cross the subprocess boundary. Its row limit and
+timeout derive from the supported family count, page size, three lookup
+workers and per-family deadline; unavailable pages cannot exhaust the result
+budget. The serialized response retains its 2 MiB bound.
+Search priority does not grant a parent score or waive compatibility,
 template, parser, context or resource checks. In particular, an unreviewed
 quantized export may be discoverable without an admissible guide score.
 
