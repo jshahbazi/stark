@@ -278,6 +278,18 @@ between shard completions. Network bytes can differ from model bytes due to
 compression, deduplication and retries. Phases without a reliable total show status
 without an animated indicator. Final weight validation still gates completion.
 
+An active model download pauses when the Mac sleeps and resumes automatically
+after wake. Recognized temporary connection failures also keep the installation
+active, showing **Download paused. Waiting for a connection…** and retrying with
+delays from 5 seconds up to 1 minute. Retries reuse the same checked source
+revision, completed cached files and resumable partial download data. Wake
+triggers an immediate retry; the connection may still need time to return.
+**Cancel Installation** or **Stop** also cancels a waiting download. This recovery
+lasts for the current app session; quitting does not automatically restart the
+installation on the next launch. Disk, permission, access, checkpoint and
+conversion failures still require action. Model failure messages include the
+requested model's short name, including when another model remains loaded.
+
 The catalogue starts with known sources, then follows the family's Hugging Face
 architecture search through successive pages. Each request checks up to 30
 distinct candidates; there is no fixed total result ceiling. **Load more models**

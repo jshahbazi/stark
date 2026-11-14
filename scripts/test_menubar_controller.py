@@ -213,6 +213,46 @@ extension EngineController {
         }
         let apiFirst = String(repeating: "a", count: 32), apiSecond = String(repeating: "b", count: 32)
         switch scenario {
+        case "system-sleep-wake-commands":
+            let center = NotificationCenter()
+            engine.observeSystemSleep(center: center)
+            engine.observeSystemSleep(center: center) // Re-registration must not duplicate commands.
+            center.post(name: NSWorkspace.willSleepNotification, object: nil)
+            guard command()["command"] as? String == "system_sleep", engine.modelReady else { return false }
+            center.post(name: NSWorkspace.didWakeNotification, object: nil)
+            guard command()["command"] as? String == "system_wake", engine.modelReady else { return false }
+            engine.stopObservingSystemSleep()
+            center.post(name: NSWorkspace.didWakeNotification, object: nil)
+            guard noCommandSent() else { return false }
+            engine.observeSystemSleep(center: center)
+            engine.shutdown()
+            return command()["command"] as? String == "quit" && engine.systemNotificationObservers.isEmpty
+        case "beginner-install-failure-name":
+            _ = prepareBeginnerReport()
+            guard engine.installBeginnerModel(recipeID: "fixture-recipe") else { return false }
+            let install = command()
+            engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Preparation failed."])
+            return engine.beginnerInstallError == "Starting model: Preparation failed." &&
+                engine.beginnerInstallState == "failed" && engine.activeInstallModelName == nil
+        case "model-failure-names":
+            engine.models = [InstalledModel(id: "fixture-model", name: "Qwen3-4B", path: "/private/model", apiID: "fixture")]
+            engine.install(source: "publisher/Qwen3-8B", kind: "huggingface")
+            let install = command()
+            engine.apply(["event": "status", "state": "installing", "message": "Download paused. Waiting for a connection…"])
+            guard engine.activeInstallRequestID == install["support_request_id"] as? String,
+                  engine.activeInstallModelName == "Qwen3 8B", engine.busy else { return false }
+            engine.apply(["event": "error", "request_id": "stale-request", "message": "Stale failure"])
+            guard engine.errorMessage == nil else { return false }
+            engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Download failed."])
+            guard engine.errorMessage == "Qwen3 8B: Download failed.", engine.activeInstallModelName == nil else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            engine.apply(["event": "error", "message": "Generation failed."])
+            guard engine.errorMessage == "Qwen3 4B: Generation failed." else { return false }
+            engine.state = "loading"; engine.loadedID = ""; engine.selectedID = "fixture-model"
+            engine.apply(["event": "error", "message": "Loading failed."])
+            guard engine.errorMessage == "Qwen3 4B: Loading failed." else { return false }
+            return engine.modelFailure("Qwen3 4B: Loading failed.", name: "Qwen3 4B") == "Qwen3 4B: Loading failed." &&
+                engine.shortModelName("/private/model/Qwen3-4B") == "Qwen3 4B"
         case "worker-pipe-small-guided-reply":
             let replies = Pipe()
             engine.observeBackendOutput(replies.fileHandleForReading)
@@ -422,7 +462,8 @@ extension EngineController {
             engine.apply(["event": "error", "request_id": id, "message": "Source recipe changed"])
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             return engine.modelReady && engine.selectedID == "fixture-model" && engine.loadedID == "fixture-model" &&
-                engine.messages.count == 1 && engine.supportsTools && engine.toolParser == "fixture"
+                engine.messages.count == 1 && engine.supportsTools && engine.toolParser == "fixture" &&
+                engine.errorMessage == "New: Source recipe changed"
         case "beginner-invalid-ready-settles-start":
             engine.models = [variant("fixture-model", name: "Current", display: nil), variant("new-model", name: "New", display: nil)]
             _ = prepareBeginnerReport(["new-model"])
@@ -2226,7 +2267,7 @@ extension EngineController {
             guard engine.catalogInstallation != nil, engine.errorMessage == nil, engine.busy else { return false }
             engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Fixture download failed"])
             guard engine.catalogInstallation == nil, engine.catalogInstallFailed,
-                  engine.catalogInstallMessage == "Fixture download failed", engine.modelReady else { return false }
+                  engine.catalogInstallMessage == "Model 2: Fixture download failed", engine.modelReady else { return false }
             engine.resetInstallProgress(kind: "huggingface")
             return engine.errorMessage == nil && engine.loadedID == "fixture-model"
         case "image-catalog-install-admission-error":
@@ -2328,7 +2369,7 @@ extension EngineController {
             engine.apply(["event": "model_remove_error", "request_id": "old", "model_id": "fixture-model", "message": "Stale error", "stopped_model_id": "fixture-model"])
             guard engine.busy, engine.loadedID == "fixture-model", engine.supportsImages else { return false }
             engine.apply(["event": "model_remove_error", "request_id": request["request_id"]!, "model_id": "fixture-model", "message": "Fixture rollback", "stopped_model_id": "fixture-model"])
-            return !engine.busy && engine.loadedID.isEmpty && !engine.supportsImages && engine.models.count == 1 && engine.removalError == "Fixture rollback"
+            return !engine.busy && engine.loadedID.isEmpty && !engine.supportsImages && engine.models.count == 1 && engine.removalError == "Running: Fixture rollback"
         case "image-model-removal-admission-error":
             engine.models = [InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "id",
                                             removal: InstalledModelRemoval(removal()))]
@@ -2336,7 +2377,7 @@ extension EngineController {
             let request = command()
             engine.apply(["event": "error", "request_id": request["request_id"]!, "message": "Wait for the current operation."])
             return !engine.busy && engine.modelReady && engine.loadedID == "fixture-model" && engine.supportsImages &&
-                engine.models.count == 1 && engine.removalError == "Wait for the current operation."
+                engine.models.count == 1 && engine.removalError == "Other: Wait for the current operation."
         case "support-registry-invalid":
             var raw = familyRegistry()
             raw["schema_version"] = true
@@ -2450,7 +2491,7 @@ extension EngineController {
             engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": report])
             engine.apply(["event": "error", "message": failure])
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
-            guard engine.errorMessage == failure, engine.installSupportReport != nil else { return false }
+            guard engine.errorMessage == "Unsupported: " + failure, engine.installSupportReport != nil else { return false }
             engine.resetInstallProgress(kind: "huggingface")
             guard engine.errorMessage == nil, engine.installSupportReport == nil, engine.loadedID == "fixture-model",
                   engine.downloadProgress.state == "waiting" else { return false }
@@ -2478,7 +2519,7 @@ extension EngineController {
             _ = command()
             engine.apply(["event": "error", "message": "Fixture install failure"])
             engine.resetInstallProgress(kind: "local")
-            guard engine.errorMessage == "Fixture install failure", engine.downloadProgress.state == "failed" else { return false }
+            guard engine.errorMessage == "Source: Fixture install failure", engine.downloadProgress.state == "failed" else { return false }
             engine.apply(["event": "status", "state": "ready", "message": "Ready"])
             engine.resetInstallProgress(kind: "local")
             return engine.errorMessage == nil && engine.downloadProgress.state == "skipped"
@@ -3327,6 +3368,15 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_install_error_cannot_clear_before_active_install_finishes(self):
         self.exercise("install-error-active-guard")
+
+    def test_model_failure_names_follow_the_failed_request(self):
+        self.exercise("model-failure-names")
+
+    def test_guided_install_failure_names_the_requested_model(self):
+        self.exercise("beginner-install-failure-name")
+
+    def test_system_sleep_and_wake_forward_commands_without_changing_model_state(self):
+        self.exercise("system-sleep-wake-commands")
 
     def test_shutdown_clears_registry_and_pending_support_events(self):
         self.exercise("support-shutdown-fence")

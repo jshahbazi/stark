@@ -8,6 +8,7 @@ import sys
 import threading
 from types import SimpleNamespace
 
+import httpx2 as httpx
 import numpy as np
 import pytest
 from huggingface_hub.utils._xet_progress_reporting import XetDownloadProgressReporter
@@ -132,6 +133,26 @@ def test_progress_failure_event_is_allowlisted_and_content_free():
     assert events == [{"phase": "failure", "category": "invalid_checkpoint"}]
     with pytest.raises(ValueError, match="invalid_converter_failure_category"):
         progress.failure("private exception text")
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 408, 429, 500, 502, 503, 504])
+def test_network_failure_classification_uses_status_not_private_text(status):
+    request = httpx.Request("GET", "https://example.invalid/private")
+    error = httpx.HTTPStatusError("private", request=request, response=httpx.Response(status, request=request))
+    expected = "network_unavailable" if status in {408, 429, 500, 502, 503, 504} else "conversion_failed"
+    assert converter_failure_category(error) == expected
+
+
+def test_wrapped_transport_failure_and_terminal_errors():
+    error = RuntimeError("private")
+    error.__cause__ = httpx.ConnectError("private")
+    assert converter_failure_category(error) == "network_unavailable"
+    error.__cause__.__cause__ = error  # A malformed chain must remain bounded.
+    assert converter_failure_category(error) == "network_unavailable"
+    terminal = PermissionError("private")
+    terminal.__cause__ = error
+    assert converter_failure_category(terminal) == "permission_denied"
+    assert converter_failure_category(TimeoutError("private")) == "network_unavailable"
 
 
 class ProgressHub(Hub):

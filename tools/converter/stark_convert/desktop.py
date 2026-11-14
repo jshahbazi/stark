@@ -102,6 +102,7 @@ from .vision_runtime import (
 
 MAX_COMMAND_BYTES = WIRE_BYTES
 MAX_PROGRESS_BYTES = 4096
+DOWNLOAD_RETRY_INITIAL_SECONDS = 5
 MAX_SUPPORT_BYTES = 65536
 MAX_CATALOG_BYTES = 256 * 1024
 PROGRESS_PHASES = ("download", "conversion")
@@ -397,6 +398,7 @@ def converter_failure_message(category):
         "unsupported_format_or_config": "This model format or configuration is not supported by the converter.",
         "invalid_checkpoint": "The checkpoint is incomplete or invalid. Check the source revision and retry.",
         "conversion_failed": "Model conversion failed. Check the model source and try again.",
+        "network_unavailable": "The model download lost its connection. Check your internet access and retry.",
     }.get(category, "Model conversion failed. Check the model source and try again.")
 
 
@@ -457,6 +459,10 @@ class Desktop:
         self.guided_install_request_id = None
         self.install_cancelled = None
         self.install_committing = False
+        self.system_asleep = False
+        self.download_retry_wake = threading.Event()
+        self.download_retry_epoch = None
+        self.download_interrupted_epoch = None
         self.guided_reports = {}
         self.guided_install_offer_id = None
         self.guided_hardware = {}
@@ -1397,6 +1403,7 @@ class Desktop:
                 )
                 return
             self.install_cancelled.set()
+            self.download_retry_wake.set()
             converter = self.converter
         self.terminate_converter(converter)
 
@@ -1556,6 +1563,9 @@ class Desktop:
         self.cancel_guided_discovery()
         with self.lock:
             cancelled = self.install_progress.copy() if self.install_epoch == self.epoch else {}
+            if self.install_cancelled is not None:
+                self.install_cancelled.set()
+            self.download_retry_wake.set()
             self.epoch += 1
             self.api_condition.notify_all()
             self.install_epoch = None
@@ -1594,6 +1604,8 @@ class Desktop:
             epoch = self.epoch
             installing = state == "installing"
             if installing:
+                self.download_retry_wake.clear()
+                self.download_interrupted_epoch = None
                 self.install_request_id = request_id
                 self.guided_install_request_id = request_id if guided_install else None
                 self.install_cancelled = threading.Event()
@@ -1723,6 +1735,8 @@ class Desktop:
                 if epoch != self.epoch:
                     return None
                 self.check_install_cancelled(epoch)
+                if self.download_retry_epoch == epoch and self.system_asleep:
+                    return 1, "network_unavailable"
                 process = subprocess.Popen(
                     [*command, "--progress-fd", str(write_descriptor)],
                     stdin=subprocess.DEVNULL,
@@ -1752,6 +1766,100 @@ class Desktop:
                 with self.lock:
                     if self.converter is process:
                         self.converter = None
+
+    def run_download_converter(self, command, environment, epoch):
+        """Keep an explicitly requested download alive across sleep/network loss.
+
+        Retry only typed transient transport failures before conversion starts.
+        Reuse the exact command, pinned revision, Hub cache and owned native
+        staging. Cancellation and Stop still retire the installation's epoch.
+        """
+        with self.lock:
+            self.download_retry_epoch = epoch
+        try:
+            return self.retry_download_converter(command, environment, epoch)
+        finally:
+            with self.lock:
+                self.download_retry_epoch = None
+
+    def retry_download_converter(self, command, environment, epoch):
+        delay = DOWNLOAD_RETRY_INITIAL_SECONDS
+        while True:
+            with self.lock:
+                if epoch != self.epoch:
+                    return None
+                self.check_install_cancelled(epoch)
+            result = self.run_converter(command, environment, epoch)
+            with self.lock:
+                if epoch != self.epoch:
+                    return result
+                self.check_install_cancelled(epoch)
+                conversion = self.install_progress.get("conversion", {})
+                interrupted_by_sleep = self.download_interrupted_epoch == epoch
+                if interrupted_by_sleep:
+                    self.download_interrupted_epoch = None
+                    if result is None or (isinstance(result, tuple) and result[0] != 0):
+                        # Publication can finish just as sleep terminates the
+                        # child. Let the installer's normal validation admit it.
+                        output = Path(command[command.index("--output") + 1])
+                        if model_valid(output):
+                            return 0, None
+                        result = (1, "network_unavailable")
+                if (
+                    not isinstance(result, tuple)
+                    or len(result) != 2
+                    or result[0] == 0
+                    or result[1] != "network_unavailable"
+                    or (not interrupted_by_sleep and conversion.get("state") in {"running", "complete"})
+                ):
+                    return result
+                if interrupted_by_sleep and conversion.get("state") == "running":
+                    # A buffered conversion-start frame can arrive after the
+                    # sleep handler selected this downloading child to stop.
+                    self.progress(
+                        epoch, "conversion", "waiting", conversion["completed_bytes"], conversion["total_bytes"]
+                    )
+                self.status("installing", "Download paused. Waiting for a connection…", epoch)
+            if not self.wait_for_download_retry(epoch, delay):
+                return result
+            with self.lock:
+                if epoch != self.epoch:
+                    return result
+                self.check_install_cancelled(epoch)
+                self.status("installing", "Resuming model download…", epoch)
+            delay = min(delay * 2, 60)
+
+    def wait_for_download_retry(self, epoch, delay):
+        deadline = time.monotonic() + delay
+        while True:
+            with self.lock:
+                if epoch != self.epoch:
+                    return False
+                self.check_install_cancelled(epoch)
+                if not self.system_asleep and (self.download_retry_wake.is_set() or time.monotonic() >= deadline):
+                    self.download_retry_wake.clear()
+                    return True
+                self.download_retry_wake.clear()
+                remaining = None if self.system_asleep else max(0, deadline - time.monotonic())
+            self.download_retry_wake.wait(remaining)
+
+    def system_power(self, asleep):
+        """Suspend only active weight downloads; preserve workers and conversion."""
+        converter = None
+        with self.lock:
+            self.system_asleep = asleep
+            if asleep:
+                if (
+                    self.download_retry_epoch == self.epoch
+                    and self.install_epoch == self.epoch
+                    and self.install_progress.get("conversion", {}).get("state") not in {"running", "complete"}
+                ):
+                    self.download_interrupted_epoch = self.epoch
+                    converter = self.converter
+            else:
+                self.download_retry_wake.set()
+        if converter is not None:
+            self.terminate_converter(converter)
 
     def run_support_check(self, command, environment, epoch):
         """Read one bounded metadata-only report from an isolated cancellable child."""
@@ -2084,7 +2192,11 @@ class Desktop:
                 if kind == "native" and output.exists():
                     result, failure_category = 0, None
                 else:
-                    converter_result = self.run_converter(command, environment, epoch)
+                    converter_result = (
+                        self.run_download_converter(command, environment, epoch)
+                        if kind in {"huggingface", "native"}
+                        else self.run_converter(command, environment, epoch)
+                    )
                     if isinstance(converter_result, tuple) and len(converter_result) == 2:
                         result, failure_category = converter_result
                     else:
@@ -3309,6 +3421,8 @@ class Desktop:
         command = payload["command"]
         if command == "list":
             self.library()
+        elif command in {"system_sleep", "system_wake"} and set(payload) == {"command"}:
+            self.system_power(command == "system_sleep")
         elif command == "configure_api":
             self.configure_api(payload)
         elif command in {"grant_api_client", "revoke_api_clients"}:

@@ -1492,6 +1492,8 @@ final class EngineController: ObservableObject {
     private let workerWireLimitLock = NSLock()
     private let reader = DispatchQueue(label: "stark.desktop.reader")
     private var shuttingDown = false
+    private var systemNotificationCenter: NotificationCenter?
+    private var systemNotificationObservers: [NSObjectProtocol] = []
     private var pendingMessageID: UUID?
     // Random backend identifiers for connected-application requests; never client identities.
     private var apiProgressID: String?
@@ -1509,7 +1511,10 @@ final class EngineController: ObservableObject {
     private var catalogPageKnownIDs = Set<String>()
     private var loadRemainingCatalog = false
     private var stoppedModel: (id: String, mode: PlaygroundMode)?
-    private var activeInstallRequestID: String?
+    private var activeInstallRequestID: String? {
+        didSet { if activeInstallRequestID == nil { activeInstallModelName = nil } }
+    }
+    private var activeInstallModelName: String?
     private var beginnerRequestID: String?
     private var beginnerInstallRequestID: String?
     private var beginnerInstallRecommendationID: String?
@@ -1546,6 +1551,26 @@ final class EngineController: ObservableObject {
         self.gpuMemoryBudgetBytes = gpuMemoryBudgetBytes
         apiPreferences = APIConnectionPreferences(service: apiCredentials.service, defaults: apiDefaults)
         apiPort = apiPreferences.port
+    }
+
+    deinit { stopObservingSystemSleep() }
+
+    private func observeSystemSleep(center: NotificationCenter = NSWorkspace.shared.notificationCenter) {
+        stopObservingSystemSleep()
+        systemNotificationCenter = center
+        for (notification, command) in [(NSWorkspace.willSleepNotification, "system_sleep"),
+                                        (NSWorkspace.didWakeNotification, "system_wake")] {
+            systemNotificationObservers.append(center.addObserver(forName: notification, object: nil, queue: .main) { [weak self] _ in
+                guard let self, !self.shuttingDown, self.input != nil else { return }
+                self.send(["command": command])
+            })
+        }
+    }
+
+    private func stopObservingSystemSleep() {
+        for observer in systemNotificationObservers { systemNotificationCenter?.removeObserver(observer) }
+        systemNotificationObservers.removeAll()
+        systemNotificationCenter = nil
     }
 
     var busy: Bool {
@@ -1689,6 +1714,7 @@ final class EngineController: ObservableObject {
                 self.modelFamilies = nil
                 self.clearBrowserRequests()
                 self.input = nil
+                self.stopObservingSystemSleep()
                 self.discardPendingMessage()
                 self.clearConversation()
                 self.clearDecision()
@@ -1700,6 +1726,7 @@ final class EngineController: ObservableObject {
             try child.run()
             process = child
             input = incoming.fileHandleForWriting
+            observeSystemSleep()
             retryAPI()
             send(["command": "list"])
         } catch {
@@ -1781,7 +1808,7 @@ final class EngineController: ObservableObject {
         case "install_cancel_error":
             guard let expected = beginnerInstallRequestID, event["request_id"] as? String == expected else { return }
             beginnerCancelPending = false
-            beginnerInstallError = event["message"] as? String ?? "Could not cancel setup. Wait for it to finish."
+            beginnerInstallError = modelFailure(event["message"] as? String ?? "Could not cancel setup. Wait for it to finish.", name: activeInstallModelName)
         case "model_families":
             guard let raw = event["report"] as? [String: Any], let registry = ModelFamilyRegistry(raw) else { return }
             modelFamilies = registry
@@ -1817,7 +1844,8 @@ final class EngineController: ObservableObject {
             guard let expected = removalRequestID, event["request_id"] as? String == expected,
                   event["model_id"] as? String == removingModelID else { return }
             if event["event"] as? String == "model_remove_error" {
-                removalError = event["message"] as? String ?? "Could not remove this model. Try again."
+                removalError = modelFailure(event["message"] as? String ?? "Could not remove this model. Try again.",
+                                            name: models.first { $0.id == removingModelID }?.displayName)
             } else {
                 guard event["action"] as? String == removalAction?.rawValue else { return }
                 removalError = nil
@@ -1977,7 +2005,7 @@ final class EngineController: ObservableObject {
                   abs(probabilities.reduce(0, +) - 1) <= 0.0001,
                   probabilities[index] == probabilities.max() else {
                 clearDecision()
-                errorMessage = "Stark returned an invalid decision. Run the model again."
+                errorMessage = modelFailure("Stark returned an invalid decision. Run the model again.", name: activeModel?.displayName)
                 stopAfterInvalidDecision()
                 return
             }
@@ -1986,12 +2014,13 @@ final class EngineController: ObservableObject {
         case "error":
             let requestID = event["request_id"] as? String
             if let expected = beginnerRunRequestID, requestID == expected {
+                let failedModelName = models.first { $0.id == selectedID }?.displayName
                 if let previous = beginnerRunBackup {
                     selectedID = previous.selectedID; mode = previous.mode
                     supportsTools = previous.tools; toolParser = previous.parser; gpuMemoryBytes = previous.gpu
                 }
                 beginnerRunRequestID = nil; beginnerRunBackup = nil
-                errorMessage = event["message"] as? String ?? "Could not start this model. Try again."
+                errorMessage = modelFailure(event["message"] as? String ?? "Could not start this model. Try again.", name: failedModelName)
                 return
             }
             if requestID == beginnerRequestID, beginnerRequestID != nil {
@@ -2000,7 +2029,7 @@ final class EngineController: ObservableObject {
                 return
             }
             if let expected = beginnerInstallRequestID, requestID == expected {
-                beginnerInstallError = event["message"] as? String ?? "Could not prepare this model. Try again."
+                beginnerInstallError = modelFailure(event["message"] as? String ?? "Could not prepare this model. Try again.", name: activeInstallModelName)
                 beginnerInstallState = "failed"; beginnerCancelPending = false
                 beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
                 endInstallProgress("failed")
@@ -2008,7 +2037,8 @@ final class EngineController: ObservableObject {
                 return
             }
             if let requestID = requestID, requestID == removalRequestID {
-                removalError = event["message"] as? String ?? "Could not remove this model. Try again."
+                removalError = modelFailure(event["message"] as? String ?? "Could not remove this model. Try again.",
+                                            name: models.first { $0.id == removingModelID }?.displayName)
                 removalRequestID = nil; removingModelID = nil; removalAction = nil
                 if state == "removing" { state = loadedID.isEmpty ? "idle" : "ready"; message = loadedID.isEmpty ? "Stopped" : "Ready" }
                 return
@@ -2016,7 +2046,7 @@ final class EngineController: ObservableObject {
             if let requestID = requestID, let pending = pendingMessageID, UUID(uuidString: requestID) == pending {
                 // The backend settles the worker state with a following status event
                 // or, for a rejected send, with the running operation's own status.
-                errorMessage = event["message"] as? String ?? "Unable to complete the operation."
+                errorMessage = modelFailure(event["message"] as? String ?? "Unable to complete the operation.", name: activeModel?.displayName)
                 discardPendingMessage()
                 return
             }
@@ -2024,7 +2054,9 @@ final class EngineController: ObservableObject {
             let matchingInstallError = requestID != nil && requestID == activeInstallRequestID
             let installOwned = requestID != nil || state == "installing" || (activeInstallRequestID != nil && catalogInstallation == nil)
             pendingSupportRequestID = nil
-            errorMessage = event["message"] as? String ?? "Unable to complete the operation."
+            let failedModelName = installOwned ? activeInstallModelName :
+                models.first { $0.id == (state == "loading" || loadedID.isEmpty ? selectedID : loadedID) }?.displayName
+            errorMessage = modelFailure(event["message"] as? String ?? "Unable to complete the operation.", name: failedModelName)
             if installOwned {
                 installErrorMessage = errorMessage
                 activeInstallRequestID = nil
@@ -2402,6 +2434,18 @@ final class EngineController: ObservableObject {
         if reload { run() }
     }
 
+    private func shortModelName(_ source: String) -> String? {
+        let component = (source.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).lastPathComponent
+        guard !component.isEmpty, component != ".", component != "/" else { return nil }
+        return ModelsInventory.readableName(component, display: nil)
+    }
+
+    private func modelFailure(_ message: String, name: String?) -> String {
+        guard let name, !name.isEmpty else { return message }
+        let prefix = name + ": "
+        return message.hasPrefix(prefix) ? message : prefix + message
+    }
+
     func install(source: String, kind: String, artifactMode: String? = nil) {
         guard !busy else { return }
         errorMessage = nil
@@ -2409,6 +2453,7 @@ final class EngineController: ObservableObject {
         let requestID = UUID().uuidString.lowercased()
         pendingSupportRequestID = requestID
         activeInstallRequestID = requestID
+        activeInstallModelName = shortModelName(source)
         catalogInstallation = nil; catalogInstallMessage = nil; catalogInstallFailed = false
         let purpose = artifactMode == "vision-language" ? "vision-language" : (mode == .decision ? "decision" : "text")
         state = "installing"; message = "Checking model support…"
@@ -2457,10 +2502,12 @@ final class EngineController: ObservableObject {
         beginnerInstallChoice = choice; beginnerInstalledResultID = nil; beginnerInstallState = "installing"
         beginnerInstallRecommendationID = recommendation; beginnerInstallRequestID = requestID
         activeInstallRequestID = requestID; pendingSupportRequestID = requestID
+        activeInstallModelName = shortModelName(choice.name)
         state = "installing"; message = "Checking the starting model…"
         if !send(["command": "install_guided", "recommendation_request_id": recommendation,
                   "recipe_id": recipeID, "support_request_id": requestID]) {
-            beginnerInstallState = "failed"; beginnerInstallError = "Could not start setup. Reopen Stark and try again."
+            beginnerInstallState = "failed"
+            beginnerInstallError = modelFailure("Could not start setup. Reopen Stark and try again.", name: activeInstallModelName)
             beginnerInstallRequestID = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
             endInstallProgress("failed")
             state = loadedID.isEmpty ? "idle" : "ready"
@@ -2475,7 +2522,7 @@ final class EngineController: ObservableObject {
         beginnerCancelPending = true
         if !send(["command": "cancel_install", "request_id": requestID]) {
             beginnerCancelPending = false
-            beginnerInstallError = "Could not cancel setup. Reopen Stark if it stops responding."
+            beginnerInstallError = modelFailure("Could not cancel setup. Reopen Stark if it stops responding.", name: activeInstallModelName)
         }
     }
 
@@ -2511,7 +2558,8 @@ final class EngineController: ObservableObject {
                 supportsTools = previous.tools; toolParser = previous.parser; gpuMemoryBytes = previous.gpu
             }
             beginnerRunBackup = nil; beginnerRunRequestID = nil
-            errorMessage = "Could not start this model. Reopen Stark and try again."
+            errorMessage = modelFailure("Could not start this model. Reopen Stark and try again.",
+                                        name: models.first { $0.id == modelID }?.displayName)
             return false
         }
         return true
@@ -2568,14 +2616,15 @@ final class EngineController: ObservableObject {
         errorMessage = nil; resetInstallProgress(kind: "huggingface")
         let supportID = UUID().uuidString.lowercased()
         pendingSupportRequestID = supportID; activeInstallRequestID = supportID
+        activeInstallModelName = shortModelName(item.name)
         catalogInstallation = CatalogModelInstallation(requestID: supportID, catalogRequestID: requestID,
                                                        entryID: id, name: item.name, artifactMode: artifactMode)
         catalogInstallMessage = nil; catalogInstallFailed = false
         state = "installing"; message = "Checking model support…"
         if !send(["command": "install_catalog", "catalog_request_id": requestID, "entry_id": id,
                   "artifact_mode": artifactMode.rawValue, "support_request_id": supportID]) {
+            catalogInstallMessage = modelFailure("Could not start the download. Reopen the app and try again.", name: activeInstallModelName)
             catalogInstallation = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
-            catalogInstallMessage = "Could not start the download. Reopen the app and try again."
             catalogInstallFailed = true
             endInstallProgress("failed")
         }
@@ -2745,6 +2794,7 @@ final class EngineController: ObservableObject {
 
     func shutdown() {
         shuttingDown = true
+        stopObservingSystemSleep()
         desktopConnections.shutdown()
 #if STARK_CONNECTION_VALIDATION
         ConnectionPrivacyAudit.finish()

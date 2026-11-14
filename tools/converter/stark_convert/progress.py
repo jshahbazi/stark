@@ -15,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import httpx2 as httpx
 from huggingface_hub.utils import tqdm as hf_tqdm
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -26,6 +27,7 @@ CONVERTER_FAILURE_CATEGORIES = frozenset(
         "unsupported_format_or_config",
         "invalid_checkpoint",
         "conversion_failed",
+        "network_unavailable",
     }
 )
 
@@ -42,6 +44,30 @@ def converter_failure_category(error: BaseException) -> str:
         return "unsupported_format_or_config"
     if error_name == "ConversionError":
         return "invalid_checkpoint"
+    # Hub may wrap a transport error in LocalEntryNotFoundError. Inspect only
+    # typed causes, never exception text (which can contain URLs or secrets).
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            if status in {408, 429, 500, 502, 503, 504}:
+                return "network_unavailable"
+            break  # Authentication, access and missing files require user action.
+        if isinstance(
+            current,
+            (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, ConnectionError, TimeoutError),
+        ) or getattr(current, "errno", None) in {
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EHOSTUNREACH,
+            errno.ECONNRESET,
+            errno.ETIMEDOUT,
+        }:
+            return "network_unavailable"
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
     return "conversion_failed"
 
 

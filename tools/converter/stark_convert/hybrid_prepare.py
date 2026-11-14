@@ -23,7 +23,14 @@ from huggingface_hub import snapshot_download
 
 from . import qwen38_external
 from .cli import _publish
-from .progress import FDProgressSink, ProgressCallback, ProgressReporter, SnapshotDownloadProgress, reporter
+from .progress import (
+    FDProgressSink,
+    ProgressCallback,
+    ProgressReporter,
+    SnapshotDownloadProgress,
+    converter_failure_category,
+    reporter,
+)
 from .sources import SourceSnapshot, _verified_hashes, huggingface_repository
 from .streaming import ConversionError, UnsupportedConversion, load_checkpoint, read_safetensors_header
 
@@ -847,7 +854,9 @@ def main(argv=None):
         else:
             options = {"artifact_mode": args.artifact_mode} if args.artifact_mode != "text" else {}
             receipt = prepare(args.model, args.output, offline=args.offline, progress=progress_sink, **options)
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as error:
+        if progress_sink is not None and not isinstance(error, KeyboardInterrupt):
+            ProgressReporter(progress_sink).failure(converter_failure_category(error))
         print(
             "Native model preparation did not complete; its owned download directory can be retried.", file=sys.stderr
         )
