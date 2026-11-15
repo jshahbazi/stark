@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261115-LCPP1-01/02/03: llama.cpp 1.0.0 assessment and Flash Next Lily baseline](../benchmarks/2026-11-15-llama-v1-flashnext-lily-assessment.md): active Lily source audit and ranked stop/defer decisions; fresh image-resident text/MTP measurements under explicitly accepted concurrent host activity. Preserves initial readiness/image-check failure and missing-host-observation warmup failure. No optimization candidate or promotion; public timings remain separate from historical isolated measurements and image numerical qualification.
+
 - [20261113-PIGUI-05: persistent Pi restart](../archive/runs/2026-11-13-pi-persistent-default.md): installed signed build, preserved normal Pi configuration, actual Keychain-backed authentication and native Qwen3-4B generation across two fresh default-profile client processes.
 - [20261113-PIGUI-01–04: Pi Connections delivery](2026-11-13-pi-connections.md): signed app/candidate, retained nvm/fd and pre-PR recovery/build findings, manual GUI setup and fresh bundled-profile Qwen3-4B checks.
 - [20261113-PI-01–08: guarded Pi manual qualification](2026-11-13-pi-manual-qualification.md): missing-usage/DONE guard, retained failed/superseded harness recipes, and final 21-check installed-Pi/Qwen3-4B backend qualification; manual RPC scope only.

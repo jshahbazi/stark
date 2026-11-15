@@ -12,6 +12,14 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**llama.cpp 1.0.0 assessment and Flash Next Lily baseline (2026-11-15).**
+The [ranked source assessment and measurement record](2026-11-15-llama-v1-flashnext-lily-assessment.md)
+screens release techniques against the actual retained Lily path and records a
+fresh image-resident text baseline under ordinary concurrent host activity.
+The [public aggregates](data/llama-v1-flashnext-lily-baseline-2026-11-15.json)
+preserve all measured requests and variability. No engine optimization is
+adopted, and no earlier source-bound study or image qualification is superseded.
+
 **Catalog coding ranking snapshot (2026-11-14).** The Top Models tab uses a
 shared-benchmark relative index across 28 catalog-matched models and 167
 pairwise comparisons, averaged into ten family entries. This is external
