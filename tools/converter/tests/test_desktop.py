@@ -2507,6 +2507,51 @@ def test_mtp_api_overrides_are_request_local_and_streaming_uses_same_selection(d
         assert request.call_args_list[-1].args[0]["mtp_drafts"] == 0
 
 
+def test_one_draft_recommendation_preserves_saved_off_and_image_mtp_zero(
+    desktop, model, mtp_executable
+):
+    import base64
+
+    config = json.loads((model / "config.json").read_text())
+    config["fixture_mtp"] = {
+        "supported": True,
+        "max_drafts": 3,
+        "recommended_drafts": 1,
+        "default_drafts": 0,
+        "sampling": "exact-rejection-v1",
+        "verification": "fixture-exact-v1",
+        "operations": ["generate"],
+    }
+    (model / "config.json").write_text(json.dumps(config))
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    assert desktop.settings_summary()["mtp_enabled"] is True
+
+    payload = {"messages": [{"role": "user", "content": "fixture"}]}
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.api_complete(payload)
+        assert request.call_args_list[-1].args[0]["mtp_drafts"] == 1
+
+    set_mtp(desktop, identifier, False)
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.api_complete(payload)
+        assert request.call_args_list[-1].args[0]["mtp_drafts"] == 0
+
+    desktop.worker.images = True
+    image_url = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nsynthetic").decode()
+    image_payload = {
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]}]
+    }
+    with patch.object(
+        desktop.worker, "request_image", return_value={"text": "fixture", "finish_reason": "length"}
+    ) as image:
+        desktop.api_complete(image_payload)
+        assert "mtp_drafts" not in image.call_args.args[2]
+    assert desktop.models[0]["mtp_enabled"] is False
+
+
 def test_unsupported_mtp_is_rejected_without_touching_worker_and_false_is_compatible(desktop, model):
     from stark_convert.local_api import APIError
 

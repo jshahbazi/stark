@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261115-LILY-MTP1-01/02: pinned Lily one-draft recommendation](../benchmarks/2026-11-15-flashnext-lily-one-draft-default.md): source-scoped two-to-one recommendation; explicit off/counts and other artifacts preserved. Same-worker depth study meets its bounded latency criteria; actual-default ABBA speed remains inconclusive. Model-free, selector/image and 37 prefix exactness checks pass. Implemented on branch, not installed or released.
+
 - [20261115-LCPP1-01/02/03: llama.cpp 1.0.0 assessment and Flash Next Lily baseline](../benchmarks/2026-11-15-llama-v1-flashnext-lily-assessment.md): active Lily source audit and ranked stop/defer decisions; fresh image-resident text/MTP measurements under explicitly accepted concurrent host activity. Preserves initial readiness/image-check failure and missing-host-observation warmup failure. No optimization candidate or promotion; public timings remain separate from historical isolated measurements and image numerical qualification.
 
 - [20261113-PIGUI-05: persistent Pi restart](../archive/runs/2026-11-13-pi-persistent-default.md): installed signed build, preserved normal Pi configuration, actual Keychain-backed authentication and native Qwen3-4B generation across two fresh default-profile client processes.

@@ -613,3 +613,12 @@ prompts, independent held-out tasks, full-model quality, image inference speed,
 new image numerical parity, GUI/API TTFT, peak memory or exclusive-GPU behavior.
 The first script's image-check failure is not diagnosed deeply enough to call
 an image-runtime bug. No new path is represented as production-qualified.
+
+## Follow-up
+
+The user accepted the near-10% one-draft observation as worth implementing.
+The [one-draft recommendation follow-up](2026-11-15-flashnext-lily-one-draft-default.md)
+records the subsequent source-scoped policy change and additional measurements.
+It distinguishes Desktop's enabled two-draft recommendation from the raw
+worker's omitted-option default. The original baseline and conclusions above
+remain bound to their original source and criteria.

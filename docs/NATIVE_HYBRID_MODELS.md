@@ -394,9 +394,16 @@ resource evidence are in the original [Lily generation study](benchmarks/2026-11
 and the [cross-backend follow-up](benchmarks/2026-11-08-cross-backend-idle-wake.md).
 For Qwen3.8, the generation worker can also load the checkpoint's existing MTP
 head and enable one to three draft tokens per request through `mtp_drafts`.
-It remains off by default. The generic `mtp: true` request option chooses the
-loaded model's recommended count; readiness exposes per-model MTP support and
-limits. The named GLM EXL3 profile's separate default is documented above.
+Raw native requests leave MTP off when neither selector is supplied. The
+desktop has a separate per-model on/off preference and normally enables MTP
+for supported Lily models; a saved off choice is preserved. The generic
+`mtp: true` request option and enabled host toggle choose the loaded model's
+recommended count. The exact pinned Lily Q4-XL source recommends one draft;
+other Lily/official affine artifacts retain two. Readiness exposes the actual
+recommendation and supported maximum. Explicit native `mtp_drafts` remains
+available. The [one-draft study](benchmarks/2026-11-15-flashnext-lily-one-draft-default.md)
+records the source identity, measured scope and separate installation status.
+The named GLM EXL3 profile's separate default is documented above.
 Draft and target distributions use Stark's complete-logit CPU
 sampler with exact probability-ratio rejection and residual correction;
 quantization is unchanged. Lily batched verification retains ordinary decode arithmetic,

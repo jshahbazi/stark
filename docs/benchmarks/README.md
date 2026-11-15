@@ -12,6 +12,16 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Flash Next Lily one-draft recommendation (2026-11-15).** The pinned Lily
+Q4-XL source recommends one draft when MTP is enabled. The
+[study](2026-11-15-flashnext-lily-one-draft-default.md) records 128 same-worker
+depth observations, 32 actual-default ABBA requests, 26 selector/image checks
+and 37 prefix exactness comparisons. The same-worker comparison favors one
+in several cells, while actual-default ABBA gives only +2.65% paired decode
+and -2.16% request latency, an inconclusive practical gain. See the
+[aggregates](data/flashnext-lily-one-draft-2026-11-15.json). This changes the
+branch recommendation, not any earlier timing result or installed app.
+
 **llama.cpp 1.0.0 assessment and Flash Next Lily baseline (2026-11-15).**
 The [ranked source assessment and measurement record](2026-11-15-llama-v1-flashnext-lily-assessment.md)
 screens release techniques against the actual retained Lily path and records a
