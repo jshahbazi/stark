@@ -1,0 +1,127 @@
+{
+  "artifact_limits": "No model weights loaded; no inference or performance measurement. Results cover synthetic component correctness only.",
+  "attempt_id": "20261115-LCPPGLM-02",
+  "build": {
+    "cargo": "cargo 1.101.0-nightly (f3865b2a4 2026-09-29)",
+    "command": "cargo +nightly-2026-10-01 test --locked -p stark-engine --features cpu,metal -- <exact test path> --exact --test-threads=1",
+    "feature_selectors": {
+      "matching_environment_variables": [],
+      "scope": "No environment variables beginning STARK_GLM53 or STARK_HYBRID were set."
+    },
+    "rustc": "rustc 1.101.0-nightly (21b707e3f 2026-09-30)",
+    "test_binary_path": "runtime/glm-llama-component-target/debug/build/stark-engine/73ecfc9cf0a8f09e/out/stark_engine-73ecfc9cf0a8f09e",
+    "test_binary_sha256": "befd0ffc5ad86becceebe80786e403a71819873ffe5caa7f75da1ac33c4e60e1",
+    "toolchain": "nightly-2026-10-01"
+  },
+  "logs": {
+    "directory": "private-logs/",
+    "permissions": "0600 files in 0700 directory",
+    "test_discovery_sha256": "aa926a2774a4275e40831f375861b5e46f2896b39608aea445e8bc929e431047"
+  },
+  "machine": {
+    "architecture": "arm64",
+    "model": "Mac17,7",
+    "os": "macOS 26.7.2",
+    "os_build": "25G332"
+  },
+  "performance": "Not measured; test execution durations are not kernel benchmarks.",
+  "private_receipt_sha256": "62dc06dc25f01f5a0a4d9a766cc15c0b92171c42989bc2a05c151539d0648bdf",
+  "results": {
+    "failed": 0,
+    "metal_controls": {
+      "cases": [
+        "graph_router_preserves_corrected_selection_and_probability_contract",
+        "kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates",
+        "kda_register_prefill_matches_source_bits_for_ordered_parallel_and_extreme_policies"
+      ],
+      "skip_or_early_return": "None in the inspected test bodies; Metal graph/executor creation and admission are asserted, and the tests completed successfully.",
+      "status": "executed_and_passed"
+    },
+    "passed": 7,
+    "tests": [
+      {
+        "failed": 0,
+        "file": "chunk_limits.log",
+        "log_sha256": "5167442e8d30eaf0548caf16b3214e6d5e68e73adf297a1ce78f0ff13ab08f29",
+        "metal_backed": false,
+        "name": "stark_engine::engine::hybrid::glm::prefill_batch::tests::glm_prefill_chunk_limits_keep_default_four_and_greedy_eight_tails",
+        "passed": 1,
+        "result": "passed"
+      },
+      {
+        "failed": 0,
+        "file": "router_bias_changes_selection_without_changing_combine_probabilities.log",
+        "log_sha256": "59d598299a045db2c1fd1cb70a8ef116402010b861415b02cb8438831423b7e7",
+        "metal_backed": false,
+        "name": "stark_engine::engine::hybrid::glm::tests::router_bias_changes_selection_without_changing_combine_probabilities",
+        "passed": 1,
+        "result": "passed"
+      },
+      {
+        "failed": 0,
+        "file": "graph_router_preserves_corrected_selection_and_probability_contract.log",
+        "log_sha256": "400c2d230a150943e21c1dc151dc8edd662b71e302fe005a385a25746ecb8c5a",
+        "metal_backed": true,
+        "name": "stark_engine::engine::hybrid::glm_metal::tests::graph_router_preserves_corrected_selection_and_probability_contract",
+        "passed": 1,
+        "result": "passed"
+      },
+      {
+        "failed": 0,
+        "file": "kquant_mma_geometry_matches_pinned_admission_without_runtime_changes.log",
+        "log_sha256": "539b528b62e024db3733d0840cec9fa0060c11de3bcbb377bb46a66b326bfa7d",
+        "metal_backed": false,
+        "name": "stark_engine::engine::hybrid::weight_metal::kquant_mma_tests::kquant_mma_geometry_matches_pinned_admission_without_runtime_changes",
+        "passed": 1,
+        "result": "passed"
+      },
+      {
+        "failed": 0,
+        "file": "kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates.log",
+        "log_sha256": "44fa297effd598f201da032eb7ba562ac59fb67bf62ae19b9209c81fb051a58e",
+        "metal_backed": true,
+        "name": "stark_engine::engine::hybrid::weight_metal::kquant_mma_tests::kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates",
+        "passed": 1,
+        "result": "passed"
+      },
+      {
+        "failed": 0,
+        "file": "kda_register_prefill_matches_source_bits_for_ordered_parallel_and_extreme_policies.log",
+        "log_sha256": "4e612491058627e4f2904463499444c528de57d89b8256e560ccc3576e69249b",
+        "metal_backed": true,
+        "name": "stark_engine::engine::hybrid::glm_metal::kda_prefill::tests::kda_register_prefill_matches_source_bits_for_ordered_parallel_and_extreme_policies",
+        "passed": 1,
+        "result": "passed"
+      },
+      {
+        "failed": 0,
+        "file": "glm_kda_prefix_snapshot_restores_convolution_and_recurrent_bits.log",
+        "log_sha256": "d6460dc437aa03e7ed79afd887a291cd9f80dd78a2a2786648f8b0c4e97e6018",
+        "metal_backed": false,
+        "name": "stark_engine::engine::hybrid::glm_metal::prefix_tests::glm_kda_prefix_snapshot_restores_convolution_and_recurrent_bits",
+        "passed": 1,
+        "result": "passed"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "scope": "synthetic_model_free_native_glm_component_tests",
+  "source_checkout": {
+    "clean_at_run": true,
+    "head": "d29230d68f795b67c50884b905799551ed6ff2c6",
+    "shared_rust_input_tree_ids": {
+      ".cargo": "eff2fff2e514f8f6fb3126e54d0decb991fb159a",
+      "Cargo.lock": "f431c48f7f67e18ba99c1fd08b7d65df7264bd22",
+      "Cargo.toml": "2f821c683269e634fb41935dcc6d252b7225561b",
+      "crates/stark-engine": "a2a83cc1c70f11b072155ed74ecd609b3d2016b2",
+      "crates/stark-engine-macros": "84c0a62b612a597848d5e708a1d1706dff388ce5",
+      "rust-toolchain.toml": "f71b0da057ee9b779c67f69ee3992c6e9617f089",
+      "vendor": "460c6b44088396b1ca0446e2fa9a27b3e799096d"
+    }
+  },
+  "study_checkout_equivalence": {
+    "claim_scope": "Source input byte equivalence only; test executable identity with a build in the study checkout is not claimed.",
+    "head": "f9c9720c23ee848fcd64c002450f04b727e32e35",
+    "same_tree_ids_for_all_shared_rust_inputs": true
+  }
+}

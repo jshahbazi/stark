@@ -1,5 +1,7 @@
 # Model change and experiment ledger
 
+- [20261115-LCPPGLM-01/02: llama.cpp ideas against GLM-5.3](../benchmarks/2026-11-15-llama-v1-glm53-assessment.md): separate native GGUF and optional EXL3 source assessment; ranked GPU-routing/batched-prefill checks and model-free component controls. Exact full-model payloads were not found in checked locations, so fresh full-model timing is not run. Historical T8 MMA and negative all-selector GPU-stage observations retain their original scope. No candidate/default promotion.
+
 - [20261115-LCPP1-01/02/03: llama.cpp 1.0.0 assessment and Flash Next Lily baseline](../benchmarks/2026-11-15-llama-v1-flashnext-lily-assessment.md): active Lily source audit and ranked stop/defer decisions; fresh image-resident text/MTP measurements under explicitly accepted concurrent host activity. Preserves initial readiness/image-check failure and missing-host-observation warmup failure. No optimization candidate or promotion; public timings remain separate from historical isolated measurements and image numerical qualification.
 
 - [20261113-PIGUI-05: persistent Pi restart](../archive/runs/2026-11-13-pi-persistent-default.md): installed signed build, preserved normal Pi configuration, actual Keychain-backed authentication and native Qwen3-4B generation across two fresh default-profile client processes.

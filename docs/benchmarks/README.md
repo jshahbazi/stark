@@ -12,6 +12,13 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**llama.cpp 1.0.0 against native GLM-5.3 and EXL3 (2026-11-15).**
+The [GLM assessment](2026-11-15-llama-v1-glm53-assessment.md) ranks GPU-bank
+routing and batched prefill ahead of MTP-copy and generic FP8-cache ports.
+It separates historical T8 MMA gains, current source overlaps, model-free
+controls and missing full-model timing. It changes no defaults and supersedes
+no earlier GLM benchmark or artifact qualification.
+
 **llama.cpp 1.0.0 assessment and Flash Next Lily baseline (2026-11-15).**
 The [ranked source assessment and measurement record](2026-11-15-llama-v1-flashnext-lily-assessment.md)
 screens release techniques against the actual retained Lily path and records a

@@ -2,6 +2,10 @@
 
 Date: 2026-11-15. Attempts: `20261115-LCPP1-01`, `-02`, `-03`.
 
+The [GLM-5.3 follow-up](2026-11-15-llama-v1-glm53-assessment.md) separately
+evaluates the native GGUF and optional EXL3 paths. Lily's cache format and
+MTP conclusions do not describe those backends.
+
 ## Engineering judgment
 
 The release is worth using as a source of narrowly scoped experiments. The
