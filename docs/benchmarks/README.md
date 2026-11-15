@@ -19,23 +19,22 @@ two drafts: candidate one is 11.35% slower in paired useful decode, losing all
 four pairs; its longer response also takes 38.06% more time. The
 [planning request](2026-11-15-lily-long-planning-response.md) gives only +1.02%
 paired decode, inside observed noise, with a shorter candidate response and
-unequal background load. Both show why the earlier selected short-case gain
-does not justify a generally better sampler-only default. The implemented
-policy remains experimental on branch; no installation/release or native code
-change is made by these tests.
+unequal background load. Following the coding counterexample, the
+sampling-specific automatic one-draft policy was reverted and Lily's current
+recommendation is two. This branch-only restoration changes no benchmark
+record, does not install or release the app, and is documented in the
+[restoration record](../archive/runs/2026-11-15-lily-mtp-two-draft-default-restored.md).
 
-**Pinned Lily sampling-specific MTP recommendation (2026-11-15).** A narrower
-loaded-artifact policy now selects one draft only for the pinned Lily Q4-XL
-receipt with stochastic temperature 1, top-k 20, top-p 0.95 and absent/null
-min-p. The scalar recommendation remains two; greedy, nucleus, min-p 0 and
-other settings select two. Its fixed four-session confirmation retained 64
-measured requests, 16 warmups and four setup requests; the held-out top-k
-endpoint reduced median request latency 14.66% with 8/8 paired blocks favoring
-one. Seven image-loaded
-prefix checks matched fresh outputs through one-to-two and two-to-one
-transitions and the image-clear boundary. These functional and selected-workload
-checks pass; the later long-response evidence above limits broader performance
-promotion. No release or installation is claimed. See
+**Historical Lily sampling-specific MTP candidate (2026-11-15).** The former
+branch candidate selected one draft for the pinned Lily Q4-XL receipt with
+stochastic temperature 1, top-k 20, top-p 0.95 and absent/null min-p. Its fixed
+four-session confirmation retained 64 measured requests, 16 warmups and four
+setup requests; the held-out top-k endpoint reduced median request latency
+14.66% with 8/8 paired blocks favoring one. Seven image-loaded prefix checks
+matched fresh outputs through one-to-two and two-to-one transitions and the
+image-clear boundary. The automatic policy has since been removed; the
+historical measurements remain valid for their fixed workload and do not
+qualify the current default. See
 the [policy record](2026-11-15-lily-sampling-mtp-policy.md) and
 [public aggregates](data/lily-sampling-mtp-policy-2026-11-15.json).
 
@@ -45,16 +44,15 @@ artifact-wide performance gate. In the primary 512-token top-k comparison,
 one draft reduced median request latency by 3.58%, below the required 5%; the
 4,096-token nucleus guard regressed useful decode rate by 6.01%. The held-out
 top-k cell favored one draft by 20.03% decode and 14.45% request latency, a
-scoped positive result. Two drafts remain the scalar recommendation outside
-the separately qualified sampling-specific case; explicit one-draft requests
-remain supported. The
+scoped positive result. The former sampling-specific exception was also
+reverted after long-response evidence; two drafts are the current scalar
+recommendation for Lily. Explicit one-draft requests remain supported. The
 [study](2026-11-15-flashnext-lily-one-draft-default.md),
 [reconciliation](2026-11-15-lily-mtp-default-reconciliation.md), and
 [aggregates](data/lily-mtp-default-reconciliation-2026-11-15.json) preserve
 the off/on, one/two, actual-default comparisons and validation evidence.
-The reconciliation remains the general recommendation decision; the later
-sampling-specific exception is a separately qualified, workload-specific
-follow-up.
+The [restoration record](../archive/runs/2026-11-15-lily-mtp-two-draft-default-restored.md)
+documents the current branch behavior.
 
 **llama.cpp 1.0.0 assessment and Flash Next Lily baseline (2026-11-15).**
 The [ranked source assessment and measurement record](2026-11-15-llama-v1-flashnext-lily-assessment.md)

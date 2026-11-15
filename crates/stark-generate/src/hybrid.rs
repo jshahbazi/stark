@@ -967,7 +967,6 @@ impl GenerationBackend for HybridBackend {
         self.model.mtp_capabilities().map(|capabilities| MtpCapabilities {
             max_drafts: capabilities.max_drafts,
             recommended_drafts: capabilities.recommended_drafts,
-            sampling_recommendation_policy: self.model.mtp_sampling_recommendation_policy(),
             sampling: capabilities.sampling,
             verification: capabilities.verification,
         })

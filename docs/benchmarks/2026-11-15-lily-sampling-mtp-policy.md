@@ -16,12 +16,12 @@ its small time saving includes a 2.86% shorter response and unequal host load.
 
 The selected short-case gain below remains source-bound evidence. These long
 responses show that the sampler profile alone does not establish a generally
-better draft depth. The implemented policy remains on the experiment branch,
-with no installation/release; broader promotion needs a narrower or adaptive
-selection rule and representative qualification. The following record retains
-the original implementation and confirmation rather than replacing its results.
+better draft depth. The automatic one-draft implementation was later reverted;
+the current Lily scalar recommendation is two. This record preserves the
+historical implementation and confirmation without replacing their results;
+see the [restoration record](../archive/runs/2026-11-15-lily-mtp-two-draft-default-restored.md).
 
-## Intended behavior and scope
+## Historical candidate behavior and scope
 
 Implement one automatic draft for the pinned
 `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` revision
@@ -115,10 +115,10 @@ the clock helper. Do not repeat the observer failure or infer missing clocks;
 GPU operating state remains unknown. This work does not install an app,
 publish a release or open a PR.
 
-## State and outcome
+## Candidate state and outcome at `1b0f5ed0`
 
-The implementation and bounded qualification are complete and adopted on the
-branch. Native and host model-free controls pass; 47 live functional checks
+At that revision, the implementation and bounded qualification were complete
+and adopted on the branch. Native and host model-free controls pass; 47 live functional checks
 and seven image-loaded prefix comparisons pass. The fixed 64-measurement
 before/candidate comparison confirms the selected held-out case: **+20.47%
 useful decode and -14.66% complete-request time, with 8/8 latency wins**.
@@ -242,9 +242,21 @@ include both failed setup snapshots and their continuations. Native contents,
 weights, token arrays and frozen workload copies stay ignored/private.
 
 Repository policy, pinned-nightly Rust formatting and archived Python syntax
-checks pass. The public Rust capability struct keeps its prior fields; the
-policy uses an additive engine getter and optional wire metadata. Dependencies
-and the decoder's numerical policy are unchanged. No PR, release or app
-installation is performed. Qualification is limited to this pinned artifact;
-other quantizations/checkpoints and wider sampling profiles need their own
-evidence before receiving this policy.
+checks passed for the historical candidate. That candidate kept the public
+Rust capability struct's fields and used an additive engine getter and optional
+wire metadata. The decoder's numerical policy was unchanged. The experiment
+was limited to this pinned artifact; its selected-workload qualification did
+not generalize to longer natural responses.
+
+## Superseded branch policy
+
+After the coding comparison found lower useful decode rate for one draft in all
+four pairs, the automatic sampling-specific one-draft selector was removed from
+the current branch. Lily `recommended_drafts` is again two for every sampling
+profile; explicit supported draft counts remain available, and requests with no
+MTP selector still use `default_drafts` zero. The planning comparison was near
+noise and does not reverse that decision. The held-out short-request timing and
+seven prefix checks above remain historical, source-bound evidence for the
+candidate implementation; they do not describe current branch behavior. The
+[restoration record](../archive/runs/2026-11-15-lily-mtp-two-draft-default-restored.md)
+documents the revert. No installation, release or PR is claimed.

@@ -2552,60 +2552,7 @@ def test_one_draft_recommendation_preserves_saved_off_and_image_mtp_zero(
     assert desktop.models[0]["mtp_enabled"] is False
 
 
-def test_sampling_mtp_policy_follows_each_api_request_and_saved_preference(
-    desktop, model, mtp_executable
-):
-    import base64
-
-    config = json.loads((model / "config.json").read_text())
-    config["fixture_mtp"] = {
-        "supported": True, "max_drafts": 3, "recommended_drafts": 2,
-        "default_drafts": 0, "sampling": "exact-rejection-v1",
-        "verification": "fixture-exact-v1", "operations": ["generate"],
-        "sampling_recommendation_policy": "lily-topk20-one-draft-v1",
-    }
-    (model / "config.json").write_text(json.dumps(config))
-    desktop.executable = mtp_executable
-    identifier = running(desktop, model)
-    payload = {"messages": [{"role": "user", "content": "fixture"}], "max_tokens": 16}
-    topk = {"temperature": 1, "top_k": 20, "top_p": 0.95}
-    assert desktop.settings_summary()["mtp"]["recommended_drafts"] == 2
-    assert desktop.settings_summary()["mtp_enabled"] is True
-    # Include a streaming top-k call between greedy and nucleus requests so a
-    # selected count cannot leak into a subsequent request or the saved toggle.
-    for sampling, expected, stream in (
-        ({}, 2, False), (topk, 1, True),
-        ({"temperature": 1, "top_p": 0.95}, 2, False),
-        ({**topk, "min_p": 0}, 2, False), (topk, 1, False),
-    ):
-        with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
-            desktop.api_complete({**payload, **sampling}, **({"on_delta": lambda _: None} if stream else {}))
-            assert request.call_args_list[-1].args[0]["mtp_drafts"] == expected
-    desktop.worker.images = True
-    image_url = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nsynthetic").decode()
-    image_payload = {**topk, "max_tokens": 16, "messages": [{"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": image_url}}
-    ]}]}
-    with patch.object(
-        desktop.worker, "request_image", return_value={"text": "fixture", "finish_reason": "length"}
-    ) as image:
-        desktop.api_complete(image_payload)
-        assert "mtp_drafts" not in image.call_args.args[2]
-    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
-        desktop.api_complete({**payload, **topk})
-        assert request.call_args_list[-1].args[0]["mtp_drafts"] == 1
-    assert desktop.models[0].get("mtp_enabled", True) is True
-    set_mtp(desktop, identifier, False)
-    for override, expected in ((None, 0), (True, 1), (False, 0), (None, 0)):
-        with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
-            desktop.api_complete({**payload, **topk, **({"mtp": override} if override is not None else {})})
-            assert request.call_args_list[-1].args[0]["mtp_drafts"] == expected
-    assert desktop.models[0]["mtp_enabled"] is False
-
-
-def test_sampling_mtp_policy_sends_same_depth_to_automatic_budget_and_generation(
-    desktop, model, mtp_executable
-):
+def test_retired_sampling_policy_cannot_change_two_draft_api_default(desktop, model, mtp_executable):
     config = json.loads((model / "config.json").read_text())
     config["fixture_mtp"] = {
         "supported": True, "max_drafts": 3, "recommended_drafts": 2,
@@ -2616,14 +2563,16 @@ def test_sampling_mtp_policy_sends_same_depth_to_automatic_budget_and_generation
     (model / "config.json").write_text(json.dumps(config))
     desktop.executable = mtp_executable
     running(desktop, model)
-    desktop.worker.generation_budget = True
-    topk = {"mode": "stochastic", "temperature": 1, "top_k": 20, "top_p": 0.95}
-    with patch("stark_convert.desktop.automatic_generation_budget", return_value=(512, 16)) as budget:
-        with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
-            desktop.infer([{"role": "user", "content": "fixture"}], 0, context=512, sampling=topk)
-            assert budget.call_args.kwargs["mtp_drafts"] == 1
-            assert budget.call_args.kwargs["sampling"] == topk
-            assert request.call_args_list[-1].args[0]["mtp_drafts"] == 1
+    capability = desktop.settings_summary()["mtp"]
+    assert capability["recommended_drafts"] == 2
+    assert "sampling_recommendation_policy" not in capability
+    payload = {
+        "messages": [{"role": "user", "content": "fixture"}],
+        "max_tokens": 16, "temperature": 1, "top_k": 20, "top_p": 0.95,
+    }
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.api_complete(payload)
+        assert request.call_args_list[-1].args[0]["mtp_drafts"] == 2
 
 
 def test_unsupported_mtp_is_rejected_without_touching_worker_and_false_is_compatible(desktop, model):

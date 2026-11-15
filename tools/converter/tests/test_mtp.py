@@ -104,57 +104,6 @@ def test_disabling_does_not_require_capability_or_mutate_it():
     assert raw == descriptor()
 
 
-TOPK = {"mode": "stochastic", "temperature": 1, "top_k": 20, "top_p": 0.95}
-POLICY = "lily-topk20-one-draft-v1"
-
-
-@pytest.mark.parametrize("sampling", [
-    TOPK, {**TOPK, "temperature": 1.0}, {**TOPK, "min_p": None},
-    {**TOPK, "temperature": 1.0000000001, "top_p": 0.9500000001},
-])
-def test_loaded_sampling_policy_selects_one_and_off_still_wins(sampling):
-    raw = descriptor(sampling_recommendation_policy=POLICY)
-    current = mtp_capabilities({"mtp": raw})
-    assert current["recommended_drafts"] == 2
-    assert current["sampling_recommendation_policy"] == POLICY
-    assert resolve_mtp(True, current, sampling) == 1
-    assert resolve_mtp(False, current, sampling) == 0
-    assert raw["recommended_drafts"] == 2
-
-
-@pytest.mark.parametrize(
-    "sampling",
-    [
-        None, {}, {"mode": "greedy"},
-        {**TOPK, "temperature": 0.9}, {**TOPK, "temperature": True},
-        {**TOPK, "temperature": 1.0000001192092896},
-        {**TOPK, "top_k": 19}, {**TOPK, "top_k": 21}, {**TOPK, "top_k": 20.0},
-        {k: v for k, v in TOPK.items() if k != "top_k"},
-        {**TOPK, "top_p": 0.9}, {**TOPK, "top_p": 0.9500000476837158},
-        {**TOPK, "temperature": float("inf")}, {**TOPK, "top_p": float("nan")},
-        {**TOPK, "temperature": 10**1000},
-        {k: v for k, v in TOPK.items() if k != "top_p"},
-        {**TOPK, "min_p": 0}, {**TOPK, "min_p": 0.05},
-        {**TOPK, "future_filter": 1},
-    ],
-)
-def test_sampling_policy_does_not_expand_to_untested_filters(sampling):
-    current = descriptor(sampling_recommendation_policy=POLICY)
-    assert resolve_mtp(True, current, sampling) == 2
-
-
-@pytest.mark.parametrize("policy", [None, "future-policy-v2", {}, [], True])
-def test_missing_or_unrecognized_sampling_policy_uses_scalar_recommendation(policy):
-    current = mtp_capabilities({"mtp": descriptor(sampling_recommendation_policy=policy)})
-    assert "sampling_recommendation_policy" not in current
-    assert resolve_mtp(True, current, TOPK) == 2
-
-
-def test_model_name_or_sampling_alone_cannot_grant_a_policy():
-    current = mtp_capabilities({"mtp": descriptor(), "model": "Qwen3.8-Flash-Next-lily-q4-xl"})
-    assert resolve_mtp(True, current, TOPK) == 2
-
-
 @pytest.mark.parametrize("extra", [{"ready": False}, {"ready": 1}, {"mode": "scoring-v1"}])
 def test_failed_or_wrong_protocol_readiness_cannot_advertise_mtp(extra):
     assert mtp_capabilities({"mtp": descriptor(), **extra})["supported"] is False

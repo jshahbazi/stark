@@ -959,16 +959,6 @@ impl Model {
         None
     }
 
-    /// Optional versioned sampling-specific depth recommendation for this
-    /// loaded model. The scalar recommendation remains unchanged.
-    pub fn mtp_sampling_recommendation_policy(&self) -> Option<&'static str> {
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        if let Forward::Lily(model) = &self.forward {
-            return model.mtp_sampling_recommendation_policy();
-        }
-        None
-    }
-
     pub fn mtp_verification(&self) -> &'static str {
         #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
         if let Forward::GlmExl3(model) = &self.forward {

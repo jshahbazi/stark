@@ -2810,7 +2810,7 @@ class Desktop:
             context = context or self.context
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = (default_mtp and image is None) if mtp is None else mtp
-            drafts = self.resolve_request_mtp(enabled_mtp, capability, image, sampling)
+            drafts = self.resolve_request_mtp(enabled_mtp, capability, image)
             context_capacity_known = self.context_capacity_known
             estimate_key = estimate_key or self.estimate_key(
                 context=context,
@@ -3043,13 +3043,13 @@ class Desktop:
                 self.prefix_reset_pending = True
 
     @staticmethod
-    def resolve_request_mtp(enabled, capability, image, sampling=None):
+    def resolve_request_mtp(enabled, capability, image):
         if type(enabled) is not bool:
             raise APIError(400, "mtp must be a boolean.", "invalid_request")
         if enabled is True and image is not None:
             raise APIError(400, "MTP is not supported for image requests.", "mtp_not_supported")
         try:
-            return resolve_mtp(enabled, capability, sampling)
+            return resolve_mtp(enabled, capability)
         except ValueError:
             raise APIError(400, "MTP is not supported by the loaded model and worker.", "mtp_not_supported") from None
 
@@ -3293,9 +3293,7 @@ class Desktop:
                 )
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = (default_mtp and request["image"] is None) if request["mtp"] is None else request["mtp"]
-            drafts = self.resolve_request_mtp(
-                enabled_mtp, capability, request["image"], request["sampling"]
-            )
+            drafts = self.resolve_request_mtp(enabled_mtp, capability, request["image"])
             epoch, identifier, worker = self.epoch, self.active_model, self.worker
             if len(self.api_queue) >= self.api_queue_limit:
                 raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
