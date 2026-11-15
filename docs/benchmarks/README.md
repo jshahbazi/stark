@@ -12,6 +12,18 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Lily natural long-response checks (2026-11-15).** Each comparison retains
+eight measured responses and four warmups on image-loaded before/candidate
+workers. The [coding request](2026-11-15-lily-long-coding-response.md) favors
+two drafts: candidate one is 11.35% slower in paired useful decode, losing all
+four pairs; its longer response also takes 38.06% more time. The
+[planning request](2026-11-15-lily-long-planning-response.md) gives only +1.02%
+paired decode, inside observed noise, with a shorter candidate response and
+unequal background load. Both show why the earlier selected short-case gain
+does not justify a generally better sampler-only default. The implemented
+policy remains experimental on branch; no installation/release or native code
+change is made by these tests.
+
 **Pinned Lily sampling-specific MTP recommendation (2026-11-15).** A narrower
 loaded-artifact policy now selects one draft only for the pinned Lily Q4-XL
 receipt with stochastic temperature 1, top-k 20, top-p 0.95 and absent/null
@@ -21,8 +33,9 @@ measured requests, 16 warmups and four setup requests; the held-out top-k
 endpoint reduced median request latency 14.66% with 8/8 paired blocks favoring
 one. Seven image-loaded
 prefix checks matched fresh outputs through one-to-two and two-to-one
-transitions and the image-clear boundary. Branch qualification is complete
-for this sampler/artifact scope; no release or installation is claimed. See
+transitions and the image-clear boundary. These functional and selected-workload
+checks pass; the later long-response evidence above limits broader performance
+promotion. No release or installation is claimed. See
 the [policy record](2026-11-15-lily-sampling-mtp-policy.md) and
 [public aggregates](data/lily-sampling-mtp-policy-2026-11-15.json).
 

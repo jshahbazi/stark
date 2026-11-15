@@ -5,6 +5,22 @@ controls and image continuation), `-05` (metadata-only preflight),
 `-05-CONT-02` (matched performance confirmation), and `-06` (image-loaded
 prefix transitions).
 
+## Subsequent long-response evidence
+
+The later natural [coding request](2026-11-15-lily-long-coding-response.md)
+favors two drafts: candidate one-draft useful decode is 11.35% lower in the
+paired comparison, with all four pairs worse. Its response is also 22.72%
+longer. The [planning request](2026-11-15-lily-long-planning-response.md)
+shows only +1.02% paired decode and mixed session halves, inside observed noise;
+its small time saving includes a 2.86% shorter response and unequal host load.
+
+The selected short-case gain below remains source-bound evidence. These long
+responses show that the sampler profile alone does not establish a generally
+better draft depth. The implemented policy remains on the experiment branch,
+with no installation/release; broader promotion needs a narrower or adaptive
+selection rule and representative qualification. The following record retains
+the original implementation and confirmation rather than replacing its results.
+
 ## Intended behavior and scope
 
 Implement one automatic draft for the pinned
