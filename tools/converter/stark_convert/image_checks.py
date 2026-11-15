@@ -52,6 +52,19 @@ class ImageCheckError(Exception):
     """A fixed, content-free local validation failure."""
 
 
+def _insufficient_memory(required: int, available: int) -> ImageCheckError:
+    reason = (
+        "Not enough available memory (RAM) to run the image model check. "
+        f"Estimated RAM needed: {required / 1e9:.1f} GB; available now: {available / 1e9:.1f} GB. "
+        if type(available) is int
+        else "Cannot determine available RAM to run the image model check. "
+    )
+    return ImageCheckError(
+        reason + "The check loads the model from its current folder without making another disk copy. "
+        "Stop other models or close memory-heavy apps, then retry."
+    )
+
+
 def preflight_family_memory(model: Path, config: dict) -> None:
     """Reject an obviously insufficient budget before starting the native loader.
 
@@ -72,7 +85,7 @@ def preflight_family_memory(model: Path, config: dict) -> None:
             except (OSError, ValueError, psutil.Error):
                 raise ImageCheckError("Cannot inspect this image model's memory requirements.") from None
             if type(available) is not int or available < required:
-                raise ImageCheckError("Not enough available memory to check this image model.")
+                raise _insufficient_memory(required, available)
         return
     family = artifact_image_family(config) if contract.get("schema_version") == 4 else contract.get("family")
     if not supported_image_family(family):
@@ -93,7 +106,7 @@ def preflight_family_memory(model: Path, config: dict) -> None:
             else 512 * 1024 * 1024
         )
         if size <= 0 or type(available) is not int or available < size + scratch:
-            raise ImageCheckError("Not enough available memory to check this image model.")
+            raise _insufficient_memory(size + scratch, available)
     except OSError:
         raise ImageCheckError("Cannot inspect this image model's memory requirements.") from None
 

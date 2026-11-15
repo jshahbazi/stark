@@ -502,16 +502,24 @@ def test_glm_transient_download_failure_retries_owned_stage_and_partial_data(hos
     assert module.model_valid(Path(host.models[0]["path"]))
 
 
-def test_glm_registry_failure_keeps_completed_download_for_retry(host, native_download, monkeypatch):
+@pytest.mark.parametrize("failure", ["persist", "image_check"])
+def test_glm_registry_failure_keeps_completed_download_for_retry(host, native_download, monkeypatch, failure):
     persist = host.persist
-    monkeypatch.setattr(host, "persist", lambda: (_ for _ in ()).throw(OSError("synthetic registry failure")))
+    check = host.check_family_install
+    if failure == "persist":
+        monkeypatch.setattr(host, "persist", lambda: (_ for _ in ()).throw(OSError("synthetic registry failure")))
+    else:
+        monkeypatch.setattr(
+            host, "check_family_install", lambda *_args: (_ for _ in ()).throw(DesktopError("Insufficient RAM"))
+        )
     args = (host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"])
-    with pytest.raises(OSError):
+    with pytest.raises((OSError, DesktopError)):
         host.install(*args)
     assert host.models == [] and list(host.model_dir.iterdir()) == []
     cached = list((host.data_dir / "native-downloads").glob("*/model"))
     assert len(cached) == 1 and module.model_valid(cached[0])
     monkeypatch.setattr(host, "persist", persist)
+    monkeypatch.setattr(host, "check_family_install", check)
     monkeypatch.setattr(host, "run_converter", lambda *_args: pytest.fail("redownloaded complete pinned model"))
     host.install(*args)
     assert len(host.models) == 1 and not cached[0].exists()

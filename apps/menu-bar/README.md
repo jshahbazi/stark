@@ -183,6 +183,15 @@ tool calls. Add from Source shows
 Download and Conversion progress; **Cancel Installation** cancels. Command-I
 opens that tab in the same window.
 
+Failed installations offer **Retry** while the original source or catalogue
+choice remains available. Native downloads retain completed files after a
+failed image check, so retry checks those files again without downloading them.
+Image checks run inference from the model's current folder without another
+disk copy. Their memory preflight reports estimated RAM needed and currently
+available RAM; stop other models or close memory-heavy apps before retrying a
+memory failure. The estimate includes working memory and does not guarantee
+that every later allocation will fit.
+
 The source tabs start with **Hugging Face**, selected by default, followed by
 **Local Folder**.
 
