@@ -2294,6 +2294,43 @@ extension EngineController {
                 cleanup["request_id"] as? String == browse["request_id"] as? String &&
                 engine.catalogInstallation == nil && engine.catalog == nil && callbacks == 0 &&
                 engine.selectedID == "fixture-model" && engine.loadedID == "fixture-model" && engine.modelReady
+        case "catalog-install-retry":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            engine.installCatalogItem(id: "entry")
+            let first = command()
+            guard !engine.canRetryInstallation else { return false }
+            engine.apply(["event": "error", "request_id": first["support_request_id"]!, "message": "Insufficient RAM"])
+            guard engine.canRetryInstallation else { return false }
+            engine.retryInstallation()
+            let retry = command()
+            guard retry["command"] as? String == "install_catalog",
+                  retry["catalog_request_id"] as? String == first["catalog_request_id"] as? String,
+                  retry["entry_id"] as? String == first["entry_id"] as? String,
+                  retry["artifact_mode"] as? String == first["artifact_mode"] as? String,
+                  retry["support_request_id"] as? String != first["support_request_id"] as? String,
+                  !engine.canRetryInstallation, engine.errorMessage == nil else { return false }
+            engine.apply(["event": "error", "request_id": first["support_request_id"]!, "message": "Stale failure"])
+            guard engine.errorMessage == nil else { return false }
+            engine.apply(["event": "error", "request_id": retry["support_request_id"]!, "message": "Insufficient RAM"])
+            guard engine.canRetryInstallation else { return false }
+            engine.cancelModelCatalog()
+            return !engine.canRetryInstallation
+        case "source-install-retry":
+            engine.install(source: "fixture/source", kind: "huggingface", artifactMode: "vision-language")
+            let first = command()
+            engine.apply(["event": "error", "request_id": first["support_request_id"]!, "message": "Insufficient RAM"])
+            guard engine.canRetryInstallation else { return false }
+            engine.retryInstallation()
+            let retry = command()
+            guard retry["source"] as? String == "fixture/source",
+                  retry["kind"] as? String == "huggingface",
+                  retry["artifact_mode"] as? String == "vision-language",
+                  retry["support_request_id"] as? String != first["support_request_id"] as? String,
+                  !engine.canRetryInstallation else { return false }
+            engine.apply(["event": "installed", "support_request_id": retry["support_request_id"]!, "model": ["id": "downloaded"]])
+            engine.apply(["event": "status", "state": "idle", "message": "Model installed"])
+            return !engine.canRetryInstallation && engine.errorMessage == nil
         case "catalog-install-stale-error":
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
@@ -2950,6 +2987,10 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_api_credential_reuse_and_failed_rotation(self):
         self.exercise("api-reuse-rotation-and-connection-events")
+
+    def test_installation_retry_preserves_source_and_fences_catalog_requests(self):
+        self.exercise("source-install-retry")
+        self.exercise("catalog-install-retry")
 
     def test_api_port_persistence_and_conflict_keeps_model_usable(self):
         self.exercise("api-port-settings-and-conflict")

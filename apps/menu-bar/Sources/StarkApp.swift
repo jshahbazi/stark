@@ -1542,6 +1542,11 @@ final class EngineController: ObservableObject {
     private var attachmentSelection = UUID()
     private var pendingSupportRequestID: String?
     private var installErrorMessage: String?
+    private enum InstallRetryRequest {
+        case source(String, String, String?)
+        case catalog(String, String)
+    }
+    @Published private var installRetryRequest: InstallRetryRequest?
     private var catalogRequestID: String?
     private var pendingCatalogOffset: Int64?
     // Rows shown before the pending page was requested; its own partial rows are not counted.
@@ -2491,6 +2496,7 @@ final class EngineController: ObservableObject {
         guard !busy else { return }
         errorMessage = nil
         resetInstallProgress(kind: kind)
+        installRetryRequest = .source(source, kind, artifactMode)
         let requestID = UUID().uuidString.lowercased()
         pendingSupportRequestID = requestID
         activeInstallRequestID = requestID
@@ -2666,6 +2672,7 @@ final class EngineController: ObservableObject {
               !catalogItemIsDownloaded(item, artifactMode: item.installationMode) else { return }
         let artifactMode = item.installationMode
         errorMessage = nil; resetInstallProgress(kind: "huggingface")
+        installRetryRequest = .catalog(requestID, id)
         let supportID = UUID().uuidString.lowercased()
         pendingSupportRequestID = supportID; activeInstallRequestID = supportID
         activeInstallModelName = shortModelName(item.name)
@@ -2808,6 +2815,7 @@ final class EngineController: ObservableObject {
     func resetInstallProgress(kind: String) {
         guard state != "installing" else { return }
         clearInstallSupport()
+        installRetryRequest = nil
         downloadProgress = InstallProgress(state: kind == "local" ? "skipped" : "waiting")
         conversionProgress = InstallProgress()
     }
@@ -2817,6 +2825,27 @@ final class EngineController: ObservableObject {
         installErrorMessage = nil
         pendingSupportRequestID = nil
         installSupportReport = nil
+    }
+
+    var canRetryInstallation: Bool {
+        guard !busy, installErrorMessage != nil, errorMessage == installErrorMessage,
+              let request = installRetryRequest else { return false }
+        switch request {
+        case .source: return true
+        case .catalog(let requestID, let id):
+            return catalogRequestID == requestID && catalog?.status == .ready &&
+                catalog?.items.contains(where: { $0.id == id && $0.downloadable &&
+                    !catalogItemIsDownloaded($0, artifactMode: $0.installationMode) }) == true
+        }
+    }
+
+    func retryInstallation() {
+        guard canRetryInstallation, let request = installRetryRequest else { return }
+        switch request {
+        case .source(let source, let kind, let artifactMode):
+            install(source: source, kind: kind, artifactMode: artifactMode)
+        case .catalog(_, let id): installCatalogItem(id: id)
+        }
     }
 
     func requestModelFamilies() { send(["command": "support"]) }
@@ -3254,6 +3283,9 @@ struct ModelsView: View {
             HStack {
                 if navigation.tab == .installModel && engine.state == "installing" && engine.catalogInstallation == nil {
                     Button("Cancel Installation", action: engine.stop)
+                }
+                if engine.canRetryInstallation {
+                    Button("Retry", action: engine.retryInstallation)
                 }
                 Spacer()
                 Button("Done", action: onDone).keyboardShortcut(navigation.tab == .installModel ? nil : .defaultAction)
