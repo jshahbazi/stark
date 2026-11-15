@@ -10,6 +10,19 @@ to them and must not broaden their claims. New studies need an attempt ID and
 linked source-bound evidence. Existing reports retain their original
 qualification; the ledger is not a completed historical backfill.
 
+## In progress
+
+**Native GLM-5.3 full-model execution paths (2026-11-15).** Attempt
+`20261115-LCPPGLM-03` registers comparisons of the pinned UD-Q2_K_XL artifact
+across current defaults, the admitted GPU-bank profile, and isolated MMA, MLA
+and register-KDA options. Artifact acquisition is in progress; no full-model
+inference or timing has run. The same Rust 1.98.1 release worker is used across
+arms; aggregate route markers are enabled only for readout diagnostics and
+disabled for speed arms. See the
+[attempt ledger](../model-experiments/2026-11-15-llama-v1-glm53-full-model-tests.md)
+and [ordered test plan](2026-11-15-glm53-llama-full-model-tests.md). This study
+does not supersede the prior GLM assessment or historical T8 results.
+
 ## Current result
 
 **llama.cpp 1.0.0 against native GLM-5.3 and EXL3 (2026-11-15).**

@@ -1015,7 +1015,10 @@ pub(super) fn route(
     static SERIAL_ROUTER: OnceLock<bool> = OnceLock::new();
     let serial =
         *SERIAL_ROUTER.get_or_init(|| std::env::var_os("STARK_GLM53_SERIAL_ROUTER").is_some_and(|value| value == "1"));
-    route_mode(graph, logits, bias, active, scale, !serial)
+    let result = route_mode(graph, logits, bias, active, scale, !serial)?;
+    // Calls count logical routing rows, not dispatches, experts or bytes.
+    super::profile::record("native.glm.route.gpu.rows", 0.0, 0);
+    Ok(result)
 }
 
 fn route_mode(

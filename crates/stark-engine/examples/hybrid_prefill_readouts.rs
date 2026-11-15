@@ -76,7 +76,9 @@ fn run() -> Result<(), &'static str> {
         profile::enable(false);
         let dispatch: std::collections::BTreeMap<_, _> = profile::snapshot()
             .into_iter()
-            .filter(|(name, _)| name.contains("prefill") || name.contains("scratch_high_water"))
+            .filter(|(name, _)| {
+                name.contains("prefill") || name.contains("scratch_high_water") || name.starts_with("native.glm.route.")
+            })
             .collect();
         for &token in &input[length..] {
             rows.push(model.step(token).map_err(|_| "continuation failed")?);

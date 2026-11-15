@@ -2469,6 +2469,8 @@ fn route(
     let choices: Vec<_> = probabilities.iter().zip(bias).map(|(&a, &b)| a + b).collect();
     let selected = topk(&choices, active)?;
     let denominator = selected.iter().map(|&i| probabilities[i]).sum::<f32>() + 1e-20;
+    // Count successful logical routed rows only in opt-in aggregate diagnostics.
+    super::profile::record("native.glm.route.cpu.rows", 0.0, 0);
     Ok(selected.into_iter().map(|i| (i, probabilities[i] / denominator * scale)).collect())
 }
 
