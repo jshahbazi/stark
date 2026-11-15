@@ -281,11 +281,12 @@ selecting it; choose it and **Run** when ready. Some image installations stop
 the running model for their required local checks.
 
 Native downloads show **Downloading model files** while fetching the checkpoint,
-then **Preparing model**. Their progress bar measures completed model files against
-the pinned weight total, including reusable files with matching Hugging Face
-completion metadata. It advances as shards finish; partial allocations do not
-advance it. A separate **received over network** count shows live transfer activity
-between shard completions. Network bytes can differ from model bytes due to
+then **Preparing model**. Their progress bar estimates model bytes against the
+pinned weight total, starting with reusable files with matching Hugging Face
+completion metadata and advancing with live network activity. Completed shards
+establish a lower bound; transfer estimates stay below completion until the
+files are ready. Partial allocations alone do not advance it. A separate
+**received over network** count shows live transfer activity between shard completions. Network bytes can differ from model bytes due to
 compression, deduplication and retries. Phases without a reliable total show status
 without an animated indicator. Final weight validation still gates completion.
 
@@ -297,7 +298,7 @@ delays from 5 seconds up to 1 minute. Retries reuse the same checked source
 revision, completed cached files and resumable partial download data. Wake
 triggers an immediate retry; the connection may still need time to return.
 The network-byte count accumulates bytes transferred across retry attempts,
-while completed model bytes remain separate and never move backward.
+while estimated model progress never moves backward.
 **Cancel Installation** or **Stop** also cancels a waiting download. This recovery
 lasts for the current app session; quitting does not automatically restart the
 installation on the next launch. Disk, permission, access, checkpoint and

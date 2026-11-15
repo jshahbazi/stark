@@ -494,7 +494,7 @@ def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_w
             event["event"] == "progress"
             and event.get("phase") == "download"
             and event.get("state") == "running"
-            and event.get("completed_bytes") == 0
+            and event.get("completed_bytes") == min(8, weight_bytes * 99 // 100)
             and event.get("transferred_bytes") == 8
             for event in events
         )
