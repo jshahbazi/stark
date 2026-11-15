@@ -31,7 +31,7 @@ struct CatalogModelRow: View {
     static func scoreExplanation(_ reference: CatalogReferenceScore, score: (value: Double, task: String)) -> String {
         let value = score.value.formatted(.number.precision(.fractionLength(0...1)))
         let subject = reference.relationship == .benchmarkedModel ? "this model" : reference.modelID
-        var text = "whatmodel.sh \(score.task) score \(value) for \(subject), from the \(reference.captured) snapshot."
+        var text = "llmbench.site-derived coding index \(value) for \(subject), from the \(reference.captured) snapshot. Flash Next = 100; this is not a pass percentage."
         if reference.relationship != .benchmarkedModel {
             text += "\nThis quantized version was not benchmarked itself, and quantization can change quality."
         }
@@ -106,10 +106,10 @@ struct CatalogModelRow: View {
             if let score, let reference = item.referenceScore {
                 let value = score.value.formatted(.number.precision(.fractionLength(0...1)))
                 Link(destination: reference.sourceURL) {
-                    Text("Score " + value).font(.caption.monospacedDigit().weight(.medium)).lineLimit(1)
+                    Text("Coding " + value).font(.caption.monospacedDigit().weight(.medium)).lineLimit(1)
                 }
                 .help(Self.scoreExplanation(reference, score: score))
-                .accessibilityLabel("whatmodel.sh \(score.task) score \(value)")
+                .accessibilityLabel("llmbench.site-derived coding index \(value)")
             }
         }
     }

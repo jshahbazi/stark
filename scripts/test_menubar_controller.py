@@ -1945,7 +1945,7 @@ extension EngineController {
                     item["reference_score"] = [
                         "model_id": "parent/" + id, "relationship": relationship,
                         "general": general as Any? ?? NSNull(), "coding": coding as Any? ?? NSNull(),
-                        "source_url": "https://whatmodel.sh/model/" + id, "captured": "2026-11-11"]
+                        "source_url": "https://llmbench.site/data/", "captured": "2026-11-11"]
                 }
                 if !downloadable { item["downloadable"] = false; item["unavailable_reason"] = "Fixture reason" }
                 return item
@@ -1966,18 +1966,18 @@ extension EngineController {
             }
             // Fits and downloadable first by score, the smaller download breaking a tie; unscored rows follow,
             // then models too large for this Mac, then rows that cannot be downloaded.
-            // A coding-only score does not rank on the general scale.
-            guard rows(.ratingGeneral, memory) == ["best-small", "best-full", "mid", "unscored", "coder", "huge", "blocked"],
+            // The legacy general sort aliases the coding index.
+            guard rows(.ratingGeneral, memory) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
                   rows(.ratingCoding, memory) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
-                  rows(.ratingGeneral, nil) == ["huge", "best-small", "best-full", "mid", "unscored", "coder", "blocked"],
+                  rows(.ratingGeneral, nil) == ["coder", "mid", "best-small", "best-full", "unscored", "huge", "blocked"],
                   rows(.ratingGeneral, UInt64(8) * 1024 * 1024 * 1024) ==
-                      ["mid", "unscored", "coder", "huge", "best-small", "best-full", "blocked"],
+                      ["coder", "mid", "unscored", "best-small", "best-full", "huge", "blocked"],
                   rows(.sizeAscending, memory).count == 7 else { return false }
             guard let export = catalog.items.first(where: { $0.id == "best-small" })?.referenceScore,
                   let coder = catalog.items.first(where: { $0.id == "coder" })?.referenceScore,
                   export.relationship == .namedQuantization, export.modelID == "parent/best-small",
-                  export.score(for: .ratingGeneral)?.value == 70, export.score(for: .ratingCoding)?.value == 40,
-                  coder.score(for: .ratingGeneral) == nil, coder.score(for: .sizeAscending)?.value == 80,
+                  export.score(for: .ratingGeneral)?.value == 40, export.score(for: .ratingCoding)?.value == 40,
+                  coder.score(for: .ratingGeneral)?.value == 80, coder.score(for: .sizeAscending)?.value == 80,
                   coder.score(for: .sizeAscending)?.task == "coding",
                   catalog.items.first(where: { $0.id == "unscored" })?.referenceScore == nil,
                   catalog.items.first(where: { $0.id == "huge" })?.fits(physicalMemory: memory) == false,
@@ -2151,7 +2151,8 @@ extension EngineController {
             guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
                   !ModelBrowserScope.saved.sorts.contains(where: \.isRating),
                   !ModelBrowserScope.families.sorts.contains(where: \.isRating),
-                  ModelBrowserScope.catalog.sorts.prefix(2) == [.ratingGeneral, .ratingCoding] else { return false }
+                  ModelBrowserScope.catalog.sorts.first == .ratingCoding,
+                  !ModelBrowserScope.catalog.sorts.contains(.ratingGeneral) else { return false }
             ModelBrowserPreferences.save(.sizeDescending, for: .saved, defaults: preferences)
             ModelBrowserPreferences.save(.nameDescending, for: .families, defaults: preferences)
             ModelBrowserPreferences.save(.nameAscending, for: .catalog, defaults: preferences)

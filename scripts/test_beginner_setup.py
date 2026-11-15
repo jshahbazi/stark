@@ -640,6 +640,22 @@ struct BeginnerChecks {
             guard let speedItem = BeginnerModelReport.Item(cachedRaw),
                   speedItem.beginnerSummary(availableMemoryBytes: nil).contains("speed budget for your Mac"),
                   speedItem.beginnerDetails.contains("this quantization was not evaluated") else { return false }
+            var llmbench = benchmark
+            llmbench["benchmark"] = "llmbench_coding"
+            llmbench["score"] = "-2.5"
+            llmbench["captured"] = "2026-11-12"
+            llmbench["source_url"] = "https://llmbench.site/data/"
+            guard let llmbenchReference = BeginnerModelReport.BenchmarkReference(llmbench),
+                  llmbenchReference.score == "-2.5", llmbenchReference.capturedDate == "2026-11-12",
+                  llmbenchReference.sourceURL?.absoluteString == "https://llmbench.site/data/",
+                  llmbenchReference.recommendation.contains("Cached coding index: -2.5") else { return false }
+            var llmbenchRaw = raw
+            llmbenchRaw["benchmarks"] = [llmbench]
+            guard let llmbenchItem = BeginnerModelReport.Item(llmbenchRaw),
+                  llmbenchItem.beginnerSummary(availableMemoryBytes: nil).contains("Cached coding index: -2.5"),
+                  llmbenchItem.beginnerDetails.contains("llmbench.site · Coding index: -2.5"),
+                  llmbenchItem.beginnerDetails.contains("Cached 2026-11-12"),
+                  !llmbenchItem.beginnerDetails.contains("/100") else { return false }
             return true
         case "installed-space-presentation": return BeginnerSetupView.checkInstalledSpacePresentation()
         default: return false

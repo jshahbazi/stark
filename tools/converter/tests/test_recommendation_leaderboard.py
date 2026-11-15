@@ -1,8 +1,11 @@
 """Cached source rankings remain separate from Stark artifact admission."""
 
+import hashlib
+import json
 import socket
 import urllib.request
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -395,19 +398,52 @@ def test_capacity_policy_preserves_other_resource_and_score_gates(blocker):
     assert [item["id"] for item in result["items"]] == ["small"]
 
 
-def test_packaged_snapshot_loads_both_tasks_all_ram_buckets_and_known_reference_scores():
+def test_packaged_snapshot_uses_model_coding_indexes_for_both_guide_tasks():
     cached = module.load_snapshot()
-    sizes = {8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512}
-    assert len(cached.buckets) == 22
-    assert set(cached.buckets) == {(task, size) for task in ("general", "coding") for size in sizes}
-    for bucket, records in cached.buckets.values():
-        assert bucket["models"] and records
-        assert module.HEX64.fullmatch(bucket["sha256"])
+    assert cached.source_name == "llmbench.site coding"
+    assert len(cached.records) == 28
     _, general = cached.for_host("general", 128 * guided.GIB)
-    _, coding = cached.for_host("coding", 128 * guided.GIB)
-    assert general["Qwen/Qwen3.8-Flash-Next"]["score"] == 73.4
-    assert coding["Qwen/Qwen3.8-Flash-Next"]["score"] == 76.1
-    assert general["Qwen/Qwen3-4B"]["score"] == 51.2
+    _, coding = cached.for_host("coding", 8 * guided.GIB)
+    assert general == coding
+    assert coding["Qwen/Qwen3.8-Flash-Next"]["score"] == 100
+    assert coding["Qwen/Qwen3-4B"]["score"] == pytest.approx(46.02751985197706)
+    assert "unknown/Model" not in coding
+
+
+def test_bundled_indexes_exactly_preserve_the_reviewed_aggregate():
+    root = Path(__file__).resolve().parents[3]
+    aggregate_bytes = (root / "docs/benchmarks/data/catalog-coding-ranking-2026-11-14.json").read_bytes()
+    bundled = json.loads(Path(module.__file__).with_name("llmbench_coding.json").read_bytes())
+    aggregate = json.loads(aggregate_bytes)
+    assert bundled["models"] == aggregate["models"]
+    assert bundled["sources"] == aggregate["sources"]
+    assert bundled["input_sha256"] == aggregate["input_sha256"]
+    assert bundled["aggregate_sha256"] == hashlib.sha256(aggregate_bytes).hexdigest()
+
+
+@pytest.mark.parametrize("task", ["general", "coding"])
+@pytest.mark.parametrize("preference", ["quality", "speed"])
+def test_llmbench_scores_drive_guided_selection_after_resource_checks(task, preference):
+    cached = module.load_snapshot()
+    strong = replace(recipe("strong", 27), repo="Qwen/Qwen3.8-27B")
+    small = replace(recipe("small", 4), repo="Qwen/Qwen3-4B")
+    unknown = recipe("unknown", 1)
+    result = report([unknown, small, strong], cached, task=task, preference=preference)
+    assert [item["id"] for item in result["items"]] == ["strong"]
+    evidence = result["items"][0]["benchmarks"][0]
+    assert evidence["benchmark"] == "llmbench_coding"
+    assert evidence["source_url"] == "https://llmbench.site/data/"
+    assert evidence["used_for_ranking"]
+    assert result["speed_policy"]["minimum_score"] == 35
+    assert result["leaderboard_ranking"]["task"] == "coding"
+    blocked = report(
+        [strong, small],
+        cached,
+        task=task,
+        preference=preference,
+        machine=host(free_disk_bytes=1, download_free_disk_bytes=1),
+    )
+    assert blocked["items"] == []
 
 
 @pytest.mark.parametrize("payload", ["{", "[]", "{}", '{"schema_version": 999}'])
@@ -418,7 +454,7 @@ def test_malformed_optional_snapshot_falls_back_without_network_or_disabling_adm
     monkeypatch.setattr(socket, "create_connection", forbidden_network)
     monkeypatch.setattr(urllib.request, "urlopen", forbidden_network)
     monkeypatch.setattr(module, "__file__", str(tmp_path / "module.py"))
-    (tmp_path / "recommendation_leaderboard.json").write_text(payload)
+    (tmp_path / "llmbench_coding.json").write_text(payload)
     module.load_snapshot.cache_clear()
     try:
         cached = module.load_snapshot()

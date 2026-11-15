@@ -234,9 +234,12 @@ descending. Unknown numeric values sort last
 in either direction. Choose a family to browse compatible models, sizes and
 quantizations and download a choice directly.
 
-Family detail opens on **Top rated (coding)**, with **Top rated (general)**
-beside it. Both use the bundled whatmodel.sh reference scores described in
-[Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
+Family detail opens on **Top rated (coding)**. It uses bundled llmbench
+model-level coding indexes. Quantized rows may inherit a scored model's index
+through the declared/named quantization rules or a reviewed export binding;
+the UI identifies the model the index belongs to. Top Models remains a
+separate family-level summary.
+See [Beginner recommendation evidence](MODEL_RECOMMENDATIONS.md#catalogue-ordering).
 Rows that can be downloaded and whose weights fit this Mac's memory budget come
 first, then the higher score, then the smaller download; unscored rows follow
 scored ones, then models likely too large for this Mac, then unavailable rows.

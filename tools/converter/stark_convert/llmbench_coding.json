@@ -1,0 +1,503 @@
+{
+  "snapshot": "2026-11-14T18:14:50Z",
+  "method": "Shared source-and-version benchmark pairwise mean percentage-point margins, weighted least squares; at least two benchmark groups per comparison; Flash Next anchored at 100",
+  "families": [
+    {
+      "family": "Qwen3.8 Flash Next",
+      "index": 100.0,
+      "models": 1,
+      "leave_one_group_out_rank_range": [
+        1,
+        1
+      ],
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 5,
+      "shared_benchmark_columns": [
+        "models-dev:nl2repo",
+        "whatmodel:deepswe-v1-1",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:swe-bench-multilingual",
+        "whatmodel:swe-bench-pro-qwen-refined"
+      ]
+    },
+    {
+      "family": "GLM-5.3 Flash",
+      "index": 97.32705194317778,
+      "models": 1,
+      "leave_one_group_out_rank_range": [
+        2,
+        2
+      ],
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 8,
+      "shared_benchmark_columns": [
+        "livebench:v2/2026-11-06/coding",
+        "vals:code-migration/overall",
+        "vals:ioi/overall",
+        "vals:lcb/overall",
+        "vals:programbench/overall",
+        "vals:skillsbench/overall",
+        "whatmodel:deepswe-v1-1",
+        "whatmodel:luau-leetcode-full-pass"
+      ]
+    },
+    {
+      "family": "Qwen3.5 dense",
+      "index": 61.08953815569472,
+      "models": 6,
+      "leave_one_group_out_rank_range": [
+        3,
+        3
+      ],
+      "disconnected_trials": 3,
+      "shared_benchmark_count": 18,
+      "shared_benchmark_columns": [
+        "livebench:v2/2026-11-06/coding",
+        "models-dev:nl2repo",
+        "vals:code-migration/overall",
+        "vals:ioi/overall",
+        "vals:lcb/overall",
+        "vals:programbench/overall",
+        "vals:skillsbench/overall",
+        "whatmodel:deepswe-v1-1",
+        "whatmodel:humaneval-plus",
+        "whatmodel:livecodebench-pro-2025q2-easy",
+        "whatmodel:livecodebench-pro-2025q2-medium",
+        "whatmodel:livecodebench-v6",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:mbpp-plus",
+        "whatmodel:multipl-e",
+        "whatmodel:swe-bench-multilingual",
+        "whatmodel:swe-bench-pro-qwen-refined",
+        "whatmodel:swe-bench-verified"
+      ]
+    },
+    {
+      "family": "Qwen3 dense",
+      "index": 48.30089205088184,
+      "models": 3,
+      "leave_one_group_out_rank_range": [
+        4,
+        4
+      ],
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 6,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-polyglot",
+        "whatmodel:livecodebench-v6",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:multipl-e",
+        "whatmodel:swe-bench-verified",
+        "whatmodel:webapp1k-duo-react-pass1"
+      ]
+    },
+    {
+      "family": "Qwen2 dense",
+      "index": 40.97035769679365,
+      "models": 6,
+      "leave_one_group_out_rank_range": [
+        5,
+        6
+      ],
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 17,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-code-editing",
+        "whatmodel:aider-polyglot",
+        "whatmodel:codereviewqa-acr-exact-match",
+        "whatmodel:codereviewqa-clh-invariant-accuracy",
+        "whatmodel:codereviewqa-ctr-invariant-accuracy",
+        "whatmodel:codereviewqa-sih-invariant-accuracy",
+        "whatmodel:cruxeval-i",
+        "whatmodel:cruxeval-o",
+        "whatmodel:humaneval",
+        "whatmodel:humaneval-plus",
+        "whatmodel:livecodebench-official-20240101-20241101",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:mbpp",
+        "whatmodel:mbpp-plus",
+        "whatmodel:multipl-e",
+        "whatmodel:webapp1k-duo-react-pass1",
+        "whatmodel:webapp1k-react-pass1"
+      ]
+    },
+    {
+      "family": "Phi-3 dense",
+      "index": 34.860647637431754,
+      "models": 1,
+      "leave_one_group_out_rank_range": [
+        6,
+        6
+      ],
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 4,
+      "shared_benchmark_columns": [
+        "whatmodel:humaneval",
+        "whatmodel:humaneval-plus",
+        "whatmodel:mbpp",
+        "whatmodel:mbpp-plus"
+      ]
+    },
+    {
+      "family": "Gemma 3 text",
+      "index": 25.153147306887142,
+      "models": 3,
+      "leave_one_group_out_rank_range": [
+        7,
+        7
+      ],
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 9,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-polyglot",
+        "whatmodel:bird-sql-dev",
+        "whatmodel:humaneval",
+        "whatmodel:livecodebench-v6",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:mbpp",
+        "whatmodel:viseditbench-pass",
+        "whatmodel:webapp1k-duo-react-pass1",
+        "whatmodel:webapp1k-react-pass1"
+      ]
+    },
+    {
+      "family": "Mistral dense",
+      "index": 18.32263000607705,
+      "models": 3,
+      "leave_one_group_out_rank_range": [
+        8,
+        8
+      ],
+      "disconnected_trials": 2,
+      "shared_benchmark_count": 5,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-code-editing",
+        "whatmodel:humaneval",
+        "whatmodel:humaneval-plus",
+        "whatmodel:mbpp",
+        "whatmodel:mbpp-plus"
+      ]
+    },
+    {
+      "family": "Llama dense",
+      "index": 13.29637475135597,
+      "models": 3,
+      "leave_one_group_out_rank_range": [
+        8,
+        9
+      ],
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 13,
+      "shared_benchmark_columns": [
+        "whatmodel:aider-code-editing",
+        "whatmodel:codereviewqa-acr-exact-match",
+        "whatmodel:codereviewqa-clh-invariant-accuracy",
+        "whatmodel:codereviewqa-ctr-invariant-accuracy",
+        "whatmodel:codereviewqa-sih-invariant-accuracy",
+        "whatmodel:cruxeval-zeroeval",
+        "whatmodel:humaneval",
+        "whatmodel:humaneval-plus",
+        "whatmodel:livecodebench-official-20240101-20241101",
+        "whatmodel:luau-leetcode-full-pass",
+        "whatmodel:mbpp",
+        "whatmodel:mbpp-plus",
+        "whatmodel:webapp1k-react-pass1"
+      ]
+    },
+    {
+      "family": "Gemma 2 dense",
+      "index": 1.296078524109,
+      "models": 1,
+      "leave_one_group_out_rank_range": [
+        9,
+        10
+      ],
+      "disconnected_trials": 0,
+      "shared_benchmark_count": 3,
+      "shared_benchmark_columns": [
+        "whatmodel:cruxeval-zeroeval",
+        "whatmodel:humaneval",
+        "whatmodel:mbpp"
+      ]
+    }
+  ],
+  "models": [
+    {
+      "id": "qwen3-8-27b",
+      "family": "Qwen3.5 dense",
+      "index": 91.22943272044887
+    },
+    {
+      "id": "qwen3-8-flash-next",
+      "family": "Qwen3.8 Flash Next",
+      "index": 100.0
+    },
+    {
+      "id": "llama-3-1-8b",
+      "family": "Llama dense",
+      "index": 28.017494548443864
+    },
+    {
+      "id": "codestral-22b-v0-1",
+      "family": "Mistral dense",
+      "index": 39.852451787576555
+    },
+    {
+      "id": "llama-3-2-1b",
+      "family": "Llama dense",
+      "index": 1.8149233635286686
+    },
+    {
+      "id": "llama-3-2-3b",
+      "family": "Llama dense",
+      "index": 10.056706342095378
+    },
+    {
+      "id": "phi-4-mini",
+      "family": "Phi-3 dense",
+      "index": 34.860647637431754
+    },
+    {
+      "id": "gemma-2-2b",
+      "family": "Gemma 2 dense",
+      "index": 1.296078524109
+    },
+    {
+      "id": "gemma-3-1b",
+      "family": "Gemma 3 text",
+      "index": 1.8287994430170393
+    },
+    {
+      "id": "qwen2-5-coder-0-5b",
+      "family": "Qwen2 dense",
+      "index": 17.958725317875572
+    },
+    {
+      "id": "gemma-3-27b",
+      "family": "Gemma 3 text",
+      "index": 43.087184646797965
+    },
+    {
+      "id": "qwen2-5-coder-1-5b",
+      "family": "Qwen2 dense",
+      "index": 30.384587386723272
+    },
+    {
+      "id": "qwen2-5-coder-14b",
+      "family": "Qwen2 dense",
+      "index": 52.887879817534234
+    },
+    {
+      "id": "qwen2-5-coder-32b",
+      "family": "Qwen2 dense",
+      "index": 56.2004602817015
+    },
+    {
+      "id": "qwen2-5-coder-3b",
+      "family": "Qwen2 dense",
+      "index": 40.39665635198782
+    },
+    {
+      "id": "qwen2-5-coder-7b",
+      "family": "Qwen2 dense",
+      "index": 47.993837024939474
+    },
+    {
+      "id": "gemma-3-4b",
+      "family": "Gemma 3 text",
+      "index": 30.543457830846425
+    },
+    {
+      "id": "qwen3-32b",
+      "family": "Qwen3 dense",
+      "index": 54.40947815808604
+    },
+    {
+      "id": "qwen3-4b-instruct-2507",
+      "family": "Qwen3 dense",
+      "index": 44.46567814258242
+    },
+    {
+      "id": "qwen3-4b",
+      "family": "Qwen3 dense",
+      "index": 46.02751985197706
+    },
+    {
+      "id": "glm-5-3-flash",
+      "family": "GLM-5.3 Flash",
+      "index": 97.32705194317778
+    },
+    {
+      "id": "qwen3-5-27b",
+      "family": "Qwen3.5 dense",
+      "index": 79.33260207667249
+    },
+    {
+      "id": "qwen3-5-2b",
+      "family": "Qwen3.5 dense",
+      "index": 17.220930657580297
+    },
+    {
+      "id": "qwen3-5-4b",
+      "family": "Qwen3.5 dense",
+      "index": 43.34593065670959
+    },
+    {
+      "id": "qwen3-5-9b",
+      "family": "Qwen3.5 dense",
+      "index": 51.946328925880444
+    },
+    {
+      "id": "mistral-7b-instruct-v0-2",
+      "family": "Mistral dense",
+      "index": 7.072406908009446
+    },
+    {
+      "id": "mistral-7b-instruct-v0-3",
+      "family": "Mistral dense",
+      "index": 8.04303132264514
+    },
+    {
+      "id": "qwen3-6-27b",
+      "family": "Qwen3.5 dense",
+      "index": 83.46200389687662
+    }
+  ],
+  "sources": [
+    {
+      "id": "whatmodel",
+      "name": "whatmodel.sh",
+      "license": "CC BY-SA 4.0",
+      "attribution": "whatmodel.sh by Merlinsbeard Pty Ltd, CC BY-SA 4.0. The underlying sources keep their own licences; see data/sources/whatmodel/upstream-sources.jsonl.",
+      "upstream_revision": "2769f5ba536d5d78fc70a772048512471a499802",
+      "changed_at": "2026-11-13T00:59:29Z",
+      "checked_at": "2026-11-14T06:38:43Z"
+    },
+    {
+      "id": "models-dev",
+      "name": "models.dev",
+      "license": "MIT",
+      "attribution": "models.dev (github.com/anomalyco/models.dev), MIT",
+      "upstream_revision": null,
+      "changed_at": "2026-11-13T21:59:50Z",
+      "checked_at": "2026-11-13T18:56:55Z"
+    },
+    {
+      "id": "epoch",
+      "name": "Epoch AI Benchmarking Hub",
+      "license": "CC BY 4.0",
+      "attribution": "Epoch AI, 'Capabilities & benchmarking', https://epoch.ai/benchmarks, CC BY 4.0",
+      "upstream_revision": null,
+      "changed_at": "2026-11-14T06:38:43Z",
+      "checked_at": "2026-11-14T06:38:43Z"
+    },
+    {
+      "id": "arena",
+      "name": "Arena",
+      "license": "CC BY 4.0",
+      "attribution": "Arena Leaderboard Dataset by LMArena (lmarena-ai), CC BY 4.0",
+      "upstream_revision": "e69cdc26eb7af798d9628215ce45ce353e66d26a",
+      "changed_at": "2026-11-12T23:43:36Z",
+      "checked_at": "2026-11-12T23:49:31Z"
+    },
+    {
+      "id": "aider-polyglot",
+      "name": "Aider polyglot",
+      "license": "Apache-2.0",
+      "attribution": null,
+      "upstream_revision": "cb6a152e5ee27fbc77ac499d5e628ccd74a5fa2a",
+      "changed_at": "2026-11-12T23:36:21Z",
+      "checked_at": "2026-11-14T06:38:43Z"
+    },
+    {
+      "id": "swe-bench",
+      "name": "SWE-bench",
+      "license": "CC BY-NC 4.0",
+      "attribution": "SWE-bench leaderboards (github.com/SWE-bench/swe-bench.github.io), CC BY-NC 4.0",
+      "upstream_revision": "193160a463a435d05cf44a1fa9dc5eac832113c3",
+      "changed_at": "2026-11-13T05:52:50Z",
+      "checked_at": "2026-11-14T18:14:20Z"
+    },
+    {
+      "id": "terminal-bench",
+      "name": "Terminal-Bench",
+      "license": "Apache-2.0",
+      "attribution": "Terminal-Bench (tbench.ai, github.com/harbor-framework/terminal-bench), Apache-2.0",
+      "upstream_revision": "2026-11-14T06:10:26.015148+00:00",
+      "changed_at": "2026-11-14T18:14:20Z",
+      "checked_at": "2026-11-14T18:14:20Z"
+    },
+    {
+      "id": "livebench",
+      "name": "LiveBench",
+      "license": "none stated",
+      "attribution": "LiveBench (livebench.ai)",
+      "upstream_revision": "static/js/main.8a7822ea.js?v=1794519350",
+      "changed_at": "2026-11-13T06:03:47Z",
+      "checked_at": "2026-11-14T18:14:20Z"
+    },
+    {
+      "id": "vals",
+      "name": "Vals AI",
+      "license": "none stated",
+      "attribution": "Vals AI (vals.ai)",
+      "upstream_revision": "vals:60:2065e4f2698f7e6c",
+      "changed_at": "2026-11-14T18:14:20Z",
+      "checked_at": "2026-11-14T18:14:20Z"
+    }
+  ],
+  "input_sha256": {
+    "stark-llmbench-index.json": "c483be428fa8890aee6b6d9c92e32346a064dd53a25865fed5431f8c13cf3336",
+    "stark-llmbench-whatmodel.json": "807ed27fa232dfb60008bc958dddc2ed160fcc2abb92560c4011bba0813ab0f3",
+    "stark-llmbench-models-dev.json": "59fc3c4232a5ef7ed4127501c38d4f63d789968fb02b23ebf7c651ab8a121596",
+    "stark-llmbench-epoch.json": "f5e002351ff0a89e65a794942a35994a42d4ab57fea278995c9e663d779ca8c1",
+    "stark-llmbench-arena.json": "1de29b57fad8be2ebf47819e9e4b1dd98973696990264ac1178a10496790cf90",
+    "stark-llmbench-aider-polyglot.json": "714ad20adb2459d4ea8b3a954fcd6bd8f9cebc221b251b79a2dc17a5d3c09a6b",
+    "stark-llmbench-swe-bench.json": "c47f7740ea82910de3993ece06080c111625c8ba470e2e52df051907ae068959",
+    "stark-llmbench-terminal-bench.json": "c74b46ae3454a67d948803c3d7e67d0019bba98bf4b4c64624d5489d3def6b40",
+    "stark-llmbench-livebench.json": "94df54db64e49e49fbd23389273d04830cc05fbc5f5e86a3f5e9d165aff7fdf5",
+    "stark-llmbench-vals.json": "141794ca6c5b0351b20741f9270b913ca0e4affd00271b97464a20d59f4dc23f"
+  },
+  "roster_sha256": "d497c720060d226f325d417df773ed8516c3a37ad7449ceb904aa6281db0262b",
+  "benchmark_count_definition": "Distinct source/version benchmark columns participating in at least one retained two-group pairwise comparison involving a scored reference model in the family; union across models, not sum.",
+  "model_repositories": {
+    "qwen3-8-27b": "Qwen/Qwen3.8-27B",
+    "qwen3-8-flash-next": "Qwen/Qwen3.8-Flash-Next",
+    "llama-3-1-8b": "meta-llama/Llama-3.1-8B-Instruct",
+    "codestral-22b-v0-1": "mistralai/Codestral-22B-v0.1",
+    "llama-3-2-1b": "meta-llama/Llama-3.2-1B-Instruct",
+    "llama-3-2-3b": "meta-llama/Llama-3.2-3B-Instruct",
+    "phi-4-mini": "microsoft/Phi-4-mini-instruct",
+    "gemma-2-2b": "google/gemma-2-2b-it",
+    "gemma-3-1b": "google/gemma-3-1b-it",
+    "qwen2-5-coder-0-5b": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+    "gemma-3-27b": "google/gemma-3-27b-it",
+    "qwen2-5-coder-1-5b": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+    "qwen2-5-coder-14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
+    "qwen2-5-coder-32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "qwen2-5-coder-3b": "Qwen/Qwen2.5-Coder-3B-Instruct",
+    "qwen2-5-coder-7b": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "gemma-3-4b": "google/gemma-3-4b-it",
+    "qwen3-32b": "Qwen/Qwen3-32B",
+    "qwen3-4b-instruct-2507": "Qwen/Qwen3-4B-Instruct-2507",
+    "qwen3-4b": "Qwen/Qwen3-4B",
+    "glm-5-3-flash": "zai-org/GLM-5.3-Flash",
+    "qwen3-5-27b": "Qwen/Qwen3.5-27B",
+    "qwen3-5-2b": "Qwen/Qwen3.5-2B",
+    "qwen3-5-4b": "Qwen/Qwen3.5-4B",
+    "qwen3-5-9b": "Qwen/Qwen3.5-9B",
+    "mistral-7b-instruct-v0-2": "mistralai/Mistral-7B-Instruct-v0.2",
+    "mistral-7b-instruct-v0-3": "mistralai/Mistral-7B-Instruct-v0.3",
+    "qwen3-6-27b": "Qwen/Qwen3.6-27B"
+  },
+  "compilation_license": "CC BY-SA 4.0",
+  "attribution": "Derived from llmbench.site's compilation (CC BY-SA 4.0), incorporating whatmodel.sh by Merlinsbeard Pty Ltd. Underlying sources retain their own licenses; see sources. Stark fits coding indexes and maps model IDs to repositories; no endorsement.",
+  "method_url": "https://llmbench.site/method/",
+  "aggregate_sha256": "aaad077f858e3634439acb18eb6354502ef173c88c30475d543301748a61c308",
+  "identity_index": {
+    "url": "https://llmbench.site/data/index.json",
+    "generated_at": "2026-11-15T02:21:26Z",
+    "sha256": "692c6c58260da09cbd7c0def7944debe1e13f05089ce85c5586b806e50866ba8",
+    "purpose": "Repository identity mapping only; scores and source hashes remain the frozen November 14 aggregate"
+  }
+}

@@ -15,14 +15,17 @@ struct BeginnerModelReport {
         let sourceURL: URL?
         let capturedDate: String?
 
+        var isRelativeIndex: Bool { name.hasPrefix("whatmodel.sh") || name.hasPrefix("llmbench.site") }
+
         init?(_ raw: [String: Any]) {
             let names = ["livecodebench": "LiveCodeBench", "bfcl": "BFCL", "ifeval": "IFEval",
-                         "whatmodel_general": "whatmodel.sh · General Work", "whatmodel_coding": "whatmodel.sh · Coding"]
+                         "whatmodel_general": "whatmodel.sh · General Work", "whatmodel_coding": "whatmodel.sh · Coding",
+                         "llmbench_coding": "llmbench.site · Coding index"]
             guard let key = raw["benchmark"] as? String, let name = names[key],
                   raw["evidence_kind"] as? String == "upstream_reference",
                   let text = BeginnerMetadata.string(raw["score"], limit: 32),
                   let value = Double(text), value.isFinite,
-                  key.hasPrefix("whatmodel_") || (0...100).contains(value),
+                  key.hasPrefix("whatmodel_") || key == "llmbench_coding" && abs(value) <= 1000 || (0...100).contains(value),
                   let used = raw["used_for_ranking"] as? NSNumber,
                   CFGetTypeID(used) == CFBooleanGetTypeID() else { return nil }
             self.name = name
@@ -31,11 +34,13 @@ struct BeginnerModelReport {
             formatter.usesGroupingSeparator = false
             score = formatter.string(from: NSNumber(value: value)) ?? text
             usedForRanking = used.boolValue
-            if key.hasPrefix("whatmodel_"), let date = raw["captured"] as? String,
+            if key.hasPrefix("whatmodel_") || key == "llmbench_coding", let date = raw["captured"] as? String,
                date.range(of: "\\A[0-9]{4}-[0-9]{2}-[0-9]{2}\\z", options: .regularExpression) != nil {
                 capturedDate = date
             } else { capturedDate = nil }
-            if key.hasPrefix("whatmodel_"),
+            if key == "llmbench_coding", raw["source_url"] as? String == "https://llmbench.site/data/" {
+                sourceURL = URL(string: "https://llmbench.site/data/")
+            } else if key.hasPrefix("whatmodel_"),
                let source = BeginnerMetadata.string(raw["source_url"], limit: 512),
                source.range(of: "\\Ahttps://whatmodel[.]sh/model/[a-z0-9-]+\\z", options: .regularExpression) != nil {
                 sourceURL = URL(string: source)
@@ -48,6 +53,7 @@ struct BeginnerModelReport {
 
         var recommendation: String {
             switch name {
+            case "llmbench.site · Coding index": return "Cached coding index: \(score). Flash Next = 100. Parent-model reference; this quantization was not evaluated."
             case "whatmodel.sh · General Work": return "Cached General Work score: \(score). Parent-model reference; this quantization was not evaluated."
             case "whatmodel.sh · Coding": return "Cached Coding score: \(score). Parent-model reference; this quantization was not evaluated."
             case "LiveCodeBench": return "Recommended for coding using published benchmark results."
@@ -151,10 +157,10 @@ struct BeginnerModelReport {
             var lines = ["Estimated memory: " + ByteCountFormatter.string(fromByteCount: runtimeBytes, countStyle: .memory)]
             if let benchmarkReference {
                 lines.append(benchmarkReference.name + ": " + benchmarkReference.score
-                             + (benchmarkReference.name.hasPrefix("whatmodel.sh") ? "" : "/100"))
+                             + (benchmarkReference.isRelativeIndex ? "" : "/100"))
                 lines.append(benchmarkReference.usedForRanking
                     ? (benchmarkReference.capturedDate.map { "Cached \($0). " } ?? "")
-                        + (benchmarkReference.name.hasPrefix("whatmodel.sh")
+                        + (benchmarkReference.isRelativeIndex
                            ? "Parent-model score; this quantization was not evaluated by this ranking."
                            : "Published model score; local results may vary.")
                     : "Reference only; it did not determine this choice.")

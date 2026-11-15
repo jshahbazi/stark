@@ -266,8 +266,8 @@ the publisher of a quantized export.
 Each row shows its text or text-and-image capability. Downloads automatically
 include image support when available for that artifact. Sort
 the family overview by name A–Z or Z–A. Family detail opens on
-**Top rated (coding)**, with **Top rated (general)**, name in either direction
-and model size ascending or descending beside it. Unknown numeric values stay
+**Top rated (coding)**, name in either direction and model size ascending or
+descending beside it. Unknown numeric values stay
 last in either direction. **Hide Unsupported**, checked by default, leaves out
 rows Stark cannot download; unchecked, they appear as **Unavailable** with the
 reason. A GPU-server export (AWQ, GPTQ and similar) that declares its original
@@ -400,22 +400,24 @@ recommended working-set budget, plus CPU count, physical and available memory,
 and free space in the library and download cache. GPU and system memory share
 the same physical memory; the algorithm never adds their budgets together.
 
-Quality uses bundled, dated whatmodel.sh General Work/Coding rankings for
-11 RAM sizes from 8–512 GB, after Stark’s compatibility and resource checks.
-Alternatives in both Quality and Speed must be within 10 cached task-score
-points of that mode's best admitted model and represent distinct parent models. A distant or unknown
-score does not fill an alternative slot; without cached coverage, the guide
-offers one fallback. Cards show the reference score and its quantization
-limitation. Model offers use installed RAM and the GPU memory budget. Current
+Quality ranks admitted models by frozen model-level coding indexes from the
+November 14, 2026 llmbench snapshot. Coding uses the coding index; General Work
+uses it as an explicitly labeled coding proxy, not as a general-work score.
+Speed requires at least 35 coding-index points and limits export weights to
+25% of physical RAM, after the same compatibility and resource checks.
+Alternatives in Quality and Speed must be within 10 index points of that
+mode's best admitted model and represent distinct models. Unknown models stay
+unknown and do not fill alternative slots; without indexed coverage, the guide
+offers one fallback. The snapshot is bundled and setup makes no runtime
+leaderboard requests. Indexes do not measure Stark exports. The separate Top
+Models view is unchanged. Model offers use installed RAM and the GPU memory budget. Current
 available memory can add a reminder to free memory before starting; changes
 in current memory do not alter the model ranking. That reminder uses the
 artifact's startup working set when it differs from total mapped memory.
-No recommendation click requests the leaderboard. Speed selects the highest
-cached task score above its reference floor within an export-weight budget of
-25% of physical RAM, after the normal resource checks. A missing qualifying
-option offers **Choose Quality**. Scores describe parent models; quantized
-quality and actual response speed are not measured by this ranking. See the [recommendation policy and monthly refresh
-workflow](../../docs/MODEL_RECOMMENDATIONS.md).
+No recommendation click requests leaderboard data. Speed uses the 35-point
+coding-index floor and the 25% export-weight budget described above. A missing
+qualifying option offers **Choose Quality**. The indexes do not measure Stark
+artifact quality or response speed. See the [recommendation policy](../../docs/MODEL_RECOMMENDATIONS.md).
 
 The guide checks a bounded window of candidates in each supported catalog
 family using metadata only. Every candidate retains its exact source revision

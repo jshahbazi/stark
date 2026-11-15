@@ -12,10 +12,23 @@ from stark_convert import catalog_ranking, native_catalog
 from stark_convert import model_catalog as catalog
 from stark_convert.catalog_ranking import ReferenceScores
 from stark_convert.desktop import Desktop
-from stark_convert.recommendation_leaderboard import GIB, LeaderboardSnapshot
+from stark_convert.recommendation_leaderboard import GIB, LeaderboardSnapshot, load_snapshot
 
 CONFIG = {"model_type": "qwen3", "torch_dtype": "float16"}
 PACKED = {"model_type": "qwen3", "quantization": {"group_size": 64, "bits": 4}}
+
+
+def test_llmbench_catalog_scores_use_individual_coding_indexes():
+    ranking = ReferenceScores(load_snapshot(), {})
+    exact = ranking.reference("Qwen/Qwen3-4B", PIN, "BF16", [], "Qwen3-4B")
+    assert exact["general"] is None
+    assert exact["coding"] == pytest.approx(46.02751985197706)
+    assert exact["source_url"] == "https://llmbench.site/data/"
+    export = ranking.reference("exporter/Qwen3-4B-4bit", PIN, "4-bit", [], "Qwen3-4B")
+    assert export["coding"] == exact["coding"]
+    assert export["relationship"] == "named_quantization"
+    assert ranking.priority("Qwen/Qwen3-4B", [], 8 * GIB, task="general")[1] == exact["coding"]
+    assert ranking.reference("tuner/Qwen3-4B-Tuned", PIN, "BF16", [], "Qwen3-4B") is None
 
 
 def scores():
@@ -326,7 +339,7 @@ def reference(**changes):
         "relationship": "named_quantization",
         "general": 50.5,
         "coding": None,
-        "source_url": "https://whatmodel.sh/model/small-4b",
+        "source_url": "https://llmbench.site/data/",
         "captured": "2026-11-11",
         **changes,
     }
