@@ -429,7 +429,6 @@ def test_native_progress_estimates_transfers_above_cached_baseline_without_doubl
     assert_private(events)
 
 
-
 def test_locked_hub_snapshot_routes_live_bytes_to_private_progress(tmp_path, monkeypatch, capsys):
     from huggingface_hub import _snapshot_download as snapshot
     from huggingface_hub.utils._xet_progress_reporting import XetDownloadProgressReporter
