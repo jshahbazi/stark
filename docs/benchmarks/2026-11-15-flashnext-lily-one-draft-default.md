@@ -1,33 +1,44 @@
-# Flash Next Lily one-draft recommendation
+# Flash Next Lily one-draft recommendation study
 
 Date: 2026-11-15. Attempts: `20261115-LILY-MTP1-01` and `-02`.
 
 ## Result
 
-The branch changes the enabled MTP recommendation from two drafts to one for
-the pinned Lily Q4-XL source. Explicit off/count controls, the raw omitted
-default, other artifacts and image behavior are preserved. Functional and
-prefix checks pass. No app is installed or released by this work.
+This report preserves the as-run one-draft candidate and its measurements. The
+candidate changed the enabled recommendation from two drafts to one for the
+pinned Lily Q4-XL source; it was later reverted after the preregistered
+three-depth reconciliation failed its performance gate. Two drafts remain
+recommended. Explicit one-draft requests, off/count controls, the raw omitted
+default and image behavior are unchanged. Functional and prefix checks pass.
+No app is installed or released by this work.
 
-The timing evidence is mixed. A same-worker depth comparison favors one draft
-on several cells, including 13.49% lower request latency in the motivating
-512-token top-k case. A separate actual before/candidate ABBA comparison gives
-only 2.65% higher paired decode throughput and 2.16% lower paired request
-latency, with 10/16 wins. That result is inside observed variability and does
-not establish a noticeable deployment gain. Do not advertise a delivered 9.93%
-or 13.49% improvement from this branch.
+The new within-worker reconciliation shows a workload-specific benefit and a
+failure to qualify one draft as the artifact-wide recommendation. In the
+primary 512-token top-k case, one versus two improved decode rate by 4.25% and
+reduced median request latency by 3.58%, with 12/12 latency wins; the latency
+gain missed the preregistered 5% threshold. The held-out top-k cell favored one
+by 20.03% decode and 14.45% request latency, also with 12/12 wins. However,
+the 4,096-token nucleus guard regressed decode rate by 6.01%, so the artifact-wide
+gate failed. See the
+[three-depth reconciliation](2026-11-15-lily-mtp-default-reconciliation.md)
+and [its aggregate data](data/lily-mtp-default-reconciliation-2026-11-15.json).
+The earlier same-worker depth study and actual before/candidate ABBA results
+remain distinct historical comparisons; none is a universal speed claim.
 
-The implementation is a small, reversible recommendation change for review.
-Its functional acceptance is complete; a consistent practical performance
-claim remains unqualified. The user-approved configuration is implemented on
-the branch, with the contrary timing evidence retained.
+The implementation was a small, reversible recommendation change. Its
+functional checks passed, but the later reconciliation did not meet the
+preregistered performance threshold. The candidate was reverted; measurements
+and validation records remain available for review. See the
+[three-depth reconciliation](2026-11-15-lily-mtp-default-reconciliation.md).
 
-## Problem and proposed behavior
+## Initial problem and proposal (superseded)
 
-The user accepts the measured 9.93% paired one-draft decode gain over MTP off
-as useful and requests implementation. That decision supersedes the earlier
-10% screening cutoff for this follow-up; a 0.07 percentage point difference is
-not an engineering reason to reject the setting.
+The initial decision treated the measured 9.93% one-draft gain over MTP off as
+worth implementing and superseded the earlier 10% screening cutoff. The later
+one-versus-two reconciliation tested the Desktop default comparison directly
+and did not pass its separate preregistered criteria. The 9.93% off-control
+result remains valid for its original comparison but does not establish a gain
+over two drafts.
 
 The source audit also found an important product distinction: the raw worker
 defaults to MTP off, but Desktop already enables MTP for supported Lily models
@@ -78,14 +89,21 @@ screen and functional/lifecycle checks have separate outcomes.
 
 ## State and outcome
 
-Implementation, measurements and focused validation are complete. Code adoption
-is limited to the branch. Main, release and installed-build status are unchanged.
+The one-draft candidate, its measurements and focused validation are complete
+as historical branch work. The subsequent three-depth reconciliation failed
+the preregistered gate, so the candidate recommendation was reverted to two.
+The held-out top-k cell provides positive evidence for one draft in that
+workload; the long-nucleus guard and primary material threshold keep that from
+qualifying an artifact-wide default. Explicit one-draft selection remains
+supported. Main, release and installed build status are unchanged.
 
-## Candidate confirmation plan: 20261115-LILY-MTP1-02
+## Completed candidate confirmation: 20261115-LILY-MTP1-02 (historical)
 
-The candidate changes the loaded recommendation only for the exact native-source
-repository/revision above. Other receipts and Uzu loading retain the previous
-two-draft recommendation. All raw omitted requests still default to zero.
+At the time of this completed confirmation, the candidate changed the loaded
+recommendation only for the exact native-source repository/revision above.
+Other receipts and Uzu loading retained the previous two-draft recommendation.
+All raw omitted requests still defaulted to zero. This candidate behavior is
+not the current recommendation.
 
 Before installation or promotion, confirm actual `mtp: true` behavior across
 the sealed before worker and the fresh candidate: image-loaded worker sessions
@@ -123,9 +141,9 @@ was simply off by default was incomplete for the desktop path. This follow-up
 changes the selected depth when enabled, rather than adding a new MTP algorithm
 or importing llama.cpp code.
 
-## Exact implementation scope
+## Exact candidate implementation scope (historical)
 
-`LilyModel::load_with_options` reads the existing `native-source.json` through
+In candidate commit `86cb55ca`, `LilyModel::load_with_options` read the existing `native-source.json` through
 the bounded JSON loader (1 MiB maximum). Exact `weights_source.repo` and
 `weights_source.revision` matches select recommendation one. Missing, malformed,
 oversized or different receipts retain the prior recommendation of two.
@@ -133,14 +151,14 @@ oversized or different receipts retain the prior recommendation of two.
 behavior. Both ordinary and image-loaded native-source paths use the same
 selection. The supported maximum remains three.
 
-The recommendation is bounded by the admitted head's maximum. It does not
+The candidate recommendation was bounded by the admitted head's maximum. It did not
 enable MTP in engine state or change `default_drafts=0` for raw requests.
 `mtp: true`, enabled Desktop/API preference and terminal `--mtp` use the loaded
 recommendation; explicit native `mtp_drafts: 0`, `1`, `2` or `3` remain exact
 choices. A saved Desktop off preference is preserved. Image requests use zero,
 clear the text prefix, and following text resumes its chosen selection.
 
-The prefix snapshot key still depends on MTP being enabled, rather than the
+The prefix snapshot key continued to depend on MTP being enabled, rather than the
 draft count. The captured boundary is before speculative decoding; the new
 recommendation does not change the snapshot representation or restoration
 algorithm. This study qualifies the image-loaded depth-one cache path and
@@ -260,10 +278,11 @@ model exception dumps or generated content are published.
 
 ## Reproduction and disposition
 
-The source-pinned recommendation lives in
-[`lily.rs`](../../crates/stark-engine/src/engine/hybrid/lily.rs).
+The historical candidate's source-pinned recommendation was implemented in
+[`lily.rs`](../../crates/stark-engine/src/engine/hybrid/lily.rs) at `86cb55ca`.
+The current source restores the original two-draft recommendation.
 The regular host consumes the live recommendation; it does not need a new
-per-model preference migration. The new host regression test checks a one-draft
+per-model preference migration. The retained host regression test checks a one-draft
 capability, saved-off behavior and zero image MTP.
 
 The exact prefix command uses the candidate `stark-template` on PATH and the
@@ -279,10 +298,16 @@ Use explicit depth one on both reference/candidate for numerical/cache equality.
 Using `mtp: true` on both instead would compare different draw schedules and
 is the separate actual-default timing experiment above.
 
-Disposition: recommendation implemented and tested on this branch; no kernel
-or sampler work, no installed app update, no release, no PR. A consistent
-noticeable speed claim for the actual default switch is still unproven.
-Other artifacts, longer contexts, other sampling filters, GPU operating states,
-long-form task quality and every positive-depth cache transition remain outside
-this bounded qualification. Preserve explicit controls and these limitations
-when deciding whether to merge or distribute the recommendation.
+Disposition: the one-draft candidate was implemented and tested, then reverted
+after the preregistered reconciliation gate failed. The held-out top-k cell
+measured a large scoped benefit (+20.03% decode, -14.45% request latency), but
+the primary 512-token top-k latency gain was below the material threshold and
+the long-nucleus decode guard regressed. Two drafts remain the artifact-wide
+recommendation; explicit one-draft selection remains supported. No kernel or
+sampler work, installed app update, release or PR occurred. The
+[reconciliation](2026-11-15-lily-mtp-default-reconciliation.md) and
+[aggregate data](data/lily-mtp-default-reconciliation-2026-11-15.json) retain
+the full three-depth results. Other artifacts, longer contexts, other sampling
+filters, GPU operating states, long-form task quality and every positive-depth
+cache transition remain outside this bounded qualification. Preserve explicit
+controls and these limits when considering future default changes.

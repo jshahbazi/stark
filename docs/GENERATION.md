@@ -322,14 +322,15 @@ not carry a mode into later native requests. Current operations are text-only.
 
 Native Lily and official mixed-affine Qwen3.8 checkpoints with their trained
 head currently implement this capability, with a maximum of three drafts.
-The pinned `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` artifact at revision
-`0f94842e3682b49acace4daeb4cf2e65a6f94f83` recommends one draft when its
-native-source receipt identifies that exact source. Other Lily and official
-mixed-affine artifacts retain their two-draft recommendation. The recommendation
-applies to `mtp: true` and host toggles; explicit native `mtp_drafts` remains
-the caller's selected depth. Missing or different source receipts retain the
-previous recommendation. See the
-[one-draft study](benchmarks/2026-11-15-flashnext-lily-one-draft-default.md).
+Lily and official mixed-affine checkpoints recommend two drafts when MTP is
+enabled. The source-scoped one-draft recommendation tested for
+`fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` at revision
+`0f94842e3682b49acace4daeb4cf2e65a6f94f83` was reverted after the follow-up
+comparison failed its preregistered performance gate. Explicit native
+`mtp_drafts` remains the caller's selected depth. The
+[one-draft study](benchmarks/2026-11-15-flashnext-lily-one-draft-default.md)
+and [comparison reconciliation](benchmarks/2026-11-15-lily-mtp-default-reconciliation.md)
+retain the candidate measurements and disposition.
 Lily-format weights report
 `verification: "batched-decode-exact-v1"`; official mixed-affine weights
 report `verification: "batched-affine-decode-exact-v1"`.

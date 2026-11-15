@@ -398,11 +398,12 @@ Raw native requests leave MTP off when neither selector is supplied. The
 desktop has a separate per-model on/off preference and normally enables MTP
 for supported Lily models; a saved off choice is preserved. The generic
 `mtp: true` request option and enabled host toggle choose the loaded model's
-recommended count. The exact pinned Lily Q4-XL source recommends one draft;
-other Lily/official affine artifacts retain two. Readiness exposes the actual
-recommendation and supported maximum. Explicit native `mtp_drafts` remains
-available. The [one-draft study](benchmarks/2026-11-15-flashnext-lily-one-draft-default.md)
-records the source identity, measured scope and separate installation status.
+recommended count. Lily and official affine artifacts recommend two.
+Readiness exposes the actual recommendation and supported maximum. Explicit
+native `mtp_drafts` remains available. A one-draft candidate for the pinned
+Lily Q4-XL source was reverted after failing the preregistered comparison
+gate; its measurements remain in the [one-draft study](benchmarks/2026-11-15-flashnext-lily-one-draft-default.md)
+and [reconciliation](benchmarks/2026-11-15-lily-mtp-default-reconciliation.md).
 The named GLM EXL3 profile's separate default is documented above.
 Draft and target distributions use Stark's complete-logit CPU
 sampler with exact probability-ratio rejection and residual correction;

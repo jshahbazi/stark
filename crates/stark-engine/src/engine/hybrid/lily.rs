@@ -27,17 +27,6 @@ use stark_lily_core::{
 use super::{Error, MtpSampler, MtpStats, Result, profile};
 
 const INITIAL_CONTEXT_CAPACITY: usize = 16_384;
-const FLASH_NEXT_LILY_REPO: &str = "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl";
-const FLASH_NEXT_LILY_REVISION: &str = "0f94842e3682b49acace4daeb4cf2e65a6f94f83";
-
-fn is_pinned_flash_next_lily_artifact(path: &Path) -> bool {
-    // The recommendation is qualified for this export, not the whole family.
-    // Missing or different provenance keeps the previous two-draft policy.
-    super::json_file(&path.join("native-source.json"), 1024 * 1024).is_ok_and(|receipt| {
-        receipt["weights_source"]["repo"] == FLASH_NEXT_LILY_REPO
-            && receipt["weights_source"]["revision"] == FLASH_NEXT_LILY_REVISION
-    })
-}
 
 /// Reserve capacity grows geometrically; it does not define model capacity.
 fn planned_context_capacity(
@@ -270,7 +259,6 @@ pub struct LilyModel {
     last_greedy: Option<GreedyReadout>,
     last_full_readout: Option<usize>,
     mtp_enabled: bool,
-    recommended_mtp_drafts: usize,
     mtp_stats: MtpStats,
     capture_at: Option<usize>,
     captured: Option<PrefixSnapshot>,
@@ -327,11 +315,7 @@ impl LilyModel {
         if images && !model.has_vision() {
             return Err(Error::Unsupported("checkpoint does not retain an admitted vision tower"));
         }
-        let mut loaded = Self::from_model(context, model)?;
-        if is_pinned_flash_next_lily_artifact(path) {
-            loaded.recommended_mtp_drafts = 1;
-        }
-        Ok(loaded)
+        Self::from_model(context, model)
     }
 
     pub fn load_uzu(
@@ -383,7 +367,6 @@ impl LilyModel {
             last_greedy: None,
             last_full_readout: None,
             mtp_enabled: false,
-            recommended_mtp_drafts: 2,
             mtp_stats: MtpStats::default(),
             capture_at: None,
             captured: None,
@@ -606,7 +589,7 @@ impl LilyModel {
         let max_drafts = self.model.max_drafts();
         (max_drafts > 0).then(|| super::MtpCapabilities {
             max_drafts,
-            recommended_drafts: self.recommended_mtp_drafts.min(max_drafts),
+            recommended_drafts: 2.min(max_drafts),
             sampling: "exact-rejection-v1",
             verification: self.mtp_verification(),
         })
@@ -1798,62 +1781,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
-
     use stark_engine_macros::stark_test;
 
     use super::*;
-
-    struct SourceFixture(PathBuf);
-
-    impl SourceFixture {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "stark-lily-source-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-
-        fn write_receipt(
-            &self,
-            receipt: &str,
-        ) {
-            fs::write(self.0.join("native-source.json"), receipt).unwrap();
-        }
-    }
-
-    impl Drop for SourceFixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[stark_test]
-    fn one_draft_recommendation_requires_exact_native_source_identity() {
-        let fixture = SourceFixture::new();
-        fixture.write_receipt(&format!(
-            r#"{{"weights_source":{{"repo":"{FLASH_NEXT_LILY_REPO}","revision":"{FLASH_NEXT_LILY_REVISION}"}}}}"#
-        ));
-        assert!(is_pinned_flash_next_lily_artifact(&fixture.0));
-
-        fixture.write_receipt(&format!(
-            r#"{{"weights_source":{{"repo":"other/repo","revision":"{FLASH_NEXT_LILY_REVISION}"}}}}"#
-        ));
-        assert!(!is_pinned_flash_next_lily_artifact(&fixture.0));
-
-        fixture.write_receipt(&format!(
-            r#"{{"weights_source":{{"repo":"{FLASH_NEXT_LILY_REPO}","revision":"other-revision"}}}}"#
-        ));
-        assert!(!is_pinned_flash_next_lily_artifact(&fixture.0));
-
-        let _ = fs::remove_file(fixture.0.join("native-source.json"));
-        assert!(!is_pinned_flash_next_lily_artifact(&fixture.0));
-        fixture.write_receipt("not-json");
-        assert!(!is_pinned_flash_next_lily_artifact(&fixture.0));
-    }
 
     fn digest_logits(logits: &[f32]) -> [u8; 32] {
         use sha2::{Digest, Sha256};

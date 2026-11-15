@@ -616,9 +616,17 @@ an image-runtime bug. No new path is represented as production-qualified.
 
 ## Follow-up
 
-The user accepted the near-10% one-draft observation as worth implementing.
-The [one-draft recommendation follow-up](2026-11-15-flashnext-lily-one-draft-default.md)
-records the subsequent source-scoped policy change and additional measurements.
-It distinguishes Desktop's enabled two-draft recommendation from the raw
-worker's omitted-option default. The original baseline and conclusions above
-remain bound to their original source and criteria.
+The initial 9.93% result compared one draft with MTP off; it did not establish a
+gain over Desktop's enabled two-draft recommendation. The source-scoped
+one-draft candidate and subsequent three-depth reconciliation are recorded in
+the [one-draft study](2026-11-15-flashnext-lily-one-draft-default.md) and
+[reconciliation](2026-11-15-lily-mtp-default-reconciliation.md). The primary
+one-versus-two latency gain was below its preregistered 5% threshold, and the
+long-nucleus guard regressed useful decode rate by 6.01%; the held-out top-k
+cell favored one draft by 20.03% decode and 14.45% request latency. The
+candidate was reverted because the artifact-wide criteria failed; two drafts
+remain recommended, while explicit one-draft requests remain available. The
+original baseline and conclusions above remain bound to their original source
+and criteria. The
+[reconciliation data](data/lily-mtp-default-reconciliation-2026-11-15.json)
+retains all three-depth observations.
