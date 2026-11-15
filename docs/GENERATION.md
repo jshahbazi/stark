@@ -167,7 +167,7 @@ context limit, EOS IDs and MTP support vary by loaded model:
 | `request_budget_bytes`, `max_request_bytes` | Configured logical content budget and encoded request-line budget, including the newline; see [resource budget](WORKER_PROTOCOLS.md#resource-budget) |
 | `eos_token_ids` | Stop IDs from the model's generation metadata, always honoured |
 | `streaming`, `stop_sequences`, `cancellation` | Capability tags for the features below |
-| `mtp` | Loaded-model MTP support, recommended/maximum draft counts, supported operations and exact-sampling policy; see [MTP](#multi-token-prediction) |
+| `mtp` | Loaded-model MTP support, recommended/maximum draft counts, supported operations and exact-sampling policy; it may include an optional loaded-worker `sampling_recommendation_policy`; see [MTP](#multi-token-prediction) |
 
 The configured context is a token admission boundary. Available memory and the configurable content/frame budgets still apply; accepting a model's published maximum does not qualify full-length numerical accuracy or performance.
 
@@ -222,7 +222,7 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `max_new_tokens` | Required, positive and at most `context_tokens - 1`; there is no separate fixed output-token ceiling. The actual rendered input and requested output must fit the context. |
 | `seed` | Optional unsigned 64-bit integer, default 0. Only stochastic sampling uses it. |
 | `sampling` | Optional, default `{"mode":"greedy"}`. See [Sampling](#sampling). |
-| `mtp` | Optional boolean, default `false`. `true` uses this model's `recommended_drafts`; `false` disables MTP. Unsupported models reject `true` with `mtp_not_supported`. Applies to text `generate` only. |
+| `mtp` | Optional boolean, default `false`. `true` uses this model's `recommended_drafts`, with any loaded-worker sampling-specific recommendation described below; `false` disables MTP. Unsupported models reject `true` with `mtp_not_supported`. Applies to text `generate` only. |
 | `mtp_drafts` | Optional explicit draft count, default 0. Nonzero values must fit the loaded model's `max_drafts`. Retained for advanced callers and benchmarks. Supply either `mtp` or `mtp_drafts`; supplying both, including `false` and `0`, is invalid. |
 | `stop_token_ids` | Optional, at most 256 distinct token IDs below `vocab_size`. Added to the model's EOS IDs; a model EOS cannot be removed. |
 | `stop` | Optional, at most four non-empty strings of at most 1,024 characters each. See [Stop sequences](#stop-sequences). |
@@ -322,15 +322,32 @@ not carry a mode into later native requests. Current operations are text-only.
 
 Native Lily and official mixed-affine Qwen3.8 checkpoints with their trained
 head currently implement this capability, with a maximum of three drafts.
-Lily and official mixed-affine checkpoints recommend two drafts when MTP is
-enabled. The source-scoped one-draft recommendation tested for
-`fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` at revision
-`0f94842e3682b49acace4daeb4cf2e65a6f94f83` was reverted after the follow-up
-comparison failed its preregistered performance gate. Explicit native
-`mtp_drafts` remains the caller's selected depth. The
-[one-draft study](benchmarks/2026-11-15-flashnext-lily-one-draft-default.md)
-and [comparison reconciliation](benchmarks/2026-11-15-lily-mtp-default-reconciliation.md)
-retain the candidate measurements and disposition.
+The scalar `recommended_drafts` remains two for Lily and official
+mixed-affine checkpoints. The exact pinned Lily Q4-XL receipt may additionally
+advertise `sampling_recommendation_policy: "lily-topk20-one-draft-v1"`.
+When present, `mtp: true` selects one draft only for stochastic temperature
+1, top-k 20, top-p 0.95, and absent or null min-p. Float matching follows the
+worker's native F32 representation; min-p 0 and every other sampling setup use
+the scalar two-draft recommendation. The policy is granted from the loaded
+worker's bounded `native-source.json` weights source and exact revision, not
+from a model name. An older host ignores this optional field and uses two;
+unknown policy values also fall back to the scalar recommendation.
+
+Explicit `mtp_drafts` remains the caller's exact supported depth, and raw
+requests with no selector still use `default_drafts`, normally zero. Planning
+and generation resolve the same policy for the same request. Branch
+qualification is complete for the pinned artifact and this exact sampler: a
+four-session confirmation retained 64 measured requests, 16 warmups and four
+setup requests; its held-out top-k endpoint reduced median request latency by
+14.66% with all eight paired blocks favoring one draft. Seven image-loaded
+prefix checks matched fresh executions across one-to-two and two-to-one
+transitions; image
+requests cleared MTP and reuse. These results do not qualify other sampling
+configurations, artifacts or general traffic. No installation or release is
+claimed. The broad two-draft recommendation reconciliation remains valid;
+details and aggregates are in the
+[sampling-specific MTP record](benchmarks/2026-11-15-lily-sampling-mtp-policy.md)
+and [public aggregate data](benchmarks/data/lily-sampling-mtp-policy-2026-11-15.json).
 Lily-format weights report
 `verification: "batched-decode-exact-v1"`; official mixed-affine weights
 report `verification: "batched-affine-decode-exact-v1"`.

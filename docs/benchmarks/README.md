@@ -12,18 +12,36 @@ qualification; the ledger is not a completed historical backfill.
 
 ## Current result
 
+**Pinned Lily sampling-specific MTP recommendation (2026-11-15).** A narrower
+loaded-artifact policy now selects one draft only for the pinned Lily Q4-XL
+receipt with stochastic temperature 1, top-k 20, top-p 0.95 and absent/null
+min-p. The scalar recommendation remains two; greedy, nucleus, min-p 0 and
+other settings select two. Its fixed four-session confirmation retained 64
+measured requests, 16 warmups and four setup requests; the held-out top-k
+endpoint reduced median request latency 14.66% with 8/8 paired blocks favoring
+one. Seven image-loaded
+prefix checks matched fresh outputs through one-to-two and two-to-one
+transitions and the image-clear boundary. Branch qualification is complete
+for this sampler/artifact scope; no release or installation is claimed. See
+the [policy record](2026-11-15-lily-sampling-mtp-policy.md) and
+[public aggregates](data/lily-sampling-mtp-policy-2026-11-15.json).
+
 **Flash Next Lily MTP recommendation reconciliation (2026-11-15).** The
 one-draft candidate was reverted after its preregistered follow-up failed the
 artifact-wide performance gate. In the primary 512-token top-k comparison,
 one draft reduced median request latency by 3.58%, below the required 5%; the
 4,096-token nucleus guard regressed useful decode rate by 6.01%. The held-out
 top-k cell favored one draft by 20.03% decode and 14.45% request latency, a
-scoped positive result. Two drafts remain the enabled recommendation, and
-explicit one-draft requests remain supported. The
+scoped positive result. Two drafts remain the scalar recommendation outside
+the separately qualified sampling-specific case; explicit one-draft requests
+remain supported. The
 [study](2026-11-15-flashnext-lily-one-draft-default.md),
 [reconciliation](2026-11-15-lily-mtp-default-reconciliation.md), and
 [aggregates](data/lily-mtp-default-reconciliation-2026-11-15.json) preserve
 the off/on, one/two, actual-default comparisons and validation evidence.
+The reconciliation remains the general recommendation decision; the later
+sampling-specific exception is a separately qualified, workload-specific
+follow-up.
 
 **llama.cpp 1.0.0 assessment and Flash Next Lily baseline (2026-11-15).**
 The [ranked source assessment and measurement record](2026-11-15-llama-v1-flashnext-lily-assessment.md)

@@ -543,6 +543,7 @@ impl GenerationBackend for NativeBackend {
             return Some(crate::generation::MtpCapabilities {
                 max_drafts: 3,
                 recommended_drafts: 3,
+                sampling_recommendation_policy: None,
                 sampling: "exact-rejection-v1",
                 verification: GEMMA4_ASSISTANT_VERIFICATION_POLICY,
             });
@@ -551,6 +552,7 @@ impl GenerationBackend for NativeBackend {
             true => Some(crate::generation::MtpCapabilities {
                 max_drafts: 3,
                 recommended_drafts: 3,
+                sampling_recommendation_policy: None,
                 sampling: "exact-rejection-v1",
                 verification: "dense-qwen35-target-verify-v1",
             }),

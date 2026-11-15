@@ -27,6 +27,21 @@ use stark_lily_core::{
 use super::{Error, MtpSampler, MtpStats, Result, profile};
 
 const INITIAL_CONTEXT_CAPACITY: usize = 16_384;
+const LILY_TOPK20_ONE_DRAFT_POLICY: &str = "lily-topk20-one-draft-v1";
+const LILY_TOPK20_ONE_DRAFT_REPO: &str = "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl";
+const LILY_TOPK20_ONE_DRAFT_REVISION: &str = "0f94842e3682b49acace4daeb4cf2e65a6f94f83";
+const NATIVE_SOURCE_MAX_BYTES: u64 = 1024 * 1024;
+
+fn has_lily_topk20_one_draft_identity(receipt: &serde_json::Value) -> bool {
+    receipt["weights_source"]["repo"] == LILY_TOPK20_ONE_DRAFT_REPO
+        && receipt["weights_source"]["revision"] == LILY_TOPK20_ONE_DRAFT_REVISION
+}
+
+fn lily_sampling_recommendation_policy(path: &Path) -> Option<&'static str> {
+    let receipt_path = path.join("native-source.json");
+    let receipt = super::json_file(&receipt_path, NATIVE_SOURCE_MAX_BYTES).ok()?;
+    has_lily_topk20_one_draft_identity(&receipt).then_some(LILY_TOPK20_ONE_DRAFT_POLICY)
+}
 
 /// Reserve capacity grows geometrically; it does not define model capacity.
 fn planned_context_capacity(
@@ -264,6 +279,7 @@ pub struct LilyModel {
     captured: Option<PrefixSnapshot>,
     image_owner: Arc<()>,
     image_active: bool,
+    sampling_recommendation_policy: Option<&'static str>,
     // Context ownership outlives every model/state/scratch allocation on drop.
     context: MetalContext,
 }
@@ -315,7 +331,7 @@ impl LilyModel {
         if images && !model.has_vision() {
             return Err(Error::Unsupported("checkpoint does not retain an admitted vision tower"));
         }
-        Self::from_model(context, model)
+        Self::from_model(context, model, lily_sampling_recommendation_policy(path))
     }
 
     pub fn load_uzu(
@@ -327,12 +343,13 @@ impl LilyModel {
         let context = MetalContext::new().map_err(|_| Error::Unsupported("Uzu Qwen Metal context unavailable"))?;
         let model = Qwen4ExpModel::load_uzu(&context, architecture, checkpoint)
             .map_err(|_| Error::Invalid("Uzu Qwen converted model admission failed"))?;
-        Self::from_model(context, model)
+        Self::from_model(context, model, None)
     }
 
     fn from_model(
         context: MetalContext,
         mut model: Qwen4ExpModel,
+        sampling_recommendation_policy: Option<&'static str>,
     ) -> Result<Self> {
         let vocab_size = model.config.vocab_size;
         let max_context = model.config.max_position_embeddings;
@@ -372,6 +389,7 @@ impl LilyModel {
             captured: None,
             image_owner: Arc::new(()),
             image_active: false,
+            sampling_recommendation_policy,
             context,
         })
     }
@@ -593,6 +611,10 @@ impl LilyModel {
             sampling: "exact-rejection-v1",
             verification: self.mtp_verification(),
         })
+    }
+
+    pub fn mtp_sampling_recommendation_policy(&self) -> Option<&'static str> {
+        self.sampling_recommendation_policy
     }
 
     pub fn mtp_verification(&self) -> &'static str {
@@ -1784,6 +1806,40 @@ mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn one_draft_policy_requires_exact_native_weights_source() {
+        let pinned = serde_json::json!({
+            "weights_source": {
+                "repo": LILY_TOPK20_ONE_DRAFT_REPO,
+                "revision": LILY_TOPK20_ONE_DRAFT_REVISION,
+            }
+        });
+        assert!(has_lily_topk20_one_draft_identity(&pinned));
+
+        for receipt in [
+            serde_json::json!({"weights_source":{"repo":"another/model","revision":LILY_TOPK20_ONE_DRAFT_REVISION}}),
+            serde_json::json!({"weights_source":{"repo":LILY_TOPK20_ONE_DRAFT_REPO,"revision":"0".repeat(40)}}),
+            serde_json::json!({"weights_source":{"repo":LILY_TOPK20_ONE_DRAFT_REPO}}),
+            serde_json::json!({"weights_source":null}),
+            serde_json::json!({}),
+        ] {
+            assert!(!has_lily_topk20_one_draft_identity(&receipt));
+        }
+        assert_eq!(lily_sampling_recommendation_policy(Path::new("/definitely/missing/model")), None);
+
+        let model_dir = std::env::temp_dir().join(format!("stark-lily-mtp-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&model_dir);
+        std::fs::create_dir_all(&model_dir).unwrap();
+        let receipt_path = model_dir.join("native-source.json");
+        std::fs::write(&receipt_path, serde_json::to_vec(&pinned).unwrap()).unwrap();
+        assert_eq!(lily_sampling_recommendation_policy(&model_dir), Some(LILY_TOPK20_ONE_DRAFT_POLICY));
+        std::fs::write(&receipt_path, b"{malformed").unwrap();
+        assert_eq!(lily_sampling_recommendation_policy(&model_dir), None);
+        std::fs::write(&receipt_path, vec![b' '; NATIVE_SOURCE_MAX_BYTES as usize + 1]).unwrap();
+        assert_eq!(lily_sampling_recommendation_policy(&model_dir), None);
+        std::fs::remove_dir_all(model_dir).unwrap();
+    }
 
     fn digest_logits(logits: &[f32]) -> [u8; 32] {
         use sha2::{Digest, Sha256};

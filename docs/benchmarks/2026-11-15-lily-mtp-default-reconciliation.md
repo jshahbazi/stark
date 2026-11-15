@@ -2,6 +2,20 @@
 
 Date: 2026-11-15. Attempt: `20261115-LILY-MTP1-03`.
 
+## Current reference update
+
+The decision below restores two as the general scalar recommendation and
+remains valid. A separate implementation follow-up adds one automatic draft
+only for the exact pinned Lily receipt with stochastic temperature 1, top-k
+20, top-p 0.95 and absent/null min-p. Its branch qualification now passes:
+the held-out top-k endpoint reduced median request latency by 14.66% with 8/8
+paired blocks favoring one, and seven image-loaded prefix checks matched fresh
+runs across one-to-two and two-to-one transitions. This scoped exception
+does not change the 198-request reconciliation or extend its result to other
+samplers. No installation or release is claimed. See the
+[sampling-specific follow-up](2026-11-15-lily-sampling-mtp-policy.md) and
+[aggregates](data/lily-sampling-mtp-policy-2026-11-15.json).
+
 Decision: restore the two-draft recommendation. One versus two has a real but
 modest benefit in the motivating top-k case, no benefit in the 512-token greedy
 guard, and a consistent long-nucleus regression. Explicit one draft remains available;
@@ -209,14 +223,20 @@ These observations do not establish a representative traffic-weighted gain.
 | Add automatic depth adaptation now | Defer | This study does not qualify a reliable selection rule or its switching/cache behavior. More code is unnecessary to resolve the current default decision. |
 | Attribute the gap to a specific GPU/power problem | Unsupported | Historical clocks are absent and this run's clock observer had a schema mismatch. Timing drift alone cannot identify the limiter. |
 
+The exact-profile implementation proposed by the top-k finding is subsequently
+qualified in the [sampling-specific policy record](2026-11-15-lily-sampling-mtp-policy.md).
+Representative coding-traffic performance remains unmeasured; this table
+records the engineering judgment at the reconciliation stage.
+
 The earlier implementation moved too quickly from an off-control result to a
 recommendation change. Desktop already enabled two drafts. The actual change
 needed its own product comparison before treating 9.93% as a reason to adopt
 one. Functional validation was successful; it did not establish the speed case.
 
-The source-specific recommendation override, extra model field and its helper
-test are removed. Final engine, generator and production Python sources match
-study base `f9c9720c`; Lily again reports `2.min(max_drafts)`. Explicit counts,
+At reconciliation commit `f331c648`, the source-specific recommendation
+override, extra model field and its helper test were removed. That attempt's
+final engine, generator and production Python sources matched study base
+`f9c9720c`; Lily again reported `2.min(max_drafts)`. Explicit counts,
 raw omitted-selector behavior, saved-off preferences, image behavior and
 existing prefix restoration remain as before. The generic host regression
 test for consuming a one-draft capability is retained. Commit `86cb55ca` and

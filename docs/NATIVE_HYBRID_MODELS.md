@@ -398,12 +398,32 @@ Raw native requests leave MTP off when neither selector is supplied. The
 desktop has a separate per-model on/off preference and normally enables MTP
 for supported Lily models; a saved off choice is preserved. The generic
 `mtp: true` request option and enabled host toggle choose the loaded model's
-recommended count. Lily and official affine artifacts recommend two.
-Readiness exposes the actual recommendation and supported maximum. Explicit
-native `mtp_drafts` remains available. A one-draft candidate for the pinned
-Lily Q4-XL source was reverted after failing the preregistered comparison
-gate; its measurements remain in the [one-draft study](benchmarks/2026-11-15-flashnext-lily-one-draft-default.md)
-and [reconciliation](benchmarks/2026-11-15-lily-mtp-default-reconciliation.md).
+recommended count. Lily and official affine artifacts retain a scalar
+recommendation of two. For the exact pinned Lily Q4-XL receipt only, readiness
+may also expose the optional
+`sampling_recommendation_policy: "lily-topk20-one-draft-v1"`. This selects
+one draft for stochastic temperature 1, top-k 20, top-p 0.95 and absent/null
+min-p; comparison uses native F32 float representation. Min-p 0 and other
+sampling configurations use the scalar two-draft recommendation. The engine
+grants the policy only from the bounded native-source receipt's exact
+weights repository and revision. Host callers use that readiness capability,
+not a model-name heuristic; missing or unknown policy values retain the scalar
+recommendation.
+
+Explicit native `mtp_drafts` remains the exact caller-selected count, raw
+omitted selectors remain zero, and image requests remain MTP-off. Planning and
+generation use the same resolved depth. Branch qualification is complete for
+the pinned artifact and exact sampler: the held-out top-k confirmation reduced
+median request latency by 14.66% across eight paired blocks, and seven
+image-loaded prefix checks matched fresh runs through one-to-two and
+two-to-one transitions with image requests clearing MTP and reuse. This does
+not qualify other samplers, artifacts or general traffic. No installation or
+release is claimed. The broad recommendation reconciliation remains valid and
+is preserved with this narrower policy in the
+[sampling-specific record](benchmarks/2026-11-15-lily-sampling-mtp-policy.md),
+[one-draft study](benchmarks/2026-11-15-flashnext-lily-one-draft-default.md)
+and [reconciliation](benchmarks/2026-11-15-lily-mtp-default-reconciliation.md),
+with aggregates in [the public data file](benchmarks/data/lily-sampling-mtp-policy-2026-11-15.json).
 The named GLM EXL3 profile's separate default is documented above.
 Draft and target distributions use Stark's complete-logit CPU
 sampler with exact probability-ratio rejection and residual correction;

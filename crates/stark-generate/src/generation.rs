@@ -26,6 +26,7 @@ const MAX_EXTRA_STOPS: usize = 256;
 pub(crate) struct MtpCapabilities {
     pub max_drafts: usize,
     pub recommended_drafts: usize,
+    pub sampling_recommendation_policy: Option<&'static str>,
     pub sampling: &'static str,
     pub verification: &'static str,
 }
@@ -746,6 +747,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         &self,
         enabled: Option<bool>,
         drafts: Option<u32>,
+        sampling: &Sampling,
     ) -> Result<u32, &'static str> {
         if self.backend.mtp_capabilities() != self.mtp || self.backend.default_mtp_drafts() != self.default_mtp_drafts {
             return Err("invalid_generation_output");
@@ -754,7 +756,26 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             return Err("invalid_generation_request");
         }
         let drafts = match (enabled, drafts) {
-            (Some(true), None) => self.mtp.ok_or("mtp_not_supported")?.recommended_drafts as u32,
+            (Some(true), None) => {
+                let capabilities = self.mtp.ok_or("mtp_not_supported")?;
+                let selected = match capabilities.sampling_recommendation_policy {
+                    Some("lily-topk20-one-draft-v1")
+                        if matches!(
+                            sampling,
+                            Sampling::Stochastic {
+                                temperature,
+                                top_k: Some(20),
+                                top_p: Some(top_p),
+                                min_p: None,
+                            } if *temperature == 1.0_f32 && *top_p == 0.95_f32
+                        ) =>
+                    {
+                        1
+                    },
+                    _ => capabilities.recommended_drafts,
+                };
+                selected as u32
+            },
             (Some(false), None) => 0,
             (None, None) => self.default_mtp_drafts,
             (None, Some(drafts)) => drafts,
@@ -786,7 +807,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         if options.max_new_tokens as usize > self.budget.input_bytes / std::mem::size_of::<u32>() {
             return Err("resource_budget_exceeded");
         }
-        self.resolve_mtp(None, Some(options.mtp_drafts))?;
+        self.resolve_mtp(None, Some(options.mtp_drafts), &options.sampling)?;
         if self.backend.max_context_length().is_some_and(|max| options.context_tokens > max) {
             return Err("context_overflow");
         }
@@ -1028,12 +1049,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 {
                     return Err("invalid_generation_request");
                 }
+                let mtp_drafts = self.resolve_mtp(mtp, mtp_drafts, &sampling)?;
                 let mut options = GenerationOptions {
                     context_tokens: maximum,
                     max_new_tokens: maximum - input_tokens,
                     seed: 0,
                     sampling,
-                    mtp_drafts: self.resolve_mtp(mtp, mtp_drafts)?,
+                    mtp_drafts,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: Vec::new(),
                     stop: Vec::new(),
@@ -1086,12 +1108,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 cache_scope,
             } => {
                 let cache_scope = self.resolve_cache_scope(cache_scope)?;
+                let mtp_drafts = self.resolve_mtp(mtp, mtp_drafts, &sampling)?;
                 let options = GenerationOptions {
                     context_tokens,
                     max_new_tokens,
                     seed,
                     sampling,
-                    mtp_drafts: self.resolve_mtp(mtp, mtp_drafts)?,
+                    mtp_drafts,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: stop_token_ids,
                     stop,
@@ -1444,6 +1467,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
             "recommended_drafts":capabilities.recommended_drafts,"default_drafts":worker.default_mtp_drafts,
+            "sampling_recommendation_policy":capabilities.sampling_recommendation_policy,
             "sampling":capabilities.sampling,"verification":capabilities.verification,
             "operations":["generate"]}),
         None => json!({"supported":false,"max_drafts":0,"recommended_drafts":0,
@@ -1568,6 +1592,7 @@ mod tests {
         idle_interval: Option<Duration>,
         idle_calls: usize,
         fail_idle: bool,
+        vocab_size_override: Option<usize>,
         max_context: Option<u32>,
         tokens: Vec<Result<u64, &'static str>>,
         eos: Vec<u32>,
@@ -1630,7 +1655,7 @@ mod tests {
             }
         }
         fn vocab_size(&self) -> usize {
-            8
+            self.vocab_size_override.unwrap_or(8)
         }
         fn max_context_length(&self) -> Option<u32> {
             self.max_context
@@ -1928,6 +1953,7 @@ mod tests {
             idle_interval: None,
             idle_calls: 0,
             fail_idle: false,
+            vocab_size_override: None,
             max_context: Some(1024),
             tokens: vec![Ok(3), Ok(4), Ok(1), Ok(7)],
             eos: vec![1],
@@ -1977,6 +2003,7 @@ mod tests {
         MtpCapabilities {
             max_drafts,
             recommended_drafts,
+            sampling_recommendation_policy: None,
             sampling: "exact-rejection-v1",
             verification: "fake-model-exact-v1",
         }
@@ -2036,7 +2063,7 @@ mod tests {
         assert!(GenerationWorker::new(backend).is_err());
         let mut worker = mtp_worker(3, 3);
         worker.backend.default_mtp_drafts = 3;
-        assert_eq!(worker.resolve_mtp(None, None), Err("invalid_generation_output"));
+        assert_eq!(worker.resolve_mtp(None, None, &Sampling::default()), Err("invalid_generation_output"));
     }
 
     #[test]
@@ -2148,6 +2175,98 @@ mod tests {
                     }
             }));
         }
+    }
+
+    #[test]
+    fn lily_topk20_policy_is_exact_and_plan_matches_generation() {
+        let mut backend = worker().backend;
+        let mut capabilities = capabilities(3, 2);
+        capabilities.sampling_recommendation_policy = Some("lily-topk20-one-draft-v1");
+        backend.mtp = Some(capabilities);
+        backend.vocab_size_override = Some(32);
+        backend.max_context = None;
+        let mut worker = GenerationWorker::new(backend).unwrap();
+
+        let exact = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: Some(20),
+            top_p: Some(0.95),
+            min_p: None,
+        };
+        assert_eq!(worker.resolve_mtp(Some(true), None, &exact), Ok(1));
+        assert_eq!(worker.resolve_mtp(Some(false), None, &exact), Ok(0));
+        assert_eq!(worker.resolve_mtp(None, Some(2), &exact), Ok(2));
+        assert_eq!(worker.resolve_mtp(None, None, &exact), Ok(0));
+
+        let near_temperature = Sampling::Stochastic {
+            temperature: 0.999,
+            top_k: Some(20),
+            top_p: Some(0.95),
+            min_p: None,
+        };
+        let near_top_k = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: Some(19),
+            top_p: Some(0.95),
+            min_p: None,
+        };
+        let near_top_p = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: Some(20),
+            top_p: Some(0.9),
+            min_p: None,
+        };
+        let with_min_p = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: Some(20),
+            top_p: Some(0.95),
+            min_p: Some(0.0),
+        };
+        for sample in [Sampling::default(), near_temperature, near_top_k, near_top_p, with_min_p] {
+            assert_eq!(worker.resolve_mtp(Some(true), None, &sample), Ok(2));
+        }
+        let same_f32_temperature = Sampling::Stochastic {
+            temperature: 1.00000001_f32,
+            top_k: Some(20),
+            top_p: Some(0.95),
+            min_p: None,
+        };
+        let same_f32_top_p = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: Some(20),
+            top_p: Some(0.95000001_f32),
+            min_p: None,
+        };
+        assert_eq!(worker.resolve_mtp(Some(true), None, &same_f32_temperature), Ok(1));
+        assert_eq!(worker.resolve_mtp(Some(true), None, &same_f32_top_p), Ok(1));
+        let adjacent_top_p = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: Some(20),
+            top_p: Some(f32::from_bits(0.95_f32.to_bits() + 1)),
+            min_p: None,
+        };
+        assert_eq!(worker.resolve_mtp(Some(true), None, &adjacent_top_p), Ok(2));
+
+        let plan = post(
+            &mut worker,
+            json!({"operation":"plan_generation","input_tokens":2,"context_tokens":16,
+                "mtp":true,"sampling":{"mode":"stochastic","temperature":1.0,
+                    "top_k":20,"top_p":0.95}}),
+        );
+        assert!(plan.get("error").is_none());
+        assert_eq!(worker.backend.plans.last().unwrap().mtp_drafts, 1);
+
+        let mut request = standard();
+        request["mtp"] = json!(true);
+        request["sampling"] = json!({"mode":"stochastic","temperature":1.0,"top_k":20,"top_p":0.95});
+        let reply = post(&mut worker, request);
+        assert!(reply.get("error").is_none());
+        assert_eq!(reply["mtp"]["drafts"], 1);
+        assert_eq!(worker.backend.mtp_requests, [1]);
+
+        let advertised = readiness(&mut worker);
+        assert_eq!(advertised["mtp"]["recommended_drafts"], 2);
+        assert_eq!(advertised["mtp"]["sampling_recommendation_policy"], "lily-topk20-one-draft-v1");
     }
 
     #[test]

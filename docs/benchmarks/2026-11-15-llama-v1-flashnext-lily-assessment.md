@@ -2,6 +2,21 @@
 
 Date: 2026-11-15. Attempts: `20261115-LCPP1-01`, `-02`, `-03`.
 
+## Current reference update
+
+The release audit and image-resident baseline below retain their recorded
+scope. A later, separate follow-up implements a receipt-bound one-draft
+recommendation only for the pinned Lily stochastic temperature-1/top-k-20/
+top-p-0.95 request with min-p absent/null. The scalar recommendation remains
+two. Branch qualification is complete for this artifact and sampler: the
+held-out top-k endpoint reduced median request latency by 14.66% with 8/8
+paired blocks favoring one, and seven image-loaded prefix checks matched fresh
+runs through one-to-two and two-to-one transitions. This is a sampler policy
+based on the earlier Stark MTP measurements, not an adopted llama.cpp
+optimization. No installation or release is claimed. See the
+[sampling-specific follow-up](2026-11-15-lily-sampling-mtp-policy.md) and
+[aggregates](data/lily-sampling-mtp-policy-2026-11-15.json).
+
 ## Engineering judgment
 
 The release is worth using as a source of narrowly scoped experiments. The

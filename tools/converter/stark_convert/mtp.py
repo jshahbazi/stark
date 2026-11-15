@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import struct
 from typing import Any
 
 _MAX_DRAFTS = 2**32 - 1
 _SAMPLING = "exact-rejection-v1"
+_LILY_TOPK_POLICY = "lily-topk20-one-draft-v1"
+
+
+def _same_native_float(value: Any, expected: float) -> bool:
+    """Match the generation protocol's existing F32 sampling representation."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        return struct.pack(">f", value) == struct.pack(">f", expected)
+    except (OverflowError, struct.error):
+        return False
 
 
 def _unsupported() -> dict[str, Any]:
@@ -53,7 +65,7 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
         or any(not (character.isascii() and (character.isalnum() or character in "._-")) for character in verification)
     ):
         return _unsupported()
-    return {
+    current = {
         "supported": True,
         "max_drafts": maximum,
         "recommended_drafts": recommended,
@@ -62,9 +74,14 @@ def mtp_capabilities(readiness: Any) -> dict[str, Any]:
         "verification": verification,
         "operations": ["generate"],
     }
+    # Older/future policy extensions safely retain the scalar recommendation.
+    # Only a loaded worker can grant this policy; model names are not evidence.
+    if value.get("sampling_recommendation_policy") == _LILY_TOPK_POLICY:
+        current["sampling_recommendation_policy"] = _LILY_TOPK_POLICY
+    return current
 
 
-def resolve_mtp(enabled: Any, capabilities: Any) -> int:
+def resolve_mtp(enabled: Any, capabilities: Any, sampling: Any = None) -> int:
     """Resolve one boolean toggle without carrying state across requests."""
     if type(enabled) is not bool:
         raise ValueError("invalid_mtp_option")
@@ -73,4 +90,16 @@ def resolve_mtp(enabled: Any, capabilities: Any) -> int:
     current = mtp_capabilities({"mtp": capabilities})
     if not current["supported"]:
         raise ValueError("mtp_not_supported")
+    if (
+        current.get("sampling_recommendation_policy") == _LILY_TOPK_POLICY
+        and isinstance(sampling, dict)
+        and sampling.keys() <= {"mode", "temperature", "top_k", "top_p", "min_p"}
+        and sampling.get("mode") == "stochastic"
+        and _same_native_float(sampling.get("temperature"), 1.0)
+        and type(sampling.get("top_k")) is int
+        and sampling["top_k"] == 20
+        and _same_native_float(sampling.get("top_p"), 0.95)
+        and sampling.get("min_p") is None
+    ):
+        return 1
     return current["recommended_drafts"]

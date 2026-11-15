@@ -2,6 +2,21 @@
 
 Date: 2026-11-15. Attempts: `20261115-LILY-MTP1-01` and `-02`.
 
+## Current reference update
+
+This report remains the historical record of its as-run candidate and
+one-versus-two reconciliation. The general scalar recommendation remains two.
+A separate follow-up implements one automatic draft only for the exact pinned
+Lily receipt with stochastic temperature 1, top-k 20, top-p 0.95 and absent/null
+min-p. Its branch qualification now passes: the held-out top-k endpoint
+reduced median request latency by 14.66% with 8/8 paired blocks favoring one,
+and seven image-loaded prefix checks matched fresh runs across one-to-two and
+two-to-one transitions. This narrower selector does not change the recorded
+historical results or qualify other samplers. No installation or release is
+claimed. See the
+[sampling-specific follow-up](2026-11-15-lily-sampling-mtp-policy.md) and
+[aggregates](data/lily-sampling-mtp-policy-2026-11-15.json).
+
 ## Result
 
 This report preserves the as-run one-draft candidate and its measurements. The
@@ -104,6 +119,9 @@ recommendation only for the exact native-source repository/revision above.
 Other receipts and Uzu loading retained the previous two-draft recommendation.
 All raw omitted requests still defaulted to zero. This candidate behavior is
 not the current recommendation.
+
+The following historical checklist was preregistered for the completed
+`20261115-LILY-MTP1-02` confirmation; its outcomes are recorded below.
 
 Before installation or promotion, confirm actual `mtp: true` behavior across
 the sealed before worker and the fresh candidate: image-loaded worker sessions
