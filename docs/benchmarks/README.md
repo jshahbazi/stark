@@ -1,5 +1,11 @@
 # Benchmarks
 
+[Edge0 local loading and 8K context, 2026-11-16](2026-11-16-edge0-context-loading.md):
+normal model-path and rendered-chat loading under one local-evaluation gate;
+8,176 input plus 16 output passes with MTP off, at observed 13.74 prefill /
+10.87 decode tok/s. Exact reset/recovery controls pass; this preserves the
+earlier short-context results and unfinished strict timing qualification.
+
 [Edge0 MTP-off singleton speed, 2026-11-13](2026-11-13-edge0-singleton-speed.md):
 final same-binary observed decode 7.35 to 12.09 tok/s and prefill 12.78 to
 14.71 tok/s; opt-in kernels retain exact F32 reduction order and matching

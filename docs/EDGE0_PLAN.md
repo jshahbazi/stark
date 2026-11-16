@@ -1,5 +1,19 @@
 # Edge0-145B native support plan
 
+The 2026-11-16 local loading update implements an 8,192-token native Metal
+context limit and the usual worker/model-path and terminal chat flow under
+`STARK_EDGE0_LOCAL_EVALUATION=1`. It defaults to expert-record windows and
+specialized singleton kernels, with MTP unavailable and prefix reuse disabled.
+Native controls pass, and the pinned artifact completed 8,176 input tokens plus
+16 output tokens near the extended limit. Short generation matched its retained
+reference hash. Long/short reset replay, rendered chat, overflow/MTP rejection
+and recovery, and clean worker exit passed the bounded local gate in
+[attempt `20261116-EDGE0-20`](model-experiments/2026-11-16-edge0-context-loading.md).
+The [native model guide](NATIVE_HYBRID_MODELS.md#checkpoints-and-preparation)
+records the command and current limits. The historical diagnostic selectors
+retain their 512-token limits and separate evidence. Local non-commercial
+evaluation is the authorized scope; app/catalogue admission remains unfinished.
+
 Status: phases 3 and 4 and bounded Phase 5 worker correctness/lifecycle gates
 passed for local non-commercial evaluation, 2026-11-13. Selected expert-record
 Metal bindings reduce reproduced worker decompression churn in a fixed-idle
@@ -20,8 +34,9 @@ The [MTP-off singleton optimization](benchmarks/2026-11-13-edge0-singleton-speed
 adds opt-in format-specialized single-token Metal kernels with unchanged F32
 reduction order. Initial same-binary observations improve decode from 7.08 to
 11.55 tok/s and prefill from 13.14 to 13.85 tok/s. Enable
-`STARK_EDGE0_SPECIALIZE_SINGLE=1` before worker startup for local evaluation;
-the original kernels remain the default. These observations preserve the
+`STARK_EDGE0_SPECIALIZE_SINGLE=1` before worker startup for historical diagnostic
+evaluation; the original kernels remain that mode's default. The local loading
+mode selects the specialized singleton kernels automatically. These observations preserve the
 separate strict qualification gates and all previous rejected measurements.
 The final focused build repeats the improvement with MTP off: 12.78 to 14.71
 prefill tok/s and 7.35 to 12.09 decode tok/s, three measured requests per mode.
@@ -44,10 +59,11 @@ gates in
 [`20261112-EDGE0-05`](model-experiments/2026-11-12-edge0-reference-forward.md).
 The native Metal graph also passed the bounded Phase 4 gates in
 [`20261112-EDGE0-06`](model-experiments/2026-11-12-edge0-metal.md).
-Both policies require explicit local selectors and retain a 512-token runtime limit;
+Those diagnostic policies require explicit selectors and retain a 512-token runtime limit;
 app/catalogue admission, prefix reuse and broad numerical/performance
-qualification remain unfinished. Virtual Metal worker MTP is available through
-explicit request overrides under the local evaluation policy below. Follow
+qualification remain unfinished. Historical virtual Metal worker MTP is available
+through explicit request overrides under the diagnostic policy below, with
+`STARK_EDGE0_LOCAL_EVALUATION` unset. Follow
 [model onboarding](MODEL_ONBOARDING.md), the
 [image-default parity gates](IMAGE_DEFAULT_PARITY_PLAN.md) and the
 [experiment ledger](model-experiments/README.md).
@@ -450,7 +466,7 @@ pair and no eligible complete group. The other five groups defer. Worker-task
 decompressions remain zero; partial accessible host-task attribution does not
 resolve global ownership or permit baseline subtraction. [New receipts](benchmarks/2026-11-13-edge0-arm-attribution.md)
 retain all outcomes, additive observer costs and unchanged timing thresholds.
-Default remains off and timing qualification remains pending. The 512-token cap,
+Default remains off and timing qualification remains pending. The diagnostic 512-token cap,
 disabled prefix reuse and local non-commercial scope remain in force.
 
 - Load the draft layer from `mtp/` and adapt the existing Flash-Next head
@@ -474,29 +490,37 @@ disabled prefix reuse and local non-commercial scope remain in force.
 
 ### Phase 6: prefix reuse
 
-- Complete the state inventory below against the implemented path.
-- Implement consistent export/import for the native graph using the existing
+- Extend the native graph's private export/import using the existing
   mixed-precision backend's 4,096-token snapshot contract as a reference.
-  Phase 5 supplies private positive-boundary target/head primitives; worker prefix
-  scope/lifetime integration and combined restoration at chunk boundaries remain
-  unfinished.
-  The current 512-token cap cannot exercise that boundary. Address the recorded
-  wider-context indexer finite-check concern and qualify the larger context
-  before a 4,096-token reuse run.
+  Phase 5 supplies private positive-boundary target/head primitives, but their
+  policy permits only context at or below 512 and single-step target staging.
+  Qwen has no worker prefix snapshot publication or memory-admission integration;
+  exact restoration after batched prefill at a 4,096-token boundary is unqualified.
+- The local loading route implements an 8,192-token cap and repairs the recorded
+  indexer finite-check gaps before RMS overflow or score clamping can conceal a
+  failure. Native controls cover its sparse selection branch, and the pinned
+  artifact completed an 8,176-input/16-output request near the cap in attempt
+  `20261116-EDGE0-20`. Reset replay, rendered chat, overflow/MTP rejection and
+  recovery, and clean worker exit passed the bounded local gate. This context
+  result does not enable prefix reuse or qualify broad quality, strict speed or
+  tool calling.
 - Run `scripts/validate_generation_prefix_cache.py --reuse boundary` for
   exactness and timing on the exact artifact. The validator must learn this
   file set before it can hash it.
 
-| State | Expected for Edge0-145B | Restoration |
+| State | Native owner | Current restoration |
 | --- | --- | --- |
-| Recurrent state and convolution windows, 36 layers | As Flash-Next | Snapshot at the grid boundary |
-| Attention K/V and indexer caches, 12 layers | As Flash-Next | Completed prefix rows retained; incomplete pool snapshotted |
-| N-gram history and its convolution window | As Flash-Next; table rows are stateless lookups | Snapshot |
-| Latent projections, experts, labels and scales | Stateless | None |
-| Draft-layer state | As the Flash-Next head | Snapshot, keyed by MTP selection |
+| Position and bounded token history | `QwenModel` | Private positive-boundary checkpoint; no worker prefix entry |
+| Recurrent state and convolution windows, 36 layers | GPU GDN state/history | Private F32 snapshot and staged replacement |
+| Attention K/V and indexer caches, 12 layers | Graph attention owners, raw index keys and completed pooled keys | Private snapshot of valid prefix rows; selection/query/gate scratch overwritten |
+| N-gram convolution window | GPU PLE history; table rows are stateless lookups | Private snapshot; host token history restored with the model |
+| Latent projections, experts, labels and scales | Loaded immutable resources | No mutable state to restore |
+| Draft-layer state | Separate experimental Flash-Next head | Private round checkpoint; unavailable in local loading mode |
 | Sampler and scratch | Per request | Reseeded and overwritten |
 
-These are expectations from the Flash-Next inventory, not findings.
+This inventory follows `qwen_checkpoint.rs`, `qwen_graph.rs` and the shared
+worker prefix dispatch. Private checkpoint ownership and failure fences do not
+qualify cross-request reuse, longer contexts or batched-prefill restoration.
 
 ### Phase 7: tools, images, admission and catalogue
 

@@ -10,7 +10,10 @@ fn specialize_single() -> bool {
     // Native workers fix their selectors before model loading. Cache once per
     // process rather than reading the environment for every selected expert.
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("STARK_EDGE0_SPECIALIZE_SINGLE").is_some_and(|value| value == "1"))
+    *ENABLED.get_or_init(|| {
+        crate::engine::hybrid::edge0_config::local_evaluation_enabled()
+            || std::env::var_os("STARK_EDGE0_SPECIALIZE_SINGLE").is_some_and(|value| value == "1")
+    })
 }
 
 fn geometry(

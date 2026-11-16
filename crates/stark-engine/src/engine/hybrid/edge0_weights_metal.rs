@@ -182,7 +182,8 @@ impl Weights {
         if data.metal_admitted.load(Ordering::Acquire) {
             return Err(Error::Invalid("Edge0 Metal already admitted"));
         }
-        let expert_windows = std::env::var_os("STARK_EDGE0_EXPERT_WINDOWS").is_some_and(|v| v == "1");
+        let expert_windows = crate::engine::hybrid::edge0_config::local_evaluation_enabled()
+            || std::env::var_os("STARK_EDGE0_EXPERT_WINDOWS").is_some_and(|v| v == "1");
         let resident = std::env::var_os("STARK_EDGE0_RESIDENT").is_some_and(|v| v == "1");
         admit_window_policy(expert_windows, resident)?;
         let banks = data.banks(expert_windows)?;

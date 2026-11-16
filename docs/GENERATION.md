@@ -341,6 +341,18 @@ unavailable, and explicit-residency MTP is unsupported. This is local
 non-commercial evaluation only. The [matched run](benchmarks/2026-11-13-edge0-worker-mtp.md)
 had no eligible timing group; no performance promotion follows.
 
+The separate `STARK_EDGE0_LOCAL_EVALUATION=1` loading route keeps MTP
+unavailable, including when historical diagnostic selectors are also present.
+Use ordinary `--model-path` with the pinned prepared folder. This route selects
+the native Metal graph, original expert-record windows and singleton kernels,
+and declares an 8,192-token context maximum. Requests above that limit return
+`context_overflow`; explicit drafts return `mtp_not_supported`. Prefix reuse
+remains unavailable: the private Qwen checkpoints are limited to 512-token
+single-step staging, and worker prefix publication, snapshot memory admission
+and longer-context restoration qualification are unfinished. See
+[attempt 20](model-experiments/2026-11-16-edge0-context-loading.md) for its
+local non-commercial validation and observed performance.
+
 Converted dense `qwen3_5` models with an admitted quantized one-layer MTP head
 report `verification: "dense-qwen35-target-verify-v1"`, recommend three drafts
 and allow up to three. Drafting defaults to zero. This route includes

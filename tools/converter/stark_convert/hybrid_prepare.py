@@ -261,7 +261,8 @@ def _edge0_bound_names(directory: Path) -> set[str]:
 
 def _edge0_config(source: dict, tokenizer_policy: str = "borrowed-qwen") -> dict:
     # This intentionally contains no Lily/affine fields or runtime-admission
-    # marker. Phase 1 verifies a preserved source, not a loadable model.
+    # marker. Phase 1 verifies a preserved source. The separately gated local
+    # evaluation loader consumes these immutable bytes without app admission.
     return {
         "model_type": source["architecture"],
         "storage": {"schema_version": 1, "layout": edge0_source.EDGE0_LAYOUT},
@@ -280,7 +281,8 @@ def preparation_identity(directory: Path) -> dict | None:
     """Explicit, full-hash inspection of an evaluation-only prepared source.
 
     Unlike ``prepared_identity``, this function never grants app import or
-    runtime admission. It reads all payload bytes and is not a discovery probe.
+    automatic runtime admission. The native local evaluation loader has an
+    explicit operator gate. This reads all payload bytes, not a discovery probe.
     """
     try:
         source = SOURCES["edge0-145b-q3k"]

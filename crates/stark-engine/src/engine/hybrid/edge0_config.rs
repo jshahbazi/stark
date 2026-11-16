@@ -1,14 +1,39 @@
-//! Runtime-only configuration for the pinned, explicitly selected Edge0 reference.
+//! Runtime-only configuration for pinned local Edge0 evaluation.
 //!
 //! GGUF geometry authority: Edge0's llama.cpp pin 3cf03257f219afbe7334045ff7c6a06ac68c627d,
 //! conversion/qwen4exp.py and src/models/qwen4exp.cpp. The prepared receipt and
-//! source files remain unchanged. This diagnostic path has a 512-token limit.
+//! source files remain unchanged. Historical diagnostic selectors retain their
+//! 512-token limit; the local Metal evaluation route has its own bounded cap.
 
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
 use super::{Error, Result};
+
+pub(super) const LOCAL_EVALUATION_CONTEXT: usize = 8192;
+
+pub(super) fn local_evaluation_enabled() -> bool {
+    std::env::var_os("STARK_EDGE0_LOCAL_EVALUATION").is_some_and(|value| value == "1")
+}
+
+fn admit_loading(
+    local: bool,
+    reference: bool,
+) -> Result<()> {
+    if local || reference {
+        Ok(())
+    } else {
+        Err(Error::Unsupported("Edge0 requires explicit local noncommercial evaluation"))
+    }
+}
+
+pub(super) fn admit_local_loading() -> Result<()> {
+    admit_loading(
+        local_evaluation_enabled(),
+        std::env::var_os("STARK_EDGE0_REFERENCE").is_some_and(|value| value == "1"),
+    )
+}
 
 pub(super) fn selected(config: &Value) -> bool {
     config.pointer("/storage/layout").and_then(Value::as_str) == Some("edge0-strata")
@@ -32,6 +57,14 @@ pub(super) fn validate_metadata(metadata: &BTreeMap<String, Value>) -> Result<()
 pub(super) fn runtime_config(
     prepared: &Value,
     metadata: &BTreeMap<String, Value>,
+) -> Result<Value> {
+    runtime_config_for_mode(prepared, metadata, local_evaluation_enabled())
+}
+
+fn runtime_config_for_mode(
+    prepared: &Value,
+    metadata: &BTreeMap<String, Value>,
+    local_evaluation: bool,
 ) -> Result<Value> {
     validate_metadata(metadata)?;
     if prepared.get("model_type").and_then(Value::as_str) != Some("qwen4_exp")
@@ -109,7 +142,8 @@ pub(super) fn runtime_config(
         "model_type": "qwen4_exp_text", "hidden_act": "silu", "attention_bias": false,
         "hidden_size": integer("qwen4exp.embedding_length")?, "vocab_size": 248320,
         "num_hidden_layers": count, "layer_types": layers,
-        "max_position_embeddings": 512, "source_max_position_embeddings": integer("qwen4exp.context_length")?,
+        "max_position_embeddings": if local_evaluation { LOCAL_EVALUATION_CONTEXT } else { 512 },
+        "source_max_position_embeddings": integer("qwen4exp.context_length")?,
         "hc_count": integer("qwen4exp.hyper_connection.count")?,
         "hc_lowrank": integer("qwen4exp.hyper_connection.low_rank")?,
         "num_attention_heads": integer("qwen4exp.attention.head_count")?,
@@ -146,6 +180,14 @@ mod tests {
 
     use super::*;
 
+    #[stark_test]
+    fn edge0_loading_requires_explicit_evaluation_or_historical_reference() {
+        assert!(admit_loading(false, false).is_err());
+        assert!(admit_loading(true, false).is_ok());
+        assert!(admit_loading(false, true).is_ok());
+        assert!(admit_loading(true, true).is_ok());
+    }
+
     fn inputs() -> (Value, BTreeMap<String, Value>) {
         let mut metadata: BTreeMap<String, Value> = serde_json::from_str(include_str!("edge0_geometry.json")).unwrap();
         metadata.insert("general.architecture".into(), json!("qwen4exp"));
@@ -162,7 +204,7 @@ mod tests {
     fn edge0_runtime_geometry_preserves_source_conventions_and_receipt() {
         let (prepared, metadata) = inputs();
         let original = prepared.clone();
-        let config = runtime_config(&prepared, &metadata).unwrap();
+        let config = runtime_config_for_mode(&prepared, &metadata, false).unwrap();
         assert_eq!(prepared, original);
         let text = &config["text_config"];
         assert_eq!(text["ple_layer_ids"], json!([2]));
@@ -177,6 +219,11 @@ mod tests {
         let layers = text["layer_types"].as_array().unwrap();
         assert_eq!(layers.iter().filter(|kind| **kind == "linear_attention").count(), 36);
         assert_eq!(layers.iter().filter(|kind| **kind == "full_attention").count(), 12);
+        let local = runtime_config_for_mode(&prepared, &metadata, true).unwrap();
+        assert_eq!(local["text_config"]["max_position_embeddings"], LOCAL_EVALUATION_CONTEXT);
+        assert_eq!(local["text_config"]["source_max_position_embeddings"], 262144);
+        assert_eq!(local["stark_preparation"], original["stark_preparation"]);
+        assert_eq!(prepared, original);
     }
 
     #[stark_test]

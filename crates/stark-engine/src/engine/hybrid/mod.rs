@@ -324,9 +324,7 @@ impl Model {
         let _ = (with_mtp, with_images);
         let mut outer = config(path)?;
         let edge0_weights = if edge0_config::selected(&outer) {
-            if std::env::var_os("STARK_EDGE0_REFERENCE").as_deref() != Some(std::ffi::OsStr::new("1")) {
-                return Err(Error::Unsupported("Edge0 requires the explicit local reference selector"));
-            }
+            edge0_config::admit_local_loading()?;
             let weights = weights::Weights::open_edge0(path)?;
             outer = edge0_config::runtime_config(&outer, weights.metadata())?;
             Some(weights)

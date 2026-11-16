@@ -217,6 +217,7 @@ kernel void qwen_graph_qsa_visible(device const float *index_projection [[buffer
                 float x = index_projection[qbase + i];
                 qsum += x * x;
             }
+            if (!isfinite(qsum)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
             float qscale = 1.0f / sqrt(qsum / float(dim) + eps);
             float head_score = 0.0f;
             // Compute pooled-key RMS and dot in scalar order using one dimension
@@ -229,6 +230,7 @@ kernel void qwen_graph_qsa_visible(device const float *index_projection [[buffer
                 pooled_square_sum += pooled * pooled;
                 // Defer normalized pooled components until the pooled RMS is known.
             }
+            if (!isfinite(pooled_square_sum)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
             float pooled_scale = 1.0f / sqrt(pooled_square_sum / float(dim) + eps);
             // Recompute each pooled component (same sequence) for normalization,
             // RoPE, and dot accumulation without a large per-thread array.
@@ -266,10 +268,12 @@ kernel void qwen_graph_qsa_visible(device const float *index_projection [[buffer
                 }
                 head_score += q * rotated;
             }
+            // Check before max: Metal max can turn NaN or -infinity into zero.
+            if (!isfinite(head_score)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
             score += max(head_score, 0.0f);
         }
         score /= sqrt(float(dim));
-        if (isnan(score)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        if (!isfinite(score)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
         block_scores[block] = score;
         // Insertion order implements descending total_cmp followed by ascending id.
         uint insertion = keep_count;
@@ -328,6 +332,9 @@ kernel void qwen_graph_qsa_index_prepare(device const float *index_projection [[
             float x = index_projection[base + i];
             sum += x * x;
         }
+        // Finite inputs may still overflow the RMS sum and collapse the
+        // normalized output to zero. Keep the failure sticky before writing.
+        if (!isfinite(sum)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
         float scale = 1.0f / sqrt(sum / float(dim) + eps);
         for (uint i = 0; i < dim; ++i) {
             float value = index_projection[base + i] * scale * query_norm[i];
@@ -340,6 +347,7 @@ kernel void qwen_graph_qsa_index_prepare(device const float *index_projection [[
                 float other = index_projection[base + partner] * scale * query_norm[partner];
                 value = i < rotary_dim / 2 ? value * cosine - other * sine : other * sine + value * cosine;
             }
+            if (!isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
             queries[base + i] = value;
         }
     } else {
@@ -355,6 +363,7 @@ kernel void qwen_graph_qsa_index_prepare(device const float *index_projection [[
             float pooled = qwen_graph_qsa_pooled_component(index_cache, block, ratio, dim, i);
             sum += pooled * pooled;
         }
+        if (!isfinite(sum)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
         float scale = 1.0f / sqrt(sum / float(dim) + eps);
         for (uint i = 0; i < dim; ++i) {
             float value = qwen_graph_qsa_pooled_component(index_cache, block, ratio, dim, i) * scale * key_norm[i];
@@ -367,6 +376,7 @@ kernel void qwen_graph_qsa_index_prepare(device const float *index_projection [[
                 float other = qwen_graph_qsa_pooled_component(index_cache, block, ratio, dim, partner) * scale * key_norm[partner];
                 value = i < rotary_dim / 2 ? value * cosine - other * sine : other * sine + value * cosine;
             }
+            if (!isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
             pooled_keys[block * dim + i] = value;
         }
     }
@@ -382,11 +392,12 @@ kernel void qwen_graph_qsa_index_cached_scores(device const float *queries [[buf
     for (uint head = 0; head < heads; ++head) {
         float head_score = 0.0f;
         for (uint i = 0; i < dim; ++i) head_score += queries[head * dim + i] * pooled_keys[block * dim + i];
+        if (!isfinite(head_score)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
         score += max(head_score, 0.0f);
     }
     score /= sqrt(float(dim));
     block_scores[block] = score;
-    if (isnan(score)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+    if (!isfinite(score)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
 }
 
 // The high word preserves descending float total_cmp; the low word gives the

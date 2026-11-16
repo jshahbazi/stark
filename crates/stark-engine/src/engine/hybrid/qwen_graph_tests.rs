@@ -219,6 +219,14 @@ fn qwen_graph_parallel_sparse_selection_matches_scalar_scores_masks_ties_and_tai
         (67, 4, 8, 4, 4, 16),
         (9, 2, 8, 4, 1, 4),
         (129, 4, 128, 32, 4, 64),
+        // Edge0's actual sparse budget is measured in tokens. Exercise its
+        // first sparse step, complete-block transitions and admitted cap.
+        (2048, 2, 8, 4, 4, 2048),
+        (2049, 2, 8, 4, 4, 2048),
+        (4095, 2, 8, 4, 4, 2048),
+        (4096, 2, 8, 4, 4, 2048),
+        (4097, 2, 8, 4, 4, 2048),
+        (8192, 2, 8, 4, 4, 2048),
     ] {
         let parameters =
             [count, heads, dim, rotary, count - 1, 1e-6f32.to_bits(), 10_000_000.0f32.to_bits(), ratio, budget];
@@ -227,6 +235,82 @@ fn qwen_graph_parallel_sparse_selection_matches_scalar_scores_masks_ties_and_tai
             let actual = qwen_graph_qsa_selection_case(parameters, tied, false).0;
             assert!(actual[0] == expected[0], "parallel sparse selection changed the visible mask");
             assert!(actual[1] == expected[1], "parallel sparse selection changed block scores");
+        }
+    }
+}
+
+#[stark_test]
+fn qwen_graph_index_prepare_rejects_nonfinite_and_overflow_before_valid_overwrite() {
+    // Query preparation starts above budget; pooled-key preparation also runs
+    // below budget whenever a block completes. Both must preserve failures
+    // even when another dispatch overwrites their persistent output buffers.
+    for count in [4, 9] {
+        for target in 0..4 {
+            if count == 4 && matches!(target, 0 | 2) {
+                continue; // Queries are deliberately inactive below budget.
+            }
+            for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+                let mut graph = DecodeGraph::new().unwrap();
+                let index = DecodeGraph::upload(&[1.0; 24]).unwrap();
+                let keys = DecodeGraph::upload(&[1.0; 72]).unwrap();
+                let q_norm = DecodeGraph::upload(&[1.0; 8]).unwrap();
+                let k_norm = DecodeGraph::upload(&[1.0; 8]).unwrap();
+                // MAX in a norm remains finite unless multiplication can
+                // overflow. The projection/cache MAX cases exercise RMS-sum
+                // overflow whose normalized outputs would otherwise be zero.
+                if poison == f32::MAX && target >= 2 {
+                    continue;
+                }
+                let bad = [&index, &keys, &q_norm, &k_norm][target];
+                unsafe { bad.buffer.contents().as_ptr().cast::<f32>().write(poison) };
+                let query = DecodeGraph::zeros(16).unwrap();
+                let pooled = DecodeGraph::zeros(16).unwrap();
+                let parameters = [count, 2, 8, 4, count - 1, 1e-6f32.to_bits(), 10_000.0f32.to_bits(), 4, 4, 0, 1];
+                graph
+                    .kernel(
+                        "qwen_graph_qsa_index_prepare",
+                        &[&index, &keys, &q_norm, &k_norm, &query, &pooled],
+                        &parameters,
+                        3,
+                        1,
+                    )
+                    .unwrap();
+                let valid_index = DecodeGraph::upload(&[1.0; 24]).unwrap();
+                let valid_keys = DecodeGraph::upload(&[1.0; 72]).unwrap();
+                let valid_norm = DecodeGraph::upload(&[1.0; 8]).unwrap();
+                graph
+                    .kernel(
+                        "qwen_graph_qsa_index_prepare",
+                        &[&valid_index, &valid_keys, &valid_norm, &valid_norm, &query, &pooled],
+                        &parameters,
+                        3,
+                        1,
+                    )
+                    .unwrap();
+                // Empty readback excludes finish's output finite screening.
+                assert!(graph.finish(&[]).is_err(), "index preparation concealed invalid intermediate state");
+            }
+        }
+    }
+}
+
+#[stark_test]
+fn qwen_graph_cached_index_scores_reject_invalid_heads_before_clamping_and_overwrite() {
+    for target in 0..2 {
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX, -f32::MAX] {
+            let mut graph = DecodeGraph::new().unwrap();
+            let query = DecodeGraph::upload(&[2.0; 16]).unwrap();
+            let pooled = DecodeGraph::upload(&[2.0; 8]).unwrap();
+            let bad = [&query, &pooled][target];
+            unsafe { bad.buffer.contents().as_ptr().cast::<f32>().write(poison) };
+            let scores = DecodeGraph::zeros(1).unwrap();
+            graph.kernel("qwen_graph_qsa_index_cached_scores", &[&query, &pooled, &scores], &[1, 2, 8], 1, 1).unwrap();
+            let valid_query = DecodeGraph::upload(&[2.0; 16]).unwrap();
+            let valid_pooled = DecodeGraph::upload(&[2.0; 8]).unwrap();
+            graph
+                .kernel("qwen_graph_qsa_index_cached_scores", &[&valid_query, &valid_pooled, &scores], &[1, 2, 8], 1, 1)
+                .unwrap();
+            assert!(graph.finish(&[]).is_err(), "clamping or output overwrite concealed an invalid index head");
         }
     }
 }

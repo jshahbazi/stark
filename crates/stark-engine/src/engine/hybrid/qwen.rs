@@ -1044,8 +1044,22 @@ fn edge0_mtp_policy(
     reference: bool,
     metal: bool,
     resident: bool,
+    local_evaluation: bool,
 ) -> bool {
-    edge0 && graph && reference && metal && !resident
+    edge0 && graph && reference && metal && !resident && !local_evaluation
+}
+
+fn edge0_context_admitted(
+    context: usize,
+    metal: bool,
+    local_evaluation: bool,
+) -> bool {
+    context
+        <= if metal && local_evaluation {
+            super::edge0_config::LOCAL_EVALUATION_CONTEXT
+        } else {
+            512
+        }
 }
 
 pub(super) fn forced_scalar_attention() -> bool {
@@ -1207,7 +1221,11 @@ impl QwenModel {
             "recurrent_state_precision": "f32",
             "attention_cache_precision": "f32",
             "prefill_max_batch": if graph { 8 } else { 1 },
+            "context_limit": self.geometry.context,
+            "usage_scope": "local_noncommercial_evaluation",
+            "evaluation_mode": if super::edge0_config::local_evaluation_enabled() { "local" } else { "experimental" },
             "prefix_reuse": false,
+            "prefix_reuse_blocker": "private checkpoints are limited to 512-token single-step staging; Qwen worker prefix publication, memory admission and longer-context restoration qualification are incomplete",
             "weights": self.weights.edge0_metal_metadata(),
         }))
     }
@@ -1220,9 +1238,17 @@ impl QwenModel {
             std::env::var_os("STARK_EDGE0_REFERENCE").is_some_and(|v| v == "1"),
             std::env::var_os("STARK_EDGE0_METAL").is_some_and(|v| v == "1"),
             std::env::var_os("STARK_EDGE0_RESIDENT").is_some_and(|v| v == "1"),
+            super::edge0_config::local_evaluation_enabled(),
         );
         #[cfg(not(feature = "metal"))]
-        edge0_mtp_policy(self.geometry.edge0, false, false, false, false)
+        edge0_mtp_policy(
+            self.geometry.edge0,
+            false,
+            false,
+            false,
+            false,
+            super::edge0_config::local_evaluation_enabled(),
+        )
     }
 
     pub(super) fn edge0_mtp_capabilities(&self) -> Option<super::MtpCapabilities> {
@@ -1385,8 +1411,10 @@ impl QwenModel {
         config: &Value,
     ) -> Result<Self> {
         let edge0 = weights.is_edge0();
-        if edge0 && !cfg!(feature = "metal") && std::env::var_os("STARK_EDGE0_METAL").is_some_and(|value| value == "1")
-        {
+        let local_evaluation = super::edge0_config::local_evaluation_enabled();
+        let edge0_metal_selected =
+            local_evaluation || std::env::var_os("STARK_EDGE0_METAL").is_some_and(|value| value == "1");
+        if edge0 && !cfg!(feature = "metal") && edge0_metal_selected {
             return Err(Error::Unsupported("Edge0 Metal requires a Metal-enabled build"));
         }
         if config.get("model_type").and_then(Value::as_str) != Some("qwen4_exp") {
@@ -1430,9 +1458,7 @@ impl QwenModel {
         }
         let g = Geometry {
             edge0,
-            edge0_metal: edge0
-                && cfg!(feature = "metal")
-                && std::env::var_os("STARK_EDGE0_METAL").is_some_and(|value| value == "1"),
+            edge0_metal: edge0 && cfg!(feature = "metal") && edge0_metal_selected,
             dim: integer(text, "hidden_size", 16_384)?,
             vocab: integer(text, "vocab_size", 1_000_000)?,
             streams: integer(text, "hc_count", 16)?,
@@ -1465,7 +1491,7 @@ impl QwenModel {
             shards: integer(text, "split_ngram_parts", 4096)?,
             eos,
         };
-        if g.edge0 && g.context > 512 {
+        if g.edge0 && !edge0_context_admitted(g.context, g.edge0_metal, local_evaluation) {
             return Err(Error::Unsupported("Edge0 reference context qualification"));
         }
         if !g.heads.is_multiple_of(g.kv_heads)
@@ -1827,9 +1853,16 @@ mod tests {
 
     #[stark_test]
     fn edge0_mtp_capability_requires_loaded_opt_in_virtual_metal_path() {
-        for bits in 0..32 {
+        for bits in 0..64 {
             assert_eq!(
-                edge0_mtp_policy(bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0, bits & 16 != 0),
+                edge0_mtp_policy(
+                    bits & 1 != 0,
+                    bits & 2 != 0,
+                    bits & 4 != 0,
+                    bits & 8 != 0,
+                    bits & 16 != 0,
+                    bits & 32 != 0
+                ),
                 bits == 15
             );
         }
@@ -1837,6 +1870,18 @@ mod tests {
         assert_eq!(edge0_mtp_request_allowance(true), 768 * 1024 * 1024);
         #[cfg(feature = "metal")]
         assert_eq!(edge0_mtp_request_allowance(true), mtp::HEAD_DYNAMIC_BYTES + checkpoint::MAX_CHECKPOINT_BYTES);
+    }
+
+    #[stark_test]
+    fn edge0_context_admission_preserves_reference_limit_and_bounds_local_metal() {
+        for metal in [false, true] {
+            for local in [false, true] {
+                assert!(edge0_context_admitted(512, metal, local));
+                assert_eq!(edge0_context_admitted(513, metal, local), metal && local);
+                assert_eq!(edge0_context_admitted(8192, metal, local), metal && local);
+                assert!(!edge0_context_admitted(8193, metal, local));
+            }
+        }
     }
 
     #[stark_test]
@@ -1910,6 +1955,11 @@ mod tests {
         assert_eq!(candidate + 512 * 1024 * 1024, reference + 3 * 64 * 1024 * 1024 + 7 * embedding + router);
         // Context/cache ownership remains bounded independently of grouping.
         assert!(g.execution_workspace(513, 12, true).is_none());
+        g.context = crate::engine::hybrid::edge0_config::LOCAL_EVALUATION_CONTEXT;
+        let sparse_start = g.execution_workspace(2049, 12, true).unwrap();
+        let at_limit = g.execution_workspace(8192, 12, true).unwrap();
+        assert!(at_limit > sparse_start);
+        assert!(g.execution_workspace(8193, 12, true).is_none());
         g.experts = usize::MAX;
         assert!(g.execution_workspace(128, 12, true).is_none());
     }

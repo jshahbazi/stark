@@ -1,5 +1,6 @@
 """Chat contracts with synthetic messages and a private fake worker."""
 
+import hashlib
 import io
 import json
 import sys
@@ -9,6 +10,74 @@ from unittest.mock import patch
 import pytest
 
 from stark_convert.chat import ChatError, ChatRequestTooLarge, Worker, load_template, main, run_chat, terminal_text
+
+
+@pytest.fixture
+def edge0_evaluation_model(tmp_path, monkeypatch):
+    from stark_convert import chat, hybrid_prepare
+
+    config = hybrid_prepare._edge0_config(hybrid_prepare.SOURCES["edge0-145b-q3k"], "edge0-native-v2")
+    source = "{% for m in messages %}{{ m.content }}{% endfor %}"
+    payloads = {
+        "config.json": json.dumps(config).encode(),
+        "tokenizer_config.json": json.dumps({"chat_template": source, "eos_token": "<end>"}).encode(),
+    }
+    receipt = {
+        "files": {
+            name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in payloads.items()
+        }
+    }
+    receipt_data = json.dumps(receipt).encode()
+    for name, data in {**payloads, "native-source.json": receipt_data}.items():
+        (tmp_path / name).write_bytes(data)
+    monkeypatch.setenv("STARK_EDGE0_LOCAL_EVALUATION", "1")
+    monkeypatch.setattr(chat, "_EDGE0_EVALUATION_RECEIPT_SHA256", hashlib.sha256(receipt_data).hexdigest())
+    monkeypatch.setattr(chat, "_EDGE0_EVALUATION_TEMPLATE_SHA256", hashlib.sha256(source.encode()).hexdigest())
+    # Exercise admission without invoking a template helper or loading weights.
+    monkeypatch.setattr(chat, "_ChatTemplate", lambda value: value)
+    return tmp_path, source
+
+
+def test_local_edge0_template_uses_preserved_metadata_without_app_admission(edge0_evaluation_model):
+    from stark_convert.hybrid_prepare import prepared_identity
+
+    model, source = edge0_evaluation_model
+    codec, template = load_template(model)
+    assert codec["prompt_template"] == template == source
+    assert codec["bos_token"] == ""
+    assert codec["eos_token"] == "<end>"
+    assert prepared_identity(model) is None
+    assert json.loads((model / "config.json").read_text())["stark_preparation"]["preparatory_only"] is True
+
+
+@pytest.mark.parametrize("gate", [None, "", "0", "true"])
+def test_local_edge0_template_requires_explicit_gate(edge0_evaluation_model, monkeypatch, gate):
+    model, _ = edge0_evaluation_model
+    if gate is None:
+        monkeypatch.delenv("STARK_EDGE0_LOCAL_EVALUATION")
+    else:
+        monkeypatch.setenv("STARK_EDGE0_LOCAL_EVALUATION", gate)
+    with pytest.raises(ChatError, match="Cannot read chat metadata"):
+        load_template(model)
+
+
+@pytest.mark.parametrize("name", ["native-source.json", "config.json", "tokenizer_config.json"])
+def test_local_edge0_template_rejects_changed_receipt_or_metadata(edge0_evaluation_model, name):
+    model, _ = edge0_evaluation_model
+    path = model / name
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ChatError, match="Cannot read chat metadata"):
+        load_template(model)
+
+
+def test_local_edge0_template_rejects_unregistered_program(edge0_evaluation_model, monkeypatch):
+    from stark_convert import chat
+
+    model, _ = edge0_evaluation_model
+    monkeypatch.setattr(chat, "_EDGE0_EVALUATION_TEMPLATE_SHA256", "0" * 64)
+    with pytest.raises(ChatError, match="Cannot read chat metadata"):
+        load_template(model)
 
 
 @pytest.fixture

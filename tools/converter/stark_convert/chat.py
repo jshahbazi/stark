@@ -44,6 +44,8 @@ from .vision_runtime import (
 _MAX_GPU_MEMORY_LINE = 128
 _MAX_GPU_MEMORY_BYTES = (1 << 63) - 1
 _LEGACY_MAX_REQUEST_BYTES = 1024 * 1024
+_EDGE0_EVALUATION_RECEIPT_SHA256 = "8dc700fe5cd5f6644ed9f062eb391ce32cb0a09b76a2e19ec44539bf89200a5e"
+_EDGE0_EVALUATION_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
 
 
 def _popen_with_gpu_memory(command, *, callback, **kwargs):
@@ -240,15 +242,62 @@ def read_model_config(model):
     return value
 
 
+def _edge0_evaluation_codec(model, config, data):
+    """Read the preserved template for the same receipt admitted by the worker.
+
+    This grants terminal text rendering only. Prepared-source discovery and app
+    import continue to reject this local noncommercial evaluation artifact.
+    The native loader separately checks source geometry, encoding and files.
+    """
+    from .hybrid_prepare import SOURCES, _edge0_config
+
+    if os.environ.get("STARK_EDGE0_LOCAL_EVALUATION") != "1" or config != _edge0_config(
+        SOURCES["edge0-145b-q3k"], "edge0-native-v2"
+    ):
+        raise ValueError
+    receipt_data = _chat_file(model / "native-source.json", 1024 * 1024)
+    if hashlib.sha256(receipt_data).hexdigest() != _EDGE0_EVALUATION_RECEIPT_SHA256:
+        raise ValueError
+    receipt = json.loads(receipt_data)
+    metadata_data = _chat_file(model / "tokenizer_config.json", 2 * 1024 * 1024)
+    for name, encoded in (("config.json", data), ("tokenizer_config.json", metadata_data)):
+        record = receipt["files"][name]
+        if len(encoded) != record["size"] or hashlib.sha256(encoded).hexdigest() != record["sha256"]:
+            raise ValueError
+    metadata = json.loads(metadata_data)
+    source = metadata["chat_template"]
+    if (
+        not isinstance(source, str)
+        or hashlib.sha256(source.encode("utf-8")).hexdigest() != _EDGE0_EVALUATION_TEMPLATE_SHA256
+    ):
+        raise ValueError
+    return {
+        "type": "ChatCodecConfig",
+        "bos_token": "",
+        "eos_token": metadata["eos_token"],
+        "default_system_prompt": "",
+        "prompt_template": source,
+    }
+
+
 def load_template(model, *, expected_hashes=None):
     try:
         data = _chat_file(model / "config.json", 2 * 1024 * 1024)
         if expected_hashes is not None and hashlib.sha256(data).hexdigest() != expected_hashes["config_sha256"]:
             raise ValueError
         config = json.loads(data)
-        codec = config["token_codec_config"]
+        codec = (
+            _edge0_evaluation_codec(model, config, data)
+            if config.get("storage", {}).get("layout") == "edge0-strata"
+            else config["token_codec_config"]
+        )
         source = codec["prompt_template"]
         if codec.get("type") != "ChatCodecConfig" or not isinstance(source, str) or not source:
+            raise ValueError
+        if (
+            expected_hashes is not None
+            and hashlib.sha256(source.encode("utf-8")).hexdigest() != expected_hashes["template_sha256"]
+        ):
             raise ValueError
         image_family = model_image_family(config, model)
         if config.get("type") in VISION_MODEL_TYPES or image_family is not None:

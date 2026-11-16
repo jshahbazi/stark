@@ -21,8 +21,39 @@ the app catalogue, Beginner recommendations and normal prepared-model identity.
 Its default metadata-only preflight rejects the released tokenizer's mismatch
 with the pinned Qwen reference before downloading payloads. A separately
 qualified source-native tokenizer is available through an explicit evaluation
-policy. Default worker loading rejects this source. An explicit source-checkout
-diagnostic path, selected with `STARK_EDGE0_REFERENCE=1`, has passed the
+policy. Default worker loading rejects this source unless local evaluation is
+explicitly selected.
+
+The source-checkout local route accepts the usual worker `--model-path` and
+terminal chat command with `STARK_EDGE0_LOCAL_EVALUATION=1`. It selects the
+native F32 Metal graph, expert-record windows and specialized singleton kernels.
+Its context limit is 8,192 tokens, including input and output. The pinned artifact
+completed a request with 8,176 input tokens and 16 output tokens, exercising the
+sparse indexer near that limit. Short generation matched its retained reference
+hash. Long/short reset replay, rendered chat, overflow/MTP rejection and recovery,
+and clean worker exit also passed in the bounded local gate recorded in
+[attempt `20261116-EDGE0-20`](model-experiments/2026-11-16-edge0-context-loading.md).
+Native controls cover the sparse indexer above its 2,048-token budget, finite
+failure handling and the 8,192-token selection boundary. These bounded controls
+do not qualify long-context quality or general performance. Build a separate
+worker from this checkout and pass it explicitly with the existing prepared
+folder:
+
+```sh
+CARGO_TARGET_DIR=target/edge0-context-20261116 cargo +1.98.1 build --release --locked -p stark-generate
+STARK_EDGE0_LOCAL_EVALUATION=1 uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.chat --worker target/edge0-context-20261116/release/stark-generate --model-path runtime/edge0-native-v2-evaluation --context-tokens 8192 --max-new-tokens 128 --no-mtp
+```
+
+The worker uses ordinary `--model-path` loading. The explicit worker path binds
+this command to the rebuilt candidate.
+
+This mode always advertises MTP unavailable and keeps prefix reuse disabled.
+The pinned source, preparation receipt and local non-commercial scope remain
+required; app/catalogue admission is unchanged. Image input is N/A for this
+text-only source.
+
+The historical source-checkout diagnostic path, selected with
+`STARK_EDGE0_REFERENCE=1`, has passed the
 [bounded F32 reference gate](model-experiments/2026-11-12-edge0-reference-forward.md)
 on the exact prepared artifact, with a 512-token runtime limit. The reference-only
 path has no MTP or prefix reuse; image input is N/A for this text-only source. This
@@ -37,7 +68,7 @@ accumulation, recurrence and attention caches. Its bounded prefill batches
 contain at most eight tokens. `STARK_EDGE0_RESIDENT=1` separately requests the
 existing residency manager for the complete expert/projection inventory.
 The owner selected continuing on this native Qwen graph; the plan records that
-decision. Both execution policies retain the 512-token limit and disabled prefix
+decision. These historical diagnostic policies retain the 512-token limit and disabled prefix
 reuse. Worker MTP below is available only with virtual mappings; explicit
 residency has no MTP support.
 
@@ -53,7 +84,8 @@ stops and same-model recovery. The normal JSONL worker then passed bounded
 ordinary-off full-readout equality, stopping, prompt/decode cancellation and
 same-worker recovery in
 [attempt `20261113-EDGE0-11`](model-experiments/2026-11-13-edge0-mtp-batched-worker.md).
-With `STARK_EDGE0_REFERENCE=1`, `STARK_EDGE0_METAL=1` and virtual mappings, it
+With `STARK_EDGE0_REFERENCE=1`, `STARK_EDGE0_METAL=1`, virtual mappings and the
+local loading mode unset, it
 advertises `serial-target-exact-v1`, maximum three drafts and recommendation one.
 Omitted MTP, `mtp: false` or `mtp_drafts: 0` keeps the default off;
 `mtp: true` selects one, and `mtp_drafts: 1..3` selects an explicit depth.
@@ -64,7 +96,7 @@ releasing the exclusive head lease. Request planning conservatively reserves
 
 All 60 [matched requests](benchmarks/2026-11-13-edge0-worker-mtp.md) completed,
 but no timing group met the host screens. Default remains off, with no qualified
-speed claim or draft-depth ranking. Prefix reuse, wider contexts, quality and
+speed claim or draft-depth ranking. Prefix reuse, wider-context MTP, quality and
 product admission remain unqualified; the local non-commercial scope is unchanged.
 Two stricter-admission reruns also deferred every group. The
 [worker-memory investigation](model-experiments/2026-11-13-edge0-worker-memory.md)
@@ -75,8 +107,9 @@ These accounting observations preserve every screen and establish no speed claim
 The separately evaluated `STARK_EDGE0_EXPERT_WINDOWS=1` policy narrows each
 target expert binding to its original gate/up/down record while retaining
 projection layer bindings. Admission includes every possible page-rounded
-record window; it does not reduce the full prospective allowance. Unset/zero
-keeps layer bindings, and residency plus record windows is rejected. The
+record window; it does not reduce the full prospective allowance. Outside the
+local loading mode, unset/zero keeps layer bindings. Residency plus record
+windows is rejected. The
 [fixed-idle ABBA control](benchmarks/2026-11-13-edge0-expert-windows.md) reproduces
 post-idle baseline task decompressions in both layer sessions and zero in both
 record sessions. The new policy passes 26 actual lifecycle cases. Its six-group
@@ -104,8 +137,13 @@ run with `--preflight-only`; remove that flag to acquire and fully validate the
 69 pinned source files. The source-native proof is independent of the rejected
 borrowed-HF comparison. Both policies retain the local non-commercial scope.
 Native loading, the locked Rust tokenizer and bounded streamed generation are
-qualified separately in the F32 reference record. MTP, prefix reuse and broader
-runtime qualification remain unfinished.
+qualified separately in the F32 reference record. Historical experimental MTP
+has separate bounded records above; the local loading route keeps it unavailable.
+Prefix reuse and broader runtime qualification remain unfinished. Private native
+checkpoints currently allow only context at or below 512 and single-step staging.
+Qwen has no worker prefix snapshot publication or memory-admission integration,
+and restoration after batched prefill at longer chunk boundaries remains
+unqualified.
 
 The preparation command pins these sources:
 
