@@ -345,6 +345,8 @@ def main():
     for key in ("app", "model", "snapshot", "fixtures", "output"):
         parser.add_argument("--" + key, type=Path, required=True)
     args = parser.parse_args()
+    for key in ("app", "model", "snapshot", "fixtures", "output"):
+        setattr(args, key, getattr(args, key).resolve())
     try:
         return qualify(args)
     except QualificationError as error:
