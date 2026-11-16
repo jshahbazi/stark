@@ -152,3 +152,19 @@ one skipped. Repository policy and lint/diff checks passed. Earlier full-suite
 results remain bound to the earlier source. Exact new bundle/receipt hashes and
 GUI scope are recorded in the [installed follow-up](../archive/runs/2026-11-16-decider-flash-app.md#installed-gui-follow-up-20261116-df13app-02).
 No PR, notarization or release was created.
+
+## Naming follow-up
+
+Prepared Decider imports now use `Decider Flash v1.3` rather than the source
+folder's basename; the focused desktop suite passed 24 tests. At the user's
+request, the existing saved `native-v2` entry was renamed as well. After an
+authorized app restart, Manage Models visibly showed the canonical name and
+five retained entries. Only the target entry's `name` field changed; its ID,
+path, source, artifact and other saved settings were preserved.
+
+The installed app had independently been replaced by another branch's newer
+build. That build was retained for the naming check; this follow-up does not
+transfer Decider qualification to it or claim its catalogue contains Decider.
+The Decider capability and catalogue results above remain bound to the recorded
+Decider builds. PR #169 now contains this branch's implementation and evidence;
+main/release adoption remains separate.
