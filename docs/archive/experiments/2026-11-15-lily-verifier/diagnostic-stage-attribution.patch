@@ -1,0 +1,70 @@
+diff --git a/vendor/lily-core/src/moe_ffn.rs b/vendor/lily-core/src/moe_ffn.rs
+index 88f17787..7473535f 100644
+--- a/vendor/lily-core/src/moe_ffn.rs
++++ b/vendor/lily-core/src/moe_ffn.rs
+@@ -792,6 +792,7 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
+     let inter = dims.moe_intermediate;
+     let shared_inter = w.shared.gate_proj.out_features();
+     let shared_gu = io.stack.view(0, &[m, 2 * shared_inter])?;
++    pass.profile_stage(crate::metal::stage_profile::Phase::MoeInputProjections)?;
+     project_mat_decode_exact(ctx, pass, io.x, &w.gate, &ms.decode_router_logits)?;
+     project_mat_decode_exact(ctx, pass, io.x, &w.shared_gate, &ms.decode_shared_gate)?;
+     project_mat_decode_exact(ctx, pass, io.x, &w.shared.gate_up_proj, &shared_gu)?;
+@@ -800,6 +801,7 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
+         &ms.decode_shared_gate,
+         &shared_gu,
+     ])?;
++    pass.profile_stage(crate::metal::stage_profile::Phase::MoeRouteSharedActivation)?;
+     moe::moe_router_topk_decode_rows(
+         ctx,
+         pass,
+@@ -819,7 +821,7 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
+         }
+         None => &ms.indices,
+     };
+-    pass.profile_stage(crate::metal::stage_profile::Phase::MoeGateUp)?;
++    pass.profile_stage(crate::metal::stage_profile::Phase::MoeExpertGateUpSharedDown)?;
+     moe::moe_gate_up_decode_rows(
+         ctx,
+         pass,
+@@ -839,7 +841,7 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
+         &ms.shared_out,
+     )?;
+     pass.level_barrier(&[&ms.ea, &ms.shared_out])?;
+-    pass.profile_stage(crate::metal::stage_profile::Phase::MoeDown)?;
++    pass.profile_stage(crate::metal::stage_profile::Phase::MoeExpertDownCombine)?;
+     if let Some(injection) = injection {
+         moe::moe_down_combine_inject_decode_rows(
+             ctx,
+diff --git a/vendor/lily-core/src/qwen4exp/model.rs b/vendor/lily-core/src/qwen4exp/model.rs
+index 486aa45b..ff7e3793 100644
+--- a/vendor/lily-core/src/qwen4exp/model.rs
++++ b/vendor/lily-core/src/qwen4exp/model.rs
+@@ -3212,6 +3212,11 @@ impl Qwen4ExpModel {
+                 && cfg.linear_conv_kernel_dim == 4
+                 && w.in_proj.out_features().is_multiple_of(2)
+         });
++        if capture.is_some_and(|c| c.exact) {
++            pass.profile_stage(
++                crate::metal::stage_profile::Phase::GdnInputProjectionConv,
++            )?;
++        }
+         if let Some(c) = fused_capture {
+             quant::gemv_q4_gdn_conv_rows_exact(
+                 ctx,
+@@ -3293,6 +3298,7 @@ impl Qwen4ExpModel {
+         self.trace_stage(ctx, pass, layer_index, "gdn_b", &ps.b, ps.m)?;
+         self.trace_stage(ctx, pass, layer_index, "gdn_conv", &ps.qkv_conv, ps.m)?;
+         if let Some(capture) = capture.filter(|c| c.exact) {
++            pass.profile_stage(crate::metal::stage_profile::Phase::GdnRecurrenceNorm)?;
+             gdn_verify_gated_exact(
+                 ctx,
+                 pass,
+@@ -3313,6 +3319,7 @@ impl Qwen4ExpModel {
+             )?;
+             pass.level_barrier(&[&ps.gdn_gated, gdn_state])?;
+             self.trace_stage(ctx, pass, layer_index, "gdn_gated", &ps.gdn_gated, ps.m)?;
++            pass.profile_stage(crate::metal::stage_profile::Phase::GdnOutProjection)?;
+             return project_mat_decode_exact(
+                 ctx,
+                 pass,
