@@ -959,11 +959,13 @@ def recommendation_report(
         )
         if leaderboard_used:
             reason = (
-                "Selected using the cached " + leaderboard.source_name
+                "Selected using the cached "
+                + leaderboard.source_name
                 + " leaderboard among models admitted by Stark's installed RAM, GPU and disk checks. "
                 + (
                     "General Work uses coding as a proxy. "
-                    if guide_task == "general" and ranking_task == "coding" else ""
+                    if guide_task == "general" and ranking_task == "coding"
+                    else ""
                 )
                 + (
                     "This model has a published parent-model score; this Stark artifact has not been benchmarked."
