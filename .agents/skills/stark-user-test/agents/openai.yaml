@@ -1,0 +1,5 @@
+interface:
+  display_name: "Stark user test"
+  short_description: "Exercise Stark through three real agent apps"
+policy:
+  allow_implicit_invocation: false
