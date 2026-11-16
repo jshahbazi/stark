@@ -57,9 +57,10 @@ HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false uv run --project tools/converter -
 Build the workers separately so the scorer's `optimized` features never unify into the generator:
 
 ```sh
-cargo +1.98.1 build --release --locked -p stark-generate
-cargo +1.98.1 build --release --locked -p stark-score --features optimized
-cargo +1.98.1 build --release --locked -p stark-template
+cargo +1.98.1 build --release --locked -p stark-generate --bin stark-generate
+cargo +1.98.1 build --release --locked -p stark-score --bin stark-score --features optimized
+cargo +1.98.1 build --release --locked -p stark-template --bin stark-template
+cargo +1.98.1 build --release --locked -p stark-score --bin stark-decide
 ```
 
 The `stark-template` helper is required for chat and decision rendering; there

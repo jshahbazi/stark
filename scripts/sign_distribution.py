@@ -685,6 +685,7 @@ def sign(options: argparse.Namespace) -> dict:
                 "libexec/stark-score",
                 "libexec/stark-generate",
                 "libexec/stark-template",
+                *(["libexec/stark-decide"] if (bundle / "libexec/stark-decide").is_file() else []),
                 "libexec/python/bin/python3.13",
             ):
                 verify_signature(bundle / name, identity, env, notarized=True)

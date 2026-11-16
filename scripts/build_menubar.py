@@ -1038,6 +1038,7 @@ def build(options: argparse.Namespace) -> Path:
     runtime = options.runtime.expanduser().resolve()
     worker = options.worker.expanduser().resolve()
     score_worker = options.score_worker.expanduser().resolve()
+    decide_worker = getattr(options, "decide_worker", ROOT / "target/release/stark-decide").expanduser().resolve()
     template_worker = options.template_worker.expanduser().resolve()
     worker_record_path = getattr(options, "worker_build_record", None)
     if worker_record_path is not None:
@@ -1072,6 +1073,15 @@ def build(options: argparse.Namespace) -> Path:
     ):
         raise BuildError("arm64_score_worker_missing")
     verify_worker(score_worker, "score")
+    if (
+        not decide_worker.is_file()
+        or "arm64"
+        not in run(
+            ["/usr/bin/lipo", "-archs", str(decide_worker)], "decide_worker_architecture"
+        ).split()
+    ):
+        raise BuildError("arm64_decide_worker_missing")
+    verify_worker(decide_worker, "decide")
     if (
         not template_worker.is_file()
         or "arm64"
@@ -1131,6 +1141,7 @@ def build(options: argparse.Namespace) -> Path:
         )
         shutil.copy2(worker, embedded / "libexec/stark-generate")
         shutil.copy2(score_worker, embedded / "libexec/stark-score")
+        shutil.copy2(decide_worker, embedded / "libexec/stark-decide")
         shutil.copy2(template_worker, embedded / "libexec/stark-template")
         native_notices = install_native_notices(embedded, temporary)
         converter_package = install_converter(embedded, temporary)
@@ -1173,6 +1184,8 @@ def build(options: argparse.Namespace) -> Path:
         )
         inspection = (
             "import inspect,json; import stark_convert.desktop,stark_convert.chat,stark_convert.decision,jinja2; "
+            "import stark_convert.desktop_decider,stark_convert.decider,stark_convert.decider_install; "
+            "assert callable(stark_convert.desktop_decider.DesktopDeciderWorker); "
             "import stark_convert.desktop_media,stark_convert.media,stark_convert.vision_runtime; "
             "import stark_convert.image_checks,stark_convert.vision_family,stark_convert.model_support,stark_convert.model_inventory,stark_convert.model_catalog,stark_convert.model_removal,stark_convert.guided_models; "
             "assert callable(stark_convert.model_support.support_matrix); "
@@ -1211,6 +1224,7 @@ def build(options: argparse.Namespace) -> Path:
         if (
             "--worker" not in response
             or "--score-worker" not in response
+            or "--decide-worker" not in response
             or "--data-dir" not in response
             or "--attachment-root" not in response
         ):
@@ -1235,6 +1249,7 @@ def build(options: argparse.Namespace) -> Path:
             "overlays_sha256": {
                 "libexec/stark-generate": sha256(embedded / "libexec/stark-generate"),
                 "libexec/stark-score": sha256(embedded / "libexec/stark-score"),
+                "libexec/stark-decide": sha256(embedded / "libexec/stark-decide"),
                 "libexec/stark-template": sha256(embedded / "libexec/stark-template"),
                 **native_notices["files_sha256"],
                 **converter_package["files_sha256"],
@@ -1285,6 +1300,7 @@ def build(options: argparse.Namespace) -> Path:
                 "base_runtime_hashes": "passed",
                 "worker_invalid_arguments": "passed",
                 "score_worker_invalid_arguments": "passed",
+                "decide_worker_invalid_arguments": "passed",
                 "current_native_dependency_and_adaptation_notices": "passed",
                 "python_imports": "passed",
                 "converter_progress_api": "passed",
@@ -1364,6 +1380,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=ROOT / "target/release/stark-template",
         help="Native chat-template evaluator to embed",
+    )
+    parser.add_argument(
+        "--decide-worker",
+        type=Path,
+        default=ROOT / "target/release/stark-decide",
+        help="Native Decider worker to embed (built separately with default features)",
     )
     parser.add_argument(
         "--worker-build-record",

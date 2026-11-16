@@ -296,6 +296,9 @@ pub fn main() {
             }
         }
     }
+    // Startup is single-threaded; the inherited private descriptor is owned by
+    // the same telemetry sampler used by the existing app inference workers.
+    let _gpu_memory_sampler = unsafe { stark_engine::backends::metal::memory_usage::start_from_environment() };
     let mut output = io::BufWriter::new(output);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut args = std::env::args_os().skip(1);

@@ -118,7 +118,7 @@ struct ModelImageLimits {
     var help: String {
         "Attach one PNG or JPEG up to 4 MiB and \(sourcePixels.formatted()) source pixels. " +
         "This model processes up to \(processedPixels.formatted()) pixels (\(imageTokens.formatted()) image tokens), " +
-        "subject to available memory and conversation context."
+        "subject to available memory and request context."
     }
 }
 
@@ -262,8 +262,15 @@ struct InstalledModelDisplay: Equatable {
 
 enum ModelArtifactMode: String, CaseIterable {
     case text
+    case decision
     case visionLanguage = "vision-language"
-    var title: String { self == .text ? "Text" : "Text and images" }
+    var title: String {
+        switch self {
+        case .text: return "Text"
+        case .decision: return "Decision and images"
+        case .visionLanguage: return "Text and images"
+        }
+    }
 }
 
 struct InstalledModelRemoval: Equatable {
@@ -299,13 +306,16 @@ struct InstalledModel: Identifiable, Equatable {
     let artifactMode: ModelArtifactMode?
     let removal: InstalledModelRemoval?
     let source: String?
+    let decisionOnly: Bool
 
     var displayName: String { ModelsInventory.readableName(name, display: display) }
 
     init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil,
-         artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil, source: String? = nil) {
+         artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil, source: String? = nil,
+         decisionOnly: Bool = false) {
         self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.display = display
         self.artifactMode = artifactMode; self.removal = removal; self.source = source
+        self.decisionOnly = decisionOnly || artifactMode == .decision
     }
 }
 
@@ -502,6 +512,7 @@ struct ModelFamily: Identifiable {
         case "qwen3": return "Qwen3"
         case "qwen2": return "Qwen2"
         case "qwen3_5": return "Qwen3.5"
+        case "decider-flash-v1.3": return "Decider Flash v1.3"
         case "qwen3_5_moe": return "Qwen3.5 MoE"
         case "qwen4_exp": return "Qwen3.8 Flash Next"
         case "glm5_next": return "GLM-5.3 Flash"
@@ -784,7 +795,8 @@ struct FamilyModelCatalog {
         }
 
         var installationMode: ModelArtifactMode {
-            artifactModes.contains(.visionLanguage) ? .visionLanguage : .text
+            if artifactModes.contains(.decision) { return .decision }
+            return artifactModes.contains(.visionLanguage) ? .visionLanguage : .text
         }
 
         var detailLabels: [String] {
@@ -1174,8 +1186,8 @@ struct ModelsInventory {
         var detailLabels: [String] {
             [quantization,
              weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
-             artifactMode == .visionLanguage ? "Text and images" : nil,
-             toolSupport.title,
+             artifactMode == .text ? nil : artifactMode?.title,
+             artifactMode == .decision ? nil : toolSupport.title,
              sourceRevision.map { "Version " + $0.prefix(7) }].compactMap { $0 }
         }
     }
@@ -1422,7 +1434,9 @@ struct GenerationTimingProgress {
 
 final class EngineController: ObservableObject {
     @Published var models: [InstalledModel] = []
-    @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? ""
+    @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? "" {
+        didSet { if selectedID != oldValue { clearDecisionAttachment(); clearDecision() } }
+    }
     @Published var loadedID = "" {
         didSet {
             if loadedID != oldValue {
@@ -1436,6 +1450,7 @@ final class EngineController: ObservableObject {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
             if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
             if ["idle", "error", "stopping", "loading"].contains(state) { supportsMTP = false; mtpEnabled = false }
+            if ["idle", "error", "stopping", "loading"].contains(state) { decisionModel = false; decisionCalibrated = false }
             if ["idle", "error", "stopping", "loading"].contains(state) { pendingOptions = nil; pendingOptionsModelID = nil }
             if state != "generating" {
                 generationProgress = nil
@@ -1464,6 +1479,9 @@ final class EngineController: ObservableObject {
     @Published var draft = ""
     @Published private(set) var draftImage: ImageAttachment?
     @Published private(set) var conversationImage: ImageAttachment?
+    @Published private(set) var decisionImage: ImageAttachment?
+    @Published private(set) var decisionModel = false
+    @Published private(set) var decisionCalibrated = false
     @Published private(set) var supportsImages = false {
         didSet { if !supportsImages { imageLimits = nil } }
     }
@@ -1535,6 +1553,7 @@ final class EngineController: ObservableObject {
     private var pendingOptions: ChatOptions?
     private var pendingOptionsModelID: String?
     private var pendingDecisionAnswers: [String]?
+    private var pendingDecisionID: UUID?
     private var attachmentStaging: AttachmentStaging?
     private var attachmentSelection = UUID()
     private var pendingSupportRequestID: String?
@@ -1643,6 +1662,8 @@ final class EngineController: ObservableObject {
     }
     var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
     var activeName: String { activeModel?.name ?? "No model running" }
+    var selectedDecisionOnly: Bool { models.first { $0.id == selectedID }?.decisionOnly == true }
+    var canUseChatMode: Bool { !selectedDecisionOnly && !(loadedID == selectedID && decisionModel) }
     var defaultMTPEnabled: Bool {
         if mtpVerificationPolicy.hasPrefix("gemma4-") { return false }
         guard let display = activeModel?.display else { return true }
@@ -1695,10 +1716,12 @@ final class EngineController: ObservableObject {
                 display.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }]
             .compactMap { $0 }.joined(separator: " · ")
     }
-    var canAttachImage: Bool { modelReady && supportsImages && conversationImage == nil }
+    var canAttachImage: Bool {
+        modelReady && supportsImages && (mode == .decision ? decisionModel : conversationImage == nil)
+    }
     var hasConversation: Bool { !messages.isEmpty || draftImage != nil || conversationImage != nil }
     var canSendMessage: Bool {
-        modelReady && !attachmentLoading &&
+        modelReady && mode == .chat && !attachmentLoading &&
             (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draftImage != nil)
     }
     var statusColor: Color {
@@ -1723,6 +1746,7 @@ final class EngineController: ObservableObject {
         child.arguments = ["-I", "-B", "-m", "stark_convert.desktop", "--worker",
                            runtime.appendingPathComponent("libexec/stark-generate").path,
                            "--score-worker", runtime.appendingPathComponent("libexec/stark-score").path,
+                           "--decide-worker", runtime.appendingPathComponent("libexec/stark-decide").path,
                            "--data-dir", data.path,
                            "--attachment-root", attachmentStaging!.root.path]
         let incoming = Pipe()
@@ -1822,7 +1846,8 @@ final class EngineController: ObservableObject {
                 return InstalledModel(id: id, name: name, path: path, apiID: $0["api_id"] as? String ?? name,
                                       display: InstalledModelDisplay($0["display"]),
                                       artifactMode: $0["artifact_mode"] == nil ? .text : ModelArtifactMode(rawValue: $0["artifact_mode"] as? String ?? ""),
-                                      removal: InstalledModelRemoval($0["removal"]), source: $0["source"] as? String)
+                                      removal: InstalledModelRemoval($0["removal"]), source: $0["source"] as? String,
+                                      decisionOnly: $0["decision_only"] as? Bool == true)
             }
             if !models.contains(where: { $0.id == selectedID }) && !(catalogInstallation != nil && selectedID.isEmpty) {
                 selectedID = models.first?.id ?? ""
@@ -2026,9 +2051,14 @@ final class EngineController: ObservableObject {
             }
             generationProgress = progress
         case "image_progress":
-            guard state == "generating", pendingMessageID != nil else { return }
+            let deciding = mode == .decision && state == "deciding" && pendingDecisionAnswers != nil
+            guard (state == "generating" && pendingMessageID != nil) || deciding else { return }
+            if deciding, let requestID = event["request_id"] as? String,
+               UUID(uuidString: requestID) != pendingDecisionID { return }
             if event["phase"] as? String == "preparing" { imageProgress = "Preparing image…" }
-            if event["phase"] as? String == "generating" { imageProgress = "Generating reply…" }
+            if event["phase"] as? String == "generating" || event["phase"] as? String == "deciding" {
+                imageProgress = deciding ? "Evaluating image…" : "Generating reply…"
+            }
         case "image_check":
             guard state == "installing", event["state"] as? String == "checking" else { return }
             loadedID = ""; loadedMode = nil; supportsImages = false; imageVerification = "unverified"
@@ -2038,6 +2068,7 @@ final class EngineController: ObservableObject {
         case "decision":
             guard mode == .decision, loadedMode == .decision, state == "deciding",
                   let expected = pendingDecisionAnswers else { return }
+            if let requestID = event["request_id"] as? String, UUID(uuidString: requestID) != pendingDecisionID { return }
             guard let answers = event["answers"] as? [String], answers == expected,
                   let probabilities = event["probabilities"] as? [Double], probabilities.count == answers.count,
                   let index = event["choice_index"] as? Int, answers.indices.contains(index),
@@ -2045,12 +2076,16 @@ final class EngineController: ObservableObject {
                   abs(probabilities.reduce(0, +) - 1) <= 0.0001,
                   probabilities[index] == probabilities.max() else {
                 clearDecision()
+                clearDecisionAttachment()
                 errorMessage = modelFailure("Stark returned an invalid decision. Run the model again.", name: activeModel?.displayName)
                 stopAfterInvalidDecision()
                 return
             }
             decisionResult = DecisionResult(answers: answers, probabilities: probabilities, choiceIndex: index)
             pendingDecisionAnswers = nil
+            pendingDecisionID = nil
+            imageProgress = ""
+            attachmentStaging?.clear()
         case "error":
             let requestID = event["request_id"] as? String
             if let expected = beginnerRunRequestID, requestID == expected {
@@ -2090,6 +2125,13 @@ final class EngineController: ObservableObject {
                 discardPendingMessage()
                 return
             }
+            if let requestID, let pending = pendingDecisionID, UUID(uuidString: requestID) == pending {
+                errorMessage = modelFailure(event["message"] as? String ?? "Unable to complete the decision.", name: activeModel?.displayName)
+                clearDecision(); clearDecisionAttachment()
+                state = loadedID.isEmpty ? "idle" : "ready"
+                message = loadedID.isEmpty ? "Stopped" : "Ready"
+                return
+            }
             if let requestID = requestID, requestID != activeInstallRequestID { return }
             let matchingInstallError = requestID != nil && requestID == activeInstallRequestID
             let installOwned = requestID != nil || state == "installing" || (activeInstallRequestID != nil && catalogInstallation == nil)
@@ -2109,6 +2151,7 @@ final class EngineController: ObservableObject {
             discardPendingMessage()
             pendingOptions = nil
             clearDecision()
+            clearDecisionAttachment()
             if state == "configuring" || state == "deciding" || (matchingInstallError && state == "installing") {
                 state = loadedID.isEmpty ? "idle" : "ready"
                 message = loadedID.isEmpty ? "Stopped" : "Ready"
@@ -2183,9 +2226,12 @@ final class EngineController: ObservableObject {
     }
 
     private func applyImageCapabilities(_ event: [String: Any]) {
+        decisionModel = mode == .decision && event["decision_model"] as? Bool == true
+        decisionCalibrated = decisionModel && event["decision_calibration"] as? String == "checkpoint_temperature"
         supportsTools = mode == .chat && event["tools"] as? Bool == true
         toolParser = supportsTools ? event["tool_parser"] as? String ?? "" : ""
-        supportsImages = mode == .chat && event["images"] as? Bool == true &&
+        let decisionImages = decisionModel && event["decision_images"] as? Bool == true
+        supportsImages = (mode == .chat || decisionImages) && event["images"] as? Bool == true &&
             event["image_attachment_transport"] as? String == "private-file-v1" &&
             event["max_image_bytes"] as? Int == ImageAttachment.maximumBytes
         let verification = event["image_verification"] as? String ?? "unverified"
@@ -2194,6 +2240,7 @@ final class EngineController: ObservableObject {
         imageLimits = supportsImages ? ModelImageLimits(event["image_limits"]) : nil
         if !supportsImages {
             draftImage = nil; conversationImage = nil; attachmentSelection = UUID(); attachmentLoading = false
+            clearDecisionAttachment()
         }
     }
 
@@ -2217,7 +2264,8 @@ final class EngineController: ObservableObject {
         let image = try ImageAttachment(bytes: bytes)
         attachmentSelection = UUID()
         attachmentLoading = false
-        draftImage = image
+        if mode == .decision { decisionImage = image; clearDecision() }
+        else { draftImage = image }
         errorMessage = nil
     }
 
@@ -2225,14 +2273,15 @@ final class EngineController: ObservableObject {
         guard canAttachImage else { return }
         attachmentSelection = UUID()
         attachmentLoading = false
-        draftImage = nil
+        if mode == .decision { decisionImage = nil; clearDecision() }
+        else { draftImage = nil }
     }
 
     @discardableResult
     func acceptImageProviders(_ providers: [NSItemProvider]) -> Bool {
         guard canAttachImage else { return false }
         guard providers.count == 1, let provider = providers.first else {
-            errorMessage = "Attach one image per conversation."
+            errorMessage = mode == .decision ? "Attach one image per decision." : "Attach one image per conversation."
             return false
         }
         let selection = UUID()
@@ -2242,7 +2291,12 @@ final class EngineController: ObservableObject {
             DispatchQueue.main.async {
                 guard let self = self, self.attachmentSelection == selection, self.canAttachImage else { return }
                 self.attachmentLoading = false
-                do { self.draftImage = try result.get(); self.errorMessage = nil }
+                do {
+                    let image = try result.get()
+                    if self.mode == .decision { self.decisionImage = image; self.clearDecision() }
+                    else { self.draftImage = image }
+                    self.errorMessage = nil
+                }
                 catch { self.imageError(error) }
             }
         }
@@ -2268,6 +2322,7 @@ final class EngineController: ObservableObject {
     }
 
     private func imageError(_ error: Error) {
+        if mode == .decision { clearDecisionAttachment(); clearDecision() }
         errorMessage = (error as? ImageAttachmentError)?.message ?? ImageAttachmentError.unavailable.message
     }
 
@@ -2428,6 +2483,10 @@ final class EngineController: ObservableObject {
     @discardableResult
     func run() -> Bool {
         guard !selectedID.isEmpty, !busy else { return false }
+        if selectedDecisionOnly {
+            mode = .decision
+            UserDefaults.standard.set(mode.rawValue, forKey: "playgroundMode")
+        }
         // A new run becomes the restart target even if loading later fails.
         stoppedModel = nil
         UserDefaults.standard.set(selectedID, forKey: "selectedModel")
@@ -2466,6 +2525,10 @@ final class EngineController: ObservableObject {
 
     func changeMode(_ updated: PlaygroundMode) {
         guard !busy, updated != mode else { return }
+        guard updated != .chat || canUseChatMode else {
+            errorMessage = "This model evaluates decisions. Choose another model to use Chat."
+            return
+        }
         let reload = !loadedID.isEmpty
         mode = updated
         clearInstallSupport()
@@ -2499,7 +2562,8 @@ final class EngineController: ObservableObject {
         activeInstallRequestID = requestID
         activeInstallModelName = shortModelName(source)
         catalogInstallation = nil; catalogInstallMessage = nil; catalogInstallFailed = false
-        let purpose = artifactMode == "vision-language" ? "vision-language" : (mode == .decision ? "decision" : "text")
+        let purpose = artifactMode == "decision" ? "decision" :
+            (artifactMode == "vision-language" ? "vision-language" : (mode == .decision ? "decision" : "text"))
         state = "installing"; message = "Checking model support…"
         var payload: [String: Any] = ["command": "install", "source": source, "kind": kind,
                                       "support_mode": purpose, "support_request_id": requestID]
@@ -2751,7 +2815,10 @@ final class EngineController: ObservableObject {
 
     var decisionValidation: String? {
         let answers = parsedDecisionAnswers
-        if decisionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter text to evaluate." }
+        if attachmentLoading { return "Wait for the image to load." }
+        if decisionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !(decisionModel && supportsImages && decisionImage != nil) {
+            return decisionModel && supportsImages ? "Enter text or attach an image to evaluate." : "Enter text to evaluate."
+        }
         if decisionQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter a question." }
         if !(2...16).contains(answers.count) { return "Enter between 2 and 16 answers." }
         if answers.contains(where: { $0.isEmpty }) { return "Each answer must have a label." }
@@ -2763,17 +2830,48 @@ final class EngineController: ObservableObject {
         guard modelReady, mode == .decision else { return }
         if let validation = decisionValidation { errorMessage = validation; return }
         let answers = parsedDecisionAnswers
+        attachmentSelection = UUID()
         errorMessage = nil
         clearDecision()
+        let identifier = UUID()
+        var payload: [String: Any] = ["command": "decide", "text": decisionText,
+                                      "question": decisionQuestion, "answers": answers,
+                                      "request_id": identifier.uuidString.lowercased()]
+        if let image = decisionImage {
+            guard decisionModel && supportsImages else {
+                clearDecisionAttachment()
+                errorMessage = "The running model does not support images in Decision mode."
+                return
+            }
+            do {
+                guard let storage = attachmentStaging else { throw ImageAttachmentError.unavailable }
+                payload["image"] = try storage.stage(image)
+                imageProgress = "Preparing image…"
+            } catch { clearDecisionAttachment(); imageError(error); return }
+        }
         state = "deciding"; message = "Deciding…"
-        if send(["command": "decide", "text": decisionText, "question": decisionQuestion, "answers": answers]) {
+        if send(payload) {
             pendingDecisionAnswers = answers
+            pendingDecisionID = identifier
+        } else {
+            clearDecisionAttachment()
         }
     }
 
     func clearDecision() {
         decisionResult = nil
         pendingDecisionAnswers = nil
+        pendingDecisionID = nil
+    }
+
+    private func clearDecisionAttachment() {
+        decisionImage = nil
+        if mode == .decision {
+            attachmentSelection = UUID()
+            attachmentLoading = false
+            imageProgress = ""
+            attachmentStaging?.clear()
+        }
     }
 
     private func stopAfterInvalidDecision() {
@@ -2784,7 +2882,7 @@ final class EngineController: ObservableObject {
     func reset() {
         guard !busy else { return }
         errorMessage = nil
-        if send(["command": "reset"]) { clearConversation(); draft = "" }
+        if send(["command": "reset"]) { clearConversation(); clearDecision(); draft = "" }
     }
 
     func stop() {
@@ -2867,6 +2965,7 @@ final class EngineController: ObservableObject {
     }
 
     private func clearConversation() {
+        clearDecisionAttachment()
         messages.removeAll(); pendingMessageID = nil
         finishReason = ""; inputSpeed = nil; outputSpeed = nil
         generationProgress = nil; firstTokenSeconds = nil; generationSeconds = nil; reusedInputTokens = nil
@@ -2898,6 +2997,7 @@ final class EngineController: ObservableObject {
         }
         process = nil
         clearConversation()
+        clearDecision()
         supportsImages = false
         imageVerification = "unverified"
         attachmentStaging = nil
@@ -3396,6 +3496,9 @@ struct ModelsView: View {
                 if let variantLabel {
                     Text(variantLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
+                if model.artifactMode == .decision {
+                    Text("Decision and images").font(.caption).foregroundStyle(.secondary)
+                }
             }
             .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
             .accessibilityHidden(true)
@@ -3403,8 +3506,10 @@ struct ModelsView: View {
                 .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
             Text(model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
                 .font(.caption).foregroundStyle(.secondary).frame(width: 76, alignment: .leading)
-            Text(model.toolSupport.title).font(.caption).foregroundStyle(.secondary)
-                .frame(width: 100, alignment: .leading).help(model.toolSupport.help)
+            Text(model.artifactMode == .decision ? "Not applicable" : model.toolSupport.title)
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(width: 100, alignment: .leading)
+                .help(model.artifactMode == .decision ? "This model evaluates decisions and images." : model.toolSupport.help)
             modelRepositoryLink(model).frame(width: 28, alignment: .leading)
             Group {
                 if model.id == engine.modelControlID {
@@ -3426,7 +3531,7 @@ struct ModelsView: View {
         var details = [model.name]
         if let family = family { details.append(family) }
         details.append(contentsOf: model.detailLabels.filter { !$0.hasPrefix("Version ") })
-        details.append(model.toolSupport.help)
+        if model.artifactMode != .decision { details.append(model.toolSupport.help) }
         if let revision = model.sourceRevision { details.append("Version " + revision) }
         return details.joined(separator: "\n")
     }
@@ -3855,9 +3960,11 @@ struct PlaygroundView: View {
             HStack {
                 Text("Stark").font(.title3.weight(.semibold))
                 Spacer()
-                Button("Connect to...", action: connection)
+                Button("Connect to...", action: connection).disabled(engine.decisionModel)
                 Picker("Mode", selection: Binding(get: { engine.mode }, set: engine.changeMode)) {
-                    ForEach(PlaygroundMode.allCases) { Text($0.title).tag($0) }
+                    ForEach(PlaygroundMode.allCases) {
+                        Text($0.title).tag($0).disabled($0 == .chat && !engine.canUseChatMode)
+                    }
                 }.pickerStyle(.segmented).frame(width: 180).disabled(engine.busy)
                     .accessibilityLabel("Chat or Decision mode")
             }
@@ -3887,17 +3994,41 @@ struct DecisionView: View {
     @ObservedObject var engine: EngineController
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("Text to evaluate").font(.callout)
+                    Text(engine.supportsImages ? "Text or image to evaluate" : "Text to evaluate").font(.callout)
                     TextEditor(text: $engine.decisionText).font(.body).frame(minHeight: 100, maxHeight: 150)
                         .padding(5).overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary))
                         .accessibilityLabel("Text to evaluate")
                 }
+                if engine.supportsImages {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let image = engine.decisionImage {
+                            HStack {
+                                AttachmentPreview(image: image)
+                                Spacer()
+                                Button("Remove Image", action: engine.removeImage)
+                            }.padding(10).background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        HStack {
+                            Button("Attach Image…", action: engine.selectImage).disabled(!engine.canAttachImage)
+                                .help(engine.imageLimits?.help ?? "Attach one PNG or JPEG image, up to 4 MiB.")
+                            if engine.attachmentLoading {
+                                ProgressView().controlSize(.small)
+                                Text("Loading image…").font(.caption).foregroundStyle(.secondary)
+                                Button("Cancel", action: engine.removeImage)
+                            }
+                        }
+                        if let limits = engine.imageLimits {
+                            Text(limits.summary).font(.caption).foregroundStyle(.secondary).help(limits.help)
+                        }
+                    }
+                }
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Question").font(.callout)
-                    TextField("Which answer fits this text?", text: $engine.decisionQuestion)
+                    TextField("Which answer fits this input?", text: $engine.decisionQuestion)
                         .textFieldStyle(.roundedBorder).accessibilityLabel("Decision question")
                 }
                 VStack(alignment: .leading, spacing: 7) {
@@ -3907,7 +4038,7 @@ struct DecisionView: View {
                     Text("Separate 2–16 answers with commas.").font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
-                    Text("Inputs and results stay in memory").font(.caption).foregroundStyle(.secondary)
+                    Text("Results stay in memory").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("Run decision", action: engine.decide)
                         .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
@@ -3926,12 +4057,25 @@ struct DecisionView: View {
                                     .monospacedDigit()
                             }.font(.callout)
                         }
-                        Text("Shares across these answers; calibration is unverified.")
+                        Text(engine.decisionCalibrated ? "Probabilities use the model’s saved calibration."
+                             : "Shares across these answers; calibration is unverified.")
                             .font(.caption).foregroundStyle(.secondary)
                     }.accessibilityElement(children: .contain)
                 }
             }.padding(.vertical, 2)
         }.disabled(engine.busy)
+            .onDrop(of: [UTType.fileURL, .png, .jpeg], isTargeted: nil, perform: engine.acceptImageProviders)
+            .onPasteCommand(of: [.png, .jpeg]) { _ = engine.acceptImageProviders($0) }
+            if engine.state == "deciding" {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(engine.imageProgress.isEmpty ? "Evaluating input…" : engine.imageProgress)
+                        .font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel", action: engine.stop)
+                }
+            }
+        }
             .onChange(of: engine.decisionText) { engine.clearDecision() }
             .onChange(of: engine.decisionQuestion) { engine.clearDecision() }
             .onChange(of: engine.decisionAnswers) { engine.clearDecision() }

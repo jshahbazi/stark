@@ -155,6 +155,42 @@ def test_failed_preparation_does_not_publish_output(tmp_path):
     assert not list(tmp_path.glob(".decider-*"))
 
 
+def test_preparation_reads_hf_snapshot_metadata_without_copying_weights(tmp_path, monkeypatch):
+    import hashlib
+
+    import stark_convert.decider as decider
+
+    cache = tmp_path / "models--perplexity-ai--pplx-decider-flash-v1.3"
+    source = cache / "snapshots" / ("a" * 40)
+    blobs = cache / "blobs"
+    source.parent.mkdir(parents=True)
+    decider_fixture(source)
+    blobs.mkdir()
+    for name in decider._METADATA_FILES:
+        if not (source / name).exists():
+            (source / name).write_text("fixture")
+    for path in source.iterdir():
+        target = blobs / hashlib.sha256(path.read_bytes()).hexdigest()
+        if target.exists():
+            path.unlink()
+        else:
+            path.rename(target)
+        path.symlink_to(target)
+
+    class ReachedTokenizer(Exception):
+        pass
+
+    def read_tokenizer(content):
+        assert content == "fixture"
+        raise ReachedTokenizer
+
+    monkeypatch.setattr(decider, "Tokenizer", SimpleNamespace(from_str=read_tokenizer))
+    with pytest.raises(ReachedTokenizer):
+        prepare(source, tmp_path / "output")
+    assert (source / "model.safetensors").is_symlink()
+    assert not (tmp_path / "output").exists()
+
+
 @pytest.mark.parametrize(
     "sections,interleaved", [(None, True), ([1, 0, 0], False), ([1, 1, 0], True), ([True, 0, 0], True)]
 )

@@ -18,18 +18,38 @@ Guided setup opens at 700 × 800 points, capped to the available screen, so the 
 
 The main menu and playground show **GPU memory** as a percentage and compact usage bar beside the status in both modes. Green indicates usage below 75% of Metal's recommended memory budget, orange starts at 75%, and red starts at 90%. Whole percentages round down so the label agrees with the color thresholds. Hover for the allocated bytes and budget. It refreshes about once a second, including during model loading and requests. Apple silicon uses shared memory; the percentage measures the model worker's Metal resource allocation against the device's recommended working-set size, excluding CPU-only allocations and other applications. This budget is a performance guideline. The bar fills at 100%; percentages above the budget remain visible. If the budget is unavailable, the readout shows allocated bytes with an empty neutral bar. A dash means no measurement is available. Stop clears the readout.
 
+## Decider decisions and images
+
+In **Manage Models**, open **Model Catalog**, browse **Decider Flash v1.3** and
+download the pinned BF16 entry. **Add from Source** also accepts its Hugging Face repository, a complete
+pinned local snapshot, or a prepared Decider folder. Run selects **Decision**
+automatically; saved rows show **Decision and images**.
+
+Enter a question and 2–16 distinct, comma-separated answers in the desired
+order. Supply text, one PNG/JPEG image up to 4 MiB, or both. The result uses the
+checkpoint's saved probability calibration. Image files are private and
+temporary; reset, Stop, model replacement, removal and errors clear the selected
+Decision image. **Cancel** stops the running decision worker. Chat attachments
+and history remain separate.
+
+Decider has no Chat, tool-calling, Connections, HTTP API or Locate workflow.
+Its native [reference qualification](../../docs/DECIDER.md) covers the named
+artifact and bounded text/image cases. Packaged-app qualification is pending,
+and matched tower-residency text timing remains inconclusive.
+
 ## Build and install
 
 For normal use, install the [signed release](../../docs/INSTALLATION.md). The commands below rebuild the app from source during development on an Apple silicon Mac with macOS 26.4 or newer, Xcode's command line tools, Rust 1.98.1, uv, and an existing [standalone CLI installation](../../docs/INSTALLATION.md#install-from-a-source-checkout) whose runtime the app copies. The builder refreshes native dependency and adaptation notices for the current workers using the pinned Rust toolchain and Cargo lockfile.
 
 ```sh
-PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate
-PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --features optimized
-PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-template
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --bin stark-score --features optimized
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate --bin stark-generate
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-template --bin stark-template
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --bin stark-decide
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
 ```
 
-The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory; `--runtime`, `--worker`, `--score-worker` and `--template-worker` select a different CLI bundle, generation binary, scoring binary or native template evaluator. Native binaries default to their corresponding `target/release/` paths.
+The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory. `--runtime` selects the CLI bundle; `--worker`, `--score-worker`, `--template-worker` and `--decide-worker` select the four native binaries. They default to their corresponding `target/release/` paths. Build each binary separately with its named `--bin`; `stark-decide` uses default features independently of the optimized scorer. The app records hashes for all four worker overlays, including when its base CLI runtime predates Decider.
 
 Pi's public setup/guard resources come from the separate `stark-agent-clients`
 repository. `Resources/PiClient` is an immutable distribution snapshot;

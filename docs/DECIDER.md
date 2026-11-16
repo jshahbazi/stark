@@ -13,9 +13,36 @@ error 0.00596. Repeat/error/reset/cancellation/restart controls passed. The
 matched text residency timing was inconclusive because baseline variability
 exceeded its fixed limit. Long requests remain slow on this initial path.
 
-This is a standalone engine/CLI integration. The desktop catalogue, existing
-generic Decision workflow and HTTP chat endpoint do not dispatch this model.
-Its `DeciderModelConfig` artifact cannot be loaded as a causal language model.
+The app exposes the dedicated worker through its Decision workflow. Its
+`DeciderModelConfig` artifact is registered as Decision-only and retains the
+image tower. Packaged-app qualification is pending; the native results above
+keep their original artifact and execution scope.
+
+## Use in the app
+
+In **Manage Models**, open **Model Catalog**, browse **Decider Flash v1.3** and
+download its pinned BF16 entry. **Add from Source** also accepts
+`perplexity-ai/pplx-decider-flash-v1.3` as a Hugging Face source, a complete pinned
+local snapshot, or a prepared Decider folder. A prepared-folder import keeps
+using that folder; keep it available. Image support is included automatically.
+
+Run the saved model to select **Decision** mode. Enter a question and 2–16
+distinct, comma-separated answers in the desired order. Enter text, attach one
+PNG/JPEG image up to 4 MiB, or provide both; an image-only state is supported.
+The supplied answer order is preserved. Results show the selected answer and its
+probability distribution, using the checkpoint's saved temperature. Per-task
+calibration remains unqualified.
+
+Images use private, temporary attachment files that are removed after each
+request. The selected image remains in memory for another question until it is
+removed, reset, stopped, replaced or cleared after an error. Cancelling a
+decision stops its worker. Chat history is separate. Decider is unavailable in
+Chat, Connections and the HTTP API; function tools and Locate extraction are
+unsupported.
+
+The application bundles `stark-generate`, `stark-score`, `stark-template` and
+`stark-decide`. Build `stark-decide` separately with default features; see the
+[app build instructions](../apps/menu-bar/README.md#build-and-install).
 
 ## Prepare and run
 

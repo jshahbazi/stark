@@ -26,6 +26,11 @@ from .template_compat import NamedTemplateError, is_named_template_list, select_
 from .vision_contract import REPO as EXACT_VISION_REPO
 from .vision_contract import REVISION as EXACT_VISION_REVISION
 
+_DECIDER_FAMILY_ID = "decider-flash-v1.3"
+_DECIDER_REPO = "perplexity-ai/pplx-decider-flash-v1.3"
+_DECIDER_REVISION = "d06fb3f2d97e0a52325a0d463c450cf0338f44fe"
+_DECIDER_WEIGHT_BYTES = 9_079_921_808
+
 MAX_ITEMS = 30
 MAX_CANDIDATES = MAX_ITEMS
 MAX_INVENTORY = 16384
@@ -998,16 +1003,46 @@ def family_catalog(
         return report(family_id or "", "error", "The model catalogue request is invalid.")
 
     native_family = family_id in {NATIVE_FAMILY_ID, FLINT_FAMILY_ID, RIPPLE_FAMILY_ID}
-    family = family_id if native_family else normalize_architecture(family_id)
+    family = family_id if native_family or family_id == _DECIDER_FAMILY_ID else normalize_architecture(family_id)
     definition = next((item for item in support_matrix()["families"] if item["family_id"] == family), None)
-    if definition is None or not any(
+    if family != _DECIDER_FAMILY_ID and (definition is None or not any(
         definition["modes"][mode]["status"] == "conditional" for mode in ("text", "vision-language")
-    ):
+    )):
         return report(family or "", "error", "This model family is not available in Stark.")
     if type(limit) is not int or not 1 <= limit <= MAX_ITEMS:
         return report(family, "error", "The model catalogue request is invalid.")
     if offline or os.environ.get("HF_HUB_OFFLINE", "").lower() in {"1", "true", "yes"}:
         return report(family, "offline", "Connect to the internet to browse models.")
+    if ranking_task not in (None, "general", "coding"):
+        return report(family, "error", "The model catalogue request is invalid.")
+    if family == _DECIDER_FAMILY_ID:
+        name = "Decider Flash v1.3"
+        item = {
+            "id": hashlib.sha256((_DECIDER_REPO + "@" + _DECIDER_REVISION).encode()).hexdigest()[:32],
+            "repo": _DECIDER_REPO,
+            "revision": _DECIDER_REVISION,
+            "name": name,
+            "size_label": "4B",
+            "parameter_count": None,
+            "weight_bytes": _DECIDER_WEIGHT_BYTES,
+            "quantization": "BF16",
+            "artifact_modes": ["decision"],
+            "default_artifact_mode": "decision",
+            "downloadable": True,
+            "model_group": _model_group(_DECIDER_FAMILY_ID, _DECIDER_REPO, name, "BF16", None),
+            "images": True,
+            "max_images": 1,
+        }
+        items = [item][offset : offset + limit]
+        if on_item is not None:
+            for candidate in items:
+                on_item(candidate)
+        return report(
+            family,
+            "ready",
+            "Choose Decider Flash v1.3 to install its Decision-only BF16 artifact.",
+            items,
+        )
     if family == RIPPLE_FAMILY_ID:
         # Both quantizations share a repository but have distinct pinned
         # revisions. Keep their exact artifact identities rather than collapsing
@@ -1030,8 +1065,6 @@ def family_catalog(
         hub = huggingface_hub
     deadline = time.monotonic() + deadline_seconds
     cache = VerdictCache(cache_dir, family, planning=planning) if cache_dir is not None else None
-    if ranking_task not in (None, "general", "coding"):
-        return report(family, "error", "The model catalogue request is invalid.")
     # Guided planning uses reference scores only to choose which bounded source
     # metadata to inspect first. Its own report remains score-free.
     ranking = reference_scores() if not planning or ranking_task is not None else None

@@ -32,6 +32,7 @@ from .streaming import (
     ConversionError,
     TensorOperation,
     UnsupportedConversion,
+    authorize_source_path,
     load_checkpoint,
     read_json,
     read_regular_bytes,
@@ -178,7 +179,7 @@ def prepare(source, output, *, revision=SOURCE_REVISION):
     if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
         raise ConversionError("Decider source revision must be immutable")
     plan, config, decision, joint = build_decider_plan(source)
-    payloads = {name: read_regular_bytes(source / name) for name in _METADATA_FILES}
+    payloads = {name: read_regular_bytes(authorize_source_path(source, source / name)) for name in _METADATA_FILES}
     tokenizer = Tokenizer.from_str(payloads["tokenizer.json"].decode("utf-8"))
     validate_decision_metadata(decision, joint, tokenizer)
     marker, separator = (tokenizer.token_to_id(joint[name]) for name in ("marker", "separator"))
@@ -273,6 +274,8 @@ def prepare(source, output, *, revision=SOURCE_REVISION):
                     "schema_version": 1,
                     "source": provenance,
                     "output_sha256": _hash(staging / "model.safetensors"),
+                    "output_bytes": (staging / "model.safetensors").stat().st_size,
+                    "config_sha256": _hash(staging / "config.json"),
                     "source_mtp": "config declaration without predictor tensors; non-generative checkpoint",
                     "prefix_reuse_blocker": (
                         "Full-attention states depend on future question tokens; causal prefix reuse is invalid."
