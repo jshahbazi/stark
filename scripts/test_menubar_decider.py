@@ -10,6 +10,21 @@ import unittest
 import test_menubar_controller as controller
 
 DECIDER_CASES = r'''
+        case "decider-local-upstream-link":
+            var display: [String:Any] = ["schema_version":1, "group_id":"installed:local-decider",
+                "group_name":"Local Decider", "upstream_repo":"perplexity-ai/pplx-decider-flash-v1.3"]
+            guard let parsed = InstalledModelDisplay(display), parsed.groupID == "installed:local-decider",
+                  parsed.groupName == "Local Decider", parsed.sourceRevision == nil, parsed.familyID == nil,
+                  parsed.repositoryURL?.absoluteString == "https://huggingface.co/perplexity-ai/pplx-decider-flash-v1.3"
+            else { return false }
+            for invalid: Any in ["https://evil.invalid/owner/model", "../owner/model", "owner/model/resolve",
+                                 "owner/model?query", "owner/model#fragment", "owner/\nmodel", "owner/model\n", 123] {
+                display["upstream_repo"] = invalid
+                guard InstalledModelDisplay(display) == nil else { return false }
+            }
+            display["upstream_repo"] = "perplexity-ai/pplx-decider-flash-v1.3"
+            display["group_id"] = "repo:example/bound-model"
+            return InstalledModelDisplay(display)?.repositoryURL?.absoluteString == "https://huggingface.co/example/bound-model"
         case "decider-catalog-mode-and-family":
             var family = (familyRegistry()["families"] as! [[String:Any]])[0]
             family["family_id"] = "decider-flash-v1.3"; family["name"] = "Decider Flash v1.3"; family["model_kind"] = "decision"
@@ -162,6 +177,9 @@ class DeciderControllerTests(unittest.TestCase):
 
     def test_decider_capabilities_do_not_enable_generic_decision_images(self):
         self.exercise("decider-ready-capabilities")
+
+    def test_local_decider_upstream_link_does_not_promote_grouping_or_qualification(self):
+        self.exercise("decider-local-upstream-link")
 
     def test_decision_catalog_family_is_visible_and_keeps_its_mode(self):
         self.exercise("decider-catalog-mode-and-family")

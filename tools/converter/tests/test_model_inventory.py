@@ -235,6 +235,7 @@ def test_native_text_config_overrides_stale_image_registry_mode(tmp_path):
 
 def test_prepared_decider_has_typed_decision_only_image_display(tmp_path):
     result = inventory.model_display(decider_artifact(tmp_path))
+    assert result["upstream_repo"] == "perplexity-ai/pplx-decider-flash-v1.3"
     assert result["artifact_mode"] == "decision"
     assert result["decision_only"] is True
     assert result["supported_modes"] == ["decision"]
@@ -261,6 +262,7 @@ def test_decider_display_falls_back_when_provenance_binding_is_invalid(tmp_path,
     assert result["artifact_mode"] == "decision"
     assert result["group_id"] == "installed:saved-model"
     assert result["source_revision"] is None
+    assert result["upstream_repo"] == "perplexity-ai/pplx-decider-flash-v1.3"
 
 
 def test_generic_qwen35_remains_a_text_artifact(tmp_path):

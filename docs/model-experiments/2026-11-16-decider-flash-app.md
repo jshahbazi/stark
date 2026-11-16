@@ -168,3 +168,19 @@ transfer Decider qualification to it or claim its catalogue contains Decider.
 The Decider capability and catalogue results above remain bound to the recorded
 Decider builds. PR #169 now contains this branch's implementation and evidence;
 main/release adoption remains separate.
+
+## Catalogue/link follow-up: 20261116-DF13APP-03
+
+Registered before the new build and UI checks. The user reported the missing
+Hugging Face link and catalogue entry in the independently installed app from
+another branch. Restore this branch's signed app and verify the actual row and
+catalogue, rather than transferring UI claims to the other build.
+
+The prepared artifact has an older receipt that intentionally does not satisfy
+the newer display-provenance binding. Add a separate optional upstream-repository
+link for the typed Decider family; keep its unbound revision/group identity and
+qualification unchanged. Do not modify the model or its historical receipt.
+Acceptance: the installed row visibly links to the official Hugging Face repo,
+Model Catalog visibly includes the separate Decider family and its pinned BF16
+entry, and the installed bundle matches the newly signed build. This is a
+display/installation check; no numerical or performance promotion. Pending.

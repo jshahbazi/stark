@@ -219,13 +219,12 @@ struct InstalledModelDisplay: Equatable {
     let quantization: String?
     let weightBytes: Int64?
     let sourceRevision: String?
+    let upstreamRepo: String?
     let toolSupport: ModelToolSupport
 
     var repositoryURL: URL? {
-        guard groupID.hasPrefix("repo:") else { return nil }
-        let repository = String(groupID.dropFirst(5))
-        guard repository.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$",
-                               options: .regularExpression) != nil else { return nil }
+        let grouped = groupID.hasPrefix("repo:") ? String(groupID.dropFirst(5)) : nil
+        guard let repository = grouped.flatMap({ Self.validRepository($0) ? $0 : nil }) ?? upstreamRepo else { return nil }
         return URL(string: "https://huggingface.co/" + repository)
     }
 
@@ -233,7 +232,7 @@ struct InstalledModelDisplay: Equatable {
         guard let value = value as? [String: Any], SupportMetadata.schemaOne(value),
               let groupID = Self.text(value["group_id"], maximum: 512),
               let groupName = Self.text(value["group_name"], maximum: 256) else { return nil }
-        for key in ["family_id", "quantization", "source_revision"] {
+        for key in ["family_id", "quantization", "source_revision", "upstream_repo"] {
             guard value[key] == nil || value[key] is NSNull || value[key] is String else { return nil }
         }
         let familyID = value["family_id"] as? String
@@ -242,6 +241,8 @@ struct InstalledModelDisplay: Equatable {
         if let quantization = quantization, Self.text(quantization, maximum: 64) == nil { return nil }
         let revision = value["source_revision"] as? String
         if let revision = revision, revision.utf8.count != 40 || !revision.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) { return nil }
+        let upstream = value["upstream_repo"] as? String
+        if let upstream, !Self.validRepository(upstream) { return nil }
         var bytes: Int64?
         if let raw = value["weight_bytes"], !(raw is NSNull) {
             guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
@@ -250,7 +251,13 @@ struct InstalledModelDisplay: Equatable {
         }
         self.groupID = groupID; self.groupName = groupName; self.familyID = familyID
         self.quantization = quantization; weightBytes = bytes; sourceRevision = revision
+        upstreamRepo = upstream
         toolSupport = ModelToolSupport(value["tool_support"])
+    }
+
+    private static func validRepository(_ value: String) -> Bool {
+        value.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$",
+                    options: .regularExpression) == value.startIndex..<value.endIndex
     }
 
     private static func text(_ value: Any?, maximum: Int) -> String? {

@@ -440,6 +440,9 @@ def model_display(model):
                 decision_only=True,
                 supported_modes=["decision"],
                 supports_images=True,
+                # An upstream link describes the model family; artifact-bound
+                # revision/grouping still requires the complete receipt below.
+                upstream_repo=_DECIDER_REPO,
                 tool_support=tool_support_for(None),
             )
             try:
