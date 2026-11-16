@@ -201,6 +201,19 @@ The other eight upstream shader files retain their pinned source bytes. `stark_d
 
 `stark_packed_rows.metal` extends the pinned Q4 packed-dot expression to independent short token rows while sharing raw weight loads. `stark_gdn_projection_rows.metal` adds the guarded verifier projection/convolution/scatter entry points. They preserve the 16-lane reduction, BF16 projection boundary and runtime convolution tap order, retain the original window, write its alternate, and capture projected inputs for rollback. Ordinary decode and unsupported layouts keep their existing routes. These original Stark extensions retain Apache-2.0 licensing; `quant.metal` is unchanged by this addition. The host verifier also batches up to four sparse queries through the existing QSA split kernels, using independent query scratch and per-query visibility; dense queries retain ordinary decode. Source-bound qualification is in the [MTP optimization study](../../docs/benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md).
 
+`stark_decode_rows.metal` also shares packed weight loads across two through
+four independent inputs for group-64 Q4/BF16 with even output width and
+Q8/BF16 or Q8/F32. Q4 calls the existing packed helper with its 16-lane
+reduction; Q8 retains `GEMV_Q8_BODY`'s dot expression, loop order and SIMD32
+reduction. Each input keeps its own F32 accumulation and original output
+precision. Single rows and other formats retain the row-axis implementation.
+These original Apache-2.0 Stark extensions derive from the unchanged pinned
+`quant.metal` expressions, not llama.cpp source. The sealed experimental patch
+and performance studies remain in the
+[verifier report](../../docs/benchmarks/2026-11-15-lily-small-row-verifier.md);
+default-dispatch adoption and final-build controls are recorded in
+[20261116-LILY-REUSE-01](../../docs/model-experiments/2026-11-16-lily-projection-reuse.md).
+
 Stark adds `src/kernels/metal/stark_finite_readout.metal`, an original integer-bit validation kernel. After an ordinary GPU draw, it marks the output ID invalid if any F32 logit has exponent 255 (NaN or infinity). Stark's adapter rejects that sentinel before accepting a decision. This check covers both prefill and decode through the shared sampling helper and does not change the upstream model arithmetic. `src/kernels/metal/stark_gdn_step_reference.metal` is a test-only copy of the original gated-output wrapper, with a distinct entry-point name; it retains the shared-memory round trip for differential controls and is not included in production shader sources. Kernel controls adapted from upstream tests identify the pinned revision in their source headers.
 
 Host patches also sanitize framework errors and retain submitted command memory until GPU completion feedback arrives after a fault. Missing completion feedback keeps fault cleanup blocked; it cannot safely release live GPU memory. Unused capture, profiling and standalone vision helpers are removed from the extracted Rust modules.

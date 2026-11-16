@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sys
 from argparse import Namespace
 
+import benchmark_lily_release_baseline as baseline
 import benchmark_qwen38_mtp as benchmark
 import pytest
 from benchmark_qwen38_mtp import run
@@ -159,6 +162,31 @@ def test_same_worker_pairs_routes_and_emits_private_aggregates(tmp_path, top_k):
     assert "[31, 32, 33]" not in serialized
     assert json.loads(args.output.read_text()) == report
     assert args.output.stat().st_mode & 0o777 == 0o600
+
+
+def test_ram_corpus_override_reaches_worker_without_persisting_text(tmp_path):
+    args = make_args(tmp_path)
+    sentinel = b"RAM-only corpus sentinel 4ddcaba7"
+    args.corpus.unlink()
+    worker = FakeWorker(args.worker, args.model, 0, env={})
+
+    report = run(
+        args,
+        worker_factory=lambda *a, **kw: worker,
+        corpus_bytes=sentinel,
+    )
+
+    tokenization = next(
+        request for request in worker.requests if request["operation"] == "tokenize"
+    )
+    assert tokenization["text"].encode() == sentinel
+    assert worker.closed
+    assert report["corpus_sha256"] == hashlib.sha256(sentinel).hexdigest()
+    persisted = args.output.read_bytes()
+    assert sentinel not in persisted
+    assert b"generated_token_ids" not in persisted
+    assert b"[31, 32, 33]" not in persisted
+    assert json.loads(persisted) == report
 
 
 def test_rejects_worker_without_mtp_before_tokenization(tmp_path):
@@ -370,3 +398,112 @@ def test_response_cannot_switch_between_known_exact_verifiers(tmp_path):
     with pytest.raises(ValueError, match="mtp_verifier_acknowledgement_mismatch"):
         run(args, worker_factory=lambda *a, **kw: worker)
     assert worker.closed and not args.output.exists()
+
+
+def configure_baseline_runner(tmp_path, monkeypatch, *, corpus_name="corpus.txt"):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    worker = tmp_path / "stark-generate"
+    worker.write_bytes(b"synthetic non-executable worker")
+    corpus = tmp_path / corpus_name
+    sentinel = b"private benchmark corpus sentinel a69a7bf1"
+    corpus.write_bytes(sentinel)
+    output = tmp_path / "output"
+    monkeypatch.setattr(sys, "argv", [
+        "benchmark_lily_release_baseline.py",
+        "--model", str(model), "--worker", str(worker),
+        "--corpus", str(corpus), "--output-dir", str(output),
+    ])
+    monkeypatch.setattr(baseline.os, "umask", lambda _value: 0o077)
+    monkeypatch.setattr(baseline.os, "environ", dict(baseline.os.environ))
+
+    def metadata(command, **_kwargs):
+        if command[0] == "git":
+            return "synthetic-source-revision\n"
+        if command[0] == "sysctl":
+            return "FixtureHost\n1024\n4\nFixtureCPU\n"
+        if command[0] == "sw_vers":
+            return "ProductVersion: FixtureOS\n"
+        raise AssertionError("unexpected metadata command")
+
+    monkeypatch.setattr(baseline.subprocess, "check_output", metadata)
+
+    class NeverNative:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("privacy control must not start a native worker")
+
+    monkeypatch.setattr(baseline, "Worker", NeverNative)
+    return corpus, sentinel, output
+
+
+def baseline_aggregate_report():
+    return {
+        "passed": True,
+        "requests": [
+            {
+                "route": route, "sampled_tokens": 4, "output_tokens": 3,
+                "decode_seconds": 0.5, "wall_seconds": 1.5,
+                "prefill_seconds": 1.0, "host_screen": {"eligible": False},
+            }
+            for route in ("off", "on", "off", "on")
+        ],
+        "route_summary": {
+            route: {"pooled_decode_tokens_per_second": 6.0}
+            for route in ("off", "on")
+        },
+    }
+
+
+@pytest.mark.parametrize("run_error", [False, True])
+def test_corpus_snapshot_stays_in_ram_and_errors_omit_content(
+    tmp_path, monkeypatch, capsys, run_error
+):
+    corpus, sentinel, output = configure_baseline_runner(tmp_path, monkeypatch)
+    observed = []
+
+    def paired_run(options, **kwargs):
+        observed.append(kwargs["corpus_bytes"])
+        if run_error:
+            raise RuntimeError(sentinel.decode())
+        if len(observed) == 1:
+            # Later cells must use the same RAM snapshot after its caller-owned
+            # source disappears. This never touches a user's corpus.
+            corpus.unlink()
+        report = baseline_aggregate_report()
+        options.output.write_text(json.dumps(report))
+        return report
+
+    monkeypatch.setattr(baseline.paired, "run", paired_run)
+    assert baseline.main() == int(run_error)
+    assert len(observed) == (1 if run_error else 8)
+    assert all(value == sentinel for value in observed)
+    manifest = json.loads((output / "identity.json").read_text())
+    assert manifest["corpus_sha256"] == hashlib.sha256(sentinel).hexdigest()
+    assert manifest["completed"] is (not run_error)
+    if run_error:
+        assert manifest["cells"][0]["failure_type"] == "RuntimeError"
+    artifacts = [path for path in output.rglob("*") if path.is_file()]
+    assert artifacts
+    assert not (output / "frozen-corpus.rs").exists()
+    assert all(sentinel not in path.read_bytes() for path in artifacts)
+    captured = capsys.readouterr()
+    assert sentinel.decode() not in captured.out + captured.err
+
+
+def test_startup_failure_emits_only_type_without_private_path(
+    tmp_path, monkeypatch, capsys
+):
+    corpus, _, output = configure_baseline_runner(
+        tmp_path, monkeypatch, corpus_name="private-startup-path-marker.txt"
+    )
+    corpus.unlink()
+
+    assert baseline.cli() == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "stage": "failed", "failure_type": "FileNotFoundError",
+    }
+    assert captured.err == ""
+    assert corpus.name not in captured.out
+    assert not [path for path in output.rglob("*") if path.is_file()]

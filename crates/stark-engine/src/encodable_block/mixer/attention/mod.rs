@@ -43,6 +43,7 @@ pub use state::{ATTENTION_SUFFIX_CAPACITY, AttentionState, KVCacheView};
 pub mod rope;
 
 pub struct Attention<B: Backend> {
+    is_causal: bool,
     sparse_page_bytes: Option<usize>,
     image_attention_policy: ImageAttentionPolicy,
     input_dim: u32,
@@ -288,6 +289,7 @@ impl<B: Backend> Attention<B> {
 
         Ok((
             Self {
+                is_causal,
                 sparse_page_bytes: context
                     .device_capabilities()
                     .contains(DeviceCapabilities::SPARSE_BUFFERS)

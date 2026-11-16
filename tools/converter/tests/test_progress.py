@@ -400,26 +400,33 @@ def test_snapshot_resume_reset_does_not_double_count_discarded_partial_bytes():
     assert_private(events)
 
 
-def test_completed_files_progress_has_fixed_total_and_separate_network_bytes():
-    events, completed = [], [25]
+def test_native_progress_estimates_transfers_above_cached_baseline_without_double_counting():
+    events, completed = [], [250]
     capture = SnapshotDownloadProgress(
-        ProgressReporter(events.append, interval=0), 100, completed_files=lambda: completed[0]
+        ProgressReporter(events.append, interval=0), 1000, completed_files=lambda: completed[0]
     )
     bars = capture.bar_class()
     capture.close()
-    assert events[-1]["completed_bytes"] == 25 and events[-1]["total_bytes"] == 100
+    assert events[-1]["completed_bytes"] == 250 and events[-1]["total_bytes"] == 1000
     with bars(name=capture.BAR_NAME) as reconstruction:
-        reconstruction.update(70)  # Buffered/partial file is not complete.
-    assert events[-1]["completed_bytes"] == 25
-    with bars(name=capture.TRANSFER_BAR_NAME) as transfer:
+        reconstruction.update(700)  # Partial allocations do not establish progress.
+    assert events[-1]["completed_bytes"] == 250
+    with bars(name=capture.TRANSFER_BAR_NAME, initial=250) as transfer:
+        transfer.update(100)
+        assert events[-1]["completed_bytes"] == 350
+        assert events[-1]["transferred_bytes"] == 100
+        completed[0] = 500
+        capture.close()
+        assert events[-1]["completed_bytes"] == 500
         transfer.update(200)
-    assert events[-1]["transferred_bytes"] == 200
-    assert events[-1]["completed_bytes"] == 25
-    completed[0] = 75
-    with bars(total=3) as files:
-        files.update(1)  # Hub completed-file callback also covers cache hits.
-    assert events[-1]["completed_bytes"] == 75
-    assert events[-1]["total_bytes"] == 100
+        assert events[-1]["completed_bytes"] == 550  # Do not add current completed files twice.
+        transfer.update(5000)  # Retransfers/overhead cannot claim completion.
+    assert events[-1]["completed_bytes"] == 992
+    assert events[-1]["total_bytes"] == 1000 and events[-1]["state"] == "running"
+    completed[0] = 1000
+    capture.close()
+    assert events[-1]["completed_bytes"] == 1000
+    assert_private(events)
 
 
 def test_locked_hub_snapshot_routes_live_bytes_to_private_progress(tmp_path, monkeypatch, capsys):

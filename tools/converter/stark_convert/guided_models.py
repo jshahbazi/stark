@@ -930,10 +930,7 @@ def recommendation_report(
         eligible, task, preference, lambda recipe: _fit_tier(recipe, host)
     )
     leaderboard = load_snapshot() if leaderboard is None else leaderboard
-    ranking_task = (
-        getattr(leaderboard, "ranking_task", guide_task) if guide_task in {"general", "coding"} else guide_task
-    )
-    speed_limits = speed_policy(ranking_task, guide_preference, host.get("physical_memory_bytes"))
+    speed_limits = speed_policy(guide_task, guide_preference, host.get("physical_memory_bytes"))
     eligible, bucket, records, leaderboard_used = leaderboard.rank(
         eligible, guide_task, guide_preference, host.get("physical_memory_bytes"), benchmarks.model_id
     )
@@ -959,12 +956,9 @@ def recommendation_report(
         )
         if leaderboard_used:
             reason = (
-                "Selected using the cached " + leaderboard.source_name
+                "Selected using the cached whatmodel.sh "
+                + ("Coding" if guide_task == "coding" else "General Work")
                 + " leaderboard among models admitted by Stark's installed RAM, GPU and disk checks. "
-                + (
-                    "General Work uses coding as a proxy. "
-                    if guide_task == "general" and ranking_task == "coding" else ""
-                )
                 + (
                     "This model has a published parent-model score; this Stark artifact has not been benchmarked."
                     if recipe.id in leaderboard_used
@@ -1049,7 +1043,7 @@ def recommendation_report(
         )
     elif items and leaderboard_used:
         message += (
-            f" Quality uses the offline {leaderboard.source_name} snapshot captured {leaderboard.captured}; "
+            f" Quality uses the offline whatmodel.sh {guide_task} snapshot captured {leaderboard.captured}; "
             "missing scores remain unknown."
         )
     elif items and task == "code" and preference not in {"speed", "answers"}:
@@ -1089,7 +1083,7 @@ def recommendation_report(
         "speed_policy": speed_limits,
         "leaderboard_ranking": {
             "captured": leaderboard.captured,
-            "task": ranking_task,
+            "task": guide_task,
             "ram_gb": bucket["ram_gb"] if bucket else None,
             "applied": bool(leaderboard_used),
             "source": bucket["url"] if bucket else None,

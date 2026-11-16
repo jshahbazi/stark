@@ -240,6 +240,7 @@ def verify(
                 "libexec/stark-score",
                 "libexec/stark-generate",
                 "libexec/stark-template",
+                "libexec/stark-decide",
                 "libexec/python/bin/python3.13",
             }
             for path in paths:

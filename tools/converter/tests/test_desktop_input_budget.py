@@ -44,6 +44,7 @@ def large_command():
 
 class RecordingDesktop:
     output_failed = False
+    request_id = staticmethod(desktop_module.Desktop.request_id)
 
     def __init__(self):
         self.commands = []

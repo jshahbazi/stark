@@ -19,6 +19,8 @@ mod official_gate_tests;
 const DECODE_ROWS_SOURCE: &str = concat!(
     include_str!("metal/quant.metal"),
     "\n",
+    include_str!("metal/stark_packed_rows.metal"),
+    "\n",
     include_str!("metal/stark_decode_rows.metal"),
 );
 const GDN_ROWS_SOURCE: &str = concat!(
@@ -197,7 +199,9 @@ pub fn gemv_quant(
 
 /// One dispatch for several decode projections. Each row uses the ordinary
 /// GEMV body, including its raw-code affine arithmetic and lane reduction.
-/// The row axis changes addressing only; it never materializes BF16 weights.
+/// Group-64 Q4/BF16 row pairs and Q8 projections share packed weight loads
+/// across independent inputs; other layouts retain the row-axis dispatch.
+/// Neither route materializes BF16 weights.
 pub fn gemv_quant_rows_decode_exact(
     ctx: &MetalContext,
     pass: &ComputePass<'_>,
@@ -216,6 +220,16 @@ pub fn gemv_quant_rows_decode_exact(
         "decode row projection geometry"
     );
     ensure!(y.numel() == m * n, "decode row output geometry");
+    // Share weights only for the qualified group-64 formats. Single rows,
+    // Q4/F32, odd Q4 widths and other group sizes retain the ordinary route.
+    if m > 1
+        && w.group_size == 64
+        && (w.bits == 8
+            || (w.bits == 4 && y.dtype() == DType::BF16 && n.is_multiple_of(2)))
+        && matches!(y.dtype(), DType::BF16 | DType::F32)
+    {
+        return gemv_quant_rows_reuse(ctx, pass, w, x, y);
+    }
     let requested_rows =
         if w.bits == 4 && y.dtype() == DType::BF16 { Q4_GEMV_ROWS } else { 1 };
     let packed_rows = if n.is_multiple_of(requested_rows) { requested_rows } else { 1 };
@@ -242,6 +256,74 @@ pub fn gemv_quant_rows_decode_exact(
         Grid::Threadgroups { groups: (m, n / packed_rows, 1), threadgroup: (32, 1, 1) },
     )
 }
+
+/// Reuse packed weights across independent verifier inputs.
+/// The Q4/BF16 path keeps the stock two-output-channel, 16-lane order; Q8
+/// keeps the ordinary SIMD32 reduction and requested output precision.
+fn gemv_quant_rows_reuse(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    y: &Tensor,
+) -> Result<()> {
+    let (n, k) = check_quant(w)?;
+    ensure!(
+        x.dtype() == DType::BF16 && x.shape().len() == 2,
+        "projection reuse needs BF16 rows"
+    );
+    let m = x.shape()[0];
+    ensure!(
+        w.group_size == 64
+            && (2..=4).contains(&m)
+            && x.shape()[1] == k
+            && y.numel() == m * n,
+        "projection reuse geometry"
+    );
+    let family = match (w.bits, y.dtype()) {
+        (4, DType::BF16) if n.is_multiple_of(2) => "q4_bf16",
+        (8, DType::BF16) => "q8_bf16",
+        (8, DType::F32) => "q8_f32",
+        _ => anyhow::bail!("unsupported projection reuse policy"),
+    };
+    let name = match (family, m) {
+        ("q4_bf16", 2) => "stark_projection_reuse_q4_bf16_m2",
+        ("q4_bf16", 3) => "stark_projection_reuse_q4_bf16_m3",
+        ("q4_bf16", 4) => "stark_projection_reuse_q4_bf16_m4",
+        ("q8_bf16", 2) => "stark_projection_reuse_q8_bf16_m2",
+        ("q8_bf16", 3) => "stark_projection_reuse_q8_bf16_m3",
+        ("q8_bf16", 4) => "stark_projection_reuse_q8_bf16_m4",
+        ("q8_f32", 2) => "stark_projection_reuse_q8_f32_m2",
+        ("q8_f32", 3) => "stark_projection_reuse_q8_f32_m3",
+        ("q8_f32", 4) => "stark_projection_reuse_q8_f32_m4",
+        _ => unreachable!(),
+    };
+    // Preserve generic Q4/Q8 PlatformDefault arithmetic policy.
+    let pipeline = ctx.pipeline(name, DECODE_ROWS_SOURCE, MslVersion::V3_1)?;
+    ensure!(
+        pipeline.thread_execution_width() == 32,
+        "projection reuse requires SIMD32"
+    );
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            y.binding(),
+        ],
+        &[&u32_bytes(k), &u32_bytes(w.group_size), &u32_bytes(n)],
+        Grid::Threadgroups {
+            groups: (if w.bits == 4 { n / 2 } else { n }, 1, 1),
+            threadgroup: (32, 1, 1),
+        },
+    )
+}
+
+#[cfg(test)]
+#[path = "stark_projection_reuse_tests.rs"]
+mod stark_projection_reuse_tests;
 
 #[cfg(test)]
 #[path = "quant_decode_rows_tests.rs"]
@@ -812,10 +894,10 @@ pub fn gemv_quant_logits_rows_decode_exact(
     Ok(())
 }
 
-/// Q8 verifier implementation and its row-axis reference control. Both arms
-/// retain the ordinary native Q8
-/// arithmetic and official BF16-valued F32 readout. The fused arm additionally
-/// reuses packed weight loads across rows and folds the value-rounding store.
+/// Q8 verifier implementation and its separate-rounding reference control.
+/// Both arms retain ordinary native Q8 arithmetic and official BF16-valued
+/// F32 readout. Group-64 generic rows also share packed weight loads; the
+/// fused arm folds the value-rounding store into the projection dispatch.
 /// Production selects fused reuse for multiple verifier rows; the unfused
 /// alternative supports explicit component comparisons.
 fn gemv_quant_logits_q8_rows_candidate(

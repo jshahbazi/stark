@@ -1,6 +1,6 @@
 """Reference scores that order a family catalogue.
 
-Scores come from the bundled llmbench coding snapshot and describe parent models.
+Scores come from the bundled whatmodel.sh snapshot and describe parent models.
 A quantized export may show its parent's score for ordering only; no export is
 benchmarked here and a score never grants compatibility or a download.
 """
@@ -76,7 +76,7 @@ class ReferenceScores:
             "model_id": parent,
             "relationship": relationship,
             **{task: rows[task]["score"] if task in rows else None for task in TASKS},
-            "source_url": self.snapshot.source_url(row),
+            "source_url": "https://whatmodel.sh/model/" + row["id"],
             "captured": self.captured,
         }
 
@@ -96,8 +96,6 @@ class ReferenceScores:
         if not rows:
             return None
         selected_task = task
-        if self.snapshot.source_name == "llmbench.site coding" and task == "general":
-            task = "coding"
         if task is None:
             task = "general" if "general" in rows else "coding"
         if task not in TASKS or task not in rows:

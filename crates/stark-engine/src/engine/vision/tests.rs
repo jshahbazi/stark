@@ -119,6 +119,31 @@ fn native_vision_prepared_image_exposes_actual_grid_and_token_count() {
 }
 
 #[stark_test]
+fn native_vision_public_image_wrapper_keeps_4096_patch_admission() {
+    // The shared tower now accepts Decider's larger processor grid. The
+    // existing public vision request must retain its independent admission.
+    let limits = PreprocessLimits {
+        processor_max_pixels: 1_638_400,
+        max_processed_pixels: 1_638_400,
+        max_encoder_patches: 6400,
+        ..PreprocessLimits::default()
+    };
+    for (width, height, patches, admitted) in
+        [(1024, 1024, 4096, true), (1024, 1056, 4224, false), (1280, 1280, 6400, false)]
+    {
+        let source =
+            RgbImage::try_new(width, height, vec![128; width as usize * height as usize * 3], &limits).unwrap();
+        let prepared = prepare_patches(&source, &limits).unwrap();
+        assert_eq!(prepared.grid[1] * prepared.grid[2], patches);
+        let result = PreparedVisionImage::from_prepared(Arc::new(()), prepared);
+        assert_eq!(result.is_ok(), admitted);
+        if let Ok(image) = result {
+            assert_eq!(image.image_token_count(), 1024);
+        }
+    }
+}
+
+#[stark_test]
 fn native_vision_prompt_expands_one_placeholder_and_reserves_output_room() {
     let template = || vec![100, 248053, 248056, 248054, 101].into_boxed_slice();
     let (expanded, start) = expand_image_placeholder(&template(), 64, 69, 248056).unwrap();

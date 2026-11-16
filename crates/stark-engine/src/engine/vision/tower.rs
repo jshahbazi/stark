@@ -68,7 +68,7 @@ impl VisionTowerConfig {
         self.patch_width()?;
         self.merged_width()?;
         for width in [self.hidden_size, self.intermediate_size, self.out_hidden_size] {
-            checked_elements(4096, width)?;
+            checked_elements(6400, width)?;
         }
         self.hidden_size.checked_mul(3).ok_or(InvalidInput("vision QKV width overflow"))?;
         Ok(())
@@ -169,7 +169,9 @@ fn checked_rows(
     }
     height
         .checked_mul(width)
-        .filter(|&rows| rows <= 4096)
+        // Decider's 1.6 MP processor produces up to 6400 patches. Ordinary
+        // vision callers retain their separate 4096-patch request admission.
+        .filter(|&rows| rows <= 6400)
         .ok_or(InvalidInput("native vision grid exceeds patch budget"))
 }
 
@@ -473,7 +475,7 @@ impl<B: Backend> VisionEagerAttention<B> {
         let head_elements = rows * self.head_dim;
         let head_bytes = head_elements as usize * size_of::<bf16>();
         // Sequential head dispatches can reuse private scratch after each
-        // observer has encoded its readback. This bounds storage at 4096 patches.
+        // observer has encoded its readback. The caller admits the patch count.
         let mut full_precision_scores = commands.allocate_scratch_for_shape(&[rows, rows], DataType::F32)?;
         let mut scores = commands.allocate_scratch_for_shape(&[rows, rows], DataType::BF16)?;
         let mut full_precision_head = commands.allocate_scratch_for_shape(&[rows, self.head_dim], DataType::F32)?;
@@ -632,7 +634,7 @@ impl<B: Backend> VisionTower<B> {
         })
     }
 
-    pub(super) fn workspace_bytes(
+    pub(crate) fn workspace_bytes(
         &self,
         grid: [u32; 3],
     ) -> Option<usize> {
@@ -956,7 +958,12 @@ mod tests {
         assert!(spatial_positions([2, 4, 6], 2).is_err());
         assert!(spatial_positions([1, 3, 6], 2).is_err());
         assert!(spatial_positions([1, u32::MAX, 2], 1).is_err());
-        assert!(spatial_positions([1, 66, 64], 2).is_err());
+        assert_eq!(spatial_positions([1, 66, 64], 2).unwrap().len(), 4224);
+        let decider_maximum = spatial_positions([1, 80, 80], 2).unwrap();
+        assert_eq!(decider_maximum.len(), 6400);
+        assert_eq!(decider_maximum.last(), Some(&[79, 79]));
+        assert!(spatial_positions([1, 2, 3202], 2).is_err());
+        assert!(spatial_positions([1, 80, 82], 2).is_err());
     }
 
     #[stark_test]
