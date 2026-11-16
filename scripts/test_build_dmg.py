@@ -26,6 +26,12 @@ SUBMISSION = "12345678-1234-1234-1234-123456789abc"
 
 
 class DMGTests(unittest.TestCase):
+    def test_independent_payload_copies_are_rejected(self):
+        launcher = self.root / "Independent.app"
+        shutil.copytree(self.app, launcher / "Contents/Helpers/Stark.app")
+        with self.assertRaisesRegex(dmg.signing.SigningError, "dmg_payload_not_shared"):
+            dmg.verify_shared_payload(self.app, launcher)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -133,9 +139,15 @@ class DMGTests(unittest.TestCase):
             self.assertIn("-nobrowse", arguments)
             self.assertIn("-noautoopen", arguments)
             destination = Path(arguments[arguments.index("-mountpoint") + 1])
-            shutil.copytree(self.image_app, destination / "Stark.app")
+            shutil.copytree(
+                self.image_app, destination / "Stark.app", copy_function=os.link
+            )
             if self.image_installer is not None:
-                shutil.copytree(self.image_installer, destination / dmg.INSTALLER_NAME)
+                shutil.copytree(
+                    self.image_installer,
+                    destination / dmg.INSTALLER_NAME,
+                    copy_function=os.link,
+                )
             (destination / "Applications").symlink_to("/Applications")
             if self.tamper:
                 (destination / "Stark.app/Contents/MacOS/Stark").write_bytes(b"changed")
@@ -155,6 +167,7 @@ class DMGTests(unittest.TestCase):
     def test_success_preserves_application_and_verifies_before_publication(self):
         before = self.archive.read_bytes()
         receipt = self.build()
+        self.assertEqual(receipt["payload_storage"], "shared_hardlinks")
         self.assertEqual(self.archive.read_bytes(), before)
         self.assertEqual(receipt["input_archive_sha256"], self.digest)
         self.assertEqual(
@@ -335,7 +348,7 @@ class DMGTests(unittest.TestCase):
 
     def test_receiving_verification_never_imports_signing_credentials(self):
         receipt = self.build()
-        self.image_app = self.app
+        self.image_app = self.installer_snapshot / "Contents/Helpers/Stark.app"
         self.image_installer = self.installer_snapshot
         image = self.options.output_dir / "stark-0.3.0-aarch64-apple-darwin.dmg"
         receipt_path = image.with_suffix(".dmg.notarization.json")
@@ -359,6 +372,12 @@ class DMGTests(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["dmg_sha256"], receipt["dmg_sha256"])
         self.assertIn("installer_gatekeeper", result["checks"])
+        # Historical receipts describe two independent payload copies.
+        receipt.pop("payload_storage")
+        receipt_path.write_text(json.dumps(receipt))
+        self.image_app = self.app
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(dmg.verify_download(options)["status"], "passed")
         image.write_bytes(b"different downloaded bytes")
         with self.assertRaisesRegex(
             dmg.signing.SigningError, "dmg_download_hash_mismatch"
@@ -368,6 +387,139 @@ class DMGTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "Xcode Swift compiler required")
 class NativeInstallerTests(unittest.TestCase):
+    def test_hfs_image_shares_payload_and_foundation_copies_survive_unmount(self):
+        with tempfile.TemporaryDirectory(prefix="stark shared dmg ") as temporary:
+            root = Path(temporary)
+            staging = root / "image"
+            app = staging / "Stark.app"
+            (app / "Contents/MacOS").mkdir(parents=True)
+            shutil.copy("/bin/echo", app / "Contents/MacOS/Stark")
+            (app / "Contents/Info.plist").write_bytes(
+                plistlib.dumps(
+                    {
+                        "CFBundleIdentifier": "com.starkengine.test-payload",
+                        "CFBundleExecutable": "Stark",
+                        "CFBundlePackageType": "APPL",
+                    }
+                )
+            )
+            (app / "Contents/Resources").mkdir()
+            payload = app / "Contents/Resources/payload"
+            payload.write_bytes(os.urandom(2 * 1024 * 1024))
+            subprocess.run(
+                ["codesign", "--force", "--sign", "-", str(app)],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+            launcher = staging / dmg.INSTALLER_NAME
+            shutil.copytree(
+                app, launcher / "Contents/Helpers/Stark.app", copy_function=os.link
+            )
+            (launcher / "Contents/MacOS").mkdir()
+            shutil.copy("/bin/echo", launcher / "Contents/MacOS/InstallStark")
+            (launcher / "Contents/Info.plist").write_bytes(
+                plistlib.dumps(
+                    {
+                        "CFBundleIdentifier": "com.starkengine.test-installer",
+                        "CFBundleExecutable": "InstallStark",
+                        "CFBundlePackageType": "APPL",
+                    }
+                )
+            )
+            subprocess.run(
+                ["codesign", "--force", "--sign", "-", str(launcher)],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+            image = root / "shared.dmg"
+            subprocess.run(
+                [
+                    "hdiutil",
+                    "create",
+                    "-srcfolder",
+                    str(staging),
+                    "-fs",
+                    "HFS+",
+                    "-format",
+                    "UDZO",
+                    str(image),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+            # Incompressible fixture data must occupy one payload, not two.
+            self.assertLess(image.stat().st_size, 3 * 1024 * 1024)
+            mount = root / "mount"
+            mount.mkdir()
+            subprocess.run(
+                [
+                    "hdiutil",
+                    "attach",
+                    "-readonly",
+                    "-nobrowse",
+                    "-mountpoint",
+                    str(mount),
+                    str(image),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+            try:
+                dmg.verify_shared_payload(
+                    mount / "Stark.app", mount / dmg.INSTALLER_NAME
+                )
+                for signed in (mount / "Stark.app", mount / dmg.INSTALLER_NAME):
+                    subprocess.run(
+                        ["codesign", "--verify", "--deep", "--strict", str(signed)],
+                        check=True,
+                        capture_output=True,
+                        timeout=60,
+                    )
+                # Use the same Foundation operation as the unchanged installer
+                # and existing in-app updaters, then detach before using copies.
+                driver = root / "copy.swift"
+                driver.write_text(
+                    "import Foundation\n"
+                    "for i in stride(from: 1, to: CommandLine.arguments.count, by: 2) {\n"
+                    "try FileManager.default.copyItem(atPath: CommandLine.arguments[i], "
+                    "toPath: CommandLine.arguments[i+1])\n}\n"
+                )
+                subprocess.run(
+                    [
+                        "xcrun",
+                        "swift",
+                        str(driver),
+                        str(mount / "Stark.app"),
+                        str(root / "updated.app"),
+                        str(mount / dmg.INSTALLER_NAME / "Contents/Helpers/Stark.app"),
+                        str(root / "installed.app"),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=120,
+                )
+            finally:
+                subprocess.run(
+                    ["hdiutil", "detach", str(mount)],
+                    check=True,
+                    capture_output=True,
+                    timeout=60,
+                )
+            for name in ("updated.app", "installed.app"):
+                copied = root / name / "Contents/Resources/payload"
+                self.assertEqual(copied.read_bytes(), payload.read_bytes())
+                self.assertFalse(copied.samefile(payload))
+                subprocess.run(
+                    ["codesign", "--verify", "--deep", "--strict", str(root / name)],
+                    check=True,
+                    capture_output=True,
+                    timeout=60,
+                )
+
     def test_native_workspace_passes_helper_validation_and_reports_early_errors(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

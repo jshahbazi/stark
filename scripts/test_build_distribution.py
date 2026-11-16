@@ -28,6 +28,57 @@ SPEC.loader.exec_module(distribution)
 
 
 class BundleConstructionTests(unittest.TestCase):
+    def test_pruning_preserves_runtime_modules_and_notices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            remove = [
+                "include/python3.13/Python.h",
+                "lib/libpython3.13.dylib",
+                "lib/libtcl9.0.dylib",
+                "lib/libtcl9tk9.0.dylib",
+                "lib/tcl9.0/init.tcl",
+                "lib/tk9.0/tk.tcl",
+                "lib/itcl4.3.5/pkgIndex.tcl",
+                "lib/thread3.0.4/pkgIndex.tcl",
+                "lib/python3.13/tkinter/__init__.py",
+                "lib/python3.13/turtle.py",
+                "lib/python3.13/idlelib/__init__.py",
+                "lib/python3.13/lib-dynload/_tkinter.cpython-313-darwin.so",
+            ]
+            keep = [
+                "bin/python3.13",
+                "lib/python3.13/ssl.py",
+                "lib/python3.13/site-packages/numpy/__init__.py",
+                "LICENSE",
+            ]
+            for name in remove + keep:
+                path = runtime / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"synthetic fixture")
+            self.assertTrue(distribution.prune_python_runtime(runtime))
+            self.assertTrue(all(not (runtime / name).exists() for name in remove))
+            self.assertTrue(all((runtime / name).exists() for name in keep))
+            self.assertEqual(distribution.prune_python_runtime(runtime), [])
+
+    def test_pruning_rejects_new_native_dependency_on_removed_library(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            (runtime / "python").write_bytes(b"\xcf\xfa\xed\xfe")
+            for library in ("libpython3.13.dylib", "libtcl9.0.dylib"):
+                with (
+                    patch.object(
+                        distribution,
+                        "run",
+                        return_value=subprocess.CompletedProcess(
+                            [], 0, stdout=("python:\n\t@rpath/" + library).encode()
+                        ),
+                    ),
+                    self.assertRaisesRegex(
+                        distribution.BuildError, "python_dependency_on_removed_library"
+                    ),
+                ):
+                    distribution.verify_python_linkage(runtime, {})
+
     def test_menu_builder_recipe_imports_and_stages_pi_without_a_private_checkout(self):
         with tempfile.TemporaryDirectory(prefix="stark-clean-recipe-") as temporary:
             root = Path(temporary) / "stark"

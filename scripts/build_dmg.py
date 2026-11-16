@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import plistlib
 import re
@@ -120,7 +121,9 @@ def build_installer(
     # inside its own seal; the root copy remains for existing in-app updaters.
     helpers = contents / "Helpers"
     helpers.mkdir()
-    shutil.copytree(staging / "Stark.app", helpers / "Stark.app")
+    # HFS+ disk images preserve file hard links. Keep both real app directories
+    # for old updaters and App Translocation, but store their file data once.
+    shutil.copytree(staging / "Stark.app", helpers / "Stark.app", copy_function=os.link)
     signing.run(
         [
             "/usr/bin/xcrun",
@@ -163,6 +166,24 @@ def inventory_digest(app: Path) -> str:
     return hashlib.sha256(
         json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def verify_shared_payload(app: Path, installer: Path) -> None:
+    """Reject images that expanded the compatibility paths into two payloads."""
+    embedded = installer / "Contents/Helpers/Stark.app"
+    signing.require(
+        inventory_digest(app) == inventory_digest(embedded),
+        "dmg_shared_payload_bytes_changed",
+    )
+    for path in app.rglob("*"):
+        if path.is_file():
+            other = embedded / path.relative_to(app)
+            signing.require(
+                not path.is_symlink()
+                and not other.is_symlink()
+                and path.samefile(other),
+                "dmg_payload_not_shared",
+            )
 
 
 def recipe_provenance(env: dict[str, str]) -> dict:
@@ -238,6 +259,7 @@ def verify_image(
     source: str,
     version: str,
     installer_digest: str | None = None,
+    shared_payload: bool = False,
 ) -> None:
     """Inspect an attached read-only image without opening or installing its app."""
     verify_image_signature(image, identity, env)
@@ -315,6 +337,8 @@ def verify_image(
                 and inventory_digest(launcher) == installer_digest,
                 "dmg_installer_bytes_changed",
             )
+            if shared_payload:
+                verify_shared_payload(app, launcher)
             metadata = plistlib.loads((launcher / "Contents/Info.plist").read_bytes())
             signing.require(
                 metadata.get("CFBundleIdentifier") == INSTALLER_ID
@@ -446,6 +470,7 @@ def build(options: argparse.Namespace) -> dict:
             options.expected_source,
             options.version,
             installer_digest,
+            shared_payload=True,
         )
         digest = signing.distribution.sha256(image)
         receipt = {
@@ -459,6 +484,7 @@ def build(options: argparse.Namespace) -> dict:
             "application_bytes_preserved": True,
             "installer_inventory_sha256": installer_digest,
             "installer_bundle_id": INSTALLER_ID,
+            "payload_storage": "shared_hardlinks",
             "application_ticket": "stapled_and_validated",
             "certificate_sha1": identity["sha1"],
             "team_id": identity["team_id"],
@@ -546,6 +572,7 @@ def verify_download(options: argparse.Namespace) -> dict:
             options.expected_source,
             options.version,
             installer_digest,
+            shared_payload=receipt.get("payload_storage") == "shared_hardlinks",
         )
     result = {
         "status": "passed",
