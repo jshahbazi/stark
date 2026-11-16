@@ -2998,7 +2998,6 @@ struct MenuView: View {
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             HStack(spacing: 8) {
                 Button(interface.mode == .beginner ? "Guided setup" : "Manage Models", action: manage)
-                    .buttonStyle(.borderedProminent)
                 Spacer(minLength: 0)
                 Button("Start model", action: engine.startModel).disabled(!engine.canStartModel)
                     .help(engine.startableModel.map { "Start " + $0.displayName } ?? "Choose a model first")

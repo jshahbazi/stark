@@ -368,7 +368,7 @@ final class AppUpdateController: ObservableObject {
     var actionTitle: String {
         if downloading { return "Downloading..." }
         if available != nil { return "Upgrade" }
-        return "Check for Upgrades"
+        return "Check for Updates"
     }
 
     var versionLabel: String { installedBuild.label }
