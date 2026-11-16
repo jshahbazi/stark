@@ -2170,6 +2170,8 @@ class Desktop:
                 if artifact_mode is not None and selected_mode != stored_mode:
                     raise DesktopError("The selected conversion mode does not match this Stark artifact.")
                 selected_mode = stored_mode
+                if stored_mode == "decision":
+                    name = "Decider Flash v1.3"
         elif kind == "huggingface":
             try:
                 source = huggingface_repository(source)

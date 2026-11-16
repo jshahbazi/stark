@@ -30,7 +30,9 @@ In **Manage Models**, open **Model Catalog**, browse **Decider Flash v1.3** and
 download its pinned BF16 entry. **Add from Source** also accepts
 `perplexity-ai/pplx-decider-flash-v1.3` as a Hugging Face source, a complete pinned
 local snapshot, or a prepared Decider folder. A prepared-folder import keeps
-using that folder; keep it available. Image support is included automatically.
+using that folder; keep it available. New prepared-folder imports are named
+**Decider Flash v1.3**, independent of the folder name. Image support is included
+automatically.
 
 Run the saved model to select **Decision** mode. Enter a question and 2–16
 distinct, comma-separated answers in the desired order. Enter text, attach one

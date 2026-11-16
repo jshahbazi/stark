@@ -177,6 +177,7 @@ def request(image=None, text="State", request_id="request-1"):
 def test_prepared_local_import_and_decision_native_ready(desktop):
     instance, _ = desktop
     assert instance.models[0]["artifact_mode"] == "decision"
+    assert instance.models[0]["name"] == "Decider Flash v1.3"
     run(instance)
     ready = next(x for x in events(instance) if x["event"] == "ready")
     assert ready["mode"] == "decision" and ready["backend"] == "decision-native"
