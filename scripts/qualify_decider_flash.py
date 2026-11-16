@@ -184,7 +184,9 @@ def qualify(args):
     if not cases:
         raise QualificationError("empty_corpus")
     record = {
-        "attempt_id": "20261116-DF13-01", "source_revision": "d06fb3f2d97e0a52325a0d463c450cf0338f44fe",
+        "attempt_id": args.attempt_id, "source_revision": "d06fb3f2d97e0a52325a0d463c450cf0338f44fe",
+        "qualification_script_sha256": file_hash(Path(__file__)),
+        "reference_runner_sha256": file_hash(args.root / "tools/validation/decider_flash/runner.py"),
         "fixture_sha256": file_hash(args.fixtures), "worker_sha256": file_hash(args.worker),
         "native_config_sha256": file_hash(args.model / "config.json"),
         "native_weights_sha256": file_hash(args.model / "model.safetensors"),
@@ -299,6 +301,7 @@ def main():
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--device", choices=("cpu", "mps"), default="cpu")
     parser.add_argument("--timing", action="store_true", help="also compare native text with tower residency off/on")
+    parser.add_argument("--attempt-id", default="20261116-DF13-01")
     args = parser.parse_args()
     args.root = Path(__file__).resolve().parents[1]
     try:

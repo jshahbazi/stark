@@ -160,3 +160,58 @@ repository policy and all 11 policy regression tests then passed. This records
 coverage configuration, not a completed OSV vulnerability scan. Original
 upstream licence/notice bytes (including CRLF) are preserved using the existing
 file-specific Git attributes convention.
+
+### Candidate seal before numerical execution
+
+Implementation commit: `5c582fa0f6ff8ac13ad27a5a7b910c75063e43dd`, pushed to
+`codex/decider-flash-v13`. Rebuilding from that commit produced the same native
+executable SHA-256 recorded above. No PR was opened. The initial GitHub Build
+run was still in progress when checked; no CI pass is inferred from local tests.
+
+| Native precision/state component | Policy |
+| --- | --- |
+| Embeddings, dense projections, vision and decision matrices | BF16, no weight quantization |
+| Decoder residuals, projection outputs and readout output | BF16 |
+| Full-attention QK/AV dot accumulation | F32, with reference BF16 probability/output materialization |
+| Attention KV | BF16; fresh allocation and logical length per request |
+| Zero-centered RMSNorm | F32 normalization/gain through final BF16 cast; gated DeltaNet normalization follows its existing reference cast boundary |
+| DeltaNet convolution coefficients/control vectors | F32 conversion/loading policy |
+| DeltaNet convolution history and recurrent accumulator | F32; fresh zeroed state per request |
+| Complete-result or generation-prefix reuse | Disabled; no retained cross-request tensors/results |
+| MTP | Non-generative checkpoint; absent predictor tensors and no supported speculative path |
+
+To preserve the 15 GiB conversion disk margin, this task's completed debug/test
+build cache was cleaned with Cargo (14.3 GiB). Release executables, test logs,
+source models, fixtures and source-bound receipts were retained. No other task's
+worktree or cache was changed.
+
+### DF13-01 full-model attempt and DF13-02 correction
+
+Acquisition verified all 29 pinned files. The upstream release manifest also
+has a stale README checksum; both README and NOTICE match the pinned repository
+identities, and all source bytes are preserved. The BF16 preparation completed
+with 604 operations / 724 input tensors, with output SHA-256
+`c3ab2961a63c3342ff3390b41036c6029d62095414db4cffbd59a8944c754c97` and configuration
+SHA-256 `44dec9e9ca8211aafd998aa011185540fa3aaef12571e390ce331a45d4702f9c`.
+
+`20261116-DF13-01` completed all 12 reference requests on unmodified MPS FP32,
+then failed on the first native forward before producing decisions. The
+input-token constant handle remained alive through command submission, violating
+Metal's constant allocator lifetime assertion. This is a native integration
+failure, not a numerical result. Its private progress receipt is
+`runtime/decider-flash-v13/qualification-01.progress.json`. A temporary diagnostic
+collected only the static Rust source location, never the panic message,
+backtrace, inputs or outputs; that diagnostic was removed before rebuilding.
+
+Follow-up `20261116-DF13-02` explicitly drops the host token constant handle
+after decoder encoding and before submission; the submitted command retains its
+constant page. A rebuilt single-request native control passed (79 input tokens).
+Corrected executable SHA-256:
+`9cfda7079e80ed4ceb43726b0eefa1dcc86965bee556386b6965704be3d927d7`.
+The same corpus, references and fixed numerical gates will be replayed in a new
+receipt. A real artifact forward is the regression control for this lifetime
+failure; the prior component tests did not exercise it.
+
+At pre-run screening and after the corrective probe, system pageouts remained
+146,097 and swapouts 220,868; existing swap use stayed 3,299.06 MiB. Existing
+swap is historical host state, not new paging caused by the experiment.

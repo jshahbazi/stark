@@ -465,6 +465,9 @@ where
             .decoder
             .encode_decision_hidden(&tokens, replacement, &batch, marker, &mut state, &mut command)
             .map_err(|_| DeciderError("decider_forward_failed"))?;
+        // End encoding transfers the command's constant pages to the submitted
+        // work. Release the host handle first; the page remains command-owned.
+        drop(tokens);
         let logits =
             self.readout.encode(hidden, 1, &mut command).map_err(|_| DeciderError("decider_readout_failed"))?;
         // The single submission is always waited before state or scratch drops.
